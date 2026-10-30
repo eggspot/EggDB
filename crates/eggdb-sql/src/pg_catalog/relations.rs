@@ -1,8 +1,8 @@
 use super::oids::{self, BuiltinType};
 use super::snapshot::{
-    CatalogSnapshot, ConstraintSource, IndexSource, RelationKind, RelationSource,
+    CatalogSnapshot, ConstraintSource, IndexSource, RelationKind, RelationSource, RoutineEntry,
 };
-use super::{CatalogRelation, deparse};
+use super::{CatalogRelation, deparse, routines};
 use crate::arrays::{ArrayElement, ArrayValue};
 use crate::ast::ReferentialAction;
 use crate::encoding::{
@@ -23,7 +23,6 @@ const PG_NAMESPACE: u32 = 2615;
 const HASH: u32 = 405;
 const INDOPTION_DESC: i64 = 1;
 const INDOPTION_NULLS_FIRST: i64 = 2;
-const INTERNAL_LANGUAGE: u32 = 12;
 
 pub(crate) fn generated_rows(
     reader: &dyn KeyValueRead,
@@ -186,7 +185,8 @@ pub(crate) fn build(
         | CatalogRelation::Opclass => Vec::new(),
         CatalogRelation::Enum => enum_rows(snapshot),
         CatalogRelation::Range => range_rows(snapshot),
-        CatalogRelation::Proc => proc_rows(),
+        CatalogRelation::Proc => proc_rows(snapshot),
+        CatalogRelation::Language => language_rows(),
         CatalogRelation::Settings => setting_rows(snapshot),
         CatalogRelation::TimezoneNames => time_zone_name_rows(),
         CatalogRelation::Information(relation) => {
@@ -695,7 +695,110 @@ fn builtin_type_rows() -> Vec<Vec<Value>> {
         .collect()
 }
 
-fn proc_rows() -> Vec<Vec<Value>> {
+fn proc_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = builtin_proc_rows();
+    rows.extend(snapshot.routines.iter().map(|routine| routine_proc_row(snapshot, routine)));
+    rows
+}
+
+fn routine_proc_row(snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> Vec<Value> {
+    let definition = &routine.definition;
+    let inputs: Vec<Value> = definition
+        .input_types()
+        .into_iter()
+        .map(|sql_type| oid(oids::type_oid(sql_type)))
+        .collect();
+    let mut row = Row::new(CatalogRelation::Proc)
+        .set("oid", oid(routine.oid))
+        .set("proname", text(&routine.name))
+        .set("pronamespace", oid(routine.namespace))
+        .set("proowner", oid(oids::SESSION_USER))
+        .set("prolang", oid(routines::language_oid(definition.language)))
+        .set("procost", Value::Real(routines::ROUTINE_COST))
+        .set("prorows", Value::Real(routines::estimated_rows(definition)))
+        .set("provariadic", oid(routines::variadic_element_oid(definition)))
+        .set("prosupport", regproc_none())
+        .set("prokind", text(routines::kind_code(definition.kind)))
+        .set("prosecdef", flag(definition.security_definer))
+        .set("proleakproof", flag(false))
+        .set("proisstrict", flag(definition.strict))
+        .set("proretset", flag(definition.returns.is_set()))
+        .set("provolatile", text(definition.volatility.code()))
+        .set("proparallel", text("u"))
+        .set("pronargs", small(routines::argument_count(definition) as i64))
+        .set("pronargdefaults", small(routines::default_count(definition) as i64))
+        .set("prorettype", oid(routines::result_type_oid(snapshot, definition)))
+        .set("proargtypes", vector(ArrayElement::OidVector, inputs))
+        .set("prosrc", text(&definition.body));
+    let listed = routines::every_parameter(definition);
+    if routines::lists_every_parameter(definition) {
+        row = row
+            .set(
+                "proallargtypes",
+                list(
+                    ArrayElement::Oid,
+                    listed.iter().map(|parameter| oid(oids::type_oid(parameter.sql_type))).collect(),
+                ),
+            )
+            .set(
+                "proargmodes",
+                list(
+                    ArrayElement::InternalChar,
+                    listed.iter().map(|parameter| text(parameter.mode)).collect(),
+                ),
+            );
+    }
+    if listed.iter().any(|parameter| !parameter.name.is_empty()) {
+        row = row.set(
+            "proargnames",
+            list(
+                ArrayElement::Text,
+                listed.iter().map(|parameter| text(&parameter.name)).collect(),
+            ),
+        );
+    }
+    if let Some(defaults) = routines::defaults_text(definition) {
+        row = row.set("proargdefaults", Value::Text(defaults));
+    }
+    if !definition.settings.is_empty() {
+        row = row.set(
+            "proconfig",
+            list(
+                ArrayElement::Text,
+                definition
+                    .settings
+                    .iter()
+                    .map(|(name, value)| Value::Text(format!("{name}={value}")))
+                    .collect(),
+            ),
+        );
+    }
+    row.done()
+}
+
+fn list(element: ArrayElement, items: Vec<Value>) -> Value {
+    Value::Array(Box::new(ArrayValue::new(element, items)))
+}
+
+fn language_rows() -> Vec<Vec<Value>> {
+    routines::LANGUAGES
+        .iter()
+        .map(|language| {
+            Row::new(CatalogRelation::Language)
+                .set("oid", oid(language.oid))
+                .set("lanname", text(language.name))
+                .set("lanowner", oid(oids::SESSION_USER))
+                .set("lanispl", flag(language.procedural))
+                .set("lanpltrusted", flag(language.trusted))
+                .set("lanplcallfoid", oid(0))
+                .set("laninline", oid(0))
+                .set("lanvalidator", oid(0))
+                .done()
+        })
+        .collect()
+}
+
+fn builtin_proc_rows() -> Vec<Vec<Value>> {
     oids::BUILTIN_FUNCTIONS
         .iter()
         .map(|function| {
@@ -705,7 +808,7 @@ fn proc_rows() -> Vec<Vec<Value>> {
                 .set("proname", text(function.name))
                 .set("pronamespace", oid(oids::PG_CATALOG))
                 .set("proowner", oid(oids::SESSION_USER))
-                .set("prolang", oid(INTERNAL_LANGUAGE))
+                .set("prolang", oid(routines::INTERNAL_LANGUAGE))
                 .set("procost", Value::Real(1.0))
                 .set("prorows", Value::Real(0.0))
                 .set("provariadic", oid(0))
@@ -752,6 +855,13 @@ fn collation_of(table: &TableDefinition, column: usize) -> Value {
         .columns
         .get(column)
         .map_or(0, |column| facts(column.sql_type).collation))
+}
+
+fn trigger_function_oid(snapshot: &CatalogSnapshot, definition: &TriggerDefinition) -> u32 {
+    match &definition.action {
+        TriggerAction::Function { name, .. } => snapshot.trigger_function_oid(name),
+        TriggerAction::Statements(_) | TriggerAction::Batch(_) => 0,
+    }
 }
 
 fn trigger_type(definition: &TriggerDefinition) -> i64 {
@@ -819,7 +929,7 @@ fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("tgrelid", oid(owner.oid))
                 .set("tgparentid", oid(0))
                 .set("tgname", text(&definition.name))
-                .set("tgfoid", oid(0))
+                .set("tgfoid", oid(trigger_function_oid(snapshot, definition)))
                 .set("tgtype", small(trigger_type(definition)))
                 .set("tgenabled", text(if definition.enabled { "O" } else { "D" }))
                 .set("tgisinternal", flag(false))

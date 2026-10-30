@@ -8,6 +8,7 @@ use crate::encoding::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind};
 use crate::pg_keywords::quote_ident;
+use crate::routines::{NamedRoutines, ReturnType, RoutineDefinition, RoutineReturns};
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, ScanDirection};
 use crate::types::Value;
@@ -16,8 +17,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 16] = [
+const SNAPSHOT_FUNCTIONS: [&str; 21] = [
     "pg_get_serial_sequence",
+    "pg_get_functiondef",
+    "pg_get_function_arguments",
+    "pg_get_function_identity_arguments",
+    "pg_get_function_result",
+    "pg_function_is_visible",
     "to_regclass",
     "pg_table_is_visible",
     "pg_relation_is_publishable",
@@ -334,6 +340,14 @@ pub(crate) struct TriggerEntry {
     pub(crate) definition: crate::triggers::TriggerDefinition,
 }
 
+pub(crate) struct RoutineEntry {
+    pub(crate) oid: u32,
+    pub(crate) namespace: u32,
+    pub(crate) schema: String,
+    pub(crate) name: String,
+    pub(crate) definition: Arc<RoutineDefinition>,
+}
+
 pub(crate) struct CatalogSnapshot {
     pub(crate) user: String,
     pub(crate) database: String,
@@ -345,6 +359,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) defaults: Vec<DefaultEntry>,
     pub(crate) comments: Vec<StoredComment>,
     pub(crate) triggers: Vec<TriggerEntry>,
+    pub(crate) routines: Vec<RoutineEntry>,
     relation_oids: HashMap<u32, usize>,
     relation_names: HashMap<(String, String), usize>,
     constraint_oids: HashMap<u32, usize>,
@@ -560,6 +575,7 @@ impl CatalogSnapshot {
             defaults: Vec::new(),
             comments: crate::comments::every_comment(reader)?,
             triggers: Vec::new(),
+            routines: Vec::new(),
             relation_oids: HashMap::new(),
             relation_names: HashMap::new(),
             constraint_oids: HashMap::new(),
@@ -573,7 +589,29 @@ impl CatalogSnapshot {
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();
         snapshot.add_triggers(crate::triggers::every_trigger(reader)?);
+        snapshot.add_routines(crate::routines::every_routine(reader)?);
         Ok(snapshot)
+    }
+
+    fn add_routines(&mut self, named: Vec<NamedRoutines>) {
+        let mut assigned = oids::assign(Space::Routine, &routine_requests(&named)).into_iter();
+        for listed in named {
+            let schema = crate::schemas::schema_of(&listed.name).to_owned();
+            let namespace = self.schema_named(&schema).map(|entry| entry.oid);
+            for definition in listed.routines {
+                let oid = assigned.next().unwrap_or(0);
+                let Some(namespace) = namespace else {
+                    continue;
+                };
+                self.routines.push(RoutineEntry {
+                    oid,
+                    namespace,
+                    schema: schema.clone(),
+                    name: crate::schemas::base_name(&listed.name).to_owned(),
+                    definition,
+                });
+            }
+        }
     }
 
     fn add_triggers(&mut self, stored: Vec<crate::triggers::TableTriggers>) {
@@ -756,6 +794,52 @@ impl CatalogSnapshot {
         self.triggers.iter().find(|trigger| trigger.oid == oid)
     }
 
+    pub(crate) fn routine(&self, oid: u32) -> Option<&RoutineEntry> {
+        self.routines.iter().find(|routine| routine.oid == oid)
+    }
+
+    pub(crate) fn routine_is_visible(&self, routine: &RoutineEntry) -> bool {
+        self.search_order()
+            .find(|schema| {
+                self.routines
+                    .iter()
+                    .any(|other| other.name == routine.name && other.schema == *schema)
+            })
+            .is_some_and(|schema| schema == routine.schema)
+    }
+
+    pub(crate) fn routines_named(&self, schema: Option<&str>, name: &str) -> Vec<&RoutineEntry> {
+        match schema {
+            Some(schema) => self.routines_in(schema, name),
+            None => self
+                .search_order()
+                .map(|schema| self.routines_in(schema, name))
+                .find(|found| !found.is_empty())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn routines_in(&self, schema: &str, name: &str) -> Vec<&RoutineEntry> {
+        self.routines
+            .iter()
+            .filter(|routine| routine.name == name && routine.schema == schema)
+            .collect()
+    }
+
+    pub(crate) fn trigger_function_oid(&self, written: &str) -> u32 {
+        let (schema, name) = match written.split_once('.') {
+            Some((schema, name)) => (Some(schema), name),
+            None => (None, written),
+        };
+        self.routines_named(schema, name)
+            .into_iter()
+            .find(|routine| {
+                routine.definition.input_types().is_empty()
+                    && routine.definition.returns == RoutineReturns::One(ReturnType::Trigger)
+            })
+            .map_or(0, |routine| routine.oid)
+    }
+
     pub(crate) fn has_triggers(&self, relation: usize) -> bool {
         self.triggers
             .iter()
@@ -879,6 +963,36 @@ impl CatalogSnapshot {
     }
 }
 
+fn routine_requests(named: &[NamedRoutines]) -> Vec<OidRequest> {
+    named
+        .iter()
+        .flat_map(|listed| {
+            listed.routines.iter().map(|routine| OidRequest {
+                kind: b'P',
+                owner: listed.name.clone(),
+                name: routine.identity(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn routine_oid(
+    reader: &dyn KeyValueRead,
+    definition: &RoutineDefinition,
+) -> SqlResult<u32> {
+    let named = crate::routines::every_routine(reader)?;
+    let assigned = oids::assign(Space::Routine, &routine_requests(&named));
+    let identity = definition.identity();
+    Ok(named
+        .iter()
+        .flat_map(|listed| listed.routines.iter().map(move |routine| (listed, routine)))
+        .zip(assigned)
+        .find(|((listed, routine), _)| {
+            listed.name == definition.name && routine.identity() == identity
+        })
+        .map_or(0, |(_, oid)| oid))
+}
+
 fn missing(state: SqlState, what: &str, text: &str) -> SqlError {
     SqlError::new(state, format!("{what} \"{text}\" does not exist"))
 }
@@ -921,12 +1035,14 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
             let known = schema
                 .as_deref()
                 .is_none_or(|schema| schema == crate::schemas::CATALOG_SCHEMA);
-            let oid = oids::BUILTIN_FUNCTIONS
+            let builtin = oids::BUILTIN_FUNCTIONS
                 .iter()
                 .find(|function| known && function.name == name)
-                .map(|function| function.oid)
-                .ok_or_else(|| missing(SqlState::UNDEFINED_FUNCTION, "function", text))?;
-            found(oid)
+                .map(|function| function.oid);
+            match builtin {
+                Some(oid) => found(oid),
+                None => found(user_routine_oid(schema.as_deref(), &name, text)?),
+            }
         }
         RegKind::Class | RegKind::Namespace | RegKind::Role => {
             let (schema, name) = split_object_name(text, kind)?;
@@ -969,6 +1085,31 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
     Ok(reg_from_oid(kind, reg.oid))
 }
 
+fn user_routine_oid(schema: Option<&str>, name: &str, text: &str) -> SqlResult<u32> {
+    let snapshot = current();
+    let named = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.routines_named(schema, name))
+        .unwrap_or_default();
+    match named.as_slice() {
+        [only] => Ok(only.oid),
+        [] => Err(missing(SqlState::UNDEFINED_FUNCTION, "function", text)),
+        _ => Err(SqlError::new(
+            SqlState::AMBIGUOUS_FUNCTION,
+            format!("more than one function named \"{text}\""),
+        )),
+    }
+}
+
+fn routine_display_name(snapshot: &CatalogSnapshot, oid: u32) -> Option<String> {
+    let routine = snapshot.routine(oid)?;
+    Some(if snapshot.routine_is_visible(routine) {
+        quote_ident(&routine.name)
+    } else {
+        format!("{}.{}", quote_ident(&routine.schema), quote_ident(&routine.name))
+    })
+}
+
 pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
     if oid == 0 {
         return RegValue {
@@ -1009,7 +1150,12 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
         RegKind::Proc => oids::BUILTIN_FUNCTIONS
             .iter()
             .find(|function| function.oid == oid)
-            .map(|function| function.name.to_owned()),
+            .map(|function| function.name.to_owned())
+            .or_else(|| {
+                snapshot
+                    .as_ref()
+                    .and_then(|snapshot| routine_display_name(snapshot, oid))
+            }),
     };
     RegValue {
         kind,

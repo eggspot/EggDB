@@ -1,5 +1,6 @@
 use super::oids;
 use super::relations::{index_columns, index_is_unique, index_method, index_sort_options};
+use super::routines::ArgumentList;
 use super::snapshot::{self, CatalogSnapshot, ConstraintSource, RelationSource};
 use super::types::oid_number;
 use super::{CatalogRelation, CatalogType, RegKind, deparse};
@@ -23,7 +24,14 @@ const PG_CONSTRAINT: u32 = 2606;
 pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     Some(match name {
         "format_type" => &[OID, INTEGER],
-        "pg_get_userbyid" | "pg_table_is_visible" | "pg_type_is_visible" => &[OID],
+        "pg_get_userbyid"
+        | "pg_table_is_visible"
+        | "pg_type_is_visible"
+        | "pg_function_is_visible"
+        | "pg_get_functiondef"
+        | "pg_get_function_arguments"
+        | "pg_get_function_identity_arguments"
+        | "pg_get_function_result" => &[OID],
         "pg_get_statisticsobjdef_columns" => &[OID],
         "pg_get_expr" => &[NODE_TREE, OID, BOOLEAN],
         "pg_get_constraintdef" | "pg_get_viewdef" | "pg_get_triggerdef" | "pg_get_ruledef" => {
@@ -43,9 +51,10 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "pg_get_userbyid" | "pg_encoding_to_char" => SqlType::Catalog(CatalogType::Name),
-        "pg_table_is_visible" | "pg_type_is_visible" | "pg_relation_is_publishable" => {
-            SqlType::Boolean
-        }
+        "pg_table_is_visible"
+        | "pg_type_is_visible"
+        | "pg_function_is_visible"
+        | "pg_relation_is_publishable" => SqlType::Boolean,
         "format_type"
         | "pg_get_expr"
         | "pg_get_constraintdef"
@@ -57,7 +66,11 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "obj_description"
         | "shobj_description"
         | "col_description"
-        | "pg_get_serial_sequence" => SqlType::Text,
+        | "pg_get_serial_sequence"
+        | "pg_get_functiondef"
+        | "pg_get_function_arguments"
+        | "pg_get_function_identity_arguments"
+        | "pg_get_function_result" => SqlType::Text,
         "to_regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
         "to_regtype" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
         _ => return None,
@@ -235,6 +248,29 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
                 .trigger(object)
                 .map(|trigger| trigger.definition.text.clone()),
         ),
+        ("pg_function_is_visible", [_]) => match snapshot.routine(object) {
+            Some(routine) => Value::Boolean(snapshot.routine_is_visible(routine)),
+            None if builtin_function(object).is_some() => Value::Boolean(true),
+            None => Value::Null,
+        },
+        ("pg_get_functiondef", [_]) => text(
+            snapshot
+                .routine(object)
+                .map(super::routines::function_definition),
+        ),
+        ("pg_get_function_arguments", [_]) => text(routine_arguments(
+            &snapshot,
+            object,
+            ArgumentList::WithDefaults,
+        )),
+        ("pg_get_function_identity_arguments", [_]) => {
+            text(routine_arguments(&snapshot, object, ArgumentList::Identity))
+        }
+        ("pg_get_function_result", [_]) => text(match snapshot.routine(object) {
+            Some(routine) => super::routines::function_result(&routine.definition),
+            None => builtin_function(object)
+                .map(|function| oids::format_type(function.result_type, None)),
+        }),
         ("pg_get_indexdef", [_]) => text(index_definition(&snapshot, object, 0, false)),
         ("pg_get_indexdef", [_, column, rest @ ..]) => text(index_definition(
             &snapshot,
@@ -267,6 +303,26 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
         },
         _ => Value::Null,
     })
+}
+
+fn builtin_function(oid: u32) -> Option<&'static oids::BuiltinFunction> {
+    oids::BUILTIN_FUNCTIONS
+        .iter()
+        .find(|function| function.oid == oid)
+}
+
+fn routine_arguments(snapshot: &CatalogSnapshot, oid: u32, list: ArgumentList) -> Option<String> {
+    match snapshot.routine(oid) {
+        Some(routine) => Some(super::routines::function_arguments(&routine.definition, list)),
+        None => builtin_function(oid).map(|function| {
+            function
+                .argument_types
+                .iter()
+                .map(|&argument| oids::format_type(argument, None))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }),
+    }
 }
 
 fn description(

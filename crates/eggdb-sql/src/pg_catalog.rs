@@ -2,11 +2,14 @@ mod deparse;
 mod functions;
 mod oids;
 mod relations;
+mod routines;
 mod snapshot;
 mod types;
 
 #[cfg(test)]
 mod deparse_tests;
+#[cfg(test)]
+mod routine_tests;
 #[cfg(test)]
 mod tests;
 
@@ -26,8 +29,8 @@ pub(crate) use relations::generated_rows;
 pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{
     CatalogSnapshot, ConstraintSource, IndexSource, RelationEntry, RelationKind, RelationSource,
-    current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
-    mentions_catalog, names_non_sequence_relation, snapshot_for, statement_settings,
+    RoutineEntry, current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
+    mentions_catalog, names_non_sequence_relation, routine_oid, snapshot_for, statement_settings,
     text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
@@ -188,6 +191,7 @@ pub(crate) enum CatalogRelation {
     Opclass,
     Enum,
     Proc,
+    Language,
     Range,
     Information(InformationRelation),
     SqlServer(SqlServerRelation),
@@ -246,7 +250,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const IN_PG_CATALOG: [Self; 30] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 31] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -276,6 +280,7 @@ impl CatalogRelation {
         Self::Opclass,
         Self::Enum,
         Self::Proc,
+        Self::Language,
         Self::Range,
     ];
 
@@ -310,6 +315,7 @@ impl CatalogRelation {
             Self::Opclass => "pg_opclass",
             Self::Enum => "pg_enum",
             Self::Proc => "pg_proc",
+            Self::Language => "pg_language",
             Self::Range => "pg_range",
             Self::Information(relation) => relation.name(),
             Self::SqlServer(relation) => relation.name(),
@@ -363,6 +369,7 @@ impl CatalogRelation {
             Self::Opclass => 2616,
             Self::Enum => 3501,
             Self::Proc => 1255,
+            Self::Language => 2612,
             Self::Range => 3541,
             Self::Information(relation) => relation.oid(),
             Self::SqlServer(_) | Self::Oracle(_) => 0,
@@ -428,6 +435,7 @@ impl CatalogRelation {
             Self::Opclass => &OPCLASS_COLUMNS,
             Self::Enum => &ENUM_COLUMNS,
             Self::Proc => &PROC_COLUMNS,
+            Self::Language => &LANGUAGE_COLUMNS,
             Self::Range => &RANGE_COLUMNS,
             Self::Information(relation) => relation.columns(),
             Self::SqlServer(relation) => relation.columns(),
@@ -879,6 +887,18 @@ const PROC_COLUMNS: [CatalogColumn; 30] = [
     column("prosqlbody", NODE_TREE),
     column("proconfig", TEXTS),
     column("proacl", ACL_ITEMS),
+];
+
+const LANGUAGE_COLUMNS: [CatalogColumn; 9] = [
+    column("oid", OID),
+    column("lanname", NAME),
+    column("lanowner", OID),
+    column("lanispl", SqlType::Boolean),
+    column("lanpltrusted", SqlType::Boolean),
+    column("lanplcallfoid", OID),
+    column("laninline", OID),
+    column("lanvalidator", OID),
+    column("lanacl", ACL_ITEMS),
 ];
 
 const RANGE_COLUMNS: [CatalogColumn; 7] = [

@@ -1695,7 +1695,9 @@ impl<'r> Run<'r> {
                     Value::BigInt(i64::try_from(self.row_count).unwrap_or(i64::MAX))
                 }
                 (DiagnosticsItem::PgContext, _) => Value::Text(self.label.clone()),
-                (DiagnosticsItem::PgRoutineOid, _) => Value::Oid(0),
+                (DiagnosticsItem::PgRoutineOid, _) => {
+                    Value::Oid(crate::pg_catalog::routine_oid(&*self.writer, self.definition)?)
+                }
                 (item, Some(error)) => Value::Text(stacked_item(*item, error)),
                 (_, None) => Value::Null,
             };

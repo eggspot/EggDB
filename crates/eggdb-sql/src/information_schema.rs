@@ -1,8 +1,9 @@
 use crate::encoding::{IdentityGeneration, TableDefinition, integer_type_range};
 use crate::lexer::TokenKind;
+use crate::routines::{ParameterMode, ReturnType, RoutineKind, RoutineLanguage, RoutineReturns, Volatility};
 use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, CatalogType, ConstraintSource, RelationEntry, RelationSource,
-    builtin_type, check_text, default_text, format_type, type_modifier, type_oid,
+    RoutineEntry, builtin_type, check_text, default_text, format_type, type_modifier, type_oid,
 };
 use crate::triggers::{TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming};
 use crate::types::{SqlType, Value};
@@ -467,7 +468,8 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: InformationRelation) ->
         InformationRelation::ReferentialConstraints => referential_constraints_rows(snapshot),
         InformationRelation::ConstraintColumnUsage => constraint_column_usage_rows(snapshot),
         InformationRelation::CheckConstraints => check_constraints_rows(snapshot),
-        InformationRelation::Routines | InformationRelation::Parameters => Vec::new(),
+        InformationRelation::Routines => routines_rows(snapshot),
+        InformationRelation::Parameters => parameters_rows(snapshot),
         InformationRelation::Triggers => triggers_rows(snapshot),
     }
 }
@@ -1433,4 +1435,207 @@ fn check_constraint_row(
         .set("constraint_name", identifier(name))
         .set("check_clause", character_data(clause))
         .done()
+}
+
+fn specific_name(routine: &RoutineEntry) -> String {
+    format!("{}_{}", routine.name, routine.oid)
+}
+
+fn with_type_description(
+    row: InformationRow,
+    snapshot: &CatalogSnapshot,
+    sql_type: SqlType,
+    udt_prefix: &str,
+) -> InformationRow {
+    let described = describe_type(sql_type);
+    let row = row
+        .set("data_type", character_data(&described.data_type))
+        .set(
+            "character_maximum_length",
+            optional_cardinal(described.character_maximum_length),
+        )
+        .set(
+            "character_octet_length",
+            optional_cardinal(described.character_octet_length),
+        )
+        .set(
+            "numeric_precision",
+            optional_cardinal(described.numeric_precision),
+        )
+        .set(
+            "numeric_precision_radix",
+            optional_cardinal(described.numeric_precision_radix),
+        )
+        .set("numeric_scale", optional_cardinal(described.numeric_scale))
+        .set(
+            "datetime_precision",
+            optional_cardinal(described.datetime_precision),
+        )
+        .set(
+            "interval_type",
+            described
+                .interval_type
+                .as_deref()
+                .map_or(Value::Null, character_data),
+        );
+    let (schema, name) = match (described.udt_name, sql_type.defined()) {
+        (Some(udt_name), _) => (crate::schemas::CATALOG_SCHEMA.to_owned(), udt_name.to_owned()),
+        (None, Some(defined)) => match snapshot.user_types.of_oid(defined.oid) {
+            Some(found) => (
+                crate::schemas::schema_of(&found.name).to_owned(),
+                crate::schemas::base_name(&found.name).to_owned(),
+            ),
+            None => return row,
+        },
+        (None, None) => return row,
+    };
+    row.set(&format!("{udt_prefix}udt_catalog"), identifier(&snapshot.database))
+        .set(&format!("{udt_prefix}udt_schema"), identifier(&schema))
+        .set(&format!("{udt_prefix}udt_name"), identifier(&name))
+}
+
+fn pseudo_type_name(returned: &ReturnType) -> Option<&'static str> {
+    match returned {
+        ReturnType::Void => Some("void"),
+        ReturnType::Trigger => Some("trigger"),
+        ReturnType::Record => Some("record"),
+        ReturnType::Type(_) | ReturnType::Relation(_) => None,
+    }
+}
+
+fn with_return_type(row: InformationRow, snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> InformationRow {
+    let returned = match &routine.definition.returns {
+        RoutineReturns::Nothing => return row,
+        RoutineReturns::One(returned) | RoutineReturns::Set(returned) => returned.clone(),
+        RoutineReturns::Table(columns) => match columns.as_slice() {
+            [(_, only)] => ReturnType::Type(*only),
+            _ => ReturnType::Record,
+        },
+    };
+    match (&returned, pseudo_type_name(&returned)) {
+        (_, Some(name)) => row
+            .set("data_type", character_data(name))
+            .set("type_udt_catalog", identifier(&snapshot.database))
+            .set("type_udt_schema", identifier(crate::schemas::CATALOG_SCHEMA))
+            .set("type_udt_name", identifier(name)),
+        (ReturnType::Type(sql_type), None) => {
+            with_type_description(row, snapshot, *sql_type, "type_")
+        }
+        (ReturnType::Relation(name), None) => row
+            .set("data_type", character_data("USER-DEFINED"))
+            .set("type_udt_catalog", identifier(&snapshot.database))
+            .set("type_udt_schema", identifier(crate::schemas::schema_of(name)))
+            .set("type_udt_name", identifier(crate::schemas::base_name(name))),
+        _ => row,
+    }
+}
+
+fn routines_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .routines
+        .iter()
+        .map(|routine| {
+            let definition = &routine.definition;
+            let function = definition.kind == RoutineKind::Function;
+            let row = InformationRow::new(InformationRelation::Routines)
+                .set("specific_catalog", identifier(&snapshot.database))
+                .set("specific_schema", identifier(&routine.schema))
+                .set("specific_name", identifier(&specific_name(routine)))
+                .set("routine_catalog", identifier(&snapshot.database))
+                .set("routine_schema", identifier(&routine.schema))
+                .set("routine_name", identifier(&routine.name))
+                .set("routine_type", character_data(definition.kind.keyword()))
+                .set(
+                    "dtd_identifier",
+                    if function { identifier("0") } else { Value::Null },
+                )
+                .set(
+                    "routine_body",
+                    character_data(match definition.language {
+                        RoutineLanguage::Sql => "SQL",
+                        RoutineLanguage::PlPgSql => "EXTERNAL",
+                    }),
+                )
+                .set("routine_definition", character_data(&definition.body))
+                .set(
+                    "external_language",
+                    character_data(&definition.language.name().to_ascii_uppercase()),
+                )
+                .set("parameter_style", character_data("GENERAL"))
+                .set(
+                    "is_deterministic",
+                    yes_or_no(definition.volatility == Volatility::Immutable),
+                )
+                .set("sql_data_access", character_data("MODIFIES"))
+                .set(
+                    "is_null_call",
+                    if function {
+                        yes_or_no(definition.strict)
+                    } else {
+                        Value::Null
+                    },
+                )
+                .set("schema_level_routine", yes_or_no(true))
+                .set("max_dynamic_result_sets", cardinal(0))
+                .set("is_user_defined_cast", yes_or_no(false))
+                .set("is_implicitly_invocable", yes_or_no(false))
+                .set(
+                    "security_type",
+                    character_data(if definition.security_definer { "DEFINER" } else { "INVOKER" }),
+                )
+                .set("as_locator", yes_or_no(false))
+                .set("is_udt_dependent", yes_or_no(false));
+            with_return_type(row, snapshot, routine).done()
+        })
+        .collect()
+}
+
+fn parameter_mode_name(mode: ParameterMode) -> &'static str {
+    match mode {
+        ParameterMode::In | ParameterMode::Variadic => "IN",
+        ParameterMode::Out => "OUT",
+        ParameterMode::InOut => "INOUT",
+    }
+}
+
+fn parameters_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for routine in &snapshot.routines {
+        let definition = &routine.definition;
+        let mut listed: Vec<(Option<&str>, &'static str, SqlType, Option<&str>)> = definition
+            .parameters
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name.as_deref(),
+                    parameter_mode_name(parameter.mode),
+                    parameter.sql_type,
+                    parameter.default.as_deref().map(str::trim),
+                )
+            })
+            .collect();
+        if let RoutineReturns::Table(columns) = &definition.returns {
+            listed.extend(
+                columns
+                    .iter()
+                    .map(|(name, sql_type)| (Some(name.as_str()), "OUT", *sql_type, None)),
+            );
+        }
+        for (at, (name, mode, sql_type, default)) in listed.into_iter().enumerate() {
+            let position = at as i64 + 1;
+            let row = InformationRow::new(InformationRelation::Parameters)
+                .set("specific_catalog", identifier(&snapshot.database))
+                .set("specific_schema", identifier(&routine.schema))
+                .set("specific_name", identifier(&specific_name(routine)))
+                .set("ordinal_position", cardinal(position))
+                .set("parameter_mode", character_data(mode))
+                .set("is_result", yes_or_no(false))
+                .set("as_locator", yes_or_no(false))
+                .set("parameter_name", name.map_or(Value::Null, identifier))
+                .set("dtd_identifier", identifier(&position.to_string()))
+                .set("parameter_default", default.map_or(Value::Null, character_data));
+            rows.push(with_type_description(row, snapshot, sql_type, "").done());
+        }
+    }
+    rows
 }
