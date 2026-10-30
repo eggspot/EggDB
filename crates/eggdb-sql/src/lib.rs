@@ -101,6 +101,7 @@ mod types;
 mod typing;
 mod views;
 mod window;
+mod with_statement;
 
 #[cfg(test)]
 mod arrays_tests;

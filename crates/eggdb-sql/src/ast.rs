@@ -75,6 +75,33 @@ pub(crate) enum Statement {
     Merge(Box<MergeStatement>),
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
+    With(Box<WithStatement>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WithStatement {
+    pub(crate) tables: Vec<WithTable>,
+    pub(crate) recursive: bool,
+    pub(crate) body: Statement,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WithTable {
+    Query(CommonTable),
+    Modifying {
+        name: Name,
+        column_names: Vec<Name>,
+        statement: Statement,
+    },
+}
+
+impl WithTable {
+    pub(crate) fn name(&self) -> &Name {
+        match self {
+            Self::Query(table) => &table.name,
+            Self::Modifying { name, .. } => name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +272,8 @@ pub(crate) struct CreateView {
     pub(crate) columns: Vec<Name>,
     pub(crate) query: Query,
     pub(crate) text: String,
+    pub(crate) check_option: Option<crate::encoding::CheckOption>,
+    pub(crate) temporary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -650,6 +679,7 @@ pub(crate) struct DerivedTable {
     pub(crate) query: Query,
     pub(crate) column_names: Vec<Name>,
     pub(crate) dialect: Dialect,
+    pub(crate) lateral: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -780,6 +810,8 @@ pub(crate) enum SubqueryState {
     Correlated {
         template: usize,
         sql_type: Option<SqlType>,
+        reads: Arc<[usize]>,
+        grouped: Option<Arc<[(usize, usize)]>>,
     },
 }
 
@@ -792,10 +824,12 @@ impl PartialEq for SubqueryState {
                 Self::Correlated {
                     template: left,
                     sql_type: left_type,
+                    ..
                 },
                 Self::Correlated {
                     template: right,
                     sql_type: right_type,
+                    ..
                 },
             ) => left == right && left_type == right_type,
             _ => false,

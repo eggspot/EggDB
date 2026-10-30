@@ -49,8 +49,14 @@ fn sources_between<'a>(
     }
 }
 
-fn columns_of(source: &Source<'_>) -> impl Iterator<Item = usize> {
-    source.offset..source.offset + source.table.columns.len()
+fn shown_columns_of<'s>(source: &'s Source<'_>) -> impl Iterator<Item = usize> + 's {
+    source
+        .table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !crate::temp_tables::is_hidden_column(&column.name))
+        .map(move |(index, _)| source.offset + index)
 }
 
 pub(crate) fn type_family(sql_type: SqlType) -> u8 {
@@ -132,7 +138,7 @@ pub(crate) fn resolve<'a>(
     let mut merged = Vec::new();
     let mut star = Vec::new();
     let mut group_start = 0;
-    let mut group_star: Vec<usize> = columns_of(&list[0]).collect();
+    let mut group_star: Vec<usize> = shown_columns_of(&list[0]).collect();
     let mut shapes = Vec::with_capacity(from.joins.len());
     for (index, join) in from.joins.iter().enumerate() {
         let right_index = index + 1;
@@ -140,7 +146,7 @@ pub(crate) fn resolve<'a>(
         if join.kind == JoinKind::Comma {
             star.append(&mut group_star);
             group_start = right_index;
-            group_star = columns_of(&right).collect();
+            group_star = shown_columns_of(&right).collect();
             shapes.push(StepShape {
                 kind: join.kind,
                 source: right,
@@ -159,14 +165,6 @@ pub(crate) fn resolve<'a>(
                 reject_aggregates(expr, "JOIN conditions")?;
                 check_columns(expr, Scope::Many(&visible))?;
                 on = Some(expr);
-            }
-            JoinCondition::Using(names) if join.kind == JoinKind::Full => {
-                let position = names.first().map_or(0, |name| name.position);
-                return Err(
-                    SqlError::not_supported("FULL JOIN with USING is not supported yet")
-                        .with_hint("Write the join with ON and COALESCE the joined columns.")
-                        .at(position),
-                );
             }
             JoinCondition::Using(names) => {
                 let left = sources_between(&list, group_start..right_index, &merged);
@@ -227,7 +225,7 @@ pub(crate) fn resolve<'a>(
             JoinCondition::Always => {}
         }
         if using.is_empty() {
-            group_star.extend(columns_of(&right));
+            group_star.extend(shown_columns_of(&right));
         } else {
             let lefts: Vec<usize> = using.iter().map(|&(left, _)| left).collect();
             let rights: Vec<usize> = using.iter().map(|&(_, right)| right).collect();
@@ -238,7 +236,7 @@ pub(crate) fn resolve<'a>(
             };
             let mut reordered = shown.clone();
             reordered.extend(group_star.iter().filter(|offset| !lefts.contains(offset)));
-            reordered.extend(columns_of(&right).filter(|offset| !rights.contains(offset)));
+            reordered.extend(shown_columns_of(&right).filter(|offset| !rights.contains(offset)));
             group_star = reordered;
             merged.extend(hidden.iter().copied());
         }
@@ -265,6 +263,190 @@ pub(crate) fn resolve<'a>(
         joined.add_where_keys(filter)?;
     }
     Ok(joined)
+}
+
+pub(crate) fn has_full_using(from: &FromClause) -> bool {
+    from.joins.iter().any(|join| {
+        join.kind == JoinKind::Full && matches!(join.condition, JoinCondition::Using(_))
+    })
+}
+
+struct MergedColumn {
+    name: String,
+    merged: Expr,
+}
+
+fn qualified_column(label: &str, name: &str, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Column {
+            qualifier: Some(label.to_owned()),
+            name: name.to_owned(),
+        },
+        position,
+    }
+}
+
+fn with_merged_columns(expr: &Expr, merged: &[MergedColumn]) -> SqlResult<Expr> {
+    if let ExprKind::Column {
+        qualifier: None,
+        name,
+    } = &expr.kind
+        && let Some(column) = merged.iter().find(|column| &column.name == name)
+    {
+        let mut replaced = column.merged.clone();
+        replaced.position = expr.position;
+        return Ok(replaced);
+    }
+    rebuild(expr, &mut |child| with_merged_columns(child, merged))
+}
+
+pub(crate) fn merge_full_using(
+    select: &mut Select,
+    tables: &[Arc<TableDefinition>],
+) -> SqlResult<()> {
+    let Some(from) = &select.from else {
+        return Ok(());
+    };
+    let (merged, star, conditions) = {
+        let joined = resolve(from, tables, None)?;
+        let scope = Scope::Many(&joined.sources);
+        let mut merged: Vec<(usize, MergedColumn)> = Vec::new();
+        let mut conditions: Vec<(usize, Expr)> = Vec::new();
+        for (index, shape) in joined.shapes.iter().enumerate() {
+            if shape.kind != JoinKind::Full || shape.using.is_empty() {
+                continue;
+            }
+            let position = from
+                .joins
+                .get(index)
+                .map_or(0, |join| join.table.name.position);
+            let mut equalities = Vec::with_capacity(shape.using.len());
+            for &(left, right) in &shape.using {
+                let (Some((left_source, left_index)), Some((right_source, right_index))) =
+                    (scope.source_of(left), scope.source_of(right))
+                else {
+                    continue;
+                };
+                let left_name = &left_source.table.columns[left_index].name;
+                let right_name = &right_source.table.columns[right_index].name;
+                let left_column = qualified_column(left_source.label, left_name, position);
+                let right_column = qualified_column(right_source.label, right_name, position);
+                merged.push((
+                    left,
+                    MergedColumn {
+                        name: crate::temp_tables::display_name(left_name).to_owned(),
+                        merged: Expr {
+                            kind: ExprKind::Function {
+                                name: "coalesce".to_owned(),
+                                arguments: vec![left_column.clone(), right_column.clone()],
+                            },
+                            position,
+                        },
+                    },
+                ));
+                equalities.push(Expr {
+                    kind: ExprKind::Binary(
+                        BinaryOperator::Equal,
+                        Box::new(left_column),
+                        Box::new(right_column),
+                    ),
+                    position,
+                });
+            }
+            let condition = match equalities.len() {
+                1 => equalities.pop(),
+                _ => Some(Expr {
+                    kind: ExprKind::And(equalities),
+                    position,
+                }),
+            };
+            if let Some(condition) = condition {
+                conditions.push((index, condition));
+            }
+        }
+        let star: Vec<SelectItem> = scope
+            .star()
+            .into_iter()
+            .filter_map(|offset| {
+                if let Some((_, column)) = merged.iter().find(|(at, _)| *at == offset) {
+                    return Some(SelectItem::Expr {
+                        expr: column.merged.clone(),
+                        alias: Some(column.name.clone()),
+                    });
+                }
+                let (source, index) = scope.source_of(offset)?;
+                let name = &source.table.columns[index].name;
+                if crate::temp_tables::is_hidden_column(name) {
+                    return None;
+                }
+                Some(SelectItem::Expr {
+                    expr: qualified_column(source.label, name, 0),
+                    alias: Some(crate::temp_tables::display_name(name).to_owned()),
+                })
+            })
+            .collect();
+        let merged: Vec<MergedColumn> = merged.into_iter().map(|(_, column)| column).collect();
+        (merged, star, conditions)
+    };
+    let mut items = Vec::with_capacity(select.items.len());
+    for item in std::mem::take(&mut select.items) {
+        match item {
+            SelectItem::Wildcard {
+                qualifier: None,
+                position,
+            } => items.extend(star.iter().cloned().map(|item| match item {
+                SelectItem::Expr { mut expr, alias } => {
+                    expr.position = position;
+                    SelectItem::Expr { expr, alias }
+                }
+                other => other,
+            })),
+            SelectItem::Expr { expr, alias } => {
+                let alias = match (&expr.kind, alias) {
+                    (_, Some(alias)) => Some(alias),
+                    (
+                        ExprKind::Column {
+                            qualifier: None,
+                            name,
+                        },
+                        None,
+                    ) if merged.iter().any(|column| &column.name == name) => Some(name.clone()),
+                    (_, None) => None,
+                };
+                items.push(SelectItem::Expr {
+                    expr: with_merged_columns(&expr, &merged)?,
+                    alias,
+                });
+            }
+            other => items.push(other),
+        }
+    }
+    select.items = items;
+    if let Some(filter) = &select.filter {
+        select.filter = Some(with_merged_columns(filter, &merged)?);
+    }
+    for key in &mut select.group_by {
+        *key = with_merged_columns(key, &merged)?;
+    }
+    if let Some(having) = &select.having {
+        select.having = Some(with_merged_columns(having, &merged)?);
+    }
+    for item in &mut select.order_by {
+        item.expr = with_merged_columns(&item.expr, &merged)?;
+    }
+    if let Some(from) = &mut select.from {
+        for join in &mut from.joins {
+            if let JoinCondition::On(on) = &join.condition {
+                join.condition = JoinCondition::On(with_merged_columns(on, &merged)?);
+            }
+        }
+        for (index, condition) in conditions {
+            if let Some(join) = from.joins.get_mut(index) {
+                join.condition = JoinCondition::On(condition);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn source_at(list: &[Source<'_>], offset: usize) -> Option<usize> {

@@ -859,11 +859,11 @@ fn aggregates_over_only_outer_columns_are_refused_in_every_dialect() {
         "a|?column?\n1|13\n2|23\n3|NULL\nSELECT 3"
     );
     assert_eq!(
-        code(
+        last(
             &mut session,
             "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE EXISTS (SELECT 1 FROM u v WHERE v.c = t.a))"
         ),
-        "0A000"
+        "a\n1\nSELECT 1"
     );
     for (dialect, sql, expected) in [
         (

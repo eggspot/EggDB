@@ -494,6 +494,7 @@ impl<'a> Resolver<'a> {
                 query,
                 column_names,
                 dialect: view.dialect,
+                lateral: false,
             }
         };
         if reference.alias.is_none() {
@@ -525,6 +526,7 @@ impl Resolver<'_> {
                 ),
                 column_names: Vec::new(),
                 dialect: view.dialect,
+                lateral: false,
             }),
             Dialect::Sqlite if view.has_column_list => {
                 let present = self.output_columns(&query)?;
@@ -543,12 +545,14 @@ impl Resolver<'_> {
                     query,
                     column_names,
                     dialect: view.dialect,
+                    lateral: false,
                 })
             }
             Dialect::Sqlite => Ok(DerivedTable {
                 query,
                 column_names: Vec::new(),
                 dialect: view.dialect,
+                lateral: false,
             }),
             Dialect::MySql | Dialect::Oracle | Dialect::SqlServer => {
                 let present = self.output_columns(&query)?;
@@ -561,6 +565,7 @@ impl Resolver<'_> {
                     ),
                     column_names: Vec::new(),
                     dialect: view.dialect,
+                    lateral: false,
                 })
             }
         }
@@ -707,6 +712,7 @@ fn select_from(
                     query,
                     column_names,
                     dialect,
+                    lateral: false,
                 })),
                 generated: None,
             },

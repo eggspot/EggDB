@@ -2122,6 +2122,22 @@ impl<'t> Parser<'t> {
     }
 
     fn table_or_function(&mut self) -> SqlResult<TableReference> {
+        if !self.sqlite() && self.is_word("lateral") {
+            let position = self.position();
+            self.at += 1;
+            let mut reference = self.table_or_function()?;
+            return match &mut reference.derived {
+                Some(derived) => {
+                    derived.lateral = true;
+                    Ok(reference)
+                }
+                None if reference.generated.is_some() => Ok(reference),
+                None => Err(SqlError::syntax(
+                    "LATERAL must be followed by a subquery or a function call",
+                    position,
+                )),
+            };
+        }
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }
@@ -2145,9 +2161,6 @@ impl<'t> Parser<'t> {
                 return self.derived_table();
             }
             return Err(self.not_supported("parenthesized joins in FROM"));
-        }
-        if self.is_word("lateral") && !self.sqlite() {
-            return Err(self.not_supported("LATERAL"));
         }
         if self.is_word("only") {
             self.at += 1;
@@ -2522,6 +2535,42 @@ impl<'t> Parser<'t> {
             (self.table_or_function()?, Vec::new())
         };
         loop {
+            if self.sqlserver()
+                && (self.is_word("cross") || self.is_word("outer"))
+                && self.is_word_at(1, "apply")
+            {
+                let outer = self.is_word("outer");
+                let position = self.position();
+                if joins.len() + 1 >= MAX_JOINED_TABLES {
+                    return Err(SqlError::new(
+                        SqlState::PROGRAM_LIMIT_EXCEEDED,
+                        format!("a FROM clause can join at most {MAX_JOINED_TABLES} tables"),
+                    )
+                    .at(position));
+                }
+                self.at += 2;
+                let mut table = self.table_or_function()?;
+                if let Some(derived) = &mut table.derived {
+                    derived.lateral = true;
+                }
+                let (kind, condition) = if outer {
+                    (
+                        JoinKind::Left,
+                        JoinCondition::On(Expr {
+                            kind: ExprKind::Literal(Literal::Boolean(true)),
+                            position,
+                        }),
+                    )
+                } else {
+                    (JoinKind::Cross, JoinCondition::Always)
+                };
+                joins.push(Join {
+                    kind,
+                    table,
+                    condition,
+                });
+                continue;
+            }
             let kind = if self.take(&TokenKind::Comma) {
                 JoinKind::Comma
             } else if self.take_word("cross") {
@@ -2549,9 +2598,6 @@ impl<'t> Parser<'t> {
             } else {
                 break;
             };
-            if self.is_word("lateral") {
-                return Err(self.not_supported("LATERAL"));
-            }
             if joins.len() + 1 >= MAX_JOINED_TABLES {
                 return Err(SqlError::new(
                     SqlState::PROGRAM_LIMIT_EXCEEDED,

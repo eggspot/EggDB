@@ -937,6 +937,7 @@ fn derived_rows(
             query: Query::of_select(select, position),
             column_names: Vec::new(),
             dialect,
+            lateral: false,
         })),
         generated: None,
     }

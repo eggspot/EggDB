@@ -179,6 +179,7 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::AlterSession(_)
         | Statement::Discard(_)
         | Statement::SqlServer(_) => None,
+        Statement::With(with) => crate::with_statement::classify(with),
         Statement::Merge(merge) => merge
             .update
             .as_ref()

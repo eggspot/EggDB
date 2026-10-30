@@ -2,7 +2,7 @@ use super::{Parser, oracle, sqlite};
 use crate::ast::{
     BinaryOperator, CommonTable, DerivedTable, Expr, ExprKind, GeneratedTable, Literal, Name,
     OrderItem, Query, Select, SetExpr, SetOperation, SetOperator, Statement, Subquery,
-    SubqueryState, SubqueryTest, TableReference,
+    SubqueryState, SubqueryTest, TableReference, WithStatement, WithTable,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -67,9 +67,8 @@ impl Parser<'_> {
         ahead > 0 && self.starts_query_at(ahead)
     }
 
-    pub(super) fn query_statement(&mut self) -> SqlResult<Statement> {
-        let query = self.query()?;
-        Ok(match query {
+    fn as_statement(query: Query) -> Statement {
+        match query {
             Query {
                 with,
                 body: SetExpr::Select(select),
@@ -79,7 +78,61 @@ impl Parser<'_> {
                 ..
             } if with.is_empty() && order_by.is_empty() => Statement::Select(*select),
             query => Statement::Query(Box::new(query)),
-        })
+        }
+    }
+
+    fn at_data_modifying_statement(&self) -> bool {
+        ["insert", "update", "delete"]
+            .iter()
+            .any(|word| self.is_word(word))
+    }
+
+    fn data_modifying_statement(&mut self) -> SqlResult<Statement> {
+        if self.is_word("insert") {
+            self.insert()
+        } else if self.is_word("update") {
+            self.update()
+        } else {
+            self.delete()
+        }
+    }
+
+    pub(super) fn query_statement(&mut self) -> SqlResult<Statement> {
+        if !self.is_word("with") {
+            return Ok(Self::as_statement(self.query()?));
+        }
+        let position = self.position();
+        self.at += 1;
+        let (tables, recursive) = self.with_tables(true)?;
+        let modifying = tables
+            .iter()
+            .any(|table| matches!(table, WithTable::Modifying { .. }));
+        if modifying || self.at_data_modifying_statement() {
+            let body = if self.at_data_modifying_statement() {
+                self.data_modifying_statement()?
+            } else {
+                Statement::Query(Box::new(self.query_after_with(
+                    Vec::new(),
+                    false,
+                    position,
+                )?))
+            };
+            return Ok(Statement::With(Box::new(WithStatement {
+                tables,
+                recursive,
+                body,
+            })));
+        }
+        let with = tables
+            .into_iter()
+            .filter_map(|table| match table {
+                WithTable::Query(table) => Some(table),
+                WithTable::Modifying { .. } => None,
+            })
+            .collect();
+        Ok(Self::as_statement(
+            self.query_after_with(with, recursive, position)?,
+        ))
     }
 
     pub(super) fn insert_query(&mut self) -> SqlResult<Query> {
@@ -108,13 +161,21 @@ impl Parser<'_> {
         } else {
             (Vec::new(), false)
         };
-        if !with.is_empty()
-            && ["insert", "update", "delete"]
-                .iter()
-                .any(|word| self.is_word(word))
-        {
-            return Err(self.not_supported("WITH before INSERT, UPDATE or DELETE"));
+        if !with.is_empty() && self.at_data_modifying_statement() {
+            return Err(SqlError::not_supported(
+                "WITH before INSERT, UPDATE or DELETE inside another statement is not supported yet",
+            )
+            .at(self.position()));
         }
+        self.query_after_with(with, recursive, position)
+    }
+
+    fn query_after_with(
+        &mut self,
+        with: Vec<CommonTable>,
+        recursive: bool,
+        position: usize,
+    ) -> SqlResult<Query> {
         let body = self.set_expression()?;
         let windows = self.select_windows.take();
         let top = self.pending_top.take();
@@ -181,14 +242,26 @@ impl Parser<'_> {
     }
 
     fn common_tables(&mut self) -> SqlResult<(Vec<CommonTable>, bool)> {
+        let (tables, recursive) = self.with_tables(false)?;
+        let tables = tables
+            .into_iter()
+            .filter_map(|table| match table {
+                WithTable::Query(table) => Some(table),
+                WithTable::Modifying { .. } => None,
+            })
+            .collect();
+        Ok((tables, recursive))
+    }
+
+    fn with_tables(&mut self, top_level: bool) -> SqlResult<(Vec<WithTable>, bool)> {
         let recursive = self.take_word("recursive");
         if recursive && self.oracle() {
             return Err(self.unexpected());
         }
-        let mut tables: Vec<CommonTable> = Vec::new();
+        let mut tables: Vec<WithTable> = Vec::new();
         loop {
             let name = self.name()?;
-            if tables.iter().any(|table| table.name.text == name.text) {
+            if tables.iter().any(|table| table.name().text == name.text) {
                 return Err(SqlError::new(
                     SqlState::DUPLICATE_ALIAS,
                     format!("WITH query name \"{}\" specified more than once", name.text),
@@ -209,26 +282,39 @@ impl Parser<'_> {
                 self.expect_word("materialized")?;
             }
             self.expect(&TokenKind::LeftParen)?;
-            if !self.starts_query() && !self.starts_query_in_parentheses() {
-                if ["insert", "update", "delete"]
-                    .iter()
-                    .any(|word| self.is_word(word))
-                {
+            if self.at_data_modifying_statement() {
+                if !self.postgresql() {
                     return Err(self.not_supported("data-modifying statements in WITH"));
                 }
-                return Err(self.unexpected());
+                if !top_level || self.query_depth > 0 {
+                    return Err(SqlError::not_supported(
+                        "WITH clause containing a data-modifying statement must be at the top level",
+                    )
+                    .at(name.position));
+                }
+                let statement = self.data_modifying_statement()?;
+                self.expect(&TokenKind::RightParen)?;
+                tables.push(WithTable::Modifying {
+                    name,
+                    column_names,
+                    statement,
+                });
+            } else {
+                if !self.starts_query() && !self.starts_query_in_parentheses() {
+                    return Err(self.unexpected());
+                }
+                let query = self.nested_query()?;
+                self.expect(&TokenKind::RightParen)?;
+                if self.is_word("search") || self.is_word("cycle") {
+                    return Err(self.not_supported("SEARCH and CYCLE clauses"));
+                }
+                tables.push(WithTable::Query(CommonTable {
+                    name,
+                    column_names,
+                    query,
+                    dialect: self.dialect,
+                }));
             }
-            let query = self.nested_query()?;
-            self.expect(&TokenKind::RightParen)?;
-            if self.is_word("search") || self.is_word("cycle") {
-                return Err(self.not_supported("SEARCH and CYCLE clauses"));
-            }
-            tables.push(CommonTable {
-                name,
-                column_names,
-                query,
-                dialect: self.dialect,
-            });
             if !self.take(&TokenKind::Comma) {
                 return Ok((tables, recursive));
             }
@@ -532,6 +618,7 @@ impl Parser<'_> {
                 query,
                 column_names,
                 dialect: self.dialect,
+                lateral: false,
             })),
             generated: None,
         })

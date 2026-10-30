@@ -13,6 +13,9 @@ const RECORD_VERSION: u8 = 1;
 const NO_TYPE: u8 = 0;
 const WILDCARD_FLAG: u8 = 1;
 const COLUMN_LIST_FLAG: u8 = 2;
+const LOCAL_CHECK_FLAG: u8 = 4;
+const CASCADED_CHECK_FLAG: u8 = 8;
+const KNOWN_VIEW_FLAGS: u8 = WILDCARD_FLAG | COLUMN_LIST_FLAG | LOCAL_CHECK_FLAG | CASCADED_CHECK_FLAG;
 pub(crate) const MAX_SEARCH_PATH: usize = 64;
 pub(crate) const MAX_VIEW_REFERENCES: usize = 4096;
 pub(crate) const MAX_VIEW_TEXT: usize = 1 << 20;
@@ -155,6 +158,12 @@ pub(crate) struct ViewColumn {
     pub(crate) source: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckOption {
+    Local,
+    Cascaded,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ViewDefinition {
     pub(crate) name: String,
@@ -165,6 +174,7 @@ pub(crate) struct ViewDefinition {
     pub(crate) references: Vec<String>,
     pub(crate) expands_wildcard: bool,
     pub(crate) has_column_list: bool,
+    pub(crate) check_option: Option<CheckOption>,
 }
 
 impl ViewDefinition {
@@ -177,6 +187,11 @@ impl ViewDefinition {
         if self.has_column_list {
             flags |= COLUMN_LIST_FLAG;
         }
+        flags |= match self.check_option {
+            Some(CheckOption::Local) => LOCAL_CHECK_FLAG,
+            Some(CheckOption::Cascaded) => CASCADED_CHECK_FLAG,
+            None => 0,
+        };
         out.push(flags);
         put_bytes(&mut out, self.query.as_bytes());
         put_varint(&mut out, self.columns.len() as u64);
@@ -206,7 +221,10 @@ impl ViewDefinition {
         }
         let dialect = dialect_of(reader.byte()?).ok_or_else(|| reader.damaged())?;
         let flags = reader.byte()?;
-        if flags & !(WILDCARD_FLAG | COLUMN_LIST_FLAG) != 0 {
+        if flags & !KNOWN_VIEW_FLAGS != 0
+            || flags & (LOCAL_CHECK_FLAG | CASCADED_CHECK_FLAG)
+                == LOCAL_CHECK_FLAG | CASCADED_CHECK_FLAG
+        {
             return Err(reader.damaged());
         }
         let query = reader.text()?;
@@ -271,6 +289,13 @@ impl ViewDefinition {
             references,
             expands_wildcard: flags & WILDCARD_FLAG != 0,
             has_column_list: flags & COLUMN_LIST_FLAG != 0,
+            check_option: if flags & LOCAL_CHECK_FLAG != 0 {
+                Some(CheckOption::Local)
+            } else if flags & CASCADED_CHECK_FLAG != 0 {
+                Some(CheckOption::Cascaded)
+            } else {
+                None
+            },
         })
     }
 }
@@ -309,6 +334,7 @@ mod tests {
             references: vec!["app\0t".into(), "t".into()],
             expands_wildcard: true,
             has_column_list: true,
+            check_option: None,
         }
     }
 
@@ -376,10 +402,28 @@ mod tests {
             assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), flagged);
         }
         let mut bytes = view().encode();
-        for unknown in [4u8, 8, 0x80, 0xFF] {
+        for unknown in [12u8, 13, 15, 16, 0x80, 0xFF] {
             bytes[2] = unknown;
             let error = ViewDefinition::decode("app\0v", &bytes).unwrap_err();
             assert_eq!(error.state().code(), "XX001");
+        }
+    }
+
+    #[test]
+    fn check_options_take_two_new_flag_bits_and_leave_other_views_byte_for_byte() {
+        let plain = view().encode();
+        assert_eq!(plain[2], 3);
+        for (option, flag) in [
+            (super::CheckOption::Local, 4u8),
+            (super::CheckOption::Cascaded, 8),
+        ] {
+            let mut checked = view();
+            checked.check_option = Some(option);
+            let bytes = checked.encode();
+            assert_eq!(bytes[2], 3 | flag);
+            assert_eq!(bytes[..2], plain[..2]);
+            assert_eq!(bytes[3..], plain[3..]);
+            assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), checked);
         }
     }
 
@@ -521,6 +565,7 @@ mod tests {
             references: vec!["t".into()],
             expands_wildcard: false,
             has_column_list: false,
+            check_option: None,
         }
     }
 

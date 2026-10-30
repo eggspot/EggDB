@@ -45,6 +45,16 @@ pub(crate) fn enter(variables: &TableVariables) -> EnteredVariables {
     EnteredVariables { depth }
 }
 
+pub(crate) fn current() -> TableVariables {
+    VARIABLES.with(|frames| {
+        frames
+            .try_borrow()
+            .ok()
+            .and_then(|frames| frames.last().cloned())
+            .unwrap_or_default()
+    })
+}
+
 pub(crate) fn release_entered() {
     VARIABLES.with(|frames| {
         if let Ok(mut frames) = frames.try_borrow_mut()

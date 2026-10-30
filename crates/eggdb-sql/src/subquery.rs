@@ -203,14 +203,30 @@ fn more_than_one_row() -> SqlError {
 pub(crate) fn evaluate(evaluator: &Evaluator<'_>, subquery: &Subquery) -> SqlResult<Value> {
     let rows = match &subquery.state {
         SubqueryState::Rows(rows) => Arc::clone(rows),
-        SubqueryState::Correlated { template, .. } => evaluator
-            .correlation
-            .ok_or_else(|| {
+        SubqueryState::Correlated {
+            template, grouped, ..
+        } => {
+            let correlation = evaluator.correlation.ok_or_else(|| {
                 SqlError::not_supported(
                     "a subquery that refers to the outer query here is not supported yet",
                 )
-            })?
-            .rows(*template, evaluator.row)?,
+            })?;
+            match grouped {
+                Some(map) => {
+                    let width = map.iter().map(|&(offset, _)| offset + 1).max().unwrap_or(0);
+                    let mut row = vec![Value::Null; width];
+                    for &(offset, slot) in map.iter() {
+                        if let (Some(target), Some(value)) =
+                            (row.get_mut(offset), evaluator.row.get(slot))
+                        {
+                            *target = value.clone();
+                        }
+                    }
+                    correlation.rows(*template, &row)?
+                }
+                None => correlation.rows(*template, evaluator.row)?,
+            }
+        }
         SubqueryState::Unprepared => {
             return Err(SqlError::not_supported(
                 "a subquery in this part of a statement is not supported yet",
@@ -293,7 +309,7 @@ fn mentions_inner_column(expr: &Expr) -> bool {
 pub(crate) struct Template {
     query: Query,
     prepared: Prepared,
-    outer: Vec<usize>,
+    outer: Vec<(usize, usize)>,
     test: SubqueryTest,
     lookup: Option<KeyLookup>,
 }
@@ -393,8 +409,12 @@ fn key_query(query: &Query) -> Option<(Query, Vec<usize>)> {
             return None;
         };
         let (inner, index) = match (&left.kind, &right.kind) {
-            (_, ExprKind::OuterColumn { index, .. }) if !mentions_outer(left) => (left, *index),
-            (ExprKind::OuterColumn { index, .. }, _) if !mentions_outer(right) => (right, *index),
+            (_, ExprKind::OuterColumn { index, depth: 1, .. }) if !mentions_outer(left) => {
+                (left, *index)
+            }
+            (ExprKind::OuterColumn { index, depth: 1, .. }, _) if !mentions_outer(right) => {
+                (right, *index)
+            }
             _ => return None,
         };
         outer.push(index);
@@ -530,6 +550,7 @@ pub(crate) struct Correlation<'a> {
     names: &'a TempTableNames,
     tables: RefCell<TableCache>,
     memo: RefCell<Memo>,
+    enclosing: Vec<Vec<Value>>,
 }
 
 #[derive(Default)]
@@ -546,7 +567,19 @@ impl<'a> Correlation<'a> {
             names: env.names,
             tables: RefCell::new(TableCache::default()),
             memo: RefCell::new(Memo::default()),
+            enclosing: Vec::new(),
         }
+    }
+
+    fn value_at(&self, row: &[Value], depth: usize, index: usize) -> Value {
+        let source = match depth.checked_sub(2) {
+            None => Some(row),
+            Some(level) => self.enclosing.get(level).map(Vec::as_slice),
+        };
+        source
+            .and_then(|values| values.get(index))
+            .cloned()
+            .unwrap_or(Value::Null)
     }
 
     pub(crate) fn rows(&self, template: usize, row: &[Value]) -> SqlResult<Arc<SubqueryRows>> {
@@ -557,7 +590,7 @@ impl<'a> Correlation<'a> {
         let outer: Vec<Value> = found
             .outer
             .iter()
-            .map(|&index| row.get(index).cloned().unwrap_or(Value::Null))
+            .map(|&(depth, index)| self.value_at(row, depth, index))
             .collect();
         let key = (template, encode_row(&outer));
         if let Some(lookup) = &found.lookup
@@ -576,9 +609,12 @@ impl<'a> Correlation<'a> {
         let mut instance = found.query.clone();
         for_each_select_mut(&mut instance, &mut |select| {
             for expr in select_expressions_mut(select) {
-                substitute(expr, row);
+                substitute(expr, row, &self.enclosing);
             }
         });
+        let mut enclosing = Vec::with_capacity(self.enclosing.len() + 1);
+        enclosing.push(row.to_vec());
+        enclosing.extend(self.enclosing.iter().cloned());
         let generated = generated_rows(&mut instance)?;
         let overlay = Overlay::new(self.reader, &found.prepared.temp);
         let instance_overlay;
@@ -595,8 +631,16 @@ impl<'a> Correlation<'a> {
             columns_only: false,
         };
         let result = match self.tables.try_borrow_mut() {
-            Ok(mut tables) => execute_query(&env, &mut tables, &instance, &found.prepared)?,
-            Err(_) => execute_query(&env, &mut TableCache::default(), &instance, &found.prepared)?,
+            Ok(mut tables) => {
+                execute_query_enclosed(&env, &mut tables, &instance, &found.prepared, enclosing)?
+            }
+            Err(_) => execute_query_enclosed(
+                &env,
+                &mut TableCache::default(),
+                &instance,
+                &found.prepared,
+                enclosing,
+            )?,
         };
         let rows = Arc::new(SubqueryRows::from_result(result, &found.test)?);
         if let Ok(mut memo) = self.memo.try_borrow_mut() {
@@ -654,26 +698,35 @@ fn generated_rows(query: &mut Query) -> SqlResult<Option<TempTables>> {
     }
 }
 
-fn substitute(expr: &mut Expr, row: &[Value]) {
+fn substitute(expr: &mut Expr, row: &[Value], enclosing: &[Vec<Value>]) {
     if let ExprKind::OuterColumn {
-        index, sql_type, ..
+        index,
+        sql_type,
+        depth,
     } = &expr.kind
     {
+        let source = match depth.checked_sub(2) {
+            None => Some(row),
+            Some(level) => enclosing.get(level).map(Vec::as_slice),
+        };
         expr.kind = ExprKind::Constant {
-            value: row.get(*index).cloned().unwrap_or(Value::Null),
+            value: source
+                .and_then(|values| values.get(*index))
+                .cloned()
+                .unwrap_or(Value::Null),
             sql_type: *sql_type,
         };
         return;
     }
     for child in children_mut(expr) {
-        substitute(child, row);
+        substitute(child, row, enclosing);
     }
 }
 
-fn collect_outer(expr: &Expr, out: &mut Vec<usize>) {
-    if let ExprKind::OuterColumn { index, .. } = &expr.kind {
-        if !out.contains(index) {
-            out.push(*index);
+fn collect_outer(expr: &Expr, out: &mut Vec<(usize, usize)>) {
+    if let ExprKind::OuterColumn { index, depth, .. } = &expr.kind {
+        if !out.contains(&(*depth, *index)) {
+            out.push((*depth, *index));
         }
         return;
     }
@@ -826,10 +879,34 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
             .any(|table| table.derived.is_some() || table.generated.is_some())
     });
     derived
+        || select
+            .from
+            .as_ref()
+            .is_some_and(crate::join::has_full_using)
         || select_expressions(select)
             .into_iter()
             .any(mentions_subquery)
         || crate::set_returning::select_needs_expansion(select)
+}
+
+pub(crate) struct RowSubqueries {
+    names: TempTableNames,
+    templates: Vec<Template>,
+}
+
+impl RowSubqueries {
+    pub(crate) fn is_correlated(&self) -> bool {
+        !self.templates.is_empty()
+    }
+
+    pub(crate) fn correlation<'a>(&'a self, reader: &'a dyn KeyValueRead) -> Correlation<'a> {
+        let env = Env {
+            reader,
+            names: &self.names,
+            columns_only: false,
+        };
+        Correlation::new(&env, &self.templates)
+    }
 }
 
 pub(crate) fn prepare_in_place(
@@ -837,38 +914,31 @@ pub(crate) fn prepare_in_place(
     tables: &mut TableCache,
     exprs: Vec<&mut Expr>,
     scope: Scope<'_>,
-) -> SqlResult<()> {
+) -> SqlResult<RowSubqueries> {
     let _shared = crate::memory::share_statement_memory();
     let names = TempTableNames::default();
-    let env = Env {
-        reader,
-        names: &names,
-        columns_only: false,
-    };
     let mut templates = Vec::new();
-    let mut correlated = false;
-    for expr in exprs {
-        rewrite(
-            &env,
-            tables,
-            expr,
-            scope,
-            None,
-            None,
-            &mut templates,
-            &mut correlated,
-        )?;
-        if !templates.is_empty() {
-            return Err(SqlError::not_supported(
-                "a subquery that refers to the rows being changed is not supported yet",
-            )
-            .with_hint(
-                "Compute the values with a SELECT first, or use a subquery that stands alone.",
-            )
-            .at(expr.position));
+    {
+        let env = Env {
+            reader,
+            names: &names,
+            columns_only: false,
+        };
+        let mut correlated = false;
+        for expr in exprs {
+            rewrite(
+                &env,
+                tables,
+                expr,
+                scope,
+                None,
+                None,
+                &mut templates,
+                &mut correlated,
+            )?;
         }
     }
-    Ok(())
+    Ok(RowSubqueries { names, templates })
 }
 
 pub(crate) fn run_select(
@@ -919,7 +989,18 @@ fn execute_query(
     query: &Query,
     prepared: &Prepared,
 ) -> SqlResult<QueryResult> {
-    let correlation = Correlation::new(env, &prepared.templates);
+    execute_query_enclosed(env, tables, query, prepared, Vec::new())
+}
+
+fn execute_query_enclosed(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    query: &Query,
+    prepared: &Prepared,
+    enclosing: Vec<Vec<Value>>,
+) -> SqlResult<QueryResult> {
+    let mut correlation = Correlation::new(env, &prepared.templates);
+    correlation.enclosing = enclosing;
     execute_query_with(env, tables, query, &correlation)
 }
 
@@ -1319,6 +1400,10 @@ fn prepare_select(
     }
     if let Some(from) = &mut select.from {
         for index in 0..=from.joins.len() {
+            if is_lateral(env, tables, prepared, from, index, ctes) {
+                prepare_lateral(env, tables, from, index, parent, ctes, prepared)?;
+                continue;
+            }
             let checked = std::iter::once(&from.first)
                 .chain(from.joins.iter().map(|join| &join.table))
                 .nth(index)
@@ -1343,6 +1428,9 @@ fn prepare_select(
             .collect::<SqlResult<_>>()?,
         None => Vec::new(),
     };
+    if select.from.as_ref().is_some_and(join::has_full_using) {
+        join::merge_full_using(select, &definitions)?;
+    }
     let from = select.from.clone();
     let joined = match &from {
         Some(from) if !from.joins.is_empty() => Some(join::resolve(from, &definitions, None)?),
@@ -1490,10 +1578,18 @@ fn may_name_siblings(reference: &TableReference) -> bool {
 }
 
 fn siblings_of(from: &FromClause, index: usize, ctes: Option<&CteScope<'_>>) -> Vec<Sibling> {
+    siblings_where(from, ctes, |other| other != index)
+}
+
+fn siblings_where(
+    from: &FromClause,
+    ctes: Option<&CteScope<'_>>,
+    wanted: impl Fn(usize) -> bool,
+) -> Vec<Sibling> {
     std::iter::once(&from.first)
         .chain(from.joins.iter().map(|join| &join.table))
         .enumerate()
-        .filter(|(other, _)| *other != index)
+        .filter(|(other, _)| wanted(*other))
         .map(|(_, reference)| {
             let name = &reference.name.text;
             let readable = reference.derived.is_none()
@@ -1627,6 +1723,464 @@ fn lateral_through_subquery(
     } else {
         error
     }
+}
+
+fn is_lateral(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    prepared: &Prepared,
+    from: &FromClause,
+    index: usize,
+    ctes: Option<&CteScope<'_>>,
+) -> bool {
+    if index == 0 {
+        return false;
+    }
+    let Some(reference) = std::iter::once(&from.first)
+        .chain(from.joins.iter().map(|join| &join.table))
+        .nth(index)
+    else {
+        return false;
+    };
+    if reference.derived.as_ref().is_some_and(|derived| derived.lateral) {
+        return true;
+    }
+    let Some(generated) = reference.generated.as_deref() else {
+        return false;
+    };
+    if !matches!(
+        generated,
+        GeneratedTable::Function(_) | GeneratedTable::Values(_)
+    ) {
+        return false;
+    }
+    let preceding = siblings_where(from, ctes, |other| other < index);
+    let mut references = Vec::new();
+    for expr in crate::set_returning::expressions(generated) {
+        subquery_column_references(expr, &mut references);
+    }
+    references.iter().any(|(qualifier, name, position)| {
+        names_sibling(
+            env,
+            tables,
+            prepared,
+            &preceding,
+            (qualifier.as_deref(), name, *position),
+        )
+    })
+}
+
+struct LateralSource {
+    query: Query,
+    label: String,
+    renamed: Vec<crate::ast::Name>,
+    dialect: Dialect,
+    position: usize,
+}
+
+fn lateral_source(reference: &TableReference) -> Option<LateralSource> {
+    let position = reference.name.position;
+    if let Some(derived) = &reference.derived {
+        return Some(LateralSource {
+            query: derived.query.clone(),
+            label: reference
+                .alias
+                .clone()
+                .unwrap_or_else(|| "unnamed_subquery".to_owned()),
+            renamed: derived.column_names.clone(),
+            dialect: derived.dialect,
+            position,
+        });
+    }
+    let generated = reference.generated.as_deref()?;
+    let select = Select {
+        distinct: false,
+        items: vec![SelectItem::Wildcard {
+            qualifier: None,
+            position,
+        }],
+        from: Some(FromClause {
+            first: TableReference {
+                name: reference.name.clone(),
+                alias: reference.alias.clone(),
+                derived: None,
+                generated: Some(Box::new(generated.clone())),
+            },
+            joins: Vec::new(),
+        }),
+        filter: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        source_row_limit: None,
+    };
+    Some(LateralSource {
+        query: Query::of_select(select, position),
+        label: reference
+            .alias
+            .clone()
+            .unwrap_or_else(|| reference.name.text.clone()),
+        renamed: Vec::new(),
+        dialect: Dialect::PostgreSql,
+        position,
+    })
+}
+
+struct LateralKey {
+    label: String,
+    name: String,
+    sql_type: Option<SqlType>,
+    has_null: bool,
+}
+
+fn lateral_key_name(number: usize) -> String {
+    format!("{}lateral key {number}", crate::temp_tables::HIDDEN_COLUMN_MARKER)
+}
+
+struct LateralRows {
+    keys: Vec<LateralKey>,
+    columns: Vec<OutputColumn>,
+    rows: Vec<Vec<Value>>,
+}
+
+fn lateral_rows(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    prior: &FromClause,
+    source: &LateralSource,
+    parent: Option<&Outer<'_>>,
+    ctes: Option<&CteScope<'_>>,
+    prepared: &Prepared,
+) -> SqlResult<LateralRows> {
+    let overlay = Overlay::new(env.reader, &prepared.temp);
+    let outer_env = env.with_reader(&overlay);
+    let definitions: Vec<Arc<TableDefinition>> = std::iter::once(&prior.first)
+        .chain(prior.joins.iter().map(|join| &join.table))
+        .map(|reference| tables.require(&overlay, &reference.name))
+        .collect::<SqlResult<_>>()?;
+    let joined = if prior.joins.is_empty() {
+        None
+    } else {
+        Some(join::resolve(prior, &definitions, None)?)
+    };
+    let first = definitions
+        .first()
+        .ok_or_else(|| internal("a LATERAL item has nothing before it"))?;
+    let scope = match &joined {
+        Some(joined) => Scope::Many(&joined.sources),
+        None => Scope::One(Source {
+            table: first,
+            label: prior.first.alias.as_deref().unwrap_or(&first.name),
+            offset: 0,
+        }),
+    };
+    let outer = Outer {
+        scope,
+        next: parent,
+    };
+    let mut inner = Prepared::new();
+    let (query, correlated) =
+        prepare_query(&outer_env, tables, &source.query, Some(&outer), ctes, &mut inner)?;
+    let mut needed = Vec::new();
+    for_each_select(&query, &mut |select| {
+        for expr in select_expressions(select) {
+            collect_outer(expr, &mut needed);
+        }
+    });
+    for template in &inner.templates {
+        for &(depth, at) in &template.outer {
+            if depth >= 2 && !needed.contains(&(depth - 1, at)) {
+                needed.push((depth - 1, at));
+            }
+        }
+    }
+    if needed.iter().any(|&(depth, _)| depth >= 2) {
+        return Err(SqlError::not_supported(
+            "a LATERAL item that names a query around this one is not supported yet",
+        )
+        .at(source.position));
+    }
+    let mut offsets: Vec<usize> = if correlated {
+        needed.iter().map(|&(_, at)| at).collect()
+    } else {
+        Vec::new()
+    };
+    offsets.sort_unstable();
+    offsets.dedup();
+    let columns = {
+        let shape_overlay = Overlay::new(&overlay, &inner.temp);
+        let shape_env = Env {
+            reader: &shape_overlay,
+            names: env.names,
+            columns_only: true,
+        };
+        execute_query(&shape_env, tables, &query, &inner)?
+            .columns
+            .unwrap_or_default()
+    };
+    let mut keys = Vec::with_capacity(offsets.len());
+    let mut items = Vec::with_capacity(offsets.len());
+    for &offset in &offsets {
+        let (found, index) = scope
+            .source_of(offset)
+            .ok_or_else(|| internal("a LATERAL reference lost its column"))?;
+        let name = found.table.columns[index].name.clone();
+        items.push(SelectItem::Expr {
+            expr: Expr {
+                kind: ExprKind::Column {
+                    qualifier: Some(found.label.to_owned()),
+                    name: name.clone(),
+                },
+                position: source.position,
+            },
+            alias: None,
+        });
+        keys.push(LateralKey {
+            label: found.label.to_owned(),
+            name,
+            sql_type: scope.column_type(offset),
+            has_null: false,
+        });
+    }
+    if env.columns_only {
+        return Ok(LateralRows {
+            keys,
+            columns,
+            rows: Vec::new(),
+        });
+    }
+    let tuples: Vec<Vec<Value>> = if offsets.is_empty() {
+        vec![Vec::new()]
+    } else {
+        let distinct = Select {
+            distinct: true,
+            items,
+            from: Some(prior.clone()),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            source_row_limit: None,
+        };
+        run_query(
+            &outer_env,
+            tables,
+            &Query::of_select(distinct, source.position),
+            ctes,
+        )?
+        .rows
+    };
+    for (number, key) in keys.iter_mut().enumerate() {
+        key.has_null = tuples
+            .iter()
+            .any(|tuple| tuple.get(number).is_some_and(Value::is_null));
+    }
+    let width = scope.width();
+    let mut rows = Vec::new();
+    let mut memory = WorkMemory::new();
+    for tuple in tuples {
+        let mut synthetic = vec![Value::Null; width];
+        for (&offset, value) in offsets.iter().zip(&tuple) {
+            if let Some(slot) = synthetic.get_mut(offset) {
+                *slot = value.clone();
+            }
+        }
+        let mut instance = query.clone();
+        for_each_select_mut(&mut instance, &mut |select| {
+            for expr in select_expressions_mut(select) {
+                substitute(expr, &synthetic, &[]);
+            }
+        });
+        let generated = generated_rows(&mut instance)?;
+        let base = Overlay::new(&overlay, &inner.temp);
+        let instance_overlay;
+        let reader: &dyn KeyValueRead = match &generated {
+            Some(temp) => {
+                instance_overlay = Overlay::new(&base, temp);
+                &instance_overlay
+            }
+            None => &base,
+        };
+        let run_env = Env {
+            reader,
+            names: env.names,
+            columns_only: false,
+        };
+        let result = execute_query_enclosed(&run_env, tables, &instance, &inner, vec![synthetic])?;
+        for row in result.rows {
+            let mut keyed = tuple.clone();
+            keyed.extend(row);
+            memory.charge_row(&keyed)?;
+            rows.push(keyed);
+        }
+    }
+    Ok(LateralRows {
+        keys,
+        columns,
+        rows,
+    })
+}
+
+fn prepare_lateral(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    from: &mut FromClause,
+    index: usize,
+    parent: Option<&Outer<'_>>,
+    ctes: Option<&CteScope<'_>>,
+    prepared: &mut Prepared,
+) -> SqlResult<()> {
+    let Some(join_at) = index.checked_sub(1) else {
+        return Ok(());
+    };
+    let (kind, uses_names) = match from.joins.get(join_at) {
+        Some(join) => (
+            join.kind,
+            matches!(join.condition, JoinCondition::Using(_)),
+        ),
+        None => return Err(internal("a LATERAL item lost its join")),
+    };
+    let source = std::iter::once(&from.first)
+        .chain(from.joins.iter().map(|join| &join.table))
+        .nth(index)
+        .and_then(lateral_source)
+        .ok_or_else(|| internal("a LATERAL item lost its query"))?;
+    if matches!(kind, crate::ast::JoinKind::Right | crate::ast::JoinKind::Full) {
+        return Err(SqlError::new(
+            SqlState::INVALID_COLUMN_REFERENCE,
+            format!(
+                "invalid reference to FROM-clause entry for table \"{}\"",
+                source.label
+            ),
+        )
+        .with_hint("The combining JOIN type must be INNER or LEFT for a LATERAL reference.")
+        .at(source.position));
+    }
+    if uses_names {
+        return Err(SqlError::not_supported(
+            "a LATERAL item joined with USING is not supported yet",
+        )
+        .with_hint("Join it with ON instead.")
+        .at(source.position));
+    }
+    let earlier = from.joins.get(..join_at).unwrap_or(&[]);
+    if earlier
+        .iter()
+        .any(|join| join.kind == crate::ast::JoinKind::Comma)
+        && earlier.iter().any(|join| {
+            matches!(
+                join.kind,
+                crate::ast::JoinKind::Right | crate::ast::JoinKind::Full
+            )
+        })
+    {
+        return Err(SqlError::not_supported(
+            "a LATERAL item after a comma and a RIGHT or FULL join is not supported yet",
+        )
+        .at(source.position));
+    }
+    let prior = FromClause {
+        first: from.first.clone(),
+        joins: earlier.to_vec(),
+    };
+    let built = lateral_rows(env, tables, &prior, &source, parent, ctes, prepared)?;
+    let mut columns = Vec::with_capacity(built.keys.len() + built.columns.len());
+    let mut renamed = Vec::with_capacity(built.keys.len() + source.renamed.len());
+    for (number, key) in built.keys.iter().enumerate() {
+        let name = lateral_key_name(number);
+        columns.push(OutputColumn {
+            name: name.clone(),
+            sql_type: key.sql_type,
+        });
+        renamed.push(crate::ast::Name {
+            text: name,
+            position: source.position,
+        });
+    }
+    columns.extend(built.columns);
+    if !source.renamed.is_empty() || !built.keys.is_empty() {
+        renamed.extend(source.renamed.iter().cloned());
+    }
+    let temp = prepared.temp.add(
+        env.names,
+        Intermediate {
+            columns: &columns,
+            renamed: &renamed,
+            label: &source.label,
+            dialect: source.dialect,
+            position: source.position,
+        },
+        built.rows,
+    )?;
+    if let Some(reference) = reference_mut(from, index) {
+        reference.name.text = temp;
+        reference.alias = Some(source.label.clone());
+        reference.derived = None;
+        reference.generated = None;
+    }
+    if built.keys.is_empty() {
+        return Ok(());
+    }
+    let position = source.position;
+    let mut conditions: Vec<Expr> = Vec::with_capacity(built.keys.len() + 1);
+    for (number, key) in built.keys.iter().enumerate() {
+        let left = Expr {
+            kind: ExprKind::Column {
+                qualifier: Some(key.label.clone()),
+                name: key.name.clone(),
+            },
+            position,
+        };
+        let right = Expr {
+            kind: ExprKind::Column {
+                qualifier: Some(source.label.clone()),
+                name: lateral_key_name(number),
+            },
+            position,
+        };
+        conditions.push(Expr {
+            kind: if key.has_null {
+                ExprKind::IsDistinctFrom {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    negated: true,
+                }
+            } else {
+                ExprKind::Binary(BinaryOperator::Equal, Box::new(left), Box::new(right))
+            },
+            position,
+        });
+    }
+    for join in from.joins.iter_mut().take(join_at) {
+        if join.kind == crate::ast::JoinKind::Comma {
+            join.kind = crate::ast::JoinKind::Cross;
+        }
+    }
+    if let Some(join) = from.joins.get_mut(join_at) {
+        if let JoinCondition::On(on) = std::mem::replace(&mut join.condition, JoinCondition::Always)
+        {
+            conditions.insert(0, on);
+        }
+        if matches!(
+            join.kind,
+            crate::ast::JoinKind::Comma | crate::ast::JoinKind::Cross
+        ) {
+            join.kind = crate::ast::JoinKind::Inner;
+        }
+        join.condition = JoinCondition::On(if conditions.len() == 1 {
+            conditions.remove(0)
+        } else {
+            Expr {
+                kind: ExprKind::And(conditions),
+                position,
+            }
+        });
+    }
+    Ok(())
 }
 
 enum Filling {
@@ -1831,18 +2385,22 @@ fn rewrite(
                 return Ok(());
             }
             let mut farther = outer.next;
+            let mut depth = 2;
             while let Some(level) = farther {
-                if level
+                if let Ok(index) = level
                     .scope
                     .column(qualifier.as_deref(), name, expr.position)
-                    .is_ok()
                 {
-                    return Err(SqlError::not_supported(
-                        "a subquery that refers to a query two or more levels out is not supported yet",
-                    )
-                    .at(expr.position));
+                    expr.kind = ExprKind::OuterColumn {
+                        index,
+                        sql_type: level.scope.column_type(index),
+                        depth,
+                    };
+                    *correlated = true;
+                    return Ok(());
                 }
                 farther = level.next;
+                depth += 1;
             }
             Ok(())
         }
@@ -1872,7 +2430,10 @@ fn rewrite(
                 scope,
                 next: parent,
             };
-            prepare_subquery(env, tables, subquery, &outer, ctes, templates)
+            if prepare_subquery(env, tables, subquery, &outer, ctes, templates)? {
+                *correlated = true;
+            }
+            Ok(())
         }
         _ => {
             for child in children_mut(expr) {
@@ -1939,7 +2500,7 @@ fn prepare_subquery(
     outer: &Outer<'_>,
     ctes: Option<&CteScope<'_>>,
     templates: &mut Vec<Template>,
-) -> SqlResult<()> {
+) -> SqlResult<bool> {
     let query = with_cap(subquery.query.clone(), row_cap(subquery));
     let mut inner = Prepared::new();
     let (query, correlated) = prepare_query(env, tables, &query, Some(outer), ctes, &mut inner)?;
@@ -1966,8 +2527,24 @@ fn prepare_subquery(
                 collect_outer(expr, &mut outer);
             }
         });
+        for template in &inner.templates {
+            for &(depth, index) in &template.outer {
+                if depth >= 2 && !outer.contains(&(depth - 1, index)) {
+                    outer.push((depth - 1, index));
+                }
+            }
+        }
+        let reaches_beyond = outer.iter().any(|&(depth, _)| depth >= 2);
+        let reads: Arc<[usize]> = outer
+            .iter()
+            .filter(|&&(depth, _)| depth == 1)
+            .map(|&(_, index)| index)
+            .collect();
         let sql_type = rows.sql_type;
-        let lookup = if matches!(subquery.test, SubqueryTest::Exists) && !env.columns_only {
+        let lookup = if matches!(subquery.test, SubqueryTest::Exists)
+            && !env.columns_only
+            && !reaches_beyond
+        {
             let keys_env = Env {
                 reader: &overlay,
                 names: env.names,
@@ -1987,11 +2564,13 @@ fn prepare_subquery(
         subquery.state = SubqueryState::Correlated {
             template: templates.len() - 1,
             sql_type,
+            reads,
+            grouped: None,
         };
-    } else {
-        subquery.state = SubqueryState::Rows(Arc::new(rows));
+        return Ok(reaches_beyond);
     }
-    Ok(())
+    subquery.state = SubqueryState::Rows(Arc::new(rows));
+    Ok(false)
 }
 
 pub(crate) fn output_column(expr: &Expr) -> Option<OutputColumn> {

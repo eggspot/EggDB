@@ -928,7 +928,7 @@ fn with_subqueries_run<T: Clone>(
     target: &TableReference,
     values_only: bool,
     exprs: fn(&mut T) -> Vec<&mut Expr>,
-) -> SqlResult<Option<T>> {
+) -> SqlResult<(T, crate::subquery::RowSubqueries)> {
     let mut copy = statement.clone();
     let found = exprs(&mut copy);
     let table = tables.require(reader, &target.name)?;
@@ -937,8 +937,45 @@ fn with_subqueries_run<T: Clone>(
     } else {
         scope_of(&table, target)
     };
-    crate::subquery::prepare_in_place(reader, tables, found, scope)?;
-    Ok(Some(copy))
+    let subqueries = crate::subquery::prepare_in_place(reader, tables, found, scope)?;
+    Ok((copy, subqueries))
+}
+
+fn rows_being_changed(position: usize) -> SqlError {
+    SqlError::not_supported("a subquery that refers to the rows being changed is not supported yet")
+        .with_hint("Compute the values with a SELECT first, or use a subquery that stands alone.")
+        .at(position)
+}
+
+fn joined_conjuncts(mut parts: Vec<Expr>, position: usize) -> Option<Expr> {
+    match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(Expr {
+            kind: ExprKind::And(parts),
+            position,
+        }),
+    }
+}
+
+fn split_row_filter(filter: Option<&Expr>) -> (Option<Expr>, Option<Expr>) {
+    let Some(filter) = filter else {
+        return (None, None);
+    };
+    if !crate::subquery::mentions_correlated(filter) {
+        return (Some(filter.clone()), None);
+    }
+    let parts = match &filter.kind {
+        ExprKind::And(parts) => parts.clone(),
+        _ => vec![filter.clone()],
+    };
+    let (late, early): (Vec<Expr>, Vec<Expr>) = parts
+        .into_iter()
+        .partition(crate::subquery::mentions_correlated);
+    (
+        joined_conjuncts(early, filter.position),
+        joined_conjuncts(late, filter.position),
+    )
 }
 
 fn with_selected_rows(
@@ -989,7 +1026,12 @@ pub(crate) fn insert(
         return self::insert(writer, tables, &selected);
     }
     let prepared = if insert_mentions_subquery(insert) {
-        with_subqueries_run(writer, tables, insert, &insert.table, true, insert_exprs)?
+        let (prepared, subqueries) =
+            with_subqueries_run(writer, tables, insert, &insert.table, true, insert_exprs)?;
+        if subqueries.is_correlated() {
+            return Err(rows_being_changed(insert.table.name.position));
+        }
+        Some(prepared)
     } else {
         None
     };
@@ -1832,7 +1874,9 @@ impl<'a> Projection<'a> {
                                     )
                                     .at(*position)
                                 })?;
-                            (source.offset..source.offset + source.table.columns.len()).collect()
+                            (source.offset..source.offset + source.table.columns.len())
+                            .filter(|&offset| !scope.is_hidden(offset))
+                            .collect()
                         }
                     };
                     for offset in offsets {
@@ -2503,21 +2547,6 @@ fn split_correlated(select: &Select) -> SqlResult<Option<(Select, Expr)>> {
     if let Some(key) = select.group_by.iter().find(|key| correlated(key)) {
         return Err(correlated_unsupported("GROUP BY", key.position));
     }
-    if aggregate::is_aggregate_query(select) {
-        let items = select.items.iter().filter_map(|item| match item {
-            SelectItem::Expr { expr, .. } => Some(expr),
-            SelectItem::Wildcard { .. } => None,
-        });
-        let mut later = items
-            .chain(select.having.iter())
-            .chain(select.order_by.iter().map(|item| &item.expr));
-        if let Some(expr) = later.find(|expr| correlated(expr)) {
-            return Err(correlated_unsupported(
-                "the select list, HAVING or ORDER BY of a grouped query",
-                expr.position,
-            ));
-        }
-    }
     let Some(filter) = &select.filter else {
         return Ok(None);
     };
@@ -2808,6 +2837,7 @@ fn select_or_explain(
             scope,
             &mut |visit| source.for_each_borrowed(visit),
             &mut memory,
+            correlation,
         )?;
         source = SourceRows {
             reader,
@@ -3203,10 +3233,12 @@ pub(crate) fn update(
     tables: &mut TableCache,
     update: &Update,
 ) -> SqlResult<QueryResult> {
-    let prepared = if update_mentions_subquery(update) {
-        with_subqueries_run(writer, tables, update, &update.table, false, update_exprs)?
+    let (prepared, subqueries) = if update_mentions_subquery(update) {
+        let (prepared, subqueries) =
+            with_subqueries_run(writer, tables, update, &update.table, false, update_exprs)?;
+        (Some(prepared), Some(subqueries))
     } else {
-        None
+        (None, None)
     };
     let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require_target(writer, &update.table.name, "update")?;
@@ -3252,51 +3284,59 @@ pub(crate) fn update(
         reject_aggregates(filter, "WHERE")?;
         check_columns(filter, scope)?;
     }
-    let returning = returning(&update.returning, scope)?;
-    let matched = matching_rows(writer, &table, scope, update.filter.as_ref())?;
+    let (early, late) = split_row_filter(update.filter.as_ref());
+    let matched = matching_rows(writer, &table, scope, early.as_ref())?;
     let mut changes: Vec<(Vec<u8>, Vec<u8>, Vec<Value>)> = Vec::with_capacity(matched.len());
     let mut old_rows = Vec::with_capacity(if keep_old { matched.len() } else { 0 });
-    for (old_key, old_row) in matched {
-        let evaluator = Evaluator {
-            scope,
-            row: &old_row,
-            correlation: None,
-        };
-        let mut new_row = old_row.clone();
-        for ((_, value), &index) in update.assignments.iter().zip(&targets) {
-            new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
-        }
-        check_not_null(&table, &new_row)?;
-        if !checks.is_empty() {
-            checks.check(&table, &new_row)?;
-        }
-        let new_key = if table.primary_key.is_empty() {
-            old_key.clone()
-        } else {
-            row_key(&table, &new_row)
-        };
-        if keep_old {
-            old_rows.push(old_row);
-        }
-        changes.push((old_key, new_key, new_row));
-    }
     let mut result_rows = Vec::new();
-    write_updated_rows(
-        writer,
-        tables,
-        &table,
-        &changes,
-        &old_rows,
-        &mut |new_row| {
-            if let Some(projection) = &returning {
-                result_rows.push(projection.project(new_row)?);
+    let columns = {
+        let reader: &dyn KeyValueRead = &*writer;
+        let correlation = subqueries
+            .as_ref()
+            .filter(|found| found.is_correlated())
+            .map(|found| found.correlation(reader));
+        let mut returning = returning(&update.returning, scope)?;
+        if let Some(projection) = &mut returning {
+            projection.correlation = correlation.as_ref();
+        }
+        for (old_key, old_row) in matched {
+            let evaluator = Evaluator {
+                scope,
+                row: &old_row,
+                correlation: correlation.as_ref(),
+            };
+            if let Some(late) = &late
+                && evaluator.boolean(late, "WHERE")? != Some(true)
+            {
+                continue;
             }
-            Ok(())
-        },
-    )?;
+            let mut new_row = old_row.clone();
+            for ((_, value), &index) in update.assignments.iter().zip(&targets) {
+                new_row[index] = assigned_value(&evaluator, value, &table, index, rule)?;
+            }
+            check_not_null(&table, &new_row)?;
+            if !checks.is_empty() {
+                checks.check(&table, &new_row)?;
+            }
+            if let Some(projection) = &returning {
+                result_rows.push(projection.project(&new_row)?);
+            }
+            let new_key = if table.primary_key.is_empty() {
+                old_key.clone()
+            } else {
+                row_key(&table, &new_row)
+            };
+            if keep_old {
+                old_rows.push(old_row);
+            }
+            changes.push((old_key, new_key, new_row));
+        }
+        returning.map(|projection| projection.columns)
+    };
+    write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
     let tag = format!("UPDATE {}", changes.len());
-    Ok(match returning {
-        Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
+    Ok(match columns {
+        Some(columns) => QueryResult::rows(tag, columns, result_rows),
         None => QueryResult::command(tag),
     })
 }
@@ -3431,12 +3471,14 @@ pub(crate) fn delete(
     tables: &mut TableCache,
     delete: &Delete,
 ) -> SqlResult<QueryResult> {
-    let prepared = if delete.filter.iter().any(crate::subquery::mentions_subquery)
+    let (prepared, subqueries) = if delete.filter.iter().any(crate::subquery::mentions_subquery)
         || returning_mentions_subquery(&delete.returning)
     {
-        with_subqueries_run(writer, tables, delete, &delete.table, false, delete_exprs)?
+        let (prepared, subqueries) =
+            with_subqueries_run(writer, tables, delete, &delete.table, false, delete_exprs)?;
+        (Some(prepared), Some(subqueries))
     } else {
-        None
+        (None, None)
     };
     let delete = prepared.as_ref().unwrap_or(delete);
     let table = tables.require_target(writer, &delete.table.name, "delete from")?;
@@ -3445,18 +3487,44 @@ pub(crate) fn delete(
         reject_aggregates(filter, "WHERE")?;
         check_columns(filter, scope)?;
     }
-    let returning = returning(&delete.returning, scope)?;
-    let matched = matching_rows(writer, &table, scope, delete.filter.as_ref())?;
+    let (early, late) = split_row_filter(delete.filter.as_ref());
+    let mut matched = matching_rows(writer, &table, scope, early.as_ref())?;
     let mut result_rows = Vec::new();
-    let count = delete_rows(writer, tables, &table, matched, &mut |row| {
-        if let Some(projection) = &returning {
-            result_rows.push(projection.project(row)?);
+    let columns = {
+        let reader: &dyn KeyValueRead = &*writer;
+        let correlation = subqueries
+            .as_ref()
+            .filter(|found| found.is_correlated())
+            .map(|found| found.correlation(reader));
+        let mut returning = returning(&delete.returning, scope)?;
+        if let Some(projection) = &mut returning {
+            projection.correlation = correlation.as_ref();
         }
-        Ok(())
-    })?;
+        if let Some(late) = &late {
+            let mut kept = Vec::with_capacity(matched.len());
+            for (key, row) in matched {
+                let evaluator = Evaluator {
+                    scope,
+                    row: &row,
+                    correlation: correlation.as_ref(),
+                };
+                if evaluator.boolean(late, "WHERE")? == Some(true) {
+                    kept.push((key, row));
+                }
+            }
+            matched = kept;
+        }
+        if let Some(projection) = &returning {
+            for (_, row) in &matched {
+                result_rows.push(projection.project(row)?);
+            }
+        }
+        returning.map(|projection| projection.columns)
+    };
+    let count = delete_rows(writer, tables, &table, matched, &mut |_| Ok(()))?;
     let tag = format!("DELETE {count}");
-    Ok(match returning {
-        Some(projection) => QueryResult::rows(tag, projection.columns, result_rows),
+    Ok(match columns {
+        Some(columns) => QueryResult::rows(tag, columns, result_rows),
         None => QueryResult::command(tag),
     })
 }

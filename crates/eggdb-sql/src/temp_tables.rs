@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub(crate) const TEMP_TABLE_MARKER: char = '\u{1}';
+pub(crate) const HIDDEN_COLUMN_MARKER: char = '\u{2}';
 const MOST_TEMP_TABLES: u32 = 1 << 20;
 const ID_SPACE: u64 = 1 << 24;
 const ENTRY_OVERHEAD: usize = 64;
@@ -65,6 +66,10 @@ pub(crate) fn temp_definition_and_catalog_need(name: &str) -> Option<(Arc<TableD
         let registered = definitions.get(name)?;
         Some((Arc::clone(&registered.definition), registered.needs_catalog))
     })
+}
+
+pub(crate) fn is_hidden_column(name: &str) -> bool {
+    name.starts_with(HIDDEN_COLUMN_MARKER)
 }
 
 pub(crate) fn display_name(name: &str) -> &str {

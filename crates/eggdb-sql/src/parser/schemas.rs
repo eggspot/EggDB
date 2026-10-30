@@ -170,9 +170,8 @@ impl<'t> Parser<'t> {
         if self.mysql() {
             self.mysql_view_options()?;
         }
-        if self.is_word("temp") || self.is_word("temporary") {
-            return Err(self.not_supported("CREATE TEMPORARY VIEW (temporary tables and views)"));
-        }
+        let temporary = (self.postgresql() || self.sqlite())
+            && (self.take_word("temp") || self.take_word("temporary"));
         if self.is_word("recursive") {
             return Err(self.not_supported("CREATE RECURSIVE VIEW"));
         }
@@ -223,23 +222,36 @@ impl<'t> Parser<'t> {
             .get(self.at.saturating_sub(1))
             .map_or(first, |token| token.end);
         let text = self.text.get(first..last).unwrap_or("").to_owned();
+        let mut check_option = None;
         if self.is_word("with") {
             let position = self.position();
             self.at += 1;
             if self.oracle() && self.take_word("read") {
                 self.expect_word("only")?;
-            } else if self.sqlserver() {
-                self.expect_word("check")?;
-                self.expect_word("option")?;
-                return Err(super::sqlserver::not_supported("WITH CHECK OPTION").at(position));
             } else {
-                let _ = self.take_word("cascaded") || self.take_word("local");
+                let local = !self.sqlserver()
+                    && !self.oracle()
+                    && !self.take_word("cascaded")
+                    && self.take_word("local");
                 self.expect_word("check")?;
                 self.expect_word("option")?;
-                return Err(SqlError::not_supported(
-                    "CREATE VIEW ... WITH CHECK OPTION is not supported yet: views are read-only",
-                )
-                .at(position));
+                if self.sqlite() {
+                    return Err(self.unexpected());
+                }
+                if self.oracle() && self.take_word("constraint") {
+                    self.name()?;
+                }
+                if temporary {
+                    return Err(SqlError::not_supported(
+                        "WITH CHECK OPTION on a temporary view is not supported yet",
+                    )
+                    .at(position));
+                }
+                check_option = Some(if local {
+                    crate::encoding::CheckOption::Local
+                } else {
+                    crate::encoding::CheckOption::Cascaded
+                });
             }
         }
         Ok(Statement::CreateView(Box::new(CreateView {
@@ -250,6 +262,8 @@ impl<'t> Parser<'t> {
             columns,
             query,
             text,
+            check_option,
+            temporary,
         })))
     }
 

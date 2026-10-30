@@ -583,13 +583,10 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     for sql in [
-        "SELECT * FROM people a FULL JOIN people b USING (id)",
         "SELECT * FROM people a NATURAL JOIN people b",
         "SELECT age FROM people GROUP BY ROLLUP (age)",
         "SELECT DISTINCT ON (age) age FROM people",
-        "SELECT * FROM people, LATERAL (SELECT 1) x",
         "SELECT '{{1}}'::int[]",
-        "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
         "ALTER TABLE people RENAME CONSTRAINT a TO b",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
@@ -1505,8 +1502,6 @@ fn join_errors_follow_postgresql() {
             "SELECT * FROM a JOIN b ON b.k = c.k JOIN people c ON true",
             "42P01",
         ),
-        ("SELECT * FROM a FULL JOIN b USING (k)", "0A000"),
-        ("SELECT * FROM a, LATERAL (SELECT 1) s", "0A000"),
         ("SELECT * FROM a NATURAL JOIN b", "0A000"),
         ("SELECT * FROM a JOIN (a JOIN b ON true) ON true", "0A000"),
         ("SELECT * FROM nope JOIN a ON true", "42P01"),

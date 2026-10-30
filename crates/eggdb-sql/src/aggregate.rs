@@ -1,4 +1,6 @@
-use crate::ast::{AggregateFunction, Expr, ExprKind, Literal, OrderItem, Select, SelectItem};
+use crate::ast::{
+    AggregateFunction, Expr, ExprKind, Literal, OrderItem, Select, SelectItem, SubqueryState,
+};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, check_columns, first_aggregate, output_name};
 use crate::hash_index::SeededIntegerHash;
@@ -546,7 +548,9 @@ pub(crate) fn output_items(items: &[SelectItem], scope: Scope<'_>) -> SqlResult<
                                 )
                                 .at(*position)
                             })?;
-                        (source.offset..source.offset + source.table.columns.len()).collect()
+                        (source.offset..source.offset + source.table.columns.len())
+                            .filter(|&offset| !scope.is_hidden(offset))
+                            .collect()
                     }
                 };
                 for offset in offsets {
@@ -585,6 +589,51 @@ struct Analyzer<'a> {
 }
 
 impl Analyzer<'_> {
+    fn shown_column(&self, offset: usize) -> String {
+        match self.scope.source_of(offset) {
+            Some((source, index)) => {
+                format!("{}.{}", source.label, source.table.columns[index].name)
+            }
+            None => format!("column {offset}"),
+        }
+    }
+
+    fn grouped_subquery(&mut self, expr: &Expr) -> SqlResult<Expr> {
+        let rebuilt = rebuild(expr, &mut |child| self.rewrite(child))?;
+        let position = rebuilt.position;
+        let ExprKind::Subquery(mut subquery) = rebuilt.kind else {
+            return Ok(rebuilt);
+        };
+        if let SubqueryState::Correlated { reads, grouped, .. } = &mut subquery.state {
+            let mut map = Vec::with_capacity(reads.len());
+            for &offset in reads.iter() {
+                let slot = if let Some(index) = self
+                    .key_offsets
+                    .iter()
+                    .position(|key| *key == Some(offset))
+                {
+                    index
+                } else if self.dependent.iter().any(|range| range.contains(&offset)) {
+                    self.group_column_slot(GroupColumn::Carried(offset))
+                } else {
+                    return Err(grouping_error(
+                        format!(
+                            "subquery uses ungrouped column \"{}\" from outer query",
+                            self.shown_column(offset)
+                        ),
+                        position,
+                    ));
+                };
+                map.push((offset, slot));
+            }
+            *grouped = Some(map.into());
+        }
+        Ok(Expr {
+            kind: ExprKind::Subquery(subquery),
+            position,
+        })
+    }
+
     fn group_column_slot(&mut self, column: GroupColumn) -> usize {
         let found = self
             .group_columns
@@ -640,6 +689,11 @@ impl Analyzer<'_> {
             });
         }
         match &expr.kind {
+            ExprKind::Subquery(subquery)
+                if matches!(subquery.state, SubqueryState::Correlated { .. }) =>
+            {
+                self.grouped_subquery(expr)
+            }
             ExprKind::Aggregate {
                 function,
                 argument,
@@ -1414,6 +1468,7 @@ impl Grouping {
         scope: Scope<'_>,
         feed: &mut RowFeed<'_>,
         memory: &mut WorkMemory,
+        correlation: Option<&crate::subquery::Correlation<'_>>,
     ) -> SqlResult<Vec<Vec<Value>>> {
         let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
         let mut integer_index: HashMap<i64, usize, SeededIntegerHash> = HashMap::default();
@@ -1443,7 +1498,7 @@ impl Grouping {
             let evaluator = Evaluator {
                 scope,
                 row,
-                correlation: None,
+                correlation,
             };
             key.clear();
             key_values.clear();
@@ -1603,7 +1658,7 @@ impl Grouping {
                 let evaluator = Evaluator {
                     scope: Scope::empty(),
                     row: &row,
-                    correlation: None,
+                    correlation,
                 };
                 if evaluator.boolean(having, "HAVING")? != Some(true) {
                     continue;

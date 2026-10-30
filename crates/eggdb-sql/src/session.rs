@@ -906,6 +906,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 binding.delete(reader, tables, delete)?;
                 execute::returning_columns(reader, tables, &delete.table, &delete.returning)
             }),
+            Statement::With(with) => self.read(|reader, tables| {
+                crate::with_statement::describe(reader, tables, with, binding)
+            }),
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
             Statement::MySql(statement) => self.describe_mysql(statement),
             Statement::Pragma(pragma) => Ok(self.pragma_columns(pragma)),
@@ -1933,6 +1936,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Delete(delete) => self.write("DELETE", |writer, tables| {
                 binding.delete(writer, tables, delete)?;
                 execute::delete(writer, tables, delete)
+            }),
+            Statement::With(with) => self.write("WITH", |writer, tables| {
+                crate::with_statement::run(writer, tables, with, binding)
             }),
             Statement::Merge(merge) => self.write("MERGE", |writer, tables| {
                 binding.merge(writer, tables, merge)?;
