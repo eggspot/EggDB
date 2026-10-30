@@ -75,6 +75,12 @@ fn arithmetic_type(
     }
     let exact = |sql_type| matches!(sql_type, SqlType::Numeric(_));
     if (exact(left_type) || exact(right_type)) && !left_type.is_float() && !right_type.is_float() {
+        if operator == BinaryOperator::Divide
+            && crate::constraints::current_dialect() == crate::Dialect::SqlServer
+            && let Some(quotient) = crate::sqlserver_numbers::quotient_sql_type(left, right, scope)
+        {
+            return Some(quotient);
+        }
         return Some(SqlType::Numeric(None));
     }
     if operator == BinaryOperator::Power {

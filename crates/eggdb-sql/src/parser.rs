@@ -2121,6 +2121,9 @@ impl<'t> Parser<'t> {
         if self.sqlserver() && self.at_openjson() {
             return self.sqlserver_openjson();
         }
+        if self.sqlserver() && self.at_string_split() {
+            return self.sqlserver_string_split();
+        }
         self.table_reference()
     }
 

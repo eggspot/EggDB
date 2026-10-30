@@ -415,7 +415,9 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         | ExprKind::SqliteFunction { name, .. }
         | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
         ExprKind::SqlServerFunction {
-            function: crate::sqlserver_functions::Function::Convert { .. },
+            function:
+                crate::sqlserver_functions::Function::Convert { .. }
+                | crate::sqlserver_functions::Function::TryConvert { .. },
             arguments,
         } => match arguments.first().map(name_and_whether_it_names_a_value) {
             Some((name, true)) => (name, true),
@@ -716,7 +718,9 @@ impl Evaluator<'_> {
             ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
             ExprKind::Cast { sql_type, .. } => Some(*sql_type),
             ExprKind::SqlServerFunction {
-                function: crate::sqlserver_functions::Function::Convert { target, .. },
+                function:
+                    crate::sqlserver_functions::Function::Convert { target, .. }
+                    | crate::sqlserver_functions::Function::TryConvert { target, .. },
                 ..
             } => Some(target.engine_type()),
             ExprKind::SessionValue { .. } => Some(SqlType::Text),
@@ -824,10 +828,21 @@ impl Evaluator<'_> {
                     operator.symbol(),
                 )?))
             }
+            BinaryOperator::Divide => {
+                let (left_value, right_value) = self.pair(left, right)?;
+                if let Some(divided) = self.sqlserver_decimal_division(
+                    left,
+                    right,
+                    &left_value,
+                    &right_value,
+                ) {
+                    return divided;
+                }
+                arithmetic(operator, &left_value, &right_value)
+            }
             BinaryOperator::Add
             | BinaryOperator::Subtract
             | BinaryOperator::Multiply
-            | BinaryOperator::Divide
             | BinaryOperator::Modulo
             | BinaryOperator::Power => {
                 let (left, right) = self.pair(left, right)?;
@@ -1043,6 +1058,38 @@ impl Evaluator<'_> {
         }
     }
 
+    fn sqlserver_decimal_division(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        left_value: &Value,
+        right_value: &Value,
+    ) -> Option<SqlResult<Value>> {
+        let exact = |value: &Value| {
+            matches!(
+                value,
+                Value::Numeric(_) | Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_)
+            )
+        };
+        if !(matches!(left_value, Value::Numeric(_)) || matches!(right_value, Value::Numeric(_)))
+            || !exact(left_value)
+            || !exact(right_value)
+            || crate::constraints::current_dialect() != crate::Dialect::SqlServer
+        {
+            return None;
+        }
+        let declared = |expr: &Expr, value: &Value| {
+            crate::sqlserver_numbers::declared_decimal(expr, self.scope)
+                .or_else(|| crate::sqlserver_numbers::value_decimal_type(value))
+        };
+        crate::sqlserver_numbers::divide(
+            left_value,
+            right_value,
+            declared(left, left_value)?,
+            declared(right, right_value)?,
+        )
+    }
+
     fn declared_scale(&self, expr: &Expr) -> Option<u8> {
         match crate::typing::static_type(expr, self.scope)? {
             SqlType::Timestamp(scale) | SqlType::TimestampTz(scale) | SqlType::Time(scale) => scale,
@@ -1062,6 +1109,19 @@ impl Evaluator<'_> {
                 let value = self.eval(argument, None)?;
                 let scale = self.declared_scale(argument);
                 crate::sqlserver_conversion::convert(value, target, style, scale)
+            }
+            (Function::TryConvert { target, style }, [argument]) => {
+                let value = self.eval(argument, None)?;
+                let scale = self.declared_scale(argument);
+                crate::sqlserver_conversion::try_convert(value, target, style, scale)
+            }
+            (function, [first, ..]) if function.needs_declared_type() => {
+                let declared = match &first.kind {
+                    ExprKind::Literal(_) => None,
+                    _ => crate::typing::static_type(first, self.scope),
+                };
+                let values = self.arguments(arguments)?;
+                crate::sqlserver_functions::call_declared(function, &values, declared)
             }
             (Function::IsNull, [first, second]) => {
                 let declared = crate::typing::static_type(first, self.scope);

@@ -1466,6 +1466,19 @@ impl<'t> Parser<'t> {
                 "convert" if self.peek_kind_at(1) == &TokenKind::LeftParen => {
                     self.sqlserver_convert(position)?
                 }
+                "left" | "right" | "try_convert"
+                    if self.peek_kind_at(1) == &TokenKind::LeftParen =>
+                {
+                    let name = Name {
+                        text: word.as_ref().to_owned(),
+                        position,
+                    };
+                    self.at += 1;
+                    match self.sqlserver_call(&name)? {
+                        Some(expr) => expr,
+                        None => return Err(unknown_function(&name.text, position)),
+                    }
+                }
                 "current_timestamp" => {
                     self.at += 1;
                     clock(3, position)
@@ -1541,6 +1554,13 @@ impl<'t> Parser<'t> {
             "@@rowcount" => Expr {
                 kind: ExprKind::SqlServerFunction {
                     function: crate::sqlserver_functions::Function::RowCount,
+                    arguments: Vec::new(),
+                },
+                position,
+            },
+            "@@identity" => Expr {
+                kind: ExprKind::SqlServerFunction {
+                    function: crate::sqlserver_functions::Function::ScopeIdentity,
                     arguments: Vec::new(),
                 },
                 position,

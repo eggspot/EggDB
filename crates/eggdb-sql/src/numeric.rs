@@ -581,6 +581,40 @@ impl Numeric {
         self.divide_to_scale(other, scale)
     }
 
+    pub(crate) fn divide_truncated(&self, other: &Self, scale: usize) -> SqlResult<Self> {
+        if self.nan || other.nan {
+            return Ok(Self::nan());
+        }
+        if other.is_zero() {
+            return Err(SqlError::new(
+                SqlState::DIVISION_BY_ZERO,
+                "division by zero",
+            ));
+        }
+        let scale = scale.min(MAX_SCALE);
+        if self.is_zero() {
+            return Ok(Self::zero(scale));
+        }
+        let estimate = self.decimal_exponent().unwrap_or(0) - other.decimal_exponent().unwrap_or(0);
+        if estimate > MAX_INTEGRAL_DIGITS as i64 {
+            return Err(overflow());
+        }
+        let shift = i64::from(other.scale) - i64::from(self.scale) + scale as i64;
+        let (dividend, divisor) = if shift >= 0 {
+            (
+                shift_left(&self.limbs, shift as usize),
+                other.limbs.to_vec(),
+            )
+        } else {
+            (
+                self.limbs.to_vec(),
+                shift_left(&other.limbs, shift.unsigned_abs() as usize),
+            )
+        };
+        let (quotient, _) = divide_magnitudes(&dividend, &divisor);
+        Self::finite(self.negative != other.negative, quotient, scale)
+    }
+
     fn divide_to_scale(&self, other: &Self, scale: usize) -> SqlResult<Self> {
         if self.is_zero() {
             return Ok(Self::zero(scale));
@@ -1191,6 +1225,18 @@ mod tests {
             "error: value overflows numeric format"
         );
         assert_eq!(shown(n("2").power(&n("-2"))), "0.25000000000000000");
+    }
+
+    #[test]
+    fn truncated_division_drops_the_digits_past_its_scale() {
+        assert_eq!(shown(n("2").divide_truncated(&n("3"), 6)), "0.666666");
+        assert_eq!(shown(n("-2").divide_truncated(&n("3"), 2)), "-0.66");
+        assert_eq!(shown(n("10.0").divide_truncated(&n("4"), 1)), "2.5");
+        assert_eq!(shown(n("0").divide_truncated(&n("7"), 3)), "0.000");
+        assert_eq!(
+            shown(n("1").divide_truncated(&n("0"), 6)),
+            "error: division by zero"
+        );
     }
 
     #[test]

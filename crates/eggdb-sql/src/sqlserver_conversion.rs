@@ -14,6 +14,9 @@ const MAX_MONEY_UNITS: i128 = 9_223_372_036_854_775_807;
 const MAX_SMALLMONEY_UNITS: i128 = 2_147_483_647;
 const MONEY_SCALE: u16 = 4;
 const MICROS_PER_MINUTE: i64 = 60 * MICROS_PER_SECOND;
+const MICROS_PER_HOUR: i64 = 60 * MICROS_PER_MINUTE;
+const GENERAL_FLOAT_DIGITS: i32 = 6;
+const MONEY_DISPLAY_PLACES: i64 = 2;
 const SMALLDATETIME_ROUNDS_UP_AT_MILLIS: i64 = 29_999;
 
 const MONTHS: [&str; 12] = [
@@ -31,7 +34,9 @@ const MONTHS: [&str; 12] = [
     "december",
 ];
 
-const IMPLEMENTED_STYLES: [u16; 8] = [0, 23, 101, 103, 112, 120, 121, 126];
+const HIJRI_STYLES: [u16; 2] = [130, 131];
+
+const CONVERSION_FAILURES: [u16; 8] = [220, 241, 242, 245, 517, 8114, 8115, 8169];
 
 const KNOWN_DATE_STYLES: [u16; 44] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 20, 21, 22, 23, 24, 25, 100, 101, 102, 103,
@@ -42,6 +47,7 @@ const KNOWN_DATE_STYLES: [u16; 44] = [
 pub(crate) enum DateOrder {
     MonthDayYear,
     DayMonthYear,
+    YearMonthDay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,8 +175,8 @@ fn style_not_supported(style: u16) -> SqlError {
 fn check_date_style(style: Option<u16>, source: &str) -> SqlResult<()> {
     match style {
         None => Ok(()),
-        Some(style) if IMPLEMENTED_STYLES.contains(&style) => Ok(()),
-        Some(style) if KNOWN_DATE_STYLES.contains(&style) => Err(style_not_supported(style)),
+        Some(style) if HIJRI_STYLES.contains(&style) => Err(style_not_supported(style)),
+        Some(style) if KNOWN_DATE_STYLES.contains(&style) => Ok(()),
         Some(style) => Err(invalid_style(style, source)),
     }
 }
@@ -287,7 +293,7 @@ fn read_date(cursor: &mut Cursor<'_>, order: DateOrder) -> Option<(Option<i64>, 
                         return None;
                     }
                     let iso = first.len() == 4;
-                    let (year, month, day) = if iso {
+                    let (year, month, day) = if iso || order == DateOrder::YearMonthDay {
                         (year_of(first)?, second.parse().ok()?, third.parse().ok()?)
                     } else if order == DateOrder::DayMonthYear {
                         (year_of(third)?, second.parse().ok()?, first.parse().ok()?)
@@ -307,6 +313,12 @@ fn read_date(cursor: &mut Cursor<'_>, order: DateOrder) -> Option<(Option<i64>, 
                     let year = first[..4].parse().ok()?;
                     let month = first[4..6].parse().ok()?;
                     let day = first[6..].parse().ok()?;
+                    Some((Some(civil_days(year, month, day)?), false))
+                }
+                _ if first.len() == 6 => {
+                    let year = year_of(&first[..2])?;
+                    let month = first[2..4].parse().ok()?;
+                    let day = first[4..].parse().ok()?;
                     Some((Some(civil_days(year, month, day)?), false))
                 }
                 _ if first.len() <= 2 => {
@@ -377,6 +389,12 @@ fn read_time(cursor: &mut Cursor<'_>, fraction_digits: usize) -> Option<i64> {
                 }
                 let kept: String = digits.chars().take(6).collect();
                 fraction = format!("{kept:0<6}").parse().ok()?;
+            } else if cursor.take(b':') {
+                let digits = cursor.digits();
+                if digits.is_empty() || digits.len() > 3 {
+                    return None;
+                }
+                fraction = digits.parse::<i64>().ok()? * 1000;
             }
         }
     }
@@ -589,6 +607,7 @@ pub(crate) fn parse_datetime(
 fn order_of(style: Option<u16>) -> DateOrder {
     match style {
         Some(3 | 4 | 5 | 103 | 104 | 105) => DateOrder::DayMonthYear,
+        Some(2 | 11) => DateOrder::YearMonthDay,
         _ => DateOrder::MonthDayYear,
     }
 }
@@ -607,6 +626,9 @@ fn to_temporal(value: &Value, target: Temporal, scale: u8, style: Option<u16>) -
     if let Some(text) = character_text(value) {
         if let Some(style) = style.filter(|style| !KNOWN_DATE_STYLES.contains(style)) {
             return Err(invalid_style(style, value_type_name(value)));
+        }
+        if let Some(style) = style.filter(|style| HIJRI_STYLES.contains(style)) {
+            return Err(style_not_supported(style));
         }
         return parse_datetime(text, target, scale, order_of(style));
     }
@@ -679,6 +701,98 @@ fn offset_text(offset_seconds: i32) -> String {
     format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
+fn month_abbreviation(month: i64) -> String {
+    let name = MONTHS[usize::try_from(month - 1).unwrap_or(0).min(11)];
+    let mut out = name[..1].to_ascii_uppercase();
+    out.push_str(&name[1..3]);
+    out
+}
+
+fn styled_date(style: u16, year: i64, month: i64, day: i64) -> Option<String> {
+    let full = format!("{year:04}");
+    let short = format!("{:02}", year.rem_euclid(100));
+    let year_text = if style >= 100 { &full } else { &short };
+    let (mm, dd) = (format!("{month:02}"), format!("{day:02}"));
+    let mon = month_abbreviation(month);
+    Some(match style {
+        0 | 100 | 9 | 109 => format!("{mon} {day:>2} {full}"),
+        1 | 101 => format!("{mm}/{dd}/{year_text}"),
+        2 | 102 => format!("{year_text}.{mm}.{dd}"),
+        3 | 103 => format!("{dd}/{mm}/{year_text}"),
+        4 | 104 => format!("{dd}.{mm}.{year_text}"),
+        5 | 105 => format!("{dd}-{mm}-{year_text}"),
+        6 | 106 => format!("{dd} {mon} {year_text}"),
+        7 | 107 => format!("{mon} {dd}, {year_text}"),
+        10 | 110 => format!("{mm}-{dd}-{year_text}"),
+        11 | 111 => format!("{year_text}/{mm}/{dd}"),
+        12 | 112 => format!("{year_text}{mm}{dd}"),
+        13 | 113 => format!("{dd} {mon} {full}"),
+        20 | 21 | 23 | 25 | 120 | 121 | 126 | 127 => format!("{full}-{mm}-{dd}"),
+        22 => format!("{mm}/{dd}/{short}"),
+        _ => return None,
+    })
+}
+
+fn styled_fraction(of_day: i64, digits: usize, separator_for_milliseconds: char) -> String {
+    if digits == 0 {
+        return String::new();
+    }
+    let separator = if digits == 3 {
+        separator_for_milliseconds
+    } else {
+        '.'
+    };
+    let fraction = format!("{:06}0", of_day % MICROS_PER_SECOND);
+    format!("{separator}{}", &fraction[..digits.min(7)])
+}
+
+fn styled_time(style: u16, of_day: i64, declared: Option<usize>) -> Option<String> {
+    let hour = of_day / MICROS_PER_HOUR;
+    let marker = if hour < 12 { "AM" } else { "PM" };
+    let twelve = match hour % 12 {
+        0 => 12,
+        other => other,
+    };
+    let minute = of_day / MICROS_PER_MINUTE % 60;
+    let second = of_day / MICROS_PER_SECOND % 60;
+    let digits = declared.unwrap_or(3);
+    Some(match style {
+        0 | 100 => format!("{twelve:>2}:{minute:02}{marker}"),
+        9 | 109 => format!(
+            "{twelve:>2}:{minute:02}:{second:02}{}{marker}",
+            styled_fraction(of_day, digits, ':')
+        ),
+        8 | 24 | 108 | 20 | 120 => clock_text(of_day, 0),
+        13 | 113 | 14 | 114 => format!(
+            "{}{}",
+            clock_text(of_day, 0),
+            styled_fraction(of_day, digits, ':')
+        ),
+        21 | 25 | 121 => clock_text(of_day, digits),
+        22 => format!("{twelve:>2}:{minute:02}:{second:02} {marker}"),
+        126 | 127 if of_day % MICROS_PER_SECOND == 0 => clock_text(of_day, 0),
+        126 | 127 => clock_text(of_day, digits),
+        _ => return None,
+    })
+}
+
+fn default_temporal_text(
+    days: i64,
+    of_day: i64,
+    has_date: bool,
+    has_time: bool,
+    declared: Option<usize>,
+) -> String {
+    let (year, month, day) = date_parts(days);
+    let date = format!("{year}-{month}-{day}");
+    let time = clock_text(of_day, declared.unwrap_or_else(|| trimmed_digits(of_day)));
+    match (has_date, has_time) {
+        (true, false) => date,
+        (false, _) => time,
+        (true, true) => format!("{date} {time}"),
+    }
+}
+
 fn temporal_text(
     value: &Value,
     style: Option<u16>,
@@ -686,7 +800,7 @@ fn temporal_text(
 ) -> SqlResult<Option<String>> {
     let (local, has_date, has_time, offset) = match value {
         Value::Date(days) => (i64::from(*days) * MICROS_PER_DAY, true, false, None),
-        Value::Time(micros) => (*micros, false, true, None),
+        Value::Time(micros) => (base_date() * MICROS_PER_DAY + *micros, false, true, None),
         Value::Timestamp(micros) => (*micros, true, true, None),
         Value::TimestampTz(micros) => (
             datetime::utc_to_local(*micros)?,
@@ -699,37 +813,130 @@ fn temporal_text(
     check_date_style(style, value_type_name(value))?;
     let days = local.div_euclid(MICROS_PER_DAY);
     let of_day = local.rem_euclid(MICROS_PER_DAY);
-    let (year, month, day) = date_parts(days);
     let declared = scale.map(|scale| usize::from(scale.min(6)));
-    let fraction_digits = declared.unwrap_or_else(|| trimmed_digits(of_day));
-    let date = match style {
-        Some(101) => format!("{month}/{day}/{year}"),
-        Some(103) => format!("{day}/{month}/{year}"),
-        Some(112) => format!("{year}{month}{day}"),
-        _ => format!("{year}-{month}-{day}"),
+    let Some(style) = style else {
+        let mut text = default_temporal_text(days, of_day, has_date, has_time, declared);
+        if let Some(offset) = offset {
+            text.push(' ');
+            text.push_str(&offset_text(offset));
+        }
+        return Ok(Some(text));
     };
-    let time = match style {
-        Some(120) => clock_text(of_day, 0),
-        Some(121) => clock_text(of_day, declared.unwrap_or(3)),
-        Some(126) if of_day % MICROS_PER_SECOND == 0 => clock_text(of_day, 0),
-        Some(126) => clock_text(of_day, declared.unwrap_or(3)),
-        _ => clock_text(of_day, fraction_digits),
-    };
-    let date_only = matches!(style, Some(23 | 101 | 103 | 112));
-    let separator = if style == Some(126) { "T" } else { " " };
-    let mut text = match (has_date, has_time) {
-        (true, false) => date,
-        (false, _) => time,
-        (true, true) if date_only => date,
-        (true, true) => format!("{date}{separator}{time}"),
+    let (year, month, day) = datetime::civil_from_days(days);
+    let date = styled_date(style, year, month, day);
+    let time = styled_time(style, of_day, declared);
+    let separator = if matches!(style, 126 | 127) { "T" } else { " " };
+    let (mut text, time_shown) = match (has_date, has_time, date, time) {
+        (true, true, Some(date), Some(time)) => (format!("{date}{separator}{time}"), true),
+        (true, _, Some(date), _) => (date, false),
+        (_, _, _, Some(time)) => (time.trim_start().to_owned(), true),
+        (_, _, Some(date), None) => (date, false),
+        (_, _, None, None) => return Err(style_not_supported(style)),
     };
     if let Some(offset) = offset
-        && !date_only
+        && time_shown
     {
-        text.push(' ');
-        text.push_str(&offset_text(offset));
+        if style == 127 && offset == 0 {
+            text.push('Z');
+        } else if style == 127 {
+            text.push_str(&offset_text(offset));
+        } else {
+            text.push(' ');
+            text.push_str(&offset_text(offset));
+        }
     }
     Ok(Some(text))
+}
+
+fn exponent_suffix(exponent: i32) -> String {
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("e{sign}{:03}", exponent.unsigned_abs())
+}
+
+fn without_trailing_zeros(text: &str) -> &str {
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        text
+    }
+}
+
+fn split_exponent(written: &str) -> (&str, i32) {
+    match written.split_once('e') {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse().unwrap_or(0)),
+        None => (written, 0),
+    }
+}
+
+fn general_float_text(number: f64) -> String {
+    if number == 0.0 {
+        return "0".to_owned();
+    }
+    if !number.is_finite() {
+        return number.to_string();
+    }
+    let places = (GENERAL_FLOAT_DIGITS - 1) as usize;
+    let written = format!("{number:.places$e}");
+    let (mantissa, exponent) = split_exponent(&written);
+    if !(-4..GENERAL_FLOAT_DIGITS).contains(&exponent) {
+        return format!(
+            "{}{}",
+            without_trailing_zeros(mantissa),
+            exponent_suffix(exponent)
+        );
+    }
+    let decimals = (GENERAL_FLOAT_DIGITS - 1 - exponent).max(0) as usize;
+    without_trailing_zeros(&format!("{number:.decimals$}")).to_owned()
+}
+
+fn scientific_float_text(number: f64, places: usize) -> String {
+    let written = format!("{number:.places$e}");
+    let (mantissa, exponent) = split_exponent(&written);
+    format!("{mantissa}{}", exponent_suffix(exponent))
+}
+
+fn float_text(value: &Value, style: Option<u16>) -> SqlResult<String> {
+    let number = value.as_float().unwrap_or(f64::NAN);
+    match style {
+        None | Some(0) => Ok(general_float_text(number)),
+        Some(1) => Ok(scientific_float_text(number, 7)),
+        Some(2 | 126) => Ok(scientific_float_text(number, 15)),
+        Some(3) => Err(style_not_supported(3)),
+        Some(style) => Err(invalid_style(style, value_type_name(value))),
+    }
+}
+
+fn money_text(number: &Numeric, style: u16) -> SqlResult<Option<String>> {
+    if number.scale() != MONEY_SCALE || number.is_nan() {
+        return Ok(None);
+    }
+    let places = match style {
+        0 | 1 => MONEY_DISPLAY_PLACES,
+        2 | 126 => i64::from(MONEY_SCALE),
+        _ => return Ok(None),
+    };
+    let text = number.rounded(places)?.to_string();
+    if style != 1 {
+        return Ok(Some(text));
+    }
+    let (sign, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
+    };
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    Ok(Some(format!(
+        "{sign}{}.{fraction}",
+        crate::sqlserver_format::grouped(whole)
+    )))
+}
+
+fn binary_text(bytes: &[u8], style: Option<u16>) -> SqlResult<String> {
+    match style {
+        None | Some(0) => Ok(String::from_utf8_lossy(bytes).into_owned()),
+        Some(1) => Ok(format!("0x{}", hex_upper(bytes))),
+        Some(2) => Ok(hex_upper(bytes)),
+        Some(style) => Err(invalid_style(style, "varbinary")),
+    }
 }
 
 fn hex_upper(bytes: &[u8]) -> String {
@@ -740,10 +947,21 @@ pub(crate) fn text_of(value: &Value, style: Option<u16>, scale: Option<u8>) -> S
     if let Some(text) = temporal_text(value, style, scale)? {
         return Ok(text);
     }
+    match value {
+        Value::Real(_) | Value::Double(_) => return float_text(value, style),
+        Value::Bytea(bytes) => return binary_text(bytes, style),
+        Value::Numeric(number) => {
+            if let Some(style) = style
+                && let Some(text) = money_text(number, style)?
+            {
+                return Ok(text);
+            }
+        }
+        _ => {}
+    }
     Ok(match value {
         Value::Boolean(flag) => if *flag { "1" } else { "0" }.to_owned(),
         Value::Uuid(bytes) => crate::bytea::format_uuid(bytes).to_ascii_uppercase(),
-        Value::Bytea(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         Value::Text(text) | Value::Bpchar(text) => text.clone(),
         other => other.to_text().unwrap_or_default(),
     })
@@ -990,6 +1208,40 @@ fn to_bytes(value: &Value) -> SqlResult<Vec<u8>> {
     })
 }
 
+fn hex_digits(text: &str, value: &Value) -> SqlResult<Vec<u8>> {
+    let failed = || converting_error(value_type_name(value), "varbinary");
+    if text.len() % 2 == 1 {
+        return Err(failed());
+    }
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(failed)
+}
+
+fn to_styled_bytes(value: &Value, style: Option<u16>) -> SqlResult<Vec<u8>> {
+    let Some(text) = character_text(value) else {
+        return to_bytes(value);
+    };
+    match style {
+        None | Some(0) => to_bytes(value),
+        Some(1) => {
+            let digits = text
+                .strip_prefix("0x")
+                .or_else(|| text.strip_prefix("0X"))
+                .ok_or_else(|| converting_error(value_type_name(value), "varbinary"))?;
+            hex_digits(digits, value)
+        }
+        Some(2) => hex_digits(text, value),
+        Some(style) => Err(invalid_style(style, value_type_name(value))),
+    }
+}
+
 fn sized_text(text: String, length: Length, padded: bool) -> SqlResult<Value> {
     let Length::Given(length) = length else {
         return Ok(Value::Text(text));
@@ -1072,11 +1324,33 @@ pub(crate) fn convert(
             within_limit(text.len())?;
             Ok(Value::Text(text))
         }
-        SqlServerType::Binary(length) => sized_bytes(to_bytes(&value)?, length, true),
-        SqlServerType::VarBinary(length) => sized_bytes(to_bytes(&value)?, length, false),
-        SqlServerType::Image => to_bytes(&value).map(Value::Bytea),
+        SqlServerType::Binary(length) => {
+            sized_bytes(to_styled_bytes(&value, style)?, length, true)
+        }
+        SqlServerType::VarBinary(length) => {
+            sized_bytes(to_styled_bytes(&value, style)?, length, false)
+        }
+        SqlServerType::Image => to_styled_bytes(&value, style).map(Value::Bytea),
         SqlServerType::UniqueIdentifier => to_guid(&value).map(Value::Uuid),
         _ => Ok(value),
+    }
+}
+
+pub(crate) fn try_convert(
+    value: Value,
+    target: SqlServerType,
+    style: Option<u16>,
+    scale: Option<u8>,
+) -> SqlResult<Value> {
+    match convert(value, target, style, scale) {
+        Err(error)
+            if error
+                .vendor_code()
+                .is_some_and(|code| CONVERSION_FAILURES.contains(&code)) =>
+        {
+            Ok(Value::Null)
+        }
+        other => other,
     }
 }
 
@@ -1173,7 +1447,7 @@ pub(crate) fn literal_of(text: &str, target: SqlType) -> Option<SqlResult<Value>
 
 #[cfg(test)]
 mod tests {
-    use super::{DateOrder, Temporal, convert, implicit, parse_datetime, text_of};
+    use super::{DateOrder, Temporal, convert, implicit, parse_datetime, text_of, try_convert};
     use crate::datetime::{self, MICROS_PER_DAY, MICROS_PER_SECOND};
     use crate::numeric::Numeric;
     use crate::sqlserver_types::{Length, SqlServerType};
@@ -1349,6 +1623,127 @@ mod tests {
         );
         let error = text_of(&stamp, Some(999), None).err();
         assert_eq!(error.and_then(|error| error.vendor_code()), Some(281));
+    }
+
+    #[test]
+    fn every_documented_date_style_writes_its_own_layout() {
+        let day = datetime::days_from_civil(2020, 7, 4);
+        let at = day * MICROS_PER_DAY + (13 * 3600 + 5 * 60 + 9) * MICROS_PER_SECOND;
+        let stamp = Value::Timestamp(at);
+        let styled = |style| match text_of(&stamp, Some(style), Some(3)) {
+            Ok(text) => text,
+            Err(error) => format!("error {}", error.vendor_code().unwrap_or(0)),
+        };
+        let cases = [
+            (0, "Jul  4 2020  1:05PM"),
+            (100, "Jul  4 2020  1:05PM"),
+            (1, "07/04/20"),
+            (2, "20.07.04"),
+            (102, "2020.07.04"),
+            (3, "04/07/20"),
+            (4, "04.07.20"),
+            (105, "04-07-2020"),
+            (6, "04 Jul 20"),
+            (106, "04 Jul 2020"),
+            (107, "Jul 04, 2020"),
+            (8, "13:05:09"),
+            (108, "13:05:09"),
+            (109, "Jul  4 2020  1:05:09:000PM"),
+            (110, "07-04-2020"),
+            (111, "2020/07/04"),
+            (12, "200704"),
+            (113, "04 Jul 2020 13:05:09:000"),
+            (114, "13:05:09:000"),
+            (22, "07/04/20  1:05:09 PM"),
+            (127, "2020-07-04T13:05:09"),
+            (130, "error 40517"),
+        ];
+        for (style, expected) in cases {
+            assert_eq!(styled(style), expected, "{style}");
+        }
+        let time = Value::Time((13 * 3600 + 5 * 60) * MICROS_PER_SECOND);
+        assert_eq!(text_of(&time, Some(100), None).ok().as_deref(), Some("1:05PM"));
+        assert_eq!(
+            text_of(&time, Some(101), None).ok().as_deref(),
+            Some("01/01/1900")
+        );
+        let date = Value::Date(day as i32);
+        assert_eq!(text_of(&date, Some(108), None).ok().as_deref(), Some("00:00:00"));
+    }
+
+    #[test]
+    fn styled_text_reads_back_as_the_same_moment() {
+        let read = |text: &str, style: Option<u16>| {
+            convert(
+                Value::Text(text.into()),
+                SqlServerType::DateTime2 { scale: 3 },
+                style,
+                None,
+            )
+            .and_then(|value| text_of(&value, Some(121), Some(3)))
+            .unwrap_or_else(|error| format!("error {}", error.vendor_code().unwrap_or(0)))
+        };
+        assert_eq!(read("Jul  4 2020  1:05PM", Some(100)), "2020-07-04 13:05:00.000");
+        assert_eq!(
+            read("04 Jul 2020 13:05:09:123", Some(113)),
+            "2020-07-04 13:05:09.123"
+        );
+        assert_eq!(read("200704", Some(12)), "2020-07-04 00:00:00.000");
+        assert_eq!(read("20.07.04", Some(2)), "2020-07-04 00:00:00.000");
+        assert_eq!(read("2020-07-04", Some(130)), "error 40517");
+    }
+
+    #[test]
+    fn floats_money_and_binary_take_their_own_styles() {
+        let float = |number: f64, style| text_of(&Value::Double(number), style, None).unwrap_or_default();
+        assert_eq!(float(1_234_567.0, None), "1.23457e+006");
+        assert_eq!(float(123_456.0, None), "123456");
+        assert_eq!(float(0.1 + 0.2, None), "0.3");
+        assert_eq!(float(0.00001, Some(0)), "1e-005");
+        assert_eq!(float(1234.5678, Some(1)), "1.2345678e+003");
+        assert_eq!(float(1234.5678, Some(2)), "1.234567800000000e+003");
+        let money = number("4235.9877");
+        let money_text = |style| text_of(&money, Some(style), None).unwrap_or_default();
+        assert_eq!(money_text(0), "4235.99");
+        assert_eq!(money_text(1), "4,235.99");
+        assert_eq!(money_text(2), "4235.9877");
+        let bytes = Value::Bytea(vec![0x4E, 0x61]);
+        assert_eq!(text_of(&bytes, Some(1), None).ok().as_deref(), Some("0x4E61"));
+        assert_eq!(text_of(&bytes, Some(2), None).ok().as_deref(), Some("4E61"));
+        let to_binary = |text: &str, style| {
+            convert(
+                Value::Text(text.into()),
+                SqlServerType::VarBinary(Length::Max),
+                Some(style),
+                None,
+            )
+        };
+        assert_eq!(to_binary("0x4E61", 1).ok(), Some(Value::Bytea(vec![0x4E, 0x61])));
+        assert_eq!(to_binary("4E61", 2).ok(), Some(Value::Bytea(vec![0x4E, 0x61])));
+        assert_eq!(
+            to_binary("0x123", 1).err().and_then(|error| error.vendor_code()),
+            Some(8114)
+        );
+    }
+
+    #[test]
+    fn try_convert_turns_failed_conversions_into_null_but_not_forbidden_ones() {
+        let failed = try_convert(Value::Text("abc".into()), SqlServerType::Int, None, None);
+        assert_eq!(failed.ok(), Some(Value::Null));
+        let date = try_convert(
+            Value::Text("2020-02-30".into()),
+            SqlServerType::Date,
+            None,
+            None,
+        );
+        assert_eq!(date.ok(), Some(Value::Null));
+        let forbidden = try_convert(Value::Date(0), SqlServerType::Int, None, None);
+        assert_eq!(
+            forbidden.err().and_then(|error| error.vendor_code()),
+            Some(529)
+        );
+        let fine = try_convert(Value::Text("12".into()), SqlServerType::Int, None, None);
+        assert_eq!(fine.ok(), Some(Value::Integer(12)));
     }
 
     #[test]

@@ -7,7 +7,12 @@ use crate::ast::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
 use crate::sqlserver_functions::{DatePart, Function};
+use crate::sqlserver_numbers::NumberFunction;
+use crate::sqlserver_strings::{TextFunction, TrimEnds};
+use crate::sqlserver_types::{Length, SqlServerType};
 use crate::types::{SqlType, Value};
+
+const MOST_CONCAT_ARGUMENTS: usize = 254;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OutputStatement {
@@ -33,6 +38,22 @@ fn wrong_argument_count(name: &str, position: usize) -> SqlError {
     )
     .with_sqlserver_code(174)
     .at(position)
+}
+
+fn concat_argument_count(name: &str, fewest: usize, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::UNDEFINED_FUNCTION,
+        format!("The {name} function requires {fewest} to {MOST_CONCAT_ARGUMENTS} arguments."),
+    )
+    .with_sqlserver_code(189)
+    .at(position)
+}
+
+fn integer_constant(value: i64, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Literal(Literal::Integer(value)),
+        position,
+    }
 }
 
 fn unknown_date_part(word: &str, function: &str, position: usize) -> SqlError {
@@ -118,11 +139,7 @@ fn unqualified(expr: &mut Expr, statement: OutputStatement) -> SqlResult<()> {
 impl Parser<'_> {
     pub(super) fn sqlserver_cast(&mut self, position: usize) -> SqlResult<Expr> {
         self.at += 1;
-        self.expect(&TokenKind::LeftParen)?;
-        let expr = self.expression()?;
-        self.expect_word("as")?;
-        let target = self.sqlserver_declared_type(true)?;
-        self.expect(&TokenKind::RightParen)?;
+        let (target, expr) = self.sqlserver_cast_arguments()?;
         Ok(call(
             Function::Convert {
                 target,
@@ -133,8 +150,40 @@ impl Parser<'_> {
         ))
     }
 
+    fn sqlserver_cast_arguments(&mut self) -> SqlResult<(SqlServerType, Expr)> {
+        self.expect(&TokenKind::LeftParen)?;
+        let expr = self.expression()?;
+        self.expect_word("as")?;
+        let target = self.sqlserver_declared_type(true)?;
+        self.expect(&TokenKind::RightParen)?;
+        Ok((target, expr))
+    }
+
     pub(super) fn sqlserver_convert(&mut self, position: usize) -> SqlResult<Expr> {
         self.at += 1;
+        let (target, expr, style) = self.sqlserver_convert_arguments()?;
+        Ok(call(
+            Function::Convert { target, style },
+            vec![expr],
+            position,
+        ))
+    }
+
+    fn sqlserver_try_conversion(&mut self, name: &Name) -> SqlResult<Expr> {
+        let (target, expr, style) = if name.text == "try_cast" {
+            let (target, expr) = self.sqlserver_cast_arguments()?;
+            (target, expr, None)
+        } else {
+            self.sqlserver_convert_arguments()?
+        };
+        Ok(call(
+            Function::TryConvert { target, style },
+            vec![expr],
+            name.position,
+        ))
+    }
+
+    fn sqlserver_convert_arguments(&mut self) -> SqlResult<(SqlServerType, Expr, Option<u16>)> {
         self.expect(&TokenKind::LeftParen)?;
         let target = self.sqlserver_declared_type(true)?;
         self.expect(&TokenKind::Comma)?;
@@ -161,11 +210,7 @@ impl Parser<'_> {
             None
         };
         self.expect(&TokenKind::RightParen)?;
-        Ok(call(
-            Function::Convert { target, style },
-            vec![expr],
-            position,
-        ))
+        Ok((target, expr, style))
     }
 
     fn sqlserver_arguments(
@@ -190,7 +235,7 @@ impl Parser<'_> {
         Ok(arguments)
     }
 
-    fn sqlserver_date_part(&mut self, function: &str) -> SqlResult<DatePart> {
+    fn sqlserver_date_part(&mut self, function: &str) -> SqlResult<(DatePart, usize)> {
         self.expect(&TokenKind::LeftParen)?;
         let position = self.position();
         let word = match self.peek_kind() {
@@ -202,21 +247,214 @@ impl Parser<'_> {
             DatePart::named(&word).ok_or_else(|| unknown_date_part(&word, function, position))?;
         self.at += 1;
         self.expect(&TokenKind::Comma)?;
-        Ok(part)
+        Ok((part, position))
     }
 
     fn sqlserver_date_call(&mut self, name: &Name, function: &str) -> SqlResult<Expr> {
-        let part = self.sqlserver_date_part(function)?;
+        let (part, part_position) = self.sqlserver_date_part(function)?;
+        if !part.counts_between_dates() {
+            return Err(unknown_date_part(part.name(), function, part_position));
+        }
         let first = self.expression()?;
         self.expect(&TokenKind::Comma)?;
         let second = self.expression()?;
         self.expect(&TokenKind::RightParen)?;
-        let function = if function == "dateadd" {
-            Function::DateAdd(part)
-        } else {
-            Function::DateDiff(part)
+        let function = match function {
+            "dateadd" => Function::DateAdd(part),
+            "datediff_big" => Function::DateDiffBig(part),
+            _ => Function::DateDiff(part),
         };
         Ok(call(function, vec![first, second], name.position))
+    }
+
+    fn sqlserver_date_part_call(&mut self, name: &Name) -> SqlResult<Expr> {
+        let (part, _) = self.sqlserver_date_part(&name.text)?;
+        let date = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        let function = if name.text == "datename" {
+            Function::DateName(part)
+        } else {
+            Function::DatePart(part)
+        };
+        Ok(call(function, vec![date], name.position))
+    }
+
+    fn national_literal(&self, expr: &Expr) -> bool {
+        matches!(expr.kind, ExprKind::Literal(Literal::String(_)))
+            && matches!(self.text.as_bytes().get(expr.position), Some(b'N' | b'n'))
+    }
+
+    fn trim_ends(&mut self) -> Option<TrimEnds> {
+        if self.take_word("leading") {
+            Some(TrimEnds::Leading)
+        } else if self.take_word("trailing") {
+            Some(TrimEnds::Trailing)
+        } else if self.take_word("both") {
+            Some(TrimEnds::Both)
+        } else {
+            None
+        }
+    }
+
+    fn sqlserver_trim(&mut self, name: &Name, ends: TrimEnds) -> SqlResult<(TrimEnds, Vec<Expr>)> {
+        if name.text != "trim" {
+            return Ok((ends, self.sqlserver_arguments(name, 1..=2)?));
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        let named = self.trim_ends();
+        let ends = named.unwrap_or(TrimEnds::Both);
+        if named.is_some() && self.take_word("from") {
+            let subject = self.expression()?;
+            self.expect(&TokenKind::RightParen)?;
+            return Ok((ends, vec![subject]));
+        }
+        let first = self.expression()?;
+        let arguments = if self.take_word("from") {
+            vec![self.expression()?, first]
+        } else {
+            vec![first]
+        };
+        self.expect(&TokenKind::RightParen)?;
+        Ok((ends, arguments))
+    }
+
+    fn sqlserver_text_call(&mut self, name: &Name, function: TextFunction) -> SqlResult<Expr> {
+        let (function, arguments) = match function {
+            TextFunction::Trim(ends) => {
+                let (ends, arguments) = self.sqlserver_trim(name, ends)?;
+                (TextFunction::Trim(ends), arguments)
+            }
+            TextFunction::Concat | TextFunction::ConcatWs => {
+                let fewest = *function.arguments().start();
+                let arguments = self.sqlserver_arguments(name, 0..=usize::MAX)?;
+                if !function.arguments().contains(&arguments.len()) {
+                    return Err(concat_argument_count(&name.text, fewest, name.position));
+                }
+                (function, arguments)
+            }
+            _ => (function, self.sqlserver_arguments(name, function.arguments())?),
+        };
+        let national = arguments
+            .first()
+            .is_some_and(|first| self.national_literal(first));
+        Ok(call(
+            Function::Text { function, national },
+            arguments,
+            name.position,
+        ))
+    }
+
+    fn sqlserver_iif(&mut self, name: &Name) -> SqlResult<Expr> {
+        let mut arguments = self.sqlserver_arguments(name, 3..=3)?.into_iter();
+        let (Some(condition), Some(then), Some(otherwise)) =
+            (arguments.next(), arguments.next(), arguments.next())
+        else {
+            return Err(wrong_argument_count(&name.text, name.position));
+        };
+        Ok(Expr {
+            kind: ExprKind::Case {
+                operand: None,
+                branches: vec![(condition, then)],
+                otherwise: Some(Box::new(otherwise)),
+            },
+            position: name.position,
+        })
+    }
+
+    fn sqlserver_choose(&mut self, name: &Name) -> SqlResult<Expr> {
+        let mut arguments = self.sqlserver_arguments(name, 2..=usize::MAX)?;
+        let index = arguments.remove(0);
+        let index_position = index.position;
+        let branches = arguments
+            .into_iter()
+            .enumerate()
+            .map(|(at, value)| {
+                let position = value.position;
+                (integer_constant(at as i64 + 1, position), value)
+            })
+            .collect();
+        Ok(Expr {
+            kind: ExprKind::Case {
+                operand: Some(Box::new(call(
+                    Function::Convert {
+                        target: SqlServerType::Int,
+                        style: None,
+                    },
+                    vec![index],
+                    index_position,
+                ))),
+                branches,
+                otherwise: None,
+            },
+            position: name.position,
+        })
+    }
+
+    fn sqlserver_string_agg(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let value = self.expression()?;
+        self.expect(&TokenKind::Comma)?;
+        let separator = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        let order = if self.take_word("within") {
+            self.expect_word("group")?;
+            self.expect(&TokenKind::LeftParen)?;
+            self.expect_word("order")?;
+            self.expect_word("by")?;
+            let order = self.order_items()?;
+            self.expect(&TokenKind::RightParen)?;
+            order
+        } else {
+            Vec::new()
+        };
+        if self.is_word("over") {
+            return Err(not_supported("STRING_AGG with OVER").at(self.position()));
+        }
+        let value_position = value.position;
+        let text_value = call(
+            Function::Convert {
+                target: SqlServerType::NVarChar(Length::Max),
+                style: None,
+            },
+            vec![value],
+            value_position,
+        );
+        let joined = Expr {
+            kind: ExprKind::Function {
+                name: "string_agg_arguments".to_owned(),
+                arguments: vec![text_value, separator],
+            },
+            position: name.position,
+        };
+        let argument = if order.is_empty() {
+            joined
+        } else {
+            crate::aggregate::ordered_arguments(joined, order)
+        };
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::StringAgg,
+                argument: Some(Box::new(argument)),
+                distinct: false,
+            },
+            position: name.position,
+        })
+    }
+
+    fn sqlserver_aggregate_result(
+        &mut self,
+        name: &Name,
+        function: AggregateFunction,
+    ) -> SqlResult<Expr> {
+        let aggregate = self.aggregate(name.clone(), function)?;
+        Ok(call(
+            Function::AggregateResult {
+                function,
+                input: None,
+            },
+            vec![aggregate],
+            name.position,
+        ))
     }
 
     fn caught_error_value(&self, function: &str, position: usize) -> Expr {
@@ -327,16 +565,57 @@ impl Parser<'_> {
                 self.sqlserver_arguments(name, 0..=0)?;
                 now_with_offset(position)
             }
-            "dateadd" | "datediff" => self.sqlserver_date_call(name, &name.text.clone())?,
-            "count" => {
-                let aggregate = self.aggregate(name.clone(), AggregateFunction::Count)?;
+            "dateadd" | "datediff" | "datediff_big" => {
+                self.sqlserver_date_call(name, &name.text.clone())?
+            }
+            "datepart" | "datename" => self.sqlserver_date_part_call(name)?,
+            "year" | "month" | "day" => {
+                let part = DatePart::named(&name.text).unwrap_or(DatePart::Year);
                 call(
-                    Function::AggregateResult(AggregateFunction::Count),
-                    vec![aggregate],
+                    Function::DatePart(part),
+                    self.sqlserver_arguments(name, 1..=1)?,
                     position,
                 )
             }
-            _ => return Ok(None),
+            "eomonth" => call(
+                Function::EndOfMonth,
+                self.sqlserver_arguments(name, 1..=2)?,
+                position,
+            ),
+            "try_cast" | "try_convert" => self.sqlserver_try_conversion(name)?,
+            "iif" => self.sqlserver_iif(name)?,
+            "choose" => self.sqlserver_choose(name)?,
+            "format" => call(
+                Function::Format,
+                self.sqlserver_arguments(name, 2..=3)?,
+                position,
+            ),
+            "round" => call(
+                Function::Number(NumberFunction::Round),
+                self.sqlserver_arguments(name, 2..=3)?,
+                position,
+            ),
+            "ceiling" | "floor" => {
+                let function = if name.text == "ceiling" {
+                    NumberFunction::Ceiling
+                } else {
+                    NumberFunction::Floor
+                };
+                call(
+                    Function::Number(function),
+                    self.sqlserver_arguments(name, 1..=1)?,
+                    position,
+                )
+            }
+            "count" => self.sqlserver_aggregate_result(name, AggregateFunction::Count)?,
+            "sum" => self.sqlserver_aggregate_result(name, AggregateFunction::Sum)?,
+            "avg" => self.sqlserver_aggregate_result(name, AggregateFunction::Avg)?,
+            "count_big" => self.aggregate(name.clone(), AggregateFunction::Count)?,
+            "string_agg" => self.sqlserver_string_agg(name)?,
+            other => match TextFunction::named(other) {
+                Some(function) => self.sqlserver_text_call(name, function)?,
+                None => return Ok(None),
+            },
         };
         Ok(Some(expr))
     }
@@ -425,6 +704,78 @@ impl Parser<'_> {
 }
 
 impl Parser<'_> {
+    pub(super) fn at_string_split(&self) -> bool {
+        self.is_word("string_split") && self.peek_kind_at(1) == &TokenKind::LeftParen
+    }
+
+    fn enable_ordinal(&mut self) -> SqlResult<bool> {
+        if !self.take(&TokenKind::Comma) {
+            return Ok(false);
+        }
+        let position = self.position();
+        let on = match self.peek_kind() {
+            TokenKind::Integer(digits) => digits.bytes().any(|digit| digit != b'0'),
+            TokenKind::Word(word) if word.as_ref() == "null" => false,
+            _ => {
+                return Err(not_supported(
+                    "STRING_SPLIT with an enable_ordinal that is not an integer constant",
+                )
+                .at(position));
+            }
+        };
+        self.at += 1;
+        Ok(on)
+    }
+
+    pub(super) fn sqlserver_string_split(&mut self) -> SqlResult<TableReference> {
+        let position = self.position();
+        self.at += 1;
+        self.expect(&TokenKind::LeftParen)?;
+        let subject = self.expression()?;
+        self.expect(&TokenKind::Comma)?;
+        let separator = self.expression()?;
+        let ordinal = self.enable_ordinal()?;
+        self.expect(&TokenKind::RightParen)?;
+        let alias = if self.take_word("as") || self.at_bare_alias() {
+            Some(self.name()?.text)
+        } else {
+            None
+        };
+        let column = |name: &str| Expr {
+            kind: ExprKind::Column {
+                qualifier: None,
+                name: name.to_owned(),
+            },
+            position,
+        };
+        let mut items = vec![SelectItem::Expr {
+            expr: column(crate::set_returning::STRING_SPLIT_FUNCTION),
+            alias: Some("value".to_owned()),
+        }];
+        if ordinal {
+            items.push(SelectItem::Expr {
+                expr: column("ordinality"),
+                alias: Some("ordinal".to_owned()),
+            });
+        }
+        let rows = TableReference {
+            name: Name {
+                text: crate::set_returning::STRING_SPLIT_FUNCTION.to_owned(),
+                position,
+            },
+            alias: None,
+            derived: None,
+            generated: Some(Box::new(GeneratedTable::Function(TableFunction {
+                name: crate::set_returning::STRING_SPLIT_FUNCTION.to_owned(),
+                arguments: vec![subject, separator],
+                ordinality: ordinal,
+                column_names: Vec::new(),
+                position,
+            }))),
+        };
+        Ok(derived_rows(rows, items, alias, "string_split", position, self.dialect))
+    }
+
     pub(super) fn at_openjson(&self) -> bool {
         self.is_word("openjson") && self.peek_kind_at(1) == &TokenKind::LeftParen
     }
@@ -540,34 +891,45 @@ impl Parser<'_> {
                 position,
             }))),
         };
-        let select = Select {
-            distinct: false,
-            items,
-            from: Some(FromClause {
-                first: rows,
-                joins: Vec::new(),
-            }),
-            filter: None,
-            group_by: Vec::new(),
-            having: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-            source_row_limit: None,
-        };
-        Ok(TableReference {
-            name: Name {
-                text: alias.clone().unwrap_or_else(|| "openjson".to_owned()),
-                position,
-            },
-            alias,
-            derived: Some(Box::new(DerivedTable {
-                query: Query::of_select(select, position),
-                column_names: Vec::new(),
-                dialect: self.dialect,
-            })),
-            generated: None,
-        })
+        Ok(derived_rows(rows, items, alias, "openjson", position, self.dialect))
+    }
+}
+
+fn derived_rows(
+    rows: TableReference,
+    items: Vec<SelectItem>,
+    alias: Option<String>,
+    default_name: &str,
+    position: usize,
+    dialect: crate::dialect::Dialect,
+) -> TableReference {
+    let select = Select {
+        distinct: false,
+        items,
+        from: Some(FromClause {
+            first: rows,
+            joins: Vec::new(),
+        }),
+        filter: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        source_row_limit: None,
+    };
+    TableReference {
+        name: Name {
+            text: alias.clone().unwrap_or_else(|| default_name.to_owned()),
+            position,
+        },
+        alias,
+        derived: Some(Box::new(DerivedTable {
+            query: Query::of_select(select, position),
+            column_names: Vec::new(),
+            dialect,
+        })),
+        generated: None,
     }
 }
 

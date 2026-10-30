@@ -4,6 +4,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::numeric::Numeric;
 use crate::sqlite_functions::MAX_TEXT_BYTES;
 use crate::sqlserver_conversion::{DateOrder, Temporal, parse_datetime, text_of};
+use crate::sqlserver_numbers::NumberFunction;
+use crate::sqlserver_strings::{TextFunction, TextOrigin};
 use crate::sqlserver_types::SqlServerType;
 use crate::types::{NumericModifier, SqlType, Value};
 use std::cell::Cell;
@@ -13,6 +15,8 @@ const MICROS_PER_MINUTE: i64 = 60 * MICROS_PER_SECOND;
 const MICROS_PER_HOUR: i64 = 60 * MICROS_PER_MINUTE;
 const NANOS_PER_MICRO: i128 = 1000;
 const SCOPE_IDENTITY_PRECISION: u16 = 38;
+const DATE_NAME_LENGTH: u32 = 30;
+const SECONDS_PER_MINUTE: i32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DatePart {
@@ -29,6 +33,8 @@ pub(crate) enum DatePart {
     Millisecond,
     Microsecond,
     Nanosecond,
+    IsoWeek,
+    TzOffset,
 }
 
 impl DatePart {
@@ -47,11 +53,13 @@ impl DatePart {
             "millisecond" | "ms" => Self::Millisecond,
             "microsecond" | "mcs" => Self::Microsecond,
             "nanosecond" | "ns" => Self::Nanosecond,
+            "iso_week" | "isowk" | "isoww" => Self::IsoWeek,
+            "tzoffset" | "tz" => Self::TzOffset,
             _ => return None,
         })
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Year => "year",
             Self::Quarter => "quarter",
@@ -66,7 +74,13 @@ impl DatePart {
             Self::Millisecond => "millisecond",
             Self::Microsecond => "microsecond",
             Self::Nanosecond => "nanosecond",
+            Self::IsoWeek => "iso_week",
+            Self::TzOffset => "tzoffset",
         }
+    }
+
+    pub(crate) fn counts_between_dates(self) -> bool {
+        !matches!(self, Self::IsoWeek | Self::TzOffset)
     }
 
     fn is_time_of_day(self) -> bool {
@@ -88,38 +102,73 @@ pub(crate) enum Function {
         target: SqlServerType,
         style: Option<u16>,
     },
+    TryConvert {
+        target: SqlServerType,
+        style: Option<u16>,
+    },
     DateAdd(DatePart),
     DateDiff(DatePart),
+    DateDiffBig(DatePart),
+    DatePart(DatePart),
+    DateName(DatePart),
+    EndOfMonth,
     IsNull,
     Len,
     CharIndex,
     NewId,
     RowCount,
     ScopeIdentity,
-    AggregateResult(AggregateFunction),
+    AggregateResult {
+        function: AggregateFunction,
+        input: Option<SqlType>,
+    },
     Metadata(crate::sqlserver_catalog::MetadataFunction),
+    Text {
+        function: TextFunction,
+        national: bool,
+    },
+    Number(NumberFunction),
+    Format,
 }
 
 impl Function {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Convert { .. } => "convert",
+            Self::TryConvert { .. } => "try_convert",
             Self::DateAdd(_) => "dateadd",
             Self::DateDiff(_) => "datediff",
+            Self::DateDiffBig(_) => "datediff_big",
+            Self::DatePart(_) => "datepart",
+            Self::DateName(_) => "datename",
+            Self::EndOfMonth => "eomonth",
             Self::IsNull => "isnull",
             Self::Len => "len",
             Self::CharIndex => "charindex",
             Self::NewId => "newid",
             Self::RowCount => "@@rowcount",
             Self::ScopeIdentity => "scope_identity",
-            Self::AggregateResult(function) => function.name(),
+            Self::AggregateResult { function, .. } => function.name(),
             Self::Metadata(function) => function.name(),
+            Self::Text { function, .. } => function.name(),
+            Self::Number(function) => function.name(),
+            Self::Format => "format",
+        }
+    }
+
+    pub(crate) fn needs_declared_type(self) -> bool {
+        match self {
+            Self::Text { function, .. } => function.needs_declared_type(),
+            Self::Number(_) => true,
+            _ => false,
         }
     }
 
     pub(crate) fn result_type(self, first_argument: Option<SqlType>) -> Option<SqlType> {
         match self {
-            Self::Convert { target, .. } => Some(target.engine_type()),
+            Self::Convert { target, .. } | Self::TryConvert { target, .. } => {
+                Some(target.engine_type())
+            }
             Self::DateAdd(_) => match first_argument {
                 Some(sql_type)
                     if sql_type.is_datetime() || matches!(sql_type, SqlType::Time(_)) =>
@@ -129,18 +178,30 @@ impl Function {
                 _ => Some(SqlType::Timestamp(Some(3))),
             },
             Self::DateDiff(_)
+            | Self::DatePart(_)
             | Self::Len
             | Self::CharIndex
             | Self::RowCount
-            | Self::AggregateResult(AggregateFunction::Count) => Some(SqlType::Integer),
+            | Self::AggregateResult {
+                function: AggregateFunction::Count,
+                ..
+            } => Some(SqlType::Integer),
+            Self::DateDiffBig(_) => Some(SqlType::BigInt),
+            Self::DateName(_) => Some(SqlType::Varchar(Some(DATE_NAME_LENGTH))),
+            Self::EndOfMonth => Some(SqlType::Date),
             Self::IsNull => first_argument,
             Self::NewId => Some(SqlType::Uuid),
             Self::ScopeIdentity => Some(SqlType::Numeric(Some(NumericModifier {
                 precision: SCOPE_IDENTITY_PRECISION,
                 scale: 0,
             }))),
-            Self::AggregateResult(_) => None,
+            Self::AggregateResult { function, input } => {
+                crate::sqlserver_numbers::aggregate_type(function, input)
+            }
             Self::Metadata(function) => function.result_type(),
+            Self::Text { function, .. } => function.result_type(first_argument),
+            Self::Number(function) => function.result_type(first_argument),
+            Self::Format => Some(SqlType::Text),
         }
     }
 }
@@ -318,7 +379,12 @@ fn units_of(part: DatePart) -> Option<i128> {
         DatePart::Second => i128::from(MICROS_PER_SECOND),
         DatePart::Millisecond => i128::from(MICROS_PER_MILLISECOND),
         DatePart::Microsecond => 1,
-        DatePart::Year | DatePart::Quarter | DatePart::Month | DatePart::Nanosecond => {
+        DatePart::Year
+        | DatePart::Quarter
+        | DatePart::Month
+        | DatePart::Nanosecond
+        | DatePart::IsoWeek
+        | DatePart::TzOffset => {
             return None;
         }
     })
@@ -399,17 +465,164 @@ fn boundaries(part: DatePart, micros: i64) -> i128 {
     }
 }
 
-fn date_diff(part: DatePart, start: &Value, end: &Value) -> SqlResult<Value> {
+fn date_diff(part: DatePart, start: &Value, end: &Value, big: bool) -> SqlResult<Value> {
+    let function = if big { "datediff_big" } else { "datediff" };
     let (Some(start), Some(end)) = (
-        date_argument(start, 2, "datediff")?,
-        date_argument(end, 3, "datediff")?,
+        date_argument(start, 2, function)?,
+        date_argument(end, 3, function)?,
     ) else {
         return Ok(Value::Null);
     };
     let difference = boundaries(part, end.micros()) - boundaries(part, start.micros());
-    i32::try_from(difference)
-        .map(Value::Integer)
-        .map_err(|_| date_diff_overflow())
+    if big {
+        i64::try_from(difference)
+            .map(Value::BigInt)
+            .map_err(|_| date_diff_big_overflow())
+    } else {
+        i32::try_from(difference)
+            .map(Value::Integer)
+            .map_err(|_| date_diff_overflow())
+    }
+}
+
+fn date_diff_big_overflow() -> SqlError {
+    SqlError::new(
+        SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+        "The datediff_big function resulted in an overflow. The number of dateparts separating two date/time instances is too large. Try to use datediff_big with a less precise datepart.",
+    )
+    .with_sqlserver_code(535)
+}
+
+struct LocalDate {
+    days: i64,
+    of_day: i64,
+    offset_seconds: Option<i32>,
+}
+
+fn local_date(value: &Value, part: DatePart, function: &str) -> SqlResult<Option<LocalDate>> {
+    let Some(argument) = date_argument(value, 2, function)? else {
+        return Ok(None);
+    };
+    let type_name = argument.type_name();
+    let refused = match argument {
+        DateArgument::Date(_) => part.is_time_of_day(),
+        DateArgument::Time(_) => !part.is_time_of_day() && part != DatePart::TzOffset,
+        _ => false,
+    };
+    if refused {
+        return Err(part_not_supported(part, function, type_name));
+    }
+    let (local, offset_seconds) = match argument {
+        DateArgument::Utc(micros) => (datetime::utc_to_local(micros)?, Some(datetime::session_offset())),
+        other => (other.micros(), None),
+    };
+    Ok(Some(LocalDate {
+        days: local.div_euclid(MICROS_PER_DAY),
+        of_day: local.rem_euclid(MICROS_PER_DAY),
+        offset_seconds,
+    }))
+}
+
+fn sunday_based_weekday(days: i64) -> i64 {
+    (days + 6).rem_euclid(7) + 1
+}
+
+fn part_number(part: DatePart, date: &LocalDate) -> i64 {
+    let (year, month, day) = datetime::civil_from_days(date.days);
+    let day_of_year = date.days - datetime::days_from_civil(year, 1, 1) + 1;
+    let first_weekday = sunday_based_weekday(datetime::days_from_civil(year, 1, 1));
+    let of_second = date.of_day % MICROS_PER_SECOND;
+    match part {
+        DatePart::Year => year,
+        DatePart::Quarter => (month - 1) / 3 + 1,
+        DatePart::Month => month,
+        DatePart::DayOfYear => day_of_year,
+        DatePart::Day => day,
+        DatePart::Week => (day_of_year - 1 + first_weekday - 1) / 7 + 1,
+        DatePart::Weekday => sunday_based_weekday(date.days),
+        DatePart::Hour => date.of_day / MICROS_PER_HOUR,
+        DatePart::Minute => date.of_day / MICROS_PER_MINUTE % 60,
+        DatePart::Second => date.of_day / MICROS_PER_SECOND % 60,
+        DatePart::Millisecond => of_second / MICROS_PER_MILLISECOND,
+        DatePart::Microsecond => of_second,
+        DatePart::Nanosecond => of_second * NANOS_PER_MICRO as i64,
+        DatePart::IsoWeek => datetime::iso_week(date.days).1,
+        DatePart::TzOffset => i64::from(date.offset_seconds.unwrap_or(0) / SECONDS_PER_MINUTE),
+    }
+}
+
+fn date_part(part: DatePart, value: &Value) -> SqlResult<Value> {
+    Ok(match local_date(value, part, "datepart")? {
+        None => Value::Null,
+        Some(date) => Value::Integer(i32::try_from(part_number(part, &date)).unwrap_or(i32::MAX)),
+    })
+}
+
+fn offset_name(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let minutes = offset_seconds.unsigned_abs() / 60;
+    format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+fn date_name(part: DatePart, value: &Value) -> SqlResult<Value> {
+    let Some(date) = local_date(value, part, "datename")? else {
+        return Ok(Value::Null);
+    };
+    let number = part_number(part, &date);
+    Ok(Value::Text(match part {
+        DatePart::Month => crate::sqlserver_format::MONTH_NAMES
+            .get(usize::try_from(number - 1).unwrap_or(0))
+            .copied()
+            .unwrap_or_default()
+            .to_owned(),
+        DatePart::Weekday => crate::sqlserver_format::DAY_NAMES
+            .get(usize::try_from(number - 1).unwrap_or(0))
+            .copied()
+            .unwrap_or_default()
+            .to_owned(),
+        DatePart::TzOffset => offset_name(date.offset_seconds.unwrap_or(0)),
+        _ => number.to_string(),
+    }))
+}
+
+fn end_of_month(arguments: &[Value]) -> SqlResult<Value> {
+    let start = arguments.first().unwrap_or(&Value::Null);
+    let months = arguments.get(1).unwrap_or(&Value::Null);
+    let Some(argument) = date_argument(start, 1, "eomonth")? else {
+        return Ok(Value::Null);
+    };
+    if matches!(argument, DateArgument::Time(_)) {
+        return Err(argument_type_invalid(start, 1, "eomonth"));
+    }
+    let added = match months {
+        Value::Null if arguments.len() > 1 => return Ok(Value::Null),
+        Value::Null => 0,
+        Value::Text(_) | Value::Bpchar(_) => {
+            crate::sqlserver_conversion::convert(months.clone(), SqlServerType::Int, None, None)?
+                .as_integer()
+                .unwrap_or(0)
+        }
+        Value::Numeric(number) => number
+            .truncated(0)
+            .ok()
+            .and_then(|whole| whole.integral_value())
+            .and_then(|whole| i64::try_from(whole).ok())
+            .ok_or_else(|| date_add_overflow("date"))?,
+        other => other
+            .as_integer()
+            .ok_or_else(|| argument_type_invalid(other, 2, "eomonth"))?,
+    };
+    let local = match argument {
+        DateArgument::Utc(micros) => datetime::utc_to_local(micros)?,
+        other => other.micros(),
+    };
+    let day = local.div_euclid(MICROS_PER_DAY) * MICROS_PER_DAY;
+    let shifted = add_months(day, added).ok_or_else(|| date_add_overflow("date"))?;
+    let (year, month, _) = datetime::civil_from_days(shifted.div_euclid(MICROS_PER_DAY));
+    let last = datetime::days_from_civil(year, month, datetime::days_in_month(year, month));
+    i32::try_from(last)
+        .map(Value::Date)
+        .map_err(|_| date_add_overflow("date"))
 }
 
 fn character(value: &Value) -> SqlResult<Option<String>> {
@@ -461,7 +674,11 @@ fn new_id() -> SqlResult<Value> {
     Ok(Value::Uuid(crate::bytea::random_uuid(bytes)))
 }
 
-fn aggregate_result(function: AggregateFunction, value: &Value) -> SqlResult<Value> {
+fn aggregate_result(
+    function: AggregateFunction,
+    input: Option<SqlType>,
+    value: &Value,
+) -> SqlResult<Value> {
     match (function, value) {
         (_, Value::Null) => Ok(Value::Null),
         (AggregateFunction::Count, other) => other
@@ -469,18 +686,36 @@ fn aggregate_result(function: AggregateFunction, value: &Value) -> SqlResult<Val
             .and_then(|count| i32::try_from(count).ok())
             .map(Value::Integer)
             .ok_or_else(count_overflow),
+        (AggregateFunction::Sum | AggregateFunction::Avg, other) => {
+            crate::sqlserver_numbers::aggregate_value(function, input, other.clone())
+        }
         (_, other) => Ok(other.clone()),
     }
 }
 
 pub(crate) fn call(function: Function, arguments: &[Value]) -> SqlResult<Value> {
+    call_declared(function, arguments, None)
+}
+
+pub(crate) fn call_declared(
+    function: Function,
+    arguments: &[Value],
+    declared: Option<SqlType>,
+) -> SqlResult<Value> {
     let argument = |index: usize| arguments.get(index).unwrap_or(&Value::Null);
     match function {
         Function::Convert { target, style } => {
             crate::sqlserver_conversion::convert(argument(0).clone(), target, style, None)
         }
+        Function::TryConvert { target, style } => {
+            crate::sqlserver_conversion::try_convert(argument(0).clone(), target, style, None)
+        }
         Function::DateAdd(part) => date_add(part, argument(0), argument(1)),
-        Function::DateDiff(part) => date_diff(part, argument(0), argument(1)),
+        Function::DateDiff(part) => date_diff(part, argument(0), argument(1), false),
+        Function::DateDiffBig(part) => date_diff(part, argument(0), argument(1), true),
+        Function::DatePart(part) => date_part(part, argument(0)),
+        Function::DateName(part) => date_name(part, argument(0)),
+        Function::EndOfMonth => end_of_month(arguments),
         Function::IsNull => Ok(if argument(0).is_null() {
             argument(1).clone()
         } else {
@@ -496,10 +731,17 @@ pub(crate) fn call(function: Function, arguments: &[Value]) -> SqlResult<Value> 
             Some(identity) => Value::Numeric(Numeric::from_i64(identity)),
             None => Value::Null,
         }),
-        Function::AggregateResult(aggregate) => aggregate_result(aggregate, argument(0)),
+        Function::AggregateResult { function, input } => {
+            aggregate_result(function, input, argument(0))
+        }
         Function::Metadata(function) => {
             crate::sqlserver_catalog::call_metadata(function, arguments)
         }
+        Function::Text { function, national } => {
+            crate::sqlserver_strings::call(function, arguments, TextOrigin { national, declared })
+        }
+        Function::Number(function) => crate::sqlserver_numbers::call(function, arguments, declared),
+        Function::Format => crate::sqlserver_format::format(arguments),
     }
 }
 
@@ -612,5 +854,74 @@ mod tests {
     fn values_over_a_gigabyte_are_refused_before_they_are_built() {
         let error = within_limit(1_000_000_001).err();
         assert_eq!(error.and_then(|e| e.vendor_code()), Some(7119));
+    }
+
+    fn part_of(part: &str, value: Value) -> Value {
+        let part = DatePart::named(part).unwrap_or(DatePart::Year);
+        call(Function::DatePart(part), &[value]).unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn datepart_reads_every_part_with_sunday_as_the_first_day() {
+        let stamp = || text("2020-07-04 13:05:09.1234567");
+        let cases = [
+            ("year", 2020),
+            ("quarter", 3),
+            ("month", 7),
+            ("dayofyear", 186),
+            ("day", 4),
+            ("week", 27),
+            ("weekday", 7),
+            ("hour", 13),
+            ("minute", 5),
+            ("second", 9),
+            ("millisecond", 123),
+            ("microsecond", 123_456),
+            ("nanosecond", 123_456_000),
+            ("iso_week", 27),
+            ("tzoffset", 0),
+        ];
+        for (part, expected) in cases {
+            assert_eq!(part_of(part, stamp()), Value::Integer(expected), "{part}");
+        }
+        assert_eq!(part_of("week", text("2020-01-04")), Value::Integer(1));
+        assert_eq!(part_of("week", text("2020-01-05")), Value::Integer(2));
+        let on_time = call(Function::DatePart(DatePart::Year), &[Value::Time(0)]);
+        assert_eq!(on_time.err().and_then(|e| e.vendor_code()), Some(9810));
+    }
+
+    #[test]
+    fn datename_names_months_and_weekdays() {
+        let named = |part| {
+            call(Function::DateName(part), &[text("2020-07-04")]).unwrap_or(Value::Null)
+        };
+        assert_eq!(named(DatePart::Month), text("July"));
+        assert_eq!(named(DatePart::Weekday), text("Saturday"));
+        assert_eq!(named(DatePart::Day), text("4"));
+    }
+
+    #[test]
+    fn eomonth_moves_by_months_and_lands_on_the_last_day() {
+        let end = |arguments: &[Value]| call(Function::EndOfMonth, arguments);
+        let leap = crate::datetime::days_from_civil(2024, 2, 29) as i32;
+        assert_eq!(end(&[text("2024-02-10")]).ok(), Some(Value::Date(leap)));
+        let later = crate::datetime::days_from_civil(2024, 4, 30) as i32;
+        assert_eq!(
+            end(&[text("2024-01-31"), Value::Integer(3)]).ok(),
+            Some(Value::Date(later))
+        );
+        let overflow = end(&[text("9999-12-01"), Value::Integer(1)]);
+        assert_eq!(overflow.err().and_then(|e| e.vendor_code()), Some(517));
+        let huge = end(&[text("2020-01-01"), Value::Integer(i32::MAX)]);
+        assert_eq!(huge.err().and_then(|e| e.vendor_code()), Some(517));
+    }
+
+    #[test]
+    fn datediff_big_counts_past_an_int() {
+        let counted = call(
+            Function::DateDiffBig(DatePart::Millisecond),
+            &[text("0001-01-01"), text("9999-12-31")],
+        );
+        assert_eq!(counted.ok(), Some(Value::BigInt(315_537_811_200_000)));
     }
 }

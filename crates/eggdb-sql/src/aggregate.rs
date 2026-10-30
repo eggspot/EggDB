@@ -276,11 +276,40 @@ fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             .and_then(|offset| scope.column_type(offset)),
         ExprKind::Cast { sql_type, .. } => Some(*sql_type),
         ExprKind::SqlServerFunction {
-            function: crate::sqlserver_functions::Function::Convert { target, .. },
+            function:
+                crate::sqlserver_functions::Function::Convert { target, .. }
+                | crate::sqlserver_functions::Function::TryConvert { target, .. },
             ..
         } => Some(target.engine_type()),
         _ => None,
     }
+}
+
+fn sqlserver_aggregate_input(
+    expr: &Expr,
+    scope: Scope<'_>,
+) -> Option<(AggregateFunction, Option<SqlType>)> {
+    let ExprKind::SqlServerFunction {
+        function: crate::sqlserver_functions::Function::AggregateResult { function, .. },
+        arguments,
+    } = &expr.kind
+    else {
+        return None;
+    };
+    let [inner] = arguments.as_slice() else {
+        return None;
+    };
+    let ExprKind::Aggregate {
+        function: aggregate,
+        argument: Some(argument),
+        ..
+    } = &inner.kind
+    else {
+        return Some((*function, None));
+    };
+    let input = argument_type(*aggregate, argument, scope)
+        .or_else(|| crate::typing::static_type(argument, scope));
+    Some((*function, input))
 }
 
 fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option<SqlType> {
@@ -499,6 +528,28 @@ impl Analyzer<'_> {
                 kind: ExprKind::Slot {
                     index,
                     sql_type: self.key_types[index],
+                },
+                position: expr.position,
+            });
+        }
+        if let Some((function, input)) = sqlserver_aggregate_input(expr, self.scope) {
+            let rebuilt = rebuild(expr, &mut |child| self.rewrite(child))?;
+            let arguments = match rebuilt.kind {
+                ExprKind::SqlServerFunction { arguments, .. } => arguments,
+                other => {
+                    return Ok(Expr {
+                        kind: other,
+                        position: rebuilt.position,
+                    });
+                }
+            };
+            return Ok(Expr {
+                kind: ExprKind::SqlServerFunction {
+                    function: crate::sqlserver_functions::Function::AggregateResult {
+                        function,
+                        input,
+                    },
+                    arguments,
                 },
                 position: expr.position,
             });

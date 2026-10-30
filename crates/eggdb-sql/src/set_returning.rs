@@ -17,7 +17,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 17] = [
+const FUNCTIONS: [SetReturningFunction; 18] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -92,9 +92,27 @@ const FUNCTIONS: [SetReturningFunction; 17] = [
         rows: openjson_rows,
         fields: false,
     },
+    SetReturningFunction {
+        name: STRING_SPLIT_FUNCTION,
+        result_type: string_split_type,
+        rows: string_split_rows,
+        fields: false,
+    },
 ];
 
 pub(crate) const OPENJSON_FUNCTION: &str = "*openjson*";
+pub(crate) const STRING_SPLIT_FUNCTION: &str = "*string_split*";
+
+fn string_split_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    match types {
+        [_, _] => Ok(SqlType::Text),
+        _ => Err(does_not_exist("STRING_SPLIT", types)),
+    }
+}
+
+fn string_split_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::sqlserver_strings::split_rows(values, sink)
+}
 
 fn openjson_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
     match types {
