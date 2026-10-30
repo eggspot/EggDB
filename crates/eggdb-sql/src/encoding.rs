@@ -22,6 +22,9 @@ const MORE_TYPES_FORMAT_VERSION: u8 = 5;
 const CONSTRAINTS_FORMAT_VERSION: u8 = 6;
 const SCHEMA_FORMAT_VERSION: u8 = 7;
 pub(crate) const VIEW_FORMAT_VERSION: u8 = 8;
+const IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION: u8 = 9;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
+const UNIQUE_INDEX_WITHOUT_CONSTRAINT: u8 = 1;
 const SEQUENCE_SPACE: u8 = 0x05;
 const REFERENCE_SPACE: u8 = 0x06;
 const NO_PRECISION: u8 = 0xFF;
@@ -207,6 +210,137 @@ pub(crate) struct IndexDefinition {
     pub(crate) name: String,
     pub(crate) unique: bool,
     pub(crate) columns: Vec<usize>,
+    pub(crate) method: IndexMethod,
+    pub(crate) sort_options: SortOptions,
+    pub(crate) backs_unique_constraint: bool,
+}
+
+impl IndexDefinition {
+    fn needs_options_version(&self) -> bool {
+        self.method != IndexMethod::BTree
+            || !self.sort_options.is_default()
+            || (self.unique && !self.backs_unique_constraint)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum IndexMethod {
+    #[default]
+    BTree,
+    Hash,
+}
+
+impl IndexMethod {
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        [Self::BTree, Self::Hash]
+            .into_iter()
+            .find(|method| name.eq_ignore_ascii_case(method.name()))
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::BTree => "btree",
+            Self::Hash => "hash",
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::BTree => 0,
+            Self::Hash => 1,
+        }
+    }
+
+    fn of_code(code: u8) -> Option<Self> {
+        [Self::BTree, Self::Hash]
+            .into_iter()
+            .find(|method| method.code() == code)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SortOptions {
+    descending: u32,
+    nulls_first: u32,
+}
+
+impl SortOptions {
+    fn bit(position: usize) -> u32 {
+        u32::try_from(position)
+            .ok()
+            .and_then(|position| 1u32.checked_shl(position))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn with_column(mut self, position: usize, descending: bool, nulls_first: bool) -> Self {
+        let bit = Self::bit(position);
+        if descending {
+            self.descending |= bit;
+        }
+        if nulls_first {
+            self.nulls_first |= bit;
+        }
+        self
+    }
+
+    pub(crate) fn is_descending(self, position: usize) -> bool {
+        self.descending & Self::bit(position) != 0
+    }
+
+    pub(crate) fn has_nulls_first(self, position: usize) -> bool {
+        self.nulls_first & Self::bit(position) != 0
+    }
+
+    pub(crate) fn is_default(self) -> bool {
+        self == Self::default()
+    }
+
+    fn fits(self, width: usize) -> bool {
+        let mask = u32::try_from(width)
+            .ok()
+            .and_then(|width| 1u32.checked_shl(width))
+            .map_or(u32::MAX, |bit| bit - 1);
+        (self.descending | self.nulls_first) & !mask == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentityGeneration {
+    Always,
+    ByDefault,
+}
+
+impl IdentityGeneration {
+    fn code(self) -> u8 {
+        match self {
+            Self::Always => 1,
+            Self::ByDefault => 2,
+        }
+    }
+
+    fn of_code(code: u8) -> Option<Self> {
+        [Self::Always, Self::ByDefault]
+            .into_iter()
+            .find(|generation| generation.code() == code)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdentityColumn {
+    pub(crate) column: usize,
+    pub(crate) generation: IdentityGeneration,
+}
+
+fn identity_generation(
+    column: &Column,
+    stored: Option<IdentityGeneration>,
+) -> Option<IdentityGeneration> {
+    match (column.auto_increment, stored) {
+        (true, Some(IdentityGeneration::Always)) => Some(IdentityGeneration::Always),
+        (true, _) => Some(IdentityGeneration::ByDefault),
+        (false, Some(generation)) if column.default.is_some() => Some(generation),
+        (false, _) => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +373,7 @@ pub(crate) struct TableDefinition {
     pub(crate) foreign_keys: Vec<ForeignKey>,
     pub(crate) referenced: bool,
     pub(crate) owns_sequence: bool,
+    pub(crate) identities: Vec<IdentityColumn>,
 }
 
 fn dialect_code(dialect: crate::Dialect) -> u8 {
@@ -296,8 +431,91 @@ impl TableDefinition {
             || (!self.primary_key.is_empty() && self.primary_key_constraint_name() == name)
     }
 
+    pub(crate) fn identity_of(&self, column: usize) -> Option<IdentityGeneration> {
+        let found = self.columns.get(column)?;
+        let stored = self
+            .identities
+            .iter()
+            .find(|identity| identity.column == column)
+            .map(|identity| identity.generation);
+        identity_generation(found, stored)
+    }
+
+    pub(crate) fn is_generated_always(&self, column: usize) -> bool {
+        self.identity_of(column) == Some(IdentityGeneration::Always)
+    }
+
+    pub(crate) fn set_identity(&mut self, column: usize, generation: Option<IdentityGeneration>) {
+        self.identities.retain(|identity| identity.column != column);
+        if let Some(generation) = generation {
+            self.identities.push(IdentityColumn { column, generation });
+            self.identities.sort_by_key(|identity| identity.column);
+        }
+    }
+
+    pub(crate) fn identities_without_column(&self, removed: usize) -> Vec<IdentityColumn> {
+        self.identities
+            .iter()
+            .filter(|identity| identity.column != removed)
+            .map(|identity| IdentityColumn {
+                column: if identity.column > removed {
+                    identity.column - 1
+                } else {
+                    identity.column
+                },
+                generation: identity.generation,
+            })
+            .collect()
+    }
+
+    fn stored_identities(&self) -> Vec<IdentityColumn> {
+        self.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(column, found)| {
+                let stored = self
+                    .identities
+                    .iter()
+                    .find(|identity| identity.column == column)?
+                    .generation;
+                let generation = identity_generation(found, Some(stored))?;
+                (!found.auto_increment || generation == IdentityGeneration::Always)
+                    .then_some(IdentityColumn { column, generation })
+            })
+            .collect()
+    }
+
+    fn needs_options_version(&self) -> bool {
+        !self.stored_identities().is_empty()
+            || self
+                .indexes
+                .iter()
+                .any(IndexDefinition::needs_options_version)
+    }
+
+    fn encode_options(&self, out: &mut Vec<u8>) {
+        let identities = self.stored_identities();
+        put_varint(out, identities.len() as u64);
+        for identity in &identities {
+            put_varint(out, identity.column as u64);
+            out.push(identity.generation.code());
+        }
+        for index in &self.indexes {
+            out.push(index.method.code());
+            out.push(if index.unique && !index.backs_unique_constraint {
+                UNIQUE_INDEX_WITHOUT_CONSTRAINT
+            } else {
+                0
+            });
+            out.extend_from_slice(&index.sort_options.descending.to_le_bytes());
+            out.extend_from_slice(&index.sort_options.nulls_first.to_le_bytes());
+        }
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if crate::schemas::is_qualified(&self.name) {
+        let version = if self.needs_options_version() {
+            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+        } else if crate::schemas::is_qualified(&self.name) {
             SCHEMA_FORMAT_VERSION
         } else if self.has_constraints() {
             CONSTRAINTS_FORMAT_VERSION
