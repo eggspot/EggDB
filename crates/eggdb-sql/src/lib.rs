@@ -71,6 +71,8 @@ mod pg_catalog;
 mod pg_format;
 mod pg_keywords;
 mod plan;
+mod plan_cache;
+mod pushdown;
 mod random;
 mod ranges;
 mod records;
@@ -138,6 +140,8 @@ mod memory_store;
 mod migration_tool_tests;
 #[cfg(test)]
 mod one_statement_tests;
+#[cfg(test)]
+mod sql_speed_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]

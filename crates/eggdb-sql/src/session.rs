@@ -25,6 +25,7 @@ use crate::lexer::{CopyStop, Token, TokenKind, tokenize_from, tokenize_in, token
 use crate::mysql_errors::{self, Warning};
 use crate::name_resolution::Binding;
 use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
+use crate::plan_cache::CachedStatement;
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
 use crate::settings::{DIALECT_SETTING, Settings};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
@@ -372,6 +373,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     temporary: crate::temporary::TemporaryObjects,
     deferred: crate::deferred_checks::DeferredState,
     pending_user_types: Option<Arc<crate::user_types::Registry>>,
+    plan_cache: crate::plan_cache::PlanCache,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
@@ -434,6 +436,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             temporary: crate::temporary::TemporaryObjects::default(),
             deferred: crate::deferred_checks::DeferredState::default(),
             pending_user_types: None,
+            plan_cache: crate::plan_cache::PlanCache::default(),
         }
     }
 
@@ -1367,7 +1370,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let _values = crate::memory::enter_value_limit(self.max_value_bytes);
             let _rows = crate::memory::enter_row_limit(self.max_row_bytes);
             let _path = self.enter_search_path(&settings);
-            let _types = crate::user_types::enter(self.pending_user_types.take());
+            let preloaded_types = self.pending_user_types.take();
+            let parses_without_types = preloaded_types.is_none();
+            let _types = crate::user_types::enter(preloaded_types);
             let mut parser = Parser::new(text, tokens)
                 .with_context(parameters, &settings)
                 .with_batch_context(&context)
@@ -1407,15 +1412,50 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let first_token = parser.resume_point().0;
             let statement_point = parser.resume_point();
             crate::user_types::take_wanted();
-            let parsed = if std::mem::take(&mut self.condition_next) {
-                parser.sqlserver_condition()
+            let condition = std::mem::take(&mut self.condition_next);
+            let shape = if !condition
+                && parses_without_types
+                && self.batch_resume.is_none()
+                && matches!(parameters, Parameters::Absent)
+            {
+                self.plan_cache
+                    .shape(text, tokens, first_token, self.dialect)
             } else {
-                parser.statement()
+                None
+            };
+            let cached = match shape {
+                Some(shape) => self.plan_cache.find(shape, tokens, self.dialect, &settings),
+                None => CachedStatement::NeverCached,
+            };
+            let parsed_unknown_shape = matches!(cached, CachedStatement::Unknown);
+            let parsed = match (condition, cached, shape) {
+                (true, _, _) => parser.sqlserver_condition(),
+                (false, CachedStatement::Parsed(statement), Some(shape)) => {
+                    parser = parser.resuming_at((shape.stop(), statement_point.1));
+                    Ok(statement)
+                }
+                (false, _, _) => parser.statement(),
             };
             let setting_changes = parser.take_setting_changes();
             resume = parser.resume_point();
             drop(parser);
             drop(context);
+            if parsed_unknown_shape
+                && let Some(shape) = shape
+                && let Ok(statement) = &parsed
+                && setting_changes.is_empty()
+                && resume.1 == statement_point.1
+                && !crate::user_types::take_wanted()
+            {
+                self.plan_cache.remember(
+                    shape,
+                    tokens,
+                    self.dialect,
+                    &settings,
+                    statement,
+                    resume.0,
+                );
+            }
             if parsed.is_err() && crate::user_types::take_wanted() && !types_loaded {
                 types_loaded = true;
                 resume = statement_point;

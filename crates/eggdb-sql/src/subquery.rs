@@ -7,6 +7,7 @@ use crate::dialect::Dialect;
 use crate::encoding::{TableDefinition, encode_row};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, Source, and, children, children_mut, compare_truth, or};
+use crate::hash_index::SeededIntegerHash;
 use crate::execute::{self, TableCache};
 use crate::join;
 use crate::memory::WorkMemory;
@@ -66,14 +67,42 @@ fn family(value: &Value) -> Option<Family> {
 #[derive(Debug)]
 pub(crate) struct HashedValues {
     family: Family,
-    keys: HashSet<Vec<u8>>,
+    keys: HashedKeys,
     has_null: bool,
+}
+
+#[derive(Debug)]
+enum HashedKeys {
+    Integers(HashSet<i64, SeededIntegerHash>),
+    Encoded(HashSet<Vec<u8>>),
+}
+
+fn integer_of(value: &Value) -> Option<i64> {
+    match value {
+        Value::SmallInt(value) => Some(i64::from(*value)),
+        Value::Integer(value) => Some(i64::from(*value)),
+        Value::BigInt(value) => Some(*value),
+        _ => None,
+    }
+}
+
+impl HashedValues {
+    fn contains(&self, value: &Value) -> Option<bool> {
+        match &self.keys {
+            HashedKeys::Integers(keys) => integer_of(value).map(|key| keys.contains(&key)),
+            HashedKeys::Encoded(keys) => {
+                let mut key = Vec::new();
+                equality_key(&mut key, value);
+                Some(keys.contains(&key))
+            }
+        }
+    }
 }
 
 fn hashed(values: &[Value]) -> Option<HashedValues> {
     let mut shared = None;
-    let mut keys = HashSet::with_capacity(values.len());
     let mut has_null = false;
+    let mut all_integers = true;
     for value in values {
         if value.is_null() {
             has_null = true;
@@ -83,10 +112,24 @@ fn hashed(values: &[Value]) -> Option<HashedValues> {
         if *shared.get_or_insert(found) != found {
             return None;
         }
-        let mut key = Vec::new();
-        equality_key(&mut key, value);
-        keys.insert(key);
+        all_integers &= integer_of(value).is_some();
     }
+    let present = values.iter().filter(|value| !value.is_null());
+    let keys = if all_integers {
+        let mut keys = HashSet::with_capacity_and_hasher(values.len(), SeededIntegerHash::default());
+        keys.extend(present.filter_map(integer_of));
+        HashedKeys::Integers(keys)
+    } else {
+        HashedKeys::Encoded(
+            present
+                .map(|value| {
+                    let mut key = Vec::new();
+                    equality_key(&mut key, value);
+                    key
+                })
+                .collect(),
+        )
+    };
     Some(HashedValues {
         family: shared?,
         keys,
@@ -140,10 +183,9 @@ impl SubqueryRows {
         if self.values.len() >= HASHED_FROM
             && let Some(hashed) = self.hashed.get_or_init(|| hashed(&self.values))
             && family(value) == Some(hashed.family)
+            && let Some(found) = hashed.contains(value)
         {
-            let mut key = Vec::new();
-            equality_key(&mut key, value);
-            return Ok(if hashed.keys.contains(&key) {
+            return Ok(if found {
                 Some(true)
             } else if hashed.has_null {
                 None
@@ -317,10 +359,49 @@ pub(crate) struct Template {
 struct KeyLookup {
     outer: Vec<usize>,
     families: Vec<Option<Family>>,
-    keys: HashSet<Vec<u8>>,
-    found: Arc<SubqueryRows>,
+    keyed: KeyedRows,
     missing: Arc<SubqueryRows>,
     _held: crate::memory::HeldMemory,
+}
+
+enum KeyedRows {
+    Existence {
+        keys: HashSet<Vec<u8>>,
+        found: Arc<SubqueryRows>,
+    },
+    Groups(HashMap<Vec<u8>, Arc<SubqueryRows>>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookupShape {
+    Existence,
+    Members,
+    Aggregate,
+}
+
+fn lookup_shape(test: &SubqueryTest) -> Option<LookupShape> {
+    match test {
+        SubqueryTest::Exists => Some(LookupShape::Existence),
+        SubqueryTest::In { .. }
+        | SubqueryTest::Compare {
+            operator: BinaryOperator::Equal,
+            all: false,
+            ..
+        }
+        | SubqueryTest::Compare {
+            operator: BinaryOperator::NotEqual,
+            all: true,
+            ..
+        } => Some(LookupShape::Members),
+        SubqueryTest::Scalar => Some(LookupShape::Aggregate),
+        SubqueryTest::Compare { .. } | SubqueryTest::Array => None,
+    }
+}
+
+struct KeyQueries {
+    keys: Query,
+    outer: Vec<usize>,
+    empty_group: Option<Query>,
 }
 
 impl KeyLookup {
@@ -337,12 +418,62 @@ impl KeyLookup {
                 Some(_) => equality_key(&mut key, value),
             }
         }
-        Some(Arc::clone(if self.keys.contains(&key) {
-            &self.found
-        } else {
-            &self.missing
-        }))
+        Some(match &self.keyed {
+            KeyedRows::Existence { keys, found } => Arc::clone(if keys.contains(&key) {
+                found
+            } else {
+                &self.missing
+            }),
+            KeyedRows::Groups(groups) => Arc::clone(groups.get(&key).unwrap_or(&self.missing)),
+        })
     }
+}
+
+fn group_rows(sql_type: Option<SqlType>, values: Vec<Value>) -> SqlResult<Arc<SubqueryRows>> {
+    let bytes = WorkMemory::row_bytes(&values);
+    let hashing = if values.len() >= HASHED_FROM {
+        bytes
+    } else {
+        0
+    };
+    Ok(Arc::new(SubqueryRows {
+        sql_type,
+        rows: values.len(),
+        values,
+        hashed: std::sync::OnceLock::new(),
+        _held: crate::memory::HeldMemory::holding(bytes.saturating_add(hashing))?,
+    }))
+}
+
+fn at_least_one_row(limit: Option<&Expr>) -> bool {
+    match limit {
+        None => true,
+        Some(limit) => matches!(limit.kind, ExprKind::Literal(Literal::Integer(rows)) if rows >= 1),
+    }
+}
+
+fn columns_only_in_aggregates(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Aggregate { .. } => true,
+        ExprKind::Column { .. } => false,
+        _ => children(expr).into_iter().all(columns_only_in_aggregates),
+    }
+}
+
+fn single_item(select: &Select, shape: LookupShape) -> Option<&Expr> {
+    let [SelectItem::Expr { expr, .. }] = select.items.as_slice() else {
+        return None;
+    };
+    let plain = !mentions_outer(expr)
+        && !mentions_subquery(expr)
+        && select.order_by.is_empty()
+        && !crate::set_returning::select_needs_expansion(select);
+    let fits = match shape {
+        LookupShape::Existence => false,
+        LookupShape::Members => true,
+        LookupShape::Aggregate => !select.distinct && columns_only_in_aggregates(expr),
+    };
+    (plain && fits).then_some(expr)
 }
 
 fn existence(rows: usize) -> SqlResult<Arc<SubqueryRows>> {
@@ -371,18 +502,29 @@ fn mentions_outer(expr: &Expr) -> bool {
     !found.is_empty()
 }
 
-fn key_query(query: &Query) -> Option<(Query, Vec<usize>)> {
+fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
     let SetExpr::Select(select) = &query.body else {
         return None;
     };
-    if !query.with.is_empty()
+    let limits_kept = match shape {
+        LookupShape::Members => query.limit.is_none() && select.limit.is_none(),
+        LookupShape::Existence | LookupShape::Aggregate => {
+            at_least_one_row(query.limit.as_ref()) && at_least_one_row(select.limit.as_ref())
+        }
+    };
+    let item = match shape {
+        LookupShape::Existence => None,
+        LookupShape::Members | LookupShape::Aggregate => Some(single_item(select, shape)?),
+    };
+    if !limits_kept
+        || !query.with.is_empty()
         || !query.order_by.is_empty()
         || query.offset.is_some()
         || select.offset.is_some()
         || select.source_row_limit.is_some()
         || !select.group_by.is_empty()
         || select.having.is_some()
-        || crate::aggregate::is_aggregate_query(select)
+        || crate::aggregate::is_aggregate_query(select) != (shape == LookupShape::Aggregate)
     {
         return None;
     }
@@ -417,6 +559,9 @@ fn key_query(query: &Query) -> Option<(Query, Vec<usize>)> {
             }
             _ => return None,
         };
+        if shape == LookupShape::Aggregate && !matches!(inner.kind, ExprKind::Column { .. }) {
+            return None;
+        }
         outer.push(index);
         items.push(SelectItem::Expr {
             expr: (**inner).clone(),
@@ -435,19 +580,63 @@ fn key_query(query: &Query) -> Option<(Query, Vec<usize>)> {
             position,
         }),
     };
+    let group_by: Vec<Expr> = match shape {
+        LookupShape::Aggregate => items
+            .iter()
+            .filter_map(|item| match item {
+                SelectItem::Expr { expr, .. } => Some(expr.clone()),
+                SelectItem::Wildcard { .. } => None,
+            })
+            .collect(),
+        LookupShape::Existence | LookupShape::Members => Vec::new(),
+    };
+    let empty_group = match (shape, item) {
+        (LookupShape::Aggregate, Some(item)) => Some(Query::of_select(
+            Select {
+                distinct: false,
+                items: vec![SelectItem::Expr {
+                    expr: item.clone(),
+                    alias: None,
+                }],
+                from: select.from.clone(),
+                filter: Some(Expr {
+                    kind: ExprKind::Literal(Literal::Boolean(false)),
+                    position,
+                }),
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                source_row_limit: None,
+            },
+            query.position,
+        )),
+        _ => None,
+    };
+    if let Some(item) = item {
+        items.push(SelectItem::Expr {
+            expr: item.clone(),
+            alias: None,
+        });
+    }
     let keys = Select {
-        distinct: true,
+        distinct: shape != LookupShape::Aggregate,
         items,
         from: select.from.clone(),
         filter,
-        group_by: Vec::new(),
+        group_by,
         having: None,
         order_by: Vec::new(),
         limit: None,
         offset: None,
         source_row_limit: None,
     };
-    Some((Query::of_select(keys, query.position), outer))
+    Some(KeyQueries {
+        keys: Query::of_select(keys, query.position),
+        outer,
+        empty_group,
+    })
 }
 
 fn build_lookup(
@@ -455,21 +644,29 @@ fn build_lookup(
     tables: &mut TableCache,
     query: &Query,
     prepared: &Prepared,
+    shape: LookupShape,
+    sql_type: Option<SqlType>,
 ) -> SqlResult<Option<KeyLookup>> {
-    let Some((keys_query, outer)) = key_query(query) else {
+    let Some(queries) = key_query(query, shape) else {
         return Ok(None);
     };
-    let result = execute_query(env, tables, &keys_query, prepared)?;
-    let mut families: Vec<Option<Family>> = vec![None; outer.len()];
+    let outer = queries.outer;
+    let width = outer.len();
+    let result = execute_query(env, tables, &queries.keys, prepared)?;
+    let mut families: Vec<Option<Family>> = vec![None; width];
     let mut mixed = false;
-    let mut keys = HashSet::with_capacity(result.rows.len());
+    let mut keys = HashSet::new();
+    let mut grouped: HashMap<Vec<u8>, Vec<Value>> = HashMap::new();
     let mut bytes = 0usize;
-    for row in &result.rows {
-        if row.iter().any(Value::is_null) {
+    for row in result.rows {
+        let Some(key_values) = row.get(..width) else {
+            return Ok(None);
+        };
+        if key_values.iter().any(Value::is_null) {
             continue;
         }
         let mut key = Vec::new();
-        for (value, known) in row.iter().zip(families.iter_mut()) {
+        for (value, known) in key_values.iter().zip(families.iter_mut()) {
             let found = family(value);
             match known {
                 None => *known = found,
@@ -479,18 +676,50 @@ fn build_lookup(
             equality_key(&mut key, value);
         }
         bytes = bytes.saturating_add(key.len() + 48);
-        keys.insert(key);
+        match shape {
+            LookupShape::Existence => {
+                keys.insert(key);
+            }
+            LookupShape::Members | LookupShape::Aggregate => {
+                let value = row.into_iter().nth(width).unwrap_or(Value::Null);
+                grouped.entry(key).or_default().push(value);
+            }
+        }
     }
-    if mixed || families.iter().any(Option::is_none) && !keys.is_empty() {
+    let empty = keys.is_empty() && grouped.is_empty();
+    if mixed || families.iter().any(Option::is_none) && !empty {
         return Ok(None);
     }
+    let held = crate::memory::HeldMemory::holding(bytes)?;
+    let (keyed, missing) = match shape {
+        LookupShape::Existence => (
+            KeyedRows::Existence {
+                keys,
+                found: existence(1)?,
+            },
+            existence(0)?,
+        ),
+        LookupShape::Members | LookupShape::Aggregate => {
+            let mut groups = HashMap::with_capacity(grouped.len());
+            for (key, values) in grouped {
+                groups.insert(key, group_rows(sql_type, values)?);
+            }
+            let missing = match &queries.empty_group {
+                Some(empty_group) => Arc::new(SubqueryRows::from_result(
+                    execute_query(env, tables, empty_group, prepared)?,
+                    &SubqueryTest::Scalar,
+                )?),
+                None => group_rows(sql_type, Vec::new())?,
+            };
+            (KeyedRows::Groups(groups), missing)
+        }
+    };
     Ok(Some(KeyLookup {
         outer,
         families,
-        keys,
-        found: existence(1)?,
-        missing: existence(0)?,
-        _held: crate::memory::HeldMemory::holding(bytes)?,
+        keyed,
+        missing,
+        _held: held,
     }))
 }
 
@@ -763,7 +992,7 @@ fn for_each_select(query: &Query, visit: &mut dyn FnMut(&Select)) {
     }
 }
 
-fn select_expressions_mut(select: &mut Select) -> Vec<&mut Expr> {
+pub(crate) fn select_expressions_mut(select: &mut Select) -> Vec<&mut Expr> {
     let mut exprs: Vec<&mut Expr> = Vec::new();
     for item in &mut select.items {
         if let SelectItem::Expr { expr, .. } = item {
@@ -870,6 +1099,14 @@ pub(crate) fn mentions_correlated(expr: &Expr) -> bool {
         &expr.kind,
         ExprKind::Subquery(subquery) if matches!(subquery.state, SubqueryState::Correlated { .. })
     ) || children(expr).into_iter().any(mentions_correlated)
+}
+
+fn reads_derived_tables(select: &Select) -> bool {
+    select.from.as_ref().is_some_and(|from| {
+        std::iter::once(&from.first)
+            .chain(from.joins.iter().map(|join| &join.table))
+            .any(|table| table.derived.is_some())
+    })
 }
 
 pub(crate) fn needs_preparation(select: &Select) -> bool {
@@ -1397,6 +1634,23 @@ fn prepare_select(
     if crate::set_returning::select_needs_expansion(select) {
         crate::set_returning::check_placement(select)?;
         crate::set_returning::expand_select_list(select)?;
+    }
+    if select.filter.is_some() && reads_derived_tables(select) {
+        let overlay = Overlay::new(env.reader, &prepared.temp);
+        crate::pushdown::push_conditions_into_derived(select, &mut |name: &crate::ast::Name| {
+            if find_cte(ctes, &name.text).is_some() {
+                return None;
+            }
+            let definition = tables.require(&overlay, name).ok()?;
+            Some(
+                definition
+                    .columns
+                    .iter()
+                    .filter(|column| !crate::temp_tables::is_hidden_column(&column.name))
+                    .map(|column| column.name.to_string())
+                    .collect(),
+            )
+        });
     }
     if let Some(from) = &mut select.from {
         for index in 0..=from.joins.len() {
@@ -2541,18 +2795,16 @@ fn prepare_subquery(
             .map(|&(_, index)| index)
             .collect();
         let sql_type = rows.sql_type;
-        let lookup = if matches!(subquery.test, SubqueryTest::Exists)
-            && !env.columns_only
-            && !reaches_beyond
-        {
-            let keys_env = Env {
-                reader: &overlay,
-                names: env.names,
-                columns_only: false,
-            };
-            build_lookup(&keys_env, tables, &query, &inner)?
-        } else {
-            None
+        let lookup = match lookup_shape(&subquery.test) {
+            Some(shape) if !env.columns_only && !reaches_beyond => {
+                let keys_env = Env {
+                    reader: &overlay,
+                    names: env.names,
+                    columns_only: false,
+                };
+                build_lookup(&keys_env, tables, &query, &inner, shape, sql_type)?
+            }
+            _ => None,
         };
         templates.push(Template {
             query,
