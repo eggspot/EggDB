@@ -1531,3 +1531,43 @@ fn ms_description_extended_properties_are_comments_shown_in_sys_extended_propert
     assert_eq!(unknown.vendor_code(), Some(8145));
     assert_eq!(session.close(), Ok(false));
 }
+
+#[test]
+fn hostile_sequences_descriptions_and_xact_abort_return_errors_and_never_panic() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let long = "9".repeat(5_000);
+    let texts = [
+        "CREATE SEQUENCE s AS decimal(18, 0) MINVALUE -999999999999999999 MAXVALUE 999999999999999999".to_owned(),
+        "CREATE SEQUENCE s2 START WITH 99999999999999999999".to_owned(),
+        format!("CREATE SEQUENCE s3 INCREMENT BY {long}"),
+        "CREATE SEQUENCE s4 AS tinyint START WITH 300".to_owned(),
+        "CREATE SEQUENCE s5 INCREMENT BY 0".to_owned(),
+        "CREATE SEQUENCE s6 MINVALUE 10 MAXVALUE 1".to_owned(),
+        "CREATE SEQUENCE s7 AS sql_variant".to_owned(),
+        "CREATE SEQUENCE s8 MINVALUE - MAXVALUE".to_owned(),
+        "CREATE SEQUENCE s9 AS bigint INCREMENT BY -9223372036854775808 MINVALUE -9223372036854775808 MAXVALUE 9223372036854775807".to_owned(),
+        "SELECT NEXT VALUE FOR s9 AS a, NEXT VALUE FOR s9 AS b".to_owned(),
+        "SELECT NEXT VALUE FOR".to_owned(),
+        "SELECT NEXT VALUE FOR nowhere AS n".to_owned(),
+        "SELECT NEXT VALUE FOR s OVER (ORDER BY 1) AS n".to_owned(),
+        "ALTER SEQUENCE nowhere RESTART".to_owned(),
+        "DROP SEQUENCE nowhere".to_owned(),
+        "EXEC sp_addextendedproperty".to_owned(),
+        "EXEC sp_addextendedproperty NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL".to_owned(),
+        "EXEC sp_addextendedproperty N'MS_Description', N'x', N'SCHEMA', N'dbo', N'TABLE', N'nowhere', N'COLUMN', N'c', N'extra'".to_owned(),
+        "EXEC sp_dropextendedproperty N'MS_Description', N'SCHEMA', N'nowhere'".to_owned(),
+        format!("EXEC sp_addextendedproperty N'MS_Description', N'{long}', N'SCHEMA', N'{long}'"),
+        "EXEC sp_addextendedproperty @name = 1 / 0".to_owned(),
+        "SET XACT_ABORT".to_owned(),
+        "SET XACT_ABORT MAYBE".to_owned(),
+    ];
+    for text in &texts {
+        let _ = session.execute(text, &mut |_| {});
+        let _ = session.execute_batch(text, &mut |_| true);
+    }
+    assert_eq!(
+        values(&mut session, "SELECT 1 AS n"),
+        vec![vec![Value::Integer(1)]]
+    );
+}

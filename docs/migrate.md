@@ -217,8 +217,9 @@ known differences (restored, but not as the source had it)
 
 Skipped objects (procedures, functions, triggers, synonyms, users and roles, batch logic other
 than existence guards) are listed with their line; `USE`, `CREATE DATABASE`, `ALTER DATABASE`,
-`GRANT`, `PRINT`, extended properties and the like are counted as ignored; sqlcmd's commands are
-listed as client commands.
+`GRANT`, `PRINT`, alias types, extended properties other than `MS_Description` and the like are
+counted as ignored; sqlcmd's commands are listed as client commands. Sequences are counted with
+the other objects created, and `MS_Description` properties with the comments.
 
 ### Limits
 
@@ -232,26 +233,38 @@ listed as client commands.
   `MERGE`, `DBCC`, `BULK INSERT` and other statements EggDB does not have, which are skipped and
   listed.
 - **Kept as SQL Server had them:** `IDENTITY(seed, increment)` with any seed and increment, and
-  any `DEFAULT` expression, kept as written and run as Transact-SQL (D147).
+  any `DEFAULT` expression, kept as written and run as Transact-SQL (D147); sequences
+  (`CREATE SEQUENCE`, used by `NEXT VALUE FOR` in defaults and queries); `MS_Description`
+  extended properties on schemas, tables, views, columns, indexes and constraints, kept as
+  comments and shown in `sys.extended_properties` (D148); `SET XACT_ABORT ON`.
+- **Kept with their base type:** columns of an alias type (`CREATE TYPE [dbo].[Phone] FROM
+  [nvarchar](20) NOT NULL`) take the base type, and its `NOT NULL` when the column says neither;
+  each alias type is listed as a known difference (D148).
 - **Not kept, and listed as known differences:** computed and `rowversion` columns; a `DEFAULT`
   EggDB cannot keep (one that names a column or holds a subquery, which SQL Server refuses too);
-  `INCLUDE` columns, a non-unique index's filter and `DESC`;
+  `xml` columns, kept as `nvarchar(max)` (values as text, no XML methods or schema collections);
+  `IDENTITY` on `numeric(p, 0)` with p up to 18, kept as a `bigint` identity column; `IDENTITY`
+  on a heap, on a column that is not the first column of the primary key or on a wider `numeric`,
+  not kept (the column and its values are, and the table's `SET IDENTITY_INSERT` lines are
+  ignored; new rows must give the value); `INCLUDE` columns, a non-unique index's filter and
+  `DESC`;
   `datetimeoffset` offsets (values are kept in UTC); non-binary collations (text compares by code
   point); constraints disabled with `NOCHECK CONSTRAINT` (enforced here); constraints the restored
   rows violate (not created); an index whose name another table's index already has (EggDB's
   index names are unique per schema, not per table: not created); `SET ANSI_NULLS`,
   `QUOTED_IDENTIFIER` or `ANSI_PADDING OFF`.
-- **Not kept, without a note:** default-constraint names; extended properties (`MS_Description`);
-  filegroups and partitioning (`ON [PRIMARY]`, `ON ps(col)`).
-- **Tables skipped, with their rows counted:** columns of `sql_variant`, `xml`, `hierarchyid` or
-  the spatial types; alias types; tables with `IGNORE_DUP_KEY = ON`, FILESTREAM, sparse, masked,
-  Always Encrypted, memory-optimized, temporal or system-versioned columns; an identity column
-  that is not the first primary-key column, or a heap with one.
-- **Scripts:** UTF-8 or UTF-16LE with its byte-order mark (UTF-16 big-endian is refused with the
-  `iconv` command to convert it); three-part names; a batch holding more than 4 MiB of statements
-  other than one `INSERT` must be split with `GO`; `GO 2` and more only after a batch under 1 MiB;
-  a syntax error in one part of a batch does not stop the batch's earlier parts, as SQL Server's
-  compile-first would.
+- **Not kept, without a note:** default-constraint names; extended properties other than
+  `MS_Description`; filegroups and partitioning (`ON [PRIMARY]`, `ON ps(col)`).
+- **Tables skipped, with their rows counted:** columns of `sql_variant`, `hierarchyid` or the
+  spatial types; tables with `IGNORE_DUP_KEY = ON`, FILESTREAM, sparse, masked, Always
+  Encrypted, memory-optimized, temporal or system-versioned columns.
+- **Scripts:** UTF-8, or UTF-16 of either byte order with its byte-order mark; three-part names;
+  a batch of any size: one over 4 MiB without `GO` is cut at each `;` and before each line that
+  starts `INSERT`, `UPDATE` or `DELETE`, outside `BEGIN ... END` and `CASE`, and one statement
+  over 4 MiB runs whole only when it is an `INSERT`, `UPDATE` or `DELETE` (any other must be cut
+  with `;` or `GO`); `GO 2` and more only after a batch under 1 MiB; a syntax error in one part of
+  a batch does not stop the batch's earlier parts, as SQL Server's compile-first would; a cut
+  falling between `WITH ... AS (...)` and the statement it starts breaks that statement.
 - Behaviour of restored `CHECK`s and views used from another dialect follows that dialect's
   conversions and error numbers (D124).
 

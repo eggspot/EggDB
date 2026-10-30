@@ -568,6 +568,28 @@ SELECT @@VERSION
   errors 3902 and 3903. DDL is transactional. With `SET IMPLICIT_TRANSACTIONS ON` (what
   mssql-jdbc's `setAutoCommit(false)` sends) the first statement that changes data or the
   schema starts a transaction that lasts until `COMMIT` or `ROLLBACK`.
+- **`SET XACT_ABORT ON`** (D148): a run-time error, a constraint violation included, rolls the
+  open transaction back and ends the batch; `OFF` (the default) ends only the statement for the
+  errors SQL Server ends only the statement for. Syntax errors and `RAISERROR` are not affected,
+  as in SQL Server; `THROW` is. Inside `TRY` the error moves to `CATCH` and leaves the
+  transaction open but uncommittable: `XACT_STATE()` is -1, `ROLLBACK` ends it, and `COMMIT` or
+  any write is Msg 3930; a batch that ends with it still open rolls it back with Msg 3998.
+- **Sequences** (D148): `CREATE SEQUENCE name [AS tinyint | smallint | int | bigint |
+  decimal(p, 0) | numeric(p, 0)] [START WITH n] [INCREMENT BY n] [MINVALUE [n] | NO MINVALUE]
+  [MAXVALUE [n] | NO MAXVALUE] [CYCLE | NO CYCLE] [CACHE [n] | NO CACHE]` with SQL Server's
+  defaults (`bigint`, the type's whole range, starting at its minimum for an ascending
+  sequence), `ALTER SEQUENCE name [RESTART [WITH n]]` with the same options, `DROP SEQUENCE [IF
+  EXISTS] name [, ...]`, and `NEXT VALUE FOR name` in queries and defaults (`DEFAULT (NEXT VALUE
+  FOR [dbo].[Orders])`). They are the sequences of [Sequences, constraints and ALTER
+  TABLE](#sequences-constraints-and-alter-table), shown in `sys.sequences`. `decimal` and
+  `numeric` sequences hold up to 18 digits (wider ones are Msg 11702), `NEXT VALUE FOR` returns
+  a `bigint` whatever the sequence's type, its `OVER (ORDER BY ...)` form is 40517, and
+  `ALTER SEQUENCE ... NO MINVALUE` takes PostgreSQL's bound rather than the type's.
+- **Descriptions** (D148): `sp_addextendedproperty`, `sp_updateextendedproperty` and
+  `sp_dropextendedproperty` of `MS_Description` on a schema, table or view, and on a table's
+  column, index or constraint, set and remove the object's comment, which every dialect sees
+  (`COMMENT ON`, `obj_description`) and `sys.extended_properties` lists for schemas, tables, views
+  and columns. Other properties and other object types are 40517.
 - **Batch logic**: variables, `IF ... ELSE`, `WHILE`, `BEGIN ... END`, `TRY ... CATCH`,
   `THROW`, `RAISERROR`, `PRINT` and dynamic SQL; see
   [Transact-SQL batch logic](#transact-sql-batch-logic).
@@ -845,7 +867,8 @@ SELECT @odd AS odd_sum
   informational message; 11-18 is error 50000, which ends only its statement; above 18 is Msg
   2754, and a message number instead of a text is Msg 18054 (there is no `sp_addmessage`).
   `@@ERROR` is the last statement's error number (0 after one that succeeded) and
-  `XACT_STATE()` is 1 inside a transaction and 0 outside.
+  `XACT_STATE()` is 1 inside a transaction, -1 inside one that `XACT_ABORT` made uncommittable,
+  and 0 outside.
 - **`PRINT expression`** sends its text, up to 8,000 characters, as an informational message: a
   TDS `INFO` token (as `RAISERROR` of severity 10 or less), a notice in `eggdb sql`.
 - **Dynamic SQL**: `EXEC (string [+ string ...])` and `EXEC sp_executesql @statement [,
@@ -894,8 +917,9 @@ SELECT OBJECT_ID('sales.orders'), SERVERPROPERTY('ProductVersion'), DB_NAME(), S
   `sys.schemas`, `sys.indexes`, `sys.index_columns`, `sys.foreign_keys`,
   `sys.foreign_key_columns`, `sys.key_constraints`, `sys.default_constraints`,
   `sys.check_constraints`, `sys.identity_columns`, `sys.sequences`, `sys.databases` and
-  `sys.sql_modules` with SQL Server 2022's columns; `sys.procedures`, `sys.parameters`,
-  `sys.triggers` and `sys.extended_properties` are empty. They are built for each statement that
+  `sys.sql_modules` with SQL Server 2022's columns, and `sys.extended_properties` with the
+  `MS_Description` of schemas, tables, views and columns; `sys.procedures`, `sys.parameters` and
+  `sys.triggers` are empty. They are built for each statement that
   names them from the stored tables, views and sequences, read-only, and reached only with their
   schema (`sys.tables`, not `tables`).
 - **`INFORMATION_SCHEMA`**: `SCHEMATA`, `TABLES`, `COLUMNS`, `VIEWS`, `VIEW_TABLE_USAGE`,
@@ -1495,8 +1519,9 @@ sequence "s" (9223372036854775807)`) or, with `CYCLE`, starts again; arithmetic 
 `nextval` is not undone by a rollback, as in PostgreSQL, and is durable with the commit of any
 transaction that used the value. Oracle's sequences are the same objects: `CREATE SEQUENCE s
 START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE` (with `NOMAXVALUE`, `NOMINVALUE`, `ORDER` and the
-rest accepted), `s.NEXTVAL` and `s.CURRVAL`, with ORA-02289, ORA-08002 and ORA-08004. MySQL and
-SQLite have no sequences, and `nextval` there is an unknown function. A column `DEFAULT
+rest accepted), `s.NEXTVAL` and `s.CURRVAL`, with ORA-02289, ORA-08002 and ORA-08004. SQL
+Server's are too: `CREATE SEQUENCE` with SQL Server's defaults and `NEXT VALUE FOR s` (see the
+Transact-SQL section). MySQL and SQLite have no sequences, and `nextval` there is an unknown function. A column `DEFAULT
 nextval('s')` numbers rows, as `pg_dump` writes `serial` columns; EggDB's own `serial` and
 identity columns still use the auto-increment column (D111).
 
@@ -2457,7 +2482,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   the same `SELECT` assigns (`SELECT @s = @s + name FROM t`) is 40517; `SELECT @s += name FROM t`
   gives SQL Server's result. A table variable's columns take no constraints, defaults or identity
   and `NOT NULL` is not checked. `EXEC` of anything but the catalog procedures, `sp_executesql`
-  and `sp_unprepare`; rolling back to a save point (`SAVE TRANSACTION` is recorded); `XACT_ABORT`,
+  and `sp_unprepare`; rolling back to a save point (`SAVE TRANSACTION` is recorded);
   `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part names and other databases.
 - A batch that loops forever over TDS cannot be stopped by the client's attention signal while it
   runs (the connection reads its next request only when the batch ends); closing the server

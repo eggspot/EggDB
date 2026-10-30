@@ -763,6 +763,13 @@ SQLSTATE:  42P01
 - `-c` takes UTF-8 text, given once (put several statements in it, separated by semicolons);
   `-c` and a script together, a script that cannot be read, or SQL that is not UTF-8 are usage
   errors (exit 2).
+- With `--dialect sqlserver`, the SQL runs batch by batch at its `GO` lines, as sqlcmd sends
+  it: `GO` alone on its line, in any case, with an optional count that runs the batch again
+  (`GO 3`) and a comment after it, outside strings, names and comments. Each batch starts
+  fresh, so `CREATE VIEW` and `CREATE PROCEDURE` can open one; the first error stops the run,
+  and its `Msg` counts lines from the batch's start, as sqlcmd does. sqlcmd's own commands
+  (`:setvar`, `:r`, `!!`) are not run: a script with them fails with exit 3 and is restored with
+  `eggdb restore --dialect sqlserver`, or run with `sqlcmd -i` against `eggdb serve`.
 
 ### `sql --read-only`
 

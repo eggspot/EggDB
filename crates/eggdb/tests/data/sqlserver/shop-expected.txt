@@ -37,3 +37,6 @@ cà phê 🎉 $(document)
 == SELECT Id, Name FROM dbo.vActiveCustomers ORDER BY Id
 1|Ann O'Brien
 2|Nguyễn Văn An
+== SELECT Id, Body FROM dbo.Docs ORDER BY Id
+1|<doc>one</doc>
+2|<doc>two</doc>
