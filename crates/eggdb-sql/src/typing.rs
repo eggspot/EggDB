@@ -356,7 +356,8 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
         ExprKind::Column { qualifier, name } => scope
             .column(qualifier.as_deref(), name, expr.position)
             .ok()
-            .and_then(|offset| scope.column_type(offset)),
+            .and_then(|offset| scope.column_type(offset))
+            .filter(|sql_type| *sql_type != SqlType::Dynamic),
         ExprKind::Slot { sql_type, .. }
         | ExprKind::Constant { sql_type, .. }
         | ExprKind::OuterColumn { sql_type, .. } => *sql_type,

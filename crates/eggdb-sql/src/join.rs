@@ -85,6 +85,7 @@ pub(crate) fn type_family(sql_type: SqlType) -> u8 {
             crate::types::DefinedKind::Range => 19,
             crate::types::DefinedKind::Domain => 20,
         },
+        SqlType::Dynamic => 21,
     }
 }
 

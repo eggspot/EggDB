@@ -3430,6 +3430,12 @@ impl<'t> Parser<'t> {
         {
             return Ok(expr);
         }
+        if self.sqlite()
+            && let TokenKind::Binary(digits) = &token.kind
+        {
+            self.at += 1;
+            return sqlserver_functions::binary_literal(digits, position);
+        }
         if self.oracle()
             && let Some(expr) = self.oracle_primary(&token.kind, position)?
         {

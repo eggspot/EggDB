@@ -26,6 +26,25 @@ impl<'t> Lexer<'t> {
         }
     }
 
+    fn blob_literal(&mut self) -> SqlResult<TokenKind<'t>> {
+        let start = self.at;
+        let digits_start = start + 2;
+        let bytes = self.text.as_bytes();
+        let mut end = digits_start;
+        while bytes.get(end).is_some_and(u8::is_ascii_hexdigit) {
+            end += 1;
+        }
+        if bytes.get(end) != Some(&b'\'') || (end - digits_start) % 2 == 1 {
+            let shown: String = self.text[start..].chars().take(end + 1 - start).collect();
+            return Err(SqlError::syntax(
+                format!("unrecognized token: \"{shown}\""),
+                start,
+            ));
+        }
+        self.at = end + 1;
+        Ok(TokenKind::Binary(&self.text[digits_start..end]))
+    }
+
     pub(super) fn next_sqlite_kind(&mut self, byte: u8) -> SqlResult<TokenKind<'t>> {
         match byte {
             b'.' if self.peek(1).is_some_and(|next| next.is_ascii_digit()) => self.number(),
@@ -37,10 +56,7 @@ impl<'t> Lexer<'t> {
             b'\'' => self.string(false),
             b'"' => self.quoted_identifier().map(lowered),
             b'`' => self.backtick_identifier(),
-            b'x' | b'X' if self.peek(1) == Some(b'\'') => Err(SqlError::not_supported(
-                "BLOB literals (x'...') are not supported yet",
-            )
-            .at(self.at)),
+            b'x' | b'X' if self.peek(1) == Some(b'\'') => self.blob_literal(),
             b'?' => self.numbered_parameter(),
             b':' | b'@' | b'$' => self.named_parameter(),
             _ if super::is_identifier_start(byte) => Ok(self.word()),

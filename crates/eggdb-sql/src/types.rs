@@ -70,6 +70,10 @@ pub enum SqlType {
     Catalog(CatalogType),
     /// A type known by its definition: an enum, a composite type, a range type or a domain.
     Defined(DefinedType),
+    /// A value of any of SQLite's storage classes (an integer, a real, text or a blob), kept as
+    /// it is given: the type of a SQLite column declared `BLOB`, whose rows may hold different
+    /// classes.
+    Dynamic,
 }
 
 /// A type known by its definition in the catalog rather than by the engine's storage alone:
@@ -207,6 +211,7 @@ impl SqlType {
             Self::Array(element) => element.type_name(),
             Self::Catalog(kind) => kind.name().to_owned(),
             Self::Defined(defined) => crate::user_types::type_name(defined),
+            Self::Dynamic => "blob".into(),
         }
     }
 
@@ -240,6 +245,7 @@ impl SqlType {
                 DefinedKind::Range => "anyrange",
                 DefinedKind::Domain => "domain",
             },
+            Self::Dynamic => "blob",
         }
     }
 
@@ -694,7 +700,46 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             .map(|array| Value::Array(Box::new(array))),
         SqlType::Catalog(kind) => crate::pg_catalog::parse_input(text, kind),
         SqlType::Defined(defined) => crate::user_types::parse_input(text, defined),
+        SqlType::Dynamic => Ok(Value::Text(text.to_owned())),
     }
+}
+
+pub(crate) fn storage_class_value(value: Value) -> Value {
+    match value {
+        Value::SmallInt(number) => Value::BigInt(i64::from(number)),
+        Value::Integer(number) => Value::BigInt(i64::from(number)),
+        Value::Boolean(flag) => Value::BigInt(i64::from(flag)),
+        Value::Real(number) => Value::Double(f64::from(number)),
+        Value::Numeric(number) => match number.integral_value().map(i64::try_from) {
+            Some(Ok(whole)) => Value::BigInt(whole),
+            _ => Value::Double(number.to_f64()),
+        },
+        Value::Null | Value::BigInt(_) | Value::Double(_) | Value::Text(_) | Value::Bytea(_) => {
+            value
+        }
+        other => other.to_text().map_or(Value::Null, Value::Text),
+    }
+}
+
+fn storage_class_rank(value: &Value) -> Option<u8> {
+    match value {
+        Value::SmallInt(_)
+        | Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Real(_)
+        | Value::Double(_)
+        | Value::Numeric(_) => Some(1),
+        Value::Text(_) | Value::Bpchar(_) => Some(2),
+        Value::Bytea(_) => Some(3),
+        _ => None,
+    }
+}
+
+fn different_storage_classes(left: &Value, right: &Value) -> Option<Ordering> {
+    let (left_rank, right_rank) = (storage_class_rank(left)?, storage_class_rank(right)?);
+    (left_rank != right_rank
+        && crate::constraints::current_dialect() == crate::Dialect::Sqlite)
+        .then(|| left_rank.cmp(&right_rank))
 }
 
 pub(crate) fn numeric_value(value: Numeric, modifier: Option<NumericModifier>) -> SqlResult<Value> {
@@ -885,6 +930,9 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     }
     if let SqlType::Defined(defined) = target {
         return crate::user_types::convert(value, defined, conversion);
+    }
+    if target == SqlType::Dynamic {
+        return Ok(storage_class_value(value));
     }
     if target.is_character() {
         let text = match value {
@@ -1173,13 +1221,18 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
                 _ => Ordering::Equal,
             }
         }
-        _ => match (left.as_integer(), right.as_integer()) {
-            (Some(a), Some(b)) => a.cmp(&b),
-            _ => compare_floats(
-                left.as_float().unwrap_or(f64::NAN),
-                right.as_float().unwrap_or(f64::NAN),
-            ),
-        },
+        _ => {
+            if let Some(ordering) = different_storage_classes(left, right) {
+                return ordering;
+            }
+            match (left.as_integer(), right.as_integer()) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => compare_floats(
+                    left.as_float().unwrap_or(f64::NAN),
+                    right.as_float().unwrap_or(f64::NAN),
+                ),
+            }
+        }
     }
 }
 

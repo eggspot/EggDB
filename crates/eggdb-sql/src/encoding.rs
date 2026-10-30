@@ -228,11 +228,25 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Array(_) => 21,
         SqlType::Catalog(_) => 22,
         SqlType::Defined(_) => 23,
+        SqlType::Dynamic => 24,
     }
 }
 
 fn is_version_10_type(sql_type: SqlType) -> bool {
-    matches!(sql_type, SqlType::Array(_) | SqlType::Defined(_))
+    matches!(
+        sql_type,
+        SqlType::Array(_) | SqlType::Defined(_) | SqlType::Dynamic
+    )
+}
+
+const STORAGE_CLASS_TAGS: [u8; 4] = [3, 5, 7, 18];
+
+fn column_holds_tag(sql_type: SqlType, tag: u8) -> bool {
+    if sql_type == SqlType::Dynamic {
+        STORAGE_CLASS_TAGS.contains(&tag)
+    } else {
+        tag == value_tag(sql_type)
+    }
 }
 
 fn is_version_4_type(sql_type: SqlType) -> bool {
@@ -1962,7 +1976,7 @@ pub(crate) fn decode_row_into(
     }
     for (index, column) in columns[..count].iter().enumerate() {
         let tag = reader.byte()?;
-        if tag != 0 && tag != value_tag(column.sql_type) {
+        if tag != 0 && !column_holds_tag(column.sql_type, tag) {
             return Err(reader.damaged());
         }
         let wanted = needed.is_none_or(|needed| needed.get(index).copied().unwrap_or(true));
@@ -2271,6 +2285,7 @@ impl<'b> Reader<'b> {
                 }
                 SqlType::Defined(DefinedType { kind, oid })
             }
+            24 if defined_allowed => SqlType::Dynamic,
             _ => return Err(self.damaged()),
         })
     }
@@ -2357,7 +2372,7 @@ impl<'b> Reader<'b> {
                 kind: DefinedKind::Enum,
                 ..
             }) => 8,
-            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => {
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
                 return Err(self.damaged());
             }
             SqlType::Numeric(_) => {
@@ -2482,7 +2497,7 @@ impl<'b> Reader<'b> {
                 }
                 crate::enums::decoded(oid, sort_order)?
             }
-            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => {
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
                 return Err(self.damaged());
             }
             SqlType::Text

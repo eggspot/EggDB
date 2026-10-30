@@ -216,6 +216,10 @@ fn quoted(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_owned(),
         Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
+        Value::Bytea(bytes) => format!(
+            "X'{}'",
+            crate::bytea::format_hex(bytes)[2..].to_ascii_uppercase()
+        ),
         other => text_of(other).unwrap_or_else(|| "NULL".to_owned()),
     }
 }
@@ -240,6 +244,7 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             match first {
                 Value::Null => "null",
                 Value::Text(_) => "text",
+                Value::Bytea(_) => "blob",
                 Value::Real(_) | Value::Double(_) => "real",
                 _ => "integer",
             }
@@ -272,7 +277,10 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             Some(format) => Value::Text(printf(&format, values.get(1..).unwrap_or(&[]))?),
         },
         _ if any_null => Value::Null,
-        "sqlite_length" => Value::BigInt(text(0).unwrap_or_default().chars().count() as i64),
+        "sqlite_length" => match first {
+            Value::Bytea(bytes) => Value::BigInt(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
+            _ => Value::BigInt(text(0).unwrap_or_default().chars().count() as i64),
+        },
         "sqlite_substr" => {
             let start = integer_of(second).unwrap_or(0);
             let length = values.get(2).and_then(integer_of);

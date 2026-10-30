@@ -375,7 +375,6 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn sqlite_type(&mut self) -> SqlResult<(SqlType, bool)> {
-        let start = self.position();
         let mut words = Vec::new();
         while let TokenKind::Word(word) = self.peek_kind() {
             if matches!(
@@ -418,9 +417,7 @@ impl<'t> Parser<'t> {
             Affinity::Text => SqlType::Text,
             Affinity::Real => SqlType::Double,
             Affinity::Blob if declared.is_empty() => SqlType::Text,
-            Affinity::Blob => {
-                return Err(SqlError::not_supported("type BLOB is not supported yet").at(start));
-            }
+            Affinity::Blob => SqlType::Dynamic,
             Affinity::Numeric if matches!(declared.as_str(), "boolean" | "bool") => SqlType::BigInt,
             Affinity::Numeric if ["date", "time"].iter().any(|word| declared.contains(word)) => {
                 SqlType::Text

@@ -370,7 +370,8 @@ fn class_of_type(sql_type: SqlType) -> ValueClass {
         | SqlType::Uuid
         | SqlType::Array(_)
         | SqlType::Catalog(_)
-        | SqlType::Defined(_) => ValueClass::Text,
+        | SqlType::Defined(_)
+        | SqlType::Dynamic => ValueClass::Text,
         SqlType::Time(_) => ValueClass::Time,
         SqlType::Bytea => ValueClass::Bytes,
         SqlType::Date => ValueClass::Date,

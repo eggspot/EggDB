@@ -822,6 +822,7 @@ fn right_aligned(sql_type: eggdb_sql::SqlType) -> bool {
             | eggdb_sql::SqlType::Interval { .. }
             | eggdb_sql::SqlType::Array(_)
             | eggdb_sql::SqlType::Defined(_)
+            | eggdb_sql::SqlType::Dynamic
     )
 }
 

@@ -1089,10 +1089,45 @@ SELECT 5
 error 42883
 SELECT greatest(1, 2)
 
-chapter "Datatypes In SQLite": BLOB columns
+chapter "Datatypes In SQLite": BLOB columns hold every storage class as it is given, and x'...' blob literals
 ok
-CREATE TABLE b31 (x BLOB)
-... differs
+CREATE TABLE b31 (id INTEGER PRIMARY KEY, x BLOB)
+
+rows
+INSERT INTO b31 (x) VALUES (1), (2.5), ('three'), (x'0A0B'), (NULL)
+----
+INSERT 0 5
+
+rows
+SELECT typeof(x), quote(x) FROM b31 WHERE x IS NOT NULL ORDER BY x
+----
+typeof(x)|quote(x)
+integer|1
+real|2.5
+text|'three'
+blob|X'0A0B'
+SELECT 4
+
+rows
+SELECT id FROM b31 WHERE x = 'three' OR x = 1
+----
+id
+1
+3
+SELECT 2
+
+rows
+SELECT typeof(x'00ff'), length(x'00ff'), quote(x'')
+----
+typeof(x'00ff')|length(x'00ff')|quote(x'')
+blob|2|X''
+SELECT 1
+
+error 42601 1
+SELECT x'0A0'
+
+error 0A000
+CREATE INDEX b31_x ON b31 (x)
 
 chapter "SQLite Foreign Key Support", "CREATE TABLE: CHECK constraints", "ALTER TABLE"
 ok

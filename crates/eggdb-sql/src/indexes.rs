@@ -355,7 +355,7 @@ fn next_index_id(table: &TableDefinition) -> SqlResult<u32> {
 
 pub(crate) fn check_orderable(sql_type: SqlType, position: usize) -> SqlResult<()> {
     let unordered = match sql_type {
-        SqlType::Array(_) => true,
+        SqlType::Array(_) | SqlType::Dynamic => true,
         SqlType::Defined(defined) => defined.kind != crate::types::DefinedKind::Enum,
         _ => false,
     };

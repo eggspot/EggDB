@@ -1145,6 +1145,7 @@ pub(crate) fn type_oid(sql_type: SqlType) -> u32 {
         SqlType::Catalog(kind) => catalog_type_oid(kind),
         SqlType::Array(element) => array_type_oid(element),
         SqlType::Defined(defined) => defined.oid,
+        SqlType::Dynamic => 25,
     }
 }
 
