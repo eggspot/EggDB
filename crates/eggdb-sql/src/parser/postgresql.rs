@@ -276,7 +276,7 @@ impl Parser<'_> {
             _ => false,
         };
         (callable(0) && self.peek_kind_at(1) == &TokenKind::LeftParen)
-            || (self.is_word("pg_catalog")
+            || (callable(0)
                 && self.peek_kind_at(1) == &TokenKind::Dot
                 && callable(2)
                 && self.peek_kind_at(3) == &TokenKind::LeftParen)
@@ -284,16 +284,19 @@ impl Parser<'_> {
 
     pub(super) fn table_function(&mut self) -> SqlResult<TableReference> {
         let position = self.position();
-        if self.is_word("pg_catalog") {
-            self.at += 2;
-        }
-        let name = self.name()?;
-        if crate::set_returning::named(&name.text).is_none() {
-            return Err(SqlError::not_supported(format!(
-                "the function {}() in FROM is not supported yet",
-                name.text
-            ))
-            .at(name.position));
+        let schema = if self.peek_kind_at(1) == &TokenKind::Dot {
+            let schema = self.name()?;
+            self.at += 1;
+            Some(schema.text)
+        } else {
+            None
+        };
+        let mut name = self.name()?;
+        match schema.as_deref() {
+            None | Some(crate::schemas::CATALOG_SCHEMA) => {}
+            Some(schema) => {
+                name.text = crate::schemas::written_qualified(schema, &name.text);
+            }
         }
         self.expect(&TokenKind::LeftParen)?;
         let mut arguments = Vec::new();
@@ -322,7 +325,9 @@ impl Parser<'_> {
         };
         Ok(TableReference {
             name: Name {
-                text: alias.clone().unwrap_or_else(|| name.text.clone()),
+                text: alias
+                    .clone()
+                    .unwrap_or_else(|| crate::schemas::base_name(&name.text).to_owned()),
                 position,
             },
             alias,

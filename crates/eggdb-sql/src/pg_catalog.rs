@@ -27,7 +27,8 @@ pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{
     CatalogSnapshot, ConstraintSource, IndexSource, RelationEntry, RelationKind, RelationSource,
     current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
-    mentions_catalog, names_non_sequence_relation, snapshot_for, text_needs_catalog,
+    mentions_catalog, names_non_sequence_relation, snapshot_for, statement_settings,
+    text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
 

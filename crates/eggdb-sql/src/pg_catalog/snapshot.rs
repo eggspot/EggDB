@@ -140,6 +140,17 @@ pub(crate) fn enter_statement(wanted: bool, settings: &Arc<Settings>) -> Entered
     EnteredStatement { depth }
 }
 
+pub(crate) fn statement_settings() -> Arc<Settings> {
+    FRAMES
+        .with(|frames| {
+            frames
+                .try_borrow()
+                .ok()
+                .and_then(|frames| frames.last().map(|frame| Arc::clone(&frame.settings)))
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn load_if_wanted(reader: &dyn KeyValueRead) -> SqlResult<()> {
     let wanted = FRAMES.with(|frames| {
         frames.try_borrow().ok().is_some_and(|frames| {

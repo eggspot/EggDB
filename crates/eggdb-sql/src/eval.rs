@@ -430,6 +430,12 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Function { name, .. } if name == crate::records::ROW_FUNCTION => {
             ("row".into(), true)
         }
+        ExprKind::Function { name, arguments } if name == crate::routines::ROUTINE_CALL => {
+            (crate::routines::called_name(arguments), true)
+        }
+        ExprKind::Function { name, .. } if crate::schemas::is_qualified(name) => {
+            (crate::schemas::base_name(name).to_owned(), true)
+        }
         ExprKind::Function { name, .. }
             if crate::ranges::OPERATORS
                 .iter()
@@ -1304,6 +1310,7 @@ impl Evaluator<'_> {
             }
             crate::records::FIELD_FUNCTION => return self.field_selection(arguments),
             crate::triggers::RAISE_FUNCTION => return crate::triggers::raise(self, arguments),
+            crate::routines::ROUTINE_CALL => return crate::routines::evaluate(self, arguments),
             "enum_first" | "enum_last" | "enum_range" => {
                 return crate::enums::function(self, name, arguments);
             }
@@ -1486,9 +1493,12 @@ impl Evaluator<'_> {
                 Some(seconds) => crate::cancel::sleep(seconds).map(|()| Value::Text(String::new())),
                 None => Err(unknown()),
             },
-            _ => match crate::ranges::constructor(name) {
-                Some(oid) => crate::ranges::construct_from_values(oid, &values),
-                None => Err(unknown()),
+            _ => match (crate::ranges::constructor(name), self.correlation) {
+                (Some(oid), _) => crate::ranges::construct_from_values(oid, &values),
+                (None, Some(correlation)) if crate::set_returning::named(name).is_none() => {
+                    correlation.call_routine(name, &vec![None; values.len()], values.clone())
+                }
+                (None, _) => Err(unknown()),
             },
         }
     }

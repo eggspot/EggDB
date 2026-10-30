@@ -96,6 +96,21 @@ pub(crate) enum Statement {
     CreateRoutine(Box<CreateRoutine>),
     DropRoutine(DropRoutine),
     AlterRoutine(AlterRoutine),
+    Call(CallRoutine),
+    Do(DoBlock),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CallRoutine {
+    pub(crate) name: Name,
+    pub(crate) arguments: Vec<Expr>,
+    pub(crate) argument_names: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DoBlock {
+    pub(crate) code: String,
+    pub(crate) position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

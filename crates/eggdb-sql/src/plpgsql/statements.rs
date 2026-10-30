@@ -3,6 +3,7 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult};
 use crate::execute::{self, TableCache};
 use crate::name_resolution::Binding;
+use crate::routines::{self, Prefetch};
 use crate::session::QueryResult;
 use crate::settings::Settings;
 use crate::store::KeyValueWrite;
@@ -39,24 +40,36 @@ pub(crate) fn run_sql(
     match statement {
         Statement::Select(mut select) => {
             binding.select(&*writer, tables, &mut select)?;
+            routines::prepare_select(writer, tables, settings, &mut select, Prefetch::NonVolatile)?;
             execute::select(&*writer, tables, &select, false)
         }
         Statement::Query(mut query) => {
             binding.query(&*writer, tables, &mut query)?;
+            routines::prepare_query(writer, tables, settings, &mut query, Prefetch::NonVolatile)?;
             execute::query(&*writer, tables, &query, false)
         }
         Statement::Insert(mut insert) => {
             binding.insert(&*writer, tables, &mut insert)?;
+            routines::prepare_insert(writer, tables, settings, &mut insert)?;
             execute::insert(writer, tables, &insert)
         }
         Statement::Update(mut update) => {
             binding.update(&*writer, tables, &mut update)?;
+            routines::prepare_update(writer, tables, settings, &mut update)?;
             execute::update(writer, tables, &update)
         }
         Statement::Delete(mut delete) => {
             binding.delete(&*writer, tables, &mut delete)?;
+            routines::prepare_delete(writer, tables, settings, &mut delete)?;
             execute::delete(writer, tables, &delete)
         }
+        Statement::Call(mut call) => {
+            for argument in &mut call.arguments {
+                binding.condition(&*writer, tables, argument)?;
+            }
+            routines::call_procedure(writer, tables, settings, &call)
+        }
+        Statement::Do(block) => routines::run_do(writer, tables, settings, &block.code),
         Statement::Merge(mut merge) => {
             binding.merge(&*writer, tables, &mut merge)?;
             crate::merge::merge(writer, tables, &merge)
@@ -115,12 +128,12 @@ pub(crate) fn run_sql(
             crate::triggers::drop_triggers(writer, tables, &drop, DIALECT)
         }
         Statement::CreateRoutine(create) => {
-            let check = crate::routines::BodyCheck::of_setting(
+            let check = routines::BodyCheck::of_setting(
                 settings.get("check_function_bodies").ok().as_deref(),
             );
-            crate::routines::create_routine(writer, tables, &create, check)
+            routines::create_routine(writer, tables, &create, check)
         }
-        Statement::DropRoutine(drop) => crate::routines::drop_routines(writer, tables, &drop, DIALECT),
+        Statement::DropRoutine(drop) => routines::drop_routines(writer, tables, &drop, DIALECT),
         Statement::Ignored { tag, notice } => {
             let result = QueryResult::command(tag);
             Ok(match notice {

@@ -14,6 +14,7 @@ pub(crate) use conditions::{condition_name, condition_states};
 pub(crate) use frame::RoutineFrame;
 pub(crate) use raise::take_raised_notices;
 pub(crate) use run::{Call, Returned, TriggerCall, invoke, invoke_read_only, run_inline};
+pub(crate) use writes::ReadOnlyWrite;
 
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};

@@ -219,6 +219,20 @@ fn parsed(text: &str, settings: &Settings, frame: &RoutineFrame) -> SqlResult<St
     Ok(statement)
 }
 
+fn output_target(argument: &crate::ast::Expr) -> Option<Target> {
+    match &argument.kind {
+        crate::ast::ExprKind::Column {
+            qualifier: None,
+            name,
+        } => Some(Target {
+            name: name.clone(),
+            path: Vec::new(),
+            position: argument.position,
+        }),
+        _ => None,
+    }
+}
+
 fn single_value(result: QueryResult, query: &str) -> SqlResult<Value> {
     let width = result.columns.as_ref().map_or(0, Vec::len);
     if width != 1 {
@@ -651,18 +665,59 @@ impl<'r> Run<'r> {
         }
     }
 
-    fn execute(&mut self, statement: Statement) -> SqlResult<QueryResult> {
-        let mut result = if self.undo.is_recording() {
+    fn with_writer<T>(
+        &mut self,
+        body: impl FnOnce(&mut dyn KeyValueWrite, &mut TableCache, &Settings) -> SqlResult<T>,
+    ) -> SqlResult<T> {
+        if self.undo.is_recording() {
             let mut writer = UndoWrite {
                 inner: &mut *self.writer,
                 log: &mut self.undo,
             };
-            run_sql(&mut writer, self.tables, self.settings, statement)?
+            body(&mut writer, self.tables, self.settings)
         } else {
-            run_sql(&mut *self.writer, self.tables, self.settings, statement)?
-        };
+            body(&mut *self.writer, self.tables, self.settings)
+        }
+    }
+
+    fn execute(&mut self, statement: Statement) -> SqlResult<QueryResult> {
+        let mut result = self.with_writer(|writer, tables, settings| {
+            run_sql(writer, tables, settings, statement)
+        })?;
         push_statement_notices(std::mem::take(&mut result.notices));
         Ok(result)
+    }
+
+    fn call_step(&mut self, text: &str) -> SqlResult<Flow> {
+        let Statement::Call(call) = parsed(text, self.settings, &self.frame)? else {
+            self.query_text(text)?;
+            return Ok(Flow::Next);
+        };
+        let written = parsed(text, self.settings, &RoutineFrame::default()).ok();
+        let (mut result, sources) = self.with_writer(|writer, tables, settings| {
+            let binding = crate::name_resolution::Binding {
+                settings,
+                walk_expressions: true,
+            };
+            let mut call = call;
+            for argument in &mut call.arguments {
+                binding.condition(&*writer, tables, argument)?;
+            }
+            crate::routines::call_procedure_outputs(writer, tables, settings, &call)
+        })?;
+        push_statement_notices(std::mem::take(&mut result.notices));
+        let (Some(Statement::Call(written)), Some(row)) = (written, result.rows.pop()) else {
+            return Ok(Flow::Next);
+        };
+        for (value, source) in row.into_iter().zip(sources) {
+            let Some(argument) = source.and_then(|at| written.arguments.get(at)) else {
+                continue;
+            };
+            if let Some(target) = output_target(argument) {
+                self.assign(&target, value)?;
+            }
+        }
+        Ok(Flow::Next)
     }
 
     fn query_text(&mut self, text: &str) -> SqlResult<QueryResult> {
@@ -932,10 +987,7 @@ impl<'r> Run<'r> {
                 self.set_found(processed_rows(&result));
                 Ok(Flow::Next)
             }
-            StepKind::Call(call) => {
-                self.query_text(&call.text)?;
-                Ok(Flow::Next)
-            }
+            StepKind::Call(call) => self.call_step(&call.text),
             StepKind::Execute(dynamic) => self.execute_dynamic(dynamic),
             StepKind::GetDiagnostics { stacked, items } => self.diagnostics(*stacked, items),
             StepKind::If {

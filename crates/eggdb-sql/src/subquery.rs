@@ -800,6 +800,19 @@ impl<'a> Correlation<'a> {
         }
     }
 
+    pub(crate) fn call_routine(
+        &self,
+        name: &str,
+        names: &[Option<String>],
+        values: Vec<Value>,
+    ) -> SqlResult<Value> {
+        let mut tables = self
+            .tables
+            .try_borrow_mut()
+            .map_err(|_| internal("a routine call found the statement's tables in use"))?;
+        crate::routines::call_in_row(self.reader, &mut tables, name, names, values)
+    }
+
     fn value_at(&self, row: &[Value], depth: usize, index: usize) -> Value {
         let source = match depth.checked_sub(2) {
             None => Some(row),
@@ -1021,7 +1034,7 @@ pub(crate) fn select_expressions_mut(select: &mut Select) -> Vec<&mut Expr> {
     exprs
 }
 
-fn select_expressions(select: &Select) -> Vec<&Expr> {
+pub(crate) fn select_expressions(select: &Select) -> Vec<&Expr> {
     let mut exprs: Vec<&Expr> = Vec::new();
     for item in &select.items {
         if let SelectItem::Expr { expr, .. } = item {
@@ -1053,6 +1066,7 @@ pub(crate) fn mentions_subquery(expr: &Expr) -> bool {
     let any = |exprs: &[Expr]| exprs.iter().any(mentions_subquery);
     match &expr.kind {
         ExprKind::Subquery(_) => true,
+        ExprKind::Function { name, .. } if name == crate::routines::ROUTINE_CALL => true,
         ExprKind::Literal(_)
         | ExprKind::Column { .. }
         | ExprKind::Slot { .. }
@@ -1129,11 +1143,12 @@ pub(crate) fn needs_preparation(select: &Select) -> bool {
 pub(crate) struct RowSubqueries {
     names: TempTableNames,
     templates: Vec<Template>,
+    calls_routines: bool,
 }
 
 impl RowSubqueries {
     pub(crate) fn is_correlated(&self) -> bool {
-        !self.templates.is_empty()
+        !self.templates.is_empty() || self.calls_routines
     }
 
     pub(crate) fn correlation<'a>(&'a self, reader: &'a dyn KeyValueRead) -> Correlation<'a> {
@@ -1155,6 +1170,9 @@ pub(crate) fn prepare_in_place(
     let _shared = crate::memory::share_statement_memory();
     let names = TempTableNames::default();
     let mut templates = Vec::new();
+    let calls_routines = exprs
+        .iter()
+        .any(|expr| crate::routines::mentions_routine_call(expr));
     {
         let env = Env {
             reader,
@@ -1175,7 +1193,11 @@ pub(crate) fn prepare_in_place(
             )?;
         }
     }
-    Ok(RowSubqueries { names, templates })
+    Ok(RowSubqueries {
+        names,
+        templates,
+        calls_routines,
+    })
 }
 
 pub(crate) fn run_select(

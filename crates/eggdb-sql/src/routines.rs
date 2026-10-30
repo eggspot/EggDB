@@ -16,6 +16,14 @@ use crate::types::SqlType;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod calls;
+
+pub(crate) use calls::{
+    Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_outputs, called_name, evaluate, marked_call,
+    mentions_routine_call, prepare_delete, prepare_insert, prepare_query, prepare_select,
+    prepare_update, run_do, select_calls_volatile, select_may_write,
+};
+
 pub(crate) const MAX_ROUTINE_TEXT: usize = 1 << 20;
 pub(crate) const MAX_OVERLOADS: usize = 256;
 pub(crate) const MAX_PARAMETERS: usize = 100;
@@ -787,5 +795,7 @@ pub(crate) fn alter_routine(
     Ok(result)
 }
 
+#[cfg(test)]
+mod calls_tests;
 #[cfg(test)]
 mod tests;

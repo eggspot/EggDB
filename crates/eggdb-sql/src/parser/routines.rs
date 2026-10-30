@@ -1,6 +1,7 @@
 use super::Parser;
 use crate::ast::{
-    AlterRoutine, AlterRoutineAction, CreateRoutine, DropRoutine, RoutineTarget, Statement,
+    AlterRoutine, AlterRoutineAction, CallRoutine, CreateRoutine, DoBlock, DropRoutine,
+    RoutineTarget, Statement,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -50,8 +51,86 @@ impl<'t> Parser<'t> {
             "create" if self.creates_routine() => self.create_routine().map(Some),
             "drop" if self.names_routine_kind_at(1) => self.drop_routine().map(Some),
             "alter" if self.names_routine_kind_at(1) => self.alter_routine().map(Some),
+            "call" => self.call_routine().map(Some),
+            "do" => self.do_block().map(Some),
             _ => Ok(None),
         }
+    }
+
+    fn call_routine(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        let name = self.table_name()?;
+        self.expect(&TokenKind::LeftParen)?;
+        let mut arguments = Vec::new();
+        let mut argument_names: Vec<Option<String>> = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                if arguments.len() >= MAX_PARAMETERS {
+                    return Err(too_many_parameters(self.position()));
+                }
+                let position = self.position();
+                let named = self.named_argument_name()?;
+                if named.is_none() && argument_names.iter().any(Option::is_some) {
+                    return Err(SqlError::syntax(
+                        "positional argument cannot follow named argument",
+                        position,
+                    ));
+                }
+                if let Some(parameter) = &named
+                    && argument_names
+                        .iter()
+                        .flatten()
+                        .any(|known| *known == parameter.text)
+                {
+                    return Err(SqlError::syntax(
+                        format!("argument name \"{}\" used more than once", parameter.text),
+                        parameter.position,
+                    ));
+                }
+                argument_names.push(named.map(|parameter| parameter.text));
+                arguments.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(Statement::Call(CallRoutine {
+            name,
+            arguments,
+            argument_names,
+        }))
+    }
+
+    fn do_block(&mut self) -> SqlResult<Statement> {
+        let start = self.position();
+        self.at += 1;
+        let mut language = None;
+        let mut code = None;
+        loop {
+            if language.is_none() && self.take_word("language") {
+                language = Some((self.position(), self.routine_language()?));
+                continue;
+            }
+            if code.is_none() && matches!(self.peek_kind(), TokenKind::String(_)) {
+                let position = self.position();
+                let (text, _) = self.routine_source()?;
+                code = Some((text, position));
+                continue;
+            }
+            break;
+        }
+        if let Some((position, RoutineLanguage::Sql)) = language {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "language \"sql\" does not support inline code execution",
+            )
+            .at(position));
+        }
+        let Some((code, position)) = code else {
+            return Err(SqlError::syntax("no inline code specified", start));
+        };
+        Ok(Statement::Do(DoBlock { code, position }))
     }
 
     fn names_routine_kind_at(&self, ahead: usize) -> bool {

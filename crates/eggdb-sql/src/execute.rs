@@ -1002,7 +1002,7 @@ fn update_mentions_subquery(update: &Update) -> bool {
         || returning_mentions_subquery(&update.returning)
 }
 
-fn insert_exprs(insert: &mut Insert) -> Vec<&mut Expr> {
+pub(crate) fn insert_exprs(insert: &mut Insert) -> Vec<&mut Expr> {
     let mut exprs: Vec<&mut Expr> = Vec::new();
     if let InsertSource::Values(rows) = &mut insert.source {
         for value in rows.iter_mut().flatten() {
@@ -1015,7 +1015,7 @@ fn insert_exprs(insert: &mut Insert) -> Vec<&mut Expr> {
     exprs
 }
 
-fn update_exprs(update: &mut Update) -> Vec<&mut Expr> {
+pub(crate) fn update_exprs(update: &mut Update) -> Vec<&mut Expr> {
     let mut exprs: Vec<&mut Expr> = Vec::new();
     for (_, value) in &mut update.assignments {
         if let InsertValue::Expr(expr) = value {
@@ -1027,7 +1027,7 @@ fn update_exprs(update: &mut Update) -> Vec<&mut Expr> {
     exprs
 }
 
-fn delete_exprs(delete: &mut Delete) -> Vec<&mut Expr> {
+pub(crate) fn delete_exprs(delete: &mut Delete) -> Vec<&mut Expr> {
     let mut exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
     exprs.extend(returning_exprs(&mut delete.returning));
     exprs

@@ -1513,7 +1513,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.enter_sequences(uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
-            let result = self.run(&mut statement, &mut io);
+            let result = with_raised_notices(self.run(&mut statement, &mut io));
             let result = self.keep_deferred(result);
             if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
                 inline_end = Some(start + consumed);
@@ -2017,12 +2017,52 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     execute::query(writer, tables, query, false)
                 })
             }
+            Statement::Select(select)
+                if dialect == Dialect::PostgreSql
+                    && !matches!(self.block, Block::Reading(_))
+                    && crate::routines::select_may_write(&*select)
+                    && self
+                        .read(|reader, tables| {
+                            crate::routines::select_calls_volatile(reader, tables, &*select)
+                        })
+                        .unwrap_or(false) =>
+            {
+                self.write("SELECT", |writer, tables| {
+                    binding.select(&*writer, tables, select)?;
+                    crate::routines::prepare_select(
+                        writer,
+                        tables,
+                        &settings,
+                        select,
+                        crate::routines::Prefetch::Everything,
+                    )?;
+                    execute::select(&*writer, tables, select, false)
+                })
+            }
             Statement::Select(select) => self.read(|reader, tables| {
                 binding.select(reader, tables, select)?;
+                if dialect == Dialect::PostgreSql {
+                    crate::routines::prepare_select(
+                        &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
+                        tables,
+                        &settings,
+                        select,
+                        crate::routines::Prefetch::NonVolatile,
+                    )?;
+                }
                 execute::select(reader, tables, select, false)
             }),
             Statement::Query(query) => self.read(|reader, tables| {
                 binding.query(reader, tables, query)?;
+                if dialect == Dialect::PostgreSql {
+                    crate::routines::prepare_query(
+                        &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
+                        tables,
+                        &settings,
+                        query,
+                        crate::routines::Prefetch::NonVolatile,
+                    )?;
+                }
                 execute::query(reader, tables, query, false)
             }),
             Statement::CreateSequence(create) => self.write("CREATE SEQUENCE", |writer, tables| {
@@ -2141,14 +2181,23 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Insert(insert) => self.write_firing_triggers("INSERT", |writer, tables| {
                 binding.insert(writer, tables, insert)?;
+                if dialect == Dialect::PostgreSql {
+                    crate::routines::prepare_insert(writer, tables, &settings, insert)?;
+                }
                 execute::insert(writer, tables, insert)
             }),
             Statement::Update(update) => self.write_firing_triggers("UPDATE", |writer, tables| {
                 binding.update(writer, tables, update)?;
+                if dialect == Dialect::PostgreSql {
+                    crate::routines::prepare_update(writer, tables, &settings, update)?;
+                }
                 execute::update(writer, tables, update)
             }),
             Statement::Delete(delete) => self.write_firing_triggers("DELETE", |writer, tables| {
                 binding.delete(writer, tables, delete)?;
+                if dialect == Dialect::PostgreSql {
+                    crate::routines::prepare_delete(writer, tables, &settings, delete)?;
+                }
                 execute::delete(writer, tables, delete)
             }),
             Statement::With(with) => self.write_firing_triggers("WITH", |writer, tables| {
@@ -2196,6 +2245,15 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::AlterRoutine(alter) => self.write("ALTER FUNCTION", |writer, tables| {
                 crate::routines::alter_routine(writer, tables, alter)
+            }),
+            Statement::Call(call) => self.write("CALL", |writer, tables| {
+                for argument in &mut call.arguments {
+                    binding.condition(&*writer, tables, argument)?;
+                }
+                crate::routines::call_procedure(writer, tables, &settings, call)
+            }),
+            Statement::Do(block) => self.write("DO", |writer, tables| {
+                crate::routines::run_do(writer, tables, &settings, &block.code)
             }),
             Statement::AlterSession(settings) => self.alter_session(settings),
             Statement::CreateType(create) => self.write("CREATE TYPE", |writer, _| {
@@ -2683,6 +2741,18 @@ impl KeyValueWrite for TrackedWrite<'_> {
     fn rollback(self) -> SqlResult<()> {
         Ok(())
     }
+}
+
+fn with_raised_notices(result: SqlResult<QueryResult>) -> SqlResult<QueryResult> {
+    let raised = crate::plpgsql::take_raised_notices();
+    if raised.is_empty() {
+        return result;
+    }
+    result.map(|mut result| {
+        let own = std::mem::replace(&mut result.notices, raised);
+        result.notices.extend(own);
+        result
+    })
 }
 
 fn read_only_refusal(error: SqlError, command: &str) -> SqlError {

@@ -84,6 +84,8 @@ pub enum DestructiveKind {
     DeleteWithoutFilter,
     /// An `UPDATE` whose `WHERE` names no column of its table, or that has none.
     UpdateWithoutFilter,
+    /// `CALL` of a procedure or a `DO` block, whose code may change or drop anything.
+    RunCode,
 }
 
 impl DestructiveKind {
@@ -103,6 +105,7 @@ impl DestructiveKind {
             Self::Truncate => "TRUNCATE",
             Self::DeleteWithoutFilter => "DELETE of the whole table",
             Self::UpdateWithoutFilter => "UPDATE of the whole table",
+            Self::RunCode => "CALL or DO, which runs code that may change or drop data",
         }
     }
 }
@@ -200,6 +203,16 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::DropRoutine(_)
         | Statement::AlterRoutine(_)
         | Statement::SqlServer(_) => None,
+        Statement::Call(call) => Some(DestructiveStatement::new(
+            DestructiveKind::RunCode,
+            vec![shown(&call.name)],
+            false,
+        )),
+        Statement::Do(_) => Some(DestructiveStatement::new(
+            DestructiveKind::RunCode,
+            vec!["DO".to_owned()],
+            false,
+        )),
         Statement::With(with) => crate::with_statement::classify(with),
         Statement::Merge(merge) => merge
             .update

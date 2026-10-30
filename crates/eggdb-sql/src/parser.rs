@@ -227,8 +227,9 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 25] = [
+const INTERNAL_FUNCTIONS: [&str; 26] = [
     crate::triggers::RAISE_FUNCTION,
+    crate::routines::ROUTINE_CALL,
     "regclass_cast",
     "oracle_nextval",
     "oracle_currval",
@@ -3801,6 +3802,12 @@ impl<'t> Parser<'t> {
                 return Err(self.not_supported("a qualified * outside the select list"));
             }
             let column = self.name()?;
+            if self.postgresql() && self.peek_kind() == &TokenKind::LeftParen {
+                return self.function(Name {
+                    text: crate::schemas::written_qualified(&first.text, &column.text),
+                    position: first.position,
+                });
+            }
             if self.peek_kind() == &TokenKind::Dot || self.peek_kind() == &TokenKind::LeftParen {
                 return Err(self.not_supported("names with more than two parts"));
             }
@@ -4013,6 +4020,23 @@ impl<'t> Parser<'t> {
             return self.window_call(function, arguments, Some(filter), &name);
         }
         if !named.is_empty() {
+            if self.postgresql()
+                && !NAMED_PARAMETERS
+                    .iter()
+                    .any(|(known, _)| *known == name.text)
+            {
+                let mut names: Vec<Option<String>> = vec![None; arguments.len()];
+                for (parameter, value) in named {
+                    names.push(Some(parameter.text));
+                    arguments.push(value);
+                }
+                return Ok(crate::routines::marked_call(
+                    name.text,
+                    names,
+                    arguments,
+                    name.position,
+                ));
+            }
             arguments = named_arguments(&name, arguments, named)?;
         }
         Ok(Expr {
