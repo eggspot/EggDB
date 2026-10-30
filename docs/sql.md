@@ -293,7 +293,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   ''` matches nothing), and a function result that would be empty is NULL (`SUBSTR('abc', 5)`,
   `TRIM('  ')`, `REPLACE('aa', 'a')`). `||` and `CONCAT` treat NULL as the empty string.
 - **Queries**: `FROM DUAL` (also `SELECT` without `FROM` is `ORA-00923`, as in Oracle),
-  `OFFSET n ROWS` and `FETCH FIRST|NEXT n ROW|ROWS ONLY` (negative counts as 0), `ROWNUM` in
+  `OFFSET n ROWS` and `FETCH FIRST|NEXT n [PERCENT] ROW|ROWS ONLY | WITH TIES` (negative
+  counts as 0; a percent of the rows the query finds, rounded up; `WITH TIES` adds the rows
+  that sort equal to the last one, D149), `ROWNUM` in
   `WHERE` with Oracle's meaning (`ROWNUM <= n` keeps the first n rows found, before `GROUP BY`
   and `ORDER BY`; `ROWNUM = 1`; `ROWNUM > 1` and `ROWNUM = 2` find nothing), `CASE`, joins,
   `GROUP BY` and `HAVING`, `LIKE` (case-sensitive), `!=`, `^=` and `~=` for `<>`, `q'[...]'`
@@ -307,7 +309,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `INTEGER`/`INT`/`SMALLINT` (Oracle's `NUMBER(38)`) as `bigint`, `CLOB`, `NCLOB` and `LONG` as
   `text`, `BOOLEAN` (23ai), `DATE` as `timestamp(0)` (a date with a time of day, to the second,
   as Oracle's), `TIMESTAMP(p)` as `timestamp(p)` (`p` defaults to 6; 7 to 9 keep 6),
-  `TIMESTAMP(p) WITH [LOCAL] TIME ZONE` as `timestamptz(p)` and `JSON` as `jsonb`. `DATE
+  `TIMESTAMP(p) WITH [LOCAL] TIME ZONE` as `timestamptz(p)`, `INTERVAL YEAR [(p)] TO MONTH` and
+  `INTERVAL DAY [(p)] TO SECOND [(s)]` as `interval year to month` and `interval day to
+  second(s)` (D149), and `JSON` as `jsonb`. `DATE
   '...'` and `TIMESTAMP '...'` literals (strict ISO 8601, never the NLS format; a `TIMESTAMP`
   literal with an offset such as `-8:00` is a time zone value), `SYSDATE` and `CURRENT_DATE`
   (the session's local time to the second), `SYSTIMESTAMP`, `CURRENT_TIMESTAMP` and
@@ -315,29 +319,51 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   format in `TO_CHAR`, `||` and character columns. `EXTRACT(field FROM d)` takes `YEAR`, `MONTH`, `DAY`, `HOUR`,
   `MINUTE`, `SECOND`, `TIMEZONE_HOUR` and `TIMEZONE_MINUTE`; `HOUR`, `MINUTE` and `SECOND` of a
   `DATE` and a zone field of a time stamp without a zone are `ORA-30076`, another field
-  `ORA-00907`. `CHAR(n)` and `NCHAR(n)` are blank-padded `character(n)` (compared without
+  `ORA-00907`; of an interval it takes the fields of its kind (`YEAR` and `MONTH`, or `DAY` to
+  `SECOND`, another `ORA-30076`). `CHAR(n)` and `NCHAR(n)` are blank-padded `character(n)` (compared without
   their trailing blanks; `LENGTH` counts them, as Oracle's does), and `RAW(n)`, `LONG RAW` and
   `BLOB` are `bytea` (D113).
 - **Exact numbers** (D126): decimal constants, `/`, `ROUND`, `TRUNC`, `CEIL`, `FLOOR`, `MOD`,
   `ABS`, `SIGN`, `GREATEST`, `LEAST`, `TO_CHAR` and `TO_NUMBER` compute in decimal, so `0.1 +
   0.2` is `.3`, `0.3 / 0.1` is `3` and `ROUND(1.005, 2)` is `1.01`. Values the `NUMBER` page's
   "Storage of Scale and Precision" table lists are stored as it lists them.
-- **Datetime format models** (D126): `TO_DATE(char [, fmt [, nlsparam]])`, `TO_TIMESTAMP`
-  and `TO_CHAR(datetime [, fmt [, nlsparam]])` with `DD`, `MM`, `MON`, `MONTH`, `Y` to `YYYY`,
-  `RR`, `RRRR`, `HH`, `HH12`, `HH24`, `MI`, `SS`, `FF`, `FF1`-`FF9`, `AM`/`PM`/`A.M.`/`P.M.`,
-  `X`, punctuation, `"quoted text"`, `FM` and `FX`, and in `TO_CHAR` also `D`, `DAY`, `DY`,
-  `DDD`, `J` and `SSSSS`; the String-to-Date Conversion Rules (blanks ignored, punctuation left
-  out or swapped, trailing time fields left out, `MM`→`MON`→`MONTH`, `YY`→`YYYY`,
-  `RR`→`RRRR`) and `FX`'s exact matching; `RR`'s century rule; years 1 to 9999. The `nlsparam`
-  accepts `NLS_DATE_LANGUAGE = American`. `TO_NUMBER(char, fmt [, nlsparam])` reads by the
-  elements `TO_CHAR` writes (`9 0 . D , G $ S MI FM`).
+- **Datetime format models** (D126, D149): `TO_DATE(char [, fmt [, nlsparam]])`,
+  `TO_TIMESTAMP`, `TO_TIMESTAMP_TZ` and `TO_CHAR(datetime [, fmt [, nlsparam]])` with `DD`,
+  `DDD`, `D`, `DAY`, `DY`, `J`, `MM`, `MON`, `MONTH`, `RM`, `Y` to `YYYY`, `SYYYY`, `Y,YYY`,
+  `RR`, `RRRR`, `AD`/`BC`/`A.D.`/`B.C.`, `HH`, `HH12`, `HH24`, `MI`, `SS`, `SSSSS`, `FF`,
+  `FF1`-`FF9`, `AM`/`PM`/`A.M.`/`P.M.`, `TZH`, `TZM`, `TZR`, `TZD`, `X`, punctuation, `"quoted
+  text"`, `FM`, `FX` and the short forms `DS` (`MM/DD/RRRR`), `DL` (`fmDay, Month dd, yyyy`)
+  and `TS` (`HH:MI:SS AM`), alone or together; `TO_CHAR` also writes `CC`, `SCC`, `YEAR`,
+  `SYEAR`, `IYYY` to `I`, `IW`, `WW`, `W`, `Q` and the suffixes `TH`, `SP`, `SPTH`/`THSP`
+  (`DDTH` is `01ST`, `Ddspth` is `First`), which a reading model refuses with `ORA-01820`. A
+  reading model checks its elements as Oracle does: a field twice (`ORA-01810`, `01812` year,
+  `01813` hour, `01814`, `01815`, `01816` month, `01817` day of week), `J` with `DDD`
+  (`ORA-01811`), `HH24` with a meridian (`ORA-01818`), `SYYYY` with BC (`ORA-01819`); and the
+  value: a Julian day against the year, month and day given (`ORA-01831`, `01833`, `01834`),
+  `SSSSS` against the hour, minute and second (`ORA-01836` to `01838`), a day name against the
+  date (`ORA-01835`). The String-to-Date Conversion Rules (blanks ignored, punctuation left out
+  or swapped, trailing time and zone fields left out, `MM`→`MON`→`MONTH`, `YY`→`YYYY`,
+  `RR`→`RRRR`) and `FX`'s exact matching; `RR`'s century rule; years 4713 BC to 9999 AD. Zones
+  read as `TZH:TZM` or a `TZR` offset (`-08:00`) or `UTC`/`GMT` (another region is
+  `ORA-01882`); a value without one takes the session's time zone. The `nlsparam` accepts
+  `NLS_DATE_LANGUAGE = American`.
+- **Number format models** (D126, D149): `TO_CHAR(n, fmt)` and `TO_NUMBER(char, fmt
+  [, nlsparam])` with `9`, `0`, `.`, `D`, `,`, `G`, `$`, `L`, `C`, `U`, `B`, `S` (leading or
+  trailing), `MI`, `PR`, `V`, `EEEE`, `RN`/`rn`, `X`/`x` (with leading `0`s), `TM`, `TM9`, `TME`
+  and `FM`, as the Format Models page's "Results of Number Conversions" table shows them
+  (`TO_CHAR(123.456, '9.9EEEE')` is `  1.2E+02`, `FM999.009` keeps the zeros of its `0`s);
+  `TO_NUMBER` reads `$`, `L`, `C`, `U`, `PR`, trailing `S`, `EEEE`, `RN` and `X`, and refuses
+  `V` with `ORA-01481`. The currencies are America's: `$` local and dual, `USD` ISO.
 - **Session settings** (D126): `ALTER SESSION SET` `NLS_DATE_FORMAT`, `NLS_TIMESTAMP_FORMAT`,
   `NLS_TIMESTAMP_TZ_FORMAT`, `NLS_LANGUAGE`/`NLS_DATE_LANGUAGE` (American),
   `NLS_TERRITORY` (America, which resets the formats it implies), `NLS_NUMERIC_CHARACTERS='.,'`,
-  `NLS_SORT=BINARY`, `NLS_COMP=BINARY` and `CURRENT_SCHEMA` (as `search_path`; the Oracle
+  `NLS_SORT=BINARY`, `NLS_COMP=BINARY`, `TIME_ZONE` (an offset such as `'-08:00'`, `'UTC'`,
+  `LOCAL` or `DBTIMEZONE`, both `+00:00`, as the session's `TimeZone`; `SESSIONTIMEZONE` and
+  `DBTIMEZONE` show them, D149) and `CURRENT_SCHEMA` (as `search_path`; the Oracle
   dialect has no `CREATE SCHEMA` or `CREATE USER`, so it reaches schemas made in another dialect
   or by a restore, and `EGGDB.T`, the session user's own table, keeps naming it; `HR.T` names
-  schema `hr`, D127). Defaults are `DD-MON-RR` and `DD-MON-RR HH.MI.SSXFF AM`.
+  schema `hr`, D127). Defaults are `DD-MON-RR`, `DD-MON-RR HH.MI.SSXFF AM` and
+  `DD-MON-RR HH.MI.SSXFF AM TZR`.
 - **DDL as Oracle's tools write it** (D127): physical properties after `CREATE TABLE`, `CREATE
   INDEX` and `USING INDEX` (`SEGMENT CREATION`, `PCTFREE`, `PCTUSED`, `INITRANS`, `MAXTRANS`,
   `STORAGE (...)`, `TABLESPACE`, `[NO]LOGGING`, `[NO]COMPRESS`, `[NO]CACHE`, `[NO]PARALLEL`,
@@ -357,14 +383,29 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   unloads tables in the Oracle dialect too, an empty field loading as NULL. SQL*Plus commands
   (`SET`, `DEFINE`, `@`, `/`) are read by `eggdb restore --dialect oracle`, not by `eggdb sql`.
 - **Implicit conversions** (D126): text compared with or assigned to a `DATE` or `TIMESTAMP`,
-  and `CAST(text AS DATE)`, is read by the NLS format, then as strict ISO 8601; text meets a
+  and `CAST(text AS DATE)`, is read by the NLS format, then as strict ISO 8601; text meets an
+  interval as `TO_YMINTERVAL` or `TO_DSINTERVAL` reads it (`'2-6'`, `'1 00:00:00'`); text meets a
   number as `TO_NUMBER` reads it (`'20.5'` into `NUMBER(4)` stores 21, `'5.5' + 1` is 6.5);
   numbers and dates assigned to character columns are written as Oracle writes them (`.5`,
   `17-JUN-03`).
-- **Date arithmetic** (D126): `date + n`, `date - n` and `n + date` add days, cutting the date
-  to the second and rounding to the second (`d + 1/24` is an hour later); `date - date` is the
-  difference in days. `ADD_MONTHS`, `LAST_DAY` and `TRUNC(date [, fmt])` (year, month, day, hour
-  and minute units).
+- **Date arithmetic** (D126, D149): `date + n`, `date - n` and `n + date` add days, cutting the
+  date to the second and rounding to the second (`d + 1/24` is an hour later); `date - date` is
+  the difference in days, and a difference with a `TIMESTAMP` on either side is an `INTERVAL DAY
+  TO SECOND`. `datetime ± interval` moves by the interval, and a month that lacks the day is
+  `ORA-01839` (`DATE '2024-01-31' + INTERVAL '1' MONTH`), as Oracle's documentation says;
+  `interval ± interval` of one kind (two kinds are `ORA-30081`), `interval * n` and `interval
+  / n`. `ADD_MONTHS`, `LAST_DAY`, `MONTHS_BETWEEN` (whole months when the days agree or both are
+  last days, otherwise with 31-day months), `NEXT_DAY(d, day)` (a full or abbreviated American
+  day name, `ORA-01846` otherwise), and `ROUND(date [, fmt])` and `TRUNC(date [, fmt])` with
+  every unit of the "ROUND and TRUNC Date Functions" table (`CC`, `YYYY`, `IYYY`, `Q`, `MM`,
+  `WW`, `IW`, `W`, `DD`, `DAY`, `HH`, `MI` and their synonyms; a year rounds up on July 1, a
+  month on the 16th, a day at noon). `FROM_TZ`, `SYS_EXTRACT_UTC` and `TZ_OFFSET`.
+- **Intervals** (D149): literals `INTERVAL '123-2' YEAR(3) TO MONTH`, `INTERVAL '4 5:12:10.222'
+  DAY TO SECOND(3)` and every field range of the Interval Literals section, with the leading
+  precision checked (`ORA-01873`, default 2) and the other fields' ranges (`ORA-01843`,
+  `01850` to `01852`); `NUMTODSINTERVAL`, `NUMTOYMINTERVAL` (`ORA-01760` for another unit),
+  `TO_DSINTERVAL` and `TO_YMINTERVAL` with Oracle's and ISO 8601's forms (`'P1DT5H'`); intervals
+  print as `+01-02` and `+04 05:12:10.222`.
 - **MERGE** (D126): `MERGE INTO t [alias] USING {table | (subquery)} [alias] ON (condition)`
   with `WHEN MATCHED THEN UPDATE SET ... [WHERE ...] [DELETE WHERE ...]` and `WHEN NOT MATCHED
   THEN INSERT [(columns)] VALUES (...) [WHERE ...]`, in either order; `ORA-30926` when a target
@@ -401,7 +442,10 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   elements `9`, `0`, `.`, `D`, `,`, `G`, `$`, `S`, `MI`, `FM`; `#`s when the number does not
   fit) and for dates, `TO_NUMBER`, `TO_DATE`, `TO_TIMESTAMP`, `ADD_MONTHS`, `LAST_DAY`, the aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `USER`. Other
   dialects' functions are not there (`CHAR_LENGTH` is `ORA-00904`), and Oracle's are not in the
-  other dialects.
+  other dialects. `LISTAGG([ALL | DISTINCT] expr [, delimiter] [ON OVERFLOW ERROR | TRUNCATE
+  ['indicator'] [WITH | WITHOUT COUNT]]) [WITHIN GROUP (ORDER BY ...)]` joins a group's values
+  (NULLs left out, NULL for none); past 32,767 bytes it is `ORA-01489`, or truncated at the last
+  whole value with the indicator (`...`) and the count of values left out (D149).
 - **Length limit**: `LPAD`, `RPAD`, `REPLACE`, `||`, `UPPER`, `LOWER`, `INITCAP` and `TO_CHAR` refuse a result longer than
   1,000,000,000 bytes with `ORA-01489` before they build it.
 - **The data dictionary** (D134): `USER_`, `ALL_` and `DBA_` `TABLES`, `TAB_COLUMNS`,
@@ -430,7 +474,9 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `ORA-00938`, `ORA-00939`, `ORA-00906`, `ORA-01741`, `ORA-01756`, `ORA-00972`, the
   datetime format errors (`ORA-01801`, `01810`, `01820`, `01821`, `01830`, `01839`, `01840`,
   `01841`, `01843`, `01847`, `01849`, `01850`, `01851`, `01852`, `01855`, `01858`, `01861`,
-  `01862`), `ORA-02248`, `ORA-01435`, `ORA-12702`, `ORA-12705`, `ORA-30926`, `ORA-38104`, and
+  `01862` and, for item 42b, `01811` to `01819`, `01831` to `01838`, `01846`, `01848`, `01853`,
+  `01854`, `01856`, `01857`, `01867`, `01873`, `01874`, `01875`, `01882`), `ORA-01481`,
+  `ORA-01760`, `ORA-30076`, `ORA-30081`, `ORA-02248`, `ORA-01435`, `ORA-12702`, `ORA-12705`, `ORA-30926`, `ORA-38104`, and
   `ORA-03001: unimplemented feature: ...` for what EggDB does not do yet.
 - **Values print as Oracle prints numbers**: no trailing zeros and no zero before the point
   (`.5`), `TRUE` and `FALSE`.
@@ -2351,16 +2397,19 @@ And more, not in the suite yet:
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 411 cases from Oracle's SQL
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 507 cases from Oracle's SQL
 Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
-- `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`,
-  and `FETCH ... PERCENT` and `WITH TIES`.
-- `LISTAGG`.
+- `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`.
 - Division that does not end keeps `numeric`'s scale (about 20 digits; Oracle has 38), so `2 /
-  3 * 3` is not exactly 2 and `date - date` of 8 hours shows fewer 3s.
-- `TIMESTAMP - TIMESTAMP` is a number of days, where Oracle gives an `INTERVAL DAY TO SECOND`.
+  3 * 3` is not exactly 2, `date - date` of 8 hours shows fewer 3s and `MONTHS_BETWEEN` fewer
+  digits.
+- An interval prints its leading field with at least two digits and its type's fractional
+  digits (six by default): `TIMESTAMP - TIMESTAMP` and `NUMTODSINTERVAL` show `+01 12:00:00.000000`
+  where Oracle shows their nine-digit precisions (`+000000001 12:00:00.000000000`). A column's
+  declared leading precision (`DAY(5)`) is accepted but not kept, and fractional seconds keep
+  six digits (D149).
 - An identity column that is not the first column of the primary key.
 
 And more, not in the suite yet:
@@ -2373,11 +2422,17 @@ And more, not in the suite yet:
 - `EXTRACT(HOUR ...)` is `ORA-30076` for a `TIMESTAMP(0)` column too, which EggDB stores like a
   `DATE`; `TIMEZONE_REGION` and `TIMEZONE_ABBR` are `ORA-00907`.
 - `DATE` and `TIMESTAMP` show as `YYYY-MM-DD HH24:MI:SS[.FF]` in result sets whatever
-  `NLS_DATE_FORMAT` says. `MONTHS_BETWEEN`, `NEXT_DAY`, `ROUND(date)`, `TO_TIMESTAMP_TZ`, the
-  zone elements (`TZH`, `TZR`, ...), AD/BC, `DS`/`DL`/`TS`, `J`, `DDD`, `SSSSS` and the day
-  names as input, `TIME_ZONE`, languages other than American, `TO_DATE(... DEFAULT ... ON
-  CONVERSION ERROR)` and the number elements `EEEE`, `V`, `L`, `C`, `RN` and the like are not
-  supported yet (item 42b). Other string functions given a date (`SUBSTR(d, ...)`) write it by
+  `NLS_DATE_FORMAT` says. A `TIMESTAMP WITH TIME ZONE` keeps the instant, not the offset it was
+  written with: it shows in the session's time zone, as `WITH LOCAL TIME ZONE` does (`TZH`,
+  `TZR` print the session's offset), and `TZR` names only offsets and `UTC`/`GMT`; `TZD` prints
+  nothing. Dates before 15 October 1582 follow the proleptic Gregorian calendar, where Oracle
+  switches to the Julian one, so their `J` and day names differ, and 4714 BC is accepted.
+  `DATE + INTERVAL` keeps fractional seconds of a `DAY TO SECOND` interval. `TS` writes
+  `HH:MI:SS AM` and `DL` follows the documented `fmDay, Month dd, yyyy` (`December 1`), choices
+  recorded in D149; `L` and `U` pad the leading symbol to twelve characters as the conversion
+  table shows. Languages other than American, `NLS_CURRENCY`, `E`/`EE` (other calendars),
+  `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)`, `LISTAGG ... OVER` and `AT TIME ZONE` are not
+  supported yet. Other string functions given a date (`SUBSTR(d, ...)`) write it by
   `NLS_DATE_FORMAT` whatever its type; a time stamp assigned to a character column takes the
   timestamp format only when it has a fractional second. `NEXTVAL` in a `MERGE`'s `VALUES` draws
   only for the rows inserted. An Oracle view read from another dialect converts text as that
@@ -2388,8 +2443,6 @@ And more, not in the suite yet:
   `CHAR`s. A string given to a `RAW` or `BLOB` is read as hexadecimal digits, as `HEXTORAW`
   does (an odd count gets a leading zero, another character is `ORA-01465`); the functions
   `HEXTORAW`, `RAWTOHEX`, `UTL_RAW` and `DBMS_LOB` are missing.
-  `INTERVAL YEAR TO MONTH` and
-  `INTERVAL DAY TO SECOND` answer `0A000` (D113).
 - A statement that fails after it wrote rows rolls back the whole transaction, where Oracle
   rolls back only the statement (no statement savepoints yet); a failing single-row `INSERT`,
   `UPDATE` or `DELETE` that wrote nothing leaves the transaction as it was, as in Oracle.
