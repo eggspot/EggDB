@@ -135,6 +135,22 @@ impl Session<'_> {
             }
             None => None,
         };
+        let memcached_listener = match options.memcached_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--memcached-listen {address}: memcached's protocol has no authentication, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for memcached on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let resp_password = resp_listener
             .as_ref()
             .map(|_| eggdb_crypto::sha256(password.as_bytes()));
@@ -324,7 +340,29 @@ impl Session<'_> {
                 ),
                 _ => Ok(()),
             });
-            let resp_database = super::serve_resp::DatabaseKeyspace { db: &db };
+            let resp_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::RESP_COLLECTIONS,
+            };
+            let memcached_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::MEMCACHED_COLLECTIONS,
+            };
+            let memcached_shared = eggdb_memcached::Shared {
+                keyspace: &memcached_database,
+                next_cas: std::sync::atomic::AtomicU64::new(1),
+            };
+            let memcached_server = scope.spawn(|| match &memcached_listener {
+                Some(listener) => eggdb_memcached::serve(
+                    &memcached_shared,
+                    listener,
+                    eggdb_memcached::ServerConfig {
+                        max_connections: config.max_connections,
+                    },
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
             let resp_limited = options.resp_max_memory.and_then(|limit| {
                 let policy = options.resp_eviction.unwrap_or(eggdb_resp::EvictionPolicy::NoEviction);
                 eggdb_resp::EvictingKeyspace::new(&resp_database, limit, policy).ok()
@@ -375,6 +413,7 @@ impl Session<'_> {
             let _ = metrics_server.join();
             let _ = mcp_server.join();
             let _ = resp_server.join();
+            let _ = memcached_server.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))

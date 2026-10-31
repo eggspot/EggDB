@@ -206,12 +206,12 @@ jobs:
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -235,6 +235,20 @@ jobs:
           pipe.incr("n").incr("n").get("n")
           assert pipe.execute() == [1, 2, b"2"]
           print("redis-py over RESP3: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from pymemcache.client.base import Client
+          client = Client(("127.0.0.1", 11212))
+          assert client.set("greeting", b"hello", expire=60)
+          assert client.get("greeting") == b"hello"
+          assert client.add("greeting", b"x") is False
+          client.set("count", b"41")
+          assert client.incr("count", 1) == 42
+          value, token = client.gets("greeting")
+          assert client.cas("greeting", b"bye", token)
+          assert client.get_many(["greeting", "missing"]) == {"greeting": b"bye"}
+          assert client.delete("greeting")
+          print("pymemcache: passed")
           PY
 
   redis-compare:

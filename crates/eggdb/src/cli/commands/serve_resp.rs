@@ -3,11 +3,11 @@ use eggdb_resp::{KeysRead, KeysWrite, Keyspace};
 
 pub(super) struct DatabaseKeyspace<'d> {
     pub(super) db: &'d Database,
+    pub(super) prefix: &'static str,
 }
 
-fn collection_name(db: u32) -> String {
-    format!("resp{db}")
-}
+pub(super) const RESP_COLLECTIONS: &str = "resp";
+pub(super) const MEMCACHED_COLLECTIONS: &str = "memcached";
 
 fn failed(error: &eggdb::Error) -> String {
     format!("ERR {error}")
@@ -73,7 +73,7 @@ impl KeysWrite for WriteKeys<'_, '_> {
 impl Keyspace for DatabaseKeyspace<'_> {
     fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String> {
         let transaction = self.db.begin_read().map_err(|error| failed(&error))?;
-        let collection = match transaction.collection(&collection_name(db)) {
+        let collection = match transaction.collection(&format!("{}{db}", self.prefix)) {
             Ok(collection) => Some(collection),
             Err(error) if error.kind() == ErrorKind::CollectionNotFound => None,
             Err(error) => return Err(failed(&error)),
@@ -83,7 +83,7 @@ impl Keyspace for DatabaseKeyspace<'_> {
 
     fn write(&self, db: u32, body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>) -> Result<(), String> {
         let mut transaction = self.db.begin_write().map_err(|error| failed(&error))?;
-        let name = collection_name(db);
+        let name = format!("{}{db}", self.prefix);
         let outcome = transaction
             .create_collection(&name)
             .map_err(|error| failed(&error))

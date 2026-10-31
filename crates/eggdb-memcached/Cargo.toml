@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-memcached"
+description = "EggDB's server for memcached's text and meta protocols, from memcached's published protocol description, over EggDB's key-value transactions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-resp = { path = "../eggdb-resp" }

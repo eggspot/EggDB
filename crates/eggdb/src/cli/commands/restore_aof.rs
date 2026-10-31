@@ -17,7 +17,10 @@ impl Session<'_> {
             Failure::usage(format!("cannot read {shown}: {error}"), Some(CommandName::Restore))
         })?;
         let db = self.open(Access::Write { create: true }, None)?;
-        let keyspace = super::serve_resp::DatabaseKeyspace { db: &db };
+        let keyspace = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::RESP_COLLECTIONS,
+        };
         let report = eggdb_resp::replay_aof(&keyspace, std::io::BufReader::new(input), now_ms())
             .map_err(|message| {
                 Failure::database(format!("cannot restore {shown}: {message}"), Exit::DatabaseError)
