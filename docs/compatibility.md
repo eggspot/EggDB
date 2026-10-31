@@ -12,6 +12,7 @@ catalog query and protocol message the tool is known to send, but no CI job runs
 | pgjdbc | 42.7 | PostgreSQL | supported | `pg-apps` job: CRUD, transactions, prepared statements, `DatabaseMetaData` (D131) |
 | psycopg 3, SQLAlchemy Core | 3.2, 2.0 | PostgreSQL | supported | `pg-apps` job, compared byte for byte with PostgreSQL 17 (D131) |
 | SQLAlchemy ORM, Flyway | 2.0, 10 | PostgreSQL | supported | `pg-apps` job (D138) |
+| SQLAlchemy dialect compliance suite | 2.0.36 | PostgreSQL | supported, by pass count | `sqlalchemy-suite` job: at least the count in `scripts/sqlalchemy-suite/minimum-passes.txt` must pass, and it may only rise |
 | Npgsql | 8.0 | PostgreSQL | supported | `pg-apps` job: type loading, batches, cancel (D135) |
 | pg8000 | 1.31 | PostgreSQL | supported | smoke test (D104) |
 | pgAdmin 4 | 8 | PostgreSQL | expected to work | its dashboard and object-browser catalog reads answered: `pg_stat_activity`, `pg_stat_database`, `pg_locks`, `pg_extension`, the privilege functions, and the rest of `pg_catalog` (part 3.19, `pg_catalog/tests.rs`) |
