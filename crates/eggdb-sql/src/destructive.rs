@@ -174,6 +174,7 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Rollback
         | Statement::Savepoint(_)
         | Statement::Analyze(_)
+        | Statement::Role(_)
         | Statement::Set { .. }
         | Statement::Show { .. }
         | Statement::Reset { .. }

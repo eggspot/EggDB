@@ -1802,6 +1802,25 @@ block that created a table leaves no table.
 - **Isolation levels.** `SET TRANSACTION`, `BEGIN ISOLATION LEVEL` and each dialect's forms are
   accepted. Every block runs serializably today, which meets every level's guarantees.
 
+## Roles and privileges
+
+Superusers (embedded use and the server's own user) can create roles and grant them table
+privileges; a role that logs in through `eggdb serve` then reads and writes only what it holds
+(D183):
+
+```sql
+CREATE ROLE readers;
+CREATE USER clerk WITH PASSWORD 'secret' IN ROLE readers;
+GRANT SELECT ON accounts TO readers;
+GRANT INSERT, UPDATE ON accounts TO clerk;
+REVOKE readers FROM clerk;
+```
+
+`psql -U clerk` then logs in with SCRAM-SHA-256 against the stored verifier, and a statement on a
+table the role holds no privilege for fails with `42501 permission denied for table audit`. Roles
+are listed in `pg_roles`. Not yet: logins of stored roles over MySQL's and SQL Server's protocols,
+column and schema privileges, object owners and `SET ROLE`.
+
 ## Statistics: `ANALYZE` and approximate counts
 - `ANALYZE [table, ...]` (PostgreSQL and SQLite), `ANALYZE TABLE t, ...` (MySQL, which answers
   with its `Table | Op | Msg_type | Msg_text` rows) and Oracle's `ANALYZE TABLE t COMPUTE

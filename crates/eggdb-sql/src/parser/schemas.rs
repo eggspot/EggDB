@@ -69,7 +69,7 @@ impl<'t> Parser<'t> {
         crate::schemas::schema_named(&name.text, name.position)
     }
 
-    fn if_exists(&mut self) -> SqlResult<bool> {
+    pub(super) fn if_exists(&mut self) -> SqlResult<bool> {
         if self.take_word("if") {
             self.expect_word("exists")?;
             return Ok(true);
@@ -77,7 +77,7 @@ impl<'t> Parser<'t> {
         Ok(false)
     }
 
-    fn if_not_exists(&mut self) -> SqlResult<bool> {
+    pub(super) fn if_not_exists(&mut self) -> SqlResult<bool> {
         if self.take_word("if") {
             self.expect_word("not")?;
             self.expect_word("exists")?;

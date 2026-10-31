@@ -23,6 +23,7 @@ pub(crate) enum Statement {
     Rollback,
     Savepoint(SavepointCommand),
     Analyze(Vec<Name>),
+    Role(crate::roles::RoleStatement),
     Set {
         name: String,
         value: Option<String>,

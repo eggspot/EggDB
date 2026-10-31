@@ -67,6 +67,19 @@ impl ScramVerifier {
         }
     }
 
+    /// The verifier a stored role keeps, written as PostgreSQL writes `pg_authid.rolpassword`
+    /// (`SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`), or `None` when the text
+    /// is not one or asks for fewer than [`MIN_SCRAM_ITERATIONS`].
+    pub fn from_stored(text: &str) -> Option<Self> {
+        let (iterations, salt, stored_key, server_key) = eggdb_sql::parse_scram_verifier(text)?;
+        (iterations >= MIN_SCRAM_ITERATIONS).then_some(Self {
+            salt,
+            iterations,
+            stored_key,
+            server_key,
+        })
+    }
+
     /// A verifier no password matches, for a user that does not exist, so the exchange looks
     /// the same as for a real user (a salt derived from `secret` and the name) and fails at
     /// its end.

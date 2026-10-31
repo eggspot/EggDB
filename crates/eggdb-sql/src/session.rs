@@ -641,6 +641,23 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
+    /// Names a stored role this session runs as, like [`Session::identify`], and checks its
+    /// privileges from now on unless it is a superuser. Fails with `28000` when the role does not
+    /// exist or may not log in.
+    pub fn identify_role(&mut self, user: &str, database: &str) -> SqlResult<()> {
+        let role = self.read(|reader, _| crate::roles::stored_role(reader, user))?;
+        let Some(role) = role.filter(|role| role.login) else {
+            return Err(SqlError::new(
+                SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+                format!("role \"{user}\" is not permitted to log in"),
+            ));
+        };
+        self.identify(user, database);
+        Arc::make_mut(&mut self.settings).checked_role =
+            (!role.superuser).then(|| role.name.clone());
+        Ok(())
+    }
+
     /// Sets the run-time parameter `name` (case-insensitive) as `SET name = value` would, for
     /// the parameters a client sends when it connects. `eggdb.dialect` chooses the dialect
     /// the session reads from its next statement: the connection's own or `oracle`.
@@ -982,6 +999,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let binding = Binding {
             settings: &settings,
             walk_expressions: true,
+            target_privilege: None,
         };
         let binding = &binding;
         let columns = match &mut statement {
@@ -2025,9 +2043,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             self.commit()?;
         }
         let settings = Arc::clone(&self.settings);
+        crate::roles::check_statement(&settings, statement)?;
         let binding = Binding {
             settings: &settings,
             walk_expressions: self.statement_walks_expressions,
+            target_privilege: Some(crate::roles::target_privilege(statement)),
         };
         let binding = &binding;
         let dialect = self.dialect;
@@ -2062,6 +2082,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         .is_some_and(|from| crate::parser::is_schema_table(&from.first)) =>
             {
                 self.select_schema(select, false)
+            }
+            Statement::Role(role) => {
+                let mut role = role.clone();
+                let tag = role.tag();
+                self.write(tag, |writer, tables| {
+                    binding.names(writer, tables, role.tables_mut())?;
+                    crate::roles::run(writer, binding.settings, &role)
+                })
             }
             Statement::Analyze(names) => {
                 let mut names = names.clone();

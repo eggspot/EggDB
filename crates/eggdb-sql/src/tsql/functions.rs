@@ -175,6 +175,7 @@ pub(crate) fn refused_in_function(
         Statement::Rollback { .. } => "ROLLBACK TRANSACTION",
         Statement::Savepoint(_) => "SAVE TRANSACTION",
         Statement::Analyze(_) => "UPDATE STATISTICS",
+        Statement::Role(role) => role.tag(),
         Statement::Set { .. } | Statement::Reset { .. } => "SET ON/OFF",
         Statement::CreateTable(_) => "CREATE TABLE",
         Statement::DropTable { .. } => "DROP TABLE",

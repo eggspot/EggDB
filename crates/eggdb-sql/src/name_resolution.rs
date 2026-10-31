@@ -44,6 +44,7 @@ pub(crate) struct Resolver<'a> {
     base_path: Arc<[String]>,
     view_paths: Vec<Arc<[String]>>,
     resolution: Resolution,
+    target_privilege: Option<crate::roles::Privilege>,
 }
 
 fn nested_too_deep(position: usize) -> SqlError {
@@ -118,6 +119,7 @@ impl<'a> Resolver<'a> {
             base_path: path,
             view_paths: Vec::new(),
             resolution: Resolution::default(),
+            target_privilege: None,
         })
     }
 
@@ -208,8 +210,20 @@ impl<'a> Resolver<'a> {
         {
             reference.alias = Some(base_name(&resolved).to_owned());
         }
+        if let Some(privilege) = self.target_privilege {
+            self.check_privilege(&resolved, privilege)?;
+        }
         reference.name.text = resolved;
         Ok(())
+    }
+
+    fn check_privilege(&self, table: &str, privilege: crate::roles::Privilege) -> SqlResult<()> {
+        match self.settings {
+            Some(settings) if self.stack.is_empty() => {
+                crate::roles::check_table(self.reader, settings, table, privilege)
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn query(&mut self, query: &mut Query) -> SqlResult<()> {
@@ -420,6 +434,9 @@ impl<'a> Resolver<'a> {
             reference.alias = Some(base_name(&reference.name.text).to_owned());
         }
         let relation = self.tables.relation(self.reader, &reference.name.text)?;
+        if relation.is_some() {
+            self.check_privilege(&reference.name.text, crate::roles::Privilege::Select)?;
+        }
         if relation.is_some() && self.recorded_at.is_some() {
             let name = reference.name.text.clone();
             self.record(&name);
@@ -917,6 +934,7 @@ pub(crate) fn resolve_view_body(
 pub(crate) struct Binding<'a> {
     pub(crate) settings: &'a Settings,
     pub(crate) walk_expressions: bool,
+    pub(crate) target_privilege: Option<crate::roles::Privilege>,
 }
 
 impl Binding<'_> {
@@ -926,7 +944,9 @@ impl Binding<'_> {
         tables: &'r mut TableCache,
     ) -> SqlResult<Resolver<'r>> {
         crate::pg_catalog::load_if_wanted(reader)?;
-        Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)
+        let mut resolver = Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)?;
+        resolver.target_privilege = self.target_privilege;
+        Ok(resolver)
     }
 
     pub(crate) fn select(

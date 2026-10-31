@@ -330,6 +330,7 @@ pub(crate) struct Settings {
     pub(crate) sqlite: SqliteState,
     pub(crate) sqlserver: SqlServerState,
     pub(crate) oracle_user_schema: Option<String>,
+    pub(crate) checked_role: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -382,6 +383,7 @@ impl Default for Settings {
             sqlite: SqliteState::default(),
             sqlserver: SqlServerState::default(),
             oracle_user_schema: None,
+            checked_role: None,
         }
     }
 }

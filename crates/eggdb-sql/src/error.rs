@@ -193,6 +193,8 @@ impl SqlState {
     pub const DUPLICATE_SCHEMA: Self = Self(*b"42P06");
     /// `42939` reserved_name: a name kept for the system, such as `pg_catalog`.
     pub const RESERVED_NAME: Self = Self(*b"42939");
+    /// `0LP01` invalid_grant_operation, such as making a role a member of itself.
+    pub const INVALID_GRANT_OPERATION: Self = Self(*b"0LP01");
     /// `42P17` invalid_object_definition, such as a view that refers to itself.
     pub const INVALID_OBJECT_DEFINITION: Self = Self(*b"42P17");
     /// `42P02` undefined_parameter: a `$n` without a value.

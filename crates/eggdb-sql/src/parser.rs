@@ -12,6 +12,7 @@ mod plsql_routines;
 mod plsql_triggers;
 mod postgresql;
 mod query;
+mod roles;
 mod routines;
 mod schemas;
 mod sqlite;
@@ -889,8 +890,11 @@ impl<'t> Parser<'t> {
             {
                 self.grant_or_revoke("ALTER DEFAULT PRIVILEGES")
             }
-            "grant" if self.postgresql() => self.grant_or_revoke("GRANT"),
-            "revoke" if self.postgresql() => self.grant_or_revoke("REVOKE"),
+            "grant" if !self.sqlite() => self.grant_or_revoke_privileges(true),
+            "revoke" if !self.sqlite() => self.grant_or_revoke_privileges(false),
+            "alter" if !self.sqlite() && (self.is_word_at(1, "role") || self.is_word_at(1, "user")) => {
+                self.alter_role()
+            }
             "comment" if self.postgresql() || self.oracle() => self.comment(),
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
@@ -1460,6 +1464,9 @@ impl<'t> Parser<'t> {
 
     fn create(&mut self) -> SqlResult<Statement> {
         self.at += 1;
+        if !self.sqlite() && self.at_role_definition() {
+            return self.create_role();
+        }
         if self.sqlserver()
             && let Some(refused) = self.sqlserver_special_index()
         {
@@ -2326,6 +2333,9 @@ impl<'t> Parser<'t> {
 
     fn drop(&mut self) -> SqlResult<Statement> {
         self.at += 1;
+        if !self.sqlite() && self.at_role_definition() {
+            return self.drop_role();
+        }
         if self.is_word("index") {
             return self.drop_index();
         }

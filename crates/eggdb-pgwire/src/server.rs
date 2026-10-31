@@ -30,7 +30,8 @@ const LONGEST_FAILURE_DELAY: Duration = Duration::from_secs(5);
 /// What a server serves and to whom.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// The one user that may connect.
+    /// The server's own user, a superuser; roles stored in the database with `LOGIN` and a
+    /// password may connect too, with their privileges checked.
     pub user: String,
     /// That user's SCRAM-SHA-256 verifier.
     pub verifier: ScramVerifier,

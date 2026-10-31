@@ -536,10 +536,23 @@ fn read_sasl_message(wire: &mut Wire<'_>) -> Option<Vec<u8>> {
     }
 }
 
-fn authenticate(wire: &mut Wire<'_>, shared: &Shared<'_>, user: &str) -> AuthenticationOutcome {
+fn stored_role_verifier<S: KeyValueStore>(store: &S, user: &str) -> Option<ScramVerifier> {
+    let reader = store.begin_read().ok()?;
+    let text = eggdb_sql::login_verifier(&reader, user).ok()??;
+    ScramVerifier::from_stored(&text)
+}
+
+fn authenticate(
+    wire: &mut Wire<'_>,
+    shared: &Shared<'_>,
+    user: &str,
+    stored: Option<ScramVerifier>,
+) -> AuthenticationOutcome {
     let config = shared.config;
     let verifier = if user == config.user {
         config.verifier.clone()
+    } else if let Some(stored) = stored {
+        stored
     } else {
         ScramVerifier::for_unknown_user(&shared.secret, user, config.verifier_iterations())
     };
@@ -699,7 +712,11 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let Some(startup) = read_startup(&mut wire, shared) else {
         return;
     };
-    match authenticate(&mut wire, shared, &startup.user) {
+    let stored_role = (startup.user != shared.config.user)
+        .then(|| stored_role_verifier(store, &startup.user))
+        .flatten();
+    let is_stored_role = stored_role.is_some();
+    match authenticate(&mut wire, shared, &startup.user, stored_role) {
         AuthenticationOutcome::Authenticated => {}
         AuthenticationOutcome::Refused => return,
     }
@@ -722,7 +739,14 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         );
         return;
     }
-    session.identify(&startup.user, &startup.database);
+    if is_stored_role {
+        if let Err(error) = session.identify_role(&startup.user, &startup.database) {
+            fatal(&mut wire, error.state(), error.message());
+            return;
+        }
+    } else {
+        session.identify(&startup.user, &startup.database);
+    }
     let mut unrecognized_options = Vec::new();
     let mut settings = Vec::new();
     for (name, value) in &startup.parameters {

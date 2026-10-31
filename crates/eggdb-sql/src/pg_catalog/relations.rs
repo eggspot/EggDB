@@ -1344,11 +1344,37 @@ fn role_row(name: &str, role: u32, everything: bool) -> Vec<Value> {
 }
 
 fn role_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
-    let mut rows = vec![role_row(&snapshot.user, oids::SESSION_USER, true)];
+    let stored = |name: &str| snapshot.stored_roles.iter().any(|role| role.name == name);
+    let mut rows = Vec::new();
+    if !stored(&snapshot.user) {
+        rows.push(role_row(&snapshot.user, oids::SESSION_USER, true));
+    }
     for (role, name) in oids::PREDEFINED_ROLES {
-        if name != snapshot.user {
+        if name != snapshot.user && !stored(name) {
             rows.push(role_row(name, role, false));
         }
+    }
+    for role in &snapshot.stored_roles {
+        let oid_of_role = if role.name == snapshot.user {
+            oids::SESSION_USER
+        } else {
+            crate::roles::role_oid(&role.name)
+        };
+        rows.push(
+            Row::new(CatalogRelation::Roles)
+                .set("rolname", text(&role.name))
+                .set("rolsuper", flag(role.superuser))
+                .set("rolinherit", flag(true))
+                .set("rolcreaterole", flag(role.superuser))
+                .set("rolcreatedb", flag(role.superuser))
+                .set("rolcanlogin", flag(role.login))
+                .set("rolreplication", flag(false))
+                .set("rolconnlimit", int(-1))
+                .set("rolpassword", text("********"))
+                .set("rolbypassrls", flag(role.superuser))
+                .set("oid", oid(oid_of_role))
+                .done(),
+        );
     }
     rows
 }
