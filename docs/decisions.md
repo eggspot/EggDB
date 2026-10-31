@@ -196,3 +196,4 @@ its full title with its status.
 - [D169](decisions/D169.md) Declarative partitioning: partitions are tables linked by a catalog record (`0x0E`), routed writes, reads expanded into a pruned `UNION ALL`, MySQL's and Oracle's named partitions
 - [D170](decisions/D170.md) An LSM tree made of B+trees (delta, runs, a manifest), sealed deltas without copying and merges in bounded steps, in the storage engine first; `lsm.random_put` against a B+tree
 - [D171](decisions/D171.md) Compressed values: our own LZ4-format codec, overflow chains of layout 2 behind the incompatible feature `COMPRESSED_VALUES`, `Options::compress_values`
+- [D172](decisions/D172.md) Concurrent writers as optimistic transactions over the single-writer engine (`begin_concurrent`): serializable by read and range validation, snapshot isolation by write validation, `ErrorKind::Conflict`

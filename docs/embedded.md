@@ -479,6 +479,41 @@ in the snapshot memory. When that memory runs out, the oldest snapshots expire w
 `SnapshotTooOld`, so a forgotten reader never blocks the writer. Keep read transactions short,
 or give them more `snapshot_memory_bytes`.
 
+## Concurrent transactions
+`begin_write` gives one writer at a time. `begin_concurrent` gives any number of write
+transactions at once: each reads a snapshot, keeps its changes in memory, and takes the writer
+only while it commits.
+
+```rust,no_run
+use eggdb::{Database, ErrorKind, Isolation};
+
+fn transfer(db: &Database, from: &str, to: &str, amount: i64) -> eggdb::Result<()> {
+    loop {
+        let mut tx = db.begin_concurrent(Isolation::Serializable)?;
+        let balance = |value: Option<Vec<u8>>| -> i64 {
+            value.and_then(|v| String::from_utf8(v).ok()?.parse().ok()).unwrap_or(0)
+        };
+        let from_balance = balance(tx.get(from)?);
+        let to_balance = balance(tx.get(to)?);
+        tx.put(from, (from_balance - amount).to_string())?;
+        tx.put(to, (to_balance + amount).to_string())?;
+        match tx.commit() {
+            Err(error) if error.kind() == ErrorKind::Conflict => continue,
+            other => return other.map(|_| ()),
+        }
+    }
+}
+```
+
+- **`Isolation::Serializable`** (the default) checks at the commit that every key it read and
+  every range it scanned is unchanged, so committed transactions give the same results as running
+  one at a time in commit order: write skew and phantoms fail the commit.
+- **`Isolation::Snapshot`** checks only the keys it writes, so the first committer wins and
+  write skew is allowed, as in PostgreSQL's `REPEATABLE READ`.
+- A failed check returns `ErrorKind::Conflict` and writes nothing: run the transaction again.
+  `get`, `put`, `delete` and `scan` work on the default key space, and a transaction's changes
+  must fit in memory.
+
 ## Large values, streamed
 `get_reader` on a read or write transaction gives a value as a `std::io::Read`, reading its
 overflow pages one at a time, so a value of any size goes to a file or a socket without being

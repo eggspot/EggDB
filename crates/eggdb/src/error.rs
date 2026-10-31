@@ -61,6 +61,10 @@ pub enum ErrorKind {
     /// A read transaction's snapshot expired: the writer changed more pages since it began
     /// than the snapshot memory holds. Begin a new read transaction.
     SnapshotTooOld,
+    /// A [`ConcurrentTransaction`](crate::ConcurrentTransaction) could not commit: a
+    /// transaction that committed after it began changed what it read or wrote. Nothing was
+    /// written; run it again.
+    Conflict,
     /// The write transaction failed earlier and was rolled back then; begin a new one.
     TransactionFailed,
     /// An earlier write or sync failed, so the database refuses everything until it is
