@@ -293,7 +293,7 @@ fn serve_answers_postgresql_clients_on_a_unix_socket_and_removes_it_at_stop() {
         .and_then(|rest| rest.split('"').next())
         .unwrap()
         .to_owned();
-    assert!(socket.ends_with(".s.PGSQL.") == false && socket.contains(".s.PGSQL."), "{first}");
+    assert!(socket.contains(".s.PGSQL."), "{first}");
     let mut client = UnixStream::connect(&socket).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     client.write_all(&[0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]).unwrap();

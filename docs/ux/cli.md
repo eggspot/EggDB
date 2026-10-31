@@ -3947,3 +3947,29 @@ stdin as the file.
   The file is not built as `<file>.following` and renamed into place.
 - **SQL Server sources.** A SQL Server copy reads change tracking only; CDC is a later item. The
   changes of one poll are applied as one transaction.
+
+## 31. `eggdb serve` on Unix sockets (part 4.M1-1)
+
+Designed by Claude Fable (D15).
+
+### Options
+- `--socket-dir <directory>` uses libpq's word for its value: a socket directory. The socket in
+  it is named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory>` finds it.
+- `--mysql-socket <file>` uses the mysql client's word: a socket path. It needs `--mysql-listen`.
+
+TDS has no socket, because no SQL Server client takes one.
+
+### Startup report
+The report gains, after `user`, the rows `socket       <path> (owner only, PostgreSQL
+protocol)` and `mysql socket <path> (owner only)`. The `connect` row adds `or psql -h <directory>
+-p <port> -d <database>`. The JSON line adds `socket` and `mysql_socket`, which are absent when
+the option is not used.
+
+### Errors
+- **Missing directory** (exit 2): it is never created, because its owner and mode are a
+  security choice. The message says to `mkdir -p` it.
+- **Live server** on the socket (exit 3): the message names the likely server.
+- **Stale socket file:** replaced silently, as PostgreSQL does.
+- **Path that is not a socket** (exit 2): the message asks to remove it or pass another path.
+- **Windows:** exit 2 when the options are parsed, saying the option is "not available on
+  Windows yet".

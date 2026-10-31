@@ -15,6 +15,8 @@ const SERVE_FIELDS: &[FieldDefinition] = &[
     field("max_connections", FieldType::Integer),
     field("tls", FieldType::Boolean),
     field("loopback_only", FieldType::Boolean),
+    field("socket", FieldType::Text),
+    field("mysql_socket", FieldType::Text),
     field("tls_certificate", FieldType::Text),
     field("tls_key", FieldType::Text),
     field("tls_fingerprint_sha256", FieldType::Text),
@@ -138,7 +140,7 @@ pub(super) const SERVE: CommandDefinition = CommandDefinition {
     synopsis: "<file>",
     summary: "serve the file to PostgreSQL and MySQL clients; see --listen",
     description: "Serves the file to PostgreSQL clients, and with options to MySQL and SQL Server (TDS) clients, until stopped: on this machine's loopback address without TLS, and on any address with TLS, which other machines must then use; clients log in with a password and may run any statement. The first line says where it listens.",
-    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
+    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
     help: "\
 Serves the file to PostgreSQL clients: psql and PostgreSQL drivers connect to it unchanged and
 run the SQL of eggdb sql. Clients log in as one user with a password (SCRAM-SHA-256), which
@@ -166,6 +168,10 @@ the running statements, rolls back open transactions and stops with exit 0.
       --database <name>           the name clients connect to (default: the file name
                                   without its extension, so app.db is app)
       --max-connections <count>   connections open at once, one thread each (default 64)
+      --socket-dir <directory>    also accept PostgreSQL connections on a Unix socket there,
+                                  .s.PGSQL.<port> (psql -h <directory>); not on Windows yet
+      --mysql-socket <file>       also accept MySQL connections on that Unix socket
+                                  (mysql --socket=<file>); needs --mysql-listen
       --tls-certificate <file>    PEM certificate chain, server's first; with --tls-key, clients
                                   on other machines may connect (over TLS; loopback may skip it)
       --tls-key <file>            PEM private key for --tls-certificate: PKCS#8, SEC1 or PKCS#1,
@@ -232,6 +238,16 @@ Examples:
                 "connections open at once, one thread each",
             )
         },
+        valued(
+            "socket-dir",
+            "directory",
+            "also accept PostgreSQL connections on a Unix socket in that directory",
+        ),
+        valued(
+            "mysql-socket",
+            "file",
+            "also accept MySQL connections on that Unix socket; needs --mysql-listen",
+        ),
         valued(
             "tls-certificate",
             "file",
