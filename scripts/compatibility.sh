@@ -29,11 +29,16 @@ echo "| Tool | Result |" >> "$matrix"
 echo "|------|--------|" >> "$matrix"
 dbt_version="$("$tools/bin/pip" show dbt-postgres 2> /dev/null | sed -n 's/^Version: //p')"
 cd "$root/crates/eggdb/tests/clients/dbt"
+failed=0
 for step in debug run test; do
   if "$tools/bin/dbt" "$step" --profiles-dir . > "$work/dbt-$step.log" 2>&1; then
     report "dbt-postgres ${dbt_version:-unknown}: dbt $step" "passes"
   else
     report "dbt-postgres ${dbt_version:-unknown}: dbt $step" "fails"
     tail -n 30 "$work/dbt-$step.log"
+    failed=1
   fi
 done
+if [ "${EGGDB_COMPATIBILITY_STRICT:-0}" = 1 ] && [ "$failed" = 1 ]; then
+  exit 1
+fi

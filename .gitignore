@@ -4,3 +4,4 @@
 /bench-results
 /compare-results
 /web/eggdb.wasm
+/crates/eggdb-redis-compare/target

@@ -1364,6 +1364,7 @@ jobs:
       - name: Run third-party tools against eggdb serve and report the matrix (D44, D239)
         env:
           EGGDB_PASSWORD: ci-compatibility
+          EGGDB_COMPATIBILITY_STRICT: "1"
         run: |
           cargo build -p eggdb
           scripts/compatibility.sh target/debug/eggdb "$RUNNER_TEMP/tools" "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP"
@@ -1403,7 +1404,7 @@ jobs:
           PY
 
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode, arrow]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
