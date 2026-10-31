@@ -2298,6 +2298,17 @@ FROM readings GROUP BY bucket ORDER BY bucket;
 Not yet: `time_bucket_gapfill`, `locf` and `interpolate`, the `first` and `last` aggregates,
 hypertables with automatic time partitions, retention policies and continuous aggregates.
 
+## Materialized views
+
+`CREATE MATERIALIZED VIEW [IF NOT EXISTS] name AS query [WITH [NO] DATA]` stores the query's
+rows in a table of that name, `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`
+replaces them with the query's current rows in one transaction, and `DROP MATERIALIZED VIEW [IF
+EXISTS] name[, ...]` removes it. The defining queries are kept in
+`eggdb_internal.materialized_views`. Reads of a materialized view are reads of its table, so
+they are as fast as any table and see the rows of the last refresh. Not yet: keeping the rows up
+to date on every commit (incremental maintenance), column name lists, and indexes on the view
+being kept across a refresh.
+
 ## Change streams (eggdb_cdc)
 
 `CREATE EXTENSION eggdb_cdc` installs a transactional outbox, `eggdb_cdc.outbox`, and a row

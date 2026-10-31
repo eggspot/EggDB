@@ -124,6 +124,10 @@ fn quoted_text(dialect: Dialect, text: &str) -> String {
     }
 }
 
+pub(crate) fn sql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }

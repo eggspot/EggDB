@@ -196,6 +196,8 @@ mod time_series_tests;
 #[cfg(test)]
 mod geo_tests;
 #[cfg(test)]
+mod materialized_view_tests;
+#[cfg(test)]
 mod vector_tests;
 #[cfg(test)]
 mod window_tests;

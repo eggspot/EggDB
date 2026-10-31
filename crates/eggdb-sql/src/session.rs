@@ -1934,6 +1934,126 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     /// Ends the session: an open block is rolled back. Whether one was open.
+    fn run_quietly(&mut self, text: &str) -> SqlResult<Vec<QueryResult>> {
+        let mut results = Vec::new();
+        self.execute(text, &mut |result| results.push(result))?;
+        Ok(results)
+    }
+
+    fn atomically(&mut self, body: impl FnOnce(&mut Self) -> SqlResult<()>) -> SqlResult<()> {
+        if !self.autocommit() {
+            return body(self);
+        }
+        self.run_quietly("BEGIN")?;
+        match body(self) {
+            Ok(()) => self.run_quietly("COMMIT").map(drop),
+            Err(error) => {
+                let _ = self.run_quietly("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn materialized_view_query(&mut self, name: &str) -> SqlResult<Option<String>> {
+        let rows = match self.run_quietly(&format!(
+            "SELECT query FROM eggdb_internal.materialized_views WHERE name = {}",
+            crate::dump::sql_string(name)
+        )) {
+            Ok(results) => results.into_iter().flat_map(|result| result.rows).collect::<Vec<_>>(),
+            Err(error) if matches!(error.state(), SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME) => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        Ok(rows.into_iter().next().and_then(|row| match row.into_iter().next() {
+            Some(Value::Text(query)) => Some(query),
+            _ => None,
+        }))
+    }
+
+    fn materialized_view(&mut self, command: &crate::ast::MaterializedViewCommand) -> SqlResult<QueryResult> {
+        use crate::ast::MaterializedViewCommand;
+        let written = |name: &str| name.split('.').map(crate::schema::quoted).collect::<Vec<_>>().join(".");
+        match command {
+            MaterializedViewCommand::Create { name, query, with_data, if_not_exists } => {
+                if self.materialized_view_query(&name.text)?.is_some() {
+                    if *if_not_exists {
+                        return Ok(QueryResult::command("CREATE MATERIALIZED VIEW").with_notice(format!(
+                            "NOTICE:  relation \"{}\" already exists, skipping",
+                            name.text
+                        )));
+                    }
+                    return Err(SqlError::new(SqlState::DUPLICATE_TABLE, format!("relation \"{}\" already exists", name.text)));
+                }
+                let described = self
+                    .run_quietly(&format!("SELECT * FROM ({query}) AS materialized_definition LIMIT 0"))?
+                    .into_iter()
+                    .find_map(|result| result.columns)
+                    .unwrap_or_default();
+                let columns: Vec<String> = described
+                    .iter()
+                    .map(|column| format!("{} {}", crate::schema::quoted(&column.name), column.sql_type.map_or_else(|| "text".to_owned(), |sql_type| sql_type.name())))
+                    .collect();
+                let table = written(&name.text);
+                let name_text = name.text.clone();
+                let query = query.clone();
+                let with_data = *with_data;
+                self.atomically(|session| {
+                    session.run_quietly(
+                        "CREATE SCHEMA IF NOT EXISTS eggdb_internal; CREATE TABLE IF NOT EXISTS eggdb_internal.materialized_views (name text PRIMARY KEY, query text NOT NULL)",
+                    )?;
+                    session.run_quietly(&format!("CREATE TABLE {table} ({})", columns.join(", ")))?;
+                    session.run_quietly(&format!(
+                        "INSERT INTO eggdb_internal.materialized_views VALUES ({}, {})",
+                        crate::dump::sql_string(&name_text),
+                        crate::dump::sql_string(&query)
+                    ))?;
+                    if with_data {
+                        session.run_quietly(&format!("INSERT INTO {table} {query}"))?;
+                    }
+                    Ok(())
+                })?;
+                Ok(QueryResult::command("CREATE MATERIALIZED VIEW"))
+            }
+            MaterializedViewCommand::Refresh { name, with_data } => {
+                let Some(query) = self.materialized_view_query(&name.text)? else {
+                    return Err(SqlError::new(SqlState::WRONG_OBJECT_TYPE, format!("\"{}\" is not a materialized view", name.text)));
+                };
+                let table = written(&name.text);
+                let with_data = *with_data;
+                self.atomically(|session| {
+                    session.run_quietly(&format!("DELETE FROM {table}"))?;
+                    if with_data {
+                        session.run_quietly(&format!("INSERT INTO {table} {query}"))?;
+                    }
+                    Ok(())
+                })?;
+                Ok(QueryResult::command("REFRESH MATERIALIZED VIEW"))
+            }
+            MaterializedViewCommand::Drop { names, if_exists } => {
+                let mut dropped = Vec::new();
+                for name in names {
+                    match self.materialized_view_query(&name.text)? {
+                        Some(_) => dropped.push(name.text.clone()),
+                        None if *if_exists => {}
+                        None => {
+                            return Err(SqlError::new(SqlState::UNDEFINED_TABLE, format!("materialized view \"{}\" does not exist", name.text)));
+                        }
+                    }
+                }
+                self.atomically(|session| {
+                    for name in &dropped {
+                        session.run_quietly(&format!("DROP TABLE {}", written(name)))?;
+                        session.run_quietly(&format!(
+                            "DELETE FROM eggdb_internal.materialized_views WHERE name = {}",
+                            crate::dump::sql_string(name)
+                        ))?;
+                    }
+                    Ok(())
+                })?;
+                Ok(QueryResult::command("DROP MATERIALIZED VIEW"))
+            }
+        }
+    }
+
     fn install_extension(&mut self, name: &str, if_not_exists: bool) -> SqlResult<QueryResult> {
         let (schema, script) = match name {
             "pg_cron" => ("cron", crate::jobs::PG_CRON_SCRIPT),
@@ -2178,6 +2298,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
         match statement {
             Statement::InstallExtension { name, if_not_exists } => return self.install_extension(name, *if_not_exists),
+            Statement::MaterializedView(command) => return self.materialized_view(command),
             Statement::Begin { read_only } => return self.begin(*read_only),
             Statement::Commit => return self.commit(),
             Statement::Rollback => return self.rollback(),

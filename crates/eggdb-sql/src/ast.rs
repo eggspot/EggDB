@@ -85,6 +85,7 @@ pub(crate) enum Statement {
         name: &'static str,
         if_not_exists: bool,
     },
+    MaterializedView(MaterializedViewCommand),
     SqlServer(SqlServerStatement),
     Merge(Box<MergeStatement>),
     AlterSession(Vec<(String, String)>),
@@ -151,6 +152,13 @@ pub(crate) enum PackagePart {
 pub(crate) struct AlterPackage {
     pub(crate) name: Name,
     pub(crate) part: PackagePart,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MaterializedViewCommand {
+    Create { name: Name, query: String, with_data: bool, if_not_exists: bool },
+    Refresh { name: Name, with_data: bool },
+    Drop { names: Vec<Name>, if_exists: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]

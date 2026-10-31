@@ -832,6 +832,7 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         };
         match word.as_ref() {
+            "refresh" if self.postgresql() && self.is_word_at(1, "materialized") => self.refresh_materialized_view(),
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),
@@ -1502,6 +1503,9 @@ impl<'t> Parser<'t> {
 
     fn create(&mut self) -> SqlResult<Statement> {
         self.at += 1;
+        if self.postgresql() && self.is_word("materialized") && self.is_word_at(1, "view") {
+            return self.create_materialized_view();
+        }
         if !self.sqlite() && self.at_role_definition() {
             return self.create_role();
         }
@@ -2391,6 +2395,43 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn create_materialized_view(&mut self) -> SqlResult<Statement> {
+        self.at += 2;
+        let if_not_exists = self.if_not_exists()?;
+        let name = self.table_name()?;
+        if self.peek_kind() == &TokenKind::LeftParen {
+            return Err(self.not_supported("column names in CREATE MATERIALIZED VIEW"));
+        }
+        self.expect_word("as")?;
+        let start = self.peek().start;
+        self.query_statement()?;
+        let query = self.slice(start, self.previous_end());
+        let with_data = if self.take_word("with") {
+            let no = self.take_word("no");
+            self.expect_word("data")?;
+            !no
+        } else {
+            true
+        };
+        Ok(Statement::MaterializedView(crate::ast::MaterializedViewCommand::Create { name, query, with_data, if_not_exists }))
+    }
+
+    pub(super) fn refresh_materialized_view(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        self.expect_word("materialized")?;
+        self.expect_word("view")?;
+        self.take_word("concurrently");
+        let name = self.table_name()?;
+        let with_data = if self.take_word("with") {
+            let no = self.take_word("no");
+            self.expect_word("data")?;
+            !no
+        } else {
+            true
+        };
+        Ok(Statement::MaterializedView(crate::ast::MaterializedViewCommand::Refresh { name, with_data }))
+    }
+
     fn drop(&mut self) -> SqlResult<Statement> {
         self.at += 1;
         if !self.sqlite() && self.at_role_definition() {
@@ -2408,8 +2449,15 @@ impl<'t> Parser<'t> {
         if self.is_word("view") {
             return self.drop_view();
         }
-        if self.is_word("materialized") && self.is_word_at(1, "view") {
-            return Err(self.not_supported("DROP MATERIALIZED VIEW"));
+        if self.postgresql() && self.is_word("materialized") && self.is_word_at(1, "view") {
+            self.at += 2;
+            let if_exists = self.if_exists()?;
+            let mut names = vec![self.table_name()?];
+            while self.take(&TokenKind::Comma) {
+                names.push(self.table_name()?);
+            }
+            let _ = self.take_word("cascade") || self.take_word("restrict");
+            return Ok(Statement::MaterializedView(crate::ast::MaterializedViewCommand::Drop { names, if_exists }));
         }
         if self.postgresql() && self.is_word("sequence") {
             return self.drop_sequence();
