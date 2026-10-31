@@ -546,6 +546,16 @@ impl Parser<'_> {
                 let _ = self.take_word("rows") || self.take_word("row");
             } else if self.is_word("fetch") {
                 return Err(self.not_supported("FETCH FIRST"));
+            } else if self.is_word("for")
+                && ["update", "share", "no", "key"]
+                    .iter()
+                    .any(|word| self.is_word_at(1, word))
+            {
+                self.row_locking()?;
+            } else if self.mysql() && self.is_word("lock") && self.is_word_at(1, "in") {
+                self.at += 2;
+                self.expect_word("share")?;
+                self.expect_word("mode")?;
             } else if self.is_word("for") || self.mysql() && self.is_word("lock") {
                 return Err(self.not_supported("row locking (FOR UPDATE, FOR SHARE)"));
             } else {
@@ -802,5 +812,43 @@ fn is_cheap_to_repeat(expr: &Expr) -> bool {
         ExprKind::Column { .. } | ExprKind::Literal(_) => true,
         ExprKind::Cast { expr, .. } => is_cheap_to_repeat(expr),
         _ => false,
+    }
+}
+
+impl Parser<'_> {
+    fn row_locking(&mut self) -> SqlResult<()> {
+        while self.take_word("for") {
+            if !(self.take_word("update") || self.take_word("share")) {
+                if self.take_word("no") {
+                    self.expect_word("key")?;
+                    self.expect_word("update")?;
+                } else {
+                    self.expect_word("key")?;
+                    self.expect_word("share")?;
+                }
+            }
+            if self.take_word("of") {
+                loop {
+                    self.name()?;
+                    while self.take(&TokenKind::Dot) {
+                        self.name()?;
+                    }
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            if self.take_word("skip") {
+                self.expect_word("locked")?;
+            } else if self.oracle() && self.take_word("wait") {
+                if !matches!(self.peek_kind(), TokenKind::Integer(_)) {
+                    return Err(self.unexpected());
+                }
+                self.at += 1;
+            } else {
+                self.take_word("nowait");
+            }
+        }
+        Ok(())
     }
 }

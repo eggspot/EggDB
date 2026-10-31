@@ -322,7 +322,7 @@ impl<'t> Parser<'t> {
                 Statement::Begin { read_only: false }
             }
             "replace" if self.is_word_at(1, "into") => self.insert()?,
-            "attach" | "detach" | "vacuum" | "reindex" | "savepoint" | "release" | "analyze" => {
+            "attach" | "detach" | "vacuum" | "reindex" | "analyze" => {
                 return Err(self.not_supported(&word.to_ascii_uppercase()));
             }
             _ => return Ok(None),

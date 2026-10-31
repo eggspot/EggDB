@@ -21,6 +21,7 @@ pub(crate) enum Statement {
     },
     Commit,
     Rollback,
+    Savepoint(SavepointCommand),
     Set {
         name: String,
         value: Option<String>,
@@ -844,6 +845,13 @@ pub(crate) enum OnCommit {
     PreserveRows,
     DeleteRows,
     Drop,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SavepointCommand {
+    Set(Name),
+    RollbackTo(Name),
+    Release(Name),
 }
 
 #[derive(Debug, Clone, PartialEq)]

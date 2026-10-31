@@ -168,9 +168,10 @@ fn run_statement(
                 None => result,
             })
         }
-        Statement::Begin { .. } | Statement::Commit | Statement::Rollback => {
-            Err(not_in_routine("a transaction command"))
-        }
+        Statement::Begin { .. }
+        | Statement::Commit
+        | Statement::Rollback
+        | Statement::Savepoint(_) => Err(not_in_routine("a transaction command")),
         Statement::Set { .. } | Statement::Reset { .. } => Err(not_in_routine("SET")),
         _ => Err(not_in_routine("this statement")),
     }

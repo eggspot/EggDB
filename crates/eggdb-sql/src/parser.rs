@@ -843,8 +843,12 @@ impl<'t> Parser<'t> {
             "rollback" | "abort" => {
                 self.at += 1;
                 self.transaction_noise();
-                if self.is_word("to") {
-                    return Err(self.not_supported("ROLLBACK TO SAVEPOINT"));
+                if self.take_word("to") {
+                    self.take_word("savepoint");
+                    let name = self.name()?;
+                    return Ok(Statement::Savepoint(crate::ast::SavepointCommand::RollbackTo(
+                        name,
+                    )));
                 }
                 Ok(Statement::Rollback)
             }
@@ -890,6 +894,18 @@ impl<'t> Parser<'t> {
             "comment" if self.postgresql() || self.oracle() => self.comment(),
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
+            "lock" if self.postgresql() || self.oracle() => self.lock_table(),
+            "savepoint" => {
+                self.at += 1;
+                let name = self.name()?;
+                Ok(Statement::Savepoint(crate::ast::SavepointCommand::Set(name)))
+            }
+            "release" if !self.sqlserver() => {
+                self.at += 1;
+                self.take_word("savepoint");
+                let name = self.name()?;
+                Ok(Statement::Savepoint(crate::ast::SavepointCommand::Release(name)))
+            }
             "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
             | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
             | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
@@ -1062,6 +1078,32 @@ impl<'t> Parser<'t> {
                 notice: None,
             }),
         }
+    }
+
+    fn lock_table(&mut self) -> SqlResult<Statement> {
+        self.expect_word("lock")?;
+        self.take_word("table");
+        self.take_word("only");
+        loop {
+            self.table_name()?;
+            self.take_operator("*");
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        if self.take_word("in") {
+            while !self.take_word("mode") {
+                if self.at_end() || !matches!(self.peek_kind(), TokenKind::Word(_)) {
+                    return Err(self.unexpected());
+                }
+                self.at += 1;
+            }
+        }
+        self.take_word("nowait");
+        Ok(Statement::Ignored {
+            tag: "LOCK TABLE",
+            notice: None,
+        })
     }
 
     fn isolation_level(&mut self) -> SqlResult<()> {

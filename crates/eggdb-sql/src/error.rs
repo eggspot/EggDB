@@ -131,6 +131,8 @@ impl SqlState {
     pub const READ_ONLY_SQL_TRANSACTION: Self = Self(*b"25006");
     /// `25P01` no_active_sql_transaction.
     pub const NO_ACTIVE_SQL_TRANSACTION: Self = Self(*b"25P01");
+    /// `3B001` invalid_savepoint_specification: no savepoint has that name.
+    pub const SAVEPOINT_EXCEPTION: Self = Self(*b"3B001");
     /// `25P02` in_failed_sql_transaction.
     pub const IN_FAILED_SQL_TRANSACTION: Self = Self(*b"25P02");
     /// `40000` transaction_rollback.

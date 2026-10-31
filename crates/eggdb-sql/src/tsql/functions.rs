@@ -173,6 +173,7 @@ pub(crate) fn refused_in_function(
         Statement::Begin { .. } => "BEGIN TRANSACTION",
         Statement::Commit { .. } => "COMMIT TRANSACTION",
         Statement::Rollback { .. } => "ROLLBACK TRANSACTION",
+        Statement::Savepoint(_) => "SAVE TRANSACTION",
         Statement::Set { .. } | Statement::Reset { .. } => "SET ON/OFF",
         Statement::CreateTable(_) => "CREATE TABLE",
         Statement::DropTable { .. } => "DROP TABLE",

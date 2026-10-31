@@ -1,6 +1,7 @@
 mod mysql;
 mod oracle;
 mod restore;
+mod savepoints;
 mod sqlite;
 pub(crate) mod sqlserver;
 mod triggers;
@@ -375,6 +376,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     parameter_values: Vec<NamedParameter>,
     set_error: Option<u32>,
     save_points: Vec<String>,
+    savepoints: savepoints::Savepoints,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
     temporary: crate::temporary::TemporaryObjects,
     deferred: crate::deferred_checks::DeferredState,
@@ -440,6 +442,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             parameter_values: Vec::new(),
             set_error: None,
             save_points: Vec::new(),
+            savepoints: savepoints::Savepoints::default(),
             advisory_locks: crate::advisory_locks::AdvisoryLocks::new(
                 std::ptr::from_ref(store).addr(),
             ),
@@ -962,7 +965,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         };
         if matches!(
             statement,
-            Statement::Begin { .. } | Statement::Commit | Statement::Rollback
+            Statement::Begin { .. }
+                | Statement::Commit
+                | Statement::Rollback
+                | Statement::Savepoint(_)
         ) {
             return Ok(StatementDescription {
                 parameter_types,
@@ -1289,6 +1295,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Statement::Begin { .. }
                 | Statement::Commit
                 | Statement::Rollback
+                | Statement::Savepoint(_)
                 | Statement::SqlServer(
                     SqlServerStatement::SaveTransaction(_) | SqlServerStatement::RollbackTo(_),
                 ) => {
@@ -1868,6 +1875,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn fail_block(&mut self) {
+        if self.savepoints.is_active() && matches!(self.block, Block::Writing(_)) {
+            self.savepoints.aborted = true;
+            return;
+        }
         if let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None) {
             let _ = writer.rollback();
             self.temporary.rollback();
@@ -1997,10 +2008,16 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Begin { read_only } => return self.begin(*read_only),
             Statement::Commit => return self.commit(),
             Statement::Rollback => return self.rollback(),
+            Statement::Savepoint(command @ crate::ast::SavepointCommand::RollbackTo(_)) => {
+                return self.savepoint_command(command);
+            }
             _ => {}
         }
-        if matches!(self.block, Block::Failed) {
+        if matches!(self.block, Block::Failed) || self.savepoints.aborted {
             return Err(aborted_block());
+        }
+        if let Statement::Savepoint(command) = statement {
+            return self.savepoint_command(command);
         }
         if self.commits_implicitly(statement)
             && let Block::Writing(_) = self.block
@@ -2370,6 +2387,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::Begin { .. }
             | Statement::Commit
             | Statement::Rollback
+            | Statement::Savepoint(_)
             | Statement::SqlServer(_) => {
                 return Err(SqlError::new(
                     SqlState::INTERNAL_ERROR,
@@ -2455,7 +2473,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn insert_literal_rows(&mut self, rows: &mut LiteralRows<'_>) -> SqlResult<QueryResult> {
-        if matches!(self.block, Block::Failed) {
+        if matches!(self.block, Block::Failed) || self.savepoints.aborted {
             return Err(aborted_block());
         }
         let settings = Arc::clone(&self.settings);
@@ -2564,7 +2582,27 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let implicit = self.implicit_transaction;
         let tables = &mut self.tables;
         let objects = &mut self.temporary;
+        let undo = self
+            .savepoints
+            .is_active()
+            .then_some(&mut self.savepoints.undo);
         match &mut self.block {
+            Block::Writing(writer) if undo.is_some() => {
+                let mut routed = crate::temporary::TemporaryWrite {
+                    inner: writer,
+                    objects,
+                };
+                let Some(log) = undo else {
+                    return Err(SqlError::new(SqlState::INTERNAL_ERROR, "no undo log"));
+                };
+                body(
+                    &mut savepoints::UndoWrite {
+                        inner: &mut routed,
+                        log,
+                    },
+                    tables,
+                )
+            }
             Block::Writing(writer) if self.dialect != Dialect::PostgreSql => {
                 let mut routed = crate::temporary::TemporaryWrite {
                     inner: writer,
@@ -2736,6 +2774,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     fn commit(&mut self) -> SqlResult<QueryResult> {
         self.save_points.clear();
+        if self.savepoints.aborted {
+            self.savepoints.clear();
+            return self.rollback();
+        }
+        self.savepoints.clear();
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
         if matches!(self.block, Block::Failed) {
@@ -2787,6 +2830,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     fn rollback(&mut self) -> SqlResult<QueryResult> {
         self.deferred.clear();
         self.save_points.clear();
+        self.savepoints.clear();
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
         self.restore_search_path();

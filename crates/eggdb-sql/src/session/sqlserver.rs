@@ -567,6 +567,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             ));
         }
         self.save_points.push(name.text.clone());
+        self.set_savepoint(name)?;
         Ok(QueryResult::command("SAVE TRANSACTION"))
     }
 
@@ -575,10 +576,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         if self.settings.sqlserver.transaction_count > 0
             && self.save_points.iter().any(|saved| saved == &name.text)
         {
-            return Err(
-                crate::parser::sqlserver_not_supported("ROLLBACK TRANSACTION to a save point")
-                    .at(name.position),
-            );
+            if let Some(at) = self.save_points.iter().rposition(|saved| saved == &name.text) {
+                self.save_points.truncate(at + 1);
+            }
+            return self
+                .rollback_to_savepoint(name)
+                .map(|_| QueryResult::command("ROLLBACK TRANSACTION"));
         }
         self.sqlserver_rollback()
     }

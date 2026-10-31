@@ -1775,6 +1775,24 @@ a block rolls the block back at once and the session answers `25P02` until `ROLL
 of a failed block reports `ROLLBACK`, as PostgreSQL does. DDL is transactional: a rolled-back
 block that created a table leaves no table.
 
+## Transactions, savepoints and locks
+- **Savepoints** work in every dialect: `SAVEPOINT name`, `ROLLBACK TO [SAVEPOINT] name` and
+  `RELEASE [SAVEPOINT] name` (PostgreSQL, MySQL, SQLite, Oracle), and `SAVE TRANSACTION name` with
+  `ROLLBACK TRANSACTION name` (SQL Server). Rolling back to a savepoint undoes the changes made after
+  it and keeps it. In PostgreSQL's dialect a failed statement after a savepoint leaves the block
+  aborted until `ROLLBACK TO` brings it back; without savepoints the block is rolled back as
+  before. In SQLite's, a `SAVEPOINT` outside a transaction begins one, and releasing it commits.
+  A name that was never set fails with each dialect's error (`3B001`, MySQL 1305, ORA-01086,
+  SQL Server 6401).
+- **Row locks.** `SELECT ... FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` with
+  `OF`, `NOWAIT`, `SKIP LOCKED` (and Oracle's `WAIT n`, MySQL's `LOCK IN SHARE MODE`) and
+  `LOCK TABLE ... IN ... MODE [NOWAIT]` are accepted. A transaction block holds the database's
+  one writer from `BEGIN` on, so no other session changes the rows it read, and the lock
+  clauses need nothing more; they will take part when SQL sessions run on concurrent
+  transactions (D172).
+- **Isolation levels.** `SET TRANSACTION`, `BEGIN ISOLATION LEVEL` and each dialect's forms are
+  accepted. Every block runs serializably today, which meets every level's guarantees.
+
 ## Partitioned tables
 A table can be split into partitions by range, list or hash, as PostgreSQL does:
 
