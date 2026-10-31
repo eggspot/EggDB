@@ -1326,6 +1326,7 @@ pub(crate) enum Space {
     AttrDef,
     Trigger,
     Routine,
+    Package,
     SqlServerObject,
 }
 
@@ -1338,6 +1339,7 @@ impl Space {
             Self::AttrDef => b"attrdef",
             Self::Trigger => b"trigger",
             Self::Routine => b"routine",
+            Self::Package => b"package",
             Self::SqlServerObject => b"sqlserver object",
         }
     }

@@ -473,7 +473,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   1,000,000,000 bytes with `ORA-01489` before they build it.
 - **The data dictionary** (D134): `USER_`, `ALL_` and `DBA_` `TABLES`, `TAB_COLUMNS`,
   `TAB_COLS`, `CONSTRAINTS`, `CONS_COLUMNS`, `INDEXES`, `IND_COLUMNS`, `SEQUENCES`, `VIEWS`,
-  `OBJECTS`, `TAB_COMMENTS`, `COL_COMMENTS` and `USERS`, the synonyms `TABS`, `COLS`, `IND`,
+  `OBJECTS`, `TAB_COMMENTS`, `COL_COMMENTS`, `USERS`, `SOURCE`, `PROCEDURES`, `ARGUMENTS`,
+  `TRIGGERS` and `ERRORS`, the synonyms `TABS`, `COLS`, `IND`,
   `SEQ` and `OBJ`, `V$VERSION`, `NLS_SESSION_PARAMETERS` and `NLS_DATABASE_PARAMETERS`, with
   Oracle's column names and the rest of `SELECT` on them: joins (`USER_CONSTRAINTS` with
   `USER_CONS_COLUMNS`), grouping, subqueries. They are built from the catalog once per
@@ -2937,7 +2938,16 @@ And more, not in the suite yet:
   `CREATED` and `LAST_DDL_TIME` are 2000-01-01 and the statistics (`NUM_ROWS`, `BLOCKS`, ...)
   NULL, since EggDB keeps neither; every index is `NORMAL`, every table in `USERS`; the
   session user's own schema is fixed when the connection chooses Oracle's dialect (a schema
-  made for the user later is used from the next connection).
+  made for the user later is used from the next connection). For PL/SQL, `USER_SOURCE` holds
+  each procedure, function, package, package body and trigger line by line from its keyword
+  (so its line numbers are the ones `ORA-06512` reports), `USER_OBJECTS` lists them with
+  `PACKAGE BODY` next to its `PACKAGE`, `USER_PROCEDURES` and `USER_ARGUMENTS` list standalone
+  units and a package's public subprograms (with `OVERLOAD` for overloads, `%TYPE` parameters
+  resolved to their column's type, the result of a function at `POSITION` 0, no row for a
+  procedure without parameters and no `DATA_LEVEL` 1 rows for record fields), and
+  `USER_TRIGGERS` shows `TRIGGER_TYPE`, `TRIGGERING_EVENT`, `DESCRIPTION`, `WHEN_CLAUSE`,
+  `TRIGGER_BODY` and `STATUS`. `USER_ERRORS` is always empty, since EggDB refuses a unit that
+  does not compile instead of keeping it invalid.
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
 - Not supported yet: `CONNECT BY`, outer joins with `(+)`, `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database

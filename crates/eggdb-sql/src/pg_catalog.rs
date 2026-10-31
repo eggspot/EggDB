@@ -28,8 +28,8 @@ pub(crate) use oids::{builtin_type, builtin_type_named, format_type, type_modifi
 pub(crate) use relations::generated_rows;
 pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{
-    CatalogSnapshot, ConstraintSource, IndexSource, RelationEntry, RelationKind, RelationSource,
-    RoutineEntry, current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
+    CatalogSnapshot, ConstraintSource, IndexSource, PackageEntry, RelationEntry, RelationKind,
+    RelationSource, RoutineEntry, TriggerEntry, current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
     mentions_catalog, names_non_sequence_relation, routine_oid, snapshot_for, statement_settings,
     text_needs_catalog,
 };

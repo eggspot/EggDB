@@ -348,6 +348,14 @@ pub(crate) struct RoutineEntry {
     pub(crate) definition: Arc<RoutineDefinition>,
 }
 
+pub(crate) struct PackageEntry {
+    pub(crate) oid: u32,
+    pub(crate) body_oid: u32,
+    pub(crate) schema: String,
+    pub(crate) name: String,
+    pub(crate) stored: crate::plsql::StoredPackage,
+}
+
 pub(crate) struct CatalogSnapshot {
     pub(crate) user: String,
     pub(crate) database: String,
@@ -360,6 +368,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) comments: Vec<StoredComment>,
     pub(crate) triggers: Vec<TriggerEntry>,
     pub(crate) routines: Vec<RoutineEntry>,
+    pub(crate) packages: Vec<PackageEntry>,
     relation_oids: HashMap<u32, usize>,
     relation_names: HashMap<(String, String), usize>,
     constraint_oids: HashMap<u32, usize>,
@@ -576,6 +585,7 @@ impl CatalogSnapshot {
             comments: crate::comments::every_comment(reader)?,
             triggers: Vec::new(),
             routines: Vec::new(),
+            packages: Vec::new(),
             relation_oids: HashMap::new(),
             relation_names: HashMap::new(),
             constraint_oids: HashMap::new(),
@@ -590,7 +600,37 @@ impl CatalogSnapshot {
         snapshot.add_constraints_and_defaults();
         snapshot.add_triggers(crate::triggers::every_trigger(reader)?);
         snapshot.add_routines(crate::routines::every_routine(reader)?);
+        snapshot.add_packages(crate::plsql::every_package(reader)?);
         Ok(snapshot)
+    }
+
+    fn add_packages(&mut self, stored: Vec<(String, crate::plsql::StoredPackage)>) {
+        let requests: Vec<OidRequest> = stored
+            .iter()
+            .flat_map(|(internal, _)| {
+                [b'P', b'B'].map(|kind| OidRequest {
+                    kind,
+                    owner: String::new(),
+                    name: internal.clone(),
+                })
+            })
+            .collect();
+        let mut assigned = oids::assign(Space::Package, &requests).into_iter();
+        for (internal, stored) in stored {
+            let oid = assigned.next().unwrap_or(0);
+            let body_oid = assigned.next().unwrap_or(0);
+            let schema = crate::schemas::schema_of(&internal).to_owned();
+            if self.schema_named(&schema).is_none() {
+                continue;
+            }
+            self.packages.push(PackageEntry {
+                oid,
+                body_oid,
+                schema,
+                name: crate::schemas::base_name(&internal).to_owned(),
+                stored,
+            });
+        }
     }
 
     fn add_routines(&mut self, named: Vec<NamedRoutines>) {

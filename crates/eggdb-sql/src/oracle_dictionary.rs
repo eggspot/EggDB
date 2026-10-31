@@ -1,3 +1,6 @@
+mod plsql;
+#[cfg(test)]
+mod plsql_tests;
 #[cfg(test)]
 mod tests;
 
@@ -57,6 +60,11 @@ pub(crate) enum DictionaryView {
     ColComments,
     TabIdentityCols,
     Users,
+    Source,
+    Procedures,
+    Arguments,
+    Triggers,
+    Errors,
 }
 
 /// A relation of Oracle's data dictionary or dynamic performance views that the Oracle
@@ -124,6 +132,21 @@ static NAMED: &[(&str, OracleRelation)] = &[
     ("user_users", user(DictionaryView::Users)),
     ("all_users", all(DictionaryView::Users)),
     ("dba_users", dba(DictionaryView::Users)),
+    ("user_source", user(DictionaryView::Source)),
+    ("all_source", all(DictionaryView::Source)),
+    ("dba_source", dba(DictionaryView::Source)),
+    ("user_procedures", user(DictionaryView::Procedures)),
+    ("all_procedures", all(DictionaryView::Procedures)),
+    ("dba_procedures", dba(DictionaryView::Procedures)),
+    ("user_arguments", user(DictionaryView::Arguments)),
+    ("all_arguments", all(DictionaryView::Arguments)),
+    ("dba_arguments", dba(DictionaryView::Arguments)),
+    ("user_triggers", user(DictionaryView::Triggers)),
+    ("all_triggers", all(DictionaryView::Triggers)),
+    ("dba_triggers", dba(DictionaryView::Triggers)),
+    ("user_errors", user(DictionaryView::Errors)),
+    ("all_errors", all(DictionaryView::Errors)),
+    ("dba_errors", dba(DictionaryView::Errors)),
     ("tabs", user(DictionaryView::Tables)),
     ("cols", user(DictionaryView::TabColumns)),
     ("ind", user(DictionaryView::Indexes)),
@@ -190,6 +213,11 @@ fn dictionary_columns(scope: DictionaryScope, view: DictionaryView) -> &'static 
         DictionaryView::TabIdentityCols => without_owner(TAB_IDENTITY_COLS_COLUMNS),
         DictionaryView::Users if scope == DictionaryScope::All => ALL_USERS_COLUMNS,
         DictionaryView::Users => ACCOUNT_COLUMNS,
+        DictionaryView::Source => without_owner(SOURCE_COLUMNS),
+        DictionaryView::Procedures => without_owner(PROCEDURES_COLUMNS),
+        DictionaryView::Arguments => without_owner(ARGUMENTS_COLUMNS),
+        DictionaryView::Triggers => without_owner(TRIGGERS_COLUMNS),
+        DictionaryView::Errors => without_owner(ERRORS_COLUMNS),
     }
 }
 
@@ -431,6 +459,105 @@ static ACCOUNT_COLUMNS: &[CatalogColumn] = &[
     column("created", DATE),
     column("common", VARCHAR2),
     column("oracle_maintained", VARCHAR2),
+];
+
+static SOURCE_COLUMNS: &[CatalogColumn] = &[
+    column("owner", VARCHAR2),
+    column("name", VARCHAR2),
+    column("type", VARCHAR2),
+    column("line", NUMBER),
+    column("text", VARCHAR2),
+    column("origin_con_id", NUMBER),
+];
+
+static PROCEDURES_COLUMNS: &[CatalogColumn] = &[
+    column("owner", VARCHAR2),
+    column("object_name", VARCHAR2),
+    column("procedure_name", VARCHAR2),
+    column("object_id", NUMBER),
+    column("subprogram_id", NUMBER),
+    column("overload", VARCHAR2),
+    column("object_type", VARCHAR2),
+    column("aggregate", VARCHAR2),
+    column("pipelined", VARCHAR2),
+    column("impltypeowner", VARCHAR2),
+    column("impltypename", VARCHAR2),
+    column("parallel", VARCHAR2),
+    column("interface", VARCHAR2),
+    column("deterministic", VARCHAR2),
+    column("authid", VARCHAR2),
+    column("result_cache", VARCHAR2),
+    column("origin_con_id", NUMBER),
+    column("polymorphic", VARCHAR2),
+];
+
+static ARGUMENTS_COLUMNS: &[CatalogColumn] = &[
+    column("owner", VARCHAR2),
+    column("object_name", VARCHAR2),
+    column("package_name", VARCHAR2),
+    column("object_id", NUMBER),
+    column("overload", VARCHAR2),
+    column("subprogram_id", NUMBER),
+    column("argument_name", VARCHAR2),
+    column("position", NUMBER),
+    column("sequence", NUMBER),
+    column("data_level", NUMBER),
+    column("data_type", VARCHAR2),
+    column("defaulted", VARCHAR2),
+    column("default_value", VARCHAR2),
+    column("default_length", NUMBER),
+    column("in_out", VARCHAR2),
+    column("data_length", NUMBER),
+    column("data_precision", NUMBER),
+    column("data_scale", NUMBER),
+    column("radix", NUMBER),
+    column("character_set_name", VARCHAR2),
+    column("type_owner", VARCHAR2),
+    column("type_name", VARCHAR2),
+    column("type_subname", VARCHAR2),
+    column("type_link", VARCHAR2),
+    column("type_object_type", VARCHAR2),
+    column("pls_type", VARCHAR2),
+    column("char_length", NUMBER),
+    column("char_used", VARCHAR2),
+    column("origin_con_id", NUMBER),
+];
+
+static TRIGGERS_COLUMNS: &[CatalogColumn] = &[
+    column("owner", VARCHAR2),
+    column("trigger_name", VARCHAR2),
+    column("trigger_type", VARCHAR2),
+    column("triggering_event", VARCHAR2),
+    column("table_owner", VARCHAR2),
+    column("base_object_type", VARCHAR2),
+    column("table_name", VARCHAR2),
+    column("column_name", VARCHAR2),
+    column("referencing_names", VARCHAR2),
+    column("when_clause", VARCHAR2),
+    column("status", VARCHAR2),
+    column("description", VARCHAR2),
+    column("action_type", VARCHAR2),
+    column("trigger_body", VARCHAR2),
+    column("crossedition", VARCHAR2),
+    column("before_statement", VARCHAR2),
+    column("before_row", VARCHAR2),
+    column("after_row", VARCHAR2),
+    column("after_statement", VARCHAR2),
+    column("instead_of_row", VARCHAR2),
+    column("fire_once", VARCHAR2),
+    column("apply_server_only", VARCHAR2),
+];
+
+static ERRORS_COLUMNS: &[CatalogColumn] = &[
+    column("owner", VARCHAR2),
+    column("name", VARCHAR2),
+    column("type", VARCHAR2),
+    column("sequence", NUMBER),
+    column("line", NUMBER),
+    column("position", NUMBER),
+    column("text", VARCHAR2),
+    column("attribute", VARCHAR2),
+    column("message_number", NUMBER),
 ];
 
 static VERSION_COLUMNS: &[CatalogColumn] = &[
@@ -792,6 +919,11 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: OracleRelation) -> Vec<
             DictionaryView::ColComments => column_comment_rows(&dictionary),
             DictionaryView::TabIdentityCols => identity_column_rows(&dictionary),
             DictionaryView::Users => user_rows(&dictionary),
+            DictionaryView::Source => plsql::source_rows(&dictionary),
+            DictionaryView::Procedures => plsql::procedure_rows(&dictionary),
+            DictionaryView::Arguments => plsql::argument_rows(&dictionary),
+            DictionaryView::Triggers => plsql::trigger_rows(&dictionary),
+            DictionaryView::Errors => Vec::new(),
         },
     }
 }
@@ -1165,7 +1297,12 @@ fn object_row(
     kind: &str,
     stored: bool,
 ) -> Vec<Value> {
-    let namespace = if kind == "INDEX" { 4 } else { 1 };
+    let namespace = match kind {
+        plsql::PACKAGE_BODY => 2,
+        plsql::TRIGGER => 3,
+        "INDEX" => 4,
+        _ => 1,
+    };
     dictionary
         .row()
         .set("owner", dictionary.owner(schema))
@@ -1226,6 +1363,7 @@ fn object_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
             ));
         }
     }
+    plsql::code_object_rows(dictionary, &mut rows);
     rows
 }
 

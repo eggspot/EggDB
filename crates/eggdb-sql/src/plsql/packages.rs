@@ -1,7 +1,7 @@
 use super::{PlsqlPackage, compilation_error, compile_package, name_in_use, object_missing};
 use crate::ast::{AlterPackage, CreatePackage, DropPackage, Name, PackagePart, Statement};
 use crate::dialect::Dialect;
-use crate::encoding::{decode_package, encode_package, package_key};
+use crate::encoding::{decode_package, encode_package, package_key, packages_prefix, prefix_end};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
 use crate::lexer::tokenize_in;
@@ -9,7 +9,7 @@ use crate::parser::Parser;
 use crate::routines::MAX_ROUTINE_TEXT;
 use crate::schemas::{base_name, is_qualified, normalized, qualified};
 use crate::session::QueryResult;
-use crate::store::{KeyValueRead, KeyValueWrite};
+use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredPackage {
@@ -24,6 +24,36 @@ pub(crate) fn stored_package(
     match reader.get(&package_key(name))? {
         Some(bytes) => decode_package(name, &bytes).map(Some),
         None => Ok(None),
+    }
+}
+
+pub(crate) fn every_package(reader: &dyn KeyValueRead) -> SqlResult<Vec<(String, StoredPackage)>> {
+    let prefix = packages_prefix();
+    let mut found = Vec::new();
+    let mut failure = None;
+    let mut memory = crate::memory::WorkMemory::new();
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            memory.charge(key.len() + value.len() + 64)?;
+            let decoded = std::str::from_utf8(&key[prefix.len()..])
+                .map_err(|_| crate::encoding::corrupt("package definitions"))
+                .and_then(|name| Ok((name.to_owned(), decode_package(name, value)?)));
+            match decoded {
+                Ok(package) => found.push(package),
+                Err(error) => {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+    )?;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(found),
     }
 }
 

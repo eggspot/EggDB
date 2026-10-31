@@ -33,8 +33,8 @@ pub(crate) use exceptions::{
     predefined_by_code, predefined_by_name, sqlcode_of, sqlerrm_of,
 };
 pub(crate) use packages::{
-    StoredPackage, alter_package, create_package, drop_package, parse_package, resolve_package,
-    stored_package,
+    StoredPackage, alter_package, create_package, drop_package, every_package, parse_package,
+    resolve_package, stored_package,
 };
 pub use session_state::ServerOutputReader;
 pub(crate) use session_state::{
@@ -58,6 +58,7 @@ pub(crate) const ANONYMOUS_BLOCK_NAME: &str = "anonymous block";
 pub(crate) const REF_CURSOR_TYPE: &str = "sys_refcursor";
 const MAX_PACKAGE_CANDIDATES: usize = 256;
 const NOT_PACKAGES: [&str; 3] = ["dbms_output", "standard", "sys"];
+const CREATE_PREFIX: [&str; 5] = ["create", "or", "replace", "editionable", "noneditionable"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DeclaredType {
@@ -234,6 +235,21 @@ pub(crate) fn compile_trigger(body: &str, records: &TriggerRecords) -> SqlResult
         .map_err(|error| compilation_error(body, error))?;
     program.package_candidates = package_candidates(&tokens);
     Ok(program)
+}
+
+pub(crate) fn unit_source(create_text: &str) -> &str {
+    tokenize_in(create_text, Dialect::Oracle)
+        .ok()
+        .and_then(|tokens| {
+            tokens
+                .iter()
+                .find(|token| {
+                    !matches!(&token.kind, TokenKind::Word(word) if CREATE_PREFIX.contains(&&**word))
+                })
+                .map(|token| token.start)
+        })
+        .and_then(|start| create_text.get(start..))
+        .unwrap_or(create_text)
 }
 
 pub(crate) fn package_candidates(tokens: &[Token<'_>]) -> Vec<String> {
