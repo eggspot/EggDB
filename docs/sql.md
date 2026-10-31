@@ -2396,6 +2396,24 @@ CREATE EXTENSION eggdb_console;
 SELECT eggdb_console.er_diagram('public', 'mermaid');
 ```
 
+## Reports and alerts (eggdb_bi)
+
+`CREATE EXTENSION eggdb_bi` sends query results to webhooks on a schedule (D238):
+
+```sql
+CREATE EXTENSION eggdb_bi;
+CREATE EXTENSION pg_cron;
+INSERT INTO eggdb_bi.reports (name, query, target, only_when_rows)
+VALUES ('low-stock', 'SELECT item, quantity FROM stock WHERE quantity < 5', 'http://hooks.internal/stock', true);
+SELECT cron.schedule('low-stock', '*/5 * * * *', $$SELECT eggdb_bi.run_report('low-stock')$$);
+```
+
+`run_report` queues `{"report", "rows", "count", "text"}` for the target; with `only_when_rows` it
+queues nothing when the query finds no rows, which makes the report an alert. `eggdb serve` posts
+the queue at least once, oldest first, to `http://` targets whose prefix is listed in
+`EGGDB_REPORT_TARGETS` (comma-separated). It sends nothing when that is unset, and drops a
+message whose target is not allowed.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form

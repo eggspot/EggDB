@@ -201,7 +201,8 @@ From the second gap review (D37–D45):
 
 More tracks (D46), and any further missing capability is added here without asking the owner:
 - **Business intelligence:** our own dashboards, reports, semantic layer, scheduling, sharing and
-  embedding.
+  embedding. Started: scheduled reports and alerts to webhooks through `eggdb_bi`
+  (D238).
 - **ETL and ELT pipelines:** our own connectors, transformations, orchestration and change data
   capture.
 - **Big-data compatibility:** a Spark connector, an Iceberg REST catalog, federated SQL and Kafka

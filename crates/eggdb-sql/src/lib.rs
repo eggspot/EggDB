@@ -51,6 +51,7 @@ mod information_schema;
 mod interval;
 mod join;
 pub mod jobs;
+pub mod reports;
 pub mod json;
 mod json_functions;
 mod lexer;

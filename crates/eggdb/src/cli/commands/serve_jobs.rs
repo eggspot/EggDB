@@ -53,3 +53,27 @@ pub(super) fn deliver_changes_to_queue(
         let _ = eggdb_sql::cdc::deliver_changes(store, database, EVENTS_PER_ROUND, &mut |event| queues.send(queue, event.as_bytes(), 0, now).is_ok());
     }
 }
+
+const REPORT_TARGETS: &str = "EGGDB_REPORT_TARGETS";
+
+pub(super) fn deliver_reports(store: &impl eggdb_sql::KeyValueStore, stop: &(dyn Fn() -> bool + Sync)) {
+    let Ok(allowed) = std::env::var(REPORT_TARGETS) else {
+        return;
+    };
+    let prefixes: Vec<String> = allowed.split(',').map(str::trim).filter(|prefix| !prefix.is_empty()).map(str::to_owned).collect();
+    if prefixes.is_empty() {
+        return;
+    }
+    while !stop() {
+        std::thread::sleep(DELIVER_EVERY);
+        let _ = eggdb_sql::reports::deliver_reports(store, EVENTS_PER_ROUND, &mut |target, body| {
+            if !prefixes.iter().any(|prefix| target.starts_with(prefix.as_str())) {
+                return true;
+            }
+            let Ok(url) = eggdb_http::parse_http_url(target) else {
+                return true;
+            };
+            eggdb_http::post(&url, "application/json", body.as_bytes(), WEBHOOK_TIMEOUT).is_ok_and(|status| (200..300).contains(&status))
+        });
+    }
+}

@@ -601,6 +601,7 @@ impl Session<'_> {
                 None => Ok(()),
             });
             let job_scheduler = scope.spawn(|| super::serve_jobs::run_scheduled_jobs(&store, &stop_signals::requested));
+            let report_delivery = scope.spawn(|| super::serve_jobs::deliver_reports(&store, &stop_signals::requested));
             let cdc_delivery = scope.spawn(|| match &options.cdc_webhook {
                 Some(url) => super::serve_jobs::deliver_changes(&store, &config.database, url, &stop_signals::requested),
                 None => {}
@@ -815,6 +816,7 @@ impl Session<'_> {
             let _ = sqs_server.join();
             let _ = s3_server.join();
             let _ = job_scheduler.join();
+            let _ = report_delivery.join();
             let _ = cdc_delivery.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
