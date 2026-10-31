@@ -21,7 +21,7 @@ if (-not $version) {
 }
 $version = $version.TrimStart('v')
 
-$package = "eggdb-$version-$arch-pc-windows-msvc"
+$package = "eggdb-v$version-$arch-pc-windows-msvc"
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("eggdb-install-" + [System.Guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 try {

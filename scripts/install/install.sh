@@ -60,7 +60,7 @@ if [ -z "$version" ]; then
 fi
 version="${version#v}"
 
-package="eggdb-$version-$(target)"
+package="eggdb-v$version-$(target)"
 fetch "$base/v$version/$package.tar.gz" "$work/$package.tar.gz"
 fetch "$base/v$version/SHA256SUMS" "$work/SHA256SUMS"
 expected=$(grep " $package.tar.gz\$" "$work/SHA256SUMS" | cut -d ' ' -f 1)

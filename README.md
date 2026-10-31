@@ -51,6 +51,21 @@ what is tested and what is not: [docs/correctness.md](docs/correctness.md); the 
 
 ### Install: download one file
 
+One line installs the latest release, after checking it against the release's `SHA256SUMS`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/eggspot/EggDB/main/scripts/install/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/eggspot/EggDB/main/scripts/install/install.ps1 | iex
+```
+
+The first puts `eggdb` in `~/.local/bin` (the static musl build on Linux, and macOS), the second
+in `%LOCALAPPDATA%\EggDB\bin`, added to your PATH. `EGGDB_VERSION` picks a release and
+`EGGDB_INSTALL_DIR` another folder. CI runs both on Linux, macOS and Windows against the latest
+release and times the download, the install and the first start.
+
 Each release on the [releases page](https://github.com/eggspot/EggDB/releases) has one archive
 per platform holding the `eggdb` binary, which needs nothing else (the Linux `musl` builds are
 static and run on any distribution). On Linux on x86-64:
