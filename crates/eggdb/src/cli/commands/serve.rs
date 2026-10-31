@@ -200,6 +200,26 @@ impl Session<'_> {
             }
             None => None,
         };
+        let kafka_listener = match options.kafka_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--kafka-listen {address}: the Kafka listener has no authentication or TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for Kafka clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let kafka_config = eggdb_kafka::ServerConfig {
+            advertised: kafka_listener.as_ref().and_then(|listener| listener.local_addr().ok()).unwrap_or(address),
+            max_connections: config.max_connections,
+        };
         let bolt_config = eggdb_bolt::ServerConfig {
             user: config.user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
@@ -445,6 +465,14 @@ impl Session<'_> {
                 db: &db,
                 prefix: super::serve_resp::GRAPH_COLLECTIONS,
             };
+            let kafka_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::KAFKA_COLLECTIONS,
+            };
+            let kafka_server = scope.spawn(|| match &kafka_listener {
+                Some(listener) => eggdb_kafka::serve(&kafka_database, listener, &kafka_config, &stop_signals::requested),
+                None => Ok(()),
+            });
             let bolt_server = scope.spawn(|| match &bolt_listener {
                 Some(listener) => eggdb_bolt::serve(&graph_database, listener, &bolt_config, &stop_signals::requested),
                 None => Ok(()),
@@ -514,6 +542,7 @@ impl Session<'_> {
             let _ = es_server.join();
             let _ = mongo_server.join();
             let _ = bolt_server.join();
+            let _ = kafka_server.join();
             let _ = job_scheduler.join();
             let _ = cdc_delivery.join();
             postgresql

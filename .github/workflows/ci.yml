@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo and the neo4j driver (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver and confluent-kafka (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -306,6 +306,24 @@ jobs:
               assert session.run("MATCH (p:Person) RETURN count(p) AS people").single()["people"] == 2
           driver.close()
           print("neo4j driver over Bolt: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from confluent_kafka import Consumer, Producer, TopicPartition, OFFSET_BEGINNING
+          producer = Producer({"bootstrap.servers": "127.0.0.1:9093", "api.version.request": True})
+          for n in range(5):
+              producer.produce("events", value=f"event {n}".encode())
+          assert producer.flush(10) == 0
+          consumer = Consumer({"bootstrap.servers": "127.0.0.1:9093", "group.id": "ci", "enable.auto.commit": False})
+          consumer.assign([TopicPartition("events", 0, OFFSET_BEGINNING)])
+          values = []
+          while len(values) < 5:
+              message = consumer.poll(10)
+              assert message is not None, values
+              assert message.error() is None, message.error()
+              values.append(message.value().decode())
+          assert values == [f"event {n}" for n in range(5)], values
+          consumer.close()
+          print("confluent-kafka: passed")
           PY
 
   redis-compare:

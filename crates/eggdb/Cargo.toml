@@ -26,6 +26,7 @@ eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-memcached = { path = "../eggdb-memcached" }
 eggdb-esrest = { path = "../eggdb-esrest" }
+eggdb-kafka = { path = "../eggdb-kafka" }
 eggdb-documents = { path = "../eggdb-documents" }
 eggdb-mongowire = { path = "../eggdb-mongowire" }
 eggdb-parquet = { path = "../eggdb-parquet" }
