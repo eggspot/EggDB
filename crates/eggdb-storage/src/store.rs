@@ -4,6 +4,7 @@ use crate::error::StorageError;
 use crate::format::{Features, NO_PAGE, PageSize, Superblock};
 use crate::hybrid_clock::{CommitStamp, HybridClock};
 use crate::log::{Durability, LogStats};
+use crate::lsm::{LsmCursor, LsmReport, LsmTree};
 use crate::overflow::{ChainReader, ChainWriter};
 use crate::page_cache::{CacheSize, CacheStats, PageCache, PageSource, Snapshot};
 use crate::page_set::PageSet;
@@ -280,6 +281,55 @@ impl<'s, F: File> ReadTransaction<'s, F> {
         BTree::open_in(&snapshot, root)
     }
 
+    /// Opens the LSM tree whose manifest's root is page `root` as of the snapshot.
+    pub fn open_lsm_tree(&self, root: u64) -> Result<LsmTree, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        LsmTree::open_in(&snapshot, root)
+    }
+
+    /// The value stored under `key` in the LSM tree as of the snapshot, or `None`.
+    pub fn lsm_get(&self, tree: &LsmTree, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        tree.get_in(&snapshot, key)
+    }
+
+    /// A cursor over the LSM tree's live entries as of the snapshot (see [`LsmTree::scan_in`]).
+    pub fn lsm_scan(
+        &self,
+        tree: &LsmTree,
+        start: std::ops::Bound<&[u8]>,
+        end: std::ops::Bound<&[u8]>,
+        order: crate::cursor::ScanOrder,
+    ) -> Result<LsmCursor, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        tree.scan_in(&snapshot, start, end, order)
+    }
+
+    /// The next live entry of an LSM cursor, as of the snapshot.
+    pub fn lsm_next<'c>(
+        &self,
+        cursor: &'c mut LsmCursor,
+    ) -> Result<Option<(&'c [u8], &'c [u8])>, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        cursor.next_in(&snapshot)
+    }
+
     /// A reader of the value stored under `key` in `tree` as of the snapshot, or `None`. A
     /// value on overflow pages is read a page at a time as the reader is read, so a large value
     /// is never held whole in memory; the store is taken for each read only.
@@ -437,6 +487,72 @@ impl<'s, F: File> WriteTransaction<'s, F> {
         self.check_open()?;
         let state = self.store.lock()?;
         BTree::open(&state.cache, root)
+    }
+
+    /// Creates an empty LSM tree (see [`LsmTree::create`]).
+    pub fn create_lsm_tree(&mut self) -> Result<LsmTree, StorageError> {
+        self.change(|cache| LsmTree::create(cache))
+    }
+
+    /// Opens the LSM tree whose manifest's root is page `root`, this transaction's changes
+    /// included.
+    pub fn open_lsm_tree(&self, root: u64) -> Result<LsmTree, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        LsmTree::open(&state.cache, root)
+    }
+
+    /// The value stored under `key` in the LSM tree, this transaction's changes included.
+    pub fn lsm_get(&self, tree: &LsmTree, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        tree.get(&state.cache, key)
+    }
+
+    /// Stores `value` under `key` in the LSM tree (see [`LsmTree::put`]). An error other than
+    /// a refused key or value rolls the transaction back.
+    pub fn lsm_put(&mut self, tree: &LsmTree, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.change(|cache| tree.put(cache, key, value))
+    }
+
+    /// Removes `key` from the LSM tree and returns whether it held a value.
+    pub fn lsm_delete(&mut self, tree: &LsmTree, key: &[u8]) -> Result<bool, StorageError> {
+        self.change(|cache| tree.delete(cache, key))
+    }
+
+    /// Finishes the LSM tree's merge in this transaction (see [`LsmTree::finish_merges`]).
+    pub fn lsm_finish_merges(&mut self, tree: &LsmTree) -> Result<(), StorageError> {
+        self.change(|cache| tree.finish_merges(cache))
+    }
+
+    /// A cursor over the LSM tree's live entries, this transaction's changes included.
+    pub fn lsm_scan(
+        &self,
+        tree: &LsmTree,
+        start: std::ops::Bound<&[u8]>,
+        end: std::ops::Bound<&[u8]>,
+        order: crate::cursor::ScanOrder,
+    ) -> Result<LsmCursor, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        tree.scan(&state.cache, start, end, order)
+    }
+
+    /// The next live entry of an LSM cursor, this transaction's changes included.
+    pub fn lsm_next<'c>(
+        &self,
+        cursor: &'c mut LsmCursor,
+    ) -> Result<Option<(&'c [u8], &'c [u8])>, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        cursor.next(&state.cache)
+    }
+
+    /// Checks the LSM tree (see [`LsmTree::check`]).
+    pub fn lsm_check(&self, tree: &LsmTree) -> Result<LsmReport, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        tree.check(&state.cache)
     }
 
     /// A reader of the value stored under `key` in `tree`, this transaction's changes

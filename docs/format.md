@@ -416,6 +416,13 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   of the one tree a file holds.
 - **Key scheme 0**, the only scheme in v0.2.0, is the raw key compared as unsigned bytes. The
   empty key is a valid key, and the smallest.
+- **LSM trees (D170)** are made of B+trees of the same file, so they add no page type. A
+  manifest tree names the others: key `d` the delta, keys `r` and a 4-byte big-endian run
+  number the runs (a larger number is newer), `n` the next run number (4 bytes, little-endian),
+  and `m`, while one is under way, a merge: its target's root and entry count, a resume key (a
+  byte `0`, or `1`, a 4-byte length and the key) and the run numbers it merges. A component
+  entry is its root page and its entry count, 8 bytes each, little-endian. Each value in a
+  component starts with a tag byte: `1` and the value, or `0` alone for a deleted key.
 - **Tenant and shard prefixes (D20):** a later scheme encodes `(tenant, shard, key)` into the
   same byte string, preserving order, and sets an incompatible feature bit.
 - **Prefix truncation:** B+tree pages keep low and high fence keys and store the prefix those

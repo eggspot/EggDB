@@ -36,6 +36,7 @@ mod footprint;
 mod harness;
 mod large_value;
 mod log;
+mod lsm;
 mod mcp;
 mod measure;
 mod net;
@@ -54,7 +55,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 33] = [
+const COUNTED: [(&str, Counted); 34] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -88,6 +89,7 @@ const COUNTED: [(&str, Counted); 33] = [
     (tls::HANDSHAKE, tls::handshake),
     (net::ROUND_TRIP, net::round_trip),
     (egg_allocator::SMALL_BLOCKS, egg_allocator::small_blocks),
+    (lsm::RANDOM_PUT, lsm::random_put),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 3] = [

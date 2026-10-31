@@ -34,6 +34,15 @@ impl PageSet {
         Ok(!was_present)
     }
 
+    pub(crate) fn pages(&self) -> impl Iterator<Item = u64> + '_ {
+        self.words.iter().enumerate().flat_map(|(index, &word)| {
+            let base = index as u64 * BITS_PER_WORD;
+            (0..BITS_PER_WORD)
+                .filter(move |bit| word & (1 << bit) != 0)
+                .map(move |bit| base + bit)
+        })
+    }
+
     pub(crate) fn contains(&self, page: u64) -> bool {
         if page >= self.page_count {
             return false;

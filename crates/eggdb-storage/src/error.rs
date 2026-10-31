@@ -82,6 +82,11 @@ pub enum FormatError {
         /// The rule the page breaks.
         problem: &'static str,
     },
+    /// An LSM tree's manifest, or one of its entries, breaks its rules.
+    CorruptLsm {
+        /// What is wrong.
+        problem: &'static str,
+    },
     /// A page of a large value's chain of overflow pages breaks the chain's rules: it is of
     /// another type, belongs to another value or another place in the chain, ends the chain too
     /// early or too late, or is reached twice.
@@ -152,6 +157,10 @@ impl fmt::Display for FormatError {
             Self::CorruptTree { page, problem } => write!(
                 f,
                 "the B+tree page {page} is damaged: {problem}; restore from a backup or run `eggdb check`"
+            ),
+            Self::CorruptLsm { problem } => write!(
+                f,
+                "an LSM tree is damaged: {problem}; restore from a backup or run `eggdb check`"
             ),
             Self::CorruptOverflow { page, problem } => write!(
                 f,

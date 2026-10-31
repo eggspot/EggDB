@@ -47,6 +47,9 @@ mod format;
 mod frames;
 mod hybrid_clock;
 mod log;
+mod lsm;
+#[cfg(test)]
+mod lsm_tests;
 #[cfg(test)]
 mod model_tests;
 mod overflow;
@@ -81,6 +84,7 @@ pub use format::{
 };
 pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};
+pub use lsm::{LsmCursor, LsmReport, LsmTree};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};
 pub use snapshot_copy::{CopyDestination, CopyFailure, CopyReport};
