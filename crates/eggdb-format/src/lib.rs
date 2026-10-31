@@ -1,7 +1,7 @@
 //! EggDB's file format building blocks (D20, D223), as `docs/format.md` specifies them, in a crate
 //! that builds without the standard library (`default-features = false`, needing only `alloc`)
 //! so a microcontroller reads and writes the same format as a server:
-//! - [`crc32c`], the checksum of every page and log record;
+//! - [`crc32c()`], the checksum of every page and log record;
 //! - the [`Superblock`] kept in two alternating header slots at the start of the file, and the
 //!   [`Features`] flags that decide whether a release may open a file for an [`Access`];
 //! - the [`PageHeader`] at the start of every other page, written and verified through

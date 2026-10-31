@@ -36,18 +36,18 @@ fn a_program_written_for_sqlite_runs_its_statements_on_eggdb() {
     for (index, person) in ["Ada", "Grace"].iter().enumerate() {
         let person = CString::new(*person).unwrap();
         let photo = [index as u8, 0xff];
-        // SAFETY: a live statement and NUL-terminated text.
         assert_eq!(
+            // SAFETY: a live statement and NUL-terminated text.
             unsafe { sqlite3_bind_text(statement, 1, person.as_ptr(), -1, None) },
             SQLITE_OK
         );
-        // SAFETY: a live statement.
         assert_eq!(
+            // SAFETY: a live statement.
             unsafe { sqlite3_bind_double(statement, 2, 1.5 + index as f64) },
             SQLITE_OK
         );
-        // SAFETY: a live statement and two readable bytes.
         assert_eq!(
+            // SAFETY: a live statement and two readable bytes.
             unsafe { sqlite3_bind_blob(statement, 3, photo.as_ptr().cast(), 2, None) },
             SQLITE_OK
         );
@@ -71,8 +71,8 @@ fn a_program_written_for_sqlite_runs_its_statements_on_eggdb() {
     let prepared =
         unsafe { sqlite3_prepare_v2(db, select.as_ptr(), -1, &mut statement, &mut tail) };
     assert_eq!(prepared, SQLITE_OK);
-    // SAFETY: the tail points into the given NUL-terminated text.
     assert_eq!(
+        // SAFETY: the tail points into the given NUL-terminated text.
         unsafe { CStr::from_ptr(tail) }.to_str().unwrap().trim(),
         "SELECT 1"
     );
@@ -109,8 +109,8 @@ fn a_program_written_for_sqlite_runs_its_statements_on_eggdb() {
     // SAFETY: a live connection and memory for the message pointer.
     let failed = unsafe { sqlite3_exec(db, wrong.as_ptr(), None, ptr::null_mut(), &mut message) };
     assert_eq!(failed, SQLITE_ERROR);
-    // SAFETY: the message is NUL-terminated and lives until it is freed below.
     assert!(
+        // SAFETY: the message is NUL-terminated and lives until it is freed below.
         unsafe { CStr::from_ptr(message) }
             .to_string_lossy()
             .contains("nowhere")
@@ -119,8 +119,8 @@ fn a_program_written_for_sqlite_runs_its_statements_on_eggdb() {
     unsafe { sqlite3_free(message.cast::<c_void>()) };
     // SAFETY: a live connection.
     let error = unsafe { sqlite3_errmsg(db) };
-    // SAFETY: the connection's message is NUL-terminated and lives while the connection does.
     assert!(
+        // SAFETY: the connection's message is NUL-terminated and lives while the connection does.
         unsafe { CStr::from_ptr(error) }
             .to_string_lossy()
             .contains("nowhere")

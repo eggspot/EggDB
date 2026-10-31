@@ -307,7 +307,8 @@ impl<'s, F: File> ReadTransaction<'s, F> {
         tree.get_in(&snapshot, key)
     }
 
-    /// A cursor over the LSM tree's live entries as of the snapshot (see [`LsmTree::scan_in`]).
+    /// A cursor over the LSM tree's live entries as of the snapshot, holding no page between
+    /// calls.
     pub fn lsm_scan(
         &self,
         tree: &LsmTree,

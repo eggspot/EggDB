@@ -1,7 +1,7 @@
 //! Parquet files for EggDB (D202), written from the public Apache Parquet format
 //! specification and Apache Thrift's compact protocol: [`read`] turns a flat file (any number
 //! of row groups; plain and dictionary pages, versions 1 and 2; uncompressed or Snappy) into
-//! columns of [`Cell`]s, and [`write`] writes columns as an uncompressed file other tools read.
+//! columns of [`Cell`]s, and [`write()`] writes columns as an uncompressed file other tools read.
 //! Damaged or hostile files are errors, never panics.
 
 mod read;

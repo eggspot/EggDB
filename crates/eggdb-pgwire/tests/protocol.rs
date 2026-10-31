@@ -369,8 +369,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA shop GRANT SELECT ON TABLES
     );
     assert_eq!(client.query("DROP SCHEMA shop")[0].code(), "2BP01");
     assert_eq!(
-        client.query("CREATE MATERIALIZED VIEW m AS SELECT 1")[0].code(),
-        "0A000"
+        client.query("CREATE MATERIALIZED VIEW m AS SELECT 1")[0].text(),
+        "CREATE MATERIALIZED VIEW"
     );
 }
 

@@ -878,14 +878,14 @@ fn misuse_is_refused_with_a_status_not_a_crash() {
     let db = open_at(&file.path);
     let txn = begin_write(db);
     let mut db_out = ptr::null_mut();
-    // SAFETY: NULL is refused before anything is read.
     assert_eq!(
+        // SAFETY: NULL is refused before anything is read.
         unsafe { eggdb_open(ptr::null(), ptr::null(), &mut db_out) },
         EGGDB_ERR_INVALID_ARGUMENT
     );
     let path = file.c_path();
-    // SAFETY: a NULL place for the handle is refused before the file is opened.
     assert_eq!(
+        // SAFETY: a NULL place for the handle is refused before the file is opened.
         unsafe { eggdb_open(path.as_ptr(), ptr::null(), ptr::null_mut()) },
         EGGDB_ERR_INVALID_ARGUMENT
     );
@@ -911,14 +911,14 @@ fn misuse_is_refused_with_a_status_not_a_crash() {
     assert!(scan.is_null());
     let unknown = c_text("cobol");
     let mut sql = ptr::null_mut();
-    // SAFETY: a live database handle, a dialect name and a place for the session.
     assert_eq!(
+        // SAFETY: a live database handle, a dialect name and a place for the session.
         unsafe { eggdb_sql_open(db, unknown.as_ptr(), &mut sql) },
         EGGDB_ERR_INVALID_ARGUMENT
     );
     assert!(sql.is_null());
-    // SAFETY: NULL is refused.
     assert_eq!(
+        // SAFETY: NULL is refused.
         unsafe { eggdb_commit(ptr::null_mut(), ptr::null_mut()) },
         EGGDB_ERR_INVALID_ARGUMENT
     );

@@ -525,8 +525,8 @@ impl LsmTree {
         })
     }
 
-    /// A cursor over the live entries with keys from `start` to `end` (see
-    /// [`LsmTree::scan_in`]).
+    /// A cursor over the live entries with keys from `start` to `end`, in key order. Like
+    /// [`BTree::scan`], it holds no page between calls.
     pub fn scan<F: File>(
         &self,
         cache: &PageCache<F>,

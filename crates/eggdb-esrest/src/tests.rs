@@ -166,7 +166,7 @@ fn a_document_without_an_id_gets_one() {
 }
 
 #[test]
-fn a_match_query_ranks_by_relevance_with_stemming() {
+fn a_match_query_ranks_by_relevance_with_english_stemming() {
     let keyspace = MemoryKeyspace::default();
     let api = seeded(&keyspace);
     let response = api.answer(&request(
@@ -289,7 +289,8 @@ fn hostile_bodies_return_errors() {
             let response = api.answer(&request("POST", path, text));
             assert!(
                 response.status >= 400
-                    || (path == "/books/_search" && text.starts_with("{\"index")),
+                    || (matches!(path, "/books/_search" | "/books/_doc/1")
+                        && text.starts_with("{\"index")),
                 "{path} {text:?} {}",
                 body(&response)
             );

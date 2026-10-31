@@ -82,8 +82,8 @@ fn a_session_on_a_server_runs_statements_with_typed_values() {
     ))
     .unwrap();
     let mut sql: *mut EggdbSql = ptr::null_mut();
-    // SAFETY: a URL and a place for the handle.
     assert_eq!(
+        // SAFETY: a URL and a place for the handle.
         unsafe { eggdb_sql_connect(url.as_ptr(), &mut sql) },
         EGGDB_OK
     );
