@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-crypto"
-description = "EggDB's cryptography, written from the public standards: SHA-256, SHA-1, HMAC-SHA-256, PBKDF2-HMAC-SHA-256, Base64 and constant-time comparison (D23, D35)."
+description = "EggDB's cryptography, written from the public standards and checked against their published vectors: the SHA-2 hashes, HMAC, HKDF, PBKDF2, the ciphers, key exchanges and signatures of TLS, Base64 and constant-time comparison (D23, D35)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
