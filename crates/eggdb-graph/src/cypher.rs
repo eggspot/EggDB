@@ -238,6 +238,7 @@ pub(crate) enum Clause {
     Remove(Vec<SetItem>),
     Delete { detach: bool, targets: Vec<Expr> },
     Unwind(Expr, String),
+    Call { procedure: String, arguments: Vec<Expr>, yields: Vec<(String, String)> },
     With(Projecting),
     Return(Projecting),
 }
@@ -814,10 +815,44 @@ impl Parser<'_> {
         if self.take_keyword("return") {
             return Ok(Clause::Return(self.projecting(true)?));
         }
-        if self.is_keyword("call") || self.is_keyword("foreach") || self.is_keyword("load") || self.is_keyword("union") {
+        if self.take_keyword("call") {
+            return self.call_rest();
+        }
+        if self.is_keyword("foreach") || self.is_keyword("load") || self.is_keyword("union") {
             return Err(GraphError::not_supported(&format!("{:?}", self.peek())));
         }
         Err(self.unexpected())
+    }
+
+    fn call_rest(&mut self) -> GraphResult<Clause> {
+        let mut procedure = self.name()?;
+        while self.take_symbol(".") {
+            procedure.push('.');
+            procedure.push_str(&self.name()?);
+        }
+        self.expect_symbol("(")?;
+        let mut arguments = Vec::new();
+        if !self.take_symbol(")") {
+            loop {
+                arguments.push(self.expression()?);
+                if !self.take_symbol(",") {
+                    break;
+                }
+            }
+            self.expect_symbol(")")?;
+        }
+        let mut yields = Vec::new();
+        if self.take_keyword("yield") {
+            loop {
+                let column = self.name()?;
+                let alias = if self.take_keyword("as") { self.name()? } else { column.clone() };
+                yields.push((column, alias));
+                if !self.take_symbol(",") {
+                    break;
+                }
+            }
+        }
+        Ok(Clause::Call { procedure, arguments, yields })
     }
 
     fn match_rest(&mut self, optional: bool) -> GraphResult<Clause> {
@@ -843,7 +878,7 @@ pub(crate) fn parse(text: &str) -> GraphResult<Vec<Clause>> {
         return Err(syntax("an empty query"));
     }
     let last = clauses.last();
-    if !matches!(last, Some(Clause::Return(_))) && !clauses.iter().any(Clause::writes) {
+    if !matches!(last, Some(Clause::Return(_) | Clause::Call { .. })) && !clauses.iter().any(Clause::writes) {
         return Err(syntax("Query cannot conclude with MATCH, WITH or UNWIND (must be a RETURN clause or an update clause)"));
     }
     if clauses.iter().rev().skip(1).any(|clause| matches!(clause, Clause::Return(_))) {

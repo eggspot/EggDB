@@ -3,17 +3,19 @@
 //! which the `eggdb` binary stores in the collection `graph0`). [`run`] answers a subset of
 //! Cypher written from the openCypher specification (`MATCH`, `OPTIONAL MATCH`, `WHERE`,
 //! `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` with
-//! aggregation, `ORDER BY`, `SKIP` and `LIMIT`); a query runs in one transaction. The
-//! algorithms module offers shortest paths, connected components and PageRank. Neo4j is a
+//! aggregation, `ORDER BY`, `SKIP` and `LIMIT`, and `CALL ... YIELD` of the graph algorithms);
+//! a query runs in one transaction. The algorithms are shortest paths, connected components,
+//! PageRank, label propagation communities, triangle counts and Jaccard node similarity. Neo4j is a
 //! trademark of its owner; no Neo4j code is used or read.
 
 mod algorithms;
 mod cypher;
 mod execute;
+mod procedures;
 mod store;
 mod value;
 
-pub use algorithms::{connected_components, pagerank, shortest_path};
+pub use algorithms::{connected_components, label_propagation, node_similarity, pagerank, shortest_path, triangle_count};
 pub use execute::display;
 pub use value::{Node, Relationship, Value, equals, order};
 

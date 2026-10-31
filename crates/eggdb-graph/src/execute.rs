@@ -863,6 +863,46 @@ impl Executor<'_, '_> {
                     }
                     rows = next;
                 }
+                Clause::Call { procedure, arguments, yields } => {
+                    let mut next = Vec::new();
+                    let mut columns = Vec::new();
+                    for row in rows {
+                        let values = arguments.iter().map(|argument| self.evaluate(argument, &row)).collect::<GraphResult<Vec<_>>>()?;
+                        let (names, produced) = crate::procedures::call(&self.read(), procedure, &values)?;
+                        let picked: Vec<(usize, String)> = if yields.is_empty() {
+                            names.iter().enumerate().map(|(at, name)| (at, (*name).to_owned())).collect()
+                        } else {
+                            yields
+                                .iter()
+                                .map(|(column, alias)| {
+                                    names.iter().position(|name| name == column).map(|at| (at, alias.clone())).ok_or_else(|| {
+                                        GraphError::new("Neo.ClientError.Statement.SyntaxError", format!("{procedure} does not yield {column}"))
+                                    })
+                                })
+                                .collect::<GraphResult<_>>()?
+                        };
+                        columns = picked.iter().map(|(_, alias)| alias.clone()).collect();
+                        for record in produced {
+                            let mut extended = row.clone();
+                            for (at, alias) in &picked {
+                                bind(&mut extended, alias, record.get(*at).cloned().unwrap_or(Value::Null));
+                            }
+                            next.push(extended);
+                            if next.len() > MAX_ROWS {
+                                return Err(GraphError::new("Neo.TransientError.General.MemoryPoolOutOfMemoryError", "CALL makes too many rows"));
+                            }
+                        }
+                    }
+                    if std::ptr::eq(clause, clauses.last().unwrap_or(clause)) {
+                        result.columns = columns.clone();
+                        result.rows = next
+                            .into_iter()
+                            .map(|row| columns.iter().map(|column| lookup(&row, column).cloned().unwrap_or(Value::Null)).collect())
+                            .collect();
+                        return Ok(result);
+                    }
+                    rows = next;
+                }
                 Clause::With(projecting) => {
                     let (_, projected) = self.project(rows, projecting)?;
                     rows = match &projecting.filter {

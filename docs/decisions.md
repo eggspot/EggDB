@@ -272,3 +272,4 @@ its full title with its status.
 - [D245](decisions/D245.md) Privacy building blocks: FF1 format-preserving encryption in `eggdb-crypto` (NIST samples, D35 review) as `ff1_encrypt`/`ff1_decrypt`, `laplace_noise`, and `eggdb_privacy.k_anonymity`; sharing, clean rooms, DP budgets and blind indexes left
 - [D246](decisions/D246.md) `CREATE EXTENSION eggdb_retention`: write-once retention per table, legal holds, and erasure requests that wait for them, enforced by a trigger; engine-level WORM, row holds, residency and eDiscovery left
 - [D247](decisions/D247.md) `CREATE EXTENSION eggdb_coordination`: leases with growing fencing tokens and leader election, and OpenFeature-style flag evaluation; etcd, ZooKeeper, secrets, LDAP and SCIM left
+- [D248](decisions/D248.md) Cypher `CALL ... YIELD` runs the graph algorithms as `eggdb.` procedures, adding label propagation, triangle counts and Jaccard similarity; streaming SQL, MATCH_RECOGNIZE and more algorithms left

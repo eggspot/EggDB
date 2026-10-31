@@ -1,4 +1,4 @@
-use crate::{QueryResult, Value, connected_components, pagerank, run, shortest_path};
+use crate::{QueryResult, Value, connected_components, label_propagation, node_similarity, pagerank, run, shortest_path, triangle_count};
 use eggdb_keyspace::MemoryKeyspace;
 
 fn query(keyspace: &MemoryKeyspace, text: &str) -> QueryResult {
@@ -101,4 +101,49 @@ fn algorithms_find_paths_components_and_ranks() {
     let rank_of = |node: u64| ranks.iter().find(|(id, _)| *id == node).map(|(_, rank)| *rank).unwrap_or(0.0);
     assert!(rank_of(eggdb) > rank_of(ada));
     assert!((ranks.iter().map(|(_, rank)| rank).sum::<f64>() - 1.0).abs() < 1e-9);
+}
+
+fn two_triangles() -> MemoryKeyspace {
+    let keyspace = MemoryKeyspace::default();
+    query(
+        &keyspace,
+        "CREATE (a:N {name: 'a'}), (b:N {name: 'b'}), (c:N {name: 'c'}), (d:N {name: 'd'}), (e:N {name: 'e'}), (f:N {name: 'f'})
+         CREATE (a)-[:L]->(b), (b)-[:L]->(c), (c)-[:L]->(a), (d)-[:L]->(e), (e)-[:L]->(f), (f)-[:L]->(d), (c)-[:L]->(d)",
+    );
+    keyspace
+}
+
+#[test]
+fn communities_triangles_and_similarity_follow_the_structure() {
+    let keyspace = two_triangles();
+    let communities = label_propagation(&keyspace, 10).unwrap();
+    let names = query(&keyspace, "MATCH (n:N) RETURN id(n), n.name ORDER BY n.name");
+    let id_of = |name: &str| names.rows.iter().find(|row| row[1] == text(name)).and_then(|row| match row[0] { Value::Integer(id) => Some(id as u64), _ => None }).unwrap();
+    let community = |name: &str| communities.iter().find(|(node, _)| *node == id_of(name)).map(|(_, label)| *label);
+    assert_eq!(community("a"), community("b"));
+    assert_eq!(community("e"), community("f"));
+    assert_ne!(community("a"), community("f"));
+    let triangles = triangle_count(&keyspace).unwrap();
+    assert!(triangles.iter().all(|(_, count)| *count == 1));
+    let similar = node_similarity(&keyspace).unwrap();
+    let (a, b) = (id_of("a"), id_of("b"));
+    let pair = similar.iter().find(|(x, y, _)| (*x, *y) == (a.min(b), a.max(b))).map(|(_, _, score)| *score);
+    assert_eq!(pair, Some(1.0 / 3.0));
+}
+
+#[test]
+fn call_yields_the_algorithms_as_rows() {
+    let keyspace = two_triangles();
+    let ranked = query(&keyspace, "CALL eggdb.pageRank(20, 0.85) YIELD nodeId, score MATCH (n) WHERE id(n) = nodeId RETURN n.name AS name ORDER BY score DESC, name LIMIT 2");
+    assert_eq!(ranked.rows.len(), 2);
+    let standalone = query(&keyspace, "CALL eggdb.triangleCount()");
+    assert_eq!(standalone.columns, ["nodeId", "triangles"]);
+    assert_eq!(standalone.rows.len(), 6);
+    let communities = query(&keyspace, "CALL eggdb.labelPropagation() YIELD communityId AS community RETURN count(DISTINCT community) AS communities");
+    assert_eq!(communities.rows, vec![vec![Value::Integer(2)]]);
+    let path = query(&keyspace, "MATCH (a:N {name: 'a'}), (f:N {name: 'f'}) CALL eggdb.shortestPath(a, f, 10, false) YIELD hops RETURN hops");
+    assert_eq!(path.rows, vec![vec![Value::Integer(3)]]);
+    for bad in ["CALL eggdb.noSuch()", "CALL eggdb.pageRank(-1)", "CALL eggdb.triangleCount() YIELD missing RETURN missing", "CALL eggdb.pageRank(1, 2, 3)"] {
+        assert!(run(&keyspace, bad, &[], false).is_err(), "{bad}");
+    }
 }
