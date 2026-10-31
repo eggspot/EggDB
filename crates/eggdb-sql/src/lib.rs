@@ -85,6 +85,7 @@ mod plan_cache;
 mod plpgsql;
 mod plsql;
 mod pushdown;
+mod foreign;
 mod random;
 mod ranges;
 mod records;
@@ -225,6 +226,7 @@ pub use parser::{
 pub use pg_binary::{decode_pg_binary_text, encode_pg_binary};
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use plsql::ServerOutputReader;
+pub use foreign::{ForeignSource, set_foreign_source};
 pub use random::{RandomSource, set_random_source};
 pub use regex::regex_matches_with_flags;
 pub use notifications::Notification;

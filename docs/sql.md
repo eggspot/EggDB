@@ -2350,6 +2350,25 @@ COMMIT;
 When the `INSERT` inserts no row, the message was handled before: roll back instead of
 committing, and acknowledge the message.
 
+## Foreign sources (eggdb_foreign)
+
+`eggdb_foreign(source, query)` reads rows from outside the database, one `json` object per row
+(column name to value), so the rest of the query filters, joins and aggregates them like any
+rows (D229):
+
+```sql
+SELECT o->>'name' AS name, (o->>'total')::numeric AS total
+FROM eggdb_foreign('postgresql://reports@10.0.0.7:5432/sales', 'SELECT name, total FROM orders') AS f(o);
+SELECT count(*) FROM eggdb_foreign('file:/data/lake/events-2026-10.parquet', '*');
+```
+
+A `postgresql://` source is another EggDB server or a PostgreSQL server, asked the query as it is
+(the password from `PGPASSWORD`); a `file:...parquet` source is read whole (`'*'`). Nothing is
+reachable until the operator allows it: `eggdb sql` and `eggdb serve` read the comma-separated
+URL prefixes allowed in `EGGDB_FOREIGN_SOURCES` (for example
+`postgresql://reports@10.0.0.7,file:/data/lake/`), and a source outside them is refused with
+SQLSTATE `HV000`. With none set, the function answers `0A000`.
+
 ## Scheduled jobs (pg_cron)
 
 `CREATE EXTENSION pg_cron` installs the `cron` schema as the pg_cron extension has it (D200):

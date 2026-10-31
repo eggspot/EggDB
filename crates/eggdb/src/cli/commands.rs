@@ -28,6 +28,7 @@ mod restore_mongodump;
 mod row;
 mod follow;
 mod follow_sql_server;
+mod foreign;
 mod serve;
 mod serve_mcp;
 mod serve_jobs;

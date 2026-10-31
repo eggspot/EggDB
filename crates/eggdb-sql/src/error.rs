@@ -217,6 +217,8 @@ impl SqlState {
     pub const CANT_CHANGE_RUNTIME_PARAM: Self = Self(*b"55P02");
     /// `58030` io_error.
     pub const IO_ERROR: Self = Self(*b"58030");
+    /// `HV000` fdw_error: a foreign data source failed.
+    pub const FDW_ERROR: Self = Self(*b"HV000");
     /// `XX000` internal_error.
     pub const INTERNAL_ERROR: Self = Self(*b"XX000");
     /// `XX001` data_corrupted.

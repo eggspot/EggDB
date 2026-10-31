@@ -46,6 +46,7 @@ fn database_name_of(file: &Path) -> String {
 
 impl Session<'_> {
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
+        super::foreign::allow_from_environment();
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
         let options = self.request.serve.clone();
         if let Some(url) = &options.restore_from

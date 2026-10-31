@@ -16,6 +16,7 @@ use std::io::Read;
 
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
+        super::foreign::allow_from_environment();
         if let Some(url) = self.request.file.to_str().filter(|text| text.starts_with(super::archive::BUCKET_SCHEME)).map(str::to_owned) {
             let at = self.request.restore.at.clone();
             self.request.file = super::archive::edge_copy(&url, at.as_deref())

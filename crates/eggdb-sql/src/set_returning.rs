@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 19] = [
+const FUNCTIONS: [SetReturningFunction; 20] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -97,6 +97,12 @@ const FUNCTIONS: [SetReturningFunction; 19] = [
         name: STRING_SPLIT_FUNCTION,
         result_type: string_split_type,
         rows: string_split_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "eggdb_foreign",
+        result_type: crate::foreign::foreign_type,
+        rows: crate::foreign::foreign_rows,
         fields: false,
     },
     SetReturningFunction {
