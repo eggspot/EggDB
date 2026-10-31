@@ -286,6 +286,23 @@ impl Session<'_> {
             None => None,
         };
         let s3_secret = s3_listener.as_ref().map(|_| password.clone());
+        let observability_listener = match options.observability_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--observability-listen {address}: the metrics endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for metrics clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let observability_password = eggdb_crypto::sha256(password.as_bytes());
         let cql_listener = match options.cql_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -535,6 +552,16 @@ impl Session<'_> {
                 std::iter::once((config.database.as_str(), &*db))
                     .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
                     .collect();
+            let observability_endpoint = eggdb_observability::Endpoint::new(&store, &config.user, observability_password, &config.database);
+            let observability_server = scope.spawn(|| match &observability_listener {
+                Some(listener) => eggdb_http::serve_with_body_limit(
+                    listener,
+                    &|request| observability_endpoint.answer(request),
+                    &stop_signals::requested,
+                    eggdb_observability::MAX_REQUEST_BYTES,
+                ),
+                None => Ok(()),
+            });
             let cql_server = scope.spawn(|| match &cql_listener {
                 Some(listener) => eggdb_cql::serve(&store, listener, &cql_config, &stop_signals::requested),
                 None => Ok(()),
@@ -748,6 +775,7 @@ impl Session<'_> {
             let _ = nats_server.join();
             let _ = stomp_server.join();
             let _ = cql_server.join();
+            let _ = observability_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = sqs_server.join();
             let _ = s3_server.join();

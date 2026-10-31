@@ -43,15 +43,6 @@ fn writing_refuses_values_that_do_not_fit() {
 }
 
 #[test]
-fn snappy_blocks_decompress() {
-    let block = [12, 0x08, b'a', b'b', b'c', 0x15, 0x03];
-    assert_eq!(crate::snappy::decompress(&block, 100).unwrap(), b"abcabcabcabc");
-    assert!(crate::snappy::decompress(&block, 5).is_err());
-    assert!(crate::snappy::decompress(&[12, 0x08, b'a', b'b', b'c', 0x15, 0x09], 100).is_err());
-    assert!(crate::snappy::decompress(&[12, 0x08, b'a'], 100).is_err());
-}
-
-#[test]
 fn damaged_files_are_errors_not_panics() {
     let file = write(&sample()).unwrap();
     assert!(read(b"PAR1PAR1").is_err());

@@ -220,6 +220,7 @@ impl CommandName {
             | OptionName::StompListen
             | OptionName::CqlListen
             | OptionName::S3Listen
+            | OptionName::ObservabilityListen
             | OptionName::KafkaListen
             | OptionName::AmqpListen
             | OptionName::MqttListen
@@ -380,6 +381,7 @@ enum OptionName {
     StompListen,
     CqlListen,
     S3Listen,
+    ObservabilityListen,
     KafkaListen,
     AmqpListen,
     MqttListen,
@@ -469,6 +471,7 @@ impl OptionName {
             b"stomp-listen" => Self::StompListen,
             b"cql-listen" => Self::CqlListen,
             b"s3-listen" => Self::S3Listen,
+            b"observability-listen" => Self::ObservabilityListen,
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
             b"mqtt-listen" => Self::MqttListen,
@@ -727,6 +730,7 @@ pub(crate) struct ServeOptions {
     pub(crate) stomp_listen: Option<SocketAddr>,
     pub(crate) cql_listen: Option<SocketAddr>,
     pub(crate) s3_listen: Option<SocketAddr>,
+    pub(crate) observability_listen: Option<SocketAddr>,
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
     pub(crate) mqtt_listen: Option<SocketAddr>,
@@ -1204,6 +1208,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     return Err(usage(format!("{}: the queue name must be 1 to 255 characters", option.spelled)));
                 }
                 request.serve.cdc_queue = Some(name.to_owned());
+            }
+            OptionName::ObservabilityListen => {
+                request.serve.observability_listen =
+                    Some(parse_listen(&option.spelled, value, 8086).map_err(usage)?);
             }
             OptionName::S3Listen => {
                 request.serve.s3_listen =

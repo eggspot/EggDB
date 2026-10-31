@@ -5,7 +5,6 @@
 //! Damaged or hostile files are errors, never panics.
 
 mod read;
-mod snappy;
 mod thrift;
 mod write;
 

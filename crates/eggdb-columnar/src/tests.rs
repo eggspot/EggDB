@@ -103,3 +103,16 @@ fn dictionaries_index_repeated_values() {
     assert!(!dictionary.pays_off());
     assert!(Dictionary::of(std::iter::repeat_n(&b"x"[..], 10)).pays_off());
 }
+
+#[test]
+fn snappy_blocks_decompress_and_literal_blocks_round_trip() {
+    let block = [12, 0x08, b'a', b'b', b'c', 0x15, 0x03];
+    assert_eq!(crate::snappy_decompress(&block, 100).unwrap(), b"abcabcabcabc");
+    assert!(crate::snappy_decompress(&block, 5).is_err());
+    assert!(crate::snappy_decompress(&[12, 0x08, b'a', b'b', b'c', 0x15, 0x09], 100).is_err());
+    assert!(crate::snappy_decompress(&[12, 0x08, b'a'], 100).is_err());
+    for size in [0, 1, 59, 60, 61, 255, 256, 257, 70_000, 200_000] {
+        let input: Vec<u8> = (0..size).map(|at| (at % 251) as u8).collect();
+        assert_eq!(crate::snappy_decompress(&crate::snappy_compress(&input), size).unwrap(), input, "{size}");
+    }
+}

@@ -10,12 +10,14 @@ mod chunk;
 mod delta;
 mod dictionary;
 mod hybrid;
+mod snappy;
 
 pub use bits::{bit_width, pack, unpack};
 pub use chunk::{ChunkStats, Encoding, IntegerChunk, MAX_CHUNK_VALUES};
 pub use delta::{decode_deltas, encode_deltas, read_varint, write_varint};
 pub use dictionary::Dictionary;
 pub use hybrid::{decode_hybrid, encode_hybrid};
+pub use snappy::{snappy_compress, snappy_decompress};
 
 /// Why encoded bytes could not be decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]

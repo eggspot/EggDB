@@ -190,7 +190,7 @@ fn decompressed(codec: i64, data: &[u8], size: usize) -> Result<Vec<u8>, Parquet
     }
     match codec {
         0 => Ok(data.to_vec()),
-        1 => crate::snappy::decompress(data, size),
+        1 => eggdb_columnar::snappy_decompress(data, size).map_err(|error| damaged(&format!("a Snappy block: {}", error.0))),
         2 => Err(unsupported("GZIP-compressed Parquet")),
         6 => Err(unsupported("ZSTD-compressed Parquet")),
         other => Err(unsupported(&format!("Parquet compression codec {other}"))),

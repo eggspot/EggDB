@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3, nats-py, stomp.py, python-qpid-proton and cassandra-driver (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3, nats-py, stomp.py, python-qpid-proton, cassandra-driver and influxdb-client (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2 paho-mqtt==2.1.0 boto3==1.35.0 nats-py==2.9.0 stomp.py==8.1.2 python-qpid-proton==0.39.0 cassandra-driver==3.29.2
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2 paho-mqtt==2.1.0 boto3==1.35.0 nats-py==2.9.0 stomp.py==8.1.2 python-qpid-proton==0.39.0 cassandra-driver==3.29.2 influxdb-client==1.45.0
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 --cql-listen 127.0.0.1:9043 --s3-listen 127.0.0.1:9001 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 --cql-listen 127.0.0.1:9043 --s3-listen 127.0.0.1:9001 --observability-listen 127.0.0.1:8087 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -453,6 +453,21 @@ jobs:
           assert [(row.at, row.reading) for row in rows] == [(0, 0.0), (1, 1.5), (2, 3.0)], rows
           cluster.shutdown()
           print("cassandra-driver over CQL v4: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import base64
+          import json
+          import urllib.request
+          from influxdb_client import InfluxDBClient, Point
+          from influxdb_client.client.write_api import SYNCHRONOUS
+          client = InfluxDBClient(url="http://127.0.0.1:8087", token="ci-resp-password", org="eggs")
+          client.write_api(write_options=SYNCHRONOUS).write(bucket="metrics", record=[Point("temperature").tag("room", "kitchen").field("value", 21.5), Point("temperature").tag("room", "hall").field("value", 19.0)])
+          client.close()
+          authorization = "Basic " + base64.b64encode(b"eggdb:ci-resp-password").decode()
+          request = urllib.request.Request("http://127.0.0.1:8087/api/v1/query?query=sum%28temperature%29", headers={"Authorization": authorization})
+          answer = json.load(urllib.request.urlopen(request))
+          assert answer["data"]["result"][0]["value"][1] == "40.5", answer
+          print("influxdb-client and PromQL: passed")
           PY
 
   redis-compare:
