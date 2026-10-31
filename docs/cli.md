@@ -63,7 +63,7 @@ eggdb <command> <file> [arguments] [options]
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, or with `--dialect mysql` a `mysqldump` file, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
-| `audit <file>` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below) |
+| `audit <file> [--verify]` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below); `--verify` checks that every record links to the one before it by its SHA-256, so a record changed, removed or inserted since it was written is found (exit 3, `audit_changed`) (D231) |
 | `collection list\|add\|delete <file> [<name>]` | read-only for `list`, for writing otherwise | lists, adds or deletes the named key spaces in the file (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V`; `--json` prints `{"version":…}` |

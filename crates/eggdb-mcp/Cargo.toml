@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-commands = { path = "../eggdb-commands" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }

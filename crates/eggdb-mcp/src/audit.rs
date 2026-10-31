@@ -8,7 +8,7 @@ use eggdb_sql::json::{Json, Node, parse_document};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -86,12 +86,93 @@ impl AuditLog {
                 reason: "the audit file has reached its 1 GiB limit".to_owned(),
             });
         }
-        let mut line = Vec::with_capacity(record.len() + 1);
-        line.extend_from_slice(record.as_bytes());
+        let previous = last_line_digest(&self.path, size).map_err(failure)?;
+        let chained = match record.strip_prefix('{') {
+            Some(rest) if rest.trim_start().starts_with('}') => format!("{{\"prev\":\"{previous}\"}}"),
+            Some(rest) => format!("{{\"prev\":\"{previous}\",{rest}"),
+            None => {
+                return Err(AuditFailure { reason: "an audit record must be a JSON object".to_owned() });
+            }
+        };
+        let mut line = Vec::with_capacity(chained.len() + 1);
+        line.extend_from_slice(chained.as_bytes());
         line.push(b'\n');
         file.write_all(&line).map_err(failure)?;
         file.sync_data().map_err(failure)
     }
+}
+
+const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const TAIL_BYTES: u64 = 1 << 20;
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn last_line_digest(path: &Path, size: u64) -> io::Result<String> {
+    if size == 0 {
+        return Ok(GENESIS.to_owned());
+    }
+    let mut file = File::open(path)?;
+    let start = size.saturating_sub(TAIL_BYTES);
+    file.seek(io::SeekFrom::Start(start))?;
+    let mut tail = Vec::with_capacity(usize::try_from(size - start).unwrap_or(0));
+    file.take(size - start).read_to_end(&mut tail)?;
+    let body = tail.strip_suffix(b"\n").unwrap_or(&tail);
+    let line = match body.iter().rposition(|&byte| byte == b'\n') {
+        Some(at) => &body[at + 1..],
+        None if start == 0 => body,
+        None => return Err(io::Error::new(io::ErrorKind::InvalidData, "the audit file's last line is longer than 1 MiB")),
+    };
+    Ok(hex(&eggdb_crypto::sha256(line)))
+}
+
+/// What checking an audit file's chain found.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChainReport {
+    /// How many records carry a link to the one before.
+    pub chained: u64,
+    /// How many records at the start predate the chain (written by an older release).
+    pub unchained: u64,
+    /// The line number (from 1) of the first record whose link does not match the line before
+    /// it, or that has no link after the chain began: the file was changed there.
+    pub first_break: Option<u64>,
+}
+
+fn prev_of(line: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(line).ok()?;
+    let rest = text.strip_prefix("{\"prev\":\"")?;
+    rest.get(..64).filter(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// Checks that every record of the audit file at `path` links to the line before it by its
+/// SHA-256, so no record was changed, removed or inserted since it was written.
+pub fn verify_chain(path: &Path) -> io::Result<ChainReport> {
+    let mut report = ChainReport::default();
+    let Some(mut reader) = open_audit(path)? else {
+        return Ok(report);
+    };
+    let mut previous = GENESIS.to_owned();
+    let mut number = 0u64;
+    while let Some(bytes) = next_line(&mut reader)? {
+        number += 1;
+        let Some(line) = bytes else {
+            report.first_break.get_or_insert(number);
+            continue;
+        };
+        match prev_of(&line) {
+            Some(link) if link == previous => report.chained += 1,
+            Some(_) => {
+                report.first_break.get_or_insert(number);
+            }
+            None if report.chained == 0 && report.first_break.is_none() => report.unchained += 1,
+            None => {
+                report.first_break.get_or_insert(number);
+            }
+        }
+        previous = hex(&eggdb_crypto::sha256(&line));
+    }
+    Ok(report)
 }
 
 fn lock(file: &File, wait: Duration) -> io::Result<()> {
@@ -976,5 +1057,32 @@ mod tests {
             .unwrap();
         assert_eq!(read_all(&path, None).unwrap().1.calls, 2);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::{AuditLog, verify_chain};
+
+    #[test]
+    fn records_link_to_the_line_before_and_an_edit_breaks_the_chain() {
+        let directory = std::env::temp_dir().join(format!("eggdb-audit-chain-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("app.eggdb.mcp-audit.jsonl");
+        std::fs::write(&path, "{\"event\":\"older\"}\n").unwrap();
+        let log = AuditLog::new(path.clone());
+        for index in 0..3 {
+            log.append(&format!("{{\"event\":\"call\",\"n\":{index}}}")).unwrap();
+        }
+        log.append("{}").unwrap();
+        let report = verify_chain(&path).unwrap();
+        assert_eq!((report.chained, report.unchained, report.first_break), (4, 1, None));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.lines().nth(1).unwrap().starts_with("{\"prev\":\""));
+        std::fs::write(&path, text.replace("\"n\":1", "\"n\":9")).unwrap();
+        assert_eq!(verify_chain(&path).unwrap().first_break, Some(4));
+        assert!(log.append("not json").is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 }

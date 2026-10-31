@@ -192,6 +192,7 @@ impl CommandName {
             }
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
             OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve | Self::Shell | Self::Sql),
+            OptionName::Verify => self == Self::Audit,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::Create => {
                 matches!(
@@ -364,6 +365,7 @@ enum OptionName {
     Mono,
     Ascii,
     ReadOnly,
+    Verify,
     OnConflict,
     DryRun,
     Command,
@@ -455,6 +457,7 @@ impl OptionName {
             b"mono" => Self::Mono,
             b"ascii" => Self::Ascii,
             b"read-only" => Self::ReadOnly,
+            b"verify" => Self::Verify,
             b"on-conflict" => Self::OnConflict,
             b"dry-run" => Self::DryRun,
             b"command" => Self::Command,
@@ -554,6 +557,7 @@ impl OptionName {
                 | Self::Mono
                 | Self::Ascii
                 | Self::ReadOnly
+                | Self::Verify
                 | Self::DryRun
                 | Self::KeepGoing
                 | Self::Header
@@ -618,6 +622,7 @@ pub(crate) struct Request {
     pub(crate) mono: bool,
     pub(crate) ascii: bool,
     pub(crate) read_only: bool,
+    pub(crate) verify: bool,
     pub(crate) export_file: Option<ExportFile>,
     pub(crate) on_conflict: ConflictPolicy,
     pub(crate) dry_run: bool,
@@ -1093,6 +1098,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Mono => request.mono = true,
             OptionName::Ascii => request.ascii = true,
             OptionName::ReadOnly => request.read_only = true,
+            OptionName::Verify => request.verify = true,
             OptionName::AllowWrite => request.allow_write = true,
             OptionName::LogBatches => request.serve.log_batches = true,
             OptionName::TlsSelfSigned => request.serve.tls_self_signed = true,
