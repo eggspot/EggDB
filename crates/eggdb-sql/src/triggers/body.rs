@@ -426,6 +426,7 @@ impl Run<'_> {
         let binding = Binding {
             settings: self.settings,
             walk_expressions: true,
+            target_privilege: None,
         };
         binding.select(&*self.writer, self.tables, &mut select)?;
         let result = execute::select(&*self.writer, self.tables, &select, false)?;
@@ -459,6 +460,7 @@ fn run_statement(
     let binding = Binding {
         settings,
         walk_expressions: true,
+        target_privilege: Some(crate::roles::target_privilege(&statement)),
     };
     match statement {
         Statement::Insert(mut insert) => {

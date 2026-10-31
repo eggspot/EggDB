@@ -39,6 +39,7 @@ pub struct ZipEntry {
 }
 
 /// A ZIP archive (PKWARE's APPNOTE) read from memory: its entries, stored or deflated.
+#[derive(Debug)]
 pub struct ZipArchive<'a> {
     data: &'a [u8],
     /// The entries, in the central directory's order.

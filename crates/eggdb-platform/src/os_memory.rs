@@ -190,13 +190,11 @@ mod platform {
             return Ok(());
         }
         let error = std::io::Error::last_os_error();
-        Err(Error::new(
-            match error.kind() {
-                std::io::ErrorKind::OutOfMemory | std::io::ErrorKind::PermissionDenied => ErrorKind::OutOfMemory,
-                _ => ErrorKind::Unsupported,
-            },
-            format!("cannot lock {len} bytes in memory: {error} (raise the locked-memory limit, ulimit -l)"),
-        ))
+        let kind = match error.kind() {
+            std::io::ErrorKind::OutOfMemory | std::io::ErrorKind::PermissionDenied => ErrorKind::OutOfMemory,
+            _ => ErrorKind::Unsupported,
+        };
+        Err(Error::from(error).with_kind(kind))
     }
 
     pub(super) fn unlock(ptr: NonNull<u8>, len: usize) {

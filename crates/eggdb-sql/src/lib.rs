@@ -240,7 +240,8 @@ pub use foreign::{ForeignSource, set_foreign_source};
 pub use random::{RandomSource, set_random_source};
 pub use regex::regex_matches_with_flags;
 pub use notifications::Notification;
-pub use roles::{ScramParts, StoredRole, login_verifier, parse_scram_verifier, stored_role, stored_roles};
+pub use eggdb_auth::scram::{ScramParts, parse_scram_verifier};
+pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener, IncludeRequest,

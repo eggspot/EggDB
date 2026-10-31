@@ -116,7 +116,8 @@ fn archives_that_are_not_documents_or_are_damaged_are_refused() {
     damaged[at] = b'x';
     assert!(matches!(extract_text(&damaged, 1 << 20), Err(ContentError(message)) if message.contains("CRC")));
     assert!(extract_text(&bytes(&DOCX), 16).is_err());
-    let archive = ZipArchive::new(&bytes(&DOCX)).unwrap();
+    let docx = bytes(&DOCX);
+    let archive = ZipArchive::new(&docx).unwrap();
     assert_eq!(archive.entries.len(), 2);
     assert_eq!(archive.read("missing.xml", 100).unwrap(), None);
 }

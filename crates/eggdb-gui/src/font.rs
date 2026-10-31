@@ -229,7 +229,7 @@ impl TrueTypeFont {
         match u16_at(data, subtable) {
             Some(4) => self.format4(subtable, code),
             Some(12) => self.format12(subtable, code),
-            _ => 0,
+            _ => None,
         }
         .filter(|glyph| *glyph < self.glyph_count)
         .unwrap_or(0)

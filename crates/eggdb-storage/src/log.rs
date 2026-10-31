@@ -4,7 +4,7 @@ use crate::crc32c::{crc32c, crc32c_append};
 use crate::error::{FormatError, StorageError};
 use crate::format::{
     Features, FileId, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageSize,
-    PageType, RECYCLED_SEGMENTS, Superblock,
+    PageType, RECYCLED_SEGMENTS, Superblock, segment_holds_a_page,
 };
 use eggdb_platform::{ErrorKind, File};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +18,6 @@ const LINK_RECORD: usize = RECORD_HEADER + LINK_PAYLOAD;
 const BATCH_PAYLOAD: usize = 8;
 const IMAGE_PAGE_AT: usize = 8;
 pub(crate) const COMMIT_PAYLOAD: usize = 9 * 8;
-const SEGMENT_ROOM_BEYOND_A_PAGE: u64 = 8192;
 const DEFAULT_SEGMENT_BYTES: usize = 64 << 10;
 pub(crate) const SEQUENCE_RESERVATION: u64 = 1 << 16;
 pub(crate) const DEFAULT_AUTO_CHECKPOINT_BYTES: u64 = 1 << 20;
@@ -99,10 +98,6 @@ pub(crate) fn default_segment_pages(page_size: PageSize) -> u32 {
     (DEFAULT_SEGMENT_BYTES / page_size.bytes()).max(2) as u32
 }
 
-pub(crate) fn segment_holds_a_page(page_size: PageSize, segment_pages: u32) -> bool {
-    let page_bytes = page_size.bytes() as u64;
-    u64::from(segment_pages) * page_bytes >= page_bytes + SEGMENT_ROOM_BEYOND_A_PAGE
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Segment {

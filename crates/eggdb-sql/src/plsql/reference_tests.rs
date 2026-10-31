@@ -49,7 +49,7 @@ fn lines(texts: &[&str]) -> Vec<String> {
 
 #[test]
 fn a_nested_block_hides_an_outer_variable_that_its_label_still_reaches() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let output = printed(
         &mut session,
@@ -71,7 +71,7 @@ END outer;",
 
 #[test]
 fn a_record_type_and_a_rowtype_variable_hold_a_row() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let output = printed(
         &mut session,
@@ -90,7 +90,7 @@ END;",
 
 #[test]
 fn in_out_parameters_of_a_local_procedure_swap_two_values() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let output = printed(
         &mut session,
@@ -113,7 +113,7 @@ END;",
 
 #[test]
 fn an_error_leaving_a_procedure_names_the_line_of_each_unit() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -137,7 +137,7 @@ END check_sal;",
 
 #[test]
 fn a_function_summing_with_a_cursor_for_loop_is_called_from_sql() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -156,7 +156,7 @@ END dept_total;",
 
 #[test]
 fn a_package_initializes_once_per_session_and_keeps_its_state() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -189,7 +189,7 @@ END counter;",
 
 #[test]
 fn an_exception_raised_in_a_handler_goes_to_the_enclosing_block() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let output = printed(
         &mut session,
@@ -214,7 +214,7 @@ END;",
 
 #[test]
 fn a_simple_case_statement_without_a_match_raises_case_not_found() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let output = printed(
         &mut session,
@@ -239,7 +239,7 @@ END;",
 
 #[test]
 fn a_bulk_fetch_with_a_limit_reads_a_cursor_in_batches() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let output = printed(
         &mut session,

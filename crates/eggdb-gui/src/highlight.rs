@@ -33,7 +33,7 @@ fn is_keyword(word: &str) -> bool {
 /// a `/* */` comment is open at the line's start, and is updated for the next line.
 pub fn tokens(line: &str, in_comment: &mut bool) -> Vec<(std::ops::Range<usize>, TokenKind)> {
     let bytes = line.as_bytes();
-    let mut out = Vec::new();
+    let mut out: Vec<(std::ops::Range<usize>, TokenKind)> = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
         let start = at;

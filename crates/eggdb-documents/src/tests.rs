@@ -110,7 +110,9 @@ fn updated(update: Document) -> Document {
 
 #[test]
 fn update_operators_change_documents() {
-    let op = |name: &str, fields: Vec<(&str, Bson)>| (name, Bson::Document(doc(fields)));
+    fn op<'a>(name: &'a str, fields: Vec<(&str, Bson)>) -> (&'a str, Bson) {
+        (name, Bson::Document(doc(fields)))
+    }
     let changed = updated(doc(vec![
         op("$set", vec![("address.city", text("Paris")), ("new.deep", Bson::Boolean(true))]),
         op("$inc", vec![("age", Bson::Int32(1)), ("visits", Bson::Int64(2))]),
@@ -141,7 +143,9 @@ fn update_operators_change_documents() {
 
 #[test]
 fn bad_updates_are_errors_and_change_nothing() {
-    let op = |name: &str, fields: Vec<(&str, Bson)>| (name, Bson::Document(doc(fields)));
+    fn op<'a>(name: &'a str, fields: Vec<(&str, Bson)>) -> (&'a str, Bson) {
+        (name, Bson::Document(doc(fields)))
+    }
     assert_eq!(parse_update(&doc(vec![op("$bogus", vec![("a", Bson::Int32(1))])])).unwrap_err().code, 9);
     assert_eq!(parse_update(&doc(vec![op("$set", vec![("a", Bson::Int32(1))]), op("$inc", vec![("a", Bson::Int32(1))])])).unwrap_err().code, 40);
     let mut document = person();

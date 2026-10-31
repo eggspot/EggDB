@@ -72,6 +72,7 @@ impl Session<'_> {
     ) -> Result<Exit, Failure> {
         let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, self.out.sink()?);
         let written = write_export(db, header, only, &mut writer, progress, &mut self.messages);
+        drop(writer);
         let exported = written.map_err(|failure| match failure {
             ExportFailure::Read(error) => {
                 self.key_space_failure(&error, &format!("cannot export {}", self.file))
@@ -82,7 +83,6 @@ impl Session<'_> {
                 Exit::DatabaseError,
             ),
         })?;
-        drop(writer);
         if self.stderr_is_terminal {
             progress.clear(&mut self.messages);
             self.messages.styled(

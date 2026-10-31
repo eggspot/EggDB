@@ -165,13 +165,13 @@ impl<'t> Parser<'t> {
             tsql: None,
             plsql: None,
         };
-        Ok(Statement::CreateRoutine(CreateRoutine {
+        Ok(Statement::CreateRoutine(Box::new(CreateRoutine {
             name,
             replace: false,
             must_exist: false,
             definition,
             body_position: Some(body_position),
-        }))
+        })))
     }
 
     pub(super) fn mysql_drop_routine(&mut self) -> SqlResult<Statement> {
@@ -424,6 +424,7 @@ impl<'p, 't> Compiler<'p, 't> {
                     variable_type: VariableType::Sql(sql_type.clone()),
                     constant: false,
                     not_null: false,
+                    collation: None,
                     default: default.clone(),
                 }),
             })

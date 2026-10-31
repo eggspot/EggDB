@@ -1357,7 +1357,7 @@ fn item_spans(items: &[ExpandedItem], total: usize) -> Vec<std::ops::Range<usize
     let known: usize = items.iter().filter_map(input_width).sum();
     let unknown = total.saturating_sub(known);
     let mut spans = Vec::with_capacity(items.len());
-    let mut at = 0;
+    let mut at = 0usize;
     for item in items {
         let width = input_width(item).unwrap_or(unknown);
         let end = at.saturating_add(width).min(total);

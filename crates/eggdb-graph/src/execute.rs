@@ -74,7 +74,7 @@ fn as_count(value: &Value, what: &str) -> GraphResult<usize> {
     }
 }
 
-impl Executor<'_, '_> {
+impl<'g> Executor<'g, '_> {
     fn read(&self) -> GraphRead<'_> {
         match &self.access {
             Access::Read(read) => GraphRead { keys: read.keys },
@@ -82,7 +82,7 @@ impl Executor<'_, '_> {
         }
     }
 
-    fn writer(&mut self) -> GraphResult<&mut GraphWrite<'_>> {
+    fn writer(&mut self) -> GraphResult<&mut GraphWrite<'g>> {
         match &mut self.access {
             Access::Write(write) => Ok(write),
             Access::Read(_) => Err(GraphError::new("Neo.ClientError.Statement.AccessMode", "Writing in read access mode not allowed")),

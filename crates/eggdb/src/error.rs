@@ -128,7 +128,9 @@ impl Error {
         }
     }
 
-    pub(crate) fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self {
+    /// An error of `kind` with `message`, for code that builds on the embedded API and reports
+    /// its own failures as EggDB errors.
+    pub fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self {
         Self {
             kind,
             detail: Detail::Message(message.into(), None),

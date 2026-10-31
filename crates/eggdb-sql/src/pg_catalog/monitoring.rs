@@ -6,7 +6,8 @@
 use super::snapshot::{self, CatalogSnapshot};
 use super::{CatalogColumn, CatalogRow, CatalogType, oids};
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::types::{ArrayElement, SqlType, Value};
+use crate::arrays::ArrayElement;
+use crate::types::{SqlType, Value};
 use std::sync::OnceLock;
 
 const OID: SqlType = SqlType::Catalog(CatalogType::Oid);

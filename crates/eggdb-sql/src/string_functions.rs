@@ -531,9 +531,15 @@ fn text_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         ("md5", 1) => Ok(Value::Text(crate::md5::hex_digest(text(0)?.as_bytes()))),
         ("starts_with", 2) => Ok(Value::Boolean(text(0)?.starts_with(text(1)?))),
         ("normalize", 1) => Ok(Value::Text(eggdb_text::normalize(text(0)?, eggdb_text::Form::Nfc))),
-        ("normalize", 2) => normalization_form(text(1)?).map(|form| Value::Text(eggdb_text::normalize(text(0)?, form))),
+        ("normalize", 2) => {
+            let source = text(0)?;
+            normalization_form(text(1)?).map(|form| Value::Text(eggdb_text::normalize(source, form)))
+        }
         ("is_normalized", 1) => Ok(Value::Boolean(eggdb_text::is_normalized(text(0)?, eggdb_text::Form::Nfc))),
-        ("is_normalized", 2) => normalization_form(text(1)?).map(|form| Value::Boolean(eggdb_text::is_normalized(text(0)?, form))),
+        ("is_normalized", 2) => {
+            let source = text(0)?;
+            normalization_form(text(1)?).map(|form| Value::Boolean(eggdb_text::is_normalized(source, form)))
+        }
         ("overlay", 3) => overlaid(text(0)?, text(1)?, number(2)?, None),
         ("overlay", 4) => overlaid(text(0)?, text(1)?, number(2)?, Some(number(3)?)),
         ("quote_literal", 1) => Ok(Value::Text(quote_literal(&output_text(&values[0])?))),

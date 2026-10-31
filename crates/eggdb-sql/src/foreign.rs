@@ -18,7 +18,7 @@ pub fn set_foreign_source(source: ForeignSource) {
 
 pub(crate) fn foreign_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
     match types {
-        [source, query] if source.as_ref().is_none_or(SqlType::is_character) && query.as_ref().is_none_or(SqlType::is_character) => Ok(SqlType::Json),
+        [source, query] if source.as_ref().is_none_or(|kind| kind.is_character()) && query.as_ref().is_none_or(|kind| kind.is_character()) => Ok(SqlType::Json),
         _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "function eggdb_foreign takes a source and a query, both text")),
     }
 }

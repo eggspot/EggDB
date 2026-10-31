@@ -90,7 +90,7 @@ fn with_staff(session: &mut Session<'_, MemoryStore>) {
 
 #[test]
 fn the_references_procedure_returns_more_than_one_result_set() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     with_staff(&mut session);
     succeeds(
@@ -112,7 +112,7 @@ fn the_references_procedure_returns_more_than_one_result_set() {
 
 #[test]
 fn the_references_return_code_procedure_prints_and_returns_each_code() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     with_staff(&mut session);
     succeeds(
@@ -169,7 +169,7 @@ fn the_references_return_code_procedure_prints_and_returns_each_code() {
 
 #[test]
 fn the_references_output_parameters_feed_the_callers_if() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(
         &mut session,
@@ -227,7 +227,7 @@ fn the_references_output_parameters_feed_the_callers_if() {
 
 #[test]
 fn a_trigger_body_executes_a_stored_procedure() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(
         &mut session,
@@ -259,7 +259,7 @@ fn a_trigger_body_executes_a_stored_procedure() {
 
 #[test]
 fn procedures_and_functions_outlive_the_session_that_created_them() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     {
         let mut creator = session(&store);
         succeeds(

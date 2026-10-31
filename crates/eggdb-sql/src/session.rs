@@ -1653,7 +1653,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);
                 self.pending_bulk_load = text.get(self.statement_start..end).map(str::to_owned);
             }
-            _path.remember(&mut self.search_path_cache);
+            _path.0.remember(&mut self.search_path_cache);
             self.leave_sequences();
             let settled = self.settle_sequences();
             let result =
@@ -2763,6 +2763,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
+            | Statement::InstallExtension { .. }
+            | Statement::MaterializedView(_)
             | Statement::SqlServer(_) => {
                 return Err(SqlError::new(
                     SqlState::INTERNAL_ERROR,
@@ -2855,6 +2857,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let binding = Binding {
             settings: &settings,
             walk_expressions: false,
+            target_privilege: Some(crate::roles::Privilege::Insert),
         };
         let result = self.write_firing_triggers("INSERT", |writer, tables| {
             binding.target(writer, tables, &mut rows.table)?;

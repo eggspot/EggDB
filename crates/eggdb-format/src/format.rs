@@ -37,6 +37,16 @@ const PAGE_KEY_CHECK_AT: usize = 232;
 /// The longest a log segment may be, in bytes: 64 MiB.
 pub const MAX_LOG_SEGMENT_BYTES: u64 = 64 << 20;
 
+/// How many bytes a log segment needs beyond one page, for the records that describe it.
+pub const SEGMENT_ROOM_BEYOND_A_PAGE: u64 = 8192;
+
+/// Whether a log segment of `segment_pages` pages has room for a whole page and the records
+/// around it.
+pub fn segment_holds_a_page(page_size: PageSize, segment_pages: u32) -> bool {
+    let page_bytes = page_size.bytes() as u64;
+    u64::from(segment_pages) * page_bytes >= page_bytes + SEGMENT_ROOM_BEYOND_A_PAGE
+}
+
 const SUPERBLOCK_CHECKSUM_AT: usize = 8;
 const LOG_SEQUENCE_RESERVED_AT: usize = 192;
 
@@ -282,7 +292,8 @@ impl Superblock {
         (self.generation & 1) as usize
     }
 
-    pub(crate) fn is_copied_in(&self, other_slot: &[u8]) -> bool {
+    /// Whether `other_slot` already holds this superblock, as written to the other slot.
+    pub fn is_copied_in(&self, other_slot: &[u8]) -> bool {
         Self::decode(other_slot, 1 - self.slot()).is_ok_and(|other| {
             Self {
                 generation: self.generation,
@@ -384,7 +395,8 @@ impl Superblock {
         Ok(superblock)
     }
 
-    pub(crate) fn check(&self) -> Result<(), FormatError> {
+    /// Checks that every field holds a value the format allows.
+    pub fn check(&self) -> Result<(), FormatError> {
         self.check_fields()
     }
 
@@ -423,7 +435,7 @@ impl Superblock {
         let has_log = self.log_head_page != NO_PAGE
             || self.recycled_segments.iter().any(|&page| page != NO_PAGE);
         let too_small_for_a_log =
-            has_log && !crate::log::segment_holds_a_page(self.page_size, self.log_segment_pages);
+            has_log && !segment_holds_a_page(self.page_size, self.log_segment_pages);
         if self.log_segment_pages == 0
             || segment_bytes > MAX_LOG_SEGMENT_BYTES
             || too_small_for_a_log

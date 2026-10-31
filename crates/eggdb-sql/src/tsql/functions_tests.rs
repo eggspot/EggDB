@@ -76,7 +76,7 @@ fn create_twice(session: &mut Session<'_, MemoryStore>) {
 
 #[test]
 fn a_scalar_function_returns_its_value_in_a_select_list() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_twice(&mut session);
     let steps = succeeds(&mut session, "SELECT dbo.twice(21)");
@@ -85,7 +85,7 @@ fn a_scalar_function_returns_its_value_in_a_select_list() {
 
 #[test]
 fn a_scalar_function_runs_once_per_row_and_in_where() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     with_numbers(&mut session);
     create_twice(&mut session);
@@ -97,7 +97,7 @@ fn a_scalar_function_runs_once_per_row_and_in_where() {
 
 #[test]
 fn a_scalar_function_result_can_be_assigned_to_a_variable() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_twice(&mut session);
     let steps = succeeds(&mut session, "DECLARE @x int; SET @x = dbo.twice(4); SELECT @x");
@@ -106,7 +106,7 @@ fn a_scalar_function_result_can_be_assigned_to_a_variable() {
 
 #[test]
 fn default_takes_the_parameter_default_and_missing_arguments_fail() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(
         &mut session,
@@ -120,7 +120,7 @@ fn default_takes_the_parameter_default_and_missing_arguments_fail() {
 
 #[test]
 fn a_function_body_runs_declare_while_and_if() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(
         &mut session,
@@ -137,7 +137,7 @@ fn a_function_body_runs_declare_while_and_if() {
 
 #[test]
 fn a_function_reads_tables_with_select_assignment() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     with_numbers(&mut session);
     succeeds(
@@ -157,7 +157,7 @@ fn a_function_calls_itself_and_too_deep_recursion_fails_with_217() {
     let deep = std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(|| {
-            let store = MemoryStore::new();
+            let store = MemoryStore::default();
             let mut session = session(&store);
             succeeds(
                 &mut session,
@@ -180,7 +180,7 @@ fn a_function_calls_itself_and_too_deep_recursion_fails_with_217() {
 
 #[test]
 fn an_inline_table_valued_function_is_a_parameterized_view() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     with_numbers(&mut session);
     succeeds(
@@ -196,7 +196,7 @@ fn an_inline_table_valued_function_is_a_parameterized_view() {
 
 #[test]
 fn a_multi_statement_table_valued_function_returns_its_table_variable() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(
         &mut session,
@@ -217,7 +217,7 @@ fn a_multi_statement_table_valued_function_returns_its_table_variable() {
 
 #[test]
 fn a_function_body_with_side_effects_is_refused_at_create() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     with_numbers(&mut session);
     fails_with(
@@ -249,7 +249,7 @@ fn a_function_body_with_side_effects_is_refused_at_create() {
 
 #[test]
 fn a_procedure_called_as_a_function_fails_with_4121() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE PROCEDURE dbo.just_one AS SELECT 1");
     fails_with(&mut session, "SELECT dbo.just_one()", 4121);
@@ -257,7 +257,7 @@ fn a_procedure_called_as_a_function_fails_with_4121() {
 
 #[test]
 fn a_function_declared_with_returns_null_on_null_input_skips_its_body() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(
         &mut session,
@@ -269,7 +269,7 @@ fn a_function_declared_with_returns_null_on_null_input_skips_its_body() {
 
 #[test]
 fn a_function_parameter_converts_to_its_declared_type() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_twice(&mut session);
     let steps = succeeds(&mut session, "SELECT dbo.twice('7')");

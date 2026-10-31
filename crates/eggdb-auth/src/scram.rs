@@ -71,7 +71,7 @@ impl ScramVerifier {
     /// (`SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`), or `None` when the text
     /// is not one or asks for fewer than [`MIN_SCRAM_ITERATIONS`].
     pub fn from_stored(text: &str) -> Option<Self> {
-        let (iterations, salt, stored_key, server_key) = eggdb_sql::parse_scram_verifier(text)?;
+        let (iterations, salt, stored_key, server_key) = parse_scram_verifier(text)?;
         (iterations >= MIN_SCRAM_ITERATIONS).then_some(Self {
             salt,
             iterations,
@@ -324,6 +324,25 @@ fn split_gs2_header(text: &str) -> Result<(&str, &str), ScramFailure> {
     }
     let header_length = first_comma + 2;
     Ok((&text[..header_length], &text[header_length..]))
+}
+
+
+/// The parts of a verifier in `pg_authid.rolpassword`'s form: iterations, salt, stored key and
+/// server key.
+pub type ScramParts = (u32, Vec<u8>, [u8; 32], [u8; 32]);
+
+/// Splits a SCRAM-SHA-256 verifier written as `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`
+/// (base64 parts), or `None` when it is not one.
+pub fn parse_scram_verifier(text: &str) -> Option<ScramParts> {
+    let rest = text.strip_prefix("SCRAM-SHA-256$")?;
+    let (head, keys) = rest.split_once('$')?;
+    let (iterations, salt) = head.split_once(':')?;
+    let (stored, server) = keys.split_once(':')?;
+    let iterations: u32 = iterations.parse().ok().filter(|count| *count > 0)?;
+    let salt = base64_decode(salt.as_bytes()).ok().filter(|salt| !salt.is_empty())?;
+    let stored: [u8; 32] = base64_decode(stored.as_bytes()).ok()?.try_into().ok()?;
+    let server: [u8; 32] = base64_decode(server.as_bytes()).ok()?.try_into().ok()?;
+    Some((iterations, salt, stored, server))
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use super::script::{ScriptItem, ScriptSource, ScriptStatement};
 use crate::error::{SqlError, SqlResult, SqlState};
 use std::collections::VecDeque;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 
 const MAX_LINE_BYTES: usize = 1 << 30;
 const MAX_STATEMENT_BYTES: usize = 1 << 30;
@@ -45,10 +45,7 @@ impl<'r> MysqlScript<'r> {
 
     fn read_line(&mut self) -> SqlResult<Option<Vec<u8>>> {
         let mut line = Vec::new();
-        let read = self
-            .input
-            .by_ref()
-            .take(MAX_LINE_BYTES as u64 + 1)
+        let read = Read::take(&mut self.input, MAX_LINE_BYTES as u64 + 1)
             .read_until(b'\n', &mut line)
             .map_err(|error| SqlError::new(SqlState::IO_ERROR, format!("cannot read the dump: {error}")))?;
         if read == 0 {

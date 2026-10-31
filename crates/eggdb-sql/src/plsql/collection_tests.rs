@@ -49,7 +49,7 @@ fn pair(n: &str, msg: &str) -> (String, String) {
 
 #[test]
 fn an_integer_indexed_table_is_walked_with_first_and_next_in_key_order() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -63,7 +63,7 @@ fn an_integer_indexed_table_is_walked_with_first_and_next_in_key_order() {
 
 #[test]
 fn a_string_indexed_table_keeps_its_keys_sorted() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -81,7 +81,7 @@ fn a_string_indexed_table_keeps_its_keys_sorted() {
 
 #[test]
 fn a_nested_table_is_built_extended_trimmed_and_deleted() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -100,7 +100,7 @@ fn a_nested_table_is_built_extended_trimmed_and_deleted() {
 
 #[test]
 fn collection_misuse_raises_the_predefined_exceptions() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -131,7 +131,7 @@ fn collection_misuse_raises_the_predefined_exceptions() {
 
 #[test]
 fn bulk_collect_fills_a_table_of_rows_and_forall_counts_rows_per_index() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -150,7 +150,7 @@ fn bulk_collect_fills_a_table_of_rows_and_forall_counts_rows_per_index() {
 
 #[test]
 fn a_cursor_is_fetched_in_batches_with_its_attributes() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -168,7 +168,7 @@ fn a_cursor_is_fetched_in_batches_with_its_attributes() {
 
 #[test]
 fn a_single_row_fetch_sets_found_and_rowcount() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -182,7 +182,7 @@ fn a_single_row_fetch_sets_found_and_rowcount() {
 
 #[test]
 fn save_exceptions_reports_every_failed_index() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, "CREATE TABLE k (id NUMBER PRIMARY KEY)");
     run(
@@ -201,7 +201,7 @@ fn save_exceptions_reports_every_failed_index() {
 
 #[test]
 fn implicit_cursor_attributes_and_sqlerrm_of_a_code() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -222,7 +222,7 @@ fn implicit_cursor_attributes_and_sqlerrm_of_a_code() {
 
 #[test]
 fn a_table_of_records_is_passed_to_a_local_procedure_and_filled_field_by_field() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -233,7 +233,7 @@ fn a_table_of_records_is_passed_to_a_local_procedure_and_filled_field_by_field()
 
 #[test]
 fn hostile_collection_use_fails_with_errors_not_panics() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     for block in [
         "DECLARE TYPE t IS TABLE OF NUMBER; v t := t(); BEGIN v.EXTEND(100000000); END;",

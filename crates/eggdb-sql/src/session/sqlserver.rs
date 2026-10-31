@@ -595,6 +595,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let binding = Binding {
             settings: &settings,
             walk_expressions: false,
+            target_privilege: Some(crate::roles::Privilege::Insert),
         };
         match &mut io.bulk_rows {
             None => self.read(|reader, tables| {
@@ -688,6 +689,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let binding = Binding {
             settings: &settings,
             walk_expressions: false,
+            target_privilege: None,
         };
         let mut resolved = table.clone();
         let relation = self.read(|reader, tables| {

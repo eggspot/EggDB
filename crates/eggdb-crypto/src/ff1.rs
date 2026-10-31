@@ -27,6 +27,12 @@ pub struct Ff1 {
     radix: u32,
 }
 
+impl std::fmt::Debug for Ff1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Ff1").field("radix", &self.radix).finish_non_exhaustive()
+    }
+}
+
 impl Ff1 {
     /// An FF1 cipher for an AES key and a radix from 2 to 65536.
     pub fn new(key: &[u8], radix: u32) -> Result<Self, Ff1Error> {

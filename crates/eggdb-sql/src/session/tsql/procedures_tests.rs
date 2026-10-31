@@ -67,7 +67,7 @@ fn create_add_numbers(session: &mut Session<'_, MemoryStore>) {
 
 #[test]
 fn exec_binds_positional_arguments_defaults_output_parameters_and_the_status() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_add_numbers(&mut session);
     let steps = succeeds(
@@ -87,7 +87,7 @@ fn exec_binds_positional_arguments_defaults_output_parameters_and_the_status() {
 
 #[test]
 fn exec_takes_named_arguments_in_any_order_and_the_default_keyword() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_add_numbers(&mut session);
     let steps = succeeds(
@@ -107,7 +107,7 @@ fn exec_takes_named_arguments_in_any_order_and_the_default_keyword() {
 
 #[test]
 fn arguments_that_do_not_fit_the_parameters_fail_with_sqlserver_numbers() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_add_numbers(&mut session);
     succeeds(
@@ -125,7 +125,7 @@ fn arguments_that_do_not_fit_the_parameters_fail_with_sqlserver_numbers() {
 
 #[test]
 fn procedures_write_print_and_return_without_a_value() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE TABLE audit (id int, note nvarchar(20))");
     succeeds(
@@ -152,7 +152,7 @@ fn procedures_write_print_and_return_without_a_value() {
 
 #[test]
 fn nested_procedures_see_their_nesting_level_and_recursion_stops_at_32() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE PROCEDURE inner_level AS SELECT @@NESTLEVEL AS level");
     succeeds(&mut session, "CREATE PROCEDURE outer_level AS EXEC inner_level");
@@ -168,7 +168,7 @@ fn nested_procedures_see_their_nesting_level_and_recursion_stops_at_32() {
 
 #[test]
 fn errors_raised_in_a_procedure_reach_the_callers_catch_block() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(
         &mut session,
@@ -190,7 +190,7 @@ fn errors_raised_in_a_procedure_reach_the_callers_catch_block() {
 
 #[test]
 fn insert_exec_fills_a_table_variable_from_a_procedures_result_set() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_add_numbers(&mut session);
     let steps = succeeds(
@@ -207,7 +207,7 @@ fn insert_exec_fills_a_table_variable_from_a_procedures_result_set() {
 
 #[test]
 fn a_procedure_that_leaves_a_transaction_open_reports_error_266() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE PROCEDURE opens AS BEGIN TRANSACTION");
     fails_with(&mut session, "EXEC opens", 266);
@@ -216,7 +216,7 @@ fn a_procedure_that_leaves_a_transaction_open_reports_error_266() {
 
 #[test]
 fn stored_procedures_are_found_by_the_names_clients_write() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_add_numbers(&mut session);
     for written in ["add_numbers", "dbo.add_numbers", "[dbo].[ADD_NUMBERS]", "db..add_numbers"] {

@@ -48,6 +48,7 @@ fn run_statement(
     let binding = Binding {
         settings,
         walk_expressions: true,
+        target_privilege: Some(crate::roles::target_privilege(&statement)),
     };
     match statement {
         Statement::Select(mut select) => {

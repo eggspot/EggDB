@@ -173,7 +173,7 @@ fn count_of(session: &mut Session<'_, MemoryStore>, text: &str) -> String {
 
 #[test]
 fn scrambled_blocks_run_to_an_end_or_an_error_and_leave_the_session_usable() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
     session
         .execute("CREATE TABLE t (n NUMBER)", &mut |_| {})
@@ -199,7 +199,7 @@ fn scrambled_blocks_run_to_an_end_or_an_error_and_leave_the_session_usable() {
 
 #[test]
 fn runaway_recursion_and_oversized_output_end_with_errors() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
     for text in [
         "CREATE PROCEDURE again IS BEGIN again; END;",

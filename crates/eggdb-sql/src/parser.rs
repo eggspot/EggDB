@@ -160,7 +160,7 @@ fn is_plain_literal(kind: &TokenKind<'_>) -> bool {
     ) || matches!(kind, TokenKind::Word(word) if word == "null" || word == "true" || word == "false")
 }
 
-const POSTGRESQL_ONLY_FUNCTIONS: [&str; 40] = [
+const POSTGRESQL_ONLY_FUNCTIONS: [&str; 42] = [
     "set_config",
     "current_schemas",
     "nextval",
@@ -241,7 +241,7 @@ const NAMED_PARAMETERS: [(&str, &[&str]); 5] = [
     ),
 ];
 
-const INTERNAL_FUNCTIONS: [&str; 26] = [
+const INTERNAL_FUNCTIONS: [&str; 28] = [
     crate::triggers::RAISE_FUNCTION,
     crate::routines::ROUTINE_CALL,
     "regclass_cast",

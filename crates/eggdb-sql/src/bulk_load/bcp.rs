@@ -35,7 +35,7 @@ fn written_terminator(text: &str, option: &str) -> SqlResult<Vec<u8>> {
             bytes.push(byte);
             continue;
         }
-        bytes.push(match characters.next() {
+        let unescaped = match characters.next() {
             Some(b't') => b'\t',
             Some(b'n') => b'\n',
             Some(b'r') => b'\r',
@@ -46,7 +46,8 @@ fn written_terminator(text: &str, option: &str) -> SqlResult<Vec<u8>> {
                 other
             }
             None => b'\\',
-        });
+        };
+        bytes.push(unescaped);
     }
     if bytes.is_empty() {
         return Err(SqlError::new(

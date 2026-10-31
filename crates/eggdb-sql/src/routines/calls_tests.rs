@@ -31,7 +31,7 @@ fn refusal(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
     }
 }
 
-fn session_with(store: &MemoryStore, statements: &[&str]) -> Session<'_, MemoryStore> {
+fn session_with<'s>(store: &'s MemoryStore, statements: &[&str]) -> Session<'s, MemoryStore> {
     let mut session = Session::new(store);
     for statement in statements {
         answer(&mut session, statement);

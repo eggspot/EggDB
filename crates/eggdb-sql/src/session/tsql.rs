@@ -677,6 +677,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let binding = Binding {
             settings: &settings,
             walk_expressions: self.statement_walks_expressions,
+            target_privilege: None,
         };
         self.read(|reader, tables| {
             binding.select(reader, tables, select)?;
@@ -701,6 +702,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 let binding = Binding {
                     settings: &settings,
                     walk_expressions: self.statement_walks_expressions,
+                    target_privilege: None,
                 };
                 self.read(|reader, tables| {
                     binding.query(reader, tables, query)?;

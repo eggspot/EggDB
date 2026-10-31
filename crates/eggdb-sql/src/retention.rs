@@ -118,6 +118,7 @@ mod tests {
         ] {
             run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
         }
+        drop(session);
         store
     }
 

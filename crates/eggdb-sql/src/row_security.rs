@@ -284,7 +284,7 @@ pub(crate) fn run(
 
 pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
     crate::store::delete_prefix(writer, &policy_prefix(table))?;
-    writer.delete(&switch_key(table))
+    writer.delete(&switch_key(table)).map(|_| ())
 }
 
 fn applicable(

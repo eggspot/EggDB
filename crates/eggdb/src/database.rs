@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::expiry::Moment;
 use crate::options::Options;
 use crate::transaction::{ReadTransaction, WriteTransaction};

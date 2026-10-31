@@ -107,7 +107,7 @@ mod tests {
     fn flags_resolve_like_openfeature_providers() {
         let store = installed();
         let mut session = Session::new(&store);
-        run(&mut session, r#"INSERT INTO eggdb_coordination.flags (flag_key, variants, default_variant, targeting) VALUES ('new-checkout', '{"on": true, "off": false}', 'off', '[{"attribute": "country", "in": ["VN", "SE"], "variant": "on"}]'), ('banner', '{"blue": "#00f"}', 'blue', '[]')"#).unwrap();
+        run(&mut session, r##"INSERT INTO eggdb_coordination.flags (flag_key, variants, default_variant, targeting) VALUES ('new-checkout', '{"on": true, "off": false}', 'off', '[{"attribute": "country", "in": ["VN", "SE"], "variant": "on"}]'), ('banner', '{"blue": "#00f"}', 'blue', '[]')"##).unwrap();
         let resolve = |session: &mut Session<'_, MemoryStore>, key: &str, context: &str| {
             run(session, &format!("SELECT eggdb_coordination.evaluate_flag('{key}', '{context}') ->> 'reason' AS reason")).unwrap()
         };

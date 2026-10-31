@@ -42,7 +42,7 @@ fn pair(n: &str, msg: &str) -> (String, String) {
 
 #[test]
 fn a_predefined_exception_is_caught_by_its_name_with_sqlerrm() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -53,7 +53,7 @@ fn a_predefined_exception_is_caught_by_its_name_with_sqlerrm() {
 
 #[test]
 fn a_user_exception_has_sqlcode_one() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -64,7 +64,7 @@ fn a_user_exception_has_sqlcode_one() {
 
 #[test]
 fn a_handled_exception_keeps_the_work_done_before_it() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, "CREATE TABLE k (id NUMBER PRIMARY KEY)");
     run(
@@ -79,7 +79,7 @@ fn a_handled_exception_keeps_the_work_done_before_it() {
 
 #[test]
 fn others_catches_what_no_named_handler_does() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -93,7 +93,7 @@ fn others_catches_what_no_named_handler_does() {
 
 #[test]
 fn raise_application_error_reaches_the_client_with_its_number_and_line() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let error = failure(
         &mut session,
@@ -112,7 +112,7 @@ fn raise_application_error_reaches_the_client_with_its_number_and_line() {
 
 #[test]
 fn an_application_error_number_outside_its_range_is_refused() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let error = failure(&mut session, "BEGIN RAISE_APPLICATION_ERROR(-1, 'x'); END;");
     assert_eq!(error.vendor_code(), Some(21000));
@@ -120,7 +120,7 @@ fn an_application_error_number_outside_its_range_is_refused() {
 
 #[test]
 fn an_unhandled_user_exception_is_ora_06510() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let error = failure(
         &mut session,
@@ -131,7 +131,7 @@ fn an_unhandled_user_exception_is_ora_06510() {
 
 #[test]
 fn reraise_passes_the_handled_error_on() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let error = failure(
         &mut session,
@@ -142,7 +142,7 @@ fn reraise_passes_the_handled_error_on() {
 
 #[test]
 fn a_local_procedure_changes_a_variable_of_its_enclosing_block() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -153,7 +153,7 @@ fn a_local_procedure_changes_a_variable_of_its_enclosing_block() {
 
 #[test]
 fn a_local_procedure_returns_out_parameters() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -164,7 +164,7 @@ fn a_local_procedure_returns_out_parameters() {
 
 #[test]
 fn a_query_loop_declares_its_record() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, "CREATE TABLE src (n NUMBER)");
     run(&mut session, "INSERT INTO src VALUES (1)");
@@ -181,7 +181,7 @@ fn a_query_loop_declares_its_record() {
 
 #[test]
 fn a_record_type_starts_with_its_field_defaults() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -192,7 +192,7 @@ fn a_record_type_starts_with_its_field_defaults() {
 
 #[test]
 fn a_string_too_long_for_its_variable_is_a_value_error() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -203,7 +203,7 @@ fn a_string_too_long_for_its_variable_is_a_value_error() {
 
 #[test]
 fn hostile_blocks_fail_without_panicking() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     for text in [
         "BEGIN RAISE_APPLICATION_ERROR(NULL, NULL); END;",

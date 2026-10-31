@@ -56,8 +56,9 @@ impl Session<'_> {
                 .map_err(|message| Failure::database(format!("--restore-from {url}: {message}"), Exit::DatabaseError))?;
             self.out.text(&format!("restored {file} from {url} into {}\n", self.file));
         }
-        let user = options.user.unwrap_or_else(|| DEFAULT_USER.to_owned());
+        let user = options.user.clone().unwrap_or_else(|| DEFAULT_USER.to_owned());
         let password = self.serve_password(&user)?;
+        let max_connections = options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
         if !password.is_ascii() {
             return Err(usage(
                 "the password must be ASCII in this release: SASLprep, which normalizes other characters for SCRAM, is not implemented yet".to_owned(),
@@ -226,7 +227,7 @@ impl Session<'_> {
         };
         let kafka_config = eggdb_kafka::ServerConfig {
             advertised: kafka_listener.as_ref().and_then(|listener| listener.local_addr().ok()).unwrap_or(address),
-            max_connections: config.max_connections,
+            max_connections: max_connections,
         };
         let amqp_listener = match options.amqp_listen {
             Some(address) => {
@@ -360,11 +361,11 @@ impl Session<'_> {
             }
             None => None,
         };
-        let cql_config = eggdb_cql::ServerConfig {
-            user: config.user.clone(),
+        let mut cql_config = eggdb_cql::ServerConfig {
+            user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
-            database: config.database.clone(),
-            max_connections: config.max_connections,
+            database: String::new(),
+            max_connections: max_connections,
         };
         let stomp_listener = match options.stomp_listen {
             Some(address) => {
@@ -383,9 +384,9 @@ impl Session<'_> {
             None => None,
         };
         let stomp_config = eggdb_stomp::ServerConfig {
-            user: config.user.clone(),
+            user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
-            max_connections: config.max_connections,
+            max_connections: max_connections,
         };
         let nats_listener = match options.nats_listen {
             Some(address) => {
@@ -404,27 +405,27 @@ impl Session<'_> {
             None => None,
         };
         let nats_config = eggdb_nats::ServerConfig {
-            user: config.user.clone(),
+            user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
-            max_connections: config.max_connections,
+            max_connections: max_connections,
         };
         let mqtt_config = eggdb_mqtt::ServerConfig {
-            user: config.user.clone(),
+            user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
-            max_connections: config.max_connections,
+            max_connections: max_connections,
         };
         let amqp_config = eggdb_amqp::ServerConfig {
-            user: config.user.clone(),
+            user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
-            max_connections: config.max_connections,
+            max_connections: max_connections,
         };
         let bolt_config = eggdb_bolt::ServerConfig {
-            user: config.user.clone(),
+            user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
-            max_connections: config.max_connections,
+            max_connections: max_connections,
         };
         let mongo_config = match &mongo_listener {
-            Some(_) => Some(super::serve_mongo::config(&config.user, &password, config.max_connections).map_err(|error| {
+            Some(_) => Some(super::serve_mongo::config(&user, &password, max_connections).map_err(|error| {
                 Failure::database(format!("cannot prepare the MongoDB-compatible listener: {error}"), Exit::DatabaseError)
             })?),
             None => None,
@@ -520,11 +521,12 @@ impl Session<'_> {
             user,
             verifier,
             database: options.database.unwrap_or(served_name),
-            max_connections: options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
+            max_connections,
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
             auth_rules: self.auth_rules()?,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
         };
+        cql_config.database = config.database.clone();
         let mysql_config = mysql_credentials.map(|credentials| eggdb_mysqlwire::ServerConfig {
             user: config.user.clone(),
             credentials,
@@ -556,6 +558,88 @@ impl Session<'_> {
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
+        let metrics_databases: Vec<(&str, &eggdb::Database)> =
+            std::iter::once((config.database.as_str(), &*db))
+                .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
+                .collect();
+        let observability_endpoint = eggdb_observability::Endpoint::new(&store, &config.user, server_password_sha256, &config.database);
+        let rest_endpoint = eggdb_api::Endpoint::new(&store, &config.user, server_password_sha256, &config.database, "public");
+        let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
+        let mcp_endpoint = mcp_listener.as_ref().map(|(_, tokens)| {
+            super::serve_mcp::McpEndpoint::new(
+                &mcp_opener,
+                &config.database,
+                tokens.clone(),
+                eggdb_mcp::audit::audit_path_for(&self.request.file),
+            )
+        });
+        let resp_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::RESP_COLLECTIONS,
+        };
+        let memcached_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MEMCACHED_COLLECTIONS,
+        };
+        let memcached_shared = eggdb_memcached::Shared {
+            keyspace: &memcached_database,
+            next_cas: std::sync::atomic::AtomicU64::new(1),
+        };
+        let es_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::ES_COLLECTIONS,
+        };
+        let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password);
+        let graph_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::GRAPH_COLLECTIONS,
+        };
+        let kafka_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::KAFKA_COLLECTIONS,
+        };
+        let queue_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::QUEUE_COLLECTIONS,
+        };
+        let mqtt_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MQTT_COLLECTIONS,
+        };
+        let sqs_endpoint = match (&sqs_listener, &sqs_secret) {
+            (Some(listener), Some(secret)) => {
+                let base_url = listener.local_addr().map_or_else(|_| "http://127.0.0.1".to_owned(), |address| format!("http://{address}"));
+                Some(eggdb_sqs::Endpoint::new(&queue_database, &base_url, &config.user, secret))
+            }
+            _ => None,
+        };
+        let object_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::OBJECT_COLLECTIONS,
+        };
+        let s3_endpoint = s3_secret.as_ref().map(|secret| eggdb_s3::Endpoint::new(&object_database, &config.user, secret));
+        let dynamodb_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::DYNAMODB_COLLECTIONS,
+        };
+        let dynamodb_endpoint = dynamodb_secret.as_ref().map(|secret| eggdb_dynamodb::Endpoint::new(&dynamodb_database, &config.user, secret));
+        let mongo_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MONGO_COLLECTIONS,
+        };
+        let mongo_store = eggdb_documents::Store::new(&mongo_database, super::serve_mongo::store_seed());
+        let resp_limited = options.resp_max_memory.and_then(|limit| {
+            let policy = options.resp_eviction.unwrap_or(eggdb_resp::EvictionPolicy::NoEviction);
+            eggdb_resp::EvictingKeyspace::new(&resp_database, limit, policy).ok()
+        });
+        let resp_keyspace: &(dyn eggdb_resp::Keyspace + Sync) = match &resp_limited {
+            Some(limited) => limited,
+            None => &resp_database,
+        };
+        let resp_config = eggdb_resp::ServerConfig {
+            password_sha256: resp_password,
+            max_connections: config.max_connections,
+        };
         let served = std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 let log = move |line: &str| {
@@ -589,11 +673,6 @@ impl Session<'_> {
                     Ok(0)
                 }
             });
-            let metrics_databases: Vec<(&str, &eggdb::Database)> =
-                std::iter::once((config.database.as_str(), &*db))
-                    .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
-                    .collect();
-            let observability_endpoint = eggdb_observability::Endpoint::new(&store, &config.user, server_password_sha256, &config.database);
             let observability_server = scope.spawn(|| match &observability_listener {
                 Some(listener) => eggdb_http::serve_with_body_limit(
                     listener,
@@ -603,7 +682,6 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
-            let rest_endpoint = eggdb_api::Endpoint::new(&store, &config.user, server_password_sha256, &config.database, "public");
             let rest_server = scope.spawn(|| match &rest_listener {
                 Some(listener) => eggdb_http::serve_with_body_limit(
                     listener,
@@ -631,15 +709,6 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
-            let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
-            let mcp_endpoint = mcp_listener.as_ref().map(|(_, tokens)| {
-                super::serve_mcp::McpEndpoint::new(
-                    &mcp_opener,
-                    &config.database,
-                    tokens.clone(),
-                    eggdb_mcp::audit::audit_path_for(&self.request.file),
-                )
-            });
             let mcp_server = scope.spawn(|| match (&mcp_listener, &mcp_endpoint) {
                 (Some((listener, _)), Some(endpoint)) => eggdb_http::serve(
                     listener,
@@ -648,18 +717,6 @@ impl Session<'_> {
                 ),
                 _ => Ok(()),
             });
-            let resp_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::RESP_COLLECTIONS,
-            };
-            let memcached_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::MEMCACHED_COLLECTIONS,
-            };
-            let memcached_shared = eggdb_memcached::Shared {
-                keyspace: &memcached_database,
-                next_cas: std::sync::atomic::AtomicU64::new(1),
-            };
             let memcached_server = scope.spawn(|| match &memcached_listener {
                 Some(listener) => eggdb_memcached::serve(
                     &memcached_shared,
@@ -671,11 +728,6 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
-            let es_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::ES_COLLECTIONS,
-            };
-            let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password);
             let es_server = scope.spawn(|| match &es_listener {
                 Some(listener) => eggdb_http::serve(
                     listener,
@@ -684,22 +736,6 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
-            let graph_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::GRAPH_COLLECTIONS,
-            };
-            let kafka_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::KAFKA_COLLECTIONS,
-            };
-            let queue_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::QUEUE_COLLECTIONS,
-            };
-            let mqtt_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::MQTT_COLLECTIONS,
-            };
             let mqtt_server = scope.spawn(|| match &mqtt_listener {
                 Some(listener) => eggdb_mqtt::serve(&mqtt_database, listener, &mqtt_config, &stop_signals::requested),
                 None => Ok(()),
@@ -717,23 +753,6 @@ impl Session<'_> {
                 Some(listener) => eggdb_nats::serve(listener, &nats_config, &stop_signals::requested),
                 None => Ok(()),
             });
-            let sqs_endpoint = match (&sqs_listener, &sqs_secret) {
-                (Some(listener), Some(secret)) => {
-                    let base_url = listener.local_addr().map_or_else(|_| "http://127.0.0.1".to_owned(), |address| format!("http://{address}"));
-                    Some(eggdb_sqs::Endpoint::new(&queue_database, &base_url, &config.user, secret))
-                }
-                _ => None,
-            };
-            let object_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::OBJECT_COLLECTIONS,
-            };
-            let s3_endpoint = s3_secret.as_ref().map(|secret| eggdb_s3::Endpoint::new(&object_database, &config.user, secret));
-            let dynamodb_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::DYNAMODB_COLLECTIONS,
-            };
-            let dynamodb_endpoint = dynamodb_secret.as_ref().map(|secret| eggdb_dynamodb::Endpoint::new(&dynamodb_database, &config.user, secret));
             let dynamodb_server = scope.spawn(|| match (&dynamodb_listener, &dynamodb_endpoint) {
                 (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
                     listener,
@@ -770,29 +789,12 @@ impl Session<'_> {
                 Some(listener) => eggdb_bolt::serve(&graph_database, listener, &bolt_config, &stop_signals::requested),
                 None => Ok(()),
             });
-            let mongo_database = super::serve_resp::DatabaseKeyspace {
-                db: &db,
-                prefix: super::serve_resp::MONGO_COLLECTIONS,
-            };
-            let mongo_store = eggdb_documents::Store::new(&mongo_database, super::serve_mongo::store_seed());
             let mongo_server = scope.spawn(|| match (&mongo_listener, &mongo_config) {
                 (Some(listener), Some(mongo_config)) => {
                     eggdb_mongowire::serve(&mongo_store, listener, mongo_config, &stop_signals::requested)
                 }
                 _ => Ok(()),
             });
-            let resp_limited = options.resp_max_memory.and_then(|limit| {
-                let policy = options.resp_eviction.unwrap_or(eggdb_resp::EvictionPolicy::NoEviction);
-                eggdb_resp::EvictingKeyspace::new(&resp_database, limit, policy).ok()
-            });
-            let resp_keyspace: &(dyn eggdb_resp::Keyspace + Sync) = match &resp_limited {
-                Some(limited) => limited,
-                None => &resp_database,
-            };
-            let resp_config = eggdb_resp::ServerConfig {
-                password_sha256: resp_password,
-                max_connections: config.max_connections,
-            };
             let resp_server = scope.spawn(|| match &resp_listener {
                 Some(listener) => eggdb_resp::serve(
                     resp_keyspace,

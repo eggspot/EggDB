@@ -59,7 +59,7 @@ const DOUBLE_IT: &str =
 
 #[test]
 fn call_binds_positional_named_and_default_arguments() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, LOG_IT);
     run(&mut session, "CALL log_it(1, 'positional')");
@@ -73,7 +73,7 @@ fn call_binds_positional_named_and_default_arguments() {
 
 #[test]
 fn a_block_calls_a_stored_procedure_as_a_statement() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, LOG_IT);
     run(
@@ -88,7 +88,7 @@ fn a_block_calls_a_stored_procedure_as_a_statement() {
 
 #[test]
 fn a_stored_function_runs_in_sql_and_in_plsql() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, DOUBLE_IT);
     assert_eq!(single(&mut session, "SELECT double_it(21) FROM dual"), "42");
@@ -107,7 +107,7 @@ fn a_stored_function_runs_in_sql_and_in_plsql() {
 
 #[test]
 fn a_local_function_is_called_from_sql_inside_its_block() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -118,7 +118,7 @@ fn a_local_function_is_called_from_sql_inside_its_block() {
 
 #[test]
 fn calls_that_match_no_routine_get_oracle_errors() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, DOUBLE_IT);
     run(&mut session, LOG_IT);
@@ -138,7 +138,7 @@ fn calls_that_match_no_routine_get_oracle_errors() {
 
 #[test]
 fn commit_inside_a_block_keeps_the_transaction() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, "INSERT INTO log VALUES (1, 'before')");
     run(
@@ -154,7 +154,7 @@ fn commit_inside_a_block_keeps_the_transaction() {
 
 #[test]
 fn rollback_inside_a_procedure_undoes_the_transaction() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -170,7 +170,7 @@ fn rollback_inside_a_procedure_undoes_the_transaction() {
 
 #[test]
 fn a_function_called_from_sql_cannot_commit() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -182,7 +182,7 @@ fn a_function_called_from_sql_cannot_commit() {
 
 #[test]
 fn execute_immediate_runs_plsql_blocks_and_creates_routines() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -193,7 +193,7 @@ fn execute_immediate_runs_plsql_blocks_and_creates_routines() {
 
 #[test]
 fn hostile_calls_fail_without_panicking() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, DOUBLE_IT);
     for text in [

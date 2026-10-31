@@ -175,7 +175,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 return self.password_ok(token.trim().as_bytes());
             }
             if let Some(encoded) = header.strip_prefix("Basic ") {
-                let Ok(decoded) = eggdb_crypto::base64_decode(encoded.trim()) else {
+                let Ok(decoded) = eggdb_crypto::base64_decode(encoded.trim().as_bytes()) else {
                     return false;
                 };
                 let Some(split) = decoded.iter().position(|&byte| byte == b':') else {

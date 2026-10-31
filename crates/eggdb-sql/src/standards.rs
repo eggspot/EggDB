@@ -49,8 +49,8 @@ fn field_bytes(tag: u32, value: &str) -> usize {
 fn check_fix_trailer(fields: &[(u32, &str)]) -> SqlResult<()> {
     if let Some((10, checksum)) = fields.last() {
         let sum = fields[..fields.len() - 1].iter().fold(0u32, |sum, (tag, value)| {
-            let bytes = tag.to_string().bytes().chain([b'=']).chain(value.bytes()).chain([1u8]);
-            bytes.fold(sum, |sum, byte| (sum + u32::from(byte)) % 256)
+            let field = format!("{tag}={value}\u{1}");
+            field.bytes().fold(sum, |sum, byte| (sum + u32::from(byte)) % 256)
         });
         if checksum.parse::<u32>().ok() != Some(sum) {
             return Err(invalid("FIX", format!("CheckSum(10) is {checksum}, but the message sums to {sum:03}")));

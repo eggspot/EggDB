@@ -44,7 +44,7 @@ mod encryption_tests;
 mod crash_sweep_tests;
 mod cursor;
 mod error;
-use eggdb_format::{bytes, crc32c, format};
+use eggdb_format::{bytes, format};
 mod frames;
 mod hybrid_clock;
 mod log;
@@ -77,7 +77,7 @@ mod tree_page;
 
 pub use btree::{BTree, TreeReport};
 pub use compression::ValueCompression;
-pub use crc32c::{crc32c, crc32c_append};
+pub use eggdb_format::crc32c::{self, crc32c, crc32c_append};
 pub use cursor::{Cursor, ScanOrder};
 pub use error::{FormatError, StorageError};
 pub use format::{

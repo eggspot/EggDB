@@ -560,6 +560,7 @@ impl FunctionRun<'_, '_> {
         let binding = Binding {
             settings: self.settings,
             walk_expressions: true,
+            target_privilege: None,
         };
         let _variables = crate::table_variables::enter(&self.variables);
         binding.select(&*self.writer, self.tables, select)?;
@@ -582,6 +583,7 @@ impl FunctionRun<'_, '_> {
                 let binding = Binding {
                     settings: self.settings,
                     walk_expressions: true,
+                    target_privilege: None,
                 };
                 let _variables = crate::table_variables::enter(&self.variables);
                 binding.query(&*self.writer, self.tables, &mut query)?;

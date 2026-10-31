@@ -101,7 +101,7 @@ fn entries(rows: &[(&str, &str)]) -> Vec<(String, String)> {
 
 #[test]
 fn package_variables_keep_their_values_between_calls() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = stats_session(&store);
     run(&mut session, "BEGIN stats.add_amount(5); stats.add_amount('7'); END;");
     run(&mut session, "CALL stats.add_amount(3)");
@@ -119,7 +119,7 @@ fn package_variables_keep_their_values_between_calls() {
 
 #[test]
 fn the_initialization_part_runs_once_per_session() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut first = stats_session(&store);
     run(&mut first, "BEGIN stats.add_amount(1); END;");
     run(&mut first, "BEGIN stats.add_amount(2); END;");
@@ -136,7 +136,7 @@ fn the_initialization_part_runs_once_per_session() {
 
 #[test]
 fn blocks_read_and_assign_public_package_variables() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = stats_session(&store);
     run(
         &mut session,
@@ -155,7 +155,7 @@ END;",
 
 #[test]
 fn package_constants_and_private_items_are_protected() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = stats_session(&store);
     failure(&mut session, "BEGIN stats.limit_value := 1; END;");
     failure(
@@ -168,7 +168,7 @@ fn package_constants_and_private_items_are_protected() {
 
 #[test]
 fn package_types_declare_variables_outside_the_package() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = stats_session(&store);
     run(
         &mut session,
@@ -187,7 +187,7 @@ END;",
 
 #[test]
 fn package_exceptions_are_caught_by_their_qualified_name() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = stats_session(&store);
     run(
         &mut session,
@@ -208,7 +208,7 @@ END;",
 
 #[test]
 fn a_package_cursor_stays_open_between_calls() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, "INSERT INTO log VALUES (10, 'a')");
     run(&mut session, "INSERT INTO log VALUES (20, 'b')");
@@ -245,7 +245,7 @@ END feed;",
 
 #[test]
 fn parameterless_package_functions_are_called_without_parentheses() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = stats_session(&store);
     run(
         &mut session,
@@ -266,7 +266,7 @@ END;",
 
 #[test]
 fn replacing_a_package_discards_its_session_state() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = stats_session(&store);
     run(&mut session, "BEGIN stats.add_amount(9); END;");
     assert_eq!(single(&mut session, "SELECT stats.current_total() FROM dual"), "9");
@@ -277,7 +277,7 @@ fn replacing_a_package_discards_its_session_state() {
 
 #[test]
 fn calling_a_member_of_a_package_without_a_body_fails() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -291,7 +291,7 @@ END lonely;",
 
 #[test]
 fn an_initialization_error_leaves_the_package_uninstantiated() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,

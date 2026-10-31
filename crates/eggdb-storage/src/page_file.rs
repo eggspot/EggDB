@@ -1076,7 +1076,7 @@ impl<F: File> PageFile<F> {
             return Ok(());
         }
         let page_size = self.page_size();
-        let segment_pages = if log::segment_holds_a_page(page_size, self.header.log_segment_pages) {
+        let segment_pages = if crate::format::segment_holds_a_page(page_size, self.header.log_segment_pages) {
             self.header.log_segment_pages
         } else {
             log::default_segment_pages(page_size)

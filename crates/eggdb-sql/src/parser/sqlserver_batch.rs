@@ -769,8 +769,6 @@ impl Parser<'_> {
         )))
     }
 
-    }
-
     pub(super) fn sqlserver_insert_bulk(&mut self) -> SqlResult<Statement> {
         self.at += 2;
         let table = self.table_name()?;

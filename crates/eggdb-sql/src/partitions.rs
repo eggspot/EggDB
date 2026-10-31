@@ -1132,7 +1132,7 @@ pub(crate) fn numeric_key_columns(table: &TableDefinition, key: &PartitionKey) -
 }
 
 pub(crate) fn forget(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
-    writer.delete(&partition_key(table))
+    writer.delete(&partition_key(table)).map(|_| ())
 }
 
 pub(crate) fn rename(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> SqlResult<()> {

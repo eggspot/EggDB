@@ -104,7 +104,7 @@ fn scalar_inline_and_multi_statement_functions_parse() {
 
 #[test]
 fn routine_headers_follow_sqlserver_rules() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     fails_with(&mut session, "SELECT 1; CREATE PROCEDURE p AS SELECT 1", 111);
     fails_with(&mut session, "CREATE FUNCTION f (@a int OUTPUT) RETURNS int AS BEGIN RETURN 1 END", 181);
@@ -116,7 +116,7 @@ fn routine_headers_follow_sqlserver_rules() {
 
 #[test]
 fn procedures_and_functions_share_one_name_space_with_tables() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE TABLE orders (id int)");
     succeeds(&mut session, "CREATE PROCEDURE dbo.get_orders AS SELECT id FROM orders");
@@ -140,7 +140,7 @@ fn procedures_and_functions_share_one_name_space_with_tables() {
 
 #[test]
 fn altered_procedures_keep_a_create_statement_as_their_text() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE PROCEDURE p AS SELECT 1");
     succeeds(&mut session, "ALTER PROCEDURE p AS SELECT 2");
@@ -154,7 +154,7 @@ fn altered_procedures_keep_a_create_statement_as_their_text() {
 
 #[test]
 fn hostile_transact_sql_routines_return_errors_and_never_panic() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE TABLE t (id int PRIMARY KEY, n int)");
     succeeds(

@@ -121,7 +121,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let Some(encoded) = request.header("authorization").and_then(|header| header.strip_prefix("Basic ")) else {
             return false;
         };
-        let Ok(decoded) = eggdb_crypto::base64_decode(encoded.trim()) else {
+        let Ok(decoded) = eggdb_crypto::base64_decode(encoded.trim().as_bytes()) else {
             return false;
         };
         let Some(split) = decoded.iter().position(|&byte| byte == b':') else {

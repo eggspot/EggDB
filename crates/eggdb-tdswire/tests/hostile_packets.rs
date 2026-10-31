@@ -165,9 +165,9 @@ fn mutated_messages_never_panic_a_parser() {
 
 #[test]
 fn the_bulk_load_seed_reads_and_its_mutations_never_panic_over_a_socket() {
-    let (columns, rows) = parse_bulk_load(&bulk_load_body()).unwrap();
+    let (columns, parsed_rows) = parse_bulk_load(&bulk_load_body()).unwrap();
     assert_eq!(columns.len(), 3);
-    assert_eq!(rows.len(), 2);
+    assert_eq!(parsed_rows.len(), 2);
     let server = TestServer::start(8);
     let mut client = Client::login(server.address);
     client.batch("CREATE TABLE t (id INT PRIMARY KEY, name NVARCHAR(MAX), notes NVARCHAR(MAX))");

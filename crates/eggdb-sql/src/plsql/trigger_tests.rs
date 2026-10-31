@@ -68,7 +68,7 @@ END;";
 
 #[test]
 fn a_before_row_trigger_changes_the_new_row() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -90,7 +90,7 @@ END;",
 
 #[test]
 fn an_after_row_trigger_sees_the_event_and_both_rows() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, LOGGING_TRIGGER);
     run(&mut session, "INSERT INTO emp VALUES (1, 'KING', 5000)");
@@ -104,7 +104,7 @@ fn an_after_row_trigger_sees_the_event_and_both_rows() {
 
 #[test]
 fn updating_a_column_tells_which_columns_the_update_sets() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -128,7 +128,7 @@ END;",
 
 #[test]
 fn update_of_columns_and_a_when_clause_with_referencing_names_filter_the_rows() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -153,7 +153,7 @@ END;",
 
 #[test]
 fn a_statement_trigger_fires_once_per_statement() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -183,7 +183,7 @@ END;",
 
 #[test]
 fn an_error_in_a_trigger_stops_the_statement_with_the_trigger_named() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -209,7 +209,7 @@ END;",
 
 #[test]
 fn row_triggers_fire_for_dml_inside_a_plsql_block() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, LOGGING_TRIGGER);
     run(
@@ -229,7 +229,7 @@ END;",
 
 #[test]
 fn alter_trigger_disables_enables_renames_and_drop_removes_it() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, LOGGING_TRIGGER);
     run(&mut session, "ALTER TRIGGER emp_audit DISABLE");
@@ -256,7 +256,7 @@ fn alter_trigger_disables_enables_renames_and_drop_removes_it() {
 
 #[test]
 fn a_second_trigger_with_the_same_name_needs_or_replace() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, LOGGING_TRIGGER);
     let duplicate = failure(
@@ -274,7 +274,7 @@ fn a_second_trigger_with_the_same_name_needs_or_replace() {
 
 #[test]
 fn an_instead_of_trigger_writes_through_a_view() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -296,7 +296,7 @@ END;",
 
 #[test]
 fn commit_inside_a_trigger_is_refused() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -309,7 +309,7 @@ fn commit_inside_a_trigger_is_refused() {
 
 #[test]
 fn a_call_body_runs_a_procedure_for_each_row() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -328,7 +328,7 @@ END;",
 
 #[test]
 fn trigger_definitions_oracle_refuses_are_refused_at_create() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let cases: [(&str, Option<u16>); 7] = [
         (
@@ -391,7 +391,7 @@ fn trigger_definitions_oracle_refuses_are_refused_at_create() {
 
 #[test]
 fn hostile_trigger_text_returns_errors() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     for text in [
         "CREATE TRIGGER",

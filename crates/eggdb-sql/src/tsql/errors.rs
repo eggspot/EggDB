@@ -86,6 +86,7 @@ fn shortened(message: String) -> String {
     kept
 }
 
+#[derive(Debug)]
 pub(crate) struct RaisedMessage {
     pub(crate) number: u32,
     pub(crate) severity: u8,

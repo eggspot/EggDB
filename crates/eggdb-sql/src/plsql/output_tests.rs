@@ -25,7 +25,7 @@ fn lines(texts: &[&str]) -> Vec<String> {
 
 #[test]
 fn put_line_put_and_new_line_build_the_server_output() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -39,7 +39,7 @@ fn put_line_put_and_new_line_build_the_server_output() {
 
 #[test]
 fn output_is_ignored_until_it_is_enabled() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(&mut session, "BEGIN DBMS_OUTPUT.PUT_LINE('lost'); END;");
     assert_eq!(session.take_server_output(), Vec::<String>::new());
@@ -53,7 +53,7 @@ fn output_is_ignored_until_it_is_enabled() {
 
 #[test]
 fn a_stored_procedure_writes_server_output() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     session.enable_server_output(None);
     run(
@@ -70,7 +70,7 @@ fn a_stored_procedure_writes_server_output() {
 
 #[test]
 fn get_line_reads_the_buffer_back_with_its_status() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -97,7 +97,7 @@ fn get_line_reads_the_buffer_back_with_its_status() {
 
 #[test]
 fn a_full_buffer_raises_oru_10027() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let error = failure(
         &mut session,
@@ -109,7 +109,7 @@ fn a_full_buffer_raises_oru_10027() {
 
 #[test]
 fn hostile_output_calls_fail_without_panicking() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     for text in [
         "BEGIN DBMS_OUTPUT.PUT_LINE(); END;",

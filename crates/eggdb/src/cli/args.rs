@@ -70,7 +70,7 @@ impl TableAction {
 }
 
 impl CommandName {
-    pub(crate) const ALL: [Self; 28] = [
+    pub(crate) const ALL: [Self; 29] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -604,8 +604,9 @@ impl std::fmt::Debug for EncryptionKey {
     }
 }
 
-fn read_key_file(path: &str) -> Result<EncryptionKey, String> {
-    let text = std::fs::read_to_string(path)
+fn read_key_file(value: &OsStr) -> Result<EncryptionKey, String> {
+    let path = std::path::Path::new(value).display();
+    let text = std::fs::read_to_string(value)
         .map_err(|error| format!("cannot read --key-file {path}: {error}"))?;
     let digits = text.trim();
     let wrong = || format!("--key-file {path} must hold 64 hexadecimal digits (32 bytes), such as from: openssl rand -hex 32");
@@ -2360,6 +2361,9 @@ mod tests {
                 null: Some("NA".into()),
                 row_terminator: None,
                 keep_nulls: false,
+                parquet: None,
+                arrow: None,
+                sql_dump: None,
             }
         );
         let bcp = request(

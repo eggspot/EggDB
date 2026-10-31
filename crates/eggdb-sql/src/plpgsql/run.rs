@@ -826,6 +826,7 @@ impl<'r> Run<'r> {
             let binding = crate::name_resolution::Binding {
                 settings,
                 walk_expressions: true,
+                target_privilege: None,
             };
             let mut call = call;
             for argument in &mut call.arguments {

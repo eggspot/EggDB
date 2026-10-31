@@ -136,7 +136,7 @@ impl Call<'_> {
 
     fn content_md5_matches(&self) -> bool {
         match self.request.header("content-md5") {
-            Some(stated) => eggdb_crypto::base64_decode(stated).is_ok_and(|digest| digest == eggdb_crypto::md5_checksum(&self.request.body)),
+            Some(stated) => eggdb_crypto::base64_decode(stated.as_bytes()).is_ok_and(|digest| digest == eggdb_crypto::md5_checksum(&self.request.body)),
             None => true,
         }
     }
@@ -271,7 +271,7 @@ impl<'k> Endpoint<'k> {
         let delimiter = call.param("delimiter").unwrap_or_default();
         let url_encoded = call.param("encoding-type") == Some("url");
         let max_keys = call.param("max-keys").and_then(|text| text.parse::<usize>().ok()).unwrap_or(MAX_KEYS).min(MAX_KEYS);
-        let token = call.param("continuation-token").and_then(|token| eggdb_crypto::base64_decode(token).ok()).and_then(|bytes| String::from_utf8(bytes).ok());
+        let token = call.param("continuation-token").and_then(|token| eggdb_crypto::base64_decode(token.as_bytes()).ok()).and_then(|bytes| String::from_utf8(bytes).ok());
         let after = if version2 { token.clone().unwrap_or_else(|| call.param("start-after").unwrap_or_default().to_owned()) } else { call.param("marker").unwrap_or_default().to_owned() };
         let entries = match self.store.list(&call.bucket, prefix, &after) {
             Ok(entries) => entries,

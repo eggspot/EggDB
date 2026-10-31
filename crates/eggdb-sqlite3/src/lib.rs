@@ -764,7 +764,8 @@ pub unsafe extern "C" fn sqlite3_column_int64(statement: *mut Sqlite3Stmt, colum
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sqlite3_column_int(statement: *mut Sqlite3Stmt, column: c_int) -> c_int {
     // SAFETY: the same contract.
-    unsafe { sqlite3_column_int64(statement, column) } as c_int
+    let value = unsafe { sqlite3_column_int64(statement, column) };
+    value as c_int
 }
 
 /// Column `column` of the current row as a floating-point number.

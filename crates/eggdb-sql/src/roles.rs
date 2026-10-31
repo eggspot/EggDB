@@ -4,6 +4,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
+use eggdb_auth::scram::parse_scram_verifier;
 use eggdb_crypto::{base64_decode, base64_encode, hmac_sha256, pbkdf2_hmac_sha256, sha256};
 use std::collections::BTreeSet;
 
@@ -275,24 +276,6 @@ pub(crate) fn scram_verifier_text(password: &str) -> SqlResult<String> {
         base64_encode(&stored_key),
         base64_encode(&server_key)
     ))
-}
-
-/// The parts of a verifier in `pg_authid.rolpassword`'s form: iterations, salt, stored key and
-/// server key.
-pub type ScramParts = (u32, Vec<u8>, [u8; 32], [u8; 32]);
-
-/// Splits a SCRAM-SHA-256 verifier written as `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`
-/// (base64 parts), or `None` when it is not one.
-pub fn parse_scram_verifier(text: &str) -> Option<ScramParts> {
-    let rest = text.strip_prefix("SCRAM-SHA-256$")?;
-    let (head, keys) = rest.split_once('$')?;
-    let (iterations, salt) = head.split_once(':')?;
-    let (stored, server) = keys.split_once(':')?;
-    let iterations: u32 = iterations.parse().ok().filter(|count| *count > 0)?;
-    let salt = base64_decode(salt.as_bytes()).ok().filter(|salt| !salt.is_empty())?;
-    let stored: [u8; 32] = base64_decode(stored.as_bytes()).ok()?.try_into().ok()?;
-    let server: [u8; 32] = base64_decode(server.as_bytes()).ok()?.try_into().ok()?;
-    Some((iterations, salt, stored, server))
 }
 
 fn checked_name(name: &Name) -> SqlResult<()> {

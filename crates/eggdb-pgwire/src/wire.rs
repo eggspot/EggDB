@@ -12,6 +12,15 @@ const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug)]
+pub(crate) enum WireError {
+    Closed,
+    Stopping,
+    TimedOut,
+    TooLarge(usize),
+    Io,
+}
+
 pub(crate) struct Wire<'a> {
     stream: ServerConnection,
     peeked: Option<u8>,

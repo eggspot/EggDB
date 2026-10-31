@@ -117,7 +117,7 @@ fn drop_and_alter_name_the_unit_kind() {
 
 #[test]
 fn one_routine_per_name_and_names_shared_with_tables_and_packages() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     tag(&mut session, "CREATE TABLE job_history (employee_id NUMBER(6))");
     assert_eq!(tag(&mut session, ADD_JOB_HISTORY), "CREATE PROCEDURE");
@@ -154,7 +154,7 @@ fn one_routine_per_name_and_names_shared_with_tables_and_packages() {
 
 #[test]
 fn a_unit_that_does_not_compile_is_refused_with_its_line_and_column() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let error = failure(
         &mut session,
@@ -171,7 +171,7 @@ fn a_unit_that_does_not_compile_is_refused_with_its_line_and_column() {
 
 #[test]
 fn dropping_and_compiling_find_the_unit_of_the_named_kind() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     tag(&mut session, "CREATE PROCEDURE p AS BEGIN NULL; END p;");
     assert_eq!(oracle_code(&mut session, "DROP FUNCTION p"), Some(4043));
@@ -187,7 +187,7 @@ fn dropping_and_compiling_find_the_unit_of_the_named_kind() {
 
 #[test]
 fn a_package_body_needs_its_specification_and_compiles_against_it() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let error = failure(&mut session, COUNTER_BODY);
     assert_eq!(error.vendor_code(), Some(6550));
@@ -210,7 +210,7 @@ fn a_package_body_needs_its_specification_and_compiles_against_it() {
 
 #[test]
 fn package_bodies_and_packages_drop_and_compile_separately() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     tag(&mut session, COUNTER_SPEC);
     tag(&mut session, COUNTER_BODY);
@@ -234,7 +234,7 @@ fn package_bodies_and_packages_drop_and_compile_separately() {
 
 #[test]
 fn an_anonymous_block_runs_as_one_statement() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     assert_eq!(tag(&mut session, "BEGIN NULL; END;"), "PL/SQL BLOCK");
     assert_eq!(
@@ -245,7 +245,7 @@ fn an_anonymous_block_runs_as_one_statement() {
 
 #[test]
 fn hostile_plsql_ddl_is_refused_without_panicking() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     for text in [
         "CREATE PROCEDURE",
