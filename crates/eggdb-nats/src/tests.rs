@@ -63,14 +63,23 @@ impl Client {
 
 const LOGIN: &str = r#"{"user":"eggdb","pass":"secret","verbose":false}"#;
 
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 fn with_server(test: impl FnOnce(SocketAddr)) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let server = scope.spawn(|| serve(&listener, &config(), &|| stop.load(Ordering::Relaxed)));
+        let stopping = StopOnDrop(&stop);
         test(address);
-        stop.store(true, Ordering::Relaxed);
+        drop(stopping);
         server.join().unwrap().unwrap();
     });
 }
@@ -151,7 +160,11 @@ fn messages_reach_subscribers_and_queue_groups_share_them() {
         publisher
             .send("PUB orders.new inbox.1 5\r\nhello\r\nPUB jobs 1\r\nx\r\nPUB jobs 1\r\ny\r\n");
         publisher.sync();
-        let mut deliveries = vec![subscriber.line(), subscriber.line()];
+        let mut deliveries = Vec::new();
+        for _ in 0..2 {
+            deliveries.push(subscriber.line());
+            assert_eq!(subscriber.payload(5), "hello");
+        }
         deliveries.sort();
         assert_eq!(
             deliveries,
@@ -182,15 +195,15 @@ fn headers_auto_unsubscribe_and_echo_follow_the_client_options() {
         client.sync();
         assert_eq!(other.line(), "MSG events 9 2");
         assert_eq!(other.payload(2), "hi");
-        other.send("HPUB events 12 15\r\nNATS/1.0\r\n\r\none\r\nPUB events 3\r\ntwo\r\n");
-        other.sync();
-        assert_eq!(client.line(), "HMSG events 1 12 15");
-        assert_eq!(client.payload(15), "NATS/1.0\r\n\r\none");
-        client.sync();
+        other.send("HPUB events 12 15\r\nNATS/1.0\r\n\r\none\r\nPUB events 3\r\ntwo\r\nPING\r\n");
         assert_eq!(other.line(), "MSG events 9 3");
         assert_eq!(other.payload(3), "one");
         assert_eq!(other.line(), "MSG events 9 3");
         assert_eq!(other.payload(3), "two");
+        assert_eq!(other.line(), "PONG");
+        assert_eq!(client.line(), "HMSG events 1 12 15");
+        assert_eq!(client.payload(15), "NATS/1.0\r\n\r\none");
+        client.sync();
     });
 }
 

@@ -85,6 +85,14 @@ impl Client {
     }
 }
 
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 fn with_server(test: impl FnOnce(SocketAddr, &Queues<'_>)) {
     let keyspace = MemoryKeyspace::default();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -96,8 +104,9 @@ fn with_server(test: impl FnOnce(SocketAddr, &Queues<'_>)) {
                 stop.load(Ordering::Relaxed)
             })
         });
+        let stopping = StopOnDrop(&stop);
         test(address, &Queues::new(&keyspace));
-        stop.store(true, Ordering::Relaxed);
+        drop(stopping);
         server.join().unwrap().unwrap();
     });
 }
