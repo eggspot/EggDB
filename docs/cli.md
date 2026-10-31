@@ -53,8 +53,8 @@ eggdb <command> <file> [arguments] [options]
 | `backup <file> <copy>` | read-only | writes a copy of the last commit to the new file `<copy>`, while other readers keep working (below) |
 | `compact <file>` | read-only | rewrites the file without free or leaked pages and swaps it in atomically, while readers in other programs keep working (below) |
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
-| `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below) |
-| `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below); with `--csv <file> --table <name>`, a CSV file into a SQL table |
+| `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below); with `--table <name> --parquet <out>`, the table's rows as a Parquet file (D202) |
+| `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below); with `--csv <file> --table <name>`, a CSV file into a SQL table; with `--parquet <file> --table <name>`, a Parquet file into a SQL table, created from the file's columns when it does not exist (D202) |
 | `sql <file> [-c <sql> \| <script> \| -]` | for writing (`--read-only`: no); `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
 | `explain <file> -c <sql>` | read-only | shows the plan for one statement, in its dialect's EXPLAIN form, without running it (below) |
 | `table list\|show\|sample <file> [<table>]` | read-only | lists the tables and views, shows one in full, or prints its first rows (below) |

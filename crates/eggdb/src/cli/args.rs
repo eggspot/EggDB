@@ -240,9 +240,9 @@ impl CommandName {
             OptionName::Report => self == Self::Restore,
             OptionName::Mode => self == Self::Shell,
             OptionName::DryRun => matches!(self, Self::Import | Self::Restore),
+            OptionName::Table | OptionName::Parquet => matches!(self, Self::Import | Self::Export),
             OptionName::OnConflict
             | OptionName::Csv
-            | OptionName::Table
             | OptionName::Header
             | OptionName::Delimiter
             | OptionName::Null
@@ -383,6 +383,7 @@ enum OptionName {
     KeepGoing,
     Mode,
     Csv,
+    Parquet,
     Table,
     Header,
     Delimiter,
@@ -458,6 +459,7 @@ impl OptionName {
             b"keep-going" => Self::KeepGoing,
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
+            b"parquet" => Self::Parquet,
             b"table" => Self::Table,
             b"header" => Self::Header,
             b"delimiter" => Self::Delimiter,
@@ -630,6 +632,7 @@ pub(crate) struct CsvOptions {
     pub(crate) null: Option<String>,
     pub(crate) row_terminator: Option<String>,
     pub(crate) keep_nulls: bool,
+    pub(crate) parquet: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1189,6 +1192,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.max_connections = Some(count);
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
+            OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
             OptionName::Header => request.csv.header = true,
             OptionName::KeepNulls => request.csv.keep_nulls = true,
             OptionName::Table
@@ -1711,6 +1715,18 @@ fn parse_collection_name(option: Option<&str>, value: &OsStr) -> Result<String, 
 
 fn check_csv_options(request: &Request) -> Result<(), String> {
     let csv = &request.csv;
+    if csv.parquet.is_some() {
+        if csv.source.is_some() {
+            return Err("give --csv or --parquet, not both".to_owned());
+        }
+        if request.export_file.is_some() {
+            return Err("give the Parquet file with --parquet <file>, not as a second argument".to_owned());
+        }
+        if csv.table.is_none() {
+            return Err("--parquet needs --table <name>, the table to load or write".to_owned());
+        }
+        return Ok(());
+    }
     if csv.source.is_none() {
         let given = [
             (csv.table.is_some(), "--table"),

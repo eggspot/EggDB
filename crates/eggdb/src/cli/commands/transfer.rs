@@ -26,6 +26,9 @@ const COLLECTION_KEY_PREFIX_BYTES: usize = 10;
 
 impl Session<'_> {
     pub(super) fn export(&mut self) -> Result<Exit, Failure> {
+        if let Some(target) = self.request.csv.parquet.clone() {
+            return self.export_parquet(&target);
+        }
         let db = self.open(Access::ReadOnly, None)?;
         let header = Header {
             page_size: Some(db.page_size()),
@@ -173,6 +176,9 @@ impl Session<'_> {
     }
 
     pub(super) fn import(&mut self) -> Result<Exit, Failure> {
+        if let Some(source) = self.request.csv.parquet.clone() {
+            return self.import_parquet(&source);
+        }
         if let Some(source) = self.request.csv.source.clone() {
             return self.import_csv(source);
         }

@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-parquet"
+description = "Parquet files for EggDB, from the public Apache Parquet and Thrift specifications: reading flat files (plain and dictionary pages, Snappy) and writing them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-columnar = { path = "../eggdb-columnar" }

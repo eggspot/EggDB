@@ -20,6 +20,7 @@ mod csv_import;
 mod expiry;
 mod explain;
 mod mcp;
+mod parquet_io;
 mod restore;
 mod restore_aof;
 mod restore_mongodump;
