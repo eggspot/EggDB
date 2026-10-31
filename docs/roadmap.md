@@ -214,7 +214,8 @@ From the third gap review (D47–D58), each after its foundations:
   pipelines translated to SQL by `eggdb sql --kql` (D242).
 - **Industry standards (D50)** follow the messaging work. Started: FIX, HL7 v2 and EDIFACT
   messages parsed into `jsonb` by SQL functions (D243).
-- **Catalog and master data (D51)** follow the console.
+- **Catalog and master data (D51)** follow the console. Started: a glossary, quality rules and
+  lineage with OpenLineage events in `CREATE EXTENSION eggdb_catalog` (D244).
 - **Sharing and privacy (D52)** follow branching (D28).
 - **Retention and sovereignty (D53)** follow backups and compliance.
 - **Coordination (D54)** follows consensus (M15).

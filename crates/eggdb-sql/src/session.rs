@@ -2061,6 +2061,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             "eggdb_ledger" => ("eggdb_ledger", crate::ledger::LEDGER_SCRIPT),
             "eggdb_console" => ("eggdb_console", crate::console::CONSOLE_SCRIPT),
             "eggdb_bi" => ("eggdb_bi", crate::reports::BI_SCRIPT),
+            "eggdb_catalog" => ("eggdb_catalog", crate::catalog::CATALOG_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

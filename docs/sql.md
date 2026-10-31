@@ -2437,6 +2437,38 @@ the queue at least once, oldest first, to `http://` targets whose prefix is list
 `EGGDB_REPORT_TARGETS` (comma-separated). It sends nothing when that is unset, and drops a
 message whose target is not allowed.
 
+## Data catalog, quality rules and lineage (eggdb_catalog)
+
+`CREATE EXTENSION eggdb_catalog` keeps a business glossary, data quality rules and lineage in
+ordinary tables of the `eggdb_catalog` schema (D244):
+
+```sql
+CREATE EXTENSION eggdb_catalog;
+INSERT INTO eggdb_catalog.terms VALUES ('PII', 'Personal data under GDPR', 'privacy-team');
+INSERT INTO eggdb_catalog.tags VALUES ('public', 'customers', 'email', 'PII');
+INSERT INTO eggdb_catalog.quality_rules (rule_name, schema_name, table_name, row_condition)
+    VALUES ('email present', 'public', 'customers', 'email IS NOT NULL');
+SELECT eggdb_catalog.check_quality();
+INSERT INTO eggdb_catalog.lineage VALUES ('public.customers', 'mart.revenue', 'build_mart');
+SELECT * FROM eggdb_catalog.upstream('mart.revenue');
+SELECT eggdb_catalog.openlineage_event('build_mart', 'COMPLETE');
+```
+
+- `terms` is the glossary, each term with its definition and steward; `tags` attaches terms to a
+  table (`column_name` left empty) or a column, and refuses a term the glossary doesn't have.
+- `quality_rules` holds one boolean condition per rule, true for a good row. `check_quality()`
+  checks every rule against its table, appends a row per rule to `quality_results` with the rows
+  checked and the rows that failed (a NULL result counts as failed), and returns how many rules
+  found failing rows, so a pg_cron job can alert on it.
+- `lineage` records which asset feeds which, and through which job. `upstream(asset)` walks it
+  back and returns every upstream asset with its distance in hops, and
+  `openlineage_event(job, event_type)` returns that job's inputs and outputs as an OpenLineage
+  `RunEvent`, ready to post to any OpenLineage collector.
+
+A rule's condition runs as SQL with the privileges of whoever calls `check_quality()`, the way a
+view's query does, so only roles trusted to write SQL should be granted `INSERT` on
+`quality_rules`.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form
