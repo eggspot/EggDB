@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 
 use crate::alert::AlertDescription;
 use crate::cipher_suite::{CipherSuite, version};
-use crate::config::{ClientConfig, MinimumVersion, ServerVerification};
+use crate::config::{ClientConfig, ServerVerification};
 use crate::error::TlsError;
 use crate::handshake::{
     CertificateEntry, CertificateMessage, CertificateRequest, ClientHello, DOWNGRADE_TO_TLS12_SENTINEL,
@@ -62,7 +62,7 @@ pub(crate) fn check_server_certificates(
 fn offered_suites(config: &ClientConfig) -> Vec<u16> {
     CipherSuite::ALL
         .into_iter()
-        .filter(|suite| suite.is_tls13() || config.minimum_version == MinimumVersion::Tls12)
+        .filter(|suite| if suite.is_tls13() { config.offers_tls13() } else { config.offers_tls12() })
         .map(CipherSuite::id)
         .collect()
 }
@@ -74,13 +74,16 @@ fn client_hello(
     share: KeyShareEntry,
     cookie: Option<&[u8]>,
 ) -> ClientHello {
-    let offer_tls12 = config.minimum_version == MinimumVersion::Tls12;
+    let offer_tls12 = config.offers_tls12();
     let mut extensions = Vec::new();
     if let Some(name) = &config.server_name_indication {
         extensions.push(Extension::server_name(name));
     }
-    let versions: &[u16] = if offer_tls12 { &[version::TLS13, version::TLS12] } else { &[version::TLS13] };
-    extensions.push(Extension::client_supported_versions(versions));
+    let versions: Vec<u16> = [(config.offers_tls13(), version::TLS13), (offer_tls12, version::TLS12)]
+        .into_iter()
+        .filter_map(|(offered, version)| offered.then_some(version))
+        .collect();
+    extensions.push(Extension::client_supported_versions(&versions));
     extensions.push(Extension::supported_groups(&SUPPORTED_GROUPS));
     extensions.push(Extension::signature_algorithms(&SUPPORTED_SIGNATURE_SCHEMES));
     extensions.push(Extension::client_key_shares(&[share]));
@@ -120,6 +123,9 @@ pub(crate) fn handshake<S: Read + Write>(
     config: &ClientConfig,
     fill_random: FillRandom<'_>,
 ) -> Result<Established, TlsError> {
+    if !config.offers_tls13() && !config.offers_tls12() {
+        return Err(TlsError::protocol(AlertDescription::ProtocolVersion, "the client is set up to offer no TLS version"));
+    }
     let mut random = [0u8; 32];
     fill_random(&mut random)?;
     let mut session_id = vec![0u8; 32];
@@ -170,13 +176,13 @@ pub(crate) fn handshake<S: Read + Write>(
         Some(version::TLS13) => {}
         Some(_) => return Err(TlsError::protocol(AlertDescription::IllegalParameter, "the server selected a version the client did not offer")),
         None => {
-            let tls12_allowed = config.minimum_version == MinimumVersion::Tls12
+            let tls12_allowed = config.offers_tls12()
                 && retry_transcript.is_none()
                 && server_hello.legacy_version == version::TLS12;
             if !tls12_allowed {
                 return Err(TlsError::protocol(AlertDescription::ProtocolVersion, "the server does not speak TLS 1.3"));
             }
-            if server_hello.random[24..] == DOWNGRADE_TO_TLS12_SENTINEL {
+            if config.offers_tls13() && server_hello.random[24..] == DOWNGRADE_TO_TLS12_SENTINEL {
                 return Err(TlsError::protocol(AlertDescription::IllegalParameter, "the server signalled a downgrade from TLS 1.3"));
             }
             return crate::client12::handshake(layer, config, hello_message, server_hello_message, server_hello, random, fill_random);

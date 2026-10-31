@@ -4,7 +4,7 @@ use std::thread;
 
 use eggdb_tls::alert::AlertDescription;
 use eggdb_tls::cipher_suite::{CipherSuite, version};
-use eggdb_tls::config::{ClientConfig, MinimumVersion, ServerConfig, ServerVerification};
+use eggdb_tls::config::{ClientConfig, MaximumVersion, MinimumVersion, ServerConfig, ServerVerification};
 use eggdb_tls::error::TlsError;
 use eggdb_tls::self_signed::{SelfSignedCertificateRequest, generate_self_signed_certificate};
 use eggdb_tls::stream::TlsStream;
@@ -196,4 +196,66 @@ fn garbage_instead_of_a_client_hello_is_refused_without_panicking() {
         client_socket.shutdown(std::net::Shutdown::Write).expect("shutdown");
         assert!(server.join().expect("server thread must not panic").is_err());
     }
+}
+
+fn exchange_one_message(server_config: ServerConfig, client_config: ClientConfig) -> (u16, CipherSuite) {
+    let (server_socket, client_socket) = connected_pair();
+    let server = thread::spawn(move || {
+        let mut stream = TlsStream::accept(server_socket, &server_config).expect("server handshake");
+        let mut buffer = [0u8; 4];
+        stream.read_exact(&mut buffer).expect("read");
+        stream.write_all(&buffer).expect("echo");
+        stream.close().expect("close");
+    });
+    let mut client = TlsStream::connect(client_socket, &client_config).expect("client handshake");
+    client.write_all(b"ping").expect("write");
+    let mut echoed = Vec::new();
+    client.read_to_end(&mut echoed).expect("read");
+    assert_eq!(echoed, b"ping");
+    server.join().expect("server");
+    (client.info().version, client.info().cipher_suite)
+}
+
+#[test]
+fn a_tls12_only_client_gets_tls12_with_an_ecdsa_suite() {
+    let (server_config, certificate) = server_setup("db.example.com");
+    let mut client_config = full_verification(&certificate, "db.example.com");
+    client_config.maximum_version = MaximumVersion::Tls12;
+    let (negotiated, suite) = exchange_one_message(server_config, client_config);
+    assert_eq!(negotiated, version::TLS12);
+    assert_eq!(suite, CipherSuite::EcdheEcdsaChaCha20Poly1305Sha256);
+}
+
+#[test]
+fn a_tls12_only_server_serves_a_client_that_offers_both_versions() {
+    let (mut server_config, certificate) = server_setup("db.example.com");
+    server_config.maximum_version = MaximumVersion::Tls12;
+    let client_config = full_verification(&certificate, "db.example.com");
+    let (negotiated, _) = exchange_one_message(server_config, client_config);
+    assert_eq!(negotiated, version::TLS12);
+}
+
+#[test]
+fn a_client_requiring_tls13_refuses_a_tls12_only_server() {
+    let (mut server_config, certificate) = server_setup("db.example.com");
+    server_config.maximum_version = MaximumVersion::Tls12;
+    let mut client_config = full_verification(&certificate, "db.example.com");
+    client_config.minimum_version = MinimumVersion::Tls13;
+    let (server, client) = run_handshake(server_config, client_config);
+    assert!(server.is_err());
+    assert!(matches!(client, Err(TlsError::PeerAlert(_)) | Err(TlsError::Protocol { .. })));
+}
+
+#[test]
+fn tls12_exports_the_same_keying_material_on_both_sides() {
+    let (server_config, certificate) = server_setup("db.example.com");
+    let mut client_config = full_verification(&certificate, "db.example.com");
+    client_config.maximum_version = MaximumVersion::Tls12;
+    let (server, client) = run_handshake(server_config, client_config);
+    let (server, client) = (server.expect("server"), client.expect("client"));
+    assert_eq!(
+        server.export_keying_material(b"EXPORTER-test", None, 48),
+        client.export_keying_material(b"EXPORTER-test", None, 48)
+    );
+    assert_eq!(server.info().tls_server_end_point(), client.info().tls_server_end_point());
 }

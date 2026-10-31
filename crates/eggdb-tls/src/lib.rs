@@ -50,7 +50,7 @@ pub mod verify;
 pub mod x509;
 mod x509_time;
 
-pub use config::{ClientConfig, MinimumVersion, ServerConfig, ServerVerification};
+pub use config::{ClientConfig, MaximumVersion, MinimumVersion, ServerConfig, ServerVerification};
 pub use error::TlsError;
 pub use session::SessionInfo;
 pub use stream::{PrefixedStream, TlsStream};

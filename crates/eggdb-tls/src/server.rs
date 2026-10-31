@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 
 use crate::alert::AlertDescription;
 use crate::cipher_suite::{CipherSuite, version};
-use crate::config::{MinimumVersion, ServerConfig};
+use crate::config::{MaximumVersion, MinimumVersion, ServerConfig};
 use crate::error::TlsError;
 use crate::handshake::{
     CertificateMessage, ClientHello, DigitallySigned, EncryptedExtensions, Extension,
@@ -37,7 +37,7 @@ pub(crate) fn handshake<S: Read + Write>(
         return Err(TlsError::protocol(AlertDescription::IllegalParameter, "the client offers no null compression"));
     }
     let versions = hello.supported_versions()?;
-    if versions.contains(&version::TLS13) {
+    if versions.contains(&version::TLS13) && config.maximum_version == MaximumVersion::Tls13 {
         return tls13(layer, config, message, hello, fill_random);
     }
     let offers_tls12 = if versions.is_empty() {

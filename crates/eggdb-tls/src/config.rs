@@ -39,6 +39,16 @@ pub enum MinimumVersion {
     Tls13,
 }
 
+/// The highest protocol version a side offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MaximumVersion {
+    /// TLS 1.2 only, for a peer or middlebox that breaks on TLS 1.3.
+    Tls12,
+    /// Up to TLS 1.3, the default.
+    #[default]
+    Tls13,
+}
+
 /// A server's TLS setup.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -48,6 +58,8 @@ pub struct ServerConfig {
     pub application_protocols: Vec<Vec<u8>>,
     /// The lowest version accepted.
     pub minimum_version: MinimumVersion,
+    /// The highest version offered.
+    pub maximum_version: MaximumVersion,
 }
 
 impl ServerConfig {
@@ -65,7 +77,13 @@ impl ServerConfig {
         if !matches {
             return Err(ServerConfigError::KeyMismatch);
         }
-        Ok(Self { chain, private_key, application_protocols: Vec::new(), minimum_version: MinimumVersion::default() })
+        Ok(Self {
+            chain,
+            private_key,
+            application_protocols: Vec::new(),
+            minimum_version: MinimumVersion::default(),
+            maximum_version: MaximumVersion::default(),
+        })
     }
 
     /// The certificate chain, leaf first.
@@ -111,6 +129,8 @@ pub struct ClientConfig {
     pub application_protocols: Vec<Vec<u8>>,
     /// The lowest version accepted.
     pub minimum_version: MinimumVersion,
+    /// The highest version offered.
+    pub maximum_version: MaximumVersion,
 }
 
 impl ClientConfig {
@@ -126,6 +146,15 @@ impl ClientConfig {
             server_name_indication,
             application_protocols: Vec::new(),
             minimum_version: MinimumVersion::default(),
+            maximum_version: MaximumVersion::default(),
         }
+    }
+
+    pub(crate) fn offers_tls13(&self) -> bool {
+        self.maximum_version == MaximumVersion::Tls13
+    }
+
+    pub(crate) fn offers_tls12(&self) -> bool {
+        self.minimum_version == MinimumVersion::Tls12
     }
 }
