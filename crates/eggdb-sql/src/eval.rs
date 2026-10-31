@@ -1335,6 +1335,9 @@ impl Evaluator<'_> {
             | "websearch_to_tsquery" | "ts_rank" | "ts_rank_cd" => {
                 return crate::text_search::function(name, &self.arguments(arguments)?);
             }
+            name if crate::geo_functions::FUNCTIONS.contains(&name) => {
+                return crate::geo_functions::function(name, &self.arguments(arguments)?);
+            }
             "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_dims"
             | "vector_norm" | "l2_normalize" => {
                 return crate::vector_functions::function(name, &self.arguments(arguments)?);

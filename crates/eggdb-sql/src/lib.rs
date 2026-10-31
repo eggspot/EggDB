@@ -40,6 +40,7 @@ mod error;
 mod eval;
 mod execute;
 mod explain;
+mod geo_functions;
 mod hash_index;
 mod hyperloglog;
 mod indexes;
@@ -190,6 +191,8 @@ mod view_change_tests;
 mod visible_tables_tests;
 #[cfg(test)]
 mod time_series_tests;
+#[cfg(test)]
+mod geo_tests;
 #[cfg(test)]
 mod vector_tests;
 #[cfg(test)]

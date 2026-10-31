@@ -2222,6 +2222,28 @@ constraint and event triggers, SQL Server DDL and logon triggers, Oracle compoun
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
 fire on `TRUNCATE` too.
 
+## Geometry (PostGIS-compatible functions)
+
+Geometries are written as WKT or EWKT text (`'SRID=4326;POINT(-71.06 42.36)'`) or WKB bytes
+(D204). `CREATE EXTENSION postgis` is accepted, columns may be declared `geometry` or
+`geography` (with or without `(Point, 4326)`), and these functions work, by PostGIS's names
+(MySQL's `ST_` functions of the same names too):
+
+- reading and writing: `ST_GeomFromText`, `ST_GeomFromEWKT`, `ST_GeogFromText`,
+  `ST_GeomFromWKB`, `ST_GeomFromGeoJSON`, `ST_MakePoint`, `ST_Point`, `ST_SetSRID`, `ST_AsText`,
+  `ST_AsEWKT`, `ST_AsBinary`, `ST_AsEWKB`, `ST_AsGeoJSON`;
+- inspecting: `ST_X`, `ST_Y`, `ST_SRID`, `ST_NPoints`, `ST_GeometryType`, `ST_IsEmpty`,
+  `ST_Envelope`;
+- measuring (planar, in the coordinates' units): `ST_Distance`, `ST_Area`, `ST_Length`, and
+  `ST_DistanceSphere` in metres for longitude/latitude points;
+- predicates: `ST_DWithin`, `ST_Contains`, `ST_Within`, `ST_Intersects`, `ST_Disjoint`,
+  `ST_Equals`.
+
+Geometries of two different SRIDs are refused, as in PostGIS. Not yet: a stored geometry type
+(values are text, shown as EWKT rather than hex EWKB), spatial indexes (R-tree/GiST), Z and M
+coordinates, geography measures on the spheroid, transformations between SRIDs, set operations
+(`ST_Union`, `ST_Intersection`, `ST_Buffer`), and SQL Server's `geometry` methods.
+
 ## Vectors (pgvector)
 
 Vectors are written as pgvector writes them, `'[1,2,3]'` (D203). `CREATE EXTENSION vector` is

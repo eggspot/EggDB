@@ -228,3 +228,4 @@ its full title with its status.
 - [D201](decisions/D201.md) Columnar encodings (bit packing, hybrid runs, deltas, dictionaries) and self-describing integer chunks with statistics in `eggdb-columnar`, shared by columnar tables, Parquet and Arrow; `USING columnar` waits for chunk storage
 - [D202](decisions/D202.md) Parquet read and written by our own `eggdb-parquet` (Thrift compact, Snappy, plain and dictionary pages); `eggdb import --parquet` and `eggdb export --parquet`; SQL file access waits for a server file-access decision
 - [D203](decisions/D203.md) Vectors: pgvector's operators and functions on vector text and arrays, an HNSW graph in `eggdb-vector`; `vector(n)` accepted as text until a stored type and SQL index land together
+- [D204](decisions/D204.md) Geometry in our own `eggdb-geo` (WKT/EWKT, WKB/EWKB, GeoJSON, planar measures and predicates); PostGIS's `ST_` functions over EWKT text; stored type and R-tree index come together later

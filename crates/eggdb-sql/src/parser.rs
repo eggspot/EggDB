@@ -2317,6 +2317,21 @@ impl<'t> Parser<'t> {
             "time" | "timetz" => self.timestamp_type(word, token.start)?,
             "interval" => self.interval_type(token.start)?,
             "uuid" => SqlType::Uuid,
+            "geometry" | "geography" if self.postgresql() => {
+                if self.take(&TokenKind::LeftParen) {
+                    let mut depth = 1usize;
+                    while depth > 0 {
+                        match self.peek_kind() {
+                            TokenKind::End => return Err(self.unexpected()),
+                            TokenKind::LeftParen => depth += 1,
+                            TokenKind::RightParen => depth -= 1,
+                            _ => {}
+                        }
+                        self.at += 1;
+                    }
+                }
+                SqlType::Text
+            }
             "vector" if self.postgresql() => {
                 self.varchar_length(token.start)?;
                 SqlType::Text
