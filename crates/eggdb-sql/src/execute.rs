@@ -2921,6 +2921,31 @@ pub(crate) struct ExplainedQuery {
     pub(crate) sorted: bool,
     pub(crate) limited: bool,
     pub(crate) filtered: bool,
+    pub(crate) appended: bool,
+}
+
+fn union_branches(query: &Select) -> Option<Vec<&Select>> {
+    let from = query.from.as_ref()?;
+    if !from.joins.is_empty() {
+        return None;
+    }
+    let derived = from.first.derived.as_ref()?;
+    fn leaves<'q>(body: &'q crate::ast::SetExpr, out: &mut Vec<&'q Select>) -> Option<()> {
+        match body {
+            crate::ast::SetExpr::Select(select) => {
+                out.push(select);
+                Some(())
+            }
+            crate::ast::SetExpr::Operation(operation) if operation.all => {
+                leaves(&operation.left, out)?;
+                leaves(&operation.right, out)
+            }
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    leaves(&derived.query.body, &mut out)?;
+    (out.len() > 1 && !out.iter().any(|leaf| crate::subquery::needs_preparation(leaf))).then_some(out)
 }
 
 pub(crate) fn explain(
@@ -2931,9 +2956,19 @@ pub(crate) fn explain(
     let mut out = ExplainedQuery::default();
     let (reference, filter) = match statement {
         crate::ast::Statement::Select(query) if crate::subquery::needs_preparation(query) => {
-            return Err(SqlError::not_supported(
-                "EXPLAIN of a query with subqueries or derived tables",
-            ));
+            let Some(branches) = union_branches(query) else {
+                return Err(SqlError::not_supported(
+                    "EXPLAIN of a query with subqueries or derived tables",
+                ));
+            };
+            for branch in branches {
+                let mut explained = ExplainedQuery::default();
+                select_or_explain(reader, tables, branch, false, Some(&mut explained), None)?;
+                out.sources.extend(explained.sources);
+            }
+            out.filtered |= query.filter.is_some();
+            out.appended = true;
+            return Ok(out);
         }
         crate::ast::Statement::Select(query) => {
             select_or_explain(reader, tables, query, false, Some(&mut out), None)?;
