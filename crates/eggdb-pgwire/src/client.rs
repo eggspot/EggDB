@@ -114,6 +114,25 @@ fn percent_decoded(text: &str) -> Result<String, String> {
 /// Reads `postgres://user@host[:port]/database[?sslmode=...&sslrootcert=...]`. A password in the
 /// URL is refused: process listings show it.
 pub fn parse_postgres_url(url: &str) -> Result<ConnectOptions, String> {
+    parse_url(url, UrlPassword::Refused)
+}
+
+/// Reads the same URLs as [`parse_postgres_url`], and also takes a password from
+/// `user:password@` or `?password=`: for callers inside a process, such as the C API, whose URL
+/// no process listing shows.
+pub fn parse_postgres_url_with_password(url: &str) -> Result<ConnectOptions, String> {
+    parse_url(url, UrlPassword::Taken)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UrlPassword {
+    Refused,
+    Taken,
+}
+
+const PASSWORD_IN_URL: &str = "the password is in the URL, where every user's ps shows it; set PGPASSWORD or pass --password-file";
+
+fn parse_url(url: &str, passwords: UrlPassword) -> Result<ConnectOptions, String> {
     let rest = url
         .strip_prefix("postgres://")
         .or_else(|| url.strip_prefix("postgresql://"))
@@ -123,12 +142,11 @@ pub fn parse_postgres_url(url: &str) -> Result<ConnectOptions, String> {
     let (user_part, host_part) = authority
         .rsplit_once('@')
         .ok_or_else(|| "the URL names no user: write postgres://user@host/database".to_owned())?;
-    if user_part.contains(':') {
-        return Err(
-            "the password is in the URL, where every user's ps shows it; set PGPASSWORD or pass --password-file"
-                .to_owned(),
-        );
-    }
+    let (user_part, password) = match user_part.split_once(':') {
+        None => (user_part, None),
+        Some(_) if passwords == UrlPassword::Refused => return Err(PASSWORD_IN_URL.to_owned()),
+        Some((user_part, password)) => (user_part, Some(percent_decoded(password)?)),
+    };
     let user = percent_decoded(user_part)?;
     if user.is_empty() {
         return Err("the URL names no user: write postgres://user@host/database".to_owned());
@@ -164,7 +182,7 @@ pub fn parse_postgres_url(url: &str) -> Result<ConnectOptions, String> {
         port,
         user,
         database,
-        password: None,
+        password,
         ssl_mode: SslMode::Prefer,
         ssl_root_cert: None,
         replication: false,
@@ -179,12 +197,8 @@ pub fn parse_postgres_url(url: &str) -> Result<ConnectOptions, String> {
                 })?;
             }
             "sslrootcert" => options.ssl_root_cert = Some(PathBuf::from(value)),
-            "password" => {
-                return Err(
-                    "the password is in the URL, where every user's ps shows it; set PGPASSWORD or pass --password-file"
-                        .to_owned(),
-                );
-            }
+            "password" if passwords == UrlPassword::Taken => options.password = Some(value),
+            "password" => return Err(PASSWORD_IN_URL.to_owned()),
             "application_name" | "connect_timeout" | "sslnegotiation" => {}
             _ => return Err(format!("the URL parameter '{name}' is not supported")),
         }
@@ -1007,6 +1021,20 @@ mod tests {
                 .contains("sslrootcert")
         );
         assert!(parse_postgres_url("postgres://ada@host:port/db").is_err());
+    }
+
+    #[test]
+    fn in_process_urls_may_carry_the_password() {
+        let options = parse_postgres_url_with_password("postgres://ada:s%3Acret@host/db").unwrap();
+        assert_eq!(
+            (options.user.as_str(), options.password.as_deref()),
+            ("ada", Some("s:cret"))
+        );
+        let options =
+            parse_postgres_url_with_password("postgres://ada@host/db?password=x").unwrap();
+        assert_eq!(options.password.as_deref(), Some("x"));
+        let options = parse_postgres_url_with_password("postgres://ada@host/db").unwrap();
+        assert_eq!(options.password, None);
     }
 
     #[test]

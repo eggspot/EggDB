@@ -333,7 +333,7 @@ fn the_hr_installer_restores_unchanged_from_another_directory() {
         "2\n"
     );
     assert_eq!(
-        hr("UPDATE employees SET department_id = 110 WHERE employee_id = 101"),
+        hr("UPDATE employees SET department_id = 110 WHERE employee_id = 101; COMMIT"),
         ""
     );
     assert_eq!(

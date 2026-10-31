@@ -163,6 +163,7 @@ that declares the code; `-` marks a code only MCP gives.
 | `table_not_found` | `not_found` | 1 | CLI: `table show` or `table sample` named no table or view, or `mcp --tables` a name the file has no table, view or sequence for; `fix_command` is `eggdb table list <file>` |
 | `not_a_table` | `refused` | 3 | `row list` or `row_list` named a view, which has no stored order to page through; `fix_command` is `eggdb table sample <file> <table>` |
 | `collection_not_found` | `not_found` | 1 | `-C <name>` names no collection; `fix_command` is `eggdb collection add <file> <name>` |
+| `source_failed` | `failed` | 3 | `follow` could not connect to, read from or keep in step with the source database |
 | `already_exists` | `exists` | 3 | `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact`, or the scratch copy (`<file>.restoring`, `<file>.importing`) a dry run of `restore` or `import --csv` would write |
 | `database_busy` | `busy` | 5 | another program holds the file |
 | `read_only` | `read_only` | 3 | MCP: a write without `--allow-write`, or sent to `run_sql`. CLI: a statement refused with SQLSTATE 25006, as `sql --read-only` refuses writes |

@@ -84,6 +84,7 @@ impl Session<'_> {
             .collect();
         let tls = tls_setup(&options, &listen_hosts)?;
         let with_tls = tls.is_some();
+        missing_socket_directory(&options).map_or(Ok(()), |message| Err(usage(message)))?;
         let listener = self.listener(
             "--listen",
             "PostgreSQL",
@@ -1387,6 +1388,26 @@ struct Bound {
     postgresql: SocketAddr,
     mysql: Option<SocketAddr>,
     tds: Option<SocketAddr>,
+}
+
+fn missing_socket_directory(options: &crate::cli::args::ServeOptions) -> Option<String> {
+    let directories = [
+        (options.socket_dir.as_deref(), "--socket-dir"),
+        (
+            options.mysql_socket.as_deref().and_then(Path::parent),
+            "--mysql-socket",
+        ),
+    ];
+    directories.into_iter().find_map(|(directory, option)| {
+        let directory = directory.filter(|directory| !directory.as_os_str().is_empty())?;
+        (!directory.is_dir()).then(|| {
+            format!(
+                "cannot listen in {}: the directory does not exist. Create it (mkdir -p {}), or pass another {option}",
+                directory.display(),
+                directory.display()
+            )
+        })
+    })
 }
 
 pub(super) struct Sockets {

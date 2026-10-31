@@ -637,7 +637,14 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
     }
     let doubled = eggdb(&["explain", &path, "-c", "EXPLAIN SELECT 1"]);
     assert_eq!(doubled.status.code(), Some(2));
-    let text_plan = succeeded(&eggdb(&["explain", &path, "-c", "SELECT * FROM users"]));
+    let text_plan = succeeded(&eggdb(&[
+        "explain",
+        &path,
+        "--format",
+        "text",
+        "-c",
+        "SELECT * FROM users",
+    ]));
     assert!(
         text_plan.ends_with(")\n\n"),
         "no tag line after the plan: {text_plan}"

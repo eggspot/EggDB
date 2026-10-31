@@ -903,13 +903,15 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             };
             effect = &altered;
         }
-        let owner = match effect {
-            Effect::View(name) => name
-                .split_once('.')
-                .map(|(schema, _)| schema.to_owned())
-                .filter(|schema| *schema != self.default_schema),
+        let owned_name = match effect {
+            Effect::View(name) => Some(name),
+            Effect::Routine { name, .. } if self.rules.oracle => Some(name),
             _ => None,
         };
+        let owner = owned_name
+            .and_then(|name| name.split_once('.'))
+            .map(|(schema, _)| schema.to_owned())
+            .filter(|schema| *schema != self.default_schema);
         let current = self.default_schema.clone();
         if let Some(owner) = &owner
             && let Err(error) = self.use_schema(owner)

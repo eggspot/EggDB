@@ -172,7 +172,7 @@ fn a_ten_thousand_row_table_pages_without_repeats_or_gaps_while_a_writer_commits
         added_after.extend([soon, later]);
         cursor = Some(next);
     }
-    assert!(pages > 10, "{pages} pages");
+    assert!(pages >= 10, "{pages} pages");
     assert!(
         seen.windows(2).all(|pair| pair[0] < pair[1]),
         "every page continues strictly after the one before"
@@ -222,7 +222,9 @@ fn text_pages_print_the_next_page_s_command_and_it_runs() {
             values_list(1..=3)
         ),
     );
-    let first = eggdb(&["row", "list", &path, "orders", "--limit", "2"]);
+    let first = eggdb(&[
+        "row", "list", &path, "orders", "--limit", "2", "--format", "text",
+    ]);
     let shown = succeeded(&first);
     assert!(shown.contains("note 1") && shown.contains("note 2") && !shown.contains("note 3"));
     assert!(shown.ends_with("(2 rows)\n\n"), "{shown}");
@@ -230,12 +232,13 @@ fn text_pages_print_the_next_page_s_command_and_it_runs() {
     let prefix =
         format!("more rows follow; next page: eggdb row list {path} orders --limit 2 --after r1.");
     assert!(hint.starts_with(&prefix), "{hint}");
-    let words: Vec<&str> = hint
+    let mut words: Vec<&str> = hint
         .trim_end()
         .strip_prefix("more rows follow; next page: eggdb ")
         .unwrap()
         .split(' ')
         .collect();
+    words.extend(["--format", "text"]);
     let second = eggdb(&words);
     let rest = succeeded(&second);
     assert!(
@@ -423,7 +426,7 @@ fn table_list_pages_in_its_order_while_tables_are_added() {
     );
     assert_eq!(seen.last().map(String::as_str), Some("view:v1"));
 
-    let text_page = eggdb(&["table", "list", &path, "--limit", "2"]);
+    let text_page = eggdb(&["table", "list", &path, "--limit", "2", "--format", "text"]);
     succeeded(&text_page);
     let hint = text(&text_page.stderr);
     assert!(

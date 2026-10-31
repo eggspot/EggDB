@@ -136,7 +136,14 @@ fn restore_dry_run_reports_what_a_real_run_does_and_changes_nothing() {
     ]));
     assert!(next.contains(" 2\n"), "the sequence did not move: {next}");
 
-    let as_text = eggdb(&["restore", &path, &dump_path, "--dry-run"]);
+    let as_text = eggdb(&[
+        "restore",
+        &path,
+        &dump_path,
+        "--dry-run",
+        "--format",
+        "text",
+    ]);
     let shown = succeeded(&as_text);
     assert!(
         shown.starts_with(&format!(

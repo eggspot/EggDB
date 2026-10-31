@@ -395,6 +395,13 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
         return SQLITE_OK;
     }
     let parameters = placeholder_count(first);
+    let columns = connection
+        .session
+        .describe(first, &[])
+        .ok()
+        .and_then(|description| description.columns)
+        .unwrap_or_default();
+    let names = column_names(&columns);
     let prepared = Box::new(Sqlite3Stmt {
         db,
         text: first.to_owned(),
@@ -405,8 +412,8 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
             };
             parameters
         ],
-        columns: Vec::new(),
-        names: Vec::new(),
+        columns,
+        names,
         rows: Vec::new(),
         next_row: 0,
         ran: false,
@@ -416,6 +423,13 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
     // SAFETY: `statement` is writable memory for one pointer.
     unsafe { statement.write(Box::into_raw(prepared)) };
     SQLITE_OK
+}
+
+fn column_names(columns: &[OutputColumn]) -> Vec<CString> {
+    columns
+        .iter()
+        .map(|column| CString::new(column.name.clone()).unwrap_or_default())
+        .collect()
 }
 
 fn first_statement_end(text: &str) -> usize {
@@ -665,11 +679,7 @@ pub unsafe extern "C" fn sqlite3_step(statement: *mut Sqlite3Stmt) -> c_int {
             statement.columns = last.columns.unwrap_or_default();
             statement.rows = last.rows;
         }
-        statement.names = statement
-            .columns
-            .iter()
-            .map(|column| CString::new(column.name.clone()).unwrap_or_default())
-            .collect();
+        statement.names = column_names(&statement.columns);
         statement.next_row = 0;
     }
     if statement.next_row < statement.rows.len() {

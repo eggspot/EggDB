@@ -1849,9 +1849,8 @@ fn scenario_35_the_picker_adds_a_collection_and_checks_the_name() {
     assert_eq!(s.row(22), " Added collection cache at 09:14:05Z");
     assert!(s.row(1).starts_with(" Keys in cache"), "{}", s.row(1));
     assert!(
-        s.screen()
-            .contains("collection cache is empty — press a to add a key"),
-        "{}",
+        s.row(2).starts_with("  collection cache is empty — p…"),
+        "the hint is cut to the key pane's width: {}",
         s.screen()
     );
     assert!(s.ui.source().collections.contains_key("cache"));

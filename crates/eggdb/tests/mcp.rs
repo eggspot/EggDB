@@ -933,8 +933,17 @@ fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
     assert!(listing.status.success(), "{}", stderr(&listing));
     let text = stdout(&listing);
     assert!(
-        text.contains("read-only, 3 tables (users, user_names, users_and_secrets), time limit 5 s, call gap off"),
-        "{text}"
+        text.contains("server started: eggdb ")
+            && text.contains(", read-only, 3 tables (users, user_names, users_and_se..."),
+        "the listing cuts the line to its width: {text}"
+    );
+    let records = eggdb(&["audit", &path, "--format", "json"]);
+    assert!(records.status.success(), "{}", stderr(&records));
+    let started = stdout(&records);
+    assert!(
+        started.contains(r#""tables":["users","user_names","users_and_secrets"]"#)
+            && started.contains(r#""call_gap_ms":0"#),
+        "{started}"
     );
     assert!(text.contains("limited_to_tables"), "{text}");
 }

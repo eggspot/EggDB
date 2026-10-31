@@ -3,6 +3,12 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 const PAGE: usize = 65_536;
+const NATIVE_STACK_BUDGET: usize = 1 << 20;
+
+fn native_stack_position() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker) as *const u8 as usize
+}
 
 /// A value passed to or returned by a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +26,8 @@ pub struct Limits {
     pub fuel: u64,
     /// The most 64 KiB pages the memory may grow to.
     pub max_memory_pages: u32,
-    /// The deepest nesting of calls.
+    /// The deepest nesting of calls; a call also traps once nested calls have used 1 MiB of the
+    /// host thread's stack, whichever comes first.
     pub max_call_depth: usize,
 }
 
@@ -47,7 +54,7 @@ pub enum Trap {
     DivideByZero,
     /// An integer division overflowed.
     IntegerOverflow,
-    /// Calls nested deeper than the limit.
+    /// Calls nested deeper than the limit, or deep enough to use up their native stack budget.
     CallDepth,
     /// No function is exported under that name.
     NoSuchExport(String),
@@ -113,6 +120,7 @@ pub struct Instance {
     max_pages: u32,
     globals: Vec<u64>,
     targets: Rc<Vec<BTreeMap<usize, Targets>>>,
+    entry_stack_position: usize,
 }
 
 fn block_arity(reader: &mut Reader<'_>) -> Result<usize, Trap> {
@@ -238,6 +246,7 @@ impl Instance {
             max_pages,
             globals,
             targets: Rc::new(targets),
+            entry_stack_position: 0,
         })
     }
 
@@ -270,6 +279,7 @@ impl Instance {
         }
         let result_type = signature.results.first().copied();
         let mut fuel = limits.fuel;
+        self.entry_stack_position = native_stack_position();
         self.invoke(index, &mut stack, &mut fuel, 0, limits)?;
         Ok(match result_type {
             Some(I32) => Some(Value::I32(as_i32(
@@ -290,7 +300,8 @@ impl Instance {
         depth: usize,
         limits: &Limits,
     ) -> Result<(), Trap> {
-        if depth >= limits.max_call_depth {
+        let native_stack_used = native_stack_position().abs_diff(self.entry_stack_position);
+        if depth >= limits.max_call_depth || native_stack_used > NATIVE_STACK_BUDGET {
             return Err(Trap::CallDepth);
         }
         let module = Rc::clone(&self.module);

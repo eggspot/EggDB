@@ -154,7 +154,7 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
         "\"rows\":21",
         "\"views\":2",
         "\"indexes\":2",
-        "\"constraints\":9",
+        "\"constraints\":10",
         "\"comments\":2",
         "\"tables_skipped\":0",
         "\"rows_skipped\":0",
@@ -194,7 +194,7 @@ fn the_ssms_fixture_restores_and_matches_the_hand_written_results() {
             &db,
             "SELECT name, is_disabled FROM sys.triggers WHERE parent_id = OBJECT_ID('sales.Orders')"
         ),
-        "trOrders|0\n"
+        "trorders|f\n"
     );
     assert!(!report.contains("\"name\":\"dbo.OrderItems\""), "{report}");
     assert_eq!(

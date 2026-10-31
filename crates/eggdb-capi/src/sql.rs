@@ -587,8 +587,8 @@ pub unsafe extern "C" fn eggdb_sql_connect(url: *const c_char, sql: *mut *mut Eg
         unsafe { args::write(sql, std::ptr::null_mut(), "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated URL.
         let url = unsafe { args::text(url, "url") }?;
-        let options =
-            eggdb_pgwire::client::parse_postgres_url(url).map_err(Failure::invalid_argument)?;
+        let options = eggdb_pgwire::client::parse_postgres_url_with_password(url)
+            .map_err(Failure::invalid_argument)?;
         let client = eggdb_pgwire::client::PgClient::connect(&options).map_err(remote_failure)?;
         let handle = args::give(EggdbSql {
             backend: Backend::Remote(Box::new(client)),
