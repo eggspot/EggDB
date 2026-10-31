@@ -50,6 +50,7 @@ mod lexer;
 mod md5;
 mod memory;
 mod merge;
+mod mysql_catalog;
 mod mysql_errors;
 mod mysql_variables;
 mod name_resolution;

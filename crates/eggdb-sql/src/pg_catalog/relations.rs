@@ -195,6 +195,7 @@ pub(crate) fn build(
         CatalogRelation::SqlServer(relation) => crate::sqlserver_catalog::rows(snapshot, relation),
         CatalogRelation::Oracle(relation) => crate::oracle_dictionary::rows(snapshot, relation),
         CatalogRelation::Monitoring(relation) => super::monitoring::rows(snapshot, relation),
+        CatalogRelation::MySql(relation) => crate::mysql_catalog::rows(snapshot, relation),
     })
 }
 

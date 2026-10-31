@@ -173,6 +173,12 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
                 Some(vec![text_column("Variable_name"), text_column("Value")])
             }
+            MySqlStatement::ShowServerFacts { view, .. } => Some(
+                crate::mysql_catalog::show_columns(*view)
+                    .iter()
+                    .map(|(label, _)| text_column(label))
+                    .collect(),
+            ),
             MySqlStatement::ShowWarnings { .. } => Some(warnings_columns()),
             MySqlStatement::ShowCount { errors_only } => {
                 Some(vec![number_column(count_name(*errors_only))])
@@ -370,6 +376,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     vec![text_column("Variable_name"), text_column("Value")],
                     rows,
                 ))
+            }
+            MySqlStatement::ShowServerFacts { view, like } => {
+                let rows = self.read(|reader, _| {
+                    let snapshot = crate::pg_catalog::snapshot_for(reader)?;
+                    Ok(crate::mysql_catalog::show_rows(&snapshot, *view))
+                })?;
+                let mut kept = Vec::new();
+                for row in rows {
+                    let first = row.first().and_then(Value::to_text).unwrap_or_default();
+                    if matches_pattern(&first, like.as_deref())? {
+                        kept.push(row);
+                    }
+                }
+                let columns = crate::mysql_catalog::show_columns(*view)
+                    .iter()
+                    .map(|(label, _)| text_column(label))
+                    .collect();
+                Ok(rows_result(columns, kept))
             }
             MySqlStatement::ShowStatus => Ok(rows_result(
                 vec![text_column("Variable_name"), text_column("Value")],

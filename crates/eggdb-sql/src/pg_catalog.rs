@@ -33,7 +33,7 @@ pub(crate) use snapshot::{
     CatalogSnapshot, ConstraintSource, IndexSource, PackageEntry, RelationEntry, RelationKind,
     RelationSource, RoutineEntry, TriggerEntry, current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
     mentions_catalog, names_non_sequence_relation, routine_oid, snapshot_for, statement_settings,
-    text_needs_catalog,
+    session_user, text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
 
@@ -66,7 +66,8 @@ pub(crate) fn catalog_reference(
         crate::Dialect::Oracle => {
             Ok(crate::oracle_dictionary::reference(reader, name)?.map(CatalogRelation::Oracle))
         }
-        crate::Dialect::MySql | crate::Dialect::Sqlite => Ok(None),
+        crate::Dialect::MySql => Ok(crate::mysql_catalog::MySqlRelation::referenced(name).map(CatalogRelation::MySql)),
+        crate::Dialect::Sqlite => Ok(None),
     }
 }
 
@@ -199,6 +200,7 @@ pub(crate) enum CatalogRelation {
     SqlServer(SqlServerRelation),
     Oracle(OracleRelation),
     Monitoring(monitoring::MonitoringRelation),
+    MySql(crate::mysql_catalog::MySqlRelation),
 }
 
 pub(crate) struct CatalogColumn {
@@ -322,6 +324,7 @@ impl CatalogRelation {
             Self::Range => "pg_range",
             Self::Information(relation) => relation.name(),
             Self::Monitoring(relation) => relation.name(),
+            Self::MySql(relation) => relation.name(),
             Self::SqlServer(relation) => relation.name(),
             Self::Oracle(relation) => relation.name(),
         }
@@ -332,6 +335,7 @@ impl CatalogRelation {
             Self::Information(_) => crate::schemas::INFORMATION_SCHEMA,
             Self::SqlServer(relation) => relation.schema(),
             Self::Oracle(relation) => relation.schema(),
+            Self::MySql(_) => crate::schemas::INFORMATION_SCHEMA,
             _ => crate::schemas::CATALOG_SCHEMA,
         }
     }
@@ -378,6 +382,7 @@ impl CatalogRelation {
             Self::Range => 3541,
             Self::Information(relation) => relation.oid(),
             Self::Monitoring(relation) => relation.oid(),
+            Self::MySql(relation) => relation.oid(),
             Self::SqlServer(_) | Self::Oracle(_) => 0,
         }
     }
@@ -392,6 +397,7 @@ impl CatalogRelation {
                 | Self::Settings
                 | Self::TimezoneNames
                 | Self::Information(_)
+                | Self::MySql(_)
                 | Self::SqlServer(_)
                 | Self::Oracle(_)
         )
@@ -449,6 +455,7 @@ impl CatalogRelation {
             Self::Range => &RANGE_COLUMNS,
             Self::Information(relation) => relation.columns(),
             Self::Monitoring(relation) => relation.columns(),
+            Self::MySql(relation) => relation.columns(),
             Self::SqlServer(relation) => relation.columns(),
             Self::Oracle(relation) => relation.columns(),
         }

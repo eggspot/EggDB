@@ -296,6 +296,28 @@ impl<'t> Parser<'t> {
             MySqlStatement::ShowTriggers {
                 like: self.like_pattern()?,
             }
+        } else if self.take_word("engines") || (self.is_word("storage") && self.is_word_at(1, "engines")) {
+            if self.take_word("storage") {
+                self.expect_word("engines")?;
+            }
+            MySqlStatement::ShowServerFacts { view: crate::mysql_catalog::MySqlRelation::Engines, like: None }
+        } else if self.take_word("charset") || (self.is_word("character") && self.is_word_at(1, "set")) {
+            if self.take_word("character") {
+                self.expect_word("set")?;
+            }
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::CharacterSets,
+                like: self.like_pattern()?,
+            }
+        } else if self.take_word("collation") {
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::Collations,
+                like: self.like_pattern()?,
+            }
+        } else if self.take_word("plugins") {
+            MySqlStatement::ShowServerFacts { view: crate::mysql_catalog::MySqlRelation::Plugins, like: None }
+        } else if self.take_word("processlist") {
+            MySqlStatement::ShowServerFacts { view: crate::mysql_catalog::MySqlRelation::ProcessList, like: None }
         } else if self.take_word("warnings") || self.take_word("errors") {
             let errors_only = self.tokens[self.at - 1].kind == TokenKind::Word("errors".into());
             if self.take_word("limit") {
@@ -319,10 +341,7 @@ impl<'t> Parser<'t> {
             };
             MySqlStatement::ShowCount { errors_only }
         } else {
-            let _ = self.take_word("session") || self.take_word("local");
-            if self.is_word("global") {
-                return Err(self.not_supported("SHOW GLOBAL"));
-            }
+            let _ = self.take_word("session") || self.take_word("local") || self.take_word("global");
             if self.take_word("variables") {
                 MySqlStatement::ShowVariables {
                     like: self.like_pattern()?,

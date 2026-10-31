@@ -794,6 +794,10 @@ pub(crate) enum MySqlStatement {
         like: Option<String>,
     },
     ShowStatus,
+    ShowServerFacts {
+        view: crate::mysql_catalog::MySqlRelation,
+        like: Option<String>,
+    },
     ShowWarnings {
         errors_only: bool,
     },
