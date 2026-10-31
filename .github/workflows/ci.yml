@@ -231,7 +231,7 @@ jobs:
           assert 0 < r.ttl("k") <= 60
           assert r.hgetall("user:1") == {b"name": b"Ada", b"lang": b"Rust"}
           assert r.smembers("nothing") == set()
-          pipe = r.pipeline()
+          pipe = r.pipeline(transaction=False)
           pipe.incr("n").incr("n").get("n")
           assert pipe.execute() == [1, 2, b"2"]
           print("redis-py over RESP3: passed")
