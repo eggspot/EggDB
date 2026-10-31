@@ -256,3 +256,4 @@ its full title with its status.
 - [D229](decisions/D229.md) Federation: `eggdb_foreign(source, query)` returns JSON rows from other EggDB or PostgreSQL servers and Parquet files through a reader the host installs, off unless `EGGDB_FOREIGN_SOURCES` allows the URL prefix
 - [D230](decisions/D230.md) Build profiles measured as artifacts (embedded: C API library and WebAssembly module; full: the binary) against `benchmarks/footprint.txt` by `scripts/footprint.sh` in CI; the server feature split of the binary follows
 - [D231](decisions/D231.md) Audit records hash-chained by `AuditLog` (each starts with the SHA-256 of the line before), checked by `eggdb audit --verify`; anchoring, server events, retention and crypto-shredding left
+- [D232](decisions/D232.md) User functions in WebAssembly on our own interpreter `eggdb-wasm-vm`: integer instruction set, no imports, fuel, memory and call-depth limits per call; floats, tables, SQL integration and extensions left

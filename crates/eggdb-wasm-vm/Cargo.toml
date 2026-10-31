@@ -1,0 +1,12 @@
+[package]
+name = "eggdb-wasm-vm"
+description = "EggDB's own WebAssembly interpreter for user functions: the binary format and the integer instruction set, run with fuel, memory and call-depth limits."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

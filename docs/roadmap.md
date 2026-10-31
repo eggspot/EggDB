@@ -166,12 +166,16 @@ behavior (D19).
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability
-  promise, and signed and reproducible releases.
+  promise, and signed and reproducible releases. Started: `CONTRIBUTING.md`,
+  `CODE_OF_CONDUCT.md`, [stability.md](stability.md), a CI check that two builds are identical,
+  and footprint budgets per build profile (D230).
 - **Security and compliance (D22, D23, D26):** with the server first, deepened every release.
+  Started: hash-chained audit records and `eggdb audit --verify` (D231).
 - **Operations (D24, D25):** backups and monitoring as soon as there is data to protect and a
   server to watch.
 - **Programmability (D27):** each dialect's procedural language with that dialect, WebAssembly
-  functions and extensions after the server.
+  functions and extensions after the server. Started: our own WebAssembly interpreter with
+  fuel, memory and call-depth limits (D232).
 - **Time travel, derived data and change streams (D28):** after transactions (M3) and the server
   (M6).
 - **Interchange and lakehouse (D29):** after columnar storage (M11).
