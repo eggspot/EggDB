@@ -3828,3 +3828,57 @@ shape.
    `ServerOutputSetting::parse` in `eggdb-sql`), so both print the same message; the shell's has
    no `line N: ` prefix. The CLI takes each statement's lines through
    `Session::server_output_reader`, which a result callback can hold while the session runs.
+
+## 29. `eggdb serve` over TLS (part 4.M6a-1)
+
+Designed by Claude Fable (D15) and recorded in D161.
+
+### Options
+```
+      --tls-certificate <file>    PEM certificate chain, server's first; with --tls-key, clients
+                                  on other machines may connect (over TLS; loopback may skip it)
+      --tls-key <file>            PEM private key for --tls-certificate: PKCS#8, SEC1 or PKCS#1,
+                                  P-256 or RSA; never on the command line, read once at start
+      --tls-self-signed           make a P-256 certificate at start, in memory, for the listen
+                                  host and localhost; its fingerprint is printed so clients pin it
+      --tls-min-version <1.2|1.3> the oldest TLS version accepted (default 1.2)
+```
+The version option is named like PostgreSQL's `ssl_min_protocol_version`, so operators recognise
+it. Without TLS the help says the server listens only on this machine; with TLS (two PEM files or
+`--tls-self-signed`) it may listen on any address, and other machines must connect over TLS.
+
+### Startup report
+Without TLS only the first line changes: `(PostgreSQL protocol; loopback only without TLS: see
+--tls-certificate)`. With TLS the first line says `TLS 1.2 or newer` (or `TLS 1.3`) and
+`required from other machines` (`optional on loopback` on a loopback listener). One `tls` row
+names the source, and a `fingerprint` row gives the SHA-256 fingerprint in openssl's form
+(uppercase pairs with colons), so it compares by eye with `openssl x509 -fingerprint -sha256`.
+The connect lines gain each client's TLS setting: `sslmode=verify-full` with certificate files and
+`sslmode=require` with a self-signed certificate; `mysql --ssl-mode=VERIFY_IDENTITY` or
+`--ssl-mode=REQUIRED`; and for sqlcmd, `encrypted`, plus `-C` with a self-signed certificate.
+
+### JSON
+These fields are added and no existing one changes: `tls`, `loopback_only`, and with TLS also
+`tls_certificate` (the file, or `"self-signed"`), `tls_key` (files only), `tls_fingerprint_sha256`
+(64 lowercase hex digits, for `jq -r`), `tls_names`, `tls_not_after` and `tls_min_version`.
+
+### Errors
+Every error is a usage failure (exit 2) that says what is wrong, then the way out:
+- a non-loopback `--listen`, `--mysql-listen` or `--tds-listen` without TLS: `… Pass
+  --tls-certificate <file> --tls-key <file>, or --tls-self-signed`;
+- `--tls-key needs --tls-certificate …` and `--tls-certificate needs --tls-key …`;
+- `--tls-self-signed and --tls-certificate exclude each other …`;
+- `--tls-key key.pem does not match --tls-certificate cert.pem: its public key is not the one in
+  the first certificate`;
+- `cannot read --tls-certificate cert.pem: …`, `--tls-certificate cert.pem has no CERTIFICATE
+  block …`, `--tls-key key.pem is not a PEM private key …`;
+- `--tls-min-version needs TLS …` and `--tls-min-version needs 1.2 or 1.3, not 1.1`.
+
+### As built
+- **Wildcard host.** On `0.0.0.0` or `::` the connect lines show the certificate's first DNS
+  name, or `localhost`, rather than the machine's host name: EggDB has no host-name lookup in its
+  platform layer yet.
+- **Mutually exclusive options.** `--tls-self-signed` with `--tls-key` alone gets its own
+  "exclude each other" message.
+- **Unsupported key types.** A key of an unsupported curve or algorithm gets one message: "the
+  key is of a kind serve does not support (P-256 or RSA)".

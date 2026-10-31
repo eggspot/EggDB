@@ -1008,7 +1008,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]
+eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1024,7 +1024,7 @@ mssql-jdbc ([sql.md](sql.md), ".NET and Java apps over TDS", D132). The design i
 ```sh
 export EGGDB_PASSWORD='choose-one'
 eggdb serve --create app.db
-# listening on 127.0.0.1:5432 (PostgreSQL protocol; loopback only until EggDB has TLS)
+# listening on 127.0.0.1:5432 (PostgreSQL protocol; loopback only without TLS: see --tls-certificate)
 #   database     app (app.db, open for writing)
 #   user         eggdb (SCRAM-SHA-256), up to 64 connections
 #   connect      psql postgresql://eggdb@127.0.0.1:5432/app
@@ -1033,23 +1033,50 @@ eggdb serve --create app.db
 
 | Option | Meaning |
 |--------|---------|
-| `--listen <address>` | `host:port`, `[::1]:port`, `localhost:port` or a port alone (on `127.0.0.1`); port 0 takes any free port. Default `127.0.0.1:5432`. **Loopback addresses only** (below) |
-| `--mysql-listen <address>` | also serve MySQL's protocol there, the same forms as `--listen` (MySQL's port is 3306); same user, password and database, `caching_sha2_password` or `mysql_native_password`, and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
-| `--tds-listen <address>` | also serve SQL Server's TDS 7.4 protocol there, the same forms as `--listen` (SQL Server's port is 1433); same user, password and database as a SQL login, **no encryption** (connect with go-sqlcmd's default or `-N disable`, SqlClient's `Encrypt=false`, mssql-jdbc's `encrypt=false`), and its own `--max-connections`. **Loopback addresses only**, like `--listen` |
+| `--listen <address>` | `host:port`, `[::1]:port`, `localhost:port` or a port alone (on `127.0.0.1`); port 0 takes any free port. Default `127.0.0.1:5432`. **Loopback addresses only without TLS**; any address with TLS (below) |
+| `--mysql-listen <address>` | also serve MySQL's protocol there, the same forms as `--listen` (MySQL's port is 3306); same user, password and database, `caching_sha2_password` or `mysql_native_password`, and its own `--max-connections`. Like `--listen`, loopback only without TLS; with TLS the client may ask for it (`--ssl-mode=REQUIRED`) |
+| `--tds-listen <address>` | also serve SQL Server's TDS 7.4 protocol there, the same forms as `--listen` (SQL Server's port is 1433); same user, password and database as a SQL login, and its own `--max-connections`. Without TLS, **no encryption** (connect with go-sqlcmd's default or `-N disable`, SqlClient's `Encrypt=false`, mssql-jdbc's `encrypt=false`); with TLS, encrypted as the client negotiates (`Encrypt=true`, `Encrypt=Strict` for TDS 8, or login-only from loopback). Loopback only without TLS, like `--listen` |
 | `--log-batches` | log the first 200 characters of each TDS batch and RPC call (`sp_executesql` and the prepared-statement procedures) and each transaction manager request to stderr, to see what a client sends; never the login or its password. Off by default |
 | `--user <name>` | the one user clients log in as, with SCRAM-SHA-256 (and MySQL's methods on `--mysql-listen`). Default `eggdb` |
 | `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented). Prefer the file: `EGGDB_PASSWORD` stays in the server's environment for as long as it runs, where the same user (and on some systems an administrator) can read it, for example through `/proc/<pid>/environ` on Linux |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
 | `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, so slow or failing logins cannot take every slot; a 17th gets `53300` too |
+| `--tls-certificate <file>` | PEM certificate chain, the server's first, for TLS on every listener; needs `--tls-key` |
+| `--tls-key <file>` | PEM private key for `--tls-certificate`: PKCS#8, SEC 1 or PKCS#1, P-256 or RSA; read once at start, never on the command line |
+| `--tls-self-signed` | make a P-256 certificate at start, in memory, for the listen hosts and `localhost`; a new one each start. Its SHA-256 fingerprint is printed so clients can pin it |
+| `--tls-min-version <1.2\|1.3>` | the oldest TLS version accepted; default 1.2 (older JDBC and .NET drivers still need it) |
 | `--read-only` | open the file read-only: writes fail with `25006`, and it works beside other readers |
 | `--create` | create the file if it is missing |
 
-**Loopback only, no TLS yet (D102).** Until EggDB has its own TLS, `serve` listens only on
-`127.0.0.1`, `::1` or another loopback address, so only programs on this machine can connect and
-no password or query crosses a network in the clear. Any other address exits 2:
-`eggdb: cannot listen on 0.0.0.0:5432: it is not a loopback address. …`. Clients that ask for
-TLS are told no; `sslmode=require` fails, `prefer` (the default) connects without it. This rule
-is removed when TLS lands.
+**TLS, and loopback without it (D161).** Without TLS, `serve` listens only on `127.0.0.1`, `::1`
+or another loopback address, so only programs on this machine can connect and no password or
+query crosses a network in the clear; any other address exits 2 with `eggdb: cannot listen on
+0.0.0.0:5432: it is not a loopback address. … Pass --tls-certificate <file> --tls-key <file>,
+or --tls-self-signed`, and clients that ask for TLS are told no. With TLS (EggDB's own TLS 1.3
+and 1.2, D23) every listener may use any address, and connections from other machines must use
+TLS: PostgreSQL clients with `sslmode=require` or stronger (`SSLRequest` and PostgreSQL 17's
+direct TLS with ALPN `postgresql`; SCRAM-SHA-256-PLUS binds the login to the TLS connection),
+MySQL clients with `--ssl-mode=REQUIRED` or stronger, and SQL Server clients with `Encrypt=true`
+or `Encrypt=Strict`. Programs on this machine may still connect without TLS. With certificate
+files the report shows the chain, its names and expiry, and the certificate's fingerprint, and
+the `connect` line uses `sslmode=verify-full`:
+
+```sh
+eggdb serve app.db --password-file pw.txt --listen 0.0.0.0:5432 --tls-certificate cert.pem --tls-key key.pem
+# listening on 0.0.0.0:5432 (PostgreSQL protocol; TLS 1.2 or newer, required from other machines)
+#   database     app (app.db, open for writing)
+#   user         eggdb (SCRAM-SHA-256), up to 64 connections
+#   tls          cert.pem (chain of 2, P-256, expires 2027-03-01) with key.pem, for db.example.com
+#   fingerprint  SHA256 A1:B2:…:F0 (the server certificate)
+#   connect      psql "postgresql://eggdb@db.example.com:5432/app?sslmode=verify-full"
+#   stop         Ctrl-C
+```
+
+With `--tls-self-signed` the `tls` line says `self-signed P-256 for <hosts> and localhost, made at
+this start (new one each start)`, the connect line uses `sslmode=require`, and the fingerprint is
+the one to pin. The JSON line gains `"tls"`, `"loopback_only"` and, with TLS,
+`"tls_certificate"` (`"self-signed"` or the file), `"tls_key"`, `"tls_fingerprint_sha256"` (64
+lowercase hex digits), `"tls_names"`, `"tls_not_after"` and `"tls_min_version"`.
 
 **Output.** On a terminal, the report above; in a pipe, one JSON line,
 `{"listening":"127.0.0.1:5432","host":"127.0.0.1","port":5432,"file":"app.db","database":"app","user":"eggdb","max_connections":64,"read_only":false}`,
