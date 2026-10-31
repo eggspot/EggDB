@@ -395,13 +395,7 @@ mod platform {
         if unsafe { VirtualLock(ptr.as_ptr().cast(), len) } != 0 {
             return Ok(());
         }
-        Err(Error::new(
-            ErrorKind::OutOfMemory,
-            format!(
-                "cannot lock {len} bytes in memory: {} (the process's working set is too small)",
-                std::io::Error::last_os_error()
-            ),
-        ))
+        Err(Error::from(std::io::Error::last_os_error()).with_kind(ErrorKind::OutOfMemory))
     }
 
     pub(super) fn unlock(ptr: NonNull<u8>, len: usize) {
@@ -582,11 +576,8 @@ mod platform {
 mod platform {
     use super::{Error, ErrorKind, MemoryRegion, NonNull, PageMode, Result};
 
-    pub(super) fn lock(_: NonNull<u8>, len: usize) -> Result<()> {
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("locking {len} bytes in memory is not supported on this platform"),
-        ))
+    pub(super) fn lock(_: NonNull<u8>, _: usize) -> Result<()> {
+        Err(Error::new(ErrorKind::Unsupported))
     }
 
     pub(super) fn unlock(_: NonNull<u8>, _: usize) {}

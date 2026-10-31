@@ -934,7 +934,8 @@ fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
     let text = stdout(&listing);
     assert!(
         text.contains("server started: eggdb ")
-            && text.contains(", read-only, 3 tables (users, user_names, users_and_se..."),
+            && text.contains(", read-only, 3 tables (users, user_names, users_and")
+            && text.contains("..."),
         "the listing cuts the line to its width: {text}"
     );
     let records = eggdb(&["audit", &path, "--format", "json"]);

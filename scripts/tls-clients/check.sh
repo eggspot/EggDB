@@ -9,8 +9,9 @@ with each protocol's own client over TLS:
 - psql with sslmode=verify-full and the authority as sslrootcert, by SSLRequest and by
   PostgreSQL 17's direct TLS (sslnegotiation=direct), each printing TLS in \\conninfo;
 - the mysql client with --ssl-mode=VERIFY_CA;
-- go-sqlcmd with encryption mandatory (-N true) and strict (-N strict), trusting the server's
-  certificate (-C): psql and mysql check the chain, sqlcmd checks the encryption.
+- go-sqlcmd with encryption mandatory (-N true, trusting the server's certificate with -C) and
+  strict (-N strict, TDS 8.0, which ignores -C and checks the chain against the authority given
+  through SSL_CERT_FILE).
 Then it serves with --tls-self-signed and checks psql with sslmode=require. Fails on the first
 client that cannot connect over TLS or prints the wrong answer.
 
@@ -91,7 +92,8 @@ MYSQL_PWD=$password "$mysql" -h 127.0.0.1 -P "$mysql_port" -u eggdb -D tls --bat
 grep -qx '42' "$work/mysql.out" || fail "mysql printed $(cat "$work/mysql.out")"
 
 for encryption in true strict; do
-  SQLCMDPASSWORD=$password "$sqlcmd" -S "localhost,$tds_port" -U eggdb -d tls -N "$encryption" \
+  SSL_CERT_FILE="$work/ca.pem" SQLCMDPASSWORD=$password \
+    "$sqlcmd" -S "localhost,$tds_port" -U eggdb -d tls -N "$encryption" \
     -C -h -1 -W -Q "SET NOCOUNT ON; SELECT 6 * 7" > "$work/sqlcmd.out" 2> "$work/sqlcmd.err" \
     || fail "sqlcmd -N $encryption failed: $(cat "$work/sqlcmd.out" "$work/sqlcmd.err")"
   grep -qx '42' "$work/sqlcmd.out" || fail "sqlcmd -N $encryption printed $(cat "$work/sqlcmd.out")"

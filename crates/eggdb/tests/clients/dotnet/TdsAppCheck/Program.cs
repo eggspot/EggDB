@@ -91,8 +91,10 @@ internal static class TdsAppCheck
         var price = insert.Parameters.Add("@price", SqlDbType.Decimal);
         price.Precision = 10;
         price.Scale = 2;
+        price.Size = 17;
         var baked = insert.Parameters.Add("@baked", SqlDbType.DateTime2);
         baked.Scale = 3;
+        baked.Size = 8;
         insert.Parameters.Add("@flag", SqlDbType.Bit);
         insert.Parameters.Add("@code", SqlDbType.UniqueIdentifier);
         return insert;

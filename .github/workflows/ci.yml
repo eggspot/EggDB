@@ -1361,7 +1361,7 @@ jobs:
       - name: Install dbt-postgres (test tool only, never shipped)
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
-          "$RUNNER_TEMP/tools/bin/pip" install --quiet dbt-postgres==1.8.2
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet dbt-core==1.8.9 dbt-postgres==1.8.2
       - name: Run third-party tools against eggdb serve and report the matrix (D44, D239)
         env:
           EGGDB_PASSWORD: ci-compatibility

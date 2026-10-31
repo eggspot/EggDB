@@ -849,9 +849,9 @@ impl NumberShape {
         match kind {
             SignKind::Minus if !self.negative => (!self.fill).then_some(' '),
             SignKind::Minus => Some('-'),
-            SignKind::Anchored | SignKind::Both | SignKind::Plus => {
-                Some(if self.negative { '-' } else { '+' })
-            }
+            SignKind::Plus if self.negative => (!self.fill).then_some(' '),
+            SignKind::Plus => Some('+'),
+            SignKind::Anchored | SignKind::Both => Some(if self.negative { '-' } else { '+' }),
         }
     }
 
@@ -945,7 +945,13 @@ fn format_number(value: &Value, template_text: &str) -> SqlResult<String> {
         explicit_sign: template
             .pieces
             .iter()
-            .any(|piece| matches!(piece, NumberPiece::Sign(_) | NumberPiece::Brackets)),
+            .any(|piece| {
+                matches!(
+                    piece,
+                    NumberPiece::Sign(SignKind::Anchored | SignKind::Both | SignKind::Minus)
+                        | NumberPiece::Brackets
+                )
+            }),
         anchored_leading: template
             .pieces
             .iter()
@@ -1715,7 +1721,9 @@ mod tests {
             ("-485", "999MI", "485-"),
             ("485", "999MI", "485 "),
             ("485", "FM999MI", "485"),
-            ("485", "PL999", "+485"),
+            ("485", "PL999", "+ 485"),
+            ("-485", "PL999", " -485"),
+            ("485", "FMPL999", "+485"),
             ("485", "SG999", "+485"),
             ("-485", "SG999", "-485"),
             ("-485", "9SG99", "4-85"),

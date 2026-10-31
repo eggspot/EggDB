@@ -39,7 +39,7 @@ java=${JAVA:-java}
 python=${PYTHON:-python3}
 dotnet=${DOTNET:-dotnet}
 : "${PGJDBC_JAR:?PGJDBC_JAR must name the pgjdbc jar}"
-: "${FLYWAY_CLASSPATH:?FLYWAY_CLASSPATH must hold Flyway's jars and pgjdbc}"
+: "${FLYWAY_CLASSPATH:?FLYWAY_CLASSPATH must hold the Flyway jars and pgjdbc}"
 flyway_database=${FLYWAY_DATABASE:-eggdb_flyway}
 : "${PGHOST:?PGHOST must reach PostgreSQL}"
 : "${PGUSER:?PGUSER must name a PostgreSQL superuser}"
