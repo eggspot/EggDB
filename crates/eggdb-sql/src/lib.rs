@@ -32,6 +32,7 @@ pub mod cdc;
 mod comments;
 mod console;
 mod constraints;
+mod coordination;
 mod copy;
 mod datetime;
 mod deferred_checks;

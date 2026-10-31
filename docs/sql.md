@@ -2520,6 +2520,32 @@ SELECT eggdb_retention.process_erasures();
 Refused changes fail with SQLSTATE `55000`. These are rules enforced by triggers, so a role that
 may drop triggers or tables can still go around them; grant those rights only to administrators.
 
+## Leases, leader election and feature flags (eggdb_coordination)
+
+`CREATE EXTENSION eggdb_coordination` gives services locks with fencing tokens, leader election
+and OpenFeature-style flags, kept in the database they already use (D247):
+
+```sql
+CREATE EXTENSION eggdb_coordination;
+SELECT eggdb_coordination.acquire('scheduler', 'node-a', interval '30 seconds');  -- token or NULL
+SELECT eggdb_coordination.leader('scheduler');
+SELECT eggdb_coordination.release('scheduler', 'node-a');
+INSERT INTO eggdb_coordination.flags (flag_key, variants, default_variant, targeting)
+    VALUES ('new-checkout', '{"on": true, "off": false}', 'off',
+            '[{"attribute": "country", "in": ["VN"], "variant": "on"}]');
+SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "VN"}');
+```
+
+- `acquire(lease, holder, ttl)` returns a fencing token when the holder gets or renews the
+  lease, and NULL while someone else holds it. Every new holder gets a larger token than any
+  before, so a storage service that remembers the largest token it has seen can refuse writes
+  from a holder whose lease has expired. Renew before the time to live runs out;
+  `leader(lease)` is the current holder, and `release` gives the lease up.
+- `evaluate_flag(key, context)` returns OpenFeature resolution details as `jsonb`: `value`,
+  `variant` and `reason` (`TARGETING_MATCH`, `DEFAULT`, `STATIC`, `DISABLED`), or
+  `reason: ERROR` with `errorCode: FLAG_NOT_FOUND`. Targeting rules are tried in order, and each
+  matches when a context attribute is one of the listed values.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form

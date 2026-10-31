@@ -220,7 +220,8 @@ From the third gap review (D47–D58), each after its foundations:
   Laplace noise and a k-anonymity check (D245).
 - **Retention and sovereignty (D53)** follow backups and compliance. Started: write-once
   retention, legal holds and waiting erasure in `CREATE EXTENSION eggdb_retention` (D246).
-- **Coordination (D54)** follows consensus (M15).
+- **Coordination (D54)** follows consensus (M15). Started: leases with fencing tokens, leader
+  election and OpenFeature-style flags in `CREATE EXTENSION eggdb_coordination` (D247).
 - **Streaming (D55)** follows the messaging work (M16).
 - **Content (D56)** follows full-text search.
 - **Science and GIS (D57)** follow analytics.
