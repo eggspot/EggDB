@@ -13,6 +13,10 @@
 //!   masked GHASH, so neither looks up memory by a secret;
 //! - [`x25519`], [`x25519_public_key`] and [`x25519_shared_secret`]: the X25519 key exchange
 //!   (RFC 7748), by a constant-time Montgomery ladder;
+//! - [`P256PrivateKey`], [`P256PublicKey`], [`p256_shared_secret`], [`ecdsa_p256_sign`] and
+//!   [`ecdsa_p256_verify`]: ECDH and ECDSA over the NIST P-256 curve (SEC 1, FIPS 186-5), with
+//!   complete addition formulas, a constant-time fixed-window scalar multiplication and
+//!   deterministic nonces (RFC 6979);
 //! - [`pbkdf2_hmac_sha256`]: PBKDF2 with HMAC-SHA-256 (RFC 8018, vectors from RFC 7914);
 //! - [`base64_encode`] and [`base64_decode`]: Base64 with padding, the standard alphabet
 //!   (RFC 4648), decoded strictly;
@@ -34,6 +38,7 @@ mod poly1305;
 mod sha1;
 mod sha256;
 mod sha512;
+mod p256;
 mod x25519;
 
 pub use aead::{AEAD_NONCE_BYTES, AEAD_TAG_BYTES, AeadError, ChaCha20Poly1305};
@@ -51,6 +56,11 @@ pub use sha1::{SHA1_BLOCK_BYTES, SHA1_DIGEST_BYTES, Sha1, sha1};
 pub use sha256::{SHA256_BLOCK_BYTES, SHA256_DIGEST_BYTES, Sha256, sha256};
 pub use sha512::{
     SHA384_DIGEST_BYTES, SHA512_BLOCK_BYTES, SHA512_DIGEST_BYTES, Sha384, Sha512, sha384, sha512,
+};
+pub use p256::{
+    EcdsaP256Signature, P256_COMPRESSED_POINT_BYTES, P256_ELEMENT_BYTES,
+    P256_UNCOMPRESSED_POINT_BYTES, P256Error, P256PrivateKey, P256PublicKey, ecdsa_p256_sign,
+    ecdsa_p256_verify, p256_shared_secret,
 };
 pub use x25519::{
     X25519_KEY_BYTES, X25519LowOrderPoint, x25519, x25519_public_key, x25519_shared_secret,

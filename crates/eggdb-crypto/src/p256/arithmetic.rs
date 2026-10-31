@@ -147,11 +147,15 @@ impl Modulus {
             let (high, overflow) = add_with_carry(top, carry, 0);
             let m = t[0].wrapping_mul(self.negated_inverse);
             let (_, mut carry) = multiply_add(t[0], m, self.value[0], 0);
-            for j in 1..4 {
-                (t[j - 1], carry) = multiply_add(t[j], m, self.value[j], carry);
+            let mut shifted = [0u64; 4];
+            for ((shifted, &t_limb), &modulus_limb) in
+                shifted.iter_mut().zip(&t[1..]).zip(&self.value[1..])
+            {
+                (*shifted, carry) = multiply_add(t_limb, m, modulus_limb, carry);
             }
             let (last, overflow_carry) = add_with_carry(high, carry, 0);
-            t[3] = last;
+            shifted[3] = last;
+            t = shifted;
             top = overflow + overflow_carry;
         }
         self.reduce_once(&t, top)
