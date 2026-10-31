@@ -27,6 +27,7 @@ mod ast;
 mod bulk_load;
 mod bytea;
 mod cancel;
+pub mod cdc;
 mod comments;
 mod constraints;
 mod copy;

@@ -81,7 +81,8 @@ pub(crate) enum Statement {
         tag: &'static str,
         notice: Option<String>,
     },
-    CreatePgCron {
+    InstallExtension {
+        name: &'static str,
         if_not_exists: bool,
     },
     SqlServer(SqlServerStatement),

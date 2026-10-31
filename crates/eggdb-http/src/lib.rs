@@ -1,6 +1,11 @@
 //! A small HTTP/1.1 server written from RFC 9110 and RFC 9112: one request per connection,
 //! bodies only with `Content-Length` and at most 1 MiB, with every length and wait bounded so a
-//! hostile client cannot hold a thread or memory for long.
+//! hostile client cannot hold a thread or memory for long. A minimal client posts to plain
+//! `http://` URLs, for webhooks.
+
+mod client;
+
+pub use client::{HttpTarget, parse_http_url, post};
 
 use std::fmt;
 use std::io::{self, Read, Write};

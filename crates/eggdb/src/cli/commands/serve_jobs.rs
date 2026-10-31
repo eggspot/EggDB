@@ -19,3 +19,19 @@ pub(super) fn run_scheduled_jobs(store: &impl eggdb_sql::KeyValueStore, stop: &(
         }
     }
 }
+
+const DELIVER_EVERY: Duration = Duration::from_secs(1);
+const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
+const EVENTS_PER_ROUND: u64 = 100;
+
+pub(super) fn deliver_changes(store: &impl eggdb_sql::KeyValueStore, database: &str, url: &str, stop: &(dyn Fn() -> bool + Sync)) {
+    let Ok(target) = eggdb_http::parse_http_url(url) else {
+        return;
+    };
+    while !stop() {
+        std::thread::sleep(DELIVER_EVERY);
+        let _ = eggdb_sql::cdc::deliver_changes(store, database, EVENTS_PER_ROUND, &mut |event| {
+            eggdb_http::post(&target, "application/json", event.as_bytes(), WEBHOOK_TIMEOUT).is_ok_and(|status| (200..300).contains(&status))
+        });
+    }
+}

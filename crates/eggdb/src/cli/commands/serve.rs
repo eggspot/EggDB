@@ -376,6 +376,10 @@ impl Session<'_> {
                     .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
                     .collect();
             let job_scheduler = scope.spawn(|| super::serve_jobs::run_scheduled_jobs(&store, &stop_signals::requested));
+            let cdc_delivery = scope.spawn(|| match &options.cdc_webhook {
+                Some(url) => super::serve_jobs::deliver_changes(&store, &config.database, url, &stop_signals::requested),
+                None => {}
+            });
             let metrics_server = scope.spawn(|| match &metrics_listener {
                 Some(listener) => eggdb_http::serve(
                     listener,
@@ -511,6 +515,7 @@ impl Session<'_> {
             let _ = mongo_server.join();
             let _ = bolt_server.join();
             let _ = job_scheduler.join();
+            let _ = cdc_delivery.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))

@@ -2298,6 +2298,24 @@ FROM readings GROUP BY bucket ORDER BY bucket;
 Not yet: `time_bucket_gapfill`, `locf` and `interpolate`, the `first` and `last` aggregates,
 hypertables with automatic time partitions, retention policies and continuous aggregates.
 
+## Change streams (eggdb_cdc)
+
+`CREATE EXTENSION eggdb_cdc` installs a transactional outbox, `eggdb_cdc.outbox`, and a row
+trigger function, `eggdb_cdc.capture()` (D210). A table whose changes should stream gets a
+trigger:
+
+```sql
+CREATE EXTENSION eggdb_cdc;
+CREATE TRIGGER orders_cdc AFTER INSERT OR UPDATE OR DELETE ON orders
+    FOR EACH ROW EXECUTE FUNCTION eggdb_cdc.capture();
+```
+
+Each change is written to the outbox in the same transaction as the change itself, so a
+rolled-back change never streams and a committed one always does. `eggdb serve
+--cdc-webhook http://...` delivers the outbox as Debezium-style events (`before`, `after`,
+`source`, `op` of `c`, `u` or `d`, `ts_ms`), oldest first, at least once. Not yet: Kafka, AMQP
+and MQTT sinks, Debezium's schema section, and capture without triggers.
+
 ## Scheduled jobs (pg_cron)
 
 `CREATE EXTENSION pg_cron` installs the `cron` schema as the pg_cron extension has it (D200):

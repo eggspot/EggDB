@@ -1934,20 +1934,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     /// Ends the session: an open block is rolled back. Whether one was open.
-    fn create_pg_cron(&mut self, if_not_exists: bool) -> SqlResult<QueryResult> {
+    fn install_extension(&mut self, name: &str, if_not_exists: bool) -> SqlResult<QueryResult> {
+        let (schema, script) = match name {
+            "pg_cron" => ("cron", crate::jobs::PG_CRON_SCRIPT),
+            _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
+        };
         let mut installed = false;
         self.execute(
-            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron'",
+            &format!("SELECT 1 FROM information_schema.schemata WHERE schema_name = '{schema}'"),
             &mut |result| installed = !result.rows.is_empty(),
         )?;
         if installed {
             if if_not_exists {
                 return Ok(QueryResult::command("CREATE EXTENSION")
-                    .with_notice("NOTICE:  extension \"pg_cron\" already exists, skipping".to_owned()));
+                    .with_notice(format!("NOTICE:  extension \"{name}\" already exists, skipping")));
             }
-            return Err(SqlError::new(SqlState::DUPLICATE_OBJECT, "extension \"pg_cron\" already exists"));
+            return Err(SqlError::new(SqlState::DUPLICATE_OBJECT, format!("extension \"{name}\" already exists")));
         }
-        self.execute(crate::jobs::PG_CRON_SCRIPT, &mut |_| {})?;
+        self.execute(script, &mut |_| {})?;
         Ok(QueryResult::command("CREATE EXTENSION"))
     }
 
@@ -2173,7 +2177,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
         }
         match statement {
-            Statement::CreatePgCron { if_not_exists } => return self.create_pg_cron(*if_not_exists),
+            Statement::InstallExtension { name, if_not_exists } => return self.install_extension(name, *if_not_exists),
             Statement::Begin { read_only } => return self.begin(*read_only),
             Statement::Commit => return self.commit(),
             Statement::Rollback => return self.rollback(),
