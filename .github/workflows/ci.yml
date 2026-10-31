@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3 and nats-py (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3, nats-py, stomp.py and python-qpid-proton (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2 paho-mqtt==2.1.0 boto3==1.35.0 nats-py==2.9.0
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2 paho-mqtt==2.1.0 boto3==1.35.0 nats-py==2.9.0 stomp.py==8.1.2 python-qpid-proton==0.39.0
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -384,6 +384,39 @@ jobs:
               await nc.close()
           asyncio.run(main())
           print("nats-py: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import time
+          import stomp
+          received = []
+          class Listener(stomp.ConnectionListener):
+              def on_message(self, frame):
+                  received.append(frame.body)
+          conn = stomp.Connection([("127.0.0.1", 61614)], heartbeats=(0, 0))
+          conn.set_listener("", Listener())
+          conn.connect("eggdb", "ci-resp-password", wait=True)
+          conn.subscribe("/queue/stomp-jobs", id="1", ack="auto")
+          conn.send("/queue/stomp-jobs", "job 1")
+          for attempt in range(50):
+              if received:
+                  break
+              time.sleep(0.1)
+          assert received == ["job 1"], received
+          conn.disconnect()
+          print("stomp.py: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from proton import Message
+          from proton.utils import BlockingConnection
+          conn = BlockingConnection("amqp://127.0.0.1:5673", user="eggdb", password="ci-resp-password", allowed_mechs="PLAIN")
+          sender = conn.create_sender("amqp1-orders")
+          sender.send(Message(body="order 1.0"))
+          receiver = conn.create_receiver("amqp1-orders", credit=10)
+          message = receiver.receive(timeout=5)
+          receiver.accept()
+          assert bytes(message.body) == b"order 1.0", message.body
+          conn.close()
+          print("python-qpid-proton over AMQP 1.0: passed")
           PY
 
   redis-compare:

@@ -109,6 +109,17 @@ impl Stored {
     }
 }
 
+fn append(keys: &mut dyn KeysWrite, name: &str, body: &[u8], delay_ms: u64, now_ms: u64) -> Result<u64> {
+    let Some(counter) = keys.get(&queue_key(name)).map_err(storage)? else {
+        return Err(QueueError::NoQueue(name.to_owned()));
+    };
+    let id = u64::from_be_bytes(counter.get(..8).and_then(|raw| raw.try_into().ok()).unwrap_or_default()) + 1;
+    keys.put(&queue_key(name), &id.to_be_bytes()).map_err(storage)?;
+    let stored = Stored { visible_ms: now_ms.saturating_add(delay_ms), receive_count: 0, sent_ms: now_ms, body: body.to_vec() };
+    keys.put(&message_key(name, id), &stored.encode()).map_err(storage)?;
+    Ok(id)
+}
+
 /// The queues of one keyspace (its database 0).
 pub struct Queues<'k> {
     keyspace: &'k (dyn Keyspace + Sync),
@@ -229,16 +240,15 @@ impl<'k> Queues<'k> {
         if body.len() > MAX_MESSAGE_BYTES {
             return Err(QueueError::TooLarge);
         }
-        self.write(|keys| {
-            let Some(counter) = keys.get(&queue_key(name)).map_err(storage)? else {
-                return Err(QueueError::NoQueue(name.to_owned()));
-            };
-            let id = u64::from_be_bytes(counter.get(..8).and_then(|raw| raw.try_into().ok()).unwrap_or_default()) + 1;
-            keys.put(&queue_key(name), &id.to_be_bytes()).map_err(storage)?;
-            let stored = Stored { visible_ms: now_ms.saturating_add(delay_ms), receive_count: 0, sent_ms: now_ms, body: body.to_vec() };
-            keys.put(&message_key(name, id), &stored.encode()).map_err(storage)?;
-            Ok(id)
-        })
+        self.write(|keys| append(keys, name, body, delay_ms, now_ms))
+    }
+
+    /// Appends every `(queue, body)` message in one transaction, all or none; returns their ids.
+    pub fn send_all(&self, messages: &[(&str, &[u8])], now_ms: u64) -> Result<Vec<u64>> {
+        if messages.iter().any(|(_, body)| body.len() > MAX_MESSAGE_BYTES) {
+            return Err(QueueError::TooLarge);
+        }
+        self.write(|keys| messages.iter().map(|(name, body)| append(keys, name, body, 0, now_ms)).collect())
     }
 
     /// Leases up to `max` of the oldest messages visible at `now_ms` for `lease_ms`.
@@ -347,5 +357,16 @@ mod tests {
         assert_eq!(queues.delete("jobs").unwrap(), 0);
         assert!(matches!(queues.send("jobs", b"x", 0, 0), Err(QueueError::NoQueue(_))));
         assert!(matches!(queues.declare(""), Err(QueueError::BadName(_))));
+    }
+
+    #[test]
+    fn send_all_is_all_or_nothing() {
+        let keyspace = MemoryKeyspace::default();
+        let queues = Queues::new(&keyspace);
+        queues.declare("a").unwrap();
+        queues.declare("b").unwrap();
+        assert_eq!(queues.send_all(&[("a", b"1"), ("b", b"2"), ("a", b"3")], 0).unwrap(), [1, 1, 2]);
+        assert!(matches!(queues.send_all(&[("a", b"4"), ("missing", b"5")], 0), Err(QueueError::NoQueue(_))));
+        assert_eq!(queues.depth("a", 0).unwrap(), Depth { ready: 2, waiting: 0 });
     }
 }

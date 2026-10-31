@@ -269,6 +269,27 @@ impl Session<'_> {
             None => None,
         };
         let sqs_secret = sqs_listener.as_ref().map(|_| password.clone());
+        let stomp_listener = match options.stomp_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--stomp-listen {address}: the STOMP listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for STOMP clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let stomp_config = eggdb_stomp::ServerConfig {
+            user: config.user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections: config.max_connections,
+        };
         let nats_listener = match options.nats_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -561,6 +582,15 @@ impl Session<'_> {
                 Some(listener) => eggdb_mqtt::serve(&mqtt_database, listener, &mqtt_config, &stop_signals::requested),
                 None => Ok(()),
             });
+            let stomp_server = scope.spawn(|| match &stomp_listener {
+                Some(listener) => eggdb_stomp::serve(&queue_database, listener, &stomp_config, &stop_signals::requested),
+                None => Ok(()),
+            });
+            let cdc_queue_delivery = scope.spawn(|| {
+                if let Some(queue) = &options.cdc_queue {
+                    super::serve_jobs::deliver_changes_to_queue(&store, &config.database, &queue_database, queue, &stop_signals::requested);
+                }
+            });
             let nats_server = scope.spawn(|| match &nats_listener {
                 Some(listener) => eggdb_nats::serve(listener, &nats_config, &stop_signals::requested),
                 None => Ok(()),
@@ -659,6 +689,8 @@ impl Session<'_> {
             let _ = amqp_server.join();
             let _ = mqtt_server.join();
             let _ = nats_server.join();
+            let _ = stomp_server.join();
+            let _ = cdc_queue_delivery.join();
             let _ = sqs_server.join();
             let _ = job_scheduler.join();
             let _ = cdc_delivery.join();

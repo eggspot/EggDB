@@ -35,3 +35,21 @@ pub(super) fn deliver_changes(store: &impl eggdb_sql::KeyValueStore, database: &
         });
     }
 }
+
+pub(super) fn deliver_changes_to_queue(
+    store: &impl eggdb_sql::KeyValueStore,
+    database: &str,
+    keyspace: &(dyn eggdb_keyspace::Keyspace + Sync),
+    queue: &str,
+    stop: &(dyn Fn() -> bool + Sync),
+) {
+    let queues = eggdb_queues::Queues::new(keyspace);
+    while !stop() {
+        std::thread::sleep(DELIVER_EVERY);
+        if queues.declare(queue).is_err() {
+            continue;
+        }
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        let _ = eggdb_sql::cdc::deliver_changes(store, database, EVENTS_PER_ROUND, &mut |event| queues.send(queue, event.as_bytes(), 0, now).is_ok());
+    }
+}

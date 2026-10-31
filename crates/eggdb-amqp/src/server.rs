@@ -648,6 +648,13 @@ pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reade
             Err(error) => return Err(error),
         }
     }
+    if &header == crate::amqp1::SASL_HEADER {
+        return crate::amqp1::serve_stream(broker, config, reader, writer, stop);
+    }
+    if &header == crate::amqp1::AMQP_HEADER {
+        writer.write_all(crate::amqp1::SASL_HEADER)?;
+        return Ok(());
+    }
     if &header != PROTOCOL_HEADER {
         writer.write_all(PROTOCOL_HEADER)?;
         return Ok(());

@@ -216,6 +216,8 @@ impl CommandName {
             | OptionName::MongoListen
             | OptionName::BoltListen
             | OptionName::CdcWebhook
+            | OptionName::CdcQueue
+            | OptionName::StompListen
             | OptionName::KafkaListen
             | OptionName::AmqpListen
             | OptionName::MqttListen
@@ -372,6 +374,8 @@ enum OptionName {
     MongoListen,
     BoltListen,
     CdcWebhook,
+    CdcQueue,
+    StompListen,
     KafkaListen,
     AmqpListen,
     MqttListen,
@@ -457,6 +461,8 @@ impl OptionName {
             b"mongo-listen" => Self::MongoListen,
             b"bolt-listen" => Self::BoltListen,
             b"cdc-webhook" => Self::CdcWebhook,
+            b"cdc-queue" => Self::CdcQueue,
+            b"stomp-listen" => Self::StompListen,
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
             b"mqtt-listen" => Self::MqttListen,
@@ -711,6 +717,8 @@ pub(crate) struct ServeOptions {
     pub(crate) mongo_listen: Option<SocketAddr>,
     pub(crate) bolt_listen: Option<SocketAddr>,
     pub(crate) cdc_webhook: Option<String>,
+    pub(crate) cdc_queue: Option<String>,
+    pub(crate) stomp_listen: Option<SocketAddr>,
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
     pub(crate) mqtt_listen: Option<SocketAddr>,
@@ -1181,6 +1189,17 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 let url = value.to_str().unwrap_or_default();
                 eggdb_http::parse_http_url(url).map_err(usage)?;
                 request.serve.cdc_webhook = Some(url.to_owned());
+            }
+            OptionName::CdcQueue => {
+                let name = value.to_str().unwrap_or_default();
+                if name.is_empty() || name.len() > 255 || name.contains('\0') {
+                    return Err(usage(format!("{}: the queue name must be 1 to 255 characters", option.spelled)));
+                }
+                request.serve.cdc_queue = Some(name.to_owned());
+            }
+            OptionName::StompListen => {
+                request.serve.stomp_listen =
+                    Some(parse_listen(&option.spelled, value, 61613).map_err(usage)?);
             }
             OptionName::BoltListen => {
                 request.serve.bolt_listen =

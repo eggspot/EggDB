@@ -2324,8 +2324,31 @@ CREATE TRIGGER orders_cdc AFTER INSERT OR UPDATE OR DELETE ON orders
 Each change is written to the outbox in the same transaction as the change itself, so a
 rolled-back change never streams and a committed one always does. `eggdb serve
 --cdc-webhook http://...` delivers the outbox as Debezium-style events (`before`, `after`,
-`source`, `op` of `c`, `u` or `d`, `ts_ms`), oldest first, at least once. Not yet: Kafka, AMQP
-and MQTT sinks, Debezium's schema section, and capture without triggers.
+`source`, `op` of `c`, `u` or `d`, `ts_ms`), oldest first, at least once. `eggdb serve
+--cdc-queue <name>` delivers the same events into EggDB's durable queue `<name>`, where AMQP
+0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). Not yet: Kafka and MQTT sinks,
+Debezium's schema section, and capture without triggers.
+
+### Transactional outbox and inbox
+
+The outbox pattern needs nothing more: write the business row and capture it (or insert an
+event row into a captured table) in one transaction, and `--cdc-queue` or `--cdc-webhook`
+relays it at least once. The inbox pattern makes a consumer's effect happen once even though
+delivery is at least once. Every message from a durable queue carries an id that stays the
+same when it is delivered again (`<queue>-<number>`: the `message-id` header over STOMP, the
+`message-id` property over AMQP 1.0, the message id over SQS), so the consumer records it in
+the same transaction as its effect:
+
+```sql
+CREATE TABLE inbox (message_id text PRIMARY KEY, received_at timestamptz NOT NULL DEFAULT now());
+BEGIN;
+INSERT INTO inbox (message_id) VALUES ('orders-42') ON CONFLICT DO NOTHING;
+UPDATE stock SET reserved = reserved + 1 WHERE sku = 'egg-1';
+COMMIT;
+```
+
+When the `INSERT` inserts no row, the message was handled before: roll back instead of
+committing, and acknowledge the message.
 
 ## Scheduled jobs (pg_cron)
 
