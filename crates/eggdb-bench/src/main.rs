@@ -30,6 +30,7 @@ mod btree;
 mod checkpoint;
 mod copy;
 mod database;
+mod egg_allocator;
 mod entries;
 mod footprint;
 mod harness;
@@ -53,7 +54,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 32] = [
+const COUNTED: [(&str, Counted); 33] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -86,6 +87,7 @@ const COUNTED: [(&str, Counted); 32] = [
     (tls::RECORD_SEAL, tls::record_seal),
     (tls::HANDSHAKE, tls::handshake),
     (net::ROUND_TRIP, net::round_trip),
+    (egg_allocator::SMALL_BLOCKS, egg_allocator::small_blocks),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 3] = [

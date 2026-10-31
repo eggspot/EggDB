@@ -190,3 +190,4 @@ its full title with its status.
 - [D163](decisions/D163.md) The compatibility list (`docs/compatibility.md`): supported means a CI job runs or replays the tool; expected to work means every known catalog query is answered; pgAdmin's statistics views and administration functions
 - [D164](decisions/D164.md) Unix domain sockets in the platform layer (`local_socket`), a `Local` server connection beside TCP and TLS, no TLS on local sockets; `eggdb serve --socket-dir` and `--mysql-socket`
 - [D165](decisions/D165.md) Sockets on io_uring and I/O completion ports, on request: `NetBackend::IoUring` (batched submission, kernel cancel, Linux 5.11) and `NetBackend::Iocp` (AcceptEx, ConnectEx, one port per socket), a `net.round_trip` benchmark
+- [D166](decisions/D166.md) EggDB's own memory allocator (`EggAllocator`): 40 size classes, per-thread caches, a budget, the system allocator underneath; opt-in (`--features egg-allocator`) until `allocator.small_blocks` says otherwise

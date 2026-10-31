@@ -14,6 +14,9 @@ workspace = true
 name = "eggdb"
 path = "src/main.rs"
 
+[features]
+egg-allocator = []
+
 [dependencies]
 eggdb-commands = { path = "../eggdb-commands" }
 eggdb-mcp = { path = "../eggdb-mcp" }

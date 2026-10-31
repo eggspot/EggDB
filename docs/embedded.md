@@ -478,6 +478,21 @@ in the snapshot memory. When that memory runs out, the oldest snapshots expire w
 `SnapshotTooOld`, so a forgotten reader never blocks the writer. Keep read transactions short,
 or give them more `snapshot_memory_bytes`.
 
+## EggDB's memory allocator
+A program can hand all of its memory, EggDB's included, to EggDB's own allocator. It keeps a
+cache of free blocks per thread for each size up to 32 KiB, so most allocations and frees take
+no lock, and it can stop at a budget on devices with a fixed amount of memory:
+
+```rust
+#[global_allocator]
+static ALLOCATOR: eggdb_platform::EggAllocator = eggdb_platform::EggAllocator::with_budget(64 << 20);
+```
+
+With a budget, an allocation that would hold more than that many bytes from the system fails
+the way an out-of-memory allocation does. `EggAllocator::new()` has no budget. The `eggdb`
+binary uses it when built with `--features egg-allocator`; the default build keeps the system
+allocator until the benchmark line `allocator.small_blocks` shows ours ahead on every system.
+
 ## Checking and measuring
 - `db.check()` reads every page of the tree and every large value as of the last commit, checks
   how the pages fit together, and accounts for every page of the file: each must belong to the

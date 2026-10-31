@@ -33,6 +33,7 @@
 //! to inject faults and crashes reproducibly from a seed (D9).
 
 mod aligned;
+mod allocator;
 mod cache;
 mod clock;
 mod cpus;
@@ -124,6 +125,7 @@ mod uncached;
 pub mod user_files;
 
 pub use aligned::AlignedBuffer;
+pub use allocator::EggAllocator;
 pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};
