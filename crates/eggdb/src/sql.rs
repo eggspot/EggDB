@@ -237,3 +237,171 @@ impl KeyValueStore for OwnedStore {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
     }
 }
+
+struct TransactionStore<'t, 'db> {
+    transaction: std::cell::RefCell<&'t mut WriteTransaction<'db>>,
+}
+
+/// A read of a write transaction that runs SQL inside it (see [`WriteTransaction::sql`]).
+pub struct TransactionReader<'s, 't, 'db>(std::cell::Ref<'s, &'t mut WriteTransaction<'db>>);
+
+/// A statement's writes into a write transaction that runs SQL inside it (see
+/// [`WriteTransaction::sql`]): kept with the values they replace, so a failed statement undoes
+/// its own writes and leaves the transaction's other changes.
+pub struct TransactionWriter<'s, 't, 'db> {
+    transaction: std::cell::RefMut<'s, &'t mut WriteTransaction<'db>>,
+    undo: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+fn in_use() -> SqlError {
+    SqlError::store(
+        StoreFailure::Busy,
+        "the write transaction is already in use by this SQL statement",
+    )
+}
+
+impl KeyValueRead for TransactionReader<'_, '_, '_> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.0.get(key).map_err(store_error)
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        scan_through(self.0.scan(range), direction, visit)
+    }
+}
+
+impl KeyValueRead for TransactionWriter<'_, '_, '_> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.transaction.get(key).map_err(store_error)
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        scan_through(self.transaction.scan(range), direction, visit)
+    }
+}
+
+impl KeyValueWrite for TransactionWriter<'_, '_, '_> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        let previous = self.transaction.get(key).map_err(store_error)?;
+        self.transaction.put(key, value).map_err(store_error)?;
+        self.undo.push((key.to_vec(), previous));
+        Ok(())
+    }
+
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        let inserted = self
+            .transaction
+            .put_if_absent(key, value)
+            .map_err(store_error)?;
+        if inserted {
+            self.undo.push((key.to_vec(), None));
+        }
+        Ok(inserted)
+    }
+
+    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        let previous = self.transaction.get(key).map_err(store_error)?;
+        let deleted = self.transaction.delete(key).map_err(store_error)?;
+        if deleted {
+            self.undo.push((key.to_vec(), previous));
+        }
+        Ok(deleted)
+    }
+
+    fn commit(self) -> SqlResult<()> {
+        Ok(())
+    }
+
+    fn rollback(mut self) -> SqlResult<()> {
+        while let Some((key, previous)) = self.undo.pop() {
+            match previous {
+                Some(value) => self.transaction.put(&key, &value),
+                None => self.transaction.delete(&key).map(|_| ()),
+            }
+            .map_err(store_error)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'t, 'db> KeyValueStore for TransactionStore<'t, 'db> {
+    type Read<'s>
+        = TransactionReader<'s, 't, 'db>
+    where
+        Self: 's;
+    type Write<'s>
+        = TransactionWriter<'s, 't, 'db>
+    where
+        Self: 's;
+
+    fn begin_read(&self) -> SqlResult<TransactionReader<'_, 't, 'db>> {
+        self.transaction
+            .try_borrow()
+            .map(TransactionReader)
+            .map_err(|_| in_use())
+    }
+
+    fn begin_write(&self) -> SqlResult<TransactionWriter<'_, 't, 'db>> {
+        self.transaction
+            .try_borrow_mut()
+            .map(|transaction| TransactionWriter {
+                transaction,
+                undo: Vec::new(),
+            })
+            .map_err(|_| in_use())
+    }
+}
+
+impl<'db> WriteTransaction<'db> {
+    /// Runs the SQL statements in `text`, in `dialect`, inside this transaction, and returns
+    /// each statement's result. Their changes become part of this transaction, so one commit
+    /// keeps key-value writes and SQL changes together and one rollback drops both. A statement
+    /// that fails undoes its own writes, and the error comes back; the transaction stays open
+    /// with the changes made before it. Transaction control in `text` (`BEGIN`, `COMMIT`) has no
+    /// effect beyond its statements: this transaction's commit is the only one.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-tx-sql-{}.db", std::process::id()));
+    /// use eggdb::sql::Dialect;
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.sql_store()
+    ///     .session(Dialect::PostgreSql)
+    ///     .execute("CREATE TABLE orders (id integer PRIMARY KEY)", &mut |_| {})?;
+    /// let mut tx = db.begin_write()?;
+    /// tx.put("last_order", "7")?;
+    /// tx.sql(Dialect::PostgreSql, "INSERT INTO orders VALUES (7)")?;
+    /// tx.rollback()?;
+    /// assert_eq!(db.get("last_order")?, None);
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn sql(&mut self, dialect: Dialect, text: &str) -> SqlResult<Vec<QueryResult>> {
+        eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
+        let store = TransactionStore {
+            transaction: std::cell::RefCell::new(self),
+        };
+        let mut session = Session::with_dialect(&store, dialect);
+        let mut results = Vec::new();
+        let outcome = session.execute(text, &mut |result| results.push(result));
+        let closed = session.close();
+        outcome?;
+        closed?;
+        Ok(results)
+    }
+}

@@ -399,3 +399,45 @@ fn a_refused_first_put_leaves_a_database_with_no_tree() {
     db.put("k", "v").unwrap();
     assert_eq!(db.check().unwrap().tree_height, 1);
 }
+
+#[test]
+fn key_value_writes_and_sql_share_one_commit_or_one_rollback() {
+    use eggdb::sql::Dialect;
+    let file = common::TempPath::new("kv-and-sql");
+    let db = eggdb::Database::open(file.path()).unwrap();
+    db.sql_store()
+        .session(Dialect::PostgreSql)
+        .execute(
+            "CREATE TABLE orders (id integer PRIMARY KEY, total integer)",
+            &mut |_| {},
+        )
+        .unwrap();
+    let mut tx = db.begin_write().unwrap();
+    tx.put("order:1:status", "paid").unwrap();
+    tx.sql(Dialect::PostgreSql, "INSERT INTO orders VALUES (1, 50)")
+        .unwrap();
+    let error = tx
+        .sql(Dialect::PostgreSql, "INSERT INTO orders VALUES (2, 10), (1, 99)")
+        .unwrap_err();
+    assert_eq!(error.state().code(), "23505");
+    let counted = tx
+        .sql(Dialect::PostgreSql, "SELECT count(*) FROM orders")
+        .unwrap();
+    assert_eq!(counted[0].rows[0][0], eggdb::sql::Value::BigInt(1));
+    tx.commit().unwrap();
+    assert_eq!(db.get("order:1:status").unwrap(), Some(b"paid".to_vec()));
+    let mut tx = db.begin_write().unwrap();
+    tx.put("order:2:status", "paid").unwrap();
+    tx.sql(Dialect::PostgreSql, "INSERT INTO orders VALUES (2, 10)")
+        .unwrap();
+    tx.rollback().unwrap();
+    assert_eq!(db.get("order:2:status").unwrap(), None);
+    let mut rows = Vec::new();
+    db.sql_store()
+        .session(Dialect::PostgreSql)
+        .execute("SELECT id FROM orders ORDER BY id", &mut |result| {
+            rows.extend(result.rows)
+        })
+        .unwrap();
+    assert_eq!(rows, vec![vec![eggdb::sql::Value::Integer(1)]]);
+}

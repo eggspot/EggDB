@@ -283,6 +283,10 @@ the same tables ([sql.md](sql.md)). `db.sql_store()` gives the database as a SQL
 hands each result to a closure. The session's transactions are the database's write
 transactions, so a SQL `BEGIN` holds the one writer until `COMMIT` or `ROLLBACK`.
 
+`tx.sql(dialect, text)` runs SQL inside a write transaction you already hold, so key-value writes
+and SQL changes commit together or roll back together. A statement that fails undoes its own
+writes and returns its error; the transaction stays open with what came before it.
+
 Result rows are `eggdb::sql::Value`s, one variant per type: `Value::Text`, `Value::Numeric`,
 `Value::Date` (days since 2000-01-01), `Value::Timestamp` and `Value::TimestampTz`
 (microseconds since 2000-01-01), `Value::Time` (microseconds since midnight),

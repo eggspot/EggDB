@@ -198,3 +198,4 @@ its full title with its status.
 - [D171](decisions/D171.md) Compressed values: our own LZ4-format codec, overflow chains of layout 2 behind the incompatible feature `COMPRESSED_VALUES`, `Options::compress_values`
 - [D172](decisions/D172.md) Concurrent writers as optimistic transactions over the single-writer engine (`begin_concurrent`): serializable by read and range validation, snapshot isolation by write validation, `ErrorKind::Conflict`
 - [D173](decisions/D173.md) Savepoints by an undo log of previous values in every dialect; row and table lock clauses accepted over the one writer; isolation levels accepted, blocks serializable
+- [D174](decisions/D174.md) SQL inside an embedded write transaction (`WriteTransaction::sql`) through a store that borrows it, with each statement's writes undone when it fails
