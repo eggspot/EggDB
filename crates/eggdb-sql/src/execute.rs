@@ -1729,7 +1729,10 @@ impl<'a> StoredRows<'a> {
                 .ok_or_else(|| auto_increment_exhausted(column))?,
         };
         let kept = match given {
-            Some(0) => self.identity_insert,
+            Some(0) => {
+                self.identity_insert
+                    || crate::constraints::current_dialect() != crate::dialect::Dialect::MySql
+            }
             other => other.is_some(),
         };
         match given {
