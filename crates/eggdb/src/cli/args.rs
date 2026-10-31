@@ -219,6 +219,8 @@ impl CommandName {
             | OptionName::KafkaListen
             | OptionName::AmqpListen
             | OptionName::MqttListen
+            | OptionName::SqsListen
+            | OptionName::NatsListen
             | OptionName::RespMaxMemory
             | OptionName::RespEviction
             | OptionName::McpTokenFile
@@ -373,6 +375,8 @@ enum OptionName {
     KafkaListen,
     AmqpListen,
     MqttListen,
+    SqsListen,
+    NatsListen,
     RespMaxMemory,
     RespEviction,
     McpTokenFile,
@@ -456,6 +460,8 @@ impl OptionName {
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
             b"mqtt-listen" => Self::MqttListen,
+            b"sqs-listen" => Self::SqsListen,
+            b"nats-listen" => Self::NatsListen,
             b"resp-max-memory" => Self::RespMaxMemory,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
@@ -708,6 +714,8 @@ pub(crate) struct ServeOptions {
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
     pub(crate) mqtt_listen: Option<SocketAddr>,
+    pub(crate) sqs_listen: Option<SocketAddr>,
+    pub(crate) nats_listen: Option<SocketAddr>,
     pub(crate) resp_max_memory: Option<u64>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
@@ -1152,6 +1160,14 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::MqttListen => {
                 request.serve.mqtt_listen =
                     Some(parse_listen(&option.spelled, value, 1883).map_err(usage)?);
+            }
+            OptionName::SqsListen => {
+                request.serve.sqs_listen =
+                    Some(parse_listen(&option.spelled, value, 9324).map_err(usage)?);
+            }
+            OptionName::NatsListen => {
+                request.serve.nats_listen =
+                    Some(parse_listen(&option.spelled, value, 4222).map_err(usage)?);
             }
             OptionName::AmqpListen => {
                 request.serve.amqp_listen =

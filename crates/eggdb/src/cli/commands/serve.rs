@@ -252,6 +252,44 @@ impl Session<'_> {
             }
             None => None,
         };
+        let sqs_listener = match options.sqs_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--sqs-listen {address}: the SQS-compatible endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for SQS clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let sqs_secret = sqs_listener.as_ref().map(|_| password.clone());
+        let nats_listener = match options.nats_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--nats-listen {address}: the NATS listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for NATS clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let nats_config = eggdb_nats::ServerConfig {
+            user: config.user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections: config.max_connections,
+        };
         let mqtt_config = eggdb_mqtt::ServerConfig {
             user: config.user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
@@ -523,6 +561,23 @@ impl Session<'_> {
                 Some(listener) => eggdb_mqtt::serve(&mqtt_database, listener, &mqtt_config, &stop_signals::requested),
                 None => Ok(()),
             });
+            let nats_server = scope.spawn(|| match &nats_listener {
+                Some(listener) => eggdb_nats::serve(listener, &nats_config, &stop_signals::requested),
+                None => Ok(()),
+            });
+            let sqs_endpoint = match (&sqs_listener, &sqs_secret) {
+                (Some(listener), Some(secret)) => {
+                    let base_url = listener.local_addr().map_or_else(|_| "http://127.0.0.1".to_owned(), |address| format!("http://{address}"));
+                    Some(eggdb_sqs::Endpoint::new(&queue_database, &base_url, &config.user, secret))
+                }
+                _ => None,
+            };
+            let sqs_server = scope.spawn(|| match (&sqs_listener, &sqs_endpoint) {
+                (Some(listener), Some(endpoint)) => {
+                    eggdb_http::serve(listener, &|request| endpoint.answer(request), &stop_signals::requested)
+                }
+                _ => Ok(()),
+            });
             let amqp_server = scope.spawn(|| match &amqp_listener {
                 Some(listener) => eggdb_amqp::serve(&queue_database, listener, &amqp_config, &stop_signals::requested),
                 None => Ok(()),
@@ -603,6 +658,8 @@ impl Session<'_> {
             let _ = kafka_server.join();
             let _ = amqp_server.join();
             let _ = mqtt_server.join();
+            let _ = nats_server.join();
+            let _ = sqs_server.join();
             let _ = job_scheduler.join();
             let _ = cdc_delivery.join();
             postgresql

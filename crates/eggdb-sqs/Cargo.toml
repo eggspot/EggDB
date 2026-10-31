@@ -1,0 +1,17 @@
+[package]
+name = "eggdb-sqs"
+description = "EggDB's SQS-compatible queue endpoint: the AWS JSON 1.0 queue actions with Signature Version 4 checked, on EggDB's durable queues and HTTP server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-queues = { path = "../eggdb-queues" }
+eggdb-sql = { path = "../eggdb-sql" }
