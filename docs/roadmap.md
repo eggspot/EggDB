@@ -189,7 +189,8 @@ More tracks that run alongside the milestones, each starting where its dependenc
 
 From the second gap review (D37–D45):
 - **M6 is split** into M6a to M6f (table above), with security in the first piece (D45).
-- **Generated APIs and realtime (D37)** follow the server.
+- **Generated APIs and realtime (D37)** follow the server. Started: a REST API generated from the schema in PostgREST's
+  conventions (D235).
 - **The extra models (D38)** follow the SQL dialects.
 - **Observability storage (D39)** follows time series (M11).
 - **Engine internals (D40)** run from M1 (I/O) and M5 (the optimizer).

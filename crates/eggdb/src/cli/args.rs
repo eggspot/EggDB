@@ -223,6 +223,7 @@ impl CommandName {
             | OptionName::S3Listen
             | OptionName::ObservabilityListen
             | OptionName::RestoreFrom
+            | OptionName::RestListen
             | OptionName::KafkaListen
             | OptionName::AmqpListen
             | OptionName::MqttListen
@@ -386,6 +387,7 @@ enum OptionName {
     S3Listen,
     ObservabilityListen,
     RestoreFrom,
+    RestListen,
     KafkaListen,
     AmqpListen,
     MqttListen,
@@ -478,6 +480,7 @@ impl OptionName {
             b"s3-listen" => Self::S3Listen,
             b"observability-listen" => Self::ObservabilityListen,
             b"restore-from" => Self::RestoreFrom,
+            b"rest-listen" => Self::RestListen,
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
             b"mqtt-listen" => Self::MqttListen,
@@ -740,6 +743,7 @@ pub(crate) struct ServeOptions {
     pub(crate) s3_listen: Option<SocketAddr>,
     pub(crate) observability_listen: Option<SocketAddr>,
     pub(crate) restore_from: Option<String>,
+    pub(crate) rest_listen: Option<SocketAddr>,
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
     pub(crate) mqtt_listen: Option<SocketAddr>,
@@ -1218,6 +1222,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     return Err(usage(format!("{}: the queue name must be 1 to 255 characters", option.spelled)));
                 }
                 request.serve.cdc_queue = Some(name.to_owned());
+            }
+            OptionName::RestListen => {
+                request.serve.rest_listen =
+                    Some(parse_listen(&option.spelled, value, 3000).map_err(usage)?);
             }
             OptionName::RestoreFrom => {
                 let url = value.to_str().unwrap_or_default();

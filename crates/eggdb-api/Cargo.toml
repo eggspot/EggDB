@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-api"
+description = "EggDB's REST API generated from the schema, following PostgREST's URL conventions: filters, ordering, paging, counts, inserts, updates and deletes over SQL tables."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-sql = { path = "../eggdb-sql" }
