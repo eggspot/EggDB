@@ -189,3 +189,4 @@ its full title with its status.
 - [D162](decisions/D162.md) Live copies with `eggdb follow`: PostgreSQL through `pgoutput` logical replication from a temporary slot's snapshot, SQL Server through change tracking polls, with our own PostgreSQL and TDS clients
 - [D163](decisions/D163.md) The compatibility list (`docs/compatibility.md`): supported means a CI job runs or replays the tool; expected to work means every known catalog query is answered; pgAdmin's statistics views and administration functions
 - [D164](decisions/D164.md) Unix domain sockets in the platform layer (`local_socket`), a `Local` server connection beside TCP and TLS, no TLS on local sockets; `eggdb serve --socket-dir` and `--mysql-socket`
+- [D165](decisions/D165.md) Sockets on io_uring and I/O completion ports, on request: `NetBackend::IoUring` (batched submission, kernel cancel, Linux 5.11) and `NetBackend::Iocp` (AcceptEx, ConnectEx, one port per socket), a `net.round_trip` benchmark

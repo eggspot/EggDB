@@ -37,6 +37,7 @@ mod large_value;
 mod log;
 mod mcp;
 mod measure;
+mod net;
 mod page_cache;
 mod tls;
 mod transaction;
@@ -52,7 +53,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 31] = [
+const COUNTED: [(&str, Counted); 32] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -84,6 +85,7 @@ const COUNTED: [(&str, Counted); 31] = [
     (mcp::WRITE_CALL, mcp::write_call),
     (tls::RECORD_SEAL, tls::record_seal),
     (tls::HANDSHAKE, tls::handshake),
+    (net::ROUND_TRIP, net::round_trip),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 3] = [
