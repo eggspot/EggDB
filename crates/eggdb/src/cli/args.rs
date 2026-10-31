@@ -215,6 +215,7 @@ impl CommandName {
             | OptionName::SocketDir
             | OptionName::MysqlSocket
             | OptionName::TlsCertificate
+            | OptionName::AuthRules
             | OptionName::TlsKey
             | OptionName::TlsSelfSigned
             | OptionName::TlsMinVersion => self == Self::Serve,
@@ -353,6 +354,7 @@ enum OptionName {
     SocketDir,
     MysqlSocket,
     TlsCertificate,
+    AuthRules,
     TlsKey,
     TlsSelfSigned,
     TlsMinVersion,
@@ -417,6 +419,7 @@ impl OptionName {
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
             b"tls-certificate" => Self::TlsCertificate,
+            b"auth-rules" => Self::AuthRules,
             b"tls-key" => Self::TlsKey,
             b"tls-self-signed" => Self::TlsSelfSigned,
             b"tls-min-version" => Self::TlsMinVersion,
@@ -620,6 +623,7 @@ pub(crate) struct ServeOptions {
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
     pub(crate) tls_certificate: Option<PathBuf>,
+    pub(crate) auth_rules: Option<PathBuf>,
     pub(crate) tls_key: Option<PathBuf>,
     pub(crate) tls_self_signed: bool,
     pub(crate) tls_min_version: Option<eggdb_tls::MinimumVersion>,
@@ -1051,6 +1055,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 }
             }
             OptionName::TlsCertificate => request.serve.tls_certificate = Some(PathBuf::from(value)),
+            OptionName::AuthRules => request.serve.auth_rules = Some(PathBuf::from(value)),
             OptionName::TlsKey => request.serve.tls_key = Some(PathBuf::from(value)),
             OptionName::TlsMinVersion => {
                 request.serve.tls_min_version = Some(match value.as_encoded_bytes() {

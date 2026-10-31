@@ -41,6 +41,9 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// How long a client has from connecting to finishing authentication.
     pub authentication_timeout: Duration,
+    /// The rule file that picks how users other than [`ServerConfig::user`] log in (D185);
+    /// without one, stored roles use SCRAM-SHA-256.
+    pub auth_rules: Option<std::sync::Arc<eggdb_auth::AuthRules>>,
     /// The TLS setup, when the server offers TLS (D161): `SSLRequest` is then answered `S`,
     /// PostgreSQL 17's direct TLS is accepted, and connections from other machines must use it.
     pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,

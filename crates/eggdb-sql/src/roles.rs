@@ -289,9 +289,9 @@ pub fn parse_scram_verifier(text: &str) -> Option<ScramParts> {
     let (iterations, salt) = head.split_once(':')?;
     let (stored, server) = keys.split_once(':')?;
     let iterations: u32 = iterations.parse().ok().filter(|count| *count > 0)?;
-    let salt = base64_decode(salt).ok().filter(|salt| !salt.is_empty())?;
-    let stored: [u8; 32] = base64_decode(stored).ok()?.try_into().ok()?;
-    let server: [u8; 32] = base64_decode(server).ok()?.try_into().ok()?;
+    let salt = base64_decode(salt.as_bytes()).ok().filter(|salt| !salt.is_empty())?;
+    let stored: [u8; 32] = base64_decode(stored.as_bytes()).ok()?.try_into().ok()?;
+    let server: [u8; 32] = base64_decode(server.as_bytes()).ok()?.try_into().ok()?;
     Some((iterations, salt, stored, server))
 }
 

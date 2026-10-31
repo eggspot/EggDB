@@ -116,3 +116,27 @@ fn notifications_reach_listeners_at_commit_and_while_they_are_idle() {
     assert!(after.is_empty());
     server.stop();
 }
+
+#[test]
+fn the_rule_file_rejects_users_and_keeps_clear_text_methods_off_plain_connections() {
+    let rules = eggdb_auth::AuthRules::parse(
+        "mallory reject\nclerk ldap server=127.0.0.1:1 prefix=uid=\n",
+        &|_| Err(std::io::Error::other("no key sets")),
+    )
+    .unwrap();
+    let mut server =
+        TestServer::start_databases_with_rules(&[DATABASE], Some(std::sync::Arc::new(rules)));
+    let mut mallory = Client::connect(server.address);
+    mallory.send_startup(196_608, &[("user", "mallory"), ("database", DATABASE)]);
+    let rejected = mallory.read().unwrap();
+    assert_eq!((rejected.tag, rejected.code()), (b'E', "28P01".to_owned()));
+    let mut clerk = Client::connect(server.address);
+    clerk.send_startup(196_608, &[("user", "clerk"), ("database", DATABASE)]);
+    let refused = clerk.read().unwrap();
+    assert_eq!(refused.tag, b'E');
+    assert_eq!(refused.code(), "28000");
+    let (mut own, ok) = Client::login_as(server.address, USER, PASSWORD, DATABASE);
+    assert_eq!((ok.tag, ok.body.clone()), (b'R', 0i32.to_be_bytes().to_vec()));
+    own.read_until_ready();
+    server.stop();
+}

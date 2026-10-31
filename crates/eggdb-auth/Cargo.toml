@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-auth"
+description = "EggDB's external authentication: OpenID Connect tokens (JWT signatures over our own RSA and P-256), LDAP simple binds, and the rule file that picks a method per user."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }

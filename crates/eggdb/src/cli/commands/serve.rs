@@ -177,6 +177,7 @@ impl Session<'_> {
             database: options.database.unwrap_or(served_name),
             max_connections: options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
+            auth_rules: self.auth_rules()?,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
         };
         let mysql_config = mysql_credentials.map(|credentials| eggdb_mysqlwire::ServerConfig {
@@ -303,6 +304,20 @@ impl Session<'_> {
         }
         self.close(db)?;
         Ok(Exit::Done)
+    }
+
+    fn auth_rules(&self) -> Result<Option<Arc<eggdb_auth::AuthRules>>, Failure> {
+        let Some(path) = &self.request.serve.auth_rules else {
+            return Ok(None);
+        };
+        eggdb_auth::AuthRules::load(path)
+            .map(|rules| Some(Arc::new(rules)))
+            .map_err(|error| {
+                Failure::usage(
+                    format!("--auth-rules {}: {error}", path.display()),
+                    Some(CommandName::Serve),
+                )
+            })
     }
 
     fn directory_databases(&self, access: Access) -> Result<Vec<(String, eggdb::Database)>, Failure> {

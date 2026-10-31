@@ -1831,6 +1831,22 @@ table the role holds no privilege for fails with `42501 permission denied for ta
 are listed in `pg_roles`. Not yet: logins of stored roles over MySQL's and SQL Server's protocols,
 column and schema privileges, object owners and `SET ROLE`.
 
+Roles can also log in through a directory or an identity provider (D185). Give `eggdb serve
+--auth-rules auth.conf` a file such as:
+
+```
+# user   method  settings
+alice    ldap    server=ldap.example.org:389 prefix=uid= suffix=,ou=people,dc=example,dc=org
+all      jwt     jwks=provider-keys.json issuer=https://login.example.org audience=eggdb user_claim=preferred_username
+mallory  reject
+```
+
+The first line naming a user (or `all`) decides; users no line names use their stored password.
+LDAP checks the password with a simple bind; `jwt` takes an OpenID Connect token as the password
+and checks its signature against the key set file, its issuer, audience and expiry, and that it
+names the user. Both need an encrypted connection (`sslmode=require`) or the local socket, and the
+user must exist as a role with `LOGIN`.
+
 ## Statistics: `ANALYZE` and approximate counts
 - `ANALYZE [table, ...]` (PostgreSQL and SQLite), `ANALYZE TABLE t, ...` (MySQL, which answers
   with its `Table | Op | Msg_type | Msg_text` rows) and Oracle's `ANALYZE TABLE t COMPUTE

@@ -174,6 +174,7 @@ impl TestServer {
             database: DATABASE.to_owned(),
             max_connections,
             authentication_timeout,
+            auth_rules: None,
             tls,
         };
         let thread_stop = Arc::clone(&stop);
@@ -193,6 +194,13 @@ impl TestServer {
     }
 
     pub fn start_databases(names: &'static [&'static str]) -> Self {
+        Self::start_databases_with_rules(names, None)
+    }
+
+    pub fn start_databases_with_rules(
+        names: &'static [&'static str],
+        auth_rules: Option<Arc<eggdb_auth::AuthRules>>,
+    ) -> Self {
         let listener: TcpListener =
             eggdb_pgwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
         let address = listener.local_addr().unwrap();
@@ -204,6 +212,7 @@ impl TestServer {
             database: names[0].to_owned(),
             max_connections: 8,
             authentication_timeout: Duration::from_secs(5),
+            auth_rules,
             tls: None,
         };
         let thread_stop = Arc::clone(&stop);

@@ -542,6 +542,92 @@ fn stored_role_verifier<S: KeyValueStore>(store: &S, user: &str) -> Option<Scram
     ScramVerifier::from_stored(&text)
 }
 
+fn refuse_login(wire: &mut Wire<'_>, shared: &Shared<'_>, user: &str, why: &str) -> AuthenticationOutcome {
+    (shared.log)(&format!(
+        "{}  authentication failed for user \"{}\": {why}",
+        wire.peer(),
+        printable(user)
+    ));
+    sleep_unless_stopped(shared.throttle.delay_after_failure(), shared.stop);
+    fatal(
+        wire,
+        SqlState::INVALID_PASSWORD,
+        &format!("password authentication failed for user \"{user}\""),
+    );
+    AuthenticationOutcome::Refused
+}
+
+fn may_log_in<S: KeyValueStore>(store: &S, user: &str) -> bool {
+    store
+        .begin_read()
+        .ok()
+        .and_then(|reader| eggdb_sql::stored_role(&reader, user).ok().flatten())
+        .is_some_and(|role| role.login)
+}
+
+fn authenticate_externally<S: KeyValueStore>(
+    wire: &mut Wire<'_>,
+    shared: &Shared<'_>,
+    user: &str,
+    method: &eggdb_auth::AuthMethod,
+    store: &S,
+) -> AuthenticationOutcome {
+    if matches!(method, eggdb_auth::AuthMethod::Reject) {
+        return refuse_login(wire, shared, user, "the rule file rejects the user");
+    }
+    if method.sends_secret_in_clear() && wire.tls().is_none() && !wire.is_local() {
+        fatal(
+            wire,
+            SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+            &format!(
+                "user \"{user}\" logs in with a password checked elsewhere, which needs an encrypted connection (sslmode=require) or the server's local socket"
+            ),
+        );
+        return AuthenticationOutcome::Refused;
+    }
+    wire.outbox.authentication_cleartext_password();
+    if wire.flush().is_err() {
+        return AuthenticationOutcome::Refused;
+    }
+    let Some(mut body) = read_sasl_message(wire) else {
+        return AuthenticationOutcome::Refused;
+    };
+    if body.last() == Some(&0) {
+        body.pop();
+    }
+    let Ok(secret) = String::from_utf8(body) else {
+        return refuse_login(wire, shared, user, "the password is not UTF-8");
+    };
+    let checked = match method {
+        eggdb_auth::AuthMethod::Ldap(config) => match config.authenticate(user, &secret) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("the LDAP server refused the password".to_owned()),
+            Err(error) => Err(error.to_string()),
+        },
+        eggdb_auth::AuthMethod::Jwt { keys, policy } => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+            match eggdb_auth::jwt::verify(&secret, keys, policy, now) {
+                Ok(named) if named == user => Ok(()),
+                Ok(named) => Err(format!("the token names user \"{}\"", printable(&named))),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        eggdb_auth::AuthMethod::ScramSha256 | eggdb_auth::AuthMethod::Reject => {
+            Err("no external method".to_owned())
+        }
+    };
+    if let Err(why) = checked {
+        return refuse_login(wire, shared, user, &why);
+    }
+    if !may_log_in(store, user) {
+        return refuse_login(wire, shared, user, "no stored role with LOGIN has this name");
+    }
+    wire.outbox.authentication_ok();
+    AuthenticationOutcome::Authenticated
+}
+
 fn authenticate(
     wire: &mut Wire<'_>,
     shared: &Shared<'_>,
@@ -721,11 +807,28 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let Some(&(_, first)) = databases.first() else {
         return;
     };
-    let stored_role = (startup.user != shared.config.user)
-        .then(|| stored_role_verifier(chosen.unwrap_or(first), &startup.user))
-        .flatten();
-    let is_stored_role = stored_role.is_some();
-    match authenticate(&mut wire, shared, &startup.user, stored_role) {
+    let own_user = startup.user == shared.config.user;
+    let method = match (&shared.config.auth_rules, own_user) {
+        (Some(rules), false) => rules.method_for(&startup.user).clone(),
+        _ => eggdb_auth::AuthMethod::ScramSha256,
+    };
+    let is_stored_role = !own_user;
+    let outcome = match method {
+        eggdb_auth::AuthMethod::ScramSha256 => {
+            let stored_role = (!own_user)
+                .then(|| stored_role_verifier(chosen.unwrap_or(first), &startup.user))
+                .flatten();
+            authenticate(&mut wire, shared, &startup.user, stored_role)
+        }
+        external => authenticate_externally(
+            &mut wire,
+            shared,
+            &startup.user,
+            &external,
+            chosen.unwrap_or(first),
+        ),
+    };
+    match outcome {
         AuthenticationOutcome::Authenticated => {}
         AuthenticationOutcome::Refused => return,
     }

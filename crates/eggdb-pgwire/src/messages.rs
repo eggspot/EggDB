@@ -518,6 +518,11 @@ impl Outbox {
         self.bytes.push(b'S');
     }
 
+    /// `AuthenticationCleartextPassword`, for methods that check the password elsewhere.
+    pub fn authentication_cleartext_password(&mut self) {
+        self.message(b'R', |body| body.extend_from_slice(&3i32.to_be_bytes()));
+    }
+
     /// `AuthenticationOk`.
     pub fn authentication_ok(&mut self) {
         self.message(b'R', |body| body.extend_from_slice(&0i32.to_be_bytes()));

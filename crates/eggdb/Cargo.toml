@@ -18,6 +18,7 @@ path = "src/main.rs"
 egg-allocator = []
 
 [dependencies]
+eggdb-auth = { path = "../eggdb-auth" }
 eggdb-commands = { path = "../eggdb-commands" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
