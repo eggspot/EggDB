@@ -12,9 +12,13 @@ mod compile_tests;
 #[cfg(test)]
 mod ddl_tests;
 #[cfg(test)]
+mod hostile_tests;
+#[cfg(test)]
 mod output_tests;
 #[cfg(test)]
 mod package_tests;
+#[cfg(test)]
+mod reference_tests;
 #[cfg(test)]
 mod run_tests;
 #[cfg(test)]

@@ -2516,3 +2516,714 @@ SELECT NUMTODSINTERVAL(1, 'week') FROM dual
 
 ok
 COMMIT
+
+chapter "PL/SQL Language Reference": "Overview of PL/SQL", "PL/SQL Control Statements" (part 3.16)
+ok
+CREATE TABLE emp316 (empno NUMBER PRIMARY KEY, ename VARCHAR2(20), sal NUMBER, deptno NUMBER)
+
+ok
+INSERT INTO emp316 VALUES (7369, 'SMITH', 800, 20)
+
+ok
+INSERT INTO emp316 VALUES (7499, 'ALLEN', 1600, 30)
+
+ok
+INSERT INTO emp316 VALUES (7521, 'WARD', 1250, 30)
+
+ok
+INSERT INTO emp316 VALUES (7839, 'KING', 5000, 10)
+
+ok
+CREATE TABLE log316 (n NUMBER, msg VARCHAR2(200))
+
+ok
+BEGIN
+  FOR i IN 1..3 LOOP
+    INSERT INTO log316 VALUES (i, 'pass ' || i);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|pass 1
+2|pass 2
+3|pass 3
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  v_name emp316.ename%TYPE;
+  v_sal emp316.sal%TYPE;
+  v_grade VARCHAR2(10);
+BEGIN
+  SELECT ename, sal INTO v_name, v_sal FROM emp316 WHERE empno = 7499;
+  IF v_sal > 3000 THEN
+    v_grade := 'high';
+  ELSIF v_sal > 1000 THEN
+    v_grade := 'middle';
+  ELSE
+    v_grade := 'low';
+  END IF;
+  INSERT INTO log316 VALUES (v_sal, v_name || ' ' || v_grade);
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+1600|ALLEN middle
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  n PLS_INTEGER := 0;
+  total NUMBER := 0;
+BEGIN
+  WHILE n < 10 LOOP
+    n := n + 1;
+    CONTINUE WHEN MOD(n, 2) = 0;
+    total := total + n;
+  END LOOP;
+  LOOP
+    n := n - 1;
+    EXIT WHEN n <= 7;
+  END LOOP;
+  CASE
+    WHEN total = 25 THEN
+      INSERT INTO log316 VALUES (total, 'odd sum ' || n);
+    ELSE
+      INSERT INTO log316 VALUES (total, 'wrong');
+  END CASE;
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+25|odd sum 7
+SELECT 1
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Error Handling" (part 3.16)
+ok
+DECLARE
+  v NUMBER;
+BEGIN
+  BEGIN
+    SELECT sal INTO v FROM emp316 WHERE empno = 1;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+  END;
+  BEGIN
+    SELECT sal INTO v FROM emp316;
+  EXCEPTION
+    WHEN TOO_MANY_ROWS THEN
+      INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+  END;
+  BEGIN
+    v := 10 / 0;
+  EXCEPTION
+    WHEN ZERO_DIVIDE THEN
+      INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+  END;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+-1476|ORA-01476: divisor is equal to zero
+-1422|ORA-01422: exact fetch returns more than requested number of rows
+100|ORA-01403: no data found
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  salary_too_low EXCEPTION;
+  PRAGMA EXCEPTION_INIT(salary_too_low, -20101);
+  v_sal NUMBER;
+BEGIN
+  SELECT sal INTO v_sal FROM emp316 WHERE empno = 7369;
+  IF v_sal < 1000 THEN
+    RAISE_APPLICATION_ERROR(-20101, 'salary ' || v_sal || ' is too low');
+  END IF;
+EXCEPTION
+  WHEN salary_too_low THEN
+    INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+-20101|ORA-20101: salary 800 is too low
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  out_of_stock EXCEPTION;
+  on_hand NUMBER := 0;
+BEGIN
+  INSERT INTO log316 VALUES (0, 'before the check');
+  IF on_hand < 1 THEN
+    RAISE out_of_stock;
+  END IF;
+  INSERT INTO log316 VALUES (2, 'not reached');
+EXCEPTION
+  WHEN out_of_stock THEN
+    INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+0|before the check
+1|User-Defined Exception
+SELECT 2
+
+ok
+DELETE FROM log316
+
+error P0001 20000
+BEGIN
+  RAISE_APPLICATION_ERROR(-20000, 'stopped');
+END;
+
+error P0002 1403
+DECLARE
+  v NUMBER;
+BEGIN
+  SELECT sal INTO v FROM emp316 WHERE empno = 1;
+END;
+
+error P0001 6510
+DECLARE
+  e EXCEPTION;
+BEGIN
+  RAISE e;
+END;
+
+chapter "PL/SQL Language Reference": "PL/SQL Subprograms", "CREATE PROCEDURE Statement", "CREATE FUNCTION Statement" (part 3.16)
+ok
+CREATE OR REPLACE PROCEDURE raise_salary316 (p_empno IN NUMBER, p_amount IN NUMBER, p_new_sal OUT NUMBER) IS
+BEGIN
+  UPDATE emp316 SET sal = sal + p_amount WHERE empno = p_empno;
+  SELECT sal INTO p_new_sal FROM emp316 WHERE empno = p_empno;
+END raise_salary316;
+
+ok
+DECLARE
+  v_sal NUMBER;
+BEGIN
+  raise_salary316(7369, 200, v_sal);
+  INSERT INTO log316 VALUES (v_sal, 'raised');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+1000|raised
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+CREATE OR REPLACE FUNCTION annual316 (p_sal NUMBER, p_months NUMBER DEFAULT 12) RETURN NUMBER IS
+BEGIN
+  RETURN p_sal * p_months;
+END annual316;
+
+rows
+SELECT ename, annual316(sal) AS annual FROM emp316 WHERE deptno = 30 ORDER BY empno
+----
+ENAME|ANNUAL
+ALLEN|19200
+WARD|15000
+SELECT 2
+
+rows
+SELECT annual316(p_sal => 100, p_months => 3) AS quarter FROM dual
+----
+QUARTER
+300
+SELECT 1
+
+ok
+CREATE PROCEDURE note316 (p_msg IN VARCHAR2, p_n IN NUMBER DEFAULT 0) IS
+BEGIN
+  INSERT INTO log316 VALUES (p_n, p_msg);
+END;
+
+ok
+CALL note316('called')
+
+ok
+BEGIN
+  note316(p_n => 5, p_msg => 'named');
+END;
+
+ok
+ALTER PROCEDURE note316 COMPILE
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+0|called
+5|named
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  total NUMBER := 0;
+  f NUMBER;
+  PROCEDURE add_to_total (n NUMBER) IS
+  BEGIN
+    total := total + n;
+  END add_to_total;
+  FUNCTION factorial (n PLS_INTEGER) RETURN PLS_INTEGER IS
+  BEGIN
+    IF n <= 1 THEN
+      RETURN 1;
+    END IF;
+    RETURN n * factorial(n - 1);
+  END factorial;
+BEGIN
+  f := factorial(5);
+  add_to_total(f);
+  add_to_total(1);
+  INSERT INTO log316 VALUES (total, 'factorial plus one');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+121|factorial plus one
+SELECT 1
+
+ok
+DELETE FROM log316
+
+error 42704 6550
+CREATE PROCEDURE broken316 IS
+BEGIN
+  missing_variable316 := 1;
+END;
+
+error 42710 955
+CREATE PROCEDURE emp316 IS
+BEGIN
+  NULL;
+END;
+
+chapter "PL/SQL Language Reference": "PL/SQL Packages", "CREATE PACKAGE Statement", "CREATE PACKAGE BODY Statement" (part 3.16)
+ok
+CREATE OR REPLACE PACKAGE emp_mgmt316 AS
+  hired NUMBER := 0;
+  PROCEDURE hire (p_empno NUMBER, p_ename VARCHAR2, p_sal NUMBER);
+  FUNCTION total_sal RETURN NUMBER;
+END emp_mgmt316;
+
+ok
+CREATE OR REPLACE PACKAGE BODY emp_mgmt316 AS
+  PROCEDURE hire (p_empno NUMBER, p_ename VARCHAR2, p_sal NUMBER) IS
+  BEGIN
+    INSERT INTO emp316 VALUES (p_empno, p_ename, p_sal, 40);
+    hired := hired + 1;
+  END hire;
+  FUNCTION total_sal RETURN NUMBER IS
+    v_total NUMBER;
+  BEGIN
+    SELECT SUM(sal) INTO v_total FROM emp316;
+    RETURN v_total;
+  END total_sal;
+END emp_mgmt316;
+
+ok
+BEGIN
+  emp_mgmt316.hire(8001, 'NEW1', 1000);
+  emp_mgmt316.hire(8002, 'NEW2', 1500);
+  INSERT INTO log316 VALUES (emp_mgmt316.hired, 'hired');
+END;
+
+rows
+SELECT emp_mgmt316.total_sal() AS total FROM dual
+----
+TOTAL
+11350
+SELECT 1
+
+ok
+BEGIN
+  emp_mgmt316.hire(8003, 'NEW3', 900);
+  INSERT INTO log316 VALUES (emp_mgmt316.hired, 'hired again');
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+2|hired
+3|hired again
+SELECT 2
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "Static SQL", "Explicit Cursors", "Cursor FOR LOOP Statement", "SQL Cursor" (part 3.16)
+ok
+DECLARE
+  CURSOR c_emp IS SELECT ename FROM emp316 WHERE deptno = 30 ORDER BY empno;
+  v_name emp316.ename%TYPE;
+BEGIN
+  OPEN c_emp;
+  LOOP
+    FETCH c_emp INTO v_name;
+    EXIT WHEN c_emp%NOTFOUND;
+    INSERT INTO log316 VALUES (c_emp%ROWCOUNT, v_name);
+  END LOOP;
+  CLOSE c_emp;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|ALLEN
+2|WARD
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+BEGIN
+  FOR r IN (SELECT ename, sal FROM emp316 WHERE sal >= 1600 ORDER BY sal) LOOP
+    INSERT INTO log316 VALUES (r.sal, r.ename);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1600|ALLEN
+5000|KING
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  CURSOR c_dept (p_dept NUMBER) IS SELECT ename FROM emp316 WHERE deptno = p_dept ORDER BY empno;
+  k NUMBER := 0;
+BEGIN
+  FOR r IN c_dept(40) LOOP
+    k := k + 1;
+    INSERT INTO log316 VALUES (k, r.ename);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|NEW1
+2|NEW2
+3|NEW3
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+BEGIN
+  UPDATE emp316 SET sal = sal WHERE deptno = 40;
+  INSERT INTO log316 VALUES (SQL%ROWCOUNT, 'rows in dept 40');
+  UPDATE emp316 SET sal = sal WHERE empno = 1;
+  IF SQL%NOTFOUND THEN
+    INSERT INTO log316 VALUES (0, 'no employee 1');
+  END IF;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+0|no employee 1
+3|rows in dept 40
+SELECT 2
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Collections and Records", "Bulk SQL and Bulk Binding" (part 3.16)
+ok
+DECLARE
+  TYPE population IS TABLE OF NUMBER INDEX BY VARCHAR2(64);
+  city_population population;
+  i VARCHAR2(64);
+  k NUMBER := 0;
+BEGIN
+  city_population('Smallville') := 2000;
+  city_population('Midland') := 750000;
+  city_population('Megalopolis') := 1000000;
+  city_population('Smallville') := 2001;
+  i := city_population.FIRST;
+  WHILE i IS NOT NULL LOOP
+    k := k + 1;
+    INSERT INTO log316 VALUES (k, i || ' ' || city_population(i));
+    i := city_population.NEXT(i);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|Megalopolis 1000000
+2|Midland 750000
+3|Smallville 2001
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE names_t IS TABLE OF VARCHAR2(15);
+  names names_t := names_t('D Caruso', 'J Hamil', 'D Piro', 'R Singh');
+BEGIN
+  names.EXTEND;
+  names(5) := 'K Patel';
+  names.DELETE(2);
+  INSERT INTO log316 VALUES (names.COUNT, names(1) || ', ' || names(5));
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+4|D Caruso, K Patel
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE team_t IS VARRAY(4) OF VARCHAR2(15);
+  team team_t := team_t('John', 'Mary');
+BEGIN
+  team.EXTEND(2);
+  team(3) := 'Pierre';
+  team(4) := 'Yvonne';
+  INSERT INTO log316 VALUES (team.LIMIT, team(1) || ', ' || team(4));
+  team.EXTEND;
+EXCEPTION
+  WHEN SUBSCRIPT_OUTSIDE_LIMIT THEN
+    INSERT INTO log316 VALUES (SQLCODE, 'outside the limit');
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+-6532|outside the limit
+4|John, Yvonne
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE name_list IS TABLE OF VARCHAR2(20);
+  names name_list;
+BEGIN
+  SELECT ename BULK COLLECT INTO names FROM emp316 WHERE deptno = 40 ORDER BY empno;
+  INSERT INTO log316 VALUES (names.COUNT, names(1) || ' ' || names(3));
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+3|NEW1 NEW3
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE id_list IS TABLE OF NUMBER;
+  ids id_list := id_list(8001, 8002);
+BEGIN
+  FORALL i IN 1..ids.COUNT
+    UPDATE emp316 SET sal = sal + 10 WHERE empno = ids(i);
+  INSERT INTO log316 VALUES (SQL%ROWCOUNT, 'forall');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+2|forall
+SELECT 1
+
+rows
+SELECT empno, sal FROM emp316 WHERE deptno = 40 ORDER BY empno
+----
+EMPNO|SAL
+8001|1010
+8002|1510
+8003|900
+SELECT 3
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Dynamic SQL", "EXECUTE IMMEDIATE Statement" (part 3.16)
+ok
+DECLARE
+  v_count NUMBER;
+  v_table VARCHAR2(30) := 'emp316';
+BEGIN
+  EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || v_table || ' WHERE deptno = :d' INTO v_count USING 30;
+  INSERT INTO log316 VALUES (v_count, 'dynamic');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+2|dynamic
+SELECT 1
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Triggers", "CREATE TRIGGER Statement" (part 3.16)
+ok
+CREATE OR REPLACE TRIGGER emp_sal_floor316
+BEFORE INSERT OR UPDATE OF sal ON emp316
+FOR EACH ROW
+WHEN (new.sal < 0)
+BEGIN
+  :new.sal := 0;
+END;
+
+ok
+INSERT INTO emp316 VALUES (9001, 'NEG', -5, 50)
+
+rows
+SELECT sal FROM emp316 WHERE empno = 9001
+----
+SAL
+0
+SELECT 1
+
+ok
+CREATE OR REPLACE TRIGGER emp_audit316
+AFTER DELETE ON emp316
+FOR EACH ROW
+BEGIN
+  INSERT INTO log316 VALUES (:old.empno, 'deleted ' || :old.ename);
+END;
+
+ok
+DELETE FROM emp316 WHERE deptno = 50
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+9001|deleted NEG
+SELECT 1
+
+ok
+ALTER TRIGGER emp_audit316 DISABLE
+
+ok
+DELETE FROM emp316 WHERE empno = 8003
+
+rows
+SELECT COUNT(*) AS logged FROM log316
+----
+LOGGED
+1
+SELECT 1
+
+chapter "PL/SQL Language Reference": the data dictionary's "USER_OBJECTS" and "USER_SOURCE" for PL/SQL units (part 3.16)
+rows
+SELECT object_name, object_type FROM user_objects WHERE object_name IN ('RAISE_SALARY316', 'ANNUAL316', 'NOTE316', 'EMP_MGMT316', 'EMP_SAL_FLOOR316', 'EMP_AUDIT316') ORDER BY object_name, object_type
+----
+OBJECT_NAME|OBJECT_TYPE
+ANNUAL316|FUNCTION
+EMP_AUDIT316|TRIGGER
+EMP_MGMT316|PACKAGE
+EMP_MGMT316|PACKAGE BODY
+EMP_SAL_FLOOR316|TRIGGER
+NOTE316|PROCEDURE
+RAISE_SALARY316|PROCEDURE
+SELECT 7
+
+rows
+SELECT COUNT(*) AS lines FROM user_source WHERE name = 'RAISE_SALARY316'
+----
+LINES
+5
+SELECT 1
+
+ok
+DROP TRIGGER emp_audit316
+
+ok
+DROP TRIGGER emp_sal_floor316
+
+ok
+DROP PACKAGE emp_mgmt316
+
+ok
+DROP PROCEDURE raise_salary316
+
+ok
+DROP PROCEDURE note316
+
+ok
+DROP FUNCTION annual316
+
+error 42704 4043
+DROP PROCEDURE raise_salary316
+
+ok
+DROP TABLE log316
+
+ok
+DROP TABLE emp316
