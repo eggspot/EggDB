@@ -29,6 +29,37 @@ fn choose(entries: &[Archived], at: Option<&str>, shown: &str) -> Result<Archive
         .ok_or_else(|| format!("{shown} holds no archived copy taken at or before that time"))
 }
 
+/// A read-only edge copy of what the bucket at `url` archived at or before `at`: the copy kept in
+/// the local cache (`EGGDB_EDGE_CACHE`, or `eggdb-edge` in the temporary directory) under its
+/// SHA-256, downloaded and checked first when the cache lacks it.
+pub(super) fn edge_copy(url: &str, at: Option<&str>) -> Result<PathBuf, String> {
+    let location = bucket(url)?;
+    let manifest_text = location.bucket.get(&location.key(MANIFEST))?.ok_or_else(|| format!("{url} has no {MANIFEST}: archive into it with eggdb backup <file> {url}"))?;
+    let chosen = choose(&parse_manifest(&String::from_utf8_lossy(&manifest_text)), at, url)?;
+    if chosen.sha256.len() != 64 || !chosen.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("the manifest of {url} gives {} no valid SHA-256", chosen.file));
+    }
+    let cache = std::env::var_os("EGGDB_EDGE_CACHE").map_or_else(|| std::env::temp_dir().join("eggdb-edge"), PathBuf::from);
+    let copy = cache.join(format!("{}.eggdb", chosen.sha256));
+    if file_sha256(&copy).is_ok_and(|actual| actual == chosen.sha256) {
+        return Ok(copy);
+    }
+    std::fs::create_dir_all(&cache).map_err(|error| format!("cannot create the edge cache {}: {error}", cache.display()))?;
+    let bytes = location.bucket.get(&location.key(&chosen.file))?.ok_or_else(|| format!("{} is in the manifest but not in the bucket", chosen.file))?;
+    let actual: String = eggdb_crypto::sha256(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+    if actual != chosen.sha256 {
+        return Err(format!("{} has changed since it was archived (its SHA-256 differs from the manifest)", chosen.file));
+    }
+    let mut staging = copy.clone().into_os_string();
+    staging.push(STAGING_SUFFIX);
+    let staging = PathBuf::from(staging);
+    std::fs::File::create(&staging)
+        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()))
+        .and_then(|()| std::fs::rename(&staging, &copy))
+        .map_err(|error| format!("cannot keep {} in the edge cache: {error}", chosen.file))?;
+    Ok(copy)
+}
+
 /// Restores into the new file `target` the copy archived in the bucket at `url` taken at or
 /// before `at` (the newest without it), after checking its SHA-256; returns the copy chosen.
 pub(super) fn restore_from_bucket_into(url: &str, at: Option<&str>, target: &Path) -> Result<(String, i64), String> {

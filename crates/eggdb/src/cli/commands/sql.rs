@@ -16,7 +16,12 @@ use std::io::Read;
 
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
-        if self.request.file.join(super::archive::MANIFEST).is_file() {
+        if let Some(url) = self.request.file.to_str().filter(|text| text.starts_with(super::archive::BUCKET_SCHEME)).map(str::to_owned) {
+            let at = self.request.restore.at.clone();
+            self.request.file = super::archive::edge_copy(&url, at.as_deref())
+                .map_err(|message| Failure::usage(message, Some(crate::cli::args::CommandName::Sql)))?;
+            self.request.read_only = true;
+        } else if self.request.file.join(super::archive::MANIFEST).is_file() {
             let directory = self.request.file.clone();
             let at = self.request.restore.at.clone();
             let copy = super::archive::archived_copy(&directory, at.as_deref())
