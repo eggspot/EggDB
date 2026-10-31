@@ -895,6 +895,7 @@ impl<'t> Parser<'t> {
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
             "lock" if self.postgresql() || self.oracle() => self.lock_table(),
+            "analyze" | "analyse" => self.analyze(),
             "savepoint" => {
                 self.at += 1;
                 let name = self.name()?;
@@ -1078,6 +1079,54 @@ impl<'t> Parser<'t> {
                 notice: None,
             }),
         }
+    }
+
+    fn analyze(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        if self.peek_kind() == &TokenKind::LeftParen {
+            self.skip_parenthesized_options()?;
+        }
+        self.take_word("verbose");
+        if self.mysql() {
+            let _ = self.take_word("no_write_to_binlog") || self.take_word("local");
+        }
+        self.take_word("table");
+        let mut tables = Vec::new();
+        while matches!(self.peek_kind(), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
+            && !(self.oracle()
+                && ["compute", "estimate", "delete", "validate", "list"]
+                    .iter()
+                    .any(|word| self.is_word(word)))
+        {
+            tables.push(self.table_name()?);
+            if self.peek_kind() == &TokenKind::LeftParen {
+                self.skip_parenthesized_options()?;
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        if self.oracle() {
+            while matches!(self.peek_kind(), TokenKind::Word(_) | TokenKind::Integer(_)) {
+                self.at += 1;
+            }
+        }
+        Ok(Statement::Analyze(tables))
+    }
+
+    fn skip_parenthesized_options(&mut self) -> SqlResult<()> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek_kind() {
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => depth -= 1,
+                TokenKind::End => return Err(self.unexpected()),
+                _ => {}
+            }
+            self.at += 1;
+        }
+        Ok(())
     }
 
     fn lock_table(&mut self) -> SqlResult<Statement> {

@@ -626,6 +626,7 @@ pub(crate) fn drop_tables(
         crate::comments::forget_owner(writer, &table.name)?;
         crate::triggers::remove_table_triggers(writer, &table.name)?;
         crate::partitions::forget(writer, &table.name)?;
+        crate::statistics::forget(writer, &table.name)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)

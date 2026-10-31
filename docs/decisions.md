@@ -202,3 +202,4 @@ its full title with its status.
 - [D175](decisions/D175.md) Databases in memory (`Database::in_memory`, `:memory:`) on the platform layer's memory file through `DatabaseFile`; `PageFile::create_in`/`open_in`
 - [D176](decisions/D176.md) One-line installers (`install.sh`, `install.ps1`) that check `SHA256SUMS`, run and timed by CI's `installers` job on three systems
 - [D177](decisions/D177.md) `eggdb-redis-compare` in its own workspace with our own RESP client; set and get against a Redis-compatible server, reported not gated, CI job `redis-compare`
+- [D178](decisions/D178.md) `ANALYZE` row counts in a catalog record (`0x10`) shown as `reltuples`; `approx_count_distinct` by a HyperLogLog sketch

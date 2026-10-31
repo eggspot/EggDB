@@ -1107,6 +1107,7 @@ fn rename_table(
     crate::comments::move_owner(writer, &old_name, &to.text)?;
     crate::triggers::move_table_triggers(writer, &old_name, &to.text)?;
     crate::partitions::rename(writer, &old_name, &to.text)?;
+    crate::statistics::rename(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)
 }
 

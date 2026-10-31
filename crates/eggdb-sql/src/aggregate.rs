@@ -361,7 +361,7 @@ fn sqlserver_aggregate_input(
 
 fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option<SqlType> {
     match function {
-        AggregateFunction::Count => Some(SqlType::BigInt),
+        AggregateFunction::Count | AggregateFunction::ApproxCountDistinct => Some(SqlType::BigInt),
         AggregateFunction::Avg => match argument? {
             SqlType::Real | SqlType::Double => Some(SqlType::Double),
             SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Numeric(_) => {
@@ -468,7 +468,7 @@ fn undefined_aggregate(function: AggregateFunction, type_name: &str) -> SqlError
 fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlResult<()> {
     let name = || sql_type.name();
     match function {
-        AggregateFunction::Count => Ok(()),
+        AggregateFunction::Count | AggregateFunction::ApproxCountDistinct => Ok(()),
         AggregateFunction::Min | AggregateFunction::Max => {
             if sql_type == SqlType::Boolean || sql_type == SqlType::Json {
                 Err(undefined_aggregate(function, &name()))
@@ -945,6 +945,7 @@ enum Accumulator {
     Collected(Vec<Value>),
     Truth(Option<bool>),
     Ordered(Vec<OrderedInput>),
+    Sketch(crate::hyperloglog::Sketch),
 }
 
 struct Group {
@@ -960,6 +961,7 @@ impl Accumulator {
         match self {
             Self::Extreme(value) | Self::Joined(Some(value)) => crate::memory::held_bytes(value),
             Self::JsonParts(Some(text)) => text.len(),
+            Self::Sketch(_) => crate::hyperloglog::Sketch::BYTES,
             Self::Collected(values) => values.iter().map(crate::memory::held_bytes).sum(),
             Self::Ordered(inputs) => inputs
                 .iter()
@@ -1021,6 +1023,9 @@ impl Call {
             AggregateFunction::PercentileCont
             | AggregateFunction::PercentileDisc
             | AggregateFunction::Mode => Accumulator::Ordered(Vec::new()),
+            AggregateFunction::ApproxCountDistinct => {
+                Accumulator::Sketch(crate::hyperloglog::Sketch::new())
+            }
         }
     }
 
@@ -1290,6 +1295,7 @@ impl Call {
                     (Some(now), _) => now && next,
                 });
             }
+            Accumulator::Sketch(sketch) => sketch.add(&value),
             Accumulator::Joined(_) | Accumulator::JsonParts(_) | Accumulator::Ordered(_) => {}
         }
         Ok(())
@@ -1405,6 +1411,7 @@ impl Call {
                 crate::arrays::from_rows(values, self.argument_type.map(SqlType::without_modifier))?
             }
             Accumulator::Truth(state) => state.map_or(Value::Null, Value::Boolean),
+            Accumulator::Sketch(sketch) => Value::BigInt(sketch.estimate()),
             Accumulator::Ordered(inputs) => self.finish_ordered(inputs)?,
         })
     }

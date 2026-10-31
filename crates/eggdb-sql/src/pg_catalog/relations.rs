@@ -330,6 +330,9 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     has_subclass = !snapshot.partitions.children_of(&table.name).is_empty();
                 }
                 partition_bound = snapshot.partition_bound_definition(table);
+                if let Some(&rows) = snapshot.row_counts.get(&table.name) {
+                    tuples = rows as f32;
+                }
                 natts = table.columns.len();
                 has_index = !table.primary_key.is_empty() || !table.indexes.is_empty();
                 checks = table.checks.len();

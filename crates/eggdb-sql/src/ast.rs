@@ -22,6 +22,7 @@ pub(crate) enum Statement {
     Commit,
     Rollback,
     Savepoint(SavepointCommand),
+    Analyze(Vec<Name>),
     Set {
         name: String,
         value: Option<String>,
@@ -1395,10 +1396,11 @@ pub(crate) enum AggregateFunction {
     PercentileCont,
     PercentileDisc,
     Mode,
+    ApproxCountDistinct,
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 17] = [
+    pub(crate) const ALL: [Self; 18] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -1416,6 +1418,7 @@ impl AggregateFunction {
         Self::PercentileCont,
         Self::PercentileDisc,
         Self::Mode,
+        Self::ApproxCountDistinct,
     ];
 
     pub(crate) fn ordered_set_named(name: &str) -> Option<Self> {
@@ -1438,6 +1441,7 @@ impl AggregateFunction {
             "avg" => Self::Avg,
             "min" => Self::Min,
             "max" => Self::Max,
+            "approx_count_distinct" => Self::ApproxCountDistinct,
             _ => return None,
         })
     }
@@ -1472,6 +1476,7 @@ impl AggregateFunction {
             Self::BoolAnd => "bool_and",
             Self::BoolOr => "bool_or",
             Self::Every => "every",
+            Self::ApproxCountDistinct => "approx_count_distinct",
             Self::PercentileCont => "percentile_cont",
             Self::PercentileDisc => "percentile_disc",
             Self::Mode => "mode",

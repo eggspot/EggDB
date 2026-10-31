@@ -1793,6 +1793,16 @@ block that created a table leaves no table.
 - **Isolation levels.** `SET TRANSACTION`, `BEGIN ISOLATION LEVEL` and each dialect's forms are
   accepted. Every block runs serializably today, which meets every level's guarantees.
 
+## Statistics: `ANALYZE` and approximate counts
+- `ANALYZE [table, ...]` (PostgreSQL and SQLite), `ANALYZE TABLE t, ...` (MySQL, which answers
+  with its `Table | Op | Msg_type | Msg_text` rows) and Oracle's `ANALYZE TABLE t COMPUTE
+  STATISTICS` count each table's rows. The count is kept in the catalog, shown as
+  `pg_class.reltuples`, and dropped or moved with the table.
+- `approx_count_distinct(expr)`, in every dialect, estimates the number of distinct non-NULL
+  values with a HyperLogLog sketch of 4,096 registers: within a few percent, in 4 KiB per group,
+  however many rows there are.
+- Next: column statistics (`pg_stats`), joins ordered by cost from them, and `TABLESAMPLE`.
+
 ## Partitioned tables
 A table can be split into partitions by range, list or hash, as PostgreSQL does:
 

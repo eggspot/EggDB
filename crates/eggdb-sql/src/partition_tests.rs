@@ -314,3 +314,26 @@ fn hostile_partition_statements_are_refused_with_errors() {
         "count\n0\nSELECT 1"
     );
 }
+
+#[test]
+fn analyze_records_row_counts_and_approx_count_distinct_estimates() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(&mut session, "CREATE TABLE a (v integer)");
+    for value in 0..500 {
+        answer(&mut session, &format!("INSERT INTO a VALUES ({})", value % 200));
+    }
+    answer(&mut session, "ANALYZE a");
+    answer(&mut session, "ANALYZE");
+    assert_eq!(
+        answer(&mut session, "SELECT reltuples FROM pg_class WHERE relname = 'a'"),
+        "reltuples\n500\nSELECT 1"
+    );
+    let estimate = answer(&mut session, "SELECT approx_count_distinct(v) FROM a");
+    let number: i64 = estimate.lines().nth(1).unwrap().parse().unwrap();
+    assert!((190..=210).contains(&number), "{estimate}");
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    assert!(answer(&mut mysql, "ANALYZE TABLE a").contains("OK"));
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    answer(&mut oracle, "ANALYZE TABLE a COMPUTE STATISTICS");
+}

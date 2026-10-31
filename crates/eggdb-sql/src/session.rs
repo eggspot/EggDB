@@ -2063,6 +2063,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             {
                 self.select_schema(select, false)
             }
+            Statement::Analyze(names) => {
+                let mut names = names.clone();
+                self.write("ANALYZE", |writer, tables| {
+                    binding.names(writer, tables, &mut names)?;
+                    crate::statistics::analyze(writer, tables, &names)
+                })
+            }
             Statement::Truncate(table) => {
                 self.write_firing_triggers("TRUNCATE TABLE", |writer, tables| {
                     binding.target(writer, tables, table)?;
