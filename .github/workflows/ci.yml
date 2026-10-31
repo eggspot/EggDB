@@ -1191,8 +1191,53 @@ jobs:
       - name: Build the C API as an XCFramework for iOS, the iOS simulator and macOS
         run: scripts/apple/xcframework.sh "$RUNNER_TEMP/EggDB.xcframework"
 
+  other-cpus:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: i686-unknown-linux-gnu
+            packages: gcc-multilib
+            runner: ""
+          - target: armv7-unknown-linux-gnueabihf
+            packages: gcc-arm-linux-gnueabihf qemu-user
+            runner: qemu-arm -L /usr/arm-linux-gnueabihf
+            linker: arm-linux-gnueabihf-gcc
+          - target: s390x-unknown-linux-gnu
+            packages: gcc-s390x-linux-gnu qemu-user
+            runner: qemu-s390x -L /usr/s390x-linux-gnu
+            linker: s390x-linux-gnu-gcc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain, the target, its linker and QEMU
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+          sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Test the file format, the storage engine, cryptography and columnar encodings on ${{ matrix.target }}
+        env:
+          TARGET_ENV: ${{ matrix.target }}
+          LINKER: ${{ matrix.linker }}
+          RUNNER: ${{ matrix.runner }}
+        run: |
+          upper=$(echo "$TARGET_ENV" | tr 'a-z-' 'A-Z_')
+          if [ -n "$LINKER" ]; then export "CARGO_TARGET_${upper}_LINKER=$LINKER"; fi
+          if [ -n "$RUNNER" ]; then export "CARGO_TARGET_${upper}_RUNNER=$RUNNER"; fi
+          cargo test --target "$TARGET_ENV" -p eggdb-format -p eggdb-storage -p eggdb-crypto -p eggdb-columnar
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

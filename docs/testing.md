@@ -659,3 +659,12 @@ DragonFly have no prebuilt Rust standard library (tier 3), so neither job covers
   (`checkpoint_tests.rs`, `log.rs`), not by the whole-file fuzzer, which can only damage them.
 - Real disks: the simulator's model of a power loss is sector-sized pieces of unsynced writes,
   not every behavior of real hardware.
+
+## 32-bit and big-endian CPUs
+The `other-cpus` CI job runs the tests of the file format, the storage engine, cryptography and
+the columnar encodings on 32-bit x86 (`i686-unknown-linux-gnu`, natively), 32-bit ARM
+(`armv7-unknown-linux-gnueabihf`) and big-endian IBM Z (`s390x-unknown-linux-gnu`), the last two
+under QEMU's user-mode emulation. Every number the format stores is little-endian on disk
+(`eggdb-format`'s `bytes`), so a file written on one CPU opens on any other; these runs check that
+nothing reads memory in the CPU's own byte order or assumes a 64-bit `usize`. The other crates
+are only linted for those targets so far.
