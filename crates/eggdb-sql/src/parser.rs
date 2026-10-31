@@ -2317,6 +2317,10 @@ impl<'t> Parser<'t> {
             "time" | "timetz" => self.timestamp_type(word, token.start)?,
             "interval" => self.interval_type(token.start)?,
             "uuid" => SqlType::Uuid,
+            "vector" if self.postgresql() => {
+                self.varchar_length(token.start)?;
+                SqlType::Text
+            }
             "bytea" => SqlType::Bytea,
             "character" | "char" => {
                 SqlType::Bpchar(Some(self.character_length(token.start)?.unwrap_or(1)))
@@ -3440,6 +3444,10 @@ impl<'t> Parser<'t> {
             "?&" => BinaryOperator::JsonHasAllKeys,
             "#-" => BinaryOperator::JsonDeletePath,
             "@@" => BinaryOperator::TextSearchMatch,
+            "<->" if self.postgresql() => BinaryOperator::VectorL2Distance,
+            "<=>" if self.postgresql() => BinaryOperator::VectorCosineDistance,
+            "<#>" if self.postgresql() => BinaryOperator::VectorNegativeInnerProduct,
+            "<+>" if self.postgresql() => BinaryOperator::VectorL1Distance,
             _ => return None,
         })
     }

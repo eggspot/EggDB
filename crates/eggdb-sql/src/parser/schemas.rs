@@ -484,12 +484,12 @@ impl<'t> Parser<'t> {
             self.skip_statement();
             return Ok(Statement::CreatePgCron { if_not_exists });
         }
-        if name.text != "plpgsql" {
+        if name.text != "plpgsql" && name.text != "vector" {
             return Err(SqlError::not_supported(format!(
                 "extension \"{}\" is not supported",
                 name.text
             ))
-            .with_hint("EggDB accepts CREATE EXTENSION plpgsql and pg_cron only; other extensions are not available yet.")
+            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron and vector only; other extensions are not available yet.")
             .at(name.position));
         }
         self.skip_statement();

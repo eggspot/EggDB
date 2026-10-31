@@ -875,6 +875,13 @@ impl Evaluator<'_> {
                 let (left, right) = self.pair(left, right)?;
                 crate::text_search::matches(&left, &right)
             }
+            BinaryOperator::VectorL2Distance
+            | BinaryOperator::VectorCosineDistance
+            | BinaryOperator::VectorNegativeInnerProduct
+            | BinaryOperator::VectorL1Distance => {
+                let (left, right) = self.pair(left, right)?;
+                crate::vector_functions::operator(operator, &left, &right)
+            }
             BinaryOperator::JsonDeletePath => {
                 let document = self.eval(left, Some(SqlType::Jsonb))?;
                 let path = self.eval(right, Some(SqlType::Text))?;
@@ -1327,6 +1334,10 @@ impl Evaluator<'_> {
             "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery"
             | "websearch_to_tsquery" | "ts_rank" | "ts_rank_cd" => {
                 return crate::text_search::function(name, &self.arguments(arguments)?);
+            }
+            "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_dims"
+            | "vector_norm" | "l2_normalize" => {
+                return crate::vector_functions::function(name, &self.arguments(arguments)?);
             }
             crate::json_functions::WHOLE_ROW => {
                 return crate::json_functions::whole_row(self, arguments);

@@ -2222,6 +2222,29 @@ constraint and event triggers, SQL Server DDL and logon triggers, Oracle compoun
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
 fire on `TRUNCATE` too.
 
+## Vectors (pgvector)
+
+Vectors are written as pgvector writes them, `'[1,2,3]'` (D203). `CREATE EXTENSION vector` is
+accepted, a column may be declared `vector(n)`, and pgvector's operators and functions work on
+vector text and on numeric arrays:
+
+| Operator or function | Result |
+| --- | --- |
+| `a <-> b`, `l2_distance(a, b)` | Euclidean distance |
+| `a <=> b`, `cosine_distance(a, b)` | cosine distance (NaN for a zero vector) |
+| `a <#> b`, `inner_product(a, b)` | negative inner product, and the inner product |
+| `a <+> b`, `l1_distance(a, b)` | taxicab distance |
+| `vector_dims(a)`, `vector_norm(a)`, `l2_normalize(a)` | dimensions, Euclidean norm, unit vector |
+
+```sql
+SELECT id FROM items ORDER BY embedding <-> '[3,1,2]' LIMIT 5;
+```
+
+Nearest-neighbour queries are exact for now: they read every row. Not yet: `vector(n)` as its
+own stored type (it is text, and its dimensions are not checked on insert), HNSW and IVFFlat
+indexes in SQL (the HNSW graph is written, in `eggdb-vector`), `halfvec`, `sparsevec`,
+`bit` vectors, `+`/`-`/`*` on vectors, and the binary wire format.
+
 ## Time series: time_bucket
 
 `time_bucket(width, time [, offset | origin])` puts a time in its bucket as TimescaleDB does:

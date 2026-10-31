@@ -124,6 +124,10 @@ impl Parser<'_> {
             "?&" => Some(BinaryOperator::JsonHasAllKeys),
             "#-" => Some(BinaryOperator::JsonDeletePath),
             "@@" => Some(BinaryOperator::TextSearchMatch),
+            "<->" => Some(BinaryOperator::VectorL2Distance),
+            "<=>" => Some(BinaryOperator::VectorCosineDistance),
+            "<#>" => Some(BinaryOperator::VectorNegativeInnerProduct),
+            "<+>" => Some(BinaryOperator::VectorL1Distance),
             _ => None,
         });
         if operator.is_none() && like.is_none() {

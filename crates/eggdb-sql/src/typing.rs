@@ -124,6 +124,11 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         | "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery"
         | "websearch_to_tsquery" => Some(SqlType::Text),
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
+        "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm" => {
+            Some(SqlType::Double)
+        }
+        "vector_dims" => Some(SqlType::Integer),
+        "l2_normalize" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => {
             Some(SqlType::Integer)
         }
@@ -409,6 +414,10 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::JsonHasAllKeys => Some(SqlType::Boolean),
             BinaryOperator::JsonDeletePath => Some(SqlType::Jsonb),
             BinaryOperator::TextSearchMatch => Some(SqlType::Boolean),
+            BinaryOperator::VectorL2Distance
+            | BinaryOperator::VectorCosineDistance
+            | BinaryOperator::VectorNegativeInnerProduct
+            | BinaryOperator::VectorL1Distance => Some(SqlType::Double),
             BinaryOperator::Subtract if static_type(left, scope) == Some(SqlType::Jsonb) => {
                 Some(SqlType::Jsonb)
             }

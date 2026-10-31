@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-vector"
+description = "Vectors for EggDB: pgvector-compatible text, distances (L2, cosine, inner product, L1) and an HNSW approximate nearest neighbour index, written from the published papers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

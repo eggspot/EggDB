@@ -227,3 +227,4 @@ its full title with its status.
 - [D200](decisions/D200.md) Scheduled jobs: `CREATE EXTENSION pg_cron` installs pg_cron's `cron` schema as ordinary objects; `eggdb_sql::jobs::run_due_jobs` runs what is due in a minute, called by `eggdb serve` each UTC minute
 - [D201](decisions/D201.md) Columnar encodings (bit packing, hybrid runs, deltas, dictionaries) and self-describing integer chunks with statistics in `eggdb-columnar`, shared by columnar tables, Parquet and Arrow; `USING columnar` waits for chunk storage
 - [D202](decisions/D202.md) Parquet read and written by our own `eggdb-parquet` (Thrift compact, Snappy, plain and dictionary pages); `eggdb import --parquet` and `eggdb export --parquet`; SQL file access waits for a server file-access decision
+- [D203](decisions/D203.md) Vectors: pgvector's operators and functions on vector text and arrays, an HNSW graph in `eggdb-vector`; `vector(n)` accepted as text until a stored type and SQL index land together

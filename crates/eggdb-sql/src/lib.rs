@@ -125,6 +125,7 @@ mod triggers;
 mod tsql;
 mod types;
 mod vector;
+mod vector_functions;
 mod typing;
 mod updatable_views;
 mod user_types;
@@ -189,6 +190,8 @@ mod view_change_tests;
 mod visible_tables_tests;
 #[cfg(test)]
 mod time_series_tests;
+#[cfg(test)]
+mod vector_tests;
 #[cfg(test)]
 mod window_tests;
 #[cfg(test)]
