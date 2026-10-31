@@ -15,22 +15,42 @@
 //! - [`cipher_suite`]: the cipher suites, their hashes and their record AEADs;
 //! - [`key_schedule`]: the TLS 1.3 key schedule (RFC 8446 section 7);
 //! - [`record`]: the record layer and record protection for TLS 1.3 and TLS 1.2;
-//! - [`handshake`]: the handshake messages and their extensions.
+//! - [`handshake`]: the handshake messages and their extensions;
+//! - [`negotiation`]: signature schemes, groups, application protocols and ephemeral keys;
+//! - [`tls12`]: TLS 1.2's PRF and key derivation;
+//! - [`config`], [`error`], [`session`] and [`stream`]: TLS 1.3 and TLS 1.2 servers and clients
+//!   over any byte stream, as [`TlsStream`].
 //!
 //! Nothing here panics on its input: every parser returns an error as a value.
 
 pub mod alert;
 pub mod cipher_suite;
+mod client;
+mod client12;
 pub mod codec;
+pub mod config;
 pub mod der;
+pub mod error;
 pub mod handshake;
 pub mod key_schedule;
+pub mod negotiation;
 pub mod oid;
 pub mod pem;
 pub mod private_key;
 pub mod record;
+mod record_layer;
 pub mod self_signed;
+mod server;
+mod server12;
+pub mod session;
 pub mod signature;
+pub mod stream;
+pub mod tls12;
 pub mod verify;
 pub mod x509;
 mod x509_time;
+
+pub use config::{ClientConfig, MinimumVersion, ServerConfig, ServerVerification};
+pub use error::TlsError;
+pub use session::SessionInfo;
+pub use stream::{PrefixedStream, TlsStream};
