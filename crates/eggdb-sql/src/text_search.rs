@@ -38,7 +38,12 @@ fn vector_of(value: &str) -> TsVector {
 }
 
 fn query_of(value: &str) -> TsQuery {
-    TsQuery::parse_literal(value).unwrap_or_else(|| TsQuery::plain(DEFAULT_CONFIG, value))
+    if value.contains('\'') {
+        if let Some(query) = TsQuery::parse_literal(value) {
+            return query;
+        }
+    }
+    TsQuery::plain(DEFAULT_CONFIG, value)
 }
 
 /// `vector @@ query`: a text-search vector (or text, read with the default configuration)
