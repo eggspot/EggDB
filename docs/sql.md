@@ -2566,6 +2566,27 @@ SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "VN"}');
   `reason: ERROR` with `errorCode: FLAG_NOT_FOUND`. Targeting rules are tried in order, and each
   matches when a context attribute is one of the listed values.
 
+## Resumable copies with verified differences (eggdb_migration)
+
+`CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,
+then proves the copy is complete (D251):
+
+```sql
+CREATE EXTENSION eggdb_migration;
+SELECT eggdb_migration.copy_batch('accounts', 'legacy', 'accounts', 'public', 'accounts', 'id', 10000);
+SELECT * FROM eggdb_migration.compare('legacy', 'accounts', 'public', 'accounts', 'id');
+```
+
+- `copy_batch(job, source_schema, source_table, target_schema, target_table, key, rows)` copies
+  the next rows (1 to 1,000,000) in key order after the largest key already in the target, so
+  a job can stop at any batch and continue later, from any session; it returns how many rows it
+  copied (0 when done) and adds them to `eggdb_migration.jobs`. Run it in a loop or as a pg_cron
+  job. Rows the source gains below the largest copied key are not copied, and `compare` reports
+  them.
+- `compare(source_schema, source_table, target_schema, target_table, key)` returns every key
+  that is `missing in target`, `missing in source` or `different` (any column), so an empty
+  result proves the two tables hold the same rows.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form

@@ -227,4 +227,5 @@ From the third gap review (D47–D58), each after its foundations:
   OpenDocument files on our own DEFLATE and ZIP (D249).
 - **Science and GIS (D57)** follow analytics. Started: map tiles, Web Mercator and geohashes
   (D250).
-- **Hyperscale operations (D58)** follow clusters.
+- **Hyperscale operations (D58)** follow clusters. Started: resumable batch copies with verified
+  differences in `CREATE EXTENSION eggdb_migration` (D251).

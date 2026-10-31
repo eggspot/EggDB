@@ -2065,6 +2065,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             "eggdb_privacy" => ("eggdb_privacy", crate::privacy::PRIVACY_SCRIPT),
             "eggdb_retention" => ("eggdb_retention", crate::retention::RETENTION_SCRIPT),
             "eggdb_coordination" => ("eggdb_coordination", crate::coordination::COORDINATION_SCRIPT),
+            "eggdb_migration" => ("eggdb_migration", crate::migration::MIGRATION_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

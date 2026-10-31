@@ -275,3 +275,4 @@ its full title with its status.
 - [D248](decisions/D248.md) Cypher `CALL ... YIELD` runs the graph algorithms as `eggdb.` procedures, adding label propagation, triangle counts and Jaccard similarity; streaming SQL, MATCH_RECOGNIZE and more algorithms left
 - [D249](decisions/D249.md) `eggdb-content`: our own DEFLATE and ZIP readers, bounded and CRC-checked, and `extract_text(bytea)` for docx, xlsx, pptx and OpenDocument files; PDF, PST, OCR, mail and DAV stores left
 - [D250](decisions/D250.md) Web maps: `ST_TileEnvelope`, `ST_Transform` between 4326 and 3857, and `ST_GeoHash` in `eggdb-geo`; vector tiles, other projections, H3/S2, rasters, arrays, genomics and IoT left
+- [D251](decisions/D251.md) `CREATE EXTENSION eggdb_migration`: `copy_batch` resumes from the target's largest key, `compare` lists missing and different rows; fleet control plane, chargeback, tenant lifecycle and MPP queues left
