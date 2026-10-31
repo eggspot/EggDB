@@ -212,6 +212,8 @@ impl CommandName {
             | OptionName::User
             | OptionName::Database
             | OptionName::MaxConnections
+            | OptionName::SocketDir
+            | OptionName::MysqlSocket
             | OptionName::TlsCertificate
             | OptionName::TlsKey
             | OptionName::TlsSelfSigned
@@ -348,6 +350,8 @@ enum OptionName {
     PasswordFile,
     Database,
     MaxConnections,
+    SocketDir,
+    MysqlSocket,
     TlsCertificate,
     TlsKey,
     TlsSelfSigned,
@@ -410,6 +414,8 @@ impl OptionName {
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
+            b"socket-dir" => Self::SocketDir,
+            b"mysql-socket" => Self::MysqlSocket,
             b"tls-certificate" => Self::TlsCertificate,
             b"tls-key" => Self::TlsKey,
             b"tls-self-signed" => Self::TlsSelfSigned,
@@ -611,6 +617,8 @@ pub(crate) struct ServeOptions {
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
     pub(crate) max_connections: Option<usize>,
+    pub(crate) socket_dir: Option<PathBuf>,
+    pub(crate) mysql_socket: Option<PathBuf>,
     pub(crate) tls_certificate: Option<PathBuf>,
     pub(crate) tls_key: Option<PathBuf>,
     pub(crate) tls_self_signed: bool,
@@ -1029,6 +1037,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.database = Some(parse_name(&option.spelled, value).map_err(usage)?);
             }
             OptionName::PasswordFile => request.serve.password_file = Some(export_file(value)),
+            OptionName::SocketDir | OptionName::MysqlSocket => {
+                if !eggdb_platform::local_socket::LOCAL_SOCKETS_SUPPORTED {
+                    return Err(usage(format!(
+                        "{} is not available on Windows yet; connect over --listen instead",
+                        option.spelled
+                    )));
+                }
+                if option.name == OptionName::SocketDir {
+                    request.serve.socket_dir = Some(PathBuf::from(value));
+                } else {
+                    request.serve.mysql_socket = Some(PathBuf::from(value));
+                }
+            }
             OptionName::TlsCertificate => request.serve.tls_certificate = Some(PathBuf::from(value)),
             OptionName::TlsKey => request.serve.tls_key = Some(PathBuf::from(value)),
             OptionName::TlsMinVersion => {

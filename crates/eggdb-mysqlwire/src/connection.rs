@@ -269,7 +269,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         return;
     };
     wire.sequence = 0;
-    let tls_config = shared.config.tls.as_deref();
+    let tls_config = shared.config.tls.as_deref().filter(|_| !wire.is_local());
     wire.send(&handshake_packet(connection_id, &nonce, tls_config.is_some()));
     if wire.flush().is_err() {
         return;

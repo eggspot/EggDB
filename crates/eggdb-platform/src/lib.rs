@@ -102,6 +102,7 @@ mod os_terminal_windows;
     )
 ))]
 mod os_wait_status;
+pub mod local_socket;
 pub mod process;
 mod rng;
 pub mod secure_random;

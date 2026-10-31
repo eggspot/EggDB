@@ -269,3 +269,42 @@ fn serve_with_a_self_signed_certificate_listens_beyond_loopback_and_answers_ssl_
     stop(&mut server);
     let _ = server.wait();
 }
+
+#[cfg(unix)]
+#[test]
+fn serve_answers_postgresql_clients_on_a_unix_socket_and_removes_it_at_stop() {
+    use std::os::unix::net::UnixStream;
+    let file = TempPath::new("serve-socket");
+    let path = file.path().to_str().unwrap().to_owned();
+    let directory = std::env::temp_dir().join(format!("eggdb-serve-socket-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args(["serve", &path, "--create", "--listen", "127.0.0.1:0", "--socket-dir", directory.to_str().unwrap(), "--format", "json"])
+        .env("EGGDB_PASSWORD", "s3cret")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    BufReader::new(server.stdout.take().unwrap()).read_line(&mut first).unwrap();
+    let socket = first
+        .split("\"socket\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .to_owned();
+    assert!(socket.ends_with(".s.PGSQL.") == false && socket.contains(".s.PGSQL."), "{first}");
+    let mut client = UnixStream::connect(&socket).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    client.write_all(&[0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]).unwrap();
+    let mut answer = [0u8; 1];
+    client.read_exact(&mut answer).unwrap();
+    assert_eq!(answer[0], b'N', "no TLS on a local socket");
+    drop(client);
+    stop(&mut server);
+    let _ = server.wait();
+    assert!(!std::path::Path::new(&socket).exists(), "the socket file is removed at stop");
+    let refused = eggdb(&["serve", &path, "--socket-dir", "/nonexistent-eggdb-directory"], Some("secret"));
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("does not exist"), "{}", stderr(&refused));
+}

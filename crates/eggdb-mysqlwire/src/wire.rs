@@ -1,6 +1,5 @@
 use std::io::{self, Read, Write};
 use eggdb_tls::{ServerConnection, SessionInfo};
-use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -34,16 +33,16 @@ pub(crate) struct Wire<'a> {
 
 impl<'a> Wire<'a> {
     pub(crate) fn new(
-        stream: TcpStream,
+        stream: ServerConnection,
         stop: &'a (dyn Fn() -> bool + Sync),
         deadline: Option<Instant>,
     ) -> io::Result<Self> {
-        stream.set_nonblocking(false)?;
-        stream.set_nodelay(true)?;
+        stream.set_blocking()?;
+        stream.set_nodelay()?;
         stream.set_read_timeout(Some(POLL_INTERVAL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self {
-            stream: ServerConnection::Plain(stream),
+            stream,
             stop,
             deadline,
             outbox: Vec::new(),
@@ -74,8 +73,6 @@ impl<'a> Wire<'a> {
             let wait = self.next_wait()?;
             if wait != self.read_timeout {
                 self.stream
-                    .tcp()
-                    .ok_or(WireError::Io)?
                     .set_read_timeout(Some(wait))
                     .map_err(|_| WireError::Io)?;
                 self.read_timeout = wait;
@@ -164,19 +161,16 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn close_after_refusal(&mut self) {
         self.stream.close_tls();
-        let Some(mut stream) = self.stream.tcp() else {
-            return;
-        };
-        let _ = stream.shutdown(Shutdown::Write);
+        self.stream.shutdown_write();
         let deadline = Instant::now() + REFUSAL_LINGER;
         let mut buffer = [0u8; 8 * 1024];
         let mut discarded = 0;
         while discarded < REFUSAL_LINGER_BYTES {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+            if left.is_zero() {
                 return;
             }
-            match stream.read(&mut buffer) {
+            match self.stream.drain(&mut buffer, left) {
                 Ok(0) => return,
                 Ok(count) => discarded += count,
                 Err(error)
@@ -192,10 +186,11 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn peer(&self) -> String {
-        self.stream
-            .tcp()
-            .and_then(|stream| stream.peer_addr().ok())
-            .map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string())
+        self.stream.peer_text()
+    }
+
+    pub(crate) fn is_local(&self) -> bool {
+        self.stream.is_local()
     }
 
     pub(crate) fn peer_is_loopback(&self) -> bool {

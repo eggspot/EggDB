@@ -102,6 +102,21 @@ impl Session<'_> {
         let bound = listener.local_addr().map_err(|error| {
             Failure::database(format!("cannot listen: {error}"), Exit::DatabaseError)
         })?;
+        if options.mysql_socket.is_some() && options.mysql_listen.is_none() {
+            return Err(usage("--mysql-socket needs --mysql-listen: the socket serves the same MySQL server".to_owned()));
+        }
+        let socket_path = options
+            .socket_dir
+            .as_ref()
+            .map(|directory| eggdb_platform::local_socket::postgresql_socket_path(directory, bound.port()));
+        let local_listener = match &socket_path {
+            Some(path) => Some(self.local_listener(path, "--socket-dir")?),
+            None => None,
+        };
+        let mysql_local_listener = match &options.mysql_socket {
+            Some(path) => Some(self.local_listener(path, "--mysql-socket")?),
+            None => None,
+        };
         let mysql_bound = match &mysql_listener {
             Some(listener) => Some(listener.local_addr().map_err(|error| {
                 Failure::database(format!("cannot listen: {error}"), Exit::DatabaseError)
@@ -177,7 +192,8 @@ impl Session<'_> {
             log_batches: options.log_batches,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.tds)),
         });
-        self.print_listening(bound, mysql_bound, tds_bound, &config, read_only, tls.as_ref());
+        let sockets = Sockets { postgresql: socket_path.clone(), mysql: options.mysql_socket.clone() };
+        self.print_listening(bound, mysql_bound, tds_bound, &config, read_only, tls.as_ref(), &sockets);
         self.out.finish()?;
         let _ = stop_signals::watch();
         let store = DatabaseStore(&db);
@@ -189,14 +205,28 @@ impl Session<'_> {
                 let log = move |line: &str| {
                     let _ = events.send(stamped(line));
                 };
-                eggdb_pgwire::serve(&store, &listener, &config, &stop_signals::requested, &log)
+                eggdb_pgwire::serve_with_local(
+                    &store,
+                    &listener,
+                    local_listener.as_ref(),
+                    &config,
+                    &stop_signals::requested,
+                    &log,
+                )
             });
             let mysql_server = scope.spawn(|| match (&mysql_listener, &mysql_config) {
                 (Some(listener), Some(config)) => {
                     let log = move |line: &str| {
                         let _ = mysql_events.send(stamped(&format!("mysql {line}")));
                     };
-                    eggdb_mysqlwire::serve(&store, listener, config, &stop_signals::requested, &log)
+                    eggdb_mysqlwire::serve_with_local(
+                        &store,
+                        listener,
+                        mysql_local_listener.as_ref(),
+                        config,
+                        &stop_signals::requested,
+                        &log,
+                    )
                 }
                 _ => {
                     drop(mysql_events);
@@ -234,6 +264,9 @@ impl Session<'_> {
         drop(listener);
         drop(mysql_listener);
         drop(tds_listener);
+        for path in [socket_path.as_ref(), options.mysql_socket.as_ref()].into_iter().flatten() {
+            let _ = std::fs::remove_file(path);
+        }
         let open = served.map_err(|error| {
             Failure::database(format!("the server failed: {error}"), Exit::DatabaseError)
         })?;
@@ -311,6 +344,7 @@ impl Session<'_> {
         config: &ServerConfig,
         read_only: bool,
         tls: Option<&TlsSetup>,
+        sockets: &Sockets,
     ) {
         let host = bound.ip().to_string();
         let url_host = match bound.ip() {
@@ -370,6 +404,8 @@ impl Session<'_> {
                     .number("max_connections", config.max_connections as u64)
                     .boolean("read_only", read_only)
                     .boolean("tls", tls.is_some())
+                    .string_if_any("socket", sockets.postgresql.as_ref().map(|path| path.display().to_string()).as_deref())
+                    .string_if_any("mysql_socket", sockets.mysql.as_ref().map(|path| path.display().to_string()).as_deref())
                     .boolean("loopback_only", tls.is_none());
                 if let Some(setup) = tls {
                     let certificate = match &setup.source {
@@ -445,8 +481,19 @@ impl Session<'_> {
                         )
                     }
                 };
+                let mut socket_lines = String::new();
+                let mut connect = connect;
+                if let Some(path) = &sockets.postgresql {
+                    socket_lines.push_str(&format!("  socket       {} (owner only, PostgreSQL protocol)\n", path.display()));
+                    if let Some(directory) = path.parent() {
+                        connect.push_str(&format!("   or   psql -h {} -p {} -d {}", directory.display(), bound.port(), config.database));
+                    }
+                }
+                if let Some(path) = &sockets.mysql {
+                    socket_lines.push_str(&format!("  mysql socket {} (owner only)\n", path.display()));
+                }
                 self.out.text(&format!(
-                    "listening on {bound} (PostgreSQL protocol; {transport})\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n{tls_lines}  connect      {connect}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
+                    "listening on {bound} (PostgreSQL protocol; {transport})\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n{socket_lines}{tls_lines}  connect      {connect}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
                     config.database,
                     self.file,
                     if read_only { "read-only" } else { "for writing" },
@@ -529,5 +576,43 @@ fn mysql_ssl_mode(tls: Option<&TlsSetup>) -> &'static str {
         None => "",
         Some(CertificateSource::Files { .. }) => " --ssl-mode=VERIFY_IDENTITY",
         Some(CertificateSource::SelfSigned) => " --ssl-mode=REQUIRED",
+    }
+}
+
+pub(super) struct Sockets {
+    postgresql: Option<std::path::PathBuf>,
+    mysql: Option<std::path::PathBuf>,
+}
+
+impl Session<'_> {
+    fn local_listener(
+        &self,
+        path: &Path,
+        option: &str,
+    ) -> Result<eggdb_platform::local_socket::LocalListener, Failure> {
+        use eggdb_platform::local_socket::{LocalBindError, bind_local};
+        let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
+        bind_local(path).map_err(|error| match error {
+            LocalBindError::MissingDirectory(directory) => usage(format!(
+                "cannot listen on {}: directory {} does not exist. Create it (mkdir -p {}), or pass another {option}",
+                path.display(),
+                directory.display(),
+                directory.display()
+            )),
+            LocalBindError::NotASocket => usage(format!(
+                "cannot listen on {}: it is not a socket. Remove it or pass another path",
+                path.display()
+            )),
+            LocalBindError::InUse => Failure::database(
+                format!(
+                    "cannot listen on {}: a server is already accepting connections there (often {} itself). Stop it, or pick another --listen port or {option}",
+                    path.display(),
+                    if option == "--mysql-socket" { "MySQL" } else { "PostgreSQL" }
+                ),
+                Exit::DatabaseError,
+            ),
+            LocalBindError::Unsupported => usage(format!("{option} is not available on Windows yet; connect over --listen instead")),
+            LocalBindError::Io(error) => Failure::database(format!("cannot listen on {}: {error}", path.display()), Exit::DatabaseError),
+        })
     }
 }

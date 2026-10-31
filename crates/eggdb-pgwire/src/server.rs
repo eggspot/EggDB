@@ -6,7 +6,9 @@ use eggdb_sql::KeyValueStore;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use eggdb_platform::local_socket::LocalListener;
+use eggdb_tls::ServerConnection;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -167,7 +169,22 @@ pub fn serve<S: KeyValueStore + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_with_local(store, listener, None, config, stop, log)
+}
+
+/// [`serve`], also accepting connections on the Unix socket `local`.
+pub fn serve_with_local<S: KeyValueStore + Sync>(
+    store: &S,
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     listener.set_nonblocking(true)?;
+    if let Some(local) = local {
+        local.set_nonblocking(true)?;
+    }
     let mut secret = [0u8; 32];
     eggdb_platform::secure_random::fill(&mut secret)?;
     let shared = Shared {
@@ -185,19 +202,11 @@ pub fn serve<S: KeyValueStore + Sync>(
     let next_process_id = AtomicU32::new(1);
     std::thread::scope(|scope| {
         while !stop() {
-            let (stream, peer) = match listener.accept() {
-                Ok(accepted) => accepted,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
-                    continue;
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => {
-                    log(&format!("accepting a connection failed: {error}"));
-                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
-                    continue;
-                }
+            let Some(stream) = accept_next(listener, local, log) else {
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                continue;
             };
+            let peer = stream.peer_text();
             let process_id = next_process_id.fetch_add(1, Ordering::Relaxed);
             let shared = &shared;
             match take_slot(&active, config.max_connections) {
@@ -236,8 +245,31 @@ pub fn serve<S: KeyValueStore + Sync>(
     Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }
 
+fn accept_next(
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    log: &(dyn Fn(&str) + Sync),
+) -> Option<ServerConnection> {
+    let report = |error: io::Error| {
+        if !matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) {
+            log(&format!("accepting a connection failed: {error}"));
+        }
+    };
+    match listener.accept() {
+        Ok((stream, _)) => return Some(ServerConnection::Plain(stream)),
+        Err(error) => report(error),
+    }
+    match local?.accept() {
+        Ok((stream, _)) => Some(ServerConnection::Local(stream)),
+        Err(error) => {
+            report(error);
+            None
+        }
+    }
+}
+
 fn run_connection<S: KeyValueStore>(
-    stream: TcpStream,
+    stream: ServerConnection,
     shared: &Shared<'_>,
     store: &S,
     process_id: u32,
@@ -249,7 +281,7 @@ fn run_connection<S: KeyValueStore>(
     serve_connection(wire, shared, store, process_id as i32);
 }
 
-fn refuse_connection(stream: TcpStream, shared: &Shared<'_>) {
+fn refuse_connection(stream: ServerConnection, shared: &Shared<'_>) {
     let deadline = Instant::now() + REFUSAL_TIMEOUT;
     if let Ok(mut wire) = Wire::new(stream, shared.stop, Some(deadline)) {
         refuse_too_many(&mut wire, shared);

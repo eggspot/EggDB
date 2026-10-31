@@ -32,5 +32,5 @@ pub use auth::{
 pub use connection::{MAX_AUTHENTICATION_PACKET_BYTES, MAX_PACKET_BYTES};
 pub use server::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
-    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve,
+    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve, serve_with_local,
 };

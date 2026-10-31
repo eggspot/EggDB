@@ -345,6 +345,9 @@ fn start_tls(wire: &mut Wire<'_>, shared: &Shared<'_>, config: &eggdb_tls::Serve
 }
 
 fn start_direct_tls(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<bool> {
+    if wire.is_local() {
+        return Some(true);
+    }
     let config = shared.config.tls.as_deref()?;
     match wire.peek_byte() {
         Ok(TLS_RECORD_HANDSHAKE) => {}
@@ -391,7 +394,7 @@ fn read_startup(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<Startup> {
                 );
                 return None;
             }
-            Ok(StartupRequest::Ssl) if shared.config.tls.is_some() => {
+            Ok(StartupRequest::Ssl) if shared.config.tls.is_some() && !wire.is_local() => {
                 wire.outbox.accept_encryption();
                 if wire.flush().is_err() {
                     return None;
