@@ -506,6 +506,7 @@ pub(crate) fn merge(
                         }]
                     }),
                     on_duplicate: OnDuplicate::Fail,
+                    conflict_target: None,
                     rollback_on_conflict: false,
                     overriding: None,
                 },

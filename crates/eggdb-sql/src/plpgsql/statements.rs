@@ -45,6 +45,7 @@ fn run_statement(
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     crate::cancel::check()?;
+    crate::roles::check_statement(settings, &statement)?;
     let binding = Binding {
         settings,
         walk_expressions: true,

@@ -206,6 +206,11 @@ pub const ERROR_CODES: &[ErrorCode] = &[
         "the server was started with --tables, which leaves out the key-value store",
     ),
     code(
+        "limited_to_role",
+        Category::NeedsGrant,
+        "the server acts as a database role, which leaves out the key-value store",
+    ),
+    code(
         "write_too_large",
         Category::TooLarge,
         "one call changed more than 256 MiB",

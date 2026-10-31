@@ -168,6 +168,7 @@ that declares the code; `-` marks a code only MCP gives.
 | `database_busy` | `busy` | 5 | another program holds the file |
 | `read_only` | `read_only` | 3 | MCP: a write without `--allow-write`, or sent to `run_sql`. CLI: a statement refused with SQLSTATE 25006, as `sql --read-only` refuses writes |
 | `limited_to_tables` | `needs_grant` | - | MCP: `kv_get` or `kv_scan` on a server started with `--tables`, which leaves out the key-value store |
+| `limited_to_role` | `needs_grant` | - | MCP: `kv_get` or `kv_scan` from an agent that acts as a database role, which leaves out the key-value store |
 | `needs_confirmation` | `needs_confirmation` | - | a destructive `write_sql` without `confirm: true` on a client that cannot ask |
 | `declined_by_user` | `declined` | - | the user said no |
 | `cancelled` | `declined` | - | the client cancelled the call while the user was asked |

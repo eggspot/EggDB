@@ -167,3 +167,50 @@ fn a_cancel_stops_the_running_statement_until_it_is_cleared() {
         "pg_sleep|?column?\n|t\nSELECT 1"
     );
 }
+
+fn children(session: &mut Session<'_>) -> String {
+    let shown = last(session, "SELECT count(*) FROM child");
+    shown.lines().nth(1).unwrap_or_default().to_owned()
+}
+
+#[test]
+fn deferred_foreign_keys_are_checked_when_the_implicit_transaction_commits() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE parent (id integer PRIMARY KEY)");
+    last(
+        &mut session,
+        "CREATE TABLE child (id integer PRIMARY KEY, parent_id integer REFERENCES parent DEFERRABLE INITIALLY DEFERRED)",
+    );
+    session.start_implicit_transaction();
+    last(&mut session, "INSERT INTO child VALUES (1, 99)");
+    let committed = session.commit_implicit_transaction();
+    assert_eq!(
+        committed.map_err(|error| error.state().code().to_owned()),
+        Err("23503".to_owned())
+    );
+    assert_eq!(children(&mut session), "0");
+    session.start_implicit_transaction();
+    last(&mut session, "INSERT INTO child VALUES (2, 7)");
+    last(&mut session, "INSERT INTO parent VALUES (7)");
+    session.commit_implicit_transaction().unwrap();
+    assert_eq!(children(&mut session), "1");
+}
+
+#[test]
+fn notifications_of_an_implicit_transaction_are_sent_when_it_commits() {
+    let store = MemoryStore::default();
+    let mut session = with_table(&store);
+    session.start_implicit_transaction();
+    last(&mut session, "INSERT INTO t VALUES (1)");
+    last(&mut session, "NOTIFY jobs, 'one'");
+    assert!(session.take_notifications().is_empty());
+    session.commit_implicit_transaction().unwrap();
+    let sent = session.take_notifications();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    session.start_implicit_transaction();
+    last(&mut session, "INSERT INTO t VALUES (2)");
+    last(&mut session, "NOTIFY jobs, 'two'");
+    session.roll_back_implicit_transaction().unwrap();
+    assert!(session.take_notifications().is_empty());
+}

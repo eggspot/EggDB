@@ -238,7 +238,7 @@ jobs:
           PY
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           from pymemcache.client.base import Client
-          client = Client(("127.0.0.1", 11212))
+          client = Client(("127.0.0.1", 11212), default_noreply=False)
           assert client.set("greeting", b"hello", expire=60)
           assert client.get("greeting") == b"hello"
           assert client.add("greeting", b"x") is False

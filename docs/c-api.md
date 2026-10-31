@@ -95,7 +95,10 @@ int main(void) {
   or a SQL session is used by one call at a time, from any thread. Read transactions run beside
   each other and beside the one write transaction. `eggdb_begin_write` waits up to five seconds
   for the open write transaction to end, then fails with `EGGDB_ERR_WRITER_ACTIVE`; on the thread
-  that began the open one it fails at once, since it would wait for itself.
+  that began the open one it fails at once, since it would wait for itself. SQL takes the calling
+  thread to have at least 2 MiB of stack and ends nesting that would use it up with `54001`; call
+  from a thread with at least that much (a Windows main thread has 1 MiB, a macOS secondary
+  thread 512 KiB), and from one with 16 MiB to run deeply nested routines and triggers.
 - **No crash on bad input.** NULL where a pointer is needed, unknown flags, bad names and hostile
   bytes come back as statuses. EggDB never lets input reach a panic (D9); if a bug panics anyway,
   it never unwinds into the caller: a build that unwinds returns `EGGDB_ERR_INTERNAL`, and a

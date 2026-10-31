@@ -823,27 +823,63 @@ impl<'s> Session<'s> {
         if !std::mem::take(&mut self.block_is_implicit) {
             return Ok(());
         }
+        let pending = std::mem::take(&mut self.deferred.pending);
+        self.deferred.clear();
         let ended = match std::mem::replace(&mut self.block, Block::None) {
-            Block::Writing(writer) if commit => match writer.commit() {
-                Ok(()) => {
-                    self.temporary.commit();
-                    self.pending_sequences.clear();
-                    sequences::mark_changes_committed();
-                    Ok(())
-                }
-                Err(error) => {
-                    self.temporary.rollback();
-                    Err(error)
-                }
-            },
+            Block::Writing(writer) if commit => self.commit_writes(writer, &pending),
             Block::Writing(writer) => {
+                self.notifications.rollback();
+                crate::activity::rolled_back();
                 self.temporary.rollback();
                 writer.rollback()
             }
-            Block::Reading(_) | Block::Failed | Block::None => Ok(()),
+            Block::Reading(_) if commit => {
+                self.notifications.commit();
+                Ok(())
+            }
+            Block::Reading(_) | Block::Failed | Block::None => {
+                self.notifications.rollback();
+                Ok(())
+            }
         };
         let settled = self.settle_sequences();
         ended.and(settled)
+    }
+
+    fn commit_writes(
+        &mut self,
+        writer: Box<dyn crate::store::BoxedWrite + 's>,
+        pending: &[crate::deferred_checks::PendingCheck],
+    ) -> SqlResult<()> {
+        if !pending.is_empty() {
+            let checked = crate::constraints::check_pending(
+                &crate::temporary::TemporaryRead {
+                    inner: &writer,
+                    objects: &self.temporary,
+                },
+                &mut self.tables,
+                pending,
+            );
+            if let Err(error) = checked {
+                let _ = writer.rollback();
+                self.temporary.rollback();
+                self.notifications.rollback();
+                crate::activity::rolled_back();
+                return Err(error);
+            }
+        }
+        if let Err(error) = writer.commit() {
+            self.temporary.rollback();
+            self.notifications.rollback();
+            crate::activity::rolled_back();
+            return Err(error);
+        }
+        self.temporary.commit();
+        self.notifications.commit();
+        crate::activity::committed();
+        self.pending_sequences.clear();
+        sequences::mark_changes_committed();
+        Ok(())
     }
 
     /// Makes the run-time parameters now in force the ones `RESET` and `DISCARD ALL` return
@@ -2218,14 +2254,12 @@ impl<'s> Session<'s> {
                         )
                         .with_hint("Use INSERT statements instead."));
                     }
-                    let fires_on_insert = crate::triggers::of_table(writer, tables, &name.text)?
-                        .is_some_and(|table| {
-                            table.triggers.iter().any(|trigger| {
-                                trigger.enabled
-                                    && trigger.events.contains(crate::triggers::TriggerEvent::Insert)
-                            })
-                        });
-                    if fires_on_insert {
+                    if crate::triggers::fire_on(
+                        writer,
+                        tables,
+                        &name.text,
+                        crate::triggers::TriggerEvent::Insert,
+                    )? {
                         return Err(SqlError::not_supported(
                             "COPY FROM into a table with INSERT triggers",
                         )
@@ -3273,32 +3307,7 @@ impl<'s> Session<'s> {
         self.deferred.clear();
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
-                if !pending.is_empty() {
-                    let checked = crate::constraints::check_pending(
-                        &crate::temporary::TemporaryRead {
-                            inner: &writer,
-                            objects: &self.temporary,
-                        },
-                        &mut self.tables,
-                        &pending,
-                    );
-                    if let Err(error) = checked {
-                        let _ = writer.rollback();
-                        self.temporary.rollback();
-                        self.notifications.rollback();
-                        return Err(error);
-                    }
-                }
-                if let Err(error) = writer.commit() {
-                    self.temporary.rollback();
-                    self.notifications.rollback();
-                    return Err(error);
-                }
-                self.temporary.commit();
-                self.notifications.commit();
-                crate::activity::committed();
-                self.pending_sequences.clear();
-                sequences::mark_changes_committed();
+                self.commit_writes(writer, &pending)?;
                 let committed = QueryResult::command("COMMIT");
                 Ok(if implicit && self.dialect == Dialect::PostgreSql {
                     committed.with_notice(NO_TRANSACTION_WARNING.into())

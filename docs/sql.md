@@ -1341,8 +1341,10 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
 - `INSERT ... ON CONFLICT [(columns)] DO NOTHING | DO UPDATE SET column = expr, ...` (`EXCLUDED`
   names the row that was proposed; `DO UPDATE` needs the columns, as in PostgreSQL). `RETURNING`
   gives the inserted and the updated rows, not the skipped ones, and each counts once in the
-  tag. Not yet: `ON CONSTRAINT name`, `WHERE` on the target or the update, and the conflict is
-  any unique key's, not only the one the columns name.
+  tag. The columns must be those of the primary key or a unique index (`42P10` otherwise); a
+  conflict on another unique key fails with `23505`, as in PostgreSQL, and `DO UPDATE` reaching
+  one row twice in a statement is `21000`. Not yet: `ON CONSTRAINT name` (`0A000`) and `WHERE` on
+  the target or the update.
 - `VALUES (expr, ...), (expr, ...) [ORDER BY ...] [LIMIT ...] [OFFSET ...]` as a statement, an
   operand of `UNION`, `INTERSECT` and `EXCEPT`, a subquery (`x IN (VALUES (1), (2))`), a `WITH`
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
@@ -2231,7 +2233,10 @@ it, and a statement that fails in a trigger leaves nothing behind.
   from the block's first line, as in Oracle. Compound, DDL, database event and crossedition
   triggers are `0A000`, and a trigger does not fire itself again.
 
-Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash. Dropping
+Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash. Row
+triggers do not fire yet for rows a cascading foreign key changes or removes, nor for rows a
+`REPLACE` (MySQL's statement, SQLite's `OR REPLACE`) removes, so those are refused (`0A000`) on a
+table with `UPDATE` or `DELETE` triggers instead of running without them. Dropping
 a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
 constraint and event triggers, SQL Server DDL and logon triggers, Oracle compound and event
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
@@ -2552,7 +2557,9 @@ SELECT eggdb_retention.process_erasures();
   `lift_hold(name)`; holds stay in `eggdb_retention.holds` with when they were placed and lifted.
 - A guarded table also refuses `TRUNCATE`, `eggdb_retention.rules` cannot be changed or removed,
   and a hold can only be lifted (all `55000`). Dropping a table or a trigger, and turning a
-  trigger off, need a superuser; a superuser can still get around retention.
+  trigger off, need a superuser, also inside `DO` blocks, routines and triggers; a superuser can
+  still get around retention. A cascading foreign key or a `REPLACE` that would change or
+  remove rows of a guarded table is refused (`0A000`), as for any table with row triggers.
 - `request_erasure(schema, table, condition)` records the request in
   `eggdb_retention.erasure_requests` and deletes the matching rows at once when nothing holds
   them; otherwise the request waits with `waiting_for` saying why (`legal hold <name>` or
@@ -2695,8 +2702,8 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   with PostgreSQL's messages; the SQL statements inside run when they are reached.
 
 Limits (D45): calls nest at most 32 deep (`54001`), and fewer when the session's thread runs
-out of stack first (`54001`, "stack depth limit exceeded": the servers give each session 16 MiB,
-an embedding program that runs deep routines gives its thread `eggdb_sql::SESSION_STACK_BYTES`
+out of stack first (`54001`, "stack depth limit exceeded": the servers and the `eggdb` command
+give each session 16 MiB, an embedding program that runs deep routines gives its thread `eggdb_sql::SESSION_STACK_BYTES`
 and calls `eggdb_sql::set_thread_stack_size`), every loop and statement can be cancelled,
 a body nests at most 64 levels and holds at most 100,000 statements, a routine's text is at most
 1 MiB, and a routine holds at most 1000 open cursors. Not yet: `COMMIT` and `ROLLBACK` in
@@ -3580,8 +3587,8 @@ The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 234 cases from sql
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are
 fixed:
 - Indexes: `EXPLAIN` without `QUERY PLAN` (the bytecode listing), partial indexes and indexes
-  on expressions answer an error; `ON CONFLICT (columns) DO ...` applies to a conflict on any
-  unique key, not only the one named; `sqlite_schema.sql` of an index is regenerated from the
+  on expressions answer an error; an `ON CONFLICT (columns)` that names no unique key answers
+  `42P10` with PostgreSQL's message; `sqlite_schema.sql` of an index is regenerated from the
   catalog.
 - A column of `INTEGER`, `TEXT`, `REAL` or `NUMERIC` affinity has one type: the affinity's.
   SQLite's columns may hold any storage class, so a `NUMERIC` column given `7` keeps the integer

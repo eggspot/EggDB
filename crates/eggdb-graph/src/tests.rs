@@ -303,3 +303,18 @@ fn call_yields_the_algorithms_as_rows() {
         assert!(run(&keyspace, bad, &[], false).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn the_longest_operator_chain_runs_on_a_default_thread_and_a_longer_one_is_refused() {
+    let outcome = std::thread::spawn(|| {
+        let keyspace = MemoryKeyspace::default();
+        let chain = |operators: usize| format!("RETURN 1{}", " + 1".repeat(operators));
+        let longest = run(&keyspace, &chain(256), &[], false).map(|result| result.rows);
+        let longer = run(&keyspace, &chain(257), &[], false).map(|result| result.rows);
+        (longest, longer.is_err())
+    })
+    .join()
+    .unwrap();
+    assert_eq!(outcome.0.unwrap(), vec![vec![Value::Integer(257)]]);
+    assert!(outcome.1);
+}

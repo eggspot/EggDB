@@ -192,3 +192,87 @@ fn only_a_superuser_turns_triggers_off() {
         );
     }
 }
+
+#[test]
+fn statements_inside_do_blocks_are_checked_like_top_level_ones() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut ada = as_role(&store, "ada");
+    for sql in [
+        "DO $$ BEGIN DROP TABLE notes; END $$",
+        "DO $$ BEGIN ALTER TABLE notes DISABLE TRIGGER ALL; END $$",
+        "DO $$ BEGIN DROP TRIGGER guard ON notes; END $$",
+        "DO $$ BEGIN EXECUTE 'DROP TABLE notes'; END $$",
+        "DO $$ BEGIN CREATE INDEX notes_owner ON notes (owner); END $$",
+    ] {
+        assert_eq!(
+            run(&mut ada, sql).unwrap_err().state(),
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}"
+        );
+    }
+    let mut admin = Session::new(&store);
+    let counted = run(&mut admin, "SELECT count(*) FROM notes").unwrap();
+    assert_eq!(counted.lines().nth(1), Some("3"), "{counted}");
+}
+
+fn reader_of_payroll(store: &MemoryStore, privileges: &str) {
+    let mut admin = Session::new(store);
+    for sql in [
+        "CREATE TABLE payroll (id integer PRIMARY KEY, pay integer)".to_owned(),
+        "INSERT INTO payroll VALUES (1, 10), (2, 20)".to_owned(),
+        "CREATE USER clerk LOGIN".to_owned(),
+        format!("GRANT {privileges} ON payroll TO clerk"),
+    ] {
+        run(&mut admin, &sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+}
+
+#[test]
+fn writes_inside_with_need_their_own_privilege() {
+    let store = MemoryStore::default();
+    setup(&store);
+    reader_of_payroll(&store, "SELECT");
+    let mut clerk = as_role(&store, "clerk");
+    for sql in [
+        "WITH d AS (DELETE FROM payroll RETURNING *) SELECT count(*) FROM d",
+        "WITH u AS (UPDATE payroll SET pay = 0 RETURNING *) SELECT count(*) FROM u",
+        "WITH x AS (SELECT 9 AS id) INSERT INTO payroll SELECT id, 0 FROM x",
+    ] {
+        assert_eq!(
+            run(&mut clerk, sql).unwrap_err().state(),
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}"
+        );
+    }
+    let summed = run(
+        &mut clerk,
+        "WITH x AS (SELECT pay FROM payroll) SELECT sum(pay) FROM x",
+    )
+    .unwrap();
+    assert_eq!(summed.lines().nth(1), Some("30"), "{summed}");
+}
+
+#[test]
+fn merge_needs_the_privilege_of_each_action() {
+    let store = MemoryStore::default();
+    setup(&store);
+    reader_of_payroll(&store, "SELECT, UPDATE");
+    let mut clerk = Session::with_dialect(&store, crate::Dialect::SqlServer);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    for sql in [
+        "MERGE INTO payroll AS t USING (SELECT 3 AS id, 30 AS pay) AS s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id, pay) VALUES (s.id, s.pay);",
+        "MERGE INTO payroll AS t USING (SELECT 1 AS id) AS s ON t.id = s.id WHEN MATCHED THEN DELETE;",
+    ] {
+        assert_eq!(
+            run(&mut clerk, sql).unwrap_err().state(),
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}"
+        );
+    }
+    run(
+        &mut clerk,
+        "MERGE INTO payroll AS t USING (SELECT 1 AS id, 11 AS pay) AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET pay = s.pay;",
+    )
+    .unwrap();
+}

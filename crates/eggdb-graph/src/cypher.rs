@@ -2,7 +2,7 @@ use crate::value::Value;
 use crate::{GraphError, GraphResult};
 
 const MAX_DEPTH: usize = 64;
-const MOST_OPERATORS: usize = 1024;
+const MOST_OPERATORS: usize = 256;
 const MAX_HOPS: u32 = 15;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -324,7 +324,7 @@ impl Parser<'_> {
         self.operators += 1;
         if self.operators > MOST_OPERATORS {
             return Err(syntax(
-                "the statement has too many operators; a statement may have at most 1024",
+                "the statement has too many operators; a statement may have at most 256",
             ));
         }
         Ok(())

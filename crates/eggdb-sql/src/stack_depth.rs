@@ -19,8 +19,9 @@ fn stack_position() -> usize {
 
 /// Tells the engine that the calling thread's stack holds `bytes` from here on, so nested
 /// routines, triggers and Transact-SQL calls stop with SQLSTATE `54001` before they would
-/// overflow it. Call it first thing on a thread made with that stack size; a thread that never
-/// calls it is taken to have 2 MiB, Rust's default for spawned threads.
+/// overflow it. Call it first thing on a thread made with that stack size. A thread that never
+/// calls it is taken to have 2 MiB, the default for threads Rust spawns; a thread with less (a
+/// Windows main thread has 1 MiB, a macOS secondary thread 512 KiB) must call it with its size.
 pub fn set_thread_stack_size(bytes: usize) {
     THREAD_STACK.with(|stack| stack.set(Some((stack_position(), bytes))));
 }

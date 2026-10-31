@@ -534,6 +534,7 @@ impl<'s> Session<'s> {
                 source: InsertSource::Values(rows),
                 returning: None,
                 on_duplicate: OnDuplicate::Fail,
+                conflict_target: None,
                 rollback_on_conflict: false,
                 overriding: None,
             };

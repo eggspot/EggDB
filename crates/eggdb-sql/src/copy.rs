@@ -918,6 +918,7 @@ impl RoutedRows {
             source: crate::ast::InsertSource::Values(values),
             returning: None,
             on_duplicate: crate::ast::OnDuplicate::Fail,
+            conflict_target: None,
             rollback_on_conflict: false,
             overriding: Some(crate::ast::Overriding::SystemValue),
         };

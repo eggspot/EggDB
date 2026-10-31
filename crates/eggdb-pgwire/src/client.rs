@@ -91,7 +91,7 @@ impl ConnectOptions {
     }
 }
 
-fn percent_decoded(text: &str) -> Result<String, String> {
+fn percent_decoded(part: &str, text: &str) -> Result<String, String> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -99,8 +99,9 @@ fn percent_decoded(text: &str) -> Result<String, String> {
         if bytes[index] == b'%' {
             let hex = text
                 .get(index + 1..index + 3)
+                .filter(|pair| pair.bytes().all(|digit| digit.is_ascii_hexdigit()))
                 .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-                .ok_or_else(|| format!("'{text}' has a broken %-escape"))?;
+                .ok_or_else(|| format!("the URL's {part} has a broken %-escape"))?;
             decoded.push(hex);
             index += 3;
         } else {
@@ -108,7 +109,7 @@ fn percent_decoded(text: &str) -> Result<String, String> {
             index += 1;
         }
     }
-    String::from_utf8(decoded).map_err(|_| format!("'{text}' is not UTF-8 once decoded"))
+    String::from_utf8(decoded).map_err(|_| format!("the URL's {part} is not UTF-8 once decoded"))
 }
 
 /// Reads `postgres://user@host[:port]/database[?sslmode=...&sslrootcert=...]`. A password in the
@@ -147,9 +148,9 @@ fn parse_url(url: &str, passwords: UrlPassword) -> Result<ConnectOptions, String
     let (user_part, password) = match user_part.split_once(':') {
         None => (user_part, None),
         Some(_) if passwords == UrlPassword::Refused => return Err(PASSWORD_IN_URL.to_owned()),
-        Some((user_part, password)) => (user_part, Some(percent_decoded(password)?)),
+        Some((user_part, password)) => (user_part, Some(percent_decoded("password", password)?)),
     };
-    let user = percent_decoded(user_part)?;
+    let user = percent_decoded("user", user_part)?;
     if user.is_empty() {
         return Err("the URL names no user: write postgres://user@host/database".to_owned());
     }
@@ -177,7 +178,7 @@ fn parse_url(url: &str, passwords: UrlPassword) -> Result<ConnectOptions, String
     let database = if database.is_empty() {
         user.clone()
     } else {
-        percent_decoded(database)?
+        percent_decoded("database", database)?
     };
     let mut options = ConnectOptions {
         host,
@@ -191,7 +192,7 @@ fn parse_url(url: &str, passwords: UrlPassword) -> Result<ConnectOptions, String
     };
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let value = percent_decoded(value)?;
+        let value = percent_decoded("parameter", value)?;
         match name {
             "sslmode" => {
                 options.ssl_mode = SslMode::named(&value).ok_or_else(|| {
@@ -1041,6 +1042,25 @@ mod tests {
         assert_eq!(options.password.as_deref(), Some("x"));
         let options = parse_postgres_url_with_password("postgres://ada@host/db").unwrap();
         assert_eq!(options.password, None);
+    }
+
+    #[test]
+    fn a_broken_password_is_never_shown_in_the_error() {
+        for url in [
+            "postgres://ada:50%off@host/db",
+            "postgres://ada:s%ffcret@host/db",
+            "postgres://ada:s%+1cret@host/db",
+            "postgres://ada@host/db?password=50%off",
+        ] {
+            for parsed in [
+                parse_postgres_url(url),
+                parse_postgres_url_with_password(url),
+            ] {
+                let error = parsed.err().unwrap_or_default();
+                assert!(!error.is_empty(), "{url}");
+                assert!(!error.contains("off") && !error.contains("cret"), "{error}");
+            }
+        }
     }
 
     #[test]

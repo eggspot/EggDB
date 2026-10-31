@@ -788,6 +788,15 @@ fn apply_action(
         if batch.is_empty() {
             return Ok(());
         }
+        if let Some(event) = event_of_action(action, change.new.is_none())
+            && crate::triggers::fire_on(&*writer, tables, &child.name, event)?
+        {
+            return Err(crate::triggers::unfired(
+                event,
+                &child.name,
+                "a cascading foreign key",
+            ));
+        }
         for (row_key, row) in batch {
             match action {
                 ReferentialAction::NoAction if deferred_now(child, key) => {
@@ -856,6 +865,19 @@ fn apply_action(
             }
         }
         memory.release(charged);
+    }
+}
+
+fn event_of_action(
+    action: ReferentialAction,
+    parent_deleted: bool,
+) -> Option<crate::triggers::TriggerEvent> {
+    match action {
+        ReferentialAction::NoAction | ReferentialAction::Restrict => None,
+        ReferentialAction::Cascade if parent_deleted => Some(crate::triggers::TriggerEvent::Delete),
+        ReferentialAction::Cascade | ReferentialAction::SetNull | ReferentialAction::SetDefault => {
+            Some(crate::triggers::TriggerEvent::Update)
+        }
     }
 }
 

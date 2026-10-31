@@ -1037,6 +1037,22 @@ pub(crate) fn resolve_view_body(
     Ok(resolver.finish())
 }
 
+fn merge_privileges(merge: &MergeStatement) -> Vec<crate::roles::Privilege> {
+    let mut privileges = Vec::new();
+    if let Some(update) = &merge.update {
+        if !update.assignments.is_empty() {
+            privileges.push(crate::roles::Privilege::Update);
+        }
+        if update.delete_condition.is_some() {
+            privileges.push(crate::roles::Privilege::Delete);
+        }
+    }
+    if merge.insert.is_some() {
+        privileges.push(crate::roles::Privilege::Insert);
+    }
+    privileges
+}
+
 pub(crate) struct Binding<'a> {
     pub(crate) settings: &'a Settings,
     pub(crate) walk_expressions: bool,
@@ -1175,7 +1191,15 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         self.select(reader, tables, &mut merge.source)?;
         let mut resolver = self.resolver(reader, tables)?;
+        let checked = resolver.target_privilege.take();
         resolver.target(&mut merge.target)?;
+        if checked.is_some() {
+            for privilege in merge_privileges(merge) {
+                resolver.check_privilege(&merge.target.name.text, privilege)?;
+                resolver.check_new_rows(&merge.target.name.text, privilege)?;
+            }
+        }
+        resolver.target_privilege = checked;
         if resolver
             .row_security_filter(
                 &merge.target.name.text,

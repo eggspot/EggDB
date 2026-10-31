@@ -277,6 +277,18 @@ fn reading_settings_that_change_terminators_are_refused() {
 }
 
 #[test]
+fn settings_after_unicode_spaces_are_read_without_failing() {
+    for line in [
+        "SET \u{3000}DEFINE OFF",
+        "SET \u{a0}\u{a0}ECHO OFF",
+        "SET \u{2003}\u{2003}\u{2003}DEF ^",
+    ] {
+        let read = read_with(&format!("{line}\nSELECT 1 FROM dual;\n"), None);
+        assert!(read.is_ok(), "{line}: {read:?}");
+    }
+}
+
+#[test]
 fn substitution_follows_define_escape_and_concat() {
     let mut variables = SubstitutionVariables::default();
     variables.define("t", "notes").unwrap();

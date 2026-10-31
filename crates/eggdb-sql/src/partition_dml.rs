@@ -178,6 +178,7 @@ pub(crate) fn insert(
             source: InsertSource::Values(rows),
             returning: insert.returning.clone(),
             on_duplicate: insert.on_duplicate.clone(),
+            conflict_target: insert.conflict_target.clone(),
             rollback_on_conflict: insert.rollback_on_conflict,
             overriding: insert.overriding,
         };

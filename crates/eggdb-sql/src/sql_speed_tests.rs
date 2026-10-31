@@ -203,6 +203,28 @@ fn decorrelated_in_and_aggregate_subqueries_match_running_them_per_row() {
 }
 
 #[test]
+fn decorrelation_never_fails_on_inner_rows_no_outer_row_reaches() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE o (k integer, v integer)",
+        "CREATE TABLE t (k integer, d integer, code text)",
+        "INSERT INTO o VALUES (1, 1)",
+        "INSERT INTO t VALUES (1, 1, '1'), (2, 0, 'not a number')",
+    ] {
+        rows(&mut session, sql);
+    }
+    for query in [
+        "SELECT k FROM o WHERE o.v IN (SELECT 1 / t.d FROM t WHERE t.k = o.k)",
+        "SELECT (SELECT sum(10 / t.d) FROM t WHERE t.k = o.k) FROM o",
+        "SELECT k FROM o WHERE o.v IN (SELECT t.code::integer FROM t WHERE t.k = o.k)",
+        "SELECT k FROM o WHERE EXISTS (SELECT 1 FROM t WHERE t.k = o.k AND 1 / t.d = 1)",
+    ] {
+        assert_eq!(rows(&mut session, query).len(), 1, "{query}");
+    }
+}
+
+#[test]
 fn in_lists_of_integers_answer_as_the_comparison_does() {
     let store = MemoryStore::default();
     people(&store, Dialect::PostgreSql);

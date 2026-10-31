@@ -478,6 +478,7 @@ fn run_statement(
     statement: Statement,
     dialect: Dialect,
 ) -> SqlResult<()> {
+    crate::roles::check_statement(settings, &statement)?;
     let binding = Binding {
         settings,
         walk_expressions: true,

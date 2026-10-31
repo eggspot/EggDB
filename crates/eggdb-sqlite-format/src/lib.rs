@@ -5,6 +5,7 @@
 //! before it is used, and every walk is bounded, so a hostile file is an error, never a panic or
 //! a hang. Writing the format is not part of this crate yet.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
@@ -102,12 +103,12 @@ pub struct SqliteFile {
     usable: usize,
     page_count: u32,
     wal_pages: HashMap<u32, Vec<u8>>,
+    read_budget: Cell<usize>,
 }
 
 struct TableWalk {
     visited: HashSet<u32>,
     overflow_pages: HashSet<u32>,
-    bytes_left: usize,
     rows: Vec<SqliteRow>,
 }
 
@@ -231,7 +232,14 @@ impl SqliteFile {
             std::fs::read(path).map_err(|error| SqliteFormatError::Io(error.to_string()))?;
         let mut wal_path = path.as_os_str().to_owned();
         wal_path.push("-wal");
-        let wal = std::fs::read(Path::new(&wal_path)).unwrap_or_default();
+        let wal_path = Path::new(&wal_path);
+        let wal_size = std::fs::metadata(wal_path).map_or(0, |metadata| metadata.len());
+        if wal_size > MOST_FILE_BYTES {
+            return Err(SqliteFormatError::Unsupported(
+                "a write-ahead log larger than 1 TiB".to_owned(),
+            ));
+        }
+        let wal = std::fs::read(wal_path).unwrap_or_default();
         Self::from_bytes(bytes, &wal)
     }
 
@@ -276,13 +284,27 @@ impl SqliteFile {
         if let Some(&highest) = wal_pages.keys().max() {
             page_count = page_count.max(highest);
         }
+        let held_bytes = bytes
+            .len()
+            .saturating_add(wal_pages.len().saturating_mul(page_size));
         Ok(Self {
             bytes,
             page_size,
             usable,
             page_count,
             wal_pages,
+            read_budget: Cell::new(held_bytes.saturating_mul(2).saturating_add(1 << 20)),
         })
+    }
+
+    fn spend(&self, bytes: usize) -> Result<()> {
+        let left = self
+            .read_budget
+            .get()
+            .checked_sub(bytes)
+            .ok_or_else(|| damaged("the tables hold more bytes than the file"))?;
+        self.read_budget.set(left);
+        Ok(())
     }
 
     /// The page size in bytes.
@@ -329,13 +351,13 @@ impl SqliteFile {
         Ok(entries)
     }
 
-    /// Every row of the table whose b-tree's root is `root_page`, in rowid order.
+    /// Every row of the table whose b-tree's root is `root_page`, in rowid order. All the
+    /// reads of one file share a budget of twice the bytes it holds, so a damaged file whose
+    /// tables share pages fails instead of being read over and over.
     pub fn rows(&self, root_page: u32) -> Result<Vec<SqliteRow>> {
-        let file_bytes = (self.page_count as usize).saturating_mul(self.page_size);
         let mut walk = TableWalk {
             visited: HashSet::new(),
             overflow_pages: HashSet::new(),
-            bytes_left: file_bytes.saturating_mul(2).saturating_add(1 << 20),
             rows: Vec::new(),
         };
         self.walk_table(root_page, 0, &mut walk)?;
@@ -346,6 +368,7 @@ impl SqliteFile {
         if depth > MOST_DEPTH || !walk.visited.insert(number) {
             return Err(damaged("a b-tree loops or is too deep"));
         }
+        self.spend(self.page_size)?;
         let page = self.page(number)?;
         let start = if number == 1 { HEADER_BYTES } else { 0 };
         let kind = *page.get(start).ok_or_else(|| damaged("an empty page"))?;
@@ -401,10 +424,7 @@ impl SqliteFile {
             .ok()
             .filter(|bytes| *bytes <= (1 << 30) + 1024)
             .ok_or_else(|| damaged("a record is larger than any SQLite record can be"))?;
-        walk.bytes_left = walk
-            .bytes_left
-            .checked_sub(payload_bytes)
-            .ok_or_else(|| damaged("the records hold more bytes than the file"))?;
+        self.spend(payload_bytes)?;
         let payload = self.payload(page, at, payload_bytes, &mut walk.overflow_pages)?;
         Ok(SqliteRow {
             rowid,

@@ -181,10 +181,12 @@ impl StopReason {
 
 impl Session<'_> {
     pub(super) fn follow_event(&mut self, object: JsonObject, text: &str) {
-        match self.format {
-            Format::Json => self.out.text(&object.line()),
-            _ => self.messages.text(text),
-        }
+        let (shown, line) = match self.format {
+            Format::Json => (&mut self.out, object.line()),
+            _ => (&mut self.messages, text.to_owned()),
+        };
+        shown.text(&line);
+        let _ = shown.finish();
     }
 
     pub(super) fn source_password(&mut self, variable: &str) -> Result<Option<String>, Failure> {

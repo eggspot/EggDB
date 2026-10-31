@@ -275,6 +275,12 @@ fn bind(
     tables: &mut TableCache,
     statement: &mut Statement,
 ) -> SqlResult<()> {
+    let binding = &Binding {
+        target_privilege: binding
+            .target_privilege
+            .map(|_| crate::roles::target_privilege(statement)),
+        ..*binding
+    };
     match statement {
         Statement::Select(select) => binding.select(reader, tables, select),
         Statement::Query(query) => binding.query(reader, tables, query),

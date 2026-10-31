@@ -1250,6 +1250,7 @@ pub(crate) struct Insert {
     pub(crate) source: InsertSource,
     pub(crate) returning: Option<Vec<SelectItem>>,
     pub(crate) on_duplicate: OnDuplicate,
+    pub(crate) conflict_target: Option<Vec<Name>>,
     pub(crate) rollback_on_conflict: bool,
     pub(crate) overriding: Option<Overriding>,
 }

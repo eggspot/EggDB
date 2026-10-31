@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eggdb.name" . }}
+  labels:
+    app.kubernetes.io/name: eggdb
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  serviceName: {{ include "eggdb.name" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eggdb
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: eggdb
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: eggdb
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - /data/eggdb.eggdb
+            - --create
+            - --listen
+            - "0.0.0.0:5432"
+            - --tls-self-signed
+            - --metrics-listen
+            - "0.0.0.0:9187"
+            - --password-file
+            - /secrets/password
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+            - name: metrics
+              containerPort: 9187
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+          livenessProbe:
+            tcpSocket:
+              port: postgresql
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          secret:
+            secretName: {{ include "eggdb.secret" . }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.storage.className }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}

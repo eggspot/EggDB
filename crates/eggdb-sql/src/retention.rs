@@ -268,4 +268,36 @@ mod tests {
             "count\n3\nSELECT 1"
         );
     }
+
+    #[test]
+    fn cascades_and_replace_cannot_remove_retained_rows_without_their_triggers() {
+        let store = records();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE TABLE clients (name text PRIMARY KEY)",
+            "INSERT INTO clients VALUES ('ada'), ('bob')",
+            "CREATE TABLE fills (id integer PRIMARY KEY, client text REFERENCES clients ON DELETE CASCADE, booked_at timestamptz NOT NULL)",
+            "INSERT INTO fills VALUES (1, 'ada', now())",
+            "SELECT eggdb_retention.retain('public', 'fills', 'booked_at', interval '7 years')",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        let cascaded = run(&mut session, "DELETE FROM clients WHERE name = 'ada'").unwrap_err();
+        assert_eq!(cascaded.state(), SqlState::FEATURE_NOT_SUPPORTED, "{cascaded}");
+        assert_eq!(
+            run(&mut session, "DELETE FROM clients WHERE name = 'bob'").unwrap(),
+            "DELETE 1"
+        );
+        let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+        let replaced = run(
+            &mut sqlite,
+            "INSERT OR REPLACE INTO fills VALUES (1, 'ada', '2020-01-01 00:00:00+00')",
+        )
+        .unwrap_err();
+        assert!(replaced.message().contains("DELETE triggers"), "{replaced}");
+        assert_eq!(
+            run(&mut session, "SELECT count(*) FROM fills").unwrap(),
+            "count\n1\nSELECT 1"
+        );
+    }
 }

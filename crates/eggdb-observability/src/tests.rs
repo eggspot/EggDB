@@ -429,3 +429,25 @@ fn hostile_query_api_requests_are_answered_without_panics_or_endless_loops() {
     let (status, answer) = post(&endpoint, "/api/v1/query", &long_sum, b"");
     assert_eq!(status, 400, "{answer}");
 }
+
+#[test]
+fn the_longest_operator_chain_runs_on_a_default_thread_and_a_longer_one_is_refused() {
+    let outcome = std::thread::spawn(|| {
+        let data = BTreeMap::new();
+        let chain = |operators: usize| format!("1{}", " + 1".repeat(operators));
+        let longest = parse(&chain(256)).and_then(|expr| evaluate(&expr, 0, &data));
+        let longer = parse(&chain(257));
+        (vector_or_scalar(longest), longer.is_err())
+    })
+    .join()
+    .unwrap();
+    assert_eq!(outcome.0, Some(257.0));
+    assert!(outcome.1);
+}
+
+fn vector_or_scalar(data: Result<Data, String>) -> Option<f64> {
+    match data {
+        Ok(Data::Scalar(value)) => Some(value),
+        _ => None,
+    }
+}

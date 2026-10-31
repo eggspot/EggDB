@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 pub(crate) const LOOKBACK_MS: i64 = 5 * 60 * 1000;
 const MAX_DEPTH: usize = 64;
-const MOST_OPERATORS: usize = 1024;
+const MOST_OPERATORS: usize = 256;
 
 pub(crate) type Labels = Vec<(String, String)>;
 
@@ -408,7 +408,7 @@ impl Parser {
             self.at += 1;
             self.operators += 1;
             if self.operators > MOST_OPERATORS {
-                return Err("the query has more than 1024 operators".to_owned());
+                return Err("the query has more than 256 operators".to_owned());
             }
             let right = self.expression(level)?;
             left = Expr::Binary(symbol.to_owned(), Box::new(left), Box::new(right));

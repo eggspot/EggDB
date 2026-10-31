@@ -1139,6 +1139,7 @@ fn with_selected_rows(
         source: InsertSource::Values(rows),
         returning: insert.returning.clone(),
         on_duplicate: insert.on_duplicate.clone(),
+        conflict_target: insert.conflict_target.clone(),
         rollback_on_conflict: insert.rollback_on_conflict,
         overriding: insert.overriding,
     })
@@ -1260,6 +1261,12 @@ pub(crate) fn insert(
         OnDuplicate::Update(assignments) => Some(resolved_updates(&table, scope, assignments)?),
         _ => None,
     };
+    let arbiter = match &insert.conflict_target {
+        Some(names) => Some(ConflictArbiter::of(&table, names)?),
+        None => None,
+    };
+    let mut changed_once = (dialect == Dialect::PostgreSql && updates.is_some())
+        .then(std::collections::HashSet::<Vec<u8>>::new);
     let mut firing = Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Insert, &[])?;
     let mut update_firing = match &updates {
         Some(updates) => {
@@ -1307,6 +1314,9 @@ pub(crate) fn insert(
         }
         match stored.try_insert(writer, &mut row)? {
             None => {
+                if let Some(changed) = changed_once.as_mut() {
+                    changed.insert(stored.key.clone());
+                }
                 affected += 1;
                 inserted_children.push(&row)?;
                 if let Some(firing) = firing.as_mut() {
@@ -1314,7 +1324,9 @@ pub(crate) fn insert(
                     stored.forget_generated_ids();
                 }
             }
-            Some(conflict) => match (&insert.on_duplicate, &updates) {
+            Some(found) => {
+                let conflict = stored.arbitrated(writer, arbiter, found, &row)?;
+                match (&insert.on_duplicate, &updates) {
                 (OnDuplicate::Ignore, _) => {
                     warnings.push(Warning {
                         level: "Warning",
@@ -1330,6 +1342,10 @@ pub(crate) fn insert(
                     continue;
                 }
                 (OnDuplicate::Replace, _) => {
+                    let event = crate::triggers::TriggerEvent::Delete;
+                    if crate::triggers::fire_on(&*writer, tables, &table.name, event)? {
+                        return Err(crate::triggers::unfired(event, &table.name, "REPLACE"));
+                    }
                     let mut conflict = Some(conflict);
                     while let Some(found) = conflict {
                         let removed = delete_row(writer, &table, &found.row_key)?;
@@ -1351,6 +1367,11 @@ pub(crate) fn insert(
                     }
                 }
                 (OnDuplicate::Update(_), Some(updates)) => {
+                    if let Some(changed) = changed_once.as_mut()
+                        && !changed.insert(conflict.row_key.clone())
+                    {
+                        return Err(row_affected_twice());
+                    }
                     let upsert = Upsert {
                         updates,
                         inserted: &row,
@@ -1369,7 +1390,8 @@ pub(crate) fn insert(
                     continue;
                 }
                 _ => return Err(conflict.error(&table, &row)),
-            },
+                }
+            }
         }
         if let Some(projection) = &returning {
             result_rows.push(projection.project(&row)?);
@@ -1618,6 +1640,50 @@ fn point_inserted_values(expr: &mut Expr, table: &TableDefinition) -> SqlResult<
 struct Conflict {
     index: Option<usize>,
     row_key: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum ConflictArbiter {
+    PrimaryKey,
+    UniqueIndex(usize),
+}
+
+impl ConflictArbiter {
+    fn of(table: &TableDefinition, names: &[Name]) -> SqlResult<Self> {
+        let mut columns = target_columns(table, names)?;
+        columns.sort_unstable();
+        let mut primary_key = table.primary_key.clone();
+        primary_key.sort_unstable();
+        if !primary_key.is_empty() && primary_key == columns {
+            return Ok(Self::PrimaryKey);
+        }
+        let matching = table.indexes.iter().position(|index| {
+            let mut indexed = index.columns.clone();
+            indexed.sort_unstable();
+            index.unique && indexed == columns
+        });
+        matching.map(Self::UniqueIndex).ok_or_else(|| {
+            SqlError::new(
+                SqlState::INVALID_COLUMN_REFERENCE,
+                "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+            )
+        })
+    }
+
+    fn decides(self, conflict: &Conflict) -> bool {
+        match self {
+            Self::PrimaryKey => conflict.index.is_none(),
+            Self::UniqueIndex(position) => conflict.index == Some(position),
+        }
+    }
+}
+
+fn row_affected_twice() -> SqlError {
+    SqlError::new(
+        SqlState::CARDINALITY_VIOLATION,
+        "ON CONFLICT DO UPDATE command cannot affect row a second time",
+    )
+    .with_hint("Ensure that no rows proposed for insertion within the same command have duplicate constrained values.")
 }
 
 impl Conflict {
@@ -1964,6 +2030,36 @@ impl<'a> StoredRows<'a> {
         Ok(None)
     }
 
+    fn arbitrated(
+        &self,
+        reader: &dyn KeyValueRead,
+        arbiter: Option<ConflictArbiter>,
+        found: Conflict,
+        row: &[Value],
+    ) -> SqlResult<Conflict> {
+        let Some(arbiter) = arbiter.filter(|arbiter| !arbiter.decides(&found)) else {
+            return Ok(found);
+        };
+        let existing = match arbiter {
+            ConflictArbiter::PrimaryKey => reader.get(&self.key)?.map(|_| self.key.clone()),
+            ConflictArbiter::UniqueIndex(position) => indexes::unique_conflict(
+                reader,
+                self.table,
+                &self.table.indexes[position],
+                row,
+                &self.key,
+            )?,
+        };
+        let index = match arbiter {
+            ConflictArbiter::PrimaryKey => None,
+            ConflictArbiter::UniqueIndex(position) => Some(position),
+        };
+        match existing {
+            Some(row_key) => Ok(Conflict { index, row_key }),
+            None => Err(found.error(self.table, row)),
+        }
+    }
+
     fn unique_conflict(
         &self,
         reader: &dyn KeyValueRead,
@@ -2043,6 +2139,7 @@ fn insert_literals_into_view(
         source: InsertSource::Values(rows),
         returning: None,
         on_duplicate: OnDuplicate::Fail,
+        conflict_target: None,
         rollback_on_conflict: false,
         overriding: None,
     };
@@ -2086,6 +2183,7 @@ fn insert_literals_routed(
         source: InsertSource::Values(rows),
         returning: None,
         on_duplicate: OnDuplicate::Fail,
+        conflict_target: None,
         rollback_on_conflict: false,
         overriding: None,
     };

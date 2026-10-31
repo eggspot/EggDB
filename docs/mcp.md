@@ -204,7 +204,8 @@ agent that sends that token run every call as the stored role `reporter` (D190),
 `GRANT`s and row-level security policies decide what the agent sees, and `ALTER ROLE reporter
 NOLOGIN` or `REVOKE` takes access away at once, without a restart. A line with a token alone
 runs calls as the database's owner. Agents with a role get no key-value tools, since those read
-beneath SQL's privileges. The server also offers two prompts, `explore_database` and
+beneath SQL's privileges: they are left out of `tools/list`, and a call to one answers
+`limited_to_role`. The server also offers two prompts, `explore_database` and
 `answer_with_sql` (with a `question` argument).
 
 ## Errors

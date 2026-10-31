@@ -934,7 +934,8 @@ impl<'r> SqlPlusReader<'r> {
 
     fn set(&mut self, argument: &str, number: u64) -> SqlResult<Option<ScriptItem>> {
         let option = first_word(argument);
-        let value = argument[option.len().min(argument.len())..].trim();
+        let trimmed = argument.trim_start();
+        let value = trimmed.get(option.len()..).unwrap_or_default().trim();
         let value_word = value.to_ascii_lowercase();
         let named = |full: &str, minimum: usize| {
             option.len() >= minimum && full.starts_with(option.as_str())

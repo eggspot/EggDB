@@ -590,6 +590,14 @@ fn limited_to_tables() -> ToolError {
     .with_fix("Read the listed tables with list_tables and run_sql, or ask the user to restart eggdb mcp without --tables.")
 }
 
+fn limited_to_role() -> ToolError {
+    ToolError::new(
+        "limited_to_role",
+        "This server acts as a database role, which grants tables, not raw keys, so the key-value store is not available. Nothing was read.",
+    )
+    .with_fix("Read the tables the role may read with list_tables and run_sql.")
+}
+
 fn writes_not_allowed() -> ToolError {
     ToolError::new(
         "read_only",
@@ -649,6 +657,7 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::ExplainQuery => explain_query(arguments, call),
         Tool::SampleRows => sample_rows(arguments, call),
         Tool::KvGet | Tool::KvScan if call.tables.is_some() => Err(limited_to_tables()),
+        Tool::KvGet | Tool::KvScan if call.agent_role.is_some() => Err(limited_to_role()),
         Tool::KvGet => kv_get(arguments, call),
         Tool::KvScan => kv_scan(arguments, call),
         Tool::RowList => row_list(arguments, call),

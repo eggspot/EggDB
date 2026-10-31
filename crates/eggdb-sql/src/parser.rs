@@ -2728,8 +2728,9 @@ impl<'t> Parser<'t> {
         if self.mysql() && self.is_word("on") {
             on_duplicate = self.on_duplicate_key_update(on_duplicate)?;
         }
+        let mut conflict_target = None;
         if (self.sqlite() || self.postgresql()) && self.is_word("on") {
-            on_duplicate = self.sqlite_upsert()?;
+            (on_duplicate, conflict_target) = self.sqlite_upsert()?;
         }
         if self.is_word("on") {
             return Err(self.not_supported("ON CONFLICT"));
@@ -2747,6 +2748,7 @@ impl<'t> Parser<'t> {
             source,
             returning,
             on_duplicate,
+            conflict_target,
             rollback_on_conflict,
             overriding,
         }))

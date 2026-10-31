@@ -612,19 +612,25 @@ impl<'t> Parser<'t> {
         Ok(resolution)
     }
 
-    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<OnDuplicate> {
+    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<(OnDuplicate, Option<Vec<Name>>)> {
         self.expect_word("on")?;
         self.expect_word("conflict")?;
-        let targeted = self.peek_kind() == &TokenKind::LeftParen;
-        if targeted {
-            self.name_list()?;
+        if self.postgresql() && self.is_word("on") {
+            return Err(self.not_supported("ON CONFLICT ON CONSTRAINT"));
+        }
+        let target = if self.peek_kind() == &TokenKind::LeftParen {
+            let target = self.name_list()?;
             if self.is_word("where") {
                 return Err(self.not_supported("ON CONFLICT (...) WHERE"));
             }
-        }
+            Some(target)
+        } else {
+            None
+        };
+        let targeted = target.is_some();
         self.expect_word("do")?;
         if self.take_word("nothing") {
-            return Ok(OnDuplicate::Ignore);
+            return Ok((OnDuplicate::Ignore, target));
         }
         let update_position = self.position();
         self.expect_word("update")?;
@@ -659,7 +665,7 @@ impl<'t> Parser<'t> {
         if self.is_word("on") {
             return Err(self.not_supported("more than one ON CONFLICT clause"));
         }
-        Ok(OnDuplicate::Update(assignments))
+        Ok((OnDuplicate::Update(assignments), target))
     }
 
     pub(super) fn sqlite_infix_level(&self) -> Option<Level> {

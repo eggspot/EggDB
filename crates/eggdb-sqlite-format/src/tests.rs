@@ -201,3 +201,50 @@ fn hostile_files_are_errors_never_panics() {
         }
     }
 }
+
+fn wal_of(frames: &[(u32, &[u8])]) -> Vec<u8> {
+    let mut wal = Vec::new();
+    wal.extend_from_slice(&WAL_MAGIC_BIG.to_be_bytes());
+    wal.extend_from_slice(&3_007_000u32.to_be_bytes());
+    wal.extend_from_slice(&(PAGE as u32).to_be_bytes());
+    wal.extend_from_slice(&0u32.to_be_bytes());
+    let salts = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    wal.extend_from_slice(&salts);
+    let mut sums = wal_checksum(&wal, true, (0, 0));
+    wal.extend_from_slice(&sums.0.to_be_bytes());
+    wal.extend_from_slice(&sums.1.to_be_bytes());
+    for (index, (number, page)) in frames.iter().enumerate() {
+        let mut header = Vec::new();
+        header.extend_from_slice(&number.to_be_bytes());
+        let commit = if index + 1 == frames.len() { *number } else { 0 };
+        header.extend_from_slice(&commit.to_be_bytes());
+        header.extend_from_slice(&salts);
+        sums = wal_checksum(&header, true, sums);
+        sums = wal_checksum(page, true, sums);
+        header.extend_from_slice(&sums.0.to_be_bytes());
+        header.extend_from_slice(&sums.1.to_be_bytes());
+        wal.extend_from_slice(&header);
+        wal.extend_from_slice(page);
+    }
+    wal
+}
+
+#[test]
+fn reading_one_file_over_and_over_runs_out_of_its_budget() {
+    let file = SqliteFile::from_bytes(sample_database(), &[]).unwrap();
+    let refused = (0..100_000).find_map(|_| file.rows(2).err());
+    let refused = refused.map(|error| error.to_string()).unwrap_or_default();
+    assert!(refused.contains("more bytes than the file"), "{refused}");
+}
+
+#[test]
+fn a_far_page_in_the_write_ahead_log_does_not_raise_the_budget() {
+    let sample = sample_database();
+    let leaf = sample[PAGE..].to_vec();
+    let far = vec![0u8; PAGE];
+    let wal = wal_of(&[(2, &leaf), (4_000_000, &far)]);
+    let file = SqliteFile::from_bytes(sample, &wal).unwrap();
+    assert_eq!(file.rows(2).unwrap().len(), 2);
+    let reads = (0..100_000).take_while(|_| file.rows(2).is_ok()).count();
+    assert!(reads < 10_000, "{reads}");
+}

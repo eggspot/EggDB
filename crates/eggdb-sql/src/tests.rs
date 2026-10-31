@@ -2313,6 +2313,57 @@ fn postgresql_upserts_skip_or_update_the_conflicting_row() {
 }
 
 #[test]
+fn postgresql_upserts_act_only_on_their_conflict_target_and_once_per_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE users (id integer PRIMARY KEY, email text UNIQUE, name text)",
+    );
+    last(&mut session, "INSERT INTO users VALUES (5, 'old@x', 'Ann')");
+    let other_key = fails(
+        &mut session,
+        "INSERT INTO users VALUES (5, 'new@x', 'Bob') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+    );
+    assert_eq!(other_key.state(), crate::SqlState::UNIQUE_VIOLATION);
+    let other_key = fails(
+        &mut session,
+        "INSERT INTO users VALUES (5, 'new@x', 'Bob') ON CONFLICT (email) DO NOTHING",
+    );
+    assert_eq!(other_key.state(), crate::SqlState::UNIQUE_VIOLATION);
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO users VALUES (6, 'old@x', 'Cy') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name"
+        ),
+        "INSERT 0 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id, email, name FROM users"),
+        "id|email|name\n5|old@x|Cy\nSELECT 1"
+    );
+    let no_key = fails(
+        &mut session,
+        "INSERT INTO users VALUES (7, 'z@x', 'Di') ON CONFLICT (name) DO NOTHING",
+    );
+    assert_eq!(no_key.state(), crate::SqlState::INVALID_COLUMN_REFERENCE);
+    let twice = fails(
+        &mut session,
+        "INSERT INTO users VALUES (8, 'a@x', 'Ed'), (9, 'a@x', 'Flo') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+    );
+    assert_eq!(twice.state(), crate::SqlState::CARDINALITY_VIOLATION);
+    let by_constraint = fails(
+        &mut session,
+        "INSERT INTO users VALUES (5, 'old@x', 'Gus') ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING",
+    );
+    assert_eq!(by_constraint.state(), crate::SqlState::FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM users"),
+        "count\n1\nSELECT 1"
+    );
+}
+
+#[test]
 fn hostile_sqlite_input_returns_errors_and_never_panics() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);

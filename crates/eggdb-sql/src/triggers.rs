@@ -225,6 +225,36 @@ struct CachedTriggers {
     triggers: Option<Arc<TableTriggers>>,
 }
 
+pub(crate) fn fire_on(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    table: &str,
+    event: TriggerEvent,
+) -> SqlResult<bool> {
+    Ok(of_table(reader, tables, table)?.is_some_and(|table| {
+        table
+            .triggers
+            .iter()
+            .any(|trigger| trigger.enabled && trigger.events.contains(event))
+    }))
+}
+
+pub(crate) fn unfired(event: TriggerEvent, table: &str, by: &str) -> SqlError {
+    let event = match event {
+        TriggerEvent::Insert => "INSERT",
+        TriggerEvent::Update => "UPDATE",
+        TriggerEvent::Delete => "DELETE",
+        TriggerEvent::Truncate => "TRUNCATE",
+    };
+    SqlError::not_supported(format!(
+        "{by} changing rows of table {}, which has {event} triggers",
+        display(table)
+    ))
+    .with_hint(format!(
+        "EggDB does not fire row triggers for {by} yet; change those rows with a {event} statement, which fires them."
+    ))
+}
+
 pub(crate) fn of_table(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,

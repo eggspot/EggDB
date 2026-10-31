@@ -657,6 +657,25 @@ fn build_lookup(
     shape: LookupShape,
     sql_type: Option<SqlType>,
 ) -> SqlResult<Option<KeyLookup>> {
+    match lookup_over_every_inner_row(env, tables, query, prepared, shape, sql_type) {
+        Err(error) if fails_only_on_rows_per_row_evaluation_may_skip(&error) => Ok(None),
+        built => built,
+    }
+}
+
+fn fails_only_on_rows_per_row_evaluation_may_skip(error: &SqlError) -> bool {
+    let code = error.state().code();
+    code.starts_with("22") || code == "53200"
+}
+
+fn lookup_over_every_inner_row(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    query: &Query,
+    prepared: &Prepared,
+    shape: LookupShape,
+    sql_type: Option<SqlType>,
+) -> SqlResult<Option<KeyLookup>> {
     let Some(queries) = key_query(query, shape) else {
         return Ok(None);
     };
