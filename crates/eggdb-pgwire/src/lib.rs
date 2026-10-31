@@ -14,6 +14,9 @@
 //! - Every connection authenticates with SCRAM-SHA-256 ([`ScramVerifier`], [`ScramExchange`]),
 //!   and over TLS also SCRAM-SHA-256-PLUS with `tls-server-end-point` channel binding; there is
 //!   no unauthenticated mode.
+//! - [`client`] connects to a running PostgreSQL server (TLS, SCRAM, simple queries, `COPY`,
+//!   copy-both streams) and [`replication`] reads its logical replication stream, for
+//!   `eggdb follow` (D162).
 //! - [`messages`] parses every frontend message and builds the backend ones, refusing
 //!   truncated, oversized or inconsistent input with an error, never a panic.
 //! - The simple query protocol and the extended one (`Parse`, `Bind`, `Describe`, `Execute`,
@@ -32,12 +35,14 @@
 //! The guide is "Connecting with psql" in `docs/sql.md` in the repository.
 
 mod backend_keys;
+pub mod client;
 mod connection;
 pub mod messages;
 mod scram;
 mod server;
 pub mod types;
 mod wire;
+pub mod replication;
 
 pub use connection::{MAX_AUTHENTICATION_MESSAGE_BYTES, MAX_MESSAGE_BYTES};
 pub use scram::{
