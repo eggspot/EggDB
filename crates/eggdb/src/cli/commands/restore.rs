@@ -152,6 +152,10 @@ impl Session<'_> {
         {
             return self.restore_aof(path);
         }
+        if let Some(url) = path.as_ref().and_then(|path| path.to_str()).filter(|text| text.starts_with(super::archive::BUCKET_SCHEME)) {
+            let at = self.request.restore.at.clone();
+            return self.restore_from_bucket(url, at.as_deref());
+        }
         if let Some(path) = &path
             && path.join(super::archive::MANIFEST).is_file()
         {

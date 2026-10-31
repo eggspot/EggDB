@@ -16,6 +16,9 @@ impl Session<'_> {
         let copy = self.request.copy.clone().unwrap_or_default();
         let copy_display = copy.display().to_string();
         let copy_shown = render::text(copy_display.as_bytes());
+        if let Some(url) = copy.to_str().filter(|text| text.starts_with(super::archive::BUCKET_SCHEME)) {
+            return self.backup_into_bucket(url);
+        }
         if copy.is_dir() {
             return self.backup_into_directory(&copy);
         }

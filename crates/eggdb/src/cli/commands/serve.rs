@@ -48,6 +48,13 @@ impl Session<'_> {
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
         let options = self.request.serve.clone();
+        if let Some(url) = &options.restore_from
+            && std::fs::symlink_metadata(&self.request.file).is_err()
+        {
+            let (file, _) = super::archive::restore_from_bucket_into(url, None, &self.request.file)
+                .map_err(|message| Failure::database(format!("--restore-from {url}: {message}"), Exit::DatabaseError))?;
+            self.out.text(&format!("restored {file} from {url} into {}\n", self.file));
+        }
         let user = options.user.unwrap_or_else(|| DEFAULT_USER.to_owned());
         let password = self.serve_password(&user)?;
         if !password.is_ascii() {

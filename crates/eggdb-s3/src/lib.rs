@@ -3,9 +3,12 @@
 //! delete many), `ListObjects` and `ListObjectsV2` with prefixes, delimiters and continuation,
 //! multipart uploads, and presigned URLs, every request signed with AWS Signature Version 4
 //! for the server's user and password. Objects are kept in EggDB's key-value transactions in
-//! 256 KiB chunks. Amazon S3 is a trademark of Amazon; EggDB is compatible with its API.
+//! 256 KiB chunks. [`client`] is the other side: a small client for any S3-compatible service,
+//! which EggDB's archives use (D226). Amazon S3 is a trademark of Amazon; EggDB is compatible
+//! with its API.
 
 mod api;
+pub mod client;
 mod store;
 mod xml;
 

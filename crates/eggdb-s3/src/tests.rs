@@ -111,3 +111,38 @@ fn signatures_presigned_urls_and_digests_are_checked() {
     assert_eq!(endpoint.answer(&anonymous).status, 403);
     assert_eq!(call(&endpoint, "PUT", "/Bad_Bucket", &[], b"", "secret").status, 400);
 }
+
+#[test]
+fn the_client_stores_lists_reads_and_deletes_objects_on_a_served_endpoint() {
+    let keyspace = MemoryKeyspace::default();
+    let endpoint = Endpoint::new(&keyspace, "eggdb", "secret");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| eggdb_http::serve_with_body_limit(&listener, &|request| endpoint.answer(request), &|| stop.load(std::sync::atomic::Ordering::Relaxed), crate::MAX_REQUEST_BYTES));
+        let settings = |name: &str| match name {
+            "AWS_ENDPOINT_URL" => Some(format!("http://{address}")),
+            "AWS_ACCESS_KEY_ID" => Some("eggdb".to_owned()),
+            "AWS_SECRET_ACCESS_KEY" => Some("secret".to_owned()),
+            _ => None,
+        };
+        let location = crate::client::Location::parse("s3://backups/nightly/", &settings, 1 << 20).unwrap();
+        assert_eq!(location.key("a b.eggdb"), "nightly/a b.eggdb");
+        call(&endpoint, "PUT", "/backups", &[], b"", "secret");
+        location.bucket.put(&location.key("a b.eggdb"), b"first").unwrap();
+        location.bucket.put(&location.key("c.eggdb"), &vec![7u8; 300_000]).unwrap();
+        assert_eq!(location.bucket.get(&location.key("a b.eggdb")).unwrap(), Some(b"first".to_vec()));
+        assert_eq!(location.bucket.get(&location.key("missing")).unwrap(), None);
+        assert_eq!(location.bucket.list("nightly/").unwrap(), ["nightly/a b.eggdb", "nightly/c.eggdb"]);
+        location.bucket.delete(&location.key("c.eggdb")).unwrap();
+        assert_eq!(location.bucket.list("nightly/").unwrap().len(), 1);
+        let wrong = |name: &str| if name == "AWS_SECRET_ACCESS_KEY" { Some("wrong".to_owned()) } else { settings(name) };
+        let refused = crate::client::Location::parse("s3://backups", &wrong, 1 << 20).unwrap();
+        assert!(refused.bucket.get("nightly/a b.eggdb").unwrap_err().contains("403"));
+        assert!(crate::client::Location::parse("s3://backups", &|_| None, 1).is_err());
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().unwrap().unwrap();
+    });
+}
+

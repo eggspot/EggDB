@@ -8,6 +8,50 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const MANIFEST: &str = "manifest.jsonl";
 const STAGING_SUFFIX: &str = ".restoring";
+const UPLOAD_SUFFIX: &str = ".uploading";
+pub(super) const BUCKET_SCHEME: &str = "s3://";
+
+fn bucket(url: &str) -> Result<eggdb_s3::client::Location, String> {
+    let largest = usize::try_from(16u64 << 30).unwrap_or(usize::MAX);
+    eggdb_s3::client::Location::parse(url, &|name| std::env::var(name).ok(), largest)
+}
+
+fn choose(entries: &[Archived], at: Option<&str>, shown: &str) -> Result<Archived, String> {
+    let limit = match at {
+        Some(text) => Some(parse_time(text).ok_or_else(|| format!("--at {text}: give a time such as 2026-10-31T12:00:00Z"))?),
+        None => None,
+    };
+    entries
+        .iter()
+        .filter(|entry| limit.is_none_or(|limit| entry.taken_at_ms <= limit))
+        .max_by_key(|entry| entry.taken_at_ms)
+        .map(|entry| Archived { file: entry.file.clone(), taken_at_ms: entry.taken_at_ms, sha256: entry.sha256.clone() })
+        .ok_or_else(|| format!("{shown} holds no archived copy taken at or before that time"))
+}
+
+/// Restores into the new file `target` the copy archived in the bucket at `url` taken at or
+/// before `at` (the newest without it), after checking its SHA-256; returns the copy chosen.
+pub(super) fn restore_from_bucket_into(url: &str, at: Option<&str>, target: &Path) -> Result<(String, i64), String> {
+    let location = bucket(url)?;
+    let manifest_text = location.bucket.get(&location.key(MANIFEST))?.ok_or_else(|| format!("{url} has no {MANIFEST}: archive into it with eggdb backup <file> {url}"))?;
+    let chosen = choose(&parse_manifest(&String::from_utf8_lossy(&manifest_text)), at, url)?;
+    let bytes = location.bucket.get(&location.key(&chosen.file))?.ok_or_else(|| format!("{} is in the manifest but not in the bucket", chosen.file))?;
+    let actual: String = eggdb_crypto::sha256(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+    if actual != chosen.sha256 {
+        return Err(format!("{} has changed since it was archived (its SHA-256 differs from the manifest); pick an earlier copy with --at", chosen.file));
+    }
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(format!("{} exists; restoring an archived copy writes a new file", target.display()));
+    }
+    let mut staging = target.to_path_buf().into_os_string();
+    staging.push(STAGING_SUFFIX);
+    let staging = PathBuf::from(staging);
+    std::fs::File::create(&staging)
+        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()))
+        .map_err(|error| format!("cannot write {}: {error}", chosen.file))?;
+    std::fs::rename(&staging, target).map_err(|error| format!("cannot move the restored copy into place: {error}"))?;
+    Ok((chosen.file, chosen.taken_at_ms))
+}
 
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
@@ -119,9 +163,11 @@ fn json_field<'l>(line: &'l str, name: &str) -> Option<&'l str> {
 }
 
 fn manifest(directory: &Path) -> std::io::Result<Vec<Archived>> {
-    let text = std::fs::read_to_string(directory.join(MANIFEST))?;
-    Ok(text
-        .lines()
+    Ok(parse_manifest(&std::fs::read_to_string(directory.join(MANIFEST))?))
+}
+
+fn parse_manifest(text: &str) -> Vec<Archived> {
+    text.lines()
         .filter_map(|line| {
             let file = json_field(line, "file")?;
             if file.contains(['/', '\\']) || file.starts_with('.') {
@@ -133,29 +179,43 @@ fn manifest(directory: &Path) -> std::io::Result<Vec<Archived>> {
                 sha256: json_field(line, "sha256")?.to_owned(),
             })
         })
-        .collect())
+        .collect()
 }
 
 /// The archived copy in `directory` taken at or before `at` (the newest without it), after
 /// checking its SHA-256 against the manifest.
 pub(super) fn archived_copy(directory: &Path, at: Option<&str>) -> Result<PathBuf, String> {
     let shown = render::text(directory.display().to_string().as_bytes());
-    let limit = match at {
-        Some(text) => Some(parse_time(text).ok_or_else(|| format!("--at {text}: give a time such as 2026-10-31T12:00:00Z"))?),
-        None => None,
-    };
     let entries = manifest(directory).map_err(|error| format!("cannot read {shown}/{MANIFEST}: {error}"))?;
-    let chosen = entries
-        .iter()
-        .filter(|entry| limit.is_none_or(|limit| entry.taken_at_ms <= limit))
-        .max_by_key(|entry| entry.taken_at_ms)
-        .ok_or_else(|| format!("{shown} holds no archived copy taken at or before that time"))?;
+    let chosen = choose(&entries, at, &shown)?;
     let source = directory.join(&chosen.file);
     let actual = file_sha256(&source).map_err(|error| format!("cannot read {}: {error}", chosen.file))?;
     if actual != chosen.sha256 {
         return Err(format!("{} has changed since it was archived (its SHA-256 differs from the manifest); pick an earlier copy with --at", chosen.file));
     }
     Ok(source)
+}
+
+fn upload_copy(location: &eggdb_s3::client::Location, staging: &Path, name: &str, taken_at_ms: i64, shown: &str) -> Result<(String, u64), String> {
+    let verified = eggdb::Database::open_with(staging, eggdb::Options::default().read_only(true))
+        .and_then(|copy| copy.check())
+        .map_err(|error| format!("the copy of {shown} does not verify: {error}"))?;
+    let bytes = std::fs::read(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
+    let sha256: String = eggdb_crypto::sha256(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+    location.bucket.put(&location.key(name), &bytes)?;
+    let line = JsonObject::new()
+        .string("file", name)
+        .string("taken_at", &rfc3339(taken_at_ms))
+        .number("taken_at_ms", u64::try_from(taken_at_ms).unwrap_or(0))
+        .number("bytes", bytes.len() as u64)
+        .number("entries", verified.entries)
+        .string("sha256", &sha256)
+        .boolean("verified", true)
+        .line();
+    let mut manifest_text = location.bucket.get(&location.key(MANIFEST))?.unwrap_or_default();
+    manifest_text.extend_from_slice(line.as_bytes());
+    location.bucket.put(&location.key(MANIFEST), &manifest_text)?;
+    Ok((line, verified.entries))
 }
 
 impl Session<'_> {
@@ -200,6 +260,40 @@ impl Session<'_> {
                 self.file,
                 render::count(verified.entries)
             )),
+        }
+        Ok(Exit::Done)
+    }
+
+    pub(super) fn backup_into_bucket(&mut self, url: &str) -> Result<Exit, Failure> {
+        let failed = |message: String| Failure::database(message, Exit::DatabaseError);
+        let location = bucket(url).map_err(|message| Failure::usage(message, Some(crate::cli::args::CommandName::Backup)))?;
+        let taken_at_ms = now_ms();
+        let stem = self.request.file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| "database".to_owned());
+        let stamp: String = rfc3339(taken_at_ms).chars().filter(|character| character.is_ascii_alphanumeric()).collect();
+        let name = format!("{stem}-{stamp}.eggdb");
+        let mut staging = self.request.file.clone().into_os_string();
+        staging.push(format!(".{stamp}{UPLOAD_SUFFIX}"));
+        let staging = PathBuf::from(staging);
+        let db = self.open(Access::ReadOnly, None)?;
+        let copied = db.backup_to(&staging);
+        drop(db);
+        copied.map_err(|error| failed(format!("cannot copy {} for {url}: {error}", self.file)))?;
+        let outcome = upload_copy(&location, &staging, &name, taken_at_ms, &self.file);
+        let _ = std::fs::remove_file(&staging);
+        let (line, entries) = outcome.map_err(failed)?;
+        match self.format {
+            Format::Json => self.out.text(&line),
+            _ => self.out.text(&format!("archived {} into {url} as {name} ({} entries, verified)\n", self.file, render::count(entries))),
+        }
+        Ok(Exit::Done)
+    }
+
+    pub(super) fn restore_from_bucket(&mut self, url: &str, at: Option<&str>) -> Result<Exit, Failure> {
+        let target = self.request.file.clone();
+        let (file, taken_at_ms) = restore_from_bucket_into(url, at, &target).map_err(|message| Failure::database(message, Exit::DatabaseError))?;
+        match self.format {
+            Format::Json => self.out.text(&JsonObject::new().string("restored", &file).string("taken_at", &rfc3339(taken_at_ms)).string("into", &self.file_display).line()),
+            _ => self.out.text(&format!("restored {file} (taken {}) from {url} into {}\n", rfc3339(taken_at_ms), self.file)),
         }
         Ok(Exit::Done)
     }

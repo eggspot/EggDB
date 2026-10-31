@@ -6,7 +6,7 @@
 
 mod client;
 
-pub use client::{HttpTarget, parse_http_url, post};
+pub use client::{ClientResponse, HttpTarget, host_header, parse_http_url, post, request};
 
 use std::fmt;
 use std::io::{self, Read, Write};
