@@ -578,6 +578,13 @@ impl<'t> Parser<'t> {
             self.at += 1;
             return Ok(special);
         }
+        if let TokenKind::Word(word) = self.peek_kind()
+            && let Some(sql_type) = crate::pg_catalog::cast_type_named(word.as_ref())
+            && !matches!(self.peek_kind_at(1), TokenKind::Dot | TokenKind::LeftParen)
+        {
+            self.at += 1;
+            return Ok(ReturnType::Type(sql_type));
+        }
         let at = self.at;
         match self.sql_type() {
             Ok(sql_type) => Ok(ReturnType::Type(sql_type)),

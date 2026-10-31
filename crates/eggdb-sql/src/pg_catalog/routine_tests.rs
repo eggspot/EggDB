@@ -158,7 +158,7 @@ fn pg_proc_and_pg_language_describe_user_routines() {
             &mut session,
             "SELECT lanname, lanispl, lanpltrusted FROM pg_language ORDER BY oid"
         ),
-        ["internal|f|f", "c|f|f", "sql|f|t", "plpgsql|t|t"]
+        ["internal|f|f", "c|f|f", "sql|f|t", "plpgsql|t|t", "tsql|t|t", "plsql|t|t"]
     );
     assert_eq!(
         rows(

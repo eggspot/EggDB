@@ -584,6 +584,15 @@ impl<'t> Compiler<'t, '_> {
         if self.take_word("refcursor") {
             return Ok(VariableType::RefCursor);
         }
+        if let TokenKind::Word(word) = self.kind()
+            && let Some(sql_type) = crate::pg_catalog::cast_type_named(word.as_ref())
+        {
+            self.parser.at += 1;
+            if self.ends_declared_type() {
+                return Ok(VariableType::Sql(sql_type));
+            }
+            self.parser.at = start;
+        }
         match self.parser.sql_type() {
             Ok(sql_type) => Ok(VariableType::Sql(sql_type)),
             Err(error) => {

@@ -803,7 +803,7 @@ fn matched(
             return None;
         }
         score += fit(value, parameter.sql_type)?;
-        *slot = Some(value.clone());
+        *slot = Some(literal_argument(value, parameter.sql_type));
     }
     if let Some(SqlType::Array(element)) = variadic
         && !spread.is_empty()
@@ -825,6 +825,14 @@ fn matched(
     complete.then_some((score, slots))
 }
 
+fn literal_argument(value: &Value, target: SqlType) -> Value {
+    let text = matches!(value, Value::Text(_)) && target != SqlType::Dynamic;
+    if text && convert(value.clone(), target, Conversion::Assignment).is_err() {
+        return convert(value.clone(), target, Conversion::Explicit).unwrap_or_else(|_| value.clone());
+    }
+    value.clone()
+}
+
 fn fit(value: &Value, target: SqlType) -> Option<usize> {
     if target == SqlType::Dynamic {
         return Some(1);
@@ -834,6 +842,11 @@ fn fit(value: &Value, target: SqlType) -> Option<usize> {
         Some(source) if source.without_modifier() == target.without_modifier() => Some(3),
         Some(_) => convert(value.clone(), target, Conversion::Assignment)
             .ok()
+            .or_else(|| {
+                matches!(value, Value::Text(_))
+                    .then(|| convert(value.clone(), target, Conversion::Explicit).ok())
+                    .flatten()
+            })
             .map(|_| 0),
     }
 }
