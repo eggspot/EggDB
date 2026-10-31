@@ -1,0 +1,2 @@
+darwin embedded c_api_library_bytes 6693296
+darwin full eggdb_binary_bytes 10865144
