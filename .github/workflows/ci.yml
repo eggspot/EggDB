@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver and confluent-kafka (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka and pika (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -324,6 +324,28 @@ jobs:
           assert values == [f"event {n}" for n in range(5)], values
           consumer.close()
           print("confluent-kafka: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import pika
+          parameters = pika.ConnectionParameters("127.0.0.1", 5673, credentials=pika.PlainCredentials("eggdb", "ci-resp-password"))
+          connection = pika.BlockingConnection(parameters)
+          channel = connection.channel()
+          channel.confirm_delivery()
+          channel.queue_declare(queue="jobs")
+          for n in range(3):
+              channel.basic_publish(exchange="", routing_key="jobs", body=f"job {n}".encode())
+          received = []
+          for method, properties, body in channel.consume("jobs", inactivity_timeout=2):
+              if method is None:
+                  break
+              received.append(body.decode())
+              channel.basic_ack(method.delivery_tag)
+              if len(received) == 3:
+                  break
+          assert received == ["job 0", "job 1", "job 2"], received
+          channel.cancel()
+          connection.close()
+          print("pika over AMQP 0-9-1: passed")
           PY
 
   redis-compare:

@@ -12,6 +12,7 @@ pub(super) const ES_COLLECTIONS: &str = "es";
 pub(super) const MONGO_COLLECTIONS: &str = "mongo";
 pub(super) const GRAPH_COLLECTIONS: &str = "graph";
 pub(super) const KAFKA_COLLECTIONS: &str = "kafka";
+pub(super) const QUEUE_COLLECTIONS: &str = "queue";
 
 fn failed(error: &eggdb::Error) -> String {
     format!("ERR {error}")

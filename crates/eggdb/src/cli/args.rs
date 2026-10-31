@@ -217,6 +217,7 @@ impl CommandName {
             | OptionName::BoltListen
             | OptionName::CdcWebhook
             | OptionName::KafkaListen
+            | OptionName::AmqpListen
             | OptionName::RespMaxMemory
             | OptionName::RespEviction
             | OptionName::McpTokenFile
@@ -369,6 +370,7 @@ enum OptionName {
     BoltListen,
     CdcWebhook,
     KafkaListen,
+    AmqpListen,
     RespMaxMemory,
     RespEviction,
     McpTokenFile,
@@ -450,6 +452,7 @@ impl OptionName {
             b"bolt-listen" => Self::BoltListen,
             b"cdc-webhook" => Self::CdcWebhook,
             b"kafka-listen" => Self::KafkaListen,
+            b"amqp-listen" => Self::AmqpListen,
             b"resp-max-memory" => Self::RespMaxMemory,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
@@ -700,6 +703,7 @@ pub(crate) struct ServeOptions {
     pub(crate) bolt_listen: Option<SocketAddr>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) kafka_listen: Option<SocketAddr>,
+    pub(crate) amqp_listen: Option<SocketAddr>,
     pub(crate) resp_max_memory: Option<u64>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
@@ -1140,6 +1144,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::MemcachedListen => {
                 request.serve.memcached_listen =
                     Some(parse_listen(&option.spelled, value, 11211).map_err(usage)?);
+            }
+            OptionName::AmqpListen => {
+                request.serve.amqp_listen =
+                    Some(parse_listen(&option.spelled, value, 5672).map_err(usage)?);
             }
             OptionName::KafkaListen => {
                 request.serve.kafka_listen =

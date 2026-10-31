@@ -220,6 +220,27 @@ impl Session<'_> {
             advertised: kafka_listener.as_ref().and_then(|listener| listener.local_addr().ok()).unwrap_or(address),
             max_connections: config.max_connections,
         };
+        let amqp_listener = match options.amqp_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--amqp-listen {address}: the AMQP listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for AMQP clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let amqp_config = eggdb_amqp::ServerConfig {
+            user: config.user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections: config.max_connections,
+        };
         let bolt_config = eggdb_bolt::ServerConfig {
             user: config.user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
@@ -469,6 +490,14 @@ impl Session<'_> {
                 db: &db,
                 prefix: super::serve_resp::KAFKA_COLLECTIONS,
             };
+            let queue_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::QUEUE_COLLECTIONS,
+            };
+            let amqp_server = scope.spawn(|| match &amqp_listener {
+                Some(listener) => eggdb_amqp::serve(&queue_database, listener, &amqp_config, &stop_signals::requested),
+                None => Ok(()),
+            });
             let kafka_server = scope.spawn(|| match &kafka_listener {
                 Some(listener) => eggdb_kafka::serve(&kafka_database, listener, &kafka_config, &stop_signals::requested),
                 None => Ok(()),
@@ -543,6 +572,7 @@ impl Session<'_> {
             let _ = mongo_server.join();
             let _ = bolt_server.join();
             let _ = kafka_server.join();
+            let _ = amqp_server.join();
             let _ = job_scheduler.join();
             let _ = cdc_delivery.join();
             postgresql
