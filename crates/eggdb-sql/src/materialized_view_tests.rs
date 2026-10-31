@@ -58,7 +58,7 @@ fn materialized_views_hold_results_until_refreshed() {
     );
     assert_eq!(
         run(&mut session, "SELECT count(*) FROM empty_until_refreshed"),
-        run(&mut session, "SELECT 0::bigint")
+        run(&mut session, "SELECT 0::bigint AS count")
     );
     run(
         &mut session,

@@ -2525,7 +2525,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             Statement::Select(select) => self.read(|reader, tables| {
                 binding.select(reader, tables, select)?;
-                if dialect == Dialect::PostgreSql
+                if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::select_calls_marked_routine(select))
                 {
@@ -2541,7 +2541,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Query(query) => self.read(|reader, tables| {
                 binding.query(reader, tables, query)?;
-                if dialect == Dialect::PostgreSql
+                if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::query_calls_marked_routine(query))
                 {
@@ -2675,7 +2675,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Insert(insert) => self.write_firing_triggers("INSERT", |writer, tables| {
                 binding.insert(writer, tables, insert)?;
-                if dialect == Dialect::PostgreSql
+                if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::insert_calls_marked_routine(insert))
                 {
@@ -2685,7 +2685,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Update(update) => self.write_firing_triggers("UPDATE", |writer, tables| {
                 binding.update(writer, tables, update)?;
-                if dialect == Dialect::PostgreSql
+                if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::exprs_call_marked_routine(
                             crate::execute::update_exprs(update),
@@ -2697,7 +2697,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }),
             Statement::Delete(delete) => self.write_firing_triggers("DELETE", |writer, tables| {
                 binding.delete(writer, tables, delete)?;
-                if dialect == Dialect::PostgreSql
+                if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::exprs_call_marked_routine(
                             crate::execute::delete_exprs(delete),

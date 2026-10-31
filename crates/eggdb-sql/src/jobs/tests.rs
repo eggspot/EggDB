@@ -132,7 +132,7 @@ fn pg_cron_jobs_run_when_due_and_record_their_runs() {
     assert_eq!(run_due_jobs(&store, at(10)).unwrap().succeeded, 1);
     assert_eq!(
         run(&mut session, "SELECT sum(at) FROM ticks"),
-        run(&mut session, "SELECT 4::bigint")
+        run(&mut session, "SELECT 4::bigint AS sum")
     );
     assert_eq!(
         run(

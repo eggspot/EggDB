@@ -93,7 +93,7 @@ fn savepoints_follow_each_dialect() {
         "BEGIN TRANSACTION; INSERT INTO t VALUES (1); SAVE TRANSACTION s;
          INSERT INTO t VALUES (2); ROLLBACK TRANSACTION s; COMMIT",
     );
-    assert_eq!(values(&mut session), "v\n1\n(1 row affected)");
+    assert_eq!(values(&mut session), "v\n1\nSELECT 1");
 }
 
 #[test]

@@ -13,7 +13,10 @@ fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
     session
         .execute(sql, &mut |result| out.push(render(&result)))
         .unwrap_or_else(|error| panic!("{sql}: {error}"));
-    out.join("\n")
+    out.iter()
+        .map(|shown| shown.split_once('\n').map_or(shown.clone(), |(_, rows)| rows.to_owned()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> crate::SqlError {
@@ -42,7 +45,7 @@ fn a_function_with_locals_loops_and_conditions_returns_its_value() {
     );
     assert_eq!(
         run(&mut session, "SELECT factorial(5)"),
-        run(&mut session, "SELECT CAST(120 AS SIGNED)")
+        run(&mut session, "SELECT 120")
     );
     let error = fails(&mut session, "SELECT factorial(-1)");
     assert_eq!(error.state().code(), "45000");

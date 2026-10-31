@@ -84,6 +84,6 @@ fn other_dialects_write_their_own_syntax() {
         .unwrap();
     assert_eq!(
         run(&mut target, "SELECT count(*) FROM people"),
-        run(&mut target, "SELECT 2")
+        run(&mut target, "SELECT 2 AS \"count(*)\"")
     );
 }
