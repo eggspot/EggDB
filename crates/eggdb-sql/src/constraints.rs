@@ -330,6 +330,17 @@ pub(crate) struct PreparedChecks {
 }
 
 impl PreparedChecks {
+    pub(crate) fn of_validated(table: &TableDefinition) -> SqlResult<Self> {
+        let mut prepared = Self::of(table)?;
+        prepared.checks.retain(|(position, _)| {
+            table
+                .checks
+                .get(*position)
+                .is_some_and(|check| table.is_validated(&check.name))
+        });
+        Ok(prepared)
+    }
+
     pub(crate) fn of(table: &TableDefinition) -> SqlResult<Self> {
         let mut checks = Vec::with_capacity(table.checks.len());
         for (position, check) in table.checks.iter().enumerate() {

@@ -434,7 +434,7 @@ CREATE TABLE public.events (
     id integer NOT NULL,
     at date NOT NULL
 )
-PARTITION BY RANGE (at);
+PARTITION BY RANGE (at); CREATE TABLE public.events_2024 PARTITION OF public.events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
 
 CREATE TABLE shop.items (
     id bigint NOT NULL,
@@ -548,7 +548,7 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
             report.comments,
             report.rows
         ),
-        (1, 3, 1, 2, 1, 4, 3, 5)
+        (1, 5, 1, 2, 1, 4, 3, 8)
     );
     let skipped: Vec<(u64, &str, &str, Option<u64>)> = report
         .skipped
@@ -566,17 +566,13 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
         skipped,
         [
             (26, "extension", "pg_trgm", None),
-            (38, "function", "public.touch()", None),
-            (64, "table", "public.events", Some(3)),
             (101, "materialized view", "public.counts", None),
-            (134, "trigger", "people_touch on public.people", None),
             (137, "policy", "people_own on public.people", None),
             (138, "row-level security", "public.people", None),
         ]
     );
-    assert_eq!(report.skipped[2].detail.as_deref(), Some("partitioned"));
-    assert_eq!(report.tables_skipped, 1);
-    assert_eq!(report.rows_skipped, 3);
+    assert_eq!(report.tables_skipped, 0);
+    assert_eq!(report.rows_skipped, 0);
     let consequences: Vec<(u64, &str)> = report
         .consequences
         .iter()
@@ -605,6 +601,8 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
         [
             ("public.people", 2),
             ("public.feelings", 1),
+            ("public.events", 3),
+            ("public.events_2024", 0),
             ("shop.items", 2)
         ]
     );
@@ -794,11 +792,6 @@ fn every_kind_eggdb_cannot_create_yet_is_reported_with_its_name() {
             "public.child",
         ),
         (
-            "CREATE TABLE public.part PARTITION OF public.events FOR VALUES FROM (1) TO (2);",
-            "table",
-            "public.part",
-        ),
-        (
             "CREATE COLLATION public.c (provider = icu, locale = 'und');",
             "collation",
             "public.c",
@@ -903,9 +896,9 @@ fn inserts_and_column_inserts_restore_as_copy_does() {
 }
 
 #[test]
-fn a_dialect_other_than_postgresql_is_refused() {
+fn a_dialect_without_a_dump_format_is_refused() {
     let store = MemoryStore::default();
-    let mut session = Session::with_dialect(&store, crate::Dialect::MySql);
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
     let mut input: &[u8] = b"CREATE TABLE t (a int);\n";
     let report = restore_dump(
         &mut session,
@@ -974,7 +967,7 @@ CREATE TABLE public.m (
     id integer NOT NULL,
     at date NOT NULL
 )
-PARTITION BY RANGE (at);
+INHERITS (public.inherit);
 CREATE TABLE public.m_2024 (
     id integer NOT NULL,
     at date NOT NULL
@@ -1041,9 +1034,16 @@ fn identity_columns_of_skipped_tables_and_their_setval_are_consequences() {
         .collect();
     assert_eq!(
         consequences,
-        [(19, "table public.m"), (58, "sequence public.m_id_seq")]
+        [
+            (19, "table public.m"),
+            (44, "table public.m"),
+            (58, "sequence public.m_id_seq")
+        ]
     );
-    assert_eq!(report.skipped[1].kind, "partition");
+    assert_eq!(
+        report.skipped.iter().map(|object| (object.kind.as_str(), object.name.as_str())).collect::<Vec<_>>(),
+        [("table", "public.m")]
+    );
     assert_eq!((report.tables_skipped, report.rows_skipped), (1, 0));
     assert_eq!((report.tables, report.constraints), (4, 3));
     assert_eq!(

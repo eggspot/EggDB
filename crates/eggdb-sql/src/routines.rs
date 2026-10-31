@@ -408,11 +408,11 @@ pub(crate) fn resolve_trigger_function(
     tables: &mut TableCache,
     written: &str,
 ) -> SqlResult<Option<Arc<RoutineDefinition>>> {
-    let internal = match written.split_once('.') {
-        Some((schema, name)) => qualified(schema, name),
-        None => written.to_owned(),
+    let named = match written.split_once('.') {
+        Some((schema, name)) => of_name(reader, tables, &qualified(schema, name))?,
+        None => resolve(reader, tables, written)?,
     };
-    let Some(named) = resolve(reader, tables, &internal)? else {
+    let Some(named) = named else {
         return Ok(None);
     };
     Ok(named

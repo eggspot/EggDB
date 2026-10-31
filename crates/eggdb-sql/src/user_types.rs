@@ -851,7 +851,10 @@ pub(crate) fn create_type(
     writer: &mut dyn KeyValueWrite,
     create: &CreateType,
 ) -> SqlResult<QueryResult> {
-    crate::constraints::check_identifier(&create.name)?;
+    crate::constraints::check_identifier(&crate::ast::Name {
+        text: crate::schemas::base_name(&create.name.text).to_owned(),
+        position: create.name.position,
+    })?;
     let internal = crate::schemas::creation_name(writer, &create.name)?;
     let registry = Registry::load(writer)?;
     check_new_name(writer, &registry, &internal).map_err(|error| error.at(create.name.position))?;
@@ -1001,7 +1004,10 @@ pub(crate) fn create_domain(
     writer: &mut dyn KeyValueWrite,
     create: &CreateDomain,
 ) -> SqlResult<QueryResult> {
-    crate::constraints::check_identifier(&create.name)?;
+    crate::constraints::check_identifier(&crate::ast::Name {
+        text: crate::schemas::base_name(&create.name.text).to_owned(),
+        position: create.name.position,
+    })?;
     let internal = crate::schemas::creation_name(writer, &create.name)?;
     let registry = Registry::load(writer)?;
     check_new_name(writer, &registry, &internal).map_err(|error| error.at(create.name.position))?;

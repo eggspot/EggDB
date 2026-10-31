@@ -346,7 +346,7 @@ fn rebuild(
     if has_rows(writer, &new)? {
         return Err(crate::encoding::corrupt("table numbering"));
     }
-    let checks = PreparedChecks::of(&new)?;
+    let checks = PreparedChecks::of_validated(&new)?;
     let prefix = rows_prefix(old.id);
     let end = prefix_end(&prefix);
     let mut memory = WorkMemory::new();
