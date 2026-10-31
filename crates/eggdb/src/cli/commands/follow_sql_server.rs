@@ -16,6 +16,7 @@ const PASSWORD_VARIABLE: &str = "SQLCMDPASSWORD";
 const DEFAULT_POLL_SECONDS: u64 = 5;
 const ROWS_PER_INSERT: usize = 200;
 const STOP_CHECK: Duration = Duration::from_millis(200);
+const INVALID_OBJECT_NAME: u32 = 208;
 
 struct SourceColumn {
     name: String,
@@ -133,10 +134,13 @@ impl Session<'_> {
                 if source.encrypted() { "encrypted" } else { "not encrypted" }
             ),
         );
-        let tracking = first_rows(query(
-            &mut source,
+        let tracking = match source.batch(
             "SELECT CAST(retention_period AS nvarchar(max)) FROM sys.change_tracking_databases WHERE database_id = DB_ID()",
-        )?);
+        ) {
+            Ok(results) => first_rows(results),
+            Err(TdsClientError::Server { number: INVALID_OBJECT_NAME, .. }) => Vec::new(),
+            Err(error) => return Err(tds_failure(&target, &error)),
+        };
         if tracking.is_empty() {
             return Err(Failure::Database {
                 message: format!(
