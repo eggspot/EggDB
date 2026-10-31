@@ -331,6 +331,7 @@ pub(crate) struct Settings {
     pub(crate) sqlserver: SqlServerState,
     pub(crate) oracle_user_schema: Option<String>,
     pub(crate) checked_role: Option<String>,
+    pub(crate) database_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -384,6 +385,7 @@ impl Default for Settings {
             sqlserver: SqlServerState::default(),
             oracle_user_schema: None,
             checked_role: None,
+            database_names: Vec::new(),
         }
     }
 }

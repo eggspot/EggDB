@@ -164,13 +164,17 @@ impl Session<'_> {
                 create: self.request.create,
             }
         };
-        let db = self.open(access, None)?;
+        let mut directory = self.directory_databases(access)?;
+        let (db, served_name) = if directory.is_empty() {
+            (self.open(access, None)?, database_name_of(&self.request.file))
+        } else {
+            let (name, first) = directory.remove(0);
+            (super::Opened::Owned(Box::new(first)), name)
+        };
         let config = ServerConfig {
             user,
             verifier,
-            database: options
-                .database
-                .unwrap_or_else(|| database_name_of(&self.request.file)),
+            database: options.database.unwrap_or(served_name),
             max_connections: options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
@@ -197,6 +201,12 @@ impl Session<'_> {
         self.out.finish()?;
         let _ = stop_signals::watch();
         let store = DatabaseStore(&db);
+        let other_stores: Vec<(String, DatabaseStore<'_>)> = directory
+            .iter()
+            .map(|(name, other)| (name.clone(), DatabaseStore(other)))
+            .collect();
+        let mut served: Vec<(&str, &DatabaseStore<'_>)> = vec![(config.database.as_str(), &store)];
+        served.extend(other_stores.iter().map(|(name, other)| (name.as_str(), other)));
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
@@ -205,8 +215,8 @@ impl Session<'_> {
                 let log = move |line: &str| {
                     let _ = events.send(stamped(line));
                 };
-                eggdb_pgwire::serve_with_local(
-                    &store,
+                eggdb_pgwire::serve_databases(
+                    &served,
                     &listener,
                     local_listener.as_ref(),
                     &config,
@@ -287,8 +297,52 @@ impl Session<'_> {
                 self.out.text("stopped\n");
             }
         }
+        drop(other_stores);
+        for (_, other) in directory {
+            self.close_database(other)?;
+        }
         self.close(db)?;
         Ok(Exit::Done)
+    }
+
+    fn directory_databases(&self, access: Access) -> Result<Vec<(String, eggdb::Database)>, Failure> {
+        if !self.request.file.is_dir() {
+            return Ok(Vec::new());
+        }
+        let entries = std::fs::read_dir(&self.request.file).map_err(|error| {
+            Failure::database(
+                format!("cannot list the data directory {}: {error}", self.file_display),
+                Exit::DatabaseError,
+            )
+        })?;
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().is_some_and(|extension| extension == "eggdb"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            return Err(Failure::usage(
+                format!(
+                    "the data directory {} holds no .eggdb files; create one with eggdb sql {}/<name>.eggdb --create",
+                    self.file_display, self.file_display
+                ),
+                Some(CommandName::Serve),
+            ));
+        }
+        paths
+            .into_iter()
+            .map(|path| {
+                eggdb::Database::open_with(&path, self.database_options(access, None))
+                    .map(|db| (database_name_of(&path), db))
+                    .map_err(|error| {
+                        Failure::database(
+                            format!("cannot open {}: {error}", path.display()),
+                            Exit::DatabaseError,
+                        )
+                    })
+            })
+            .collect()
     }
 
     fn listener(

@@ -641,6 +641,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
+    /// Names every database the server serves, which `pg_database` lists beside this one.
+    pub fn set_database_names(&mut self, names: Vec<String>) {
+        Arc::make_mut(&mut self.settings).database_names = names;
+    }
+
     /// Names a stored role this session runs as, like [`Session::identify`], and checks its
     /// privileges from now on unless it is a superuser. Fails with `28000` when the role does not
     /// exist or may not log in.

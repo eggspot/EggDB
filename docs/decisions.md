@@ -208,3 +208,4 @@ its full title with its status.
 - [D181](decisions/D181.md) SQLite's C API as `libsqlite3` (`eggdb-sqlite3`) with our own `sqlite3.h`, on the SQLite dialect
 - [D182](decisions/D182.md) Official drivers as thin layers over the C API: Python DB-API through ctypes and a .NET ADO.NET provider through P/Invoke, tested in CI
 - [D183](decisions/D183.md) Roles, users and table privileges stored in the database (SCRAM verifiers in `pg_authid`'s form, grants per table and grantee), checked where names are resolved; embedded sessions and the server's own user stay superusers
+- [D184](decisions/D184.md) Several databases per server: `eggdb serve <directory>` serves each `*.eggdb` file by its stem, chosen by the startup packet's database name and listed in `pg_database`

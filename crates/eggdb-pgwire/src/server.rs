@@ -182,6 +182,27 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_databases(
+        &[(config.database.as_str(), store)],
+        listener,
+        local,
+        config,
+        stop,
+        log,
+    )
+}
+
+/// [`serve_with_local`] for several databases, each reached by its name in the startup
+/// packet (`psql -d <name>`, `\c <name>`); `pg_database` lists them all. The first is
+/// [`ServerConfig::database`]'s.
+pub fn serve_databases<S: KeyValueStore + Sync>(
+    databases: &[(&str, &S)],
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     listener.set_nonblocking(true)?;
     if let Some(local) = local {
         local.set_nonblocking(true)?;
@@ -216,7 +237,7 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
                         .name(format!("eggdb-pg-{process_id}"))
                         .spawn_scoped(scope, move || {
                             let _slot = slot;
-                            run_connection(stream, shared, store, process_id);
+                            run_connection(stream, shared, databases, process_id);
                         });
                     if let Err(error) = started {
                         log(&format!("starting a connection thread failed: {error}"));
@@ -272,14 +293,14 @@ fn accept_next(
 fn run_connection<S: KeyValueStore>(
     stream: ServerConnection,
     shared: &Shared<'_>,
-    store: &S,
+    databases: &[(&str, &S)],
     process_id: u32,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;
     };
-    serve_connection(wire, shared, store, process_id as i32);
+    serve_connection(wire, shared, databases, process_id as i32);
 }
 
 fn refuse_connection(stream: ServerConnection, shared: &Shared<'_>) {

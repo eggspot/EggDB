@@ -192,6 +192,40 @@ impl TestServer {
         }
     }
 
+    pub fn start_databases(names: &'static [&'static str]) -> Self {
+        let listener: TcpListener =
+            eggdb_pgwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let logged = Arc::new(Mutex::new(Vec::new()));
+        let config = ServerConfig {
+            user: USER.to_owned(),
+            verifier: ScramVerifier::derive(PASSWORD.as_bytes(), b"0123456789abcdef", 4096),
+            database: names[0].to_owned(),
+            max_connections: 8,
+            authentication_timeout: Duration::from_secs(5),
+            tls: None,
+        };
+        let thread_stop = Arc::clone(&stop);
+        let thread_logged = Arc::clone(&logged);
+        let thread = std::thread::spawn(move || {
+            let stores: Vec<SharedMemoryStore> =
+                names.iter().map(|_| SharedMemoryStore::default()).collect();
+            let databases: Vec<(&str, &SharedMemoryStore)> =
+                names.iter().copied().zip(stores.iter()).collect();
+            let stop = move || thread_stop.load(Ordering::Acquire);
+            let log = move |line: &str| thread_logged.lock().unwrap().push(line.to_owned());
+            eggdb_pgwire::serve_databases(&databases, &listener, None, &config, &stop, &log)
+                .unwrap()
+        });
+        Self {
+            address,
+            stop,
+            logged,
+            thread: Some(thread),
+        }
+    }
+
     pub fn stop(&mut self) -> usize {
         self.stop.store(true, Ordering::Release);
         self.thread
@@ -422,6 +456,18 @@ impl Client {
         );
         assert_eq!(&message.body[4..], expected.as_bytes());
         self.read().expect("authentication ok")
+    }
+
+    pub fn login_as(
+        address: SocketAddr,
+        user: &str,
+        password: &str,
+        database: &str,
+    ) -> (Self, Message) {
+        let mut client = Self::connect(address);
+        client.send_startup(196_608, &[("user", user), ("database", database)]);
+        let outcome = client.authenticate(password);
+        (client, outcome)
     }
 
     pub fn login(address: SocketAddr) -> (Self, Vec<Message>) {

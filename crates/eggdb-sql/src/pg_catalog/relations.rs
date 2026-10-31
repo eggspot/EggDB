@@ -166,7 +166,7 @@ pub(crate) fn build(
         CatalogRelation::Constraint => constraint_rows(snapshot),
         CatalogRelation::AttrDef => attrdef_rows(snapshot),
         CatalogRelation::Description => description_rows(snapshot),
-        CatalogRelation::Database => vec![database_row(snapshot)],
+        CatalogRelation::Database => database_rows(snapshot),
         CatalogRelation::Roles => role_rows(snapshot),
         CatalogRelation::Am => am_rows(),
         CatalogRelation::Collation => collation_rows(),
@@ -1309,10 +1309,27 @@ fn description_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
-fn database_row(snapshot: &CatalogSnapshot) -> Vec<Value> {
+fn other_database_oid(name: &str) -> u32 {
+    let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    0x3000_0000 + hash % 0x1000_0000
+}
+
+fn database_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = vec![database_row(&snapshot.database, oids::DATABASE)];
+    for name in &snapshot.settings.database_names {
+        if name != &snapshot.database {
+            rows.push(database_row(name, other_database_oid(name)));
+        }
+    }
+    rows
+}
+
+fn database_row(name: &str, database: u32) -> Vec<Value> {
     Row::new(CatalogRelation::Database)
-        .set("oid", oid(oids::DATABASE))
-        .set("datname", text(&snapshot.database))
+        .set("oid", oid(database))
+        .set("datname", text(name))
         .set("datdba", oid(oids::SESSION_USER))
         .set("encoding", int(i64::from(oids::UTF8_ENCODING)))
         .set("datlocprovider", text("c"))

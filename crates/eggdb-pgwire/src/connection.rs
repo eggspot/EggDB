@@ -696,7 +696,7 @@ pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
 pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     mut wire: Wire<'a>,
     shared: &'a Shared<'a>,
-    store: &'s S,
+    databases: &[(&str, &'s S)],
     process_id: i32,
 ) {
     let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
@@ -712,8 +712,15 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let Some(startup) = read_startup(&mut wire, shared) else {
         return;
     };
+    let chosen = databases
+        .iter()
+        .find(|(name, _)| *name == startup.database)
+        .map(|(_, store)| *store);
+    let Some(&(_, first)) = databases.first() else {
+        return;
+    };
     let stored_role = (startup.user != shared.config.user)
-        .then(|| stored_role_verifier(store, &startup.user))
+        .then(|| stored_role_verifier(chosen.unwrap_or(first), &startup.user))
         .flatten();
     let is_stored_role = stored_role.is_some();
     match authenticate(&mut wire, shared, &startup.user, stored_role) {
@@ -722,23 +729,26 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     }
     drop(login_slot);
     wire.deadline = None;
-    let mut session = Session::new(store);
-    if startup.database != shared.config.database {
+    let Some(store) = chosen else {
         (shared.log)(&format!(
             "{}  database \"{}\" does not exist",
             wire.peer(),
             printable(&startup.database)
         ));
+        let served: Vec<String> = databases.iter().map(|(name, _)| format!("\"{name}\"")).collect();
         fatal(
             &mut wire,
             SqlState::INVALID_CATALOG_NAME,
             &format!(
-                "database \"{}\" does not exist; this server serves \"{}\"",
-                startup.database, shared.config.database
+                "database \"{}\" does not exist; this server serves {}",
+                startup.database,
+                served.join(", ")
             ),
         );
         return;
-    }
+    };
+    let mut session = Session::new(store);
+    session.set_database_names(databases.iter().map(|(name, _)| (*name).to_owned()).collect());
     if is_stored_role {
         if let Err(error) = session.identify_role(&startup.user, &startup.database) {
             fatal(&mut wire, error.state(), error.message());
