@@ -541,6 +541,16 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
                 .set("passwd", Value::Text("********".to_owned()))
                 .done(),
         ],
+        MonitoringRelation::PartitionedTable => super::relations::partitioned_table_rows(snapshot)
+            .into_iter()
+            .map(|(relation, strategy, columns)| {
+                row()
+                    .set("partrelid", Value::Oid(relation))
+                    .set("partstrat", Value::Text(strategy.to_owned()))
+                    .set("partnatts", Value::SmallInt(i16::try_from(columns).unwrap_or(i16::MAX)))
+                    .done()
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }

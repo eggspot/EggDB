@@ -299,10 +299,14 @@ impl<'a> Resolver<'a> {
         if self.selects > MAX_QUERIES {
             return Err(too_many_queries(0));
         }
-        if let Some(from) = &mut select.from {
-            self.walk_reference(&mut from.first, ctes)?;
-            for join in &mut from.joins {
-                self.walk_reference(&mut join.table, ctes)?;
+        {
+            let Select { from, filter, .. } = &mut *select;
+            if let Some(from) = from {
+                let filter = filter.as_ref();
+                self.walk_reference(&mut from.first, ctes, filter)?;
+                for join in &mut from.joins {
+                    self.walk_reference(&mut join.table, ctes, filter)?;
+                }
             }
         }
         if !self.walk_expressions {
@@ -381,6 +385,7 @@ impl<'a> Resolver<'a> {
         &mut self,
         reference: &mut TableReference,
         ctes: &mut Vec<String>,
+        filter: Option<&Expr>,
     ) -> SqlResult<()> {
         if let Some(derived) = &mut reference.derived {
             return self.nested_query(&mut derived.query, ctes, reference.name.position);
@@ -421,8 +426,143 @@ impl<'a> Resolver<'a> {
         }
         match relation {
             Some(Relation::View(view)) => self.expand(reference, view),
-            _ => Ok(()),
+            Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter),
+            None => Ok(()),
         }
+    }
+
+    fn expand_partitioned(
+        &mut self,
+        reference: &mut TableReference,
+        table: &crate::encoding::TableDefinition,
+        filter: Option<&Expr>,
+    ) -> SqlResult<()> {
+        let catalog = crate::partitions::catalog(self.reader, self.tables)?;
+        if catalog.is_empty() || catalog.key_of(&table.name).is_none() {
+            return Ok(());
+        }
+        let position = reference.name.position;
+        let label = reference
+            .alias
+            .clone()
+            .unwrap_or_else(|| base_name(&reference.name.text).to_owned());
+        let qualifiers = [label.as_str(), base_name(&table.name)];
+        let mut leaves = Vec::new();
+        self.surviving_leaves(&catalog, table, filter, &qualifiers, 0, &mut leaves)?;
+        if leaves.is_empty() {
+            return Ok(());
+        }
+        reference.alias = Some(label);
+        if let [only] = leaves.as_slice() {
+            reference.name.text = only.clone();
+            return Ok(());
+        }
+        let items: Vec<SelectItem> = table
+            .columns
+            .iter()
+            .map(|column| SelectItem::Expr {
+                expr: Expr {
+                    kind: crate::ast::ExprKind::Column {
+                        qualifier: None,
+                        name: column.name.clone(),
+                    },
+                    position,
+                },
+                alias: None,
+            })
+            .collect();
+        let dialect = crate::constraints::current_dialect();
+        let branch = |leaf: &String| {
+            crate::ast::SetExpr::Select(Box::new(Select {
+                distinct: false,
+                items: items.clone(),
+                from: Some(crate::ast::FromClause {
+                    first: TableReference::named(
+                        Name {
+                            text: leaf.clone(),
+                            position,
+                        },
+                        None,
+                    ),
+                    joins: Vec::new(),
+                }),
+                filter: None,
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                source_row_limit: None,
+            }))
+        };
+        let mut body = branch(&leaves[0]);
+        for leaf in &leaves[1..] {
+            body = crate::ast::SetExpr::Operation(Box::new(crate::ast::SetOperation {
+                operator: crate::ast::SetOperator::Union,
+                all: true,
+                left: body,
+                right: branch(leaf),
+                dialect,
+                position,
+            }));
+        }
+        let mut query = Query {
+            with: Vec::new(),
+            recursive: false,
+            body,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            position,
+        };
+        let walk_expressions = std::mem::replace(&mut self.walk_expressions, true);
+        let walked = self.walk_query(&mut query, &mut Vec::new());
+        self.walk_expressions = walk_expressions;
+        walked?;
+        reference.derived = Some(Box::new(DerivedTable {
+            query,
+            column_names: table
+                .columns
+                .iter()
+                .map(|column| Name {
+                    text: column.name.clone(),
+                    position,
+                })
+                .collect(),
+            dialect,
+            lateral: false,
+        }));
+        Ok(())
+    }
+
+    fn surviving_leaves(
+        &mut self,
+        catalog: &crate::partitions::PartitionCatalog,
+        table: &crate::encoding::TableDefinition,
+        filter: Option<&Expr>,
+        qualifiers: &[&str],
+        depth: usize,
+        leaves: &mut Vec<String>,
+    ) -> SqlResult<()> {
+        if depth > MAX_QUERY_NESTING {
+            return Err(crate::encoding::corrupt("partition tree"));
+        }
+        let Some(partitioned) = crate::partitions::Partitioned::of(catalog, table)? else {
+            leaves.push(table.name.clone());
+            return Ok(());
+        };
+        let children: Vec<String> = partitioned
+            .surviving(filter, qualifiers)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for child in children {
+            let Some(child_table) = self.tables.table(self.reader, &child)? else {
+                return Err(crate::encoding::corrupt("partition tree"));
+            };
+            self.surviving_leaves(catalog, &child_table, filter, qualifiers, depth + 1, leaves)?;
+        }
+        Ok(())
     }
 
     fn expand(

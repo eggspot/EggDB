@@ -31,7 +31,8 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         | "pg_get_functiondef"
         | "pg_get_function_arguments"
         | "pg_get_function_identity_arguments"
-        | "pg_get_function_result" => &[OID],
+        | "pg_get_function_result"
+        | "pg_get_partkeydef" => &[OID],
         "pg_get_statisticsobjdef_columns" => &[OID],
         "pg_get_expr" => &[NODE_TREE, OID, BOOLEAN],
         "pg_get_constraintdef" | "pg_get_viewdef" | "pg_get_triggerdef" | "pg_get_ruledef" => {
@@ -70,7 +71,8 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_get_functiondef"
         | "pg_get_function_arguments"
         | "pg_get_function_identity_arguments"
-        | "pg_get_function_result" => SqlType::Text,
+        | "pg_get_function_result"
+        | "pg_get_partkeydef" => SqlType::Text,
         "to_regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
         "to_regtype" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
         _ => return None,
@@ -243,6 +245,7 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
             object,
             pretty(rest.first()),
         )),
+        ("pg_get_partkeydef", [_]) => text(snapshot.partition_key_definition(object)),
         ("pg_get_triggerdef", _) => text(
             snapshot
                 .trigger(object)

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 21] = [
+const SNAPSHOT_FUNCTIONS: [&str; 22] = [
     "pg_get_serial_sequence",
     "pg_get_functiondef",
     "pg_get_function_arguments",
@@ -33,6 +33,7 @@ const SNAPSHOT_FUNCTIONS: [&str; 21] = [
     "pg_get_indexdef",
     "pg_get_viewdef",
     "pg_get_triggerdef",
+    "pg_get_partkeydef",
     "obj_description",
     "col_description",
     "regtype",
@@ -378,6 +379,7 @@ pub(crate) struct CatalogSnapshot {
     rows: RefCell<HashMap<CatalogRelation, Rc<Vec<Vec<Value>>>>>,
     sqlserver: OnceCell<crate::sqlserver_catalog::SqlServerObjects>,
     pub(crate) user_types: Arc<crate::user_types::Registry>,
+    pub(crate) partitions: crate::partitions::PartitionCatalog,
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -595,6 +597,7 @@ impl CatalogSnapshot {
             rows: RefCell::new(HashMap::new()),
             sqlserver: OnceCell::new(),
             user_types,
+            partitions: crate::partitions::load(reader)?,
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();
@@ -884,6 +887,23 @@ impl CatalogSnapshot {
         self.triggers
             .iter()
             .any(|trigger| trigger.relation == relation)
+    }
+
+    pub(crate) fn partition_key_definition(&self, oid: u32) -> Option<String> {
+        let table = self.relation(oid)?.table()?;
+        let key = self.partitions.key_of(&table.name)?;
+        Some(crate::partitions::key_definition(key))
+    }
+
+    pub(crate) fn partition_bound_definition(&self, table: &TableDefinition) -> Option<String> {
+        let (parent, bound) = self.partitions.parent_of(&table.name)?;
+        let parent = self
+            .table_named(parent)
+            .and_then(|at| self.relations.get(at))
+            .and_then(RelationEntry::table)?;
+        let key = self.partitions.key_of(&parent.name)?;
+        let numeric = crate::partitions::numeric_key_columns(parent, key);
+        Some(crate::partitions::bound_definition(bound, &numeric))
     }
 
     pub(crate) fn table_named(&self, internal: &str) -> Option<usize> {

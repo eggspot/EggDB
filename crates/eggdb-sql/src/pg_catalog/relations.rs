@@ -174,8 +174,8 @@ pub(crate) fn build(
         CatalogRelation::Depend => depend_rows(snapshot),
         CatalogRelation::Tablespace => tablespace_rows(),
         CatalogRelation::Trigger => trigger_rows(snapshot),
-        CatalogRelation::Inherits
-        | CatalogRelation::Policy
+        CatalogRelation::Inherits => inherits_rows(snapshot),
+        CatalogRelation::Policy
         | CatalogRelation::StatisticExt
         | CatalogRelation::Publication
         | CatalogRelation::PublicationRel
@@ -260,6 +260,51 @@ fn identity_code(generation: Option<IdentityGeneration>) -> &'static str {
     }
 }
 
+fn table_oid(snapshot: &CatalogSnapshot, internal: &str) -> Option<u32> {
+    snapshot
+        .table_named(internal)
+        .and_then(|at| snapshot.relations.get(at))
+        .map(|entry| entry.oid)
+}
+
+fn inherits_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (child, record) in snapshot.partitions.every() {
+        let Some((parent, _)) = &record.parent else {
+            continue;
+        };
+        let (Some(child), Some(parent)) = (table_oid(snapshot, child), table_oid(snapshot, parent))
+        else {
+            continue;
+        };
+        rows.push(
+            Row::new(CatalogRelation::Inherits)
+                .set("inhrelid", oid(child))
+                .set("inhparent", oid(parent))
+                .set("inhseqno", int(1))
+                .set("inhdetachpending", flag(false))
+                .done(),
+        );
+    }
+    rows
+}
+
+pub(crate) fn partitioned_table_rows(snapshot: &CatalogSnapshot) -> Vec<(u32, &'static str, i64)> {
+    snapshot
+        .partitions
+        .every()
+        .filter_map(|(table, record)| {
+            let key = record.key.as_ref()?;
+            let strategy = match key.strategy {
+                crate::partitions::PartitionStrategy::Range => "r",
+                crate::partitions::PartitionStrategy::List => "l",
+                crate::partitions::PartitionStrategy::Hash => "h",
+            };
+            Some((table_oid(snapshot, table)?, strategy, key.columns.len() as i64))
+        })
+        .collect()
+}
+
 fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let referenced = referenced_tables(snapshot);
     let mut rows = Vec::with_capacity(snapshot.relations.len());
@@ -275,8 +320,16 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         let mut tuples: f32 = -1.0;
         let mut pages = 0;
         let mut file_node = entry.oid;
+        let mut partition_bound = None;
+        let mut has_subclass = false;
         match &entry.source {
             RelationSource::Table(table) => {
+                if snapshot.partitions.key_of(&table.name).is_some() {
+                    kind = "p";
+                    file_node = 0;
+                    has_subclass = !snapshot.partitions.children_of(&table.name).is_empty();
+                }
+                partition_bound = snapshot.partition_bound_definition(table);
                 natts = table.columns.len();
                 has_index = !table.primary_key.is_empty() || !table.indexes.is_empty();
                 checks = table.checks.len();
@@ -343,12 +396,16 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("relchecks", small(checks as i64))
                 .set("relhasrules", flag(has_rules))
                 .set("relhastriggers", flag(has_triggers))
-                .set("relhassubclass", flag(false))
+                .set("relhassubclass", flag(has_subclass))
                 .set("relrowsecurity", flag(false))
                 .set("relforcerowsecurity", flag(false))
                 .set("relispopulated", flag(true))
                 .set("relreplident", text(replident))
-                .set("relispartition", flag(false))
+                .set("relispartition", flag(partition_bound.is_some()))
+                .set(
+                    "relpartbound",
+                    partition_bound.map_or(Value::Null, Value::Text),
+                )
                 .set("relrewrite", oid(0))
                 .set("relfrozenxid", oid(0))
                 .set("relminmxid", oid(0))

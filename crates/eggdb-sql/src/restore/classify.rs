@@ -572,14 +572,16 @@ fn create_table(tokens: &[Token], mut at: usize) -> Action {
         .is_some_and(|token| token.is_word("partition"))
         && tokens.get(at + 1).is_some_and(|token| token.is_word("of"))
     {
-        return skipped_table(name, "partition", "partitioned tables come later");
+        return Action::Run(Effect::Table {
+            name,
+            constraints: 0,
+        });
     }
     if tokens.get(at).is_some_and(|token| token.is_word("of")) {
         return skipped_table(name, "typed", "typed tables come later");
     }
     let mut depth = 0u32;
     let mut constraints = 0u64;
-    let mut previous: Option<&Token> = None;
     for token in &tokens[at..] {
         if token.is_symbol(b'(') {
             depth += 1;
@@ -587,16 +589,9 @@ fn create_table(tokens: &[Token], mut at: usize) -> Action {
             depth = depth.saturating_sub(1);
         } else if depth == 1 && token.is_word("constraint") {
             constraints += 1;
-        } else if depth == 0 {
-            if token.is_word("inherits") {
-                return skipped_table(name, "inherited", "table inheritance comes later");
-            }
-            if token.is_word("by") && previous.is_some_and(|previous| previous.is_word("partition"))
-            {
-                return skipped_table(name, "partitioned", "partitioned tables come later");
-            }
+        } else if depth == 0 && token.is_word("inherits") {
+            return skipped_table(name, "inherited", "table inheritance comes later");
         }
-        previous = Some(token);
     }
     Action::Run(Effect::Table { name, constraints })
 }
@@ -769,9 +764,6 @@ fn alter_table(tokens: &[Token]) -> Action {
             table,
             "row-level security policies come later",
         );
-    }
-    if kinds.contains(&AlterKind::Partition) {
-        return skip_change("partition", table, "partitioned tables come later");
     }
     if kinds.contains(&AlterKind::Inheritance) {
         return skip_change("inheritance", table, "table inheritance comes later");
