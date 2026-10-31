@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3, nats-py, stomp.py and python-qpid-proton (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3, nats-py, stomp.py, python-qpid-proton and cassandra-driver (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2 paho-mqtt==2.1.0 boto3==1.35.0 nats-py==2.9.0 stomp.py==8.1.2 python-qpid-proton==0.39.0
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2 paho-mqtt==2.1.0 boto3==1.35.0 nats-py==2.9.0 stomp.py==8.1.2 python-qpid-proton==0.39.0 cassandra-driver==3.29.2
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 --cql-listen 127.0.0.1:9043 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -417,6 +417,23 @@ jobs:
           assert bytes(message.body) == b"order 1.0", message.body
           conn.close()
           print("python-qpid-proton over AMQP 1.0: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from cassandra.auth import PlainTextAuthProvider
+          from cassandra.cluster import Cluster
+          from cassandra.io.asyncioreactor import AsyncioConnection
+          cluster = Cluster(["127.0.0.1"], port=9043, protocol_version=4, auth_provider=PlainTextAuthProvider("eggdb", "ci-resp-password"), connection_class=AsyncioConnection)
+          session = cluster.connect()
+          session.execute("CREATE KEYSPACE IF NOT EXISTS shop WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}")
+          session.set_keyspace("shop")
+          session.execute("CREATE TABLE IF NOT EXISTS events (device text, at int, reading double, PRIMARY KEY (device, at))")
+          insert = session.prepare("INSERT INTO events (device, at, reading) VALUES (?, ?, ?)")
+          for at in range(3):
+              session.execute(insert, ("sensor-1", at, at * 1.5))
+          rows = list(session.execute("SELECT at, reading FROM events WHERE device = %s", ("sensor-1",)))
+          assert [(row.at, row.reading) for row in rows] == [(0, 0.0), (1, 1.5), (2, 3.0)], rows
+          cluster.shutdown()
+          print("cassandra-driver over CQL v4: passed")
           PY
 
   redis-compare:

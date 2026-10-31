@@ -269,6 +269,28 @@ impl Session<'_> {
             None => None,
         };
         let sqs_secret = sqs_listener.as_ref().map(|_| password.clone());
+        let cql_listener = match options.cql_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--cql-listen {address}: the CQL listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for CQL clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let cql_config = eggdb_cql::ServerConfig {
+            user: config.user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            database: config.database.clone(),
+            max_connections: config.max_connections,
+        };
         let stomp_listener = match options.stomp_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -496,6 +518,10 @@ impl Session<'_> {
                 std::iter::once((config.database.as_str(), &*db))
                     .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
                     .collect();
+            let cql_server = scope.spawn(|| match &cql_listener {
+                Some(listener) => eggdb_cql::serve(&store, listener, &cql_config, &stop_signals::requested),
+                None => Ok(()),
+            });
             let job_scheduler = scope.spawn(|| super::serve_jobs::run_scheduled_jobs(&store, &stop_signals::requested));
             let cdc_delivery = scope.spawn(|| match &options.cdc_webhook {
                 Some(url) => super::serve_jobs::deliver_changes(&store, &config.database, url, &stop_signals::requested),
@@ -690,6 +716,7 @@ impl Session<'_> {
             let _ = mqtt_server.join();
             let _ = nats_server.join();
             let _ = stomp_server.join();
+            let _ = cql_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = sqs_server.join();
             let _ = job_scheduler.join();

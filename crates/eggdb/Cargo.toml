@@ -34,6 +34,7 @@ eggdb-mqtt = { path = "../eggdb-mqtt" }
 eggdb-nats = { path = "../eggdb-nats" }
 eggdb-sqs = { path = "../eggdb-sqs" }
 eggdb-stomp = { path = "../eggdb-stomp" }
+eggdb-cql = { path = "../eggdb-cql" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
 eggdb-queues = { path = "../eggdb-queues" }
 eggdb-parquet = { path = "../eggdb-parquet" }

@@ -218,6 +218,7 @@ impl CommandName {
             | OptionName::CdcWebhook
             | OptionName::CdcQueue
             | OptionName::StompListen
+            | OptionName::CqlListen
             | OptionName::KafkaListen
             | OptionName::AmqpListen
             | OptionName::MqttListen
@@ -376,6 +377,7 @@ enum OptionName {
     CdcWebhook,
     CdcQueue,
     StompListen,
+    CqlListen,
     KafkaListen,
     AmqpListen,
     MqttListen,
@@ -463,6 +465,7 @@ impl OptionName {
             b"cdc-webhook" => Self::CdcWebhook,
             b"cdc-queue" => Self::CdcQueue,
             b"stomp-listen" => Self::StompListen,
+            b"cql-listen" => Self::CqlListen,
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
             b"mqtt-listen" => Self::MqttListen,
@@ -719,6 +722,7 @@ pub(crate) struct ServeOptions {
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) cdc_queue: Option<String>,
     pub(crate) stomp_listen: Option<SocketAddr>,
+    pub(crate) cql_listen: Option<SocketAddr>,
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
     pub(crate) mqtt_listen: Option<SocketAddr>,
@@ -1196,6 +1200,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     return Err(usage(format!("{}: the queue name must be 1 to 255 characters", option.spelled)));
                 }
                 request.serve.cdc_queue = Some(name.to_owned());
+            }
+            OptionName::CqlListen => {
+                request.serve.cql_listen =
+                    Some(parse_listen(&option.spelled, value, 9042).map_err(usage)?);
             }
             OptionName::StompListen => {
                 request.serve.stomp_listen =
