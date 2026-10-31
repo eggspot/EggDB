@@ -151,6 +151,23 @@ impl Session<'_> {
             }
             None => None,
         };
+        let es_listener = match options.es_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--es-listen {address}: the REST API has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for the REST API on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let es_password = eggdb_crypto::sha256(password.as_bytes());
         let resp_password = resp_listener
             .as_ref()
             .map(|_| eggdb_crypto::sha256(password.as_bytes()));
@@ -363,6 +380,19 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let es_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::ES_COLLECTIONS,
+            };
+            let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password);
+            let es_server = scope.spawn(|| match &es_listener {
+                Some(listener) => eggdb_http::serve(
+                    listener,
+                    &|request| es_api.answer(request),
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
             let resp_limited = options.resp_max_memory.and_then(|limit| {
                 let policy = options.resp_eviction.unwrap_or(eggdb_resp::EvictionPolicy::NoEviction);
                 eggdb_resp::EvictingKeyspace::new(&resp_database, limit, policy).ok()
@@ -414,6 +444,7 @@ impl Session<'_> {
             let _ = mcp_server.join();
             let _ = resp_server.join();
             let _ = memcached_server.join();
+            let _ = es_server.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))

@@ -24,6 +24,7 @@ eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-memcached = { path = "../eggdb-memcached" }
+eggdb-esrest = { path = "../eggdb-esrest" }
 eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }
 eggdb-resp = { path = "../eggdb-resp" }

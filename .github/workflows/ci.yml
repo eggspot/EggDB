@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli and redis-py (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache and opensearch-py (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -249,6 +249,28 @@ jobs:
           assert client.get_many(["greeting", "missing"]) == {"greeting": b"bye"}
           assert client.delete("greeting")
           print("pymemcache: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from opensearchpy import OpenSearch, helpers
+          client = OpenSearch(hosts=[{"host": "127.0.0.1", "port": 9201}], http_auth=("eggdb", "ci-resp-password"), use_ssl=False)
+          assert client.info()["version"]["number"]
+          client.indices.create(index="books", body={"mappings": {"properties": {"title": {"type": "text"}}}})
+          assert client.indices.exists(index="books")
+          client.index(index="books", id="1", body={"title": "The quick brown fox", "genre": "fable", "pages": 120})
+          helpers.bulk(client, [
+              {"_index": "books", "_id": "2", "_source": {"title": "Foxes running quickly", "genre": "nature", "pages": 300}},
+              {"_index": "books", "_id": "3", "_source": {"title": "A slow turtle", "genre": "fable", "pages": 80}},
+          ])
+          assert client.get(index="books", id="1")["_source"]["pages"] == 120
+          found = client.search(index="books", body={"query": {"match": {"title": "fox"}}})
+          assert [hit["_id"] for hit in found["hits"]["hits"]] == ["1", "2"], found
+          totals = client.search(index="books", body={"size": 0, "aggs": {"genres": {"terms": {"field": "genre"}}}})
+          assert totals["aggregations"]["genres"]["buckets"][0] == {"key": "fable", "doc_count": 2}, totals
+          assert client.count(index="books")["count"] == 3
+          client.delete(index="books", id="3")
+          client.indices.delete(index="books")
+          assert not client.indices.exists(index="books")
+          print("opensearch-py: passed")
           PY
 
   redis-compare:
