@@ -3782,7 +3782,7 @@ impl<'t> Parser<'t> {
         {
             return Ok(expr);
         }
-        if self.sqlite()
+        if (self.sqlite() || self.mysql())
             && let TokenKind::Binary(digits) = &token.kind
         {
             self.at += 1;

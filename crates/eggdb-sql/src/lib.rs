@@ -219,7 +219,6 @@ mod with_statement_tests;
 pub use arrays::{ArrayElement, ArrayValue};
 pub use bulk_load::{BcpCharacterReader, BcpTerminators, BulkRows};
 pub use cancel::CancelSignal;
-pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{
     DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,
@@ -266,6 +265,7 @@ pub use session::{
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
 pub use sqlserver_catalog::is_catalog_procedure;
+pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
 };

@@ -189,20 +189,21 @@ fn endless_recursion_on_a_default_sized_thread_fails_with_217_instead_of_crashin
 }
 
 #[test]
-fn procedures_triggers_and_functions_share_one_nesting_limit() {
+fn procedures_and_the_functions_they_call_share_one_nesting_limit() {
     let store = MemoryStore::default();
     let mut session = session(&store);
     for text in [
-        "CREATE TABLE dbo.pings (id int IDENTITY(1,1) PRIMARY KEY, note nvarchar(10))",
-        "CREATE TABLE dbo.pongs (id int IDENTITY(1,1) PRIMARY KEY, note nvarchar(10))",
-        "CREATE PROCEDURE dbo.ping AS INSERT INTO dbo.pings (note) VALUES (N'x')",
-        "CREATE PROCEDURE dbo.pong AS INSERT INTO dbo.pongs (note) VALUES (N'y')",
-        "CREATE TRIGGER dbo.after_ping ON dbo.pings AFTER INSERT AS EXEC dbo.pong",
-        "CREATE TRIGGER dbo.after_pong ON dbo.pongs AFTER INSERT AS EXEC dbo.ping",
+        "CREATE FUNCTION dbo.deep(@n int) RETURNS int AS BEGIN \
+         IF @n <= 0 RETURN 0; RETURN dbo.deep(@n - 1) + 1; END",
+        "CREATE PROCEDURE dbo.down @n int AS BEGIN \
+         DECLARE @x int = dbo.deep(20); \
+         DECLARE @next int = @n - 1; \
+         IF @n > 0 EXEC dbo.down @n = @next; END",
     ] {
         succeeds(&mut session, text);
     }
-    fails_with(&mut session, "EXEC dbo.ping", 217);
+    succeeds(&mut session, "EXEC dbo.down @n = 5");
+    fails_with(&mut session, "EXEC dbo.down @n = 15", 217);
 }
 
 #[test]

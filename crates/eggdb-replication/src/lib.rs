@@ -266,9 +266,7 @@ impl<A: Apply> Replica<A> {
             if self.term_at(batch.sequence) == batch.term {
                 return Ok(self.applied);
             }
-            return Err(Refusal::Diverged {
-                at: batch.sequence,
-            });
+            return Err(Refusal::Diverged { at: batch.sequence });
         }
         let next = self.applied.saturating_add(1);
         if batch.sequence != next {
@@ -278,7 +276,11 @@ impl<A: Apply> Replica<A> {
             return Err(Refusal::Diverged { at: self.applied });
         }
         self.storage.apply(batch).map_err(Refusal::Failed)?;
-        if self.term_starts.last().is_none_or(|(_, term)| *term != batch.term) {
+        if self
+            .term_starts
+            .last()
+            .is_none_or(|(_, term)| *term != batch.term)
+        {
             self.term_starts.push((batch.sequence, batch.term));
         }
         self.term = batch.term;

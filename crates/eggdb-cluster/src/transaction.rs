@@ -154,10 +154,7 @@ impl Coordinator {
     /// The outcome of `transaction` for a participant in doubt: the recorded decision, or an
     /// abort, recorded now so that a later [`Coordinator::decide`] cannot commit it.
     pub fn outcome(&mut self, transaction: TransactionId) -> Decision {
-        *self
-            .decisions
-            .entry(transaction)
-            .or_insert(Decision::Abort)
+        *self.decisions.entry(transaction).or_insert(Decision::Abort)
     }
 }
 

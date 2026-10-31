@@ -169,7 +169,7 @@ fn literal(dialect: Dialect, value: &Value) -> String {
         Value::Null => "NULL".to_owned(),
         Value::Boolean(flag) => match dialect {
             Dialect::PostgreSql => if *flag { "true" } else { "false" }.to_owned(),
-            Dialect::MySql => if *flag { "TRUE" } else { "FALSE" }.to_owned(),
+            Dialect::MySql | Dialect::Oracle => if *flag { "TRUE" } else { "FALSE" }.to_owned(),
             _ => if *flag { "1" } else { "0" }.to_owned(),
         },
         Value::SmallInt(number) => number.to_string(),

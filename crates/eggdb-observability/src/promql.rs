@@ -648,7 +648,9 @@ pub(crate) fn evaluate(
                     let end = time_ms.saturating_sub(selector.offset_ms);
                     let mut out = Vec::new();
                     for (labels, samples) in matrix {
-                        if let Some(value) = range_function(name, &samples, end.saturating_sub(range), end)? {
+                        if let Some(value) =
+                            range_function(name, &samples, end.saturating_sub(range), end)?
+                        {
                             out.push((without_name(&labels), value));
                         }
                     }

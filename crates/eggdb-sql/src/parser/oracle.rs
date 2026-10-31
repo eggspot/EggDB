@@ -1181,6 +1181,8 @@ impl<'t> Parser<'t> {
             "rpad" => ("oracle_rpad", 2, 3),
             "replace" => ("oracle_replace", 2, 3),
             "chr" => ("oracle_chr", 1, 1),
+            "hextoraw" => ("oracle_hextoraw", 1, 1),
+            "rawtohex" => ("oracle_rawtohex", 1, 1),
             "ascii" => ("oracle_ascii", 1, 1),
             "abs" => ("oracle_abs", 1, 1),
             "round" => ("oracle_round", 1, 2),

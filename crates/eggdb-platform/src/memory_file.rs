@@ -16,12 +16,18 @@ impl MemoryFile {
     }
 
     fn read_bytes<T>(&self, body: impl FnOnce(&Vec<u8>) -> T) -> T {
-        let guard = self.bytes.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = self
+            .bytes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         body(&guard)
     }
 
     fn write_bytes<T>(&self, body: impl FnOnce(&mut Vec<u8>) -> T) -> T {
-        let mut guard = self.bytes.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .bytes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         body(&mut guard)
     }
 }
@@ -72,7 +78,9 @@ impl File for MemoryFile {
     }
 
     fn size(&self) -> Result<u64> {
-        self.read_bytes(|bytes| u64::try_from(bytes.len()).map_err(|_| Error::new(ErrorKind::InvalidInput)))
+        self.read_bytes(|bytes| {
+            u64::try_from(bytes.len()).map_err(|_| Error::new(ErrorKind::InvalidInput))
+        })
     }
 
     fn set_size(&self, size: u64) -> Result<()> {
@@ -114,7 +122,7 @@ mod tests {
     fn rewrites_keep_only_the_current_bytes_and_reads_past_the_end_are_short() {
         let file = MemoryFile::new();
         let page = vec![7u8; 1 << 16];
-        for _ in 0..(20_000) {
+        for _ in 0..20_000 {
             file.write_at(&page, 0).unwrap();
         }
         assert_eq!(file.size().unwrap(), 1 << 16);

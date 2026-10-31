@@ -133,11 +133,11 @@ pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};
 pub use database_file::DatabaseFile;
-pub use memory_file::MemoryFile;
 pub use error::{Error, ErrorKind, Result};
 pub use fs::{File, FileLock, FileSystem, OpenMode};
 pub use io::{IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp};
 pub use memory::{Memory, MemoryRegion, PageMode};
+pub use memory_file::MemoryFile;
 pub use net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
     NetStream, Network, RejectedNetOp,

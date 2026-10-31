@@ -8,9 +8,7 @@ use crate::routines::{RoutineDefinition, RoutineKind, RoutineLanguage};
 use crate::schemas::base_name;
 use crate::session::sqlserver::BatchStep;
 use crate::session::{QueryResult, Session};
-use crate::tsql::{
-    ProcedureRun, Program, ProgramEnd, ScalarVariable, TsqlReturns,
-};
+use crate::tsql::{ProcedureRun, Program, ProgramEnd, ScalarVariable, TsqlReturns};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 

@@ -439,7 +439,12 @@ fn insert_at(
             let index = array_position(step, depth + 1, items.len())?;
             if last {
                 let length = items.len() as i64;
-                let at = if after { index.saturating_add(1) } else { index }.clamp(0, length);
+                let at = if after {
+                    index.saturating_add(1)
+                } else {
+                    index
+                }
+                .clamp(0, length);
                 items.insert(usize::try_from(at).unwrap_or(0), leaf(new.clone()));
             } else if let Some(child) = usize::try_from(index).ok().and_then(|at| items.get_mut(at))
             {

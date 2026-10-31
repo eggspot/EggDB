@@ -72,9 +72,15 @@ fn raiserror_substitutes_arguments_as_the_transact_sql_reference_documents() {
 #[test]
 fn raiserror_widths_and_precisions_stop_at_the_message_length() {
     let huge = Value::BigInt(i64::MAX);
-    assert_eq!(formatted("%*d", &[huge.clone(), Value::Integer(1)]).len(), 2047);
+    assert_eq!(
+        formatted("%*d", &[huge.clone(), Value::Integer(1)]).len(),
+        2047
+    );
     assert_eq!(formatted("%.*d", &[huge, Value::Integer(1)]).len(), 2047);
-    assert_eq!(formatted("%999999999999999999999999d", &[Value::Integer(1)]), "1");
+    assert_eq!(
+        formatted("%999999999999999999999999d", &[Value::Integer(1)]),
+        "1"
+    );
     assert_eq!(formatted("%4294967295d", &[Value::Integer(1)]).len(), 2047);
     let many = "%2047d".repeat(100);
     let arguments = vec![Value::Integer(1); 100];

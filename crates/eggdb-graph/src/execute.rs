@@ -458,7 +458,7 @@ impl<'g> Executor<'g, '_> {
                     _ => return Err(argument_error()),
                 };
                 let count = if (step > 0 && end >= start) || (step < 0 && end <= start) {
-                    let span = (i128::from(end) - i128::from(start)) / i128::from(step) + 1;
+                    let span = (i128::from(*end) - i128::from(*start)) / i128::from(step) + 1;
                     u64::try_from(span).unwrap_or(u64::MAX)
                 } else {
                     0

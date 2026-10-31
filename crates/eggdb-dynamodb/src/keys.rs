@@ -31,7 +31,9 @@ pub(crate) fn key_value(attribute: &Node, wanted: &str) -> Result<KeyValue, Stri
     let value = match wanted {
         "S" => text(attribute, "S").map(|text| KeyValue::S(text.to_owned())),
         "B" => text(attribute, "B").map(|text| KeyValue::B(text.to_owned())),
-        _ => text(attribute, "N").and_then(Decimal::parse).map(KeyValue::N),
+        _ => text(attribute, "N")
+            .and_then(Decimal::parse)
+            .map(KeyValue::N),
     };
     value.ok_or_else(|| format!("a key attribute must be of type {wanted}"))
 }
@@ -59,11 +61,18 @@ impl Decimal {
         };
         let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
         if whole.is_empty() && fraction.is_empty()
-            || !whole.bytes().chain(fraction.bytes()).all(|byte| byte.is_ascii_digit())
+            || !whole
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|byte| byte.is_ascii_digit())
         {
             return None;
         }
-        let all: Vec<u8> = whole.bytes().chain(fraction.bytes()).map(|byte| byte - b'0').collect();
+        let all: Vec<u8> = whole
+            .bytes()
+            .chain(fraction.bytes())
+            .map(|byte| byte - b'0')
+            .collect();
         let Some(first) = all.iter().position(|digit| *digit != 0) else {
             return Some(Self {
                 negative: false,
@@ -95,7 +104,9 @@ impl Decimal {
             out.push(1);
             return;
         }
-        let biased = u16::try_from(self.exponent + 1000).unwrap_or(0).to_be_bytes();
+        let biased = u16::try_from(self.exponent + 1000)
+            .unwrap_or(0)
+            .to_be_bytes();
         let mut body: Vec<u8> = biased.to_vec();
         body.extend(self.digits.iter().map(|digit| digit + 1));
         body.push(0);

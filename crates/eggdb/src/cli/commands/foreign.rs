@@ -225,7 +225,10 @@ mod tests {
             "postgresql://reader@db.internal/x?sslmode=verify-full&sslrootcert=/etc/shadow"
         ));
         let one_database = "postgresql://reader@db.internal/sales";
-        assert!(allows(one_database, "postgresql://reader@db.internal/sales"));
+        assert!(allows(
+            one_database,
+            "postgresql://reader@db.internal/sales"
+        ));
         assert!(!allows(one_database, "postgresql://reader@db.internal/hr"));
     }
 
@@ -237,7 +240,10 @@ mod tests {
         std::fs::write(lake.join("x.parquet"), b"").unwrap();
         std::fs::write(root.join("secret.parquet"), b"").unwrap();
         let entry = format!("file:{}/", lake.display());
-        assert!(allows(&entry, &format!("file:{}/x.parquet", lake.display())));
+        assert!(allows(
+            &entry,
+            &format!("file:{}/x.parquet", lake.display())
+        ));
         assert!(!allows(
             &entry,
             &format!("file:{}/../secret.parquet", lake.display())

@@ -614,7 +614,10 @@ mod tests {
             Err(SigV4Error::SignatureMismatch)
         );
         let mut retargeted = signed.clone();
-        retargeted.push(("x-amz-target".to_owned(), "DynamoDB_20120810.DeleteItem".to_owned()));
+        retargeted.push((
+            "x-amz-target".to_owned(),
+            "DynamoDB_20120810.DeleteItem".to_owned(),
+        ));
         assert_eq!(
             verify(
                 &SignedRequest {

@@ -656,7 +656,12 @@ fn updates_that_would_nest_too_deeply_are_refused_and_change_nothing() {
     let keyspace = MemoryKeyspace::default();
     let store = store(&keyspace);
     store
-        .insert("app", "deep", vec![doc(vec![("_id", Bson::Int32(1))])], true)
+        .insert(
+            "app",
+            "deep",
+            vec![doc(vec![("_id", Bson::Int32(1))])],
+            true,
+        )
         .unwrap();
     let everyone = parse_filter(&Document::new()).unwrap();
     let long_path = vec!["a"; 20_000].join(".");
@@ -676,7 +681,13 @@ fn updates_that_would_nest_too_deeply_are_refused_and_change_nothing() {
     )]))
     .unwrap();
     let refused = store
-        .update("app", "deep", &everyone, &by_value, UpdateOptions::default())
+        .update(
+            "app",
+            "deep",
+            &everyone,
+            &by_value,
+            UpdateOptions::default(),
+        )
         .unwrap_err();
     assert!(refused.message.contains("nesting depth"), "{refused:?}");
     let found = store

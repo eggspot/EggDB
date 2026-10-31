@@ -394,6 +394,8 @@ fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
         "oracle_next_day" => Some(SqlType::Timestamp(Some(0))),
         "oracle_to_timestamp_tz" | "oracle_from_tz" => Some(SqlType::TimestampTz(Some(6))),
         "oracle_months_between" => Some(SqlType::Numeric(None)),
+        "oracle_hextoraw" => Some(SqlType::Bytea),
+        "oracle_rawtohex" => Some(SqlType::Text),
         "oracle_tz_offset" | "oracle_listagg" => Some(SqlType::Text),
         "oracle_numtodsinterval" | "oracle_to_dsinterval" => Some(
             crate::oracle_intervals::IntervalKind::DayToSecond

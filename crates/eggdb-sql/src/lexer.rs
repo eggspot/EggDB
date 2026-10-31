@@ -379,6 +379,7 @@ impl<'t> Lexer<'t> {
             b'0'..=b'9' => self.number(),
             b'\'' | b'"' => self.mysql_string(byte),
             b'`' => self.backtick_identifier(),
+            b'x' | b'X' if self.peek(1) == Some(b'\'') => self.blob_literal(),
             b'?' => {
                 self.at += 1;
                 Ok(TokenKind::Placeholder)

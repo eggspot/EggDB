@@ -26,7 +26,7 @@ impl<'t> Lexer<'t> {
         }
     }
 
-    fn blob_literal(&mut self) -> SqlResult<TokenKind<'t>> {
+    pub(super) fn blob_literal(&mut self) -> SqlResult<TokenKind<'t>> {
         let start = self.at;
         let digits_start = start + 2;
         let bytes = self.text.as_bytes();

@@ -14,9 +14,8 @@ use crate::parser::{Parameters, Parser};
 use crate::table_variables::{TableVariable, TableVariableRules, TableVariables};
 use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
-    BatchContext, CaughtError, DynamicBatch, Instruction, MatchingRow,
-    ProcedureRun, Program, ProgramEnd, ScalarVariable, columns_mismatch, combined, declare,
-    scalar_select, undeclared,
+    BatchContext, CaughtError, DynamicBatch, Instruction, MatchingRow, ProcedureRun, Program,
+    ProgramEnd, ScalarVariable, columns_mismatch, combined, declare, scalar_select, undeclared,
 };
 use crate::types::{SqlType, Value};
 use std::collections::HashMap;

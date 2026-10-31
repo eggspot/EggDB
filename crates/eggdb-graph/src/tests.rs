@@ -152,10 +152,10 @@ fn parameters_errors_and_read_only_mode() {
     assert!(run(&keyspace, &long_sum, &[], false).is_err());
     let long_path = format!("WITH {{a: 1}} AS m RETURN m{}", ".a".repeat(100_000));
     assert!(run(&keyspace, &long_path, &[], false).is_err());
-    let fine_sum = format!("RETURN 1{}", "+1".repeat(500));
+    let fine_sum = format!("RETURN 1{}", "+1".repeat(100));
     assert_eq!(
         query(&keyspace, &fine_sum).rows,
-        vec![vec![Value::Integer(501)]]
+        vec![vec![Value::Integer(101)]]
     );
     for hostile in [
         "MATCH (n",

@@ -129,11 +129,17 @@ mod report_target_tests {
     fn a_report_target_must_be_on_the_allowed_host_and_port() {
         let target = |url: &str| eggdb_http::parse_http_url(url).unwrap();
         let entry = "http://hooks.example.com";
-        assert!(report_target_allowed(entry, &target("http://hooks.example.com/a")));
+        assert!(report_target_allowed(
+            entry,
+            &target("http://hooks.example.com/a")
+        ));
         assert!(!report_target_allowed(
             entry,
             &target("http://hooks.example.com.evil.net/a")
         ));
-        assert!(!report_target_allowed(entry, &target("http://hooks.example.com:8080/a")));
+        assert!(!report_target_allowed(
+            entry,
+            &target("http://hooks.example.com:8080/a")
+        ));
     }
 }

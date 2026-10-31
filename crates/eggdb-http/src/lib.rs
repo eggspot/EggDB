@@ -156,7 +156,9 @@ pub fn percent_decoded(text: &str) -> Option<String> {
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {
-    char::from(byte).to_digit(16).and_then(|digit| u8::try_from(digit).ok())
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| u8::try_from(digit).ok())
 }
 
 /// Reads a request from `stream`: its head, at most 16 KiB, and a body of at most 1 MiB given

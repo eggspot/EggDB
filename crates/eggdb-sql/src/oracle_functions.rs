@@ -24,6 +24,54 @@ pub(crate) fn within_limit(bytes: usize) -> SqlResult<()> {
     }
 }
 
+fn invalid_hex_number() -> SqlError {
+    SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, "invalid hex number")
+        .with_oracle_code(1465)
+}
+
+fn hex_to_raw(value: &Value) -> SqlResult<Value> {
+    let Some(text) = text_of(value) else {
+        return Ok(Value::Null);
+    };
+    let digits: Vec<u8> = text
+        .chars()
+        .map(|digit| {
+            digit
+                .to_digit(16)
+                .and_then(|digit| u8::try_from(digit).ok())
+                .ok_or_else(invalid_hex_number)
+        })
+        .collect::<SqlResult<_>>()?;
+    let padded: Vec<u8> = if digits.len() % 2 == 1 {
+        std::iter::once(0).chain(digits).collect()
+    } else {
+        digits
+    };
+    Ok(Value::Bytea(
+        padded
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[high, low]| high << 4 | low)
+            .collect(),
+    ))
+}
+
+fn raw_to_hex(value: &Value) -> SqlResult<Value> {
+    let bytes = match value {
+        Value::Null => return Ok(Value::Null),
+        Value::Bytea(bytes) => bytes.clone(),
+        other => match text_of(other) {
+            Some(text) => text.into_bytes(),
+            None => return Ok(Value::Null),
+        },
+    };
+    within_limit(bytes.len().saturating_mul(2))?;
+    Ok(text_or_null(
+        bytes.iter().map(|byte| format!("{byte:02X}")).collect(),
+    ))
+}
+
 pub(crate) fn invalid_number() -> SqlError {
     SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, "invalid number").with_oracle_code(1722)
 }
@@ -789,6 +837,8 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
         ("oracle_rpad", _) => padded(values, false),
         ("oracle_replace", _) => replaced(values),
         ("oracle_chr", [value]) => character(value),
+        ("oracle_hextoraw", [value]) => hex_to_raw(value),
+        ("oracle_rawtohex", [value]) => raw_to_hex(value),
         ("oracle_ascii", [value]) => Ok(character_code(value)),
         ("oracle_abs", [value]) => absolute(value),
         ("oracle_round" | "oracle_trunc", [value, ..]) if is_datetime(value) => {

@@ -59,15 +59,15 @@ fn call(
         headers: &request.headers,
         body,
     };
-    let value = authorization(
-        &signed,
-        &["host", "x-amz-content-sha256", "x-amz-date"],
-        "eggdb",
-        secret,
-        "us-east-1",
-        "s3",
-    )
-    .unwrap();
+    let mut signed_names = vec!["host"];
+    signed_names.extend(
+        request
+            .headers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| name.starts_with("x-amz-")),
+    );
+    let value = authorization(&signed, &signed_names, "eggdb", secret, "us-east-1", "s3").unwrap();
     request.headers.push(("authorization".to_owned(), value));
     endpoint.answer(&request)
 }

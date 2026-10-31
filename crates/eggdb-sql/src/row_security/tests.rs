@@ -166,9 +166,12 @@ fn only_a_superuser_reads_foreign_sources() {
     setup(&store);
     let mut ada = as_role(&store, "ada");
     assert_eq!(
-        run(&mut ada, "SELECT * FROM eggdb_foreign('file:/x.parquet', 'x')")
-            .unwrap_err()
-            .state(),
+        run(
+            &mut ada,
+            "SELECT * FROM eggdb_foreign('file:/x.parquet', 'x')"
+        )
+        .unwrap_err()
+        .state(),
         SqlState::INSUFFICIENT_PRIVILEGE
     );
 }

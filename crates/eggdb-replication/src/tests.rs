@@ -143,7 +143,7 @@ fn batches_cross_the_wire_and_damaged_bytes_are_refused() {
         assert!(decode_batch(&bytes[..cut]).is_err());
     }
     let mut huge = bytes.clone();
-    huge[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+    huge[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(decode_batch(&huge).is_err());
 }
 

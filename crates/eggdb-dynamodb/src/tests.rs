@@ -157,8 +157,19 @@ fn tables_items_queries_and_scans_work() {
 fn numbers_sort_numerically_and_unsigned_requests_are_refused() {
     let mut keys = Vec::new();
     for number in [
-        "-1e5", "-5", "-1.23", "-1.2", "-0.5", "0", "0.000", "2", "10", "10.5",
-        "9007199254740992", "9007199254740993", "1e10",
+        "-1e5",
+        "-5",
+        "-1.23",
+        "-1.2",
+        "-0.5",
+        "0",
+        "0.000",
+        "2",
+        "10",
+        "10.5",
+        "1e10",
+        "9007199254740992",
+        "9007199254740993",
     ] {
         let decimal = crate::keys::Decimal::parse(number).unwrap();
         let mut out = Vec::new();
@@ -169,7 +180,7 @@ fn numbers_sort_numerically_and_unsigned_requests_are_refused() {
     sorted.sort();
     assert_eq!(keys, sorted);
     assert_eq!(keys[5], keys[6], "0 and 0.000 are one key");
-    assert_ne!(keys[10], keys[11], "integers past 2^53 stay apart");
+    assert_ne!(keys[11], keys[12], "integers past 2^53 stay apart");
     assert_eq!(
         crate::keys::Decimal::parse("1.50"),
         crate::keys::Decimal::parse("15e-1")

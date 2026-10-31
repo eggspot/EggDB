@@ -388,7 +388,12 @@ impl SqliteFile {
         Ok(())
     }
 
-    fn table_leaf_cell(&self, page: &[u8], offset: usize, walk: &mut TableWalk) -> Result<SqliteRow> {
+    fn table_leaf_cell(
+        &self,
+        page: &[u8],
+        offset: usize,
+        walk: &mut TableWalk,
+    ) -> Result<SqliteRow> {
         let mut at = offset;
         let payload_bytes = varint(page, &mut at)?;
         let rowid = varint(page, &mut at)? as i64;

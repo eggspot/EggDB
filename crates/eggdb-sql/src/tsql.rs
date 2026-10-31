@@ -6,8 +6,7 @@ mod statements;
 mod variables;
 
 pub(crate) use control::{
-    Declaration, Instruction, MAX_DYNAMIC_NESTING, Program, ProgramEnd, TryBlock, chooses_dialect,
-    uses_batch_logic,
+    Declaration, Instruction, Program, ProgramEnd, TryBlock, chooses_dialect, uses_batch_logic,
 };
 pub(crate) use errors::{CaughtError, line_of, nesting_too_deep, raised_message, thrown};
 pub(crate) use functions::{

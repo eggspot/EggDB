@@ -122,7 +122,7 @@ eggdb sql --dialect mysql shop.db -c "SELECT * FROM items LIMIT 0, 10; SHOW TABL
 What it reads, on top of the statements of "What runs today":
 - **Lexical rules**: backtick identifiers (folded to lower case like unquoted names, so
   `lower_case_table_names` is 1), `"..."` strings, backslash escapes in strings, `#` and `-- `
-  comments, `/*! ... */` run as SQL, `?` placeholders.
+  comments, `/*! ... */` run as SQL, `?` placeholders, `X'0102'` hex literals.
 - **Statements**: `LIMIT offset, count`, `AUTO_INCREMENT`, `INSERT IGNORE`, `REPLACE`,
   `INSERT ... ON DUPLICATE KEY UPDATE` with `VALUES(col)`, `SHOW TABLES`, `SHOW DATABASES`,
   `DESCRIBE`/`SHOW COLUMNS`, `SHOW CREATE TABLE`, `SHOW VARIABLES [LIKE ...]`, `SHOW WARNINGS`,
@@ -469,7 +469,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   evaluated once, up to 255 arguments as in Oracle), `CONCAT`,
   `LENGTH`, `SUBSTR` and `INSTR` (negative positions count from the end), `UPPER`, `LOWER`,
   `INITCAP`, `TRIM([LEADING|TRAILING|BOTH] [c FROM] s)`, `LTRIM`, `RTRIM`, `LPAD`, `RPAD`,
-  `REPLACE`, `CHR`, `ASCII`, `ABS`, `ROUND`, `TRUNC`, `MOD`, `CEIL`, `FLOOR`, `POWER`, `SQRT`,
+  `REPLACE`, `CHR`, `ASCII`, `HEXTORAW`, `RAWTOHEX`, `ABS`, `ROUND`, `TRUNC`, `MOD`, `CEIL`,
+  `FLOOR`, `POWER`, `SQRT`,
   `SIGN`, `GREATEST`, `LEAST` (NULL if any argument is NULL), `TO_CHAR` for numbers (format
   elements `9`, `0`, `.`, `D`, `,`, `G`, `$`, `S`, `MI`, `FM`; `#`s when the number does not
   fit) and for dates, `TO_NUMBER`, `TO_DATE`, `TO_TIMESTAMP`, `ADD_MONTHS`, `LAST_DAY`, the aggregates `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `USER`. Other
