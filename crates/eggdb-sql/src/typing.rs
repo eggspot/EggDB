@@ -132,6 +132,7 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         "rrf_score" => Some(SqlType::Double),
         name if crate::geo_functions::FUNCTIONS.contains(&name) => crate::geo_functions::result_type(name),
         name if crate::standards::FUNCTIONS.contains(&name) => Some(crate::standards::result_type(name)),
+        name if crate::privacy::FUNCTIONS.contains(&name) => Some(crate::privacy::result_type(name)),
         "l2_normalize" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => {
             Some(SqlType::Integer)

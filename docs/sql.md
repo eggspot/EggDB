@@ -2469,6 +2469,31 @@ A rule's condition runs as SQL with the privileges of whoever calls `check_quali
 view's query does, so only roles trusted to write SQL should be granted `INSERT` on
 `quality_rules`.
 
+## Privacy: format-preserving tokens, noise and k-anonymity
+
+Three tools for sharing data without exposing people (D245):
+
+```sql
+SELECT ff1_encrypt(card_number, :'key', '\x'::bytea) FROM payments;        -- same length, digits only
+SELECT ff1_decrypt(token, :'key', '\x'::bytea) FROM payments_shared;
+SELECT ff1_encrypt(code, :'key', '\x'::bytea, 36) FROM vouchers;            -- 0-9 and a-z
+SELECT count(*) + laplace_noise(1, 0.5) FROM visits WHERE city = 'Hanoi';
+CREATE EXTENSION eggdb_privacy;
+SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY['zip', 'age_band']);
+```
+
+- `ff1_encrypt(value, key, tweak [, radix])` and `ff1_decrypt` are FF1 format-preserving
+  encryption (NIST SP 800-38G) over AES with a 16, 24 or 32-byte key: a value written with the
+  first `radix` characters of `0-9a-z` (10 by default) becomes a token of the same length and
+  alphabet, so it still fits the column and its checks, and only the key holder turns it back.
+  The value must allow at least a million possibilities (six digits) and at most 72 digits.
+- `laplace_noise(sensitivity, epsilon)` draws noise from the Laplace distribution with scale
+  `sensitivity / epsilon`, from the cryptographically secure random source: adding it to a
+  count (sensitivity 1) makes that count epsilon-differentially private.
+- `eggdb_privacy.k_anonymity(schema, table, columns)` returns the size of the smallest group of
+  rows sharing the same values of the quasi-identifier columns: the table is k-anonymous for
+  that k.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form

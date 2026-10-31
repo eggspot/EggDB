@@ -1452,6 +1452,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::standards::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::privacy::function(name, &values) {
+            return result;
+        }
         match (name, values.as_slice()) {
             ("coalesce", [_, ..]) => {
                 let found = values.iter().find(|value| !value.is_null());
@@ -1594,6 +1597,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "normalize" | "is_normalized" => &[TEXT, TEXT],
         "fix_parse" | "hl7_parse" | "edifact_parse" => &[TEXT],
         "fix_field" => &[TEXT, INTEGER],
+        "laplace_noise" => &[DOUBLE, DOUBLE],
         "chr" => &[INTEGER],
         "pg_sleep" => &[DOUBLE],
         "pg_notify" => &[TEXT, TEXT],

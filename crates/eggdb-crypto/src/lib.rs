@@ -20,6 +20,8 @@
 //! - [`RsaPublicKey`], [`RsaPrivateKey`], [`rsa_pkcs1v15_sign`], [`rsa_pkcs1v15_verify`],
 //!   [`rsa_pss_sign`] and [`rsa_pss_verify`]: RSA signatures (RFC 8017), with a constant-time
 //!   Montgomery exponentiation for the private key;
+//! - [`Ff1`]: FF1 format-preserving encryption over AES (NIST SP 800-38G Rev. 1), for tokens
+//!   that keep a value's length and alphabet;
 //! - [`pbkdf2_hmac_sha256`]: PBKDF2 with HMAC-SHA-256 (RFC 8018, vectors from RFC 7914);
 //! - [`base64_encode`] and [`base64_decode`]: Base64 with padding, the standard alphabet
 //!   (RFC 4648), decoded strictly;
@@ -33,6 +35,7 @@ mod base64;
 mod bignum;
 mod chacha20;
 mod constant_time;
+mod ff1;
 mod gcm;
 mod hash;
 mod hkdf;
@@ -52,6 +55,7 @@ pub use aes::{AES_BLOCK_BYTES, Aes, AesKeyLengthError};
 pub use base64::{Base64Error, base64_decode, base64_encode};
 pub use chacha20::{CHACHA20_BLOCK_BYTES, CHACHA20_KEY_BYTES, CHACHA20_NONCE_BYTES, ChaCha20};
 pub use constant_time::constant_time_eq;
+pub use ff1::{Ff1, Ff1Error};
 pub use gcm::AesGcm;
 pub use hash::{HashFunction, MAX_HASH_BLOCK_BYTES, MAX_HASH_DIGEST_BYTES};
 pub use hkdf::{HkdfError, hkdf_expand, hkdf_extract};
