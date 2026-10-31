@@ -165,6 +165,25 @@ yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
   `DROP EXTENSION plpgsql`, `DROP DATABASE` and `DROP ROLE` are ignored.
 - Large objects (`lo_*`), and dumps in encodings other than UTF-8, are not restored.
 
+### Moving with no downtime: `eggdb follow`
+
+Instead of a dump, `eggdb follow` copies a running PostgreSQL 10 or newer (with
+`wal_level=logical`) and keeps the copy in step with it. It creates a temporary logical
+replication slot, copies the schema and every table from the slot's snapshot, then applies each
+transaction PostgreSQL commits, until you stop it:
+
+```sh
+PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'
+# … point applications at `eggdb serve app.db` when the lag is zero, then Ctrl-C the follow
+```
+
+Every table needs a primary key or `REPLICA IDENTITY FULL`, and the user needs `REPLICATION`
+and a publication: an existing one with `--publication <name>`, or `eggdb_follow`, which the
+follow creates `FOR ALL TABLES` and drops at its stop. Sequence values are copied again at the
+stop, because logical replication does not carry them. `--until caught-up` stops by itself once
+the copy has every change committed so far. Details are in [cli.md](cli.md) under `eggdb follow`,
+and the design is decision D162.
+
 ## SQL Server
 
 ### 1. Export with SQL Server's own tools
@@ -278,6 +297,20 @@ the other objects created, and `MS_Description` properties with the comments.
   falling between `WITH ... AS (...)` and the statement it starts breaks that statement.
 - Behaviour of restored `CHECK`s and views used from another dialect follows that dialect's
   conversions and error numbers (D124).
+
+### Moving with no downtime: `eggdb follow`
+
+`eggdb follow` also copies a running SQL Server database whose change tracking is on
+(`ALTER DATABASE ... SET CHANGE_TRACKING = ON`, and `ENABLE CHANGE_TRACKING` on every table). It
+copies the tables, then asks `CHANGETABLE(CHANGES ...)` for changes every `--poll` seconds
+(default 5), until you stop it:
+
+```sh
+SQLCMDPASSWORD=... eggdb follow --create shop.db 'sqlserver://sa@sql.example.com/Shop?encrypt=strict&sslrootcert=ca.pem'
+```
+
+The changes of one poll are applied together, so the copy is consistent at each poll's change
+version, not at each source transaction. Change data capture (CDC) is not read yet.
 
 ## Oracle
 

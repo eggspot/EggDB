@@ -3882,3 +3882,68 @@ Every error is a usage failure (exit 2) that says what is wrong, then the way ou
   "exclude each other" message.
 - **Unsupported key types.** A key of an unsupported curve or algorithm gets one message: "the
   key is of a kind serve does not support (P-256 or RSA)".
+
+## 30. `eggdb follow`: a live copy that keeps in step (parts 3.17 and 3.18)
+
+Designed by Claude Fable (D15) and recorded in D162.
+
+### The verb
+The verb stays `follow`. `copy` suggests a one-shot copy, and `restore` means bringing a database
+back from a dump and then stopping. `follow` is the file's own verb, as `backup` and `compact`
+are (D141): the file follows the source. `tail -f`, `docker logs --follow` and `kubectl logs -f`
+already make the word mean "live, until I stop it". Its effect is `change`, and its output is
+JSON records.
+
+### Synopsis
+`eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>]
+[--password-file <path>] [--poll <seconds>] [--until caught-up]`.
+
+The source is `postgres://` (libpq's form) or `sqlserver://` (sqlcmd's words for encryption).
+A password inside the URL is a usage error, because every user's `ps` would show it.
+
+### Progress and summary
+Each phase prints one fixed line to stderr, in the 16-column label block that restore's report
+uses: `connected`, `publication`, `slot`, `schema`, one `copied` line per table, the `copied`
+total, and then a `following` line with the lag. The summary goes to stdout, with `tables`,
+`transactions`, `sequences`, `position` and `cleaned up`, then a verdict: `ok: … point
+applications at it now`, or `stopped: the source closed the connection; …` with exit 3.
+
+### JSON
+One line per event: `connected`, `slot`, `schema`, `table_copied`, `copied`, `stopped`. The last
+carries `ok`, `reason` (`interrupt`, `caught_up` or `source_closed`), the counts, `lsn` or
+`change_version`, `slot_dropped`, `publication_dropped` and `verdict`.
+
+### Errors
+Every precondition is checked before the first row is copied, and each check names every table
+that fails it, not only the first. Each message says what is wrong and how to fix it, with a
+`try:` line:
+- `wal_level is 'replica'` (try `ALTER SYSTEM SET wal_level = logical;`);
+- the user may not create a replication slot (try `ALTER ROLE … REPLICATION;`) or a publication;
+- the publication does not exist, or does not publish some of the tables;
+- some tables have no primary key or replica identity (try `ALTER TABLE … REPLICA IDENTITY
+  FULL;`);
+- the file already has the source's tables (category `exists`);
+- SQL Server's change tracking is off for the database (try `ALTER DATABASE … SET
+  CHANGE_TRACKING = ON …`) or for some tables;
+- the change retention was exceeded while following.
+
+Usage errors (exit 2) cover a password in the URL, an unknown scheme, `--poll` or
+`--publication` for the wrong kind of source, `--until` with any value but `caught-up`, and
+stdin as the file.
+
+### Decided by this design
+- Ctrl-C and SIGTERM are `follow`'s stop button, so a clean stop exits 0. This is an exception to
+  section 7's 130.
+- The replication slot is temporary, so a lost connection ends the follow, and the verdict says
+  so. Resuming silently could miss changes.
+- Publications and slots EggDB created are removed at the stop; ones the user named are never
+  touched.
+
+### As built
+- **Progress lines.** The `following` line prints a new line every second instead of redrawing
+  one line in place. The lag is in bytes of WAL, not in seconds.
+- **Second Ctrl-C.** A second Ctrl-C is not handled separately yet.
+- **Failed first copies.** With `--create`, a PostgreSQL copy that fails removes the new file.
+  The file is not built as `<file>.following` and renamed into place.
+- **SQL Server sources.** A SQL Server copy reads change tracking only; CDC is a later item. The
+  changes of one poll are applied as one transaction.

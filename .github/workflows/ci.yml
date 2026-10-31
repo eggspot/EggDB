@@ -591,8 +591,43 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  pg-follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg-follow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Pull the postgres:17 image (a test source, never shipped)
+        run: docker pull --quiet postgres:17
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Follow a running PostgreSQL 17 while it takes writes, then compare
+        run: scripts/pg-follow/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-follow"
+      - name: Keep the follow log and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-follow-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/pg-follow/*.out
+            ${{ runner.temp }}/pg-follow/*.err
+            ${{ runner.temp }}/pg-follow/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

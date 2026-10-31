@@ -1180,6 +1180,46 @@ rows per table
 ok: every table and row of the dump is in app.db; 2 objects skipped and 1 consequence, listed above.
 ```
 
+## `eggdb follow`
+
+```
+eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--until caught-up]
+```
+
+Copies a running PostgreSQL or SQL Server database into the file and keeps the file in step with
+it until it is stopped, so applications can move to EggDB with no downtime
+([migrate.md](migrate.md), D162). The source is `postgres://user@host[:port]/database` with
+libpq's `sslmode` and `sslrootcert`, or `sqlserver://user@host[:port]/database` with
+`encrypt=yes|strict|no` and `trustServerCertificate` or `sslrootcert`. The password comes from
+`PGPASSWORD` or `SQLCMDPASSWORD`, or from `--password-file`; one written in the URL is refused,
+because process listings show it.
+
+| Option | Meaning |
+|--------|---------|
+| `--create` | create the file if it is missing; it must not already hold the source's tables |
+| `--schema <list>` | the schemas to copy, comma-separated; default every non-system schema |
+| `--publication <name>` | PostgreSQL: use this publication; default `eggdb_follow`, created `FOR ALL TABLES` and dropped at the stop |
+| `--password-file <path>` | the source's password is the file's first line |
+| `--poll <seconds>` | SQL Server: how often to ask change tracking for changes; default 5 |
+| `--until caught-up` | stop by itself once every change committed so far is in the file |
+
+Before anything is copied it checks every precondition, and it names every table that fails one:
+- `wal_level=logical`, and the right to create a replication slot and, unless `--publication` is
+  given, a publication;
+- a primary key or `REPLICA IDENTITY FULL` on every table;
+- with SQL Server, change tracking on the database and on every table.
+
+Progress goes to stderr on a terminal, as fixed lines (connected, publication, slot, schema, one
+line per copied table) and then a `following` line with the lag. In a pipe each step is one JSON
+line on stdout, with an `event` of `connected`, `slot`, `schema`, `table_copied`, `copied` or
+`stopped`.
+
+Ctrl-C or `SIGTERM` finishes the transaction being applied, copies the sequence values, drops the
+publication it created (the slot is temporary and goes with the connection) and prints a summary
+ending `ok: … holds every source transaction committed up to <position>`. It then exits 0. If
+the source closes the connection, the file is consistent at the last applied position and the
+command exits 3. The design is [ux/cli.md](ux/cli.md), section 30.
+
 ## `eggdb mcp`
 
 `eggdb mcp <file>` serves the file to an AI agent over the Model Context Protocol on stdin and
