@@ -123,6 +123,7 @@ impl Parser<'_> {
             "?|" => Some(BinaryOperator::JsonHasAnyKey),
             "?&" => Some(BinaryOperator::JsonHasAllKeys),
             "#-" => Some(BinaryOperator::JsonDeletePath),
+            "@@" => Some(BinaryOperator::TextSearchMatch),
             _ => None,
         });
         if operator.is_none() && like.is_none() {

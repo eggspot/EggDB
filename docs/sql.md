@@ -1802,6 +1802,22 @@ block that created a table leaves no table.
 - **Isolation levels.** `SET TRANSACTION`, `BEGIN ISOLATION LEVEL` and each dialect's forms are
   accepted. Every block runs serializably today, which meets every level's guarantees.
 
+## Full-text search
+
+PostgreSQL's text search works on any text column (D195):
+
+```sql
+SELECT id FROM docs
+WHERE to_tsvector('english', body) @@ websearch_to_tsquery('english', '"fat rat" or cat -dog')
+ORDER BY ts_rank(to_tsvector(body), plainto_tsquery('rat')) DESC;
+```
+
+`to_tsvector` and the `to_tsquery` family (`plainto_`, `phraseto_`, `websearch_`) take the
+`english` (stop words dropped, English stems) or `simple` configuration, and print as PostgreSQL
+prints them; `@@` matches with `&`, `|`, `!`, phrases (`<->`, `<N>`) and prefixes (`:*`).
+`ts_rank` ranks by how often the query's lexemes occur; its values are EggDB's own. There is no
+full-text index yet, so `@@` reads every row.
+
 ## EXPLAIN ANALYZE and the slow-statement log
 
 `EXPLAIN ANALYZE` (or `EXPLAIN (ANALYZE[, COSTS OFF, ...])`) runs the statement and prints its

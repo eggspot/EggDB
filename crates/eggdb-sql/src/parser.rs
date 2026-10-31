@@ -3437,6 +3437,7 @@ impl<'t> Parser<'t> {
             "?|" => BinaryOperator::JsonHasAnyKey,
             "?&" => BinaryOperator::JsonHasAllKeys,
             "#-" => BinaryOperator::JsonDeletePath,
+            "@@" => BinaryOperator::TextSearchMatch,
             _ => return None,
         })
     }

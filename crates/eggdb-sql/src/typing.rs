@@ -120,9 +120,10 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         | "repeat" | "initcap" | "translate" | "reverse" | "chr" | "md5" | "format"
         | "overlay" | "quote_literal" | "quote_nullable" | "regexp_replace" | "regexp_substr"
         | "similar_to_escape" | "similar_substring_pattern" | "to_char" | "jsonb_pretty"
-        | "json_extract_path_text" | "jsonb_extract_path_text" | "pg_sleep" | "pg_notify" => {
-            Some(SqlType::Text)
-        }
+        | "json_extract_path_text" | "jsonb_extract_path_text" | "pg_sleep" | "pg_notify"
+        | "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery"
+        | "websearch_to_tsquery" => Some(SqlType::Text),
+        "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => {
             Some(SqlType::Integer)
         }
@@ -398,6 +399,7 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::JsonHasAnyKey
             | BinaryOperator::JsonHasAllKeys => Some(SqlType::Boolean),
             BinaryOperator::JsonDeletePath => Some(SqlType::Jsonb),
+            BinaryOperator::TextSearchMatch => Some(SqlType::Boolean),
             BinaryOperator::Subtract if static_type(left, scope) == Some(SqlType::Jsonb) => {
                 Some(SqlType::Jsonb)
             }

@@ -2415,6 +2415,30 @@ fn sqlite_functions_stay_inside_the_sqlite_dialect() {
 }
 
 #[test]
+fn full_text_search_matches_and_ranks_rows() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE docs (id integer PRIMARY KEY, body text)").unwrap();
+    run(
+        &mut session,
+        "INSERT INTO docs VALUES (1, 'The fat cats ate fat rats'), (2, 'A rat ran'), (3, 'Dogs bark')",
+    )
+    .unwrap();
+    assert_eq!(
+        last(&mut session, "SELECT id FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('english', 'rats') ORDER BY ts_rank(to_tsvector(body), to_tsquery('rat')) DESC, id"),
+        "id\n1\n2\nSELECT 2"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT to_tsvector('english', 'The fat cats') AS v, plainto_tsquery('english', 'fat rats') AS q"),
+        "v|q\n'cat':3 'fat':2|'fat' & 'rat'\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM docs WHERE body @@ 'dogs'"),
+        "count\n1\nSELECT 1"
+    );
+}
+
+#[test]
 fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

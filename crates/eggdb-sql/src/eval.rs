@@ -871,6 +871,10 @@ impl Evaluator<'_> {
                 let keys = self.eval(right, Some(SqlType::Text))?;
                 crate::json_functions::has_key(operator.symbol(), &document, &keys)
             }
+            BinaryOperator::TextSearchMatch => {
+                let (left, right) = self.pair(left, right)?;
+                crate::text_search::matches(&left, &right)
+            }
             BinaryOperator::JsonDeletePath => {
                 let document = self.eval(left, Some(SqlType::Jsonb))?;
                 let path = self.eval(right, Some(SqlType::Text))?;
@@ -1320,6 +1324,10 @@ impl Evaluator<'_> {
             "array_any" => return crate::arrays::quantified(self, arguments, false),
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
+            "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery"
+            | "websearch_to_tsquery" | "ts_rank" | "ts_rank_cd" => {
+                return crate::text_search::function(name, &self.arguments(arguments)?);
+            }
             crate::json_functions::WHOLE_ROW => {
                 return crate::json_functions::whole_row(self, arguments);
             }

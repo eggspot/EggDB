@@ -1350,6 +1350,7 @@ pub(crate) enum BinaryOperator {
     JsonHasAnyKey,
     JsonHasAllKeys,
     JsonDeletePath,
+    TextSearchMatch,
 }
 
 impl BinaryOperator {
@@ -1382,6 +1383,7 @@ impl BinaryOperator {
             Self::JsonHasAnyKey => "?|",
             Self::JsonHasAllKeys => "?&",
             Self::JsonDeletePath => "#-",
+            Self::TextSearchMatch => "@@",
         }
     }
 }
