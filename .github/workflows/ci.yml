@@ -211,7 +211,7 @@ jobs:
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 --cql-listen 127.0.0.1:9043 --s3-listen 127.0.0.1:9001 --observability-listen 127.0.0.1:8087 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 --cql-listen 127.0.0.1:9043 --s3-listen 127.0.0.1:9001 --dynamodb-listen 127.0.0.1:8001 --observability-listen 127.0.0.1:8087 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -385,6 +385,17 @@ jobs:
           url = s3.generate_presigned_url("get_object", Params={"Bucket": "eggs", "Key": "2026/first egg.txt"}, ExpiresIn=60)
           assert urllib.request.urlopen(url).read() == b"hello object"
           print("boto3 over S3: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import boto3
+          from boto3.dynamodb.conditions import Key
+          dynamodb = boto3.resource("dynamodb", endpoint_url="http://127.0.0.1:8001", region_name="us-east-1", aws_access_key_id="eggdb", aws_secret_access_key="ci-resp-password")
+          table = dynamodb.create_table(TableName="readings", KeySchema=[{"AttributeName": "sensor", "KeyType": "HASH"}, {"AttributeName": "at", "KeyType": "RANGE"}], AttributeDefinitions=[{"AttributeName": "sensor", "AttributeType": "S"}, {"AttributeName": "at", "AttributeType": "N"}], BillingMode="PAY_PER_REQUEST")
+          for at, value in [(1, 20), (2, 21), (3, 23)]:
+              table.put_item(Item={"sensor": "kitchen", "at": at, "celsius": value})
+          found = table.query(KeyConditionExpression=Key("sensor").eq("kitchen") & Key("at").gte(2))["Items"]
+          assert [int(item["celsius"]) for item in found] == [21, 23], found
+          print("boto3 over DynamoDB: passed")
           PY
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           import asyncio

@@ -36,6 +36,7 @@ eggdb-sqs = { path = "../eggdb-sqs" }
 eggdb-stomp = { path = "../eggdb-stomp" }
 eggdb-cql = { path = "../eggdb-cql" }
 eggdb-s3 = { path = "../eggdb-s3" }
+eggdb-dynamodb = { path = "../eggdb-dynamodb" }
 eggdb-observability = { path = "../eggdb-observability" }
 eggdb-api = { path = "../eggdb-api" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }

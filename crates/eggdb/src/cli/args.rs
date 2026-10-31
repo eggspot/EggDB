@@ -224,6 +224,7 @@ impl CommandName {
             | OptionName::ObservabilityListen
             | OptionName::RestoreFrom
             | OptionName::RestListen
+            | OptionName::DynamodbListen
             | OptionName::KafkaListen
             | OptionName::AmqpListen
             | OptionName::MqttListen
@@ -389,6 +390,7 @@ enum OptionName {
     ObservabilityListen,
     RestoreFrom,
     RestListen,
+    DynamodbListen,
     KafkaListen,
     AmqpListen,
     MqttListen,
@@ -483,6 +485,7 @@ impl OptionName {
             b"observability-listen" => Self::ObservabilityListen,
             b"restore-from" => Self::RestoreFrom,
             b"rest-listen" => Self::RestListen,
+            b"dynamodb-listen" => Self::DynamodbListen,
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
             b"mqtt-listen" => Self::MqttListen,
@@ -748,6 +751,7 @@ pub(crate) struct ServeOptions {
     pub(crate) observability_listen: Option<SocketAddr>,
     pub(crate) restore_from: Option<String>,
     pub(crate) rest_listen: Option<SocketAddr>,
+    pub(crate) dynamodb_listen: Option<SocketAddr>,
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
     pub(crate) mqtt_listen: Option<SocketAddr>,
@@ -1226,6 +1230,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     return Err(usage(format!("{}: the queue name must be 1 to 255 characters", option.spelled)));
                 }
                 request.serve.cdc_queue = Some(name.to_owned());
+            }
+            OptionName::DynamodbListen => {
+                request.serve.dynamodb_listen =
+                    Some(parse_listen(&option.spelled, value, 8000).map_err(usage)?);
             }
             OptionName::RestListen => {
                 request.serve.rest_listen =

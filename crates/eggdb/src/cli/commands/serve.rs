@@ -294,6 +294,23 @@ impl Session<'_> {
             None => None,
         };
         let s3_secret = s3_listener.as_ref().map(|_| password.clone());
+        let dynamodb_listener = match options.dynamodb_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--dynamodb-listen {address}: the DynamoDB-compatible endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for DynamoDB clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let dynamodb_secret = dynamodb_listener.as_ref().map(|_| password.clone());
         let observability_listener = match options.observability_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -712,6 +729,20 @@ impl Session<'_> {
                 prefix: super::serve_resp::OBJECT_COLLECTIONS,
             };
             let s3_endpoint = s3_secret.as_ref().map(|secret| eggdb_s3::Endpoint::new(&object_database, &config.user, secret));
+            let dynamodb_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::DYNAMODB_COLLECTIONS,
+            };
+            let dynamodb_endpoint = dynamodb_secret.as_ref().map(|secret| eggdb_dynamodb::Endpoint::new(&dynamodb_database, &config.user, secret));
+            let dynamodb_server = scope.spawn(|| match (&dynamodb_listener, &dynamodb_endpoint) {
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
+                    listener,
+                    &|request| endpoint.answer(request),
+                    &stop_signals::requested,
+                    16 << 20,
+                ),
+                _ => Ok(()),
+            });
             let s3_server = scope.spawn(|| match (&s3_listener, &s3_endpoint) {
                 (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
                     listener,
@@ -815,6 +846,7 @@ impl Session<'_> {
             let _ = cdc_queue_delivery.join();
             let _ = sqs_server.join();
             let _ = s3_server.join();
+            let _ = dynamodb_server.join();
             let _ = job_scheduler.join();
             let _ = report_delivery.join();
             let _ = cdc_delivery.join();
