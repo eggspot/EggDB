@@ -2494,6 +2494,32 @@ SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY['zip', 'age_band'])
   rows sharing the same values of the quasi-identifier columns: the table is k-anonymous for
   that k.
 
+## Retention, legal hold and erasure (eggdb_retention)
+
+`CREATE EXTENSION eggdb_retention` adds write-once retention, legal holds and erasure requests
+that wait for them (D246):
+
+```sql
+CREATE EXTENSION eggdb_retention;
+SELECT eggdb_retention.retain('public', 'trades', 'booked_at', interval '7 years');
+SELECT eggdb_retention.place_hold('case-42', 'public', 'trades', 'litigation');
+SELECT eggdb_retention.request_erasure('public', 'trades', 'client = ''ada''');
+SELECT eggdb_retention.lift_hold('case-42');
+SELECT eggdb_retention.process_erasures();
+```
+
+- `retain(schema, table, time_column, period)` makes a table write-once: rows are never
+  updated, and a row is deleted only when its time column plus the period has passed.
+- `place_hold(name, schema, table, reason)` stops every update and delete on the table until
+  `lift_hold(name)`; holds stay in `eggdb_retention.holds` with when they were placed and lifted.
+- `request_erasure(schema, table, condition)` records the request in
+  `eggdb_retention.erasure_requests` and deletes the matching rows at once when nothing holds
+  them; otherwise the request waits with `waiting_for` saying why (`legal hold <name>` or
+  `retention`), and `process_erasures()`, run by hand or by a pg_cron job, carries it out later.
+
+Refused changes fail with SQLSTATE `55000`. These are rules enforced by triggers, so a role that
+may drop triggers or tables can still go around them; grant those rights only to administrators.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form

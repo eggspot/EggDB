@@ -218,7 +218,8 @@ From the third gap review (D47–D58), each after its foundations:
   lineage with OpenLineage events in `CREATE EXTENSION eggdb_catalog` (D244).
 - **Sharing and privacy (D52)** follow branching (D28). Started: FF1 format-preserving tokens,
   Laplace noise and a k-anonymity check (D245).
-- **Retention and sovereignty (D53)** follow backups and compliance.
+- **Retention and sovereignty (D53)** follow backups and compliance. Started: write-once
+  retention, legal holds and waiting erasure in `CREATE EXTENSION eggdb_retention` (D246).
 - **Coordination (D54)** follows consensus (M15).
 - **Streaming (D55)** follows the messaging work (M16).
 - **Content (D56)** follows full-text search.

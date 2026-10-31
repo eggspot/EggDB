@@ -96,6 +96,7 @@ mod regex;
 mod regexp_functions;
 mod relations;
 mod restore;
+mod retention;
 mod routines;
 mod schema;
 mod schemas;
