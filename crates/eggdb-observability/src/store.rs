@@ -1,5 +1,5 @@
 use crate::line_protocol::{FieldValue, Point};
-use eggdb_sql::{KeyValueStore, QueryResult, Session, SqlError, Value};
+use eggdb_sql::{QueryResult, Session, SqlError, Value};
 use std::collections::BTreeMap;
 
 type SamplesByLabels = BTreeMap<Vec<(String, String)>, Vec<(i64, f64)>>;
@@ -27,10 +27,7 @@ pub(crate) fn timestamp_literal(unix_micros: i64) -> String {
     format!("{}::timestamptz", literal(&text))
 }
 
-pub(crate) fn run<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
-    sql: &str,
-) -> Result<Vec<QueryResult>, String> {
+pub(crate) fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<QueryResult>, String> {
     let mut results = Vec::new();
     session
         .execute(sql, &mut |result| results.push(result))
@@ -38,7 +35,7 @@ pub(crate) fn run<S: KeyValueStore>(
     Ok(results)
 }
 
-fn rows<S: KeyValueStore>(session: &mut Session<'_, S>, sql: &str) -> Result<QueryResult, String> {
+fn rows(session: &mut Session<'_>, sql: &str) -> Result<QueryResult, String> {
     run(session, sql)?
         .into_iter()
         .rev()
@@ -47,8 +44,8 @@ fn rows<S: KeyValueStore>(session: &mut Session<'_, S>, sql: &str) -> Result<Que
 }
 
 /// Every column of every metrics table: table, column and `information_schema` data type.
-pub(crate) fn catalog<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
+pub(crate) fn catalog(
+    session: &mut Session<'_>,
 ) -> Result<BTreeMap<String, Vec<(String, String)>>, String> {
     let result = rows(
         session,
@@ -98,8 +95,8 @@ fn value_sql(value: &FieldValue) -> String {
     }
 }
 
-fn insert_all<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
+fn insert_all(
+    session: &mut Session<'_>,
     tables: &mut BTreeMap<String, Vec<(String, String)>>,
     by_measurement: &BTreeMap<&str, Vec<&Point>>,
 ) -> Result<(), String> {
@@ -199,10 +196,7 @@ fn insert_all<S: KeyValueStore>(
 
 /// Writes `points` into their measurements' tables, creating tables and columns as tags and
 /// fields first appear, all in one transaction.
-pub(crate) fn write<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
-    points: &[Point],
-) -> Result<usize, String> {
+pub(crate) fn write(session: &mut Session<'_>, points: &[Point]) -> Result<usize, String> {
     if points.is_empty() {
         return Ok(0);
     }
@@ -250,8 +244,8 @@ fn number(value: &Value) -> Option<f64> {
 
 /// The samples of metric `name` from `start_ms` (exclusive) to `end_ms` (inclusive), as series
 /// split by their tag values. A metric is a table with a `value` column, or `<table>_<field>`.
-pub(crate) fn read<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
+pub(crate) fn read(
+    session: &mut Session<'_>,
     tables: &BTreeMap<String, Vec<(String, String)>>,
     name: &str,
     start_ms: i64,

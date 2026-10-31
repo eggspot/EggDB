@@ -3,7 +3,6 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::relations::RelationKind;
 use crate::schema::{ColumnSchema, TableSchema};
 use crate::session::Session;
-use crate::store::KeyValueStore;
 use crate::types::{SqlType, Value};
 use std::io::Write;
 
@@ -242,8 +241,8 @@ fn write_rows(
 /// Writes every table of the database as plain SQL in `dialect`: `CREATE TABLE`, the rows as
 /// `INSERT` statements, then the secondary indexes, so that dialect's own client, or `eggdb
 /// restore`, loads it into an empty database. Views are counted, not written.
-pub fn dump_sql<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
+pub fn dump_sql(
+    session: &mut Session<'_>,
     dialect: Dialect,
     out: &mut dyn Write,
 ) -> SqlResult<DumpReport> {

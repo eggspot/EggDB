@@ -3,7 +3,7 @@ use crate::ast::{Name, SavepointCommand};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
-use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
+use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 
 const MOST_SAVEPOINTS: usize = 4096;
 
@@ -137,7 +137,7 @@ fn missing(name: &Name, dialect: Dialect) -> SqlError {
     .at(name.position)
 }
 
-impl<S: KeyValueStore> Session<'_, S> {
+impl Session<'_> {
     pub(super) fn savepoint_command(
         &mut self,
         command: &SavepointCommand,

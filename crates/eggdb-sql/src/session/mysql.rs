@@ -5,7 +5,6 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, like};
 use crate::mysql_variables::SetRefused;
 use crate::schema::{ColumnSchema, TableSchema, read_tables};
-use crate::store::KeyValueStore;
 use crate::time_zones::TimeZone;
 use crate::triggers::{TriggerAction, TriggerDefinition, TriggerTiming};
 use crate::types::{SqlType, Value};
@@ -154,7 +153,7 @@ fn column_definition(table: &TableSchema, column: &ColumnSchema) -> String {
     line
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(super) fn describe_mysql(
         &mut self,
         statement: &MySqlStatement,

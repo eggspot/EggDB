@@ -2,20 +2,20 @@ use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{Dialect, Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs.pop().unwrap_or_default())
 }
 
-fn answer(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn answer(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(output) => output,
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn values(session: &mut Session<'_, MemoryStore>) -> String {
+fn values(session: &mut Session<'_>) -> String {
     answer(session, "SELECT v FROM t ORDER BY v")
 }
 

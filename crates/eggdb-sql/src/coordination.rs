@@ -76,7 +76,7 @@ mod tests {
     use crate::tests::render;
     use crate::{Session, SqlError};
 
-    fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+    fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
         let mut outputs = Vec::new();
         session.execute(sql, &mut |result| outputs.push(render(&result)))?;
         Ok(outputs.pop().unwrap_or_default())
@@ -149,7 +149,7 @@ mod tests {
         let store = installed();
         let mut session = Session::new(&store);
         run(&mut session, r##"INSERT INTO eggdb_coordination.flags (flag_key, variants, default_variant, targeting) VALUES ('new-checkout', '{"on": true, "off": false}', 'off', '[{"attribute": "country", "in": ["VN", "SE"], "variant": "on"}]'), ('banner', '{"blue": "#00f"}', 'blue', '[]')"##).unwrap();
-        let resolve = |session: &mut Session<'_, MemoryStore>, key: &str, context: &str| {
+        let resolve = |session: &mut Session<'_>, key: &str, context: &str| {
             run(session, &format!("SELECT eggdb_coordination.evaluate_flag('{key}', '{context}'::jsonb) ->> 'reason' AS reason")).unwrap()
         };
         assert_eq!(

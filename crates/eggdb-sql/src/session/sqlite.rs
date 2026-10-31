@@ -6,7 +6,7 @@ use crate::ast::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
 use crate::schema::{ColumnSchema, TableSchema, read_tables};
-use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
+use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -250,7 +250,7 @@ fn single(name: &str, sql_type: SqlType, value: Value) -> QueryResult {
     rows_result(vec![column(name, Some(sql_type))], vec![vec![value]])
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(super) fn pragma_columns(&self, pragma: &Pragma) -> Option<Vec<OutputColumn>> {
         match pragma.name.as_str() {
             "table_info" if pragma.argument.is_some() => Some(table_info_columns()),

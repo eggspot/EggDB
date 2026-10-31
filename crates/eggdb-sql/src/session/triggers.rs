@@ -2,7 +2,7 @@ use super::{Block, QueryResult, Session};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
-use crate::store::{KeyValueStore, KeyValueWrite};
+use crate::store::KeyValueWrite;
 use crate::triggers::{StatementTriggerCall, TriggerAction};
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ fn statement_level_statements() -> SqlError {
     SqlError::not_supported("statement-level triggers with a statement body")
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(super) fn write_firing_triggers(
         &mut self,
         command: &str,

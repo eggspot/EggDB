@@ -246,7 +246,7 @@ impl Session<'_> {
 }
 
 fn run_sqlserver_batches(
-    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+    session: &mut eggdb_sql::Session<'_>,
     text: &str,
     script: bool,
     on_result: &mut dyn FnMut(QueryResult) -> bool,
@@ -414,7 +414,7 @@ fn counted_kind(command: &SqlPlusCommand) -> Option<String> {
 }
 
 fn run_sqlplus_script(
-    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+    session: &mut eggdb_sql::Session<'_>,
     script: &mut SqlPlusScript<'_>,
     on_result: &mut dyn FnMut(QueryResult) -> bool,
     on_event: &mut dyn FnMut(ScriptEvent),
@@ -438,7 +438,7 @@ fn run_sqlplus_script(
 }
 
 fn run_sqlplus_steps(
-    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+    session: &mut eggdb_sql::Session<'_>,
     script: &mut SqlPlusScript<'_>,
     on_result: &mut dyn FnMut(QueryResult) -> bool,
     on_event: &mut dyn FnMut(ScriptEvent),
@@ -498,9 +498,7 @@ fn run_sqlplus_steps(
     Ok(())
 }
 
-pub(super) fn commit_on_exit(
-    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
-) -> Result<(), SqlError> {
+pub(super) fn commit_on_exit(session: &mut eggdb_sql::Session<'_>) -> Result<(), SqlError> {
     if session.dialect() == Dialect::Oracle
         && session.transaction_status() == TransactionStatus::InBlock
     {
@@ -931,7 +929,7 @@ mod tests {
     use eggdb_sql::{QueryResult, Session};
     use std::collections::BTreeMap;
 
-    fn rows_of(session: &mut Session<'_, DatabaseStore<'_>>, sql: &str) -> Vec<String> {
+    fn rows_of(session: &mut Session<'_>, sql: &str) -> Vec<String> {
         let mut rows = Vec::new();
         session
             .execute(sql, &mut |result: QueryResult| {

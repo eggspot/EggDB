@@ -1057,7 +1057,7 @@ mod tests {
     use crate::tests::render;
     use crate::{Dialect, Session};
 
-    fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+    fn run(session: &mut Session<'_>, sql: &str) -> String {
         let mut outputs = Vec::new();
         session
             .execute(sql, &mut |result| outputs.push(render(&result)))

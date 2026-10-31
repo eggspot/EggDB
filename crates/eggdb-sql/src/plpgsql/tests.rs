@@ -738,7 +738,7 @@ fn nesting_and_size_are_bounded() {
     compiled(&function(&fine));
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<(), SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<(), SqlError> {
     session.execute(sql, &mut |_| {})
 }
 

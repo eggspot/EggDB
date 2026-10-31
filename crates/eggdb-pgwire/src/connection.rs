@@ -780,10 +780,10 @@ fn tag_with_count(tag: &str, count: usize) -> String {
     }
 }
 
-pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
+pub(crate) struct Connection<'a, 's> {
     wire: Wire<'a>,
     shared: &'a Shared<'a>,
-    session: Session<'s, S>,
+    session: Session<'s>,
     reported: Vec<(&'static str, String)>,
     statements: HashMap<String, PreparedEntry>,
     portals: HashMap<String, Portal>,
@@ -956,7 +956,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let _ = connection.session.close();
 }
 
-impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
+impl<'a, 's> Connection<'a, 's> {
     fn exchange_notifications(&mut self) {
         let channels = self.session.listening_channels();
         self.listening = !channels.is_empty();

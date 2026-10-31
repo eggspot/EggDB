@@ -10,7 +10,7 @@ use crate::tokens::{
 use crate::types::{declared_wire_columns, push_value};
 use crate::wire::WireError;
 use eggdb_sql::{
-    KeyValueStore, NamedParameter, OutputColumn, ParameterDeclaration, Session, SqlError, SqlType,
+    NamedParameter, OutputColumn, ParameterDeclaration, Session, SqlError, SqlType,
     StoredProcedure, TransactionStatus, Value,
 };
 use std::collections::HashMap;
@@ -384,11 +384,7 @@ fn is_parameter_name(name: &str) -> bool {
 }
 
 impl Connection<'_> {
-    pub(crate) fn rpc<S: KeyValueStore>(
-        &mut self,
-        session: &mut Session<'_, S>,
-        body: &[u8],
-    ) -> bool {
+    pub(crate) fn rpc(&mut self, session: &mut Session<'_>, body: &[u8]) -> bool {
         let request = match parse_rpc_request(body) {
             Ok(request) => request,
             Err(RpcError::Malformed(error)) => {
@@ -462,12 +458,7 @@ impl Connection<'_> {
         ));
     }
 
-    fn call<S: KeyValueStore>(
-        &mut self,
-        session: &mut Session<'_, S>,
-        call: &ProcedureCall,
-        more: bool,
-    ) -> bool {
+    fn call(&mut self, session: &mut Session<'_>, call: &ProcedureCall, more: bool) -> bool {
         let parameters = call.parameters.as_slice();
         let outcome = match call.procedure.system_procedure() {
             Some(SystemProcedure::ExecuteSql) => self.execute_sql(session, parameters),
@@ -516,9 +507,9 @@ impl Connection<'_> {
         self.wire.write(&tokens_out).is_ok()
     }
 
-    fn run_bound<S: KeyValueStore>(
+    fn run_bound(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         batch: &PreparedBatch,
         parameters: &[NamedParameter],
     ) -> Called {
@@ -541,8 +532,8 @@ impl Connection<'_> {
         }
     }
 
-    fn checked_batch<S: KeyValueStore>(
-        session: &mut Session<'_, S>,
+    fn checked_batch(
+        session: &mut Session<'_>,
         declarations_text: String,
         text: String,
     ) -> Result<PreparedBatch, CallError> {
@@ -567,9 +558,9 @@ impl Connection<'_> {
         })
     }
 
-    fn execute_sql<S: KeyValueStore>(
+    fn execute_sql(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
         let text = character_argument(parameters.first(), "@statement")?;
@@ -597,9 +588,9 @@ impl Connection<'_> {
         Ok(called)
     }
 
-    fn prepare<S: KeyValueStore>(
+    fn prepare(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
         let declarations_text = character_argument(parameters.get(1), "@params")?;
@@ -612,9 +603,9 @@ impl Connection<'_> {
         })
     }
 
-    fn prepare_and_execute<S: KeyValueStore>(
+    fn prepare_and_execute(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
         if let Some(old) = parameters
@@ -649,9 +640,9 @@ impl Connection<'_> {
         Ok(called)
     }
 
-    fn execute_prepared<S: KeyValueStore>(
+    fn execute_prepared(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
         let handle = handle_argument(parameters.first(), SystemProcedure::Execute)?;
@@ -674,9 +665,9 @@ impl Connection<'_> {
         Ok(called)
     }
 
-    fn catalog_procedure<S: KeyValueStore>(
+    fn catalog_procedure(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         name: &str,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
@@ -717,9 +708,9 @@ impl Connection<'_> {
         Ok(self.run_bound(session, &batch, &bound))
     }
 
-    fn stored_procedure<S: KeyValueStore>(
+    fn stored_procedure(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         procedure: &Procedure,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
@@ -750,7 +741,7 @@ impl Connection<'_> {
         Ok(called)
     }
 
-    pub(crate) fn forget_unprepared<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>) {
+    pub(crate) fn forget_unprepared(&mut self, session: &mut Session<'_>) {
         for handle in session.take_unprepare_requests() {
             self.prepared.unprepare(handle);
         }

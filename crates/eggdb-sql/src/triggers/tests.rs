@@ -8,27 +8,27 @@ use crate::memory_store::MemoryStore;
 use crate::tests::{fuzz, render};
 use crate::{Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs.pop().unwrap_or_default())
 }
 
-fn answer(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn answer(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(output) => output,
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn refusal(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn refusal(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(output) => panic!("{sql} succeeded: {output}"),
         Err(error) => error,
     }
 }
 
-fn rows(session: &mut Session<'_, MemoryStore>, sql: &str) -> Vec<String> {
+fn rows(session: &mut Session<'_>, sql: &str) -> Vec<String> {
     let rendered = answer(session, sql);
     let lines: Vec<&str> = rendered.lines().collect();
     match lines.len() {
@@ -40,7 +40,7 @@ fn rows(session: &mut Session<'_, MemoryStore>, sql: &str) -> Vec<String> {
     }
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) {
+fn batch(session: &mut Session<'_>, text: &str) {
     session
         .execute_batch(text, &mut |step| step.outcome.is_ok())
         .unwrap_or_else(|error| panic!("{text}: {error}"));
@@ -110,7 +110,7 @@ fn trigger_events_keep_only_known_bits() {
     );
 }
 
-fn sqlite_session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn sqlite_session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::Sqlite);
     answer(
         &mut session,
@@ -251,7 +251,7 @@ fn raise_outside_a_trigger_is_an_error() {
     );
 }
 
-fn mysql_session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn mysql_session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::MySql);
     answer(
         &mut session,
@@ -367,7 +367,7 @@ fn mysql_duplicate_trigger_names_are_refused() {
     );
 }
 
-fn sqlserver_session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn sqlserver_session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::SqlServer);
     batch(
         &mut session,

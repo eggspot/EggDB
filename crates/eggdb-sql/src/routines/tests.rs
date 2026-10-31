@@ -9,7 +9,7 @@ use crate::tests::render;
 use crate::types::SqlType;
 use crate::{Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| {
         let mut shown = render(&result);
@@ -22,14 +22,14 @@ fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlE
     Ok(outputs.pop().unwrap_or_default())
 }
 
-fn answer(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn answer(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(output) => output,
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn refusal(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn refusal(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(output) => panic!("{sql} succeeded: {output}"),
         Err(error) => error,

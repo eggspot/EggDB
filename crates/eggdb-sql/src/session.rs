@@ -318,10 +318,10 @@ fn aborted_block() -> SqlError {
     )
 }
 
-enum Block<'s, S: KeyValueStore + 's> {
+enum Block<'s> {
     None,
-    Writing(S::Write<'s>),
-    Reading(S::Read<'s>),
+    Writing(Box<dyn crate::store::BoxedWrite + 's>),
+    Reading(Box<dyn KeyValueRead + 's>),
     Failed,
 }
 
@@ -335,9 +335,9 @@ enum Block<'s, S: KeyValueStore + 's> {
 /// `ROLLBACK` (or `COMMIT`, which then reports `ROLLBACK`). In MySQL's, a statement that fails
 /// before writing leaves the block open, one that fails after writing rolls it back and ends
 /// it, and errors carry MySQL's numbers and wording.
-pub struct Session<'s, S: KeyValueStore + 's> {
-    store: &'s S,
-    block: Block<'s, S>,
+pub struct Session<'s> {
+    store: &'s dyn crate::store::ErasedStore,
+    block: Block<'s>,
     tables: TableCache,
     settings: Arc<Settings>,
     dialect: Dialect,
@@ -387,7 +387,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     trigger_transaction: bool,
 }
 
-impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
+impl std::fmt::Debug for Session<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("in_block", &self.in_block())
@@ -395,14 +395,14 @@ impl<S: KeyValueStore> std::fmt::Debug for Session<'_, S> {
     }
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     /// A session over `store`, outside any block.
-    pub fn new(store: &'s S) -> Self {
+    pub fn new<S: KeyValueStore>(store: &'s S) -> Self {
         Self::with_dialect(store, Dialect::PostgreSql)
     }
 
     /// A session over `store` that reads `dialect`, outside any block.
-    pub fn with_dialect(store: &'s S, dialect: Dialect) -> Self {
+    pub fn with_dialect<S: KeyValueStore>(store: &'s S, dialect: Dialect) -> Self {
         Self {
             store,
             block: Block::None,
@@ -1863,7 +1863,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             return Ok(());
         }
         let pending = std::mem::take(&mut self.pending_sequences);
-        let mut writer = self.store.begin_write().map_err(|error| {
+        let mut writer = self.store.begin_boxed_write().map_err(|error| {
             SqlError::new(
                 error.state(),
                 format!(
@@ -2974,7 +2974,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 tables,
             ),
             Block::None | Block::Failed => {
-                let reader = self.store.begin_read()?;
+                let reader = self.store.begin_boxed_read()?;
                 body(
                     &crate::temporary::TemporaryRead {
                         inner: &reader,
@@ -3098,7 +3098,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Block::None | Block::Failed => {
                 let mut writer = self
                     .store
-                    .begin_write()
+                    .begin_boxed_write()
                     .map_err(|error| read_only_refusal(error, command))?;
                 let outcome = body(
                     &mut crate::temporary::TemporaryWrite {
@@ -3215,9 +3215,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 .with_notice("WARNING:  there is already a transaction in progress".into())),
             Block::None => {
                 self.block = if read_only {
-                    Block::Reading(self.store.begin_read()?)
+                    Block::Reading(self.store.begin_boxed_read()?)
                 } else {
-                    Block::Writing(self.store.begin_write()?)
+                    Block::Writing(self.store.begin_boxed_write()?)
                 };
                 if self.dialect == Dialect::PostgreSql {
                     self.search_path_at_begin = self.settings.get("search_path").ok();

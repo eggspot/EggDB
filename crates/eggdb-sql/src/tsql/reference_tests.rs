@@ -2,11 +2,11 @@ use crate::dialect::Dialect;
 use crate::memory_store::MemoryStore;
 use crate::{BatchStep, QueryResult, Session};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::SqlServer)
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn batch(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let mut steps = Vec::new();
     session
         .execute_batch(text, &mut |step| {
@@ -25,7 +25,7 @@ fn errors(steps: &[BatchStep]) -> Vec<Option<u32>> {
         .collect()
 }
 
-fn succeeds(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn succeeds(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let steps = batch(session, text);
     assert_eq!(errors(&steps), Vec::<Option<u32>>::new(), "{text}");
     steps
@@ -79,7 +79,7 @@ fn printed(steps: &[BatchStep]) -> Vec<String> {
         .collect()
 }
 
-fn with_staff(session: &mut Session<'_, MemoryStore>) {
+fn with_staff(session: &mut Session<'_>) {
     succeeds(
         session,
         "CREATE TABLE Staff (Id int PRIMARY KEY, FirstName nvarchar(50) NOT NULL, \

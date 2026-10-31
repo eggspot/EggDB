@@ -8,7 +8,6 @@ use crate::routines::{RoutineDefinition, RoutineKind, RoutineLanguage};
 use crate::schemas::base_name;
 use crate::session::sqlserver::BatchStep;
 use crate::session::{QueryResult, Session};
-use crate::store::KeyValueStore;
 use crate::tsql::{
     MAX_DYNAMIC_NESTING, ProcedureRun, Program, ProgramEnd, ScalarVariable, TsqlReturns,
 };
@@ -123,7 +122,7 @@ fn parameter_index(
     }
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(in crate::session) fn tsql_routine(
         &mut self,
         routine: &str,

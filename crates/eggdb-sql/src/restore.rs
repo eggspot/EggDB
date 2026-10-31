@@ -18,7 +18,6 @@ use crate::copy::{CopyChannel, CopyStart};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::{QueryResult, Session};
-use crate::store::KeyValueStore;
 use classify::{Action, Effect, Ignored, Skip, ToggledConstraint};
 use reader::DumpReader;
 use script::{ClientCommand, DifferenceNote, ScriptItem, ScriptSource, ScriptStatement};
@@ -373,8 +372,8 @@ impl RestoreReport {
 /// supported yet. Any other error stops the restore, unless [`RestoreOptions::keep_going`], with
 /// the statements before it committed; `progress` is called as the restore moves on. The session
 /// must use the PostgreSQL, SQL Server or Oracle dialect and be outside a transaction block.
-pub fn restore_dump<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
+pub fn restore_dump(
+    session: &mut Session<'_>,
     input: &mut dyn BufRead,
     options: RestoreOptions<'_>,
     progress: &mut dyn FnMut(&RestoreProgress),
@@ -561,8 +560,8 @@ struct DisabledConstraint {
     default_schema: String,
 }
 
-struct Restore<'a, 's, S: KeyValueStore> {
-    session: &'a mut Session<'s, S>,
+struct Restore<'a, 's> {
+    session: &'a mut Session<'s>,
     reader: &'a mut dyn ScriptSource,
     rules: RestoreRules,
     report: RestoreReport,
@@ -580,9 +579,9 @@ struct Restore<'a, 's, S: KeyValueStore> {
     disabled: BTreeMap<(String, String), DisabledConstraint>,
 }
 
-impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
+impl<'a, 's> Restore<'a, 's> {
     fn new(
-        session: &'a mut Session<'s, S>,
+        session: &'a mut Session<'s>,
         reader: &'a mut dyn ScriptSource,
         rules: RestoreRules,
         options: RestoreOptions<'a>,

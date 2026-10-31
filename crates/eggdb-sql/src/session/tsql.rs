@@ -11,7 +11,6 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind, tokenize_in};
 use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
-use crate::store::KeyValueStore;
 use crate::table_variables::{TableVariable, TableVariableRules, TableVariables};
 use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
@@ -101,7 +100,7 @@ fn text_value(value: Option<&Value>) -> SqlResult<String> {
     }
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     /// The values the named parameters of the last parameterized batch
     /// ([`Session::execute_parameterized_batch`]) held when it ended, in the order given: the
     /// value each was bound to unless a statement of the batch assigned it (`SET @p = ...`), as

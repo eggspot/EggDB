@@ -15,7 +15,7 @@ use eggdb::sql::Store;
 use eggdb_sql::{Dialect, QueryResult, Session};
 use std::cell::RefCell;
 
-type OpenSession = Session<'static, Store<'static>>;
+type OpenSession = Session<'static>;
 
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };

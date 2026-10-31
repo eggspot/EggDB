@@ -2,26 +2,26 @@ use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{Session, SqlError};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);
     session.identify("eggdb", "shapes");
     session
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn rows(session: &mut Session<'_, MemoryStore>, sql: &str) -> Vec<String> {
+fn rows(session: &mut Session<'_>, sql: &str) -> Vec<String> {
     let rendered = last(session, sql);
     let lines: Vec<&str> = rendered.lines().collect();
     lines
@@ -49,7 +49,7 @@ WHERE pg_catalog.pg_function_is_visible(p.oid)
       AND n.nspname <> 'information_schema'
 ORDER BY 1, 2, 4;";
 
-fn with_routines(session: &mut Session<'_, MemoryStore>) {
+fn with_routines(session: &mut Session<'_>) {
     for statement in [
         "CREATE FUNCTION add_one(a integer, b integer DEFAULT 1) RETURNS integer \
          LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT a + b $$",

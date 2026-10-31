@@ -170,9 +170,9 @@ struct Prepared {
     keyspace: Option<String>,
 }
 
-struct Connection<'c, 's, S: KeyValueStore + 's> {
+struct Connection<'c, 's> {
     config: &'c ServerConfig,
-    session: Session<'s, S>,
+    session: Session<'s>,
     address: IpAddr,
     started: bool,
     authenticated: bool,
@@ -181,19 +181,13 @@ struct Connection<'c, 's, S: KeyValueStore + 's> {
     tables: BTreeMap<(String, String), TableInfo>,
 }
 
-fn run_sql<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
-    sql: &str,
-) -> Result<Vec<QueryResult>, SqlError> {
+fn run_sql(session: &mut Session<'_>, sql: &str) -> Result<Vec<QueryResult>, SqlError> {
     let mut results = Vec::new();
     session.execute(sql, &mut |result| results.push(result))?;
     Ok(results)
 }
 
-fn text_rows<S: KeyValueStore>(
-    session: &mut Session<'_, S>,
-    sql: &str,
-) -> Result<Vec<Vec<String>>, String> {
+fn text_rows(session: &mut Session<'_>, sql: &str) -> Result<Vec<Vec<String>>, String> {
     let results = run_sql(session, sql).map_err(|error| error.message().to_owned())?;
     Ok(results
         .into_iter()
@@ -212,8 +206,8 @@ fn text_rows<S: KeyValueStore>(
         .unwrap_or_default())
 }
 
-struct SessionCatalog<'c, 's, S: KeyValueStore + 's> {
-    session: &'c mut Session<'s, S>,
+struct SessionCatalog<'c, 's> {
+    session: &'c mut Session<'s>,
     tables: &'c mut BTreeMap<(String, String), TableInfo>,
 }
 
@@ -224,7 +218,7 @@ fn lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-impl<S: KeyValueStore> Catalog for SessionCatalog<'_, '_, S> {
+impl Catalog for SessionCatalog<'_, '_> {
     fn table(&mut self, keyspace: &str, table: &str) -> Result<TableInfo, String> {
         let key = (keyspace.to_owned(), table.to_owned());
         if let Some(found) = self.tables.get(&key) {
@@ -341,8 +335,8 @@ fn system_target(statement: &Statement, current: Option<&str>) -> Option<(String
         .then(|| (keyspace.to_owned(), table.table.clone()))
 }
 
-impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
-    fn catalog(&mut self) -> SessionCatalog<'_, 's, S> {
+impl<'s> Connection<'_, 's> {
+    fn catalog(&mut self) -> SessionCatalog<'_, 's> {
         SessionCatalog {
             session: &mut self.session,
             tables: &mut self.tables,

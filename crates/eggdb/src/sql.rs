@@ -44,7 +44,7 @@ pub struct Store<'db>(pub &'db Database);
 
 impl<'db> Store<'db> {
     /// A SQL session on this database that reads `dialect`, outside any transaction block.
-    pub fn session(&self, dialect: Dialect) -> Session<'_, Store<'db>> {
+    pub fn session(&self, dialect: Dialect) -> Session<'_> {
         eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
         Session::with_dialect(self, dialect)
     }

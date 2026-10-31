@@ -22,31 +22,31 @@ pub(crate) fn render(result: &QueryResult) -> String {
     out
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
     }
 }
 
-fn state(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn state(session: &mut Session<'_>, sql: &str) -> String {
     fails(session, sql).state().code().to_owned()
 }
 
-fn with_people(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn with_people(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);
     last(
         &mut session,
@@ -925,7 +925,7 @@ fn hostile_input_returns_errors_and_never_panics() {
     fuzz(&mut session, &fragments);
 }
 
-pub(crate) fn fuzz(session: &mut Session<'_, MemoryStore>, fragments: &[&str]) {
+pub(crate) fn fuzz(session: &mut Session<'_>, fragments: &[&str]) {
     let mut random = Seeded(0xDEAD_BEEF_CAFE_F00D);
     for _ in 0..20_000 {
         let length = 1 + random.below(14);
@@ -1265,7 +1265,7 @@ fn literal_inserts_take_the_direct_path_and_match_the_general_one() {
             COLUMNS[..width].join(", ")
         );
         let shift = general_sql.len() - direct_sql.len();
-        let outcome = |session: &mut Session<'_, MemoryStore>, sql: &str, shift: usize| {
+        let outcome = |session: &mut Session<'_>, sql: &str, shift: usize| {
             run(session, sql).map_err(|error| {
                 (
                     error.state(),
@@ -1319,7 +1319,7 @@ fn rows_without_a_key_stop_at_the_last_row_identifier_in_one_statement_or_many()
     assert_eq!(last(&mut session, "SELECT a FROM t"), "a\n1\n2\nSELECT 2");
 }
 
-fn with_orders(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn with_orders(store: &MemoryStore) -> Session<'_> {
     let mut session = with_people(store);
     last(
         &mut session,
@@ -2000,7 +2000,7 @@ fn parameter(declared_type: Option<crate::SqlType>, value: Option<&str>) -> crat
 }
 
 fn run_prepared(
-    session: &mut Session<'_, MemoryStore>,
+    session: &mut Session<'_>,
     sql: &str,
     parameters: &[crate::Parameter],
 ) -> Result<Vec<String>, SqlError> {

@@ -5,33 +5,33 @@ use crate::tests::render;
 use crate::types::{NumericModifier, SqlType};
 use crate::{Session, SqlError};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);
     session.identify("eggdb", "shapes");
     session
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
     }
 }
 
-fn rows(session: &mut Session<'_, MemoryStore>, sql: &str) -> Vec<String> {
+fn rows(session: &mut Session<'_>, sql: &str) -> Vec<String> {
     let rendered = last(session, sql);
     let lines: Vec<&str> = rendered.lines().collect();
     lines
@@ -42,7 +42,7 @@ fn rows(session: &mut Session<'_, MemoryStore>, sql: &str) -> Vec<String> {
         .collect()
 }
 
-fn shop(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn shop(store: &MemoryStore) -> Session<'_> {
     let mut session = session(store);
     for statement in [
         "CREATE SCHEMA shop",

@@ -1,7 +1,7 @@
 use crate::memory_store::MemoryStore;
 use crate::{Dialect, QueryResult, Session, SqlError};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
     run(
         &mut session,
@@ -14,19 +14,19 @@ fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
     session
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, text: &str) {
+fn run(session: &mut Session<'_>, text: &str) {
     session
         .execute(text, &mut |_: QueryResult| {})
         .unwrap_or_else(|error| panic!("{text}: {error}"));
 }
 
-fn failure(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+fn failure(session: &mut Session<'_>, text: &str) -> SqlError {
     session
         .execute(text, &mut |_| {})
         .expect_err("the statement fails")
 }
 
-fn texts(session: &mut Session<'_, MemoryStore>, query: &str) -> Vec<Vec<String>> {
+fn texts(session: &mut Session<'_>, query: &str) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     session
         .execute(query, &mut |result: QueryResult| {
@@ -42,7 +42,7 @@ fn texts(session: &mut Session<'_, MemoryStore>, query: &str) -> Vec<Vec<String>
     rows
 }
 
-fn messages(session: &mut Session<'_, MemoryStore>) -> Vec<String> {
+fn messages(session: &mut Session<'_>) -> Vec<String> {
     texts(session, "SELECT msg FROM log ORDER BY n")
         .into_iter()
         .filter_map(|row| row.into_iter().next())

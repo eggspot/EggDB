@@ -135,6 +135,116 @@ pub trait KeyValueStore {
     fn begin_write(&self) -> SqlResult<Self::Write<'_>>;
 }
 
+pub(crate) trait BoxedWrite: KeyValueWrite {
+    fn commit_boxed(self: Box<Self>) -> SqlResult<()>;
+
+    fn rollback_boxed(self: Box<Self>) -> SqlResult<()>;
+}
+
+impl<W: KeyValueWrite> BoxedWrite for W {
+    fn commit_boxed(self: Box<Self>) -> SqlResult<()> {
+        (*self).commit()
+    }
+
+    fn rollback_boxed(self: Box<Self>) -> SqlResult<()> {
+        (*self).rollback()
+    }
+}
+
+impl KeyValueRead for Box<dyn BoxedWrite + '_> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        (**self).get(key)
+    }
+
+    fn get_with(
+        &self,
+        key: &[u8],
+        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+    ) -> SqlResult<bool> {
+        (**self).get_with(key, read)
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        (**self).scan(start, end, direction, visit)
+    }
+
+    fn committed_version(&self) -> Option<u64> {
+        (**self).committed_version()
+    }
+}
+
+impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        (**self).put(key, value)
+    }
+
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        (**self).put_if_absent(key, value)
+    }
+
+    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        (**self).delete(key)
+    }
+
+    fn commit(self) -> SqlResult<()> {
+        self.commit_boxed()
+    }
+
+    fn rollback(self) -> SqlResult<()> {
+        self.rollback_boxed()
+    }
+}
+
+impl KeyValueRead for Box<dyn KeyValueRead + '_> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        (**self).get(key)
+    }
+
+    fn get_with(
+        &self,
+        key: &[u8],
+        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+    ) -> SqlResult<bool> {
+        (**self).get_with(key, read)
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        (**self).scan(start, end, direction, visit)
+    }
+
+    fn committed_version(&self) -> Option<u64> {
+        (**self).committed_version()
+    }
+}
+
+pub(crate) trait ErasedStore {
+    fn begin_boxed_read(&self) -> SqlResult<Box<dyn KeyValueRead + '_>>;
+
+    fn begin_boxed_write(&self) -> SqlResult<Box<dyn BoxedWrite + '_>>;
+}
+
+impl<S: KeyValueStore> ErasedStore for S {
+    fn begin_boxed_read(&self) -> SqlResult<Box<dyn KeyValueRead + '_>> {
+        Ok(Box::new(self.begin_read()?))
+    }
+
+    fn begin_boxed_write(&self) -> SqlResult<Box<dyn BoxedWrite + '_>> {
+        Ok(Box::new(self.begin_write()?))
+    }
+}
+
 const DELETE_BATCH: usize = 1024;
 
 pub(crate) fn delete_prefix(writer: &mut dyn KeyValueWrite, prefix: &[u8]) -> SqlResult<()> {

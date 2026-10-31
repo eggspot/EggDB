@@ -75,7 +75,7 @@ fn shown(store: &MemoryStore) -> ShownStore<'_> {
     }
 }
 
-fn last(session: &mut Session<'_, ShownStore<'_>>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     let mut outputs = Vec::new();
     match session.execute(sql, &mut |result| outputs.push(render(&result))) {
         Ok(()) => outputs.last().cloned().unwrap_or_default(),
@@ -83,7 +83,7 @@ fn last(session: &mut Session<'_, ShownStore<'_>>, sql: &str) -> String {
     }
 }
 
-fn fails(session: &mut Session<'_, ShownStore<'_>>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     let mut outputs = Vec::new();
     match session.execute(sql, &mut |result| outputs.push(render(&result))) {
         Ok(()) => panic!("{sql} succeeded: {outputs:?}"),

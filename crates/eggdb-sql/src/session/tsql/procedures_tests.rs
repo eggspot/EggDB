@@ -3,11 +3,11 @@ use crate::memory_store::MemoryStore;
 use crate::types::{SqlType, Value};
 use crate::{BatchStep, Session};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::SqlServer)
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn batch(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let mut steps = Vec::new();
     session
         .execute_batch(text, &mut |step| {
@@ -48,18 +48,18 @@ fn printed(steps: &[BatchStep]) -> Vec<String> {
         .collect()
 }
 
-fn succeeds(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn succeeds(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let steps = batch(session, text);
     assert_eq!(errors(&steps), Vec::<Option<u32>>::new(), "{text}");
     steps
 }
 
-fn fails_with(session: &mut Session<'_, MemoryStore>, text: &str, number: u32) {
+fn fails_with(session: &mut Session<'_>, text: &str, number: u32) {
     let steps = batch(session, text);
     assert_eq!(errors(&steps), vec![Some(number)], "{text}");
 }
 
-fn create_add_numbers(session: &mut Session<'_, MemoryStore>) {
+fn create_add_numbers(session: &mut Session<'_>) {
     succeeds(
         session,
         "CREATE PROCEDURE dbo.add_numbers @a int, @b int = 10, @sum int OUTPUT AS \

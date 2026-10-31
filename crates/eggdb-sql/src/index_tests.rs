@@ -2,20 +2,20 @@ use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{Dialect, Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
@@ -33,7 +33,7 @@ impl Seeded {
     }
 }
 
-fn numbered(session: &mut Session<'_, MemoryStore>, rows: u64) {
+fn numbered(session: &mut Session<'_>, rows: u64) {
     last(
         session,
         "CREATE TABLE t (id integer PRIMARY KEY, b integer, c text)",

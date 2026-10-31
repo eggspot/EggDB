@@ -1,11 +1,11 @@
 use crate::memory_store::MemoryStore;
 use crate::{BatchStep, Dialect, InfoMessage, NamedParameter, Session, SqlError, SqlType, Value};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::SqlServer)
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn batch(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let mut steps = Vec::new();
     session
         .execute_batch(text, &mut |step| {
@@ -16,7 +16,7 @@ fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
     steps
 }
 
-fn refused(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+fn refused(session: &mut Session<'_>, text: &str) -> SqlError {
     session.execute_batch(text, &mut |_| true).expect_err(text)
 }
 

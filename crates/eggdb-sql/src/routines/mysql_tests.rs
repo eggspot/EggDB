@@ -4,11 +4,11 @@ use crate::memory_store::MemoryStore;
 use crate::session::Session;
 use crate::tests::render;
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::MySql)
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn run(session: &mut Session<'_>, sql: &str) -> String {
     let mut out = Vec::new();
     session
         .execute(sql, &mut |result| out.push(render(&result)))
@@ -23,7 +23,7 @@ fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
         .join("\n")
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> crate::SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> crate::SqlError {
     session.execute(sql, &mut |_| {}).expect_err(sql)
 }
 

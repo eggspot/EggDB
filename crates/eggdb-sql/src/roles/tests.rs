@@ -3,7 +3,7 @@ use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{KeyValueStore, Session};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlResult<String> {
+fn run(session: &mut Session<'_>, sql: &str) -> SqlResult<String> {
     let mut last = String::new();
     session.execute(sql, &mut |result| last = render(&result))?;
     Ok(last)

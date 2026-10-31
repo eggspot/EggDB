@@ -8,11 +8,11 @@ use crate::tsql::TsqlReturns;
 use crate::types::SqlType;
 use crate::{BatchStep, Session};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::SqlServer)
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn batch(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let mut steps = Vec::new();
     session
         .execute_batch(text, &mut |step| {
@@ -31,12 +31,12 @@ fn errors(steps: &[BatchStep]) -> Vec<Option<u32>> {
         .collect()
 }
 
-fn succeeds(session: &mut Session<'_, MemoryStore>, text: &str) {
+fn succeeds(session: &mut Session<'_>, text: &str) {
     let steps = batch(session, text);
     assert_eq!(errors(&steps), Vec::<Option<u32>>::new(), "{text}");
 }
 
-fn fails_with(session: &mut Session<'_, MemoryStore>, text: &str, number: u32) {
+fn fails_with(session: &mut Session<'_>, text: &str, number: u32) {
     let mut steps = Vec::new();
     let found = match session.execute_batch(text, &mut |step| {
         steps.push(step);

@@ -2,7 +2,6 @@ use super::{OutputColumn, QueryResult, Session};
 use crate::lexer::swap_uniform_case;
 use crate::oracle_dictionary::type_text;
 use crate::schema::{ColumnSchema, TableSchema};
-use crate::store::KeyValueStore;
 
 pub(super) fn shown_columns(columns: Vec<OutputColumn>) -> Vec<OutputColumn> {
     columns
@@ -78,7 +77,7 @@ pub(crate) fn create_text(table: &TableSchema) -> String {
     )
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(super) fn oracle_user(&self) -> String {
         self.settings
             .get("session_authorization")

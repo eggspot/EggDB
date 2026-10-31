@@ -611,7 +611,7 @@ pub(crate) struct Ran {
 }
 
 impl Connection<'_> {
-    fn run<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>) {
+    fn run(&mut self, session: &mut Session<'_>) {
         loop {
             let message = match self.next_message() {
                 Ok(Incoming::Message(message)) => message,
@@ -678,12 +678,7 @@ impl Connection<'_> {
         }))
     }
 
-    fn bulk_load<S: KeyValueStore>(
-        &mut self,
-        session: &mut Session<'_, S>,
-        first: Packet,
-        body: Vec<u8>,
-    ) -> bool {
+    fn bulk_load(&mut self, session: &mut Session<'_>, first: Packet, body: Vec<u8>) -> bool {
         let pending = session.bulk_load_pending();
         let mut steps: Vec<BatchStep> = Vec::new();
         let (outcome, refused, wire_failure) = {
@@ -737,9 +732,9 @@ impl Connection<'_> {
         self.send_steps(session, steps, outcome)
     }
 
-    fn send_steps<S: KeyValueStore>(
+    fn send_steps(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         steps: Vec<BatchStep>,
         outcome: SqlResult<()>,
     ) -> bool {
@@ -758,7 +753,7 @@ impl Connection<'_> {
         self.finish_batch(session, ran)
     }
 
-    fn reset<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, keep_transaction: bool) {
+    fn reset(&mut self, session: &mut Session<'_>, keep_transaction: bool) {
         let keep_transaction = keep_transaction && self.transaction.is_some();
         if let Err(error) = session.reset_connection(keep_transaction) {
             (self.shared.log)(&format!(
@@ -808,11 +803,7 @@ impl Connection<'_> {
         self.send_error(NOT_SUPPORTED, 16, &text)
     }
 
-    fn transaction_request<S: KeyValueStore>(
-        &mut self,
-        session: &mut Session<'_, S>,
-        body: &[u8],
-    ) -> bool {
+    fn transaction_request(&mut self, session: &mut Session<'_>, body: &[u8]) -> bool {
         let request = match parse_transaction_manager_request(body) {
             Ok(request) => request,
             Err(error) => {
@@ -860,7 +851,7 @@ impl Connection<'_> {
         session.in_connection_dialect(|session| self.run_batch_text(session, &text))
     }
 
-    fn batch<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, body: &[u8]) -> bool {
+    fn batch(&mut self, session: &mut Session<'_>, body: &[u8]) -> bool {
         let batch = match parse_sql_batch(body) {
             Ok(batch) => batch,
             Err(error) => {
@@ -883,9 +874,9 @@ impl Connection<'_> {
         self.run_batch_text(session, &batch.text)
     }
 
-    pub(crate) fn run_statements<S: KeyValueStore>(
+    pub(crate) fn run_statements(
         &mut self,
-        session: &mut Session<'_, S>,
+        session: &mut Session<'_>,
         text: &str,
         parameters: Option<&[NamedParameter]>,
         done_token: u8,
@@ -930,11 +921,7 @@ impl Connection<'_> {
         }
     }
 
-    fn run_batch_text<S: KeyValueStore>(
-        &mut self,
-        session: &mut Session<'_, S>,
-        text: &str,
-    ) -> bool {
+    fn run_batch_text(&mut self, session: &mut Session<'_>, text: &str) -> bool {
         if !self.begin_response() {
             return false;
         }
@@ -942,7 +929,7 @@ impl Connection<'_> {
         self.finish_batch(session, ran)
     }
 
-    fn finish_batch<S: KeyValueStore>(&mut self, session: &Session<'_, S>, ran: Ran) -> bool {
+    fn finish_batch(&mut self, session: &Session<'_>, ran: Ran) -> bool {
         let in_transaction = session.transaction_status() != eggdb_sql::TransactionStatus::Idle;
         if ran.failed_write {
             return false;

@@ -407,13 +407,13 @@ const DEFAULTS: [(&str, &str, &str, &str); 17] = [
     ),
 ];
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<Vec<Value>>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<Vec<Value>>, SqlError> {
     let mut rows = Vec::new();
     session.execute(sql, &mut |result| rows = result.rows)?;
     Ok(rows)
 }
 
-fn single_text(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn single_text(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(rows) => rows
             .first()

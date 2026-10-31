@@ -3,11 +3,11 @@ use crate::memory_store::MemoryStore;
 use crate::types::Value;
 use crate::{BatchStep, Session};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::SqlServer)
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn batch(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let mut steps = Vec::new();
     session
         .execute_batch(text, &mut |step| {
@@ -44,13 +44,13 @@ fn column_names(steps: &[BatchStep]) -> Vec<String> {
         .collect()
 }
 
-fn succeeds(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn succeeds(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let steps = batch(session, text);
     assert_eq!(errors(&steps), Vec::<Option<u32>>::new(), "{text}");
     steps
 }
 
-fn fails_with(session: &mut Session<'_, MemoryStore>, text: &str, number: u32) {
+fn fails_with(session: &mut Session<'_>, text: &str, number: u32) {
     let mut steps = Vec::new();
     let found = match session.execute_batch(text, &mut |step| {
         steps.push(step);
@@ -69,7 +69,7 @@ fn integers(values: &[&[i32]]) -> Vec<Vec<Value>> {
         .collect()
 }
 
-fn with_numbers(session: &mut Session<'_, MemoryStore>) {
+fn with_numbers(session: &mut Session<'_>) {
     succeeds(session, "CREATE TABLE numbers (id int PRIMARY KEY, n int)");
     succeeds(
         session,
@@ -77,7 +77,7 @@ fn with_numbers(session: &mut Session<'_, MemoryStore>) {
     );
 }
 
-fn create_twice(session: &mut Session<'_, MemoryStore>) {
+fn create_twice(session: &mut Session<'_>) {
     succeeds(
         session,
         "CREATE FUNCTION dbo.twice(@n int) RETURNS int AS BEGIN RETURN @n * 2 END",

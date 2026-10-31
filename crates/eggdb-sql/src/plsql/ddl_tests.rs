@@ -6,11 +6,11 @@ use crate::parser::Parser;
 use crate::routines::{ParameterMode, RoutineKind, RoutineLanguage, parse_definition};
 use crate::{Dialect, QueryResult, Session, SqlError};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::Oracle)
 }
 
-fn tag(session: &mut Session<'_, MemoryStore>, text: &str) -> String {
+fn tag(session: &mut Session<'_>, text: &str) -> String {
     let mut last = None;
     session
         .execute(text, &mut |result: QueryResult| last = Some(result.tag))
@@ -18,13 +18,13 @@ fn tag(session: &mut Session<'_, MemoryStore>, text: &str) -> String {
     last.unwrap_or_default()
 }
 
-fn failure(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+fn failure(session: &mut Session<'_>, text: &str) -> SqlError {
     session
         .execute(text, &mut |_| {})
         .expect_err("the statement fails")
 }
 
-fn oracle_code(session: &mut Session<'_, MemoryStore>, text: &str) -> Option<u16> {
+fn oracle_code(session: &mut Session<'_>, text: &str) -> Option<u16> {
     failure(session, text).vendor_code()
 }
 

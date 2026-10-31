@@ -1,7 +1,7 @@
 use crate::memory_store::MemoryStore;
 use crate::{Dialect, Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, text: &str) -> Result<Vec<String>, SqlError> {
     let mut found = Vec::new();
     session.execute(text, &mut |result| {
         for row in result.rows {
@@ -11,7 +11,7 @@ fn run(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<String>
     Ok(found)
 }
 
-fn rows(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<String> {
+fn rows(session: &mut Session<'_>, text: &str) -> Vec<String> {
     run(session, text).unwrap_or_else(|error| panic!("{text}: {error:?}"))
 }
 

@@ -2,27 +2,27 @@ use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{Parameter, Session, SqlError, SqlType};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn state(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn state(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error.state().code().to_owned(),
     }
 }
 
-fn prepared(session: &mut Session<'_, MemoryStore>, sql: &str, values: &[&str]) -> String {
+fn prepared(session: &mut Session<'_>, sql: &str, values: &[&str]) -> String {
     let parameters: Vec<Parameter> = values
         .iter()
         .map(|value| Parameter {

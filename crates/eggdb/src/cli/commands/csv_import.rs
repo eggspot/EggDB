@@ -7,9 +7,7 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject};
 use eggdb::Database;
 use eggdb::sql::Store as DatabaseStore;
-use eggdb_sql::{
-    BcpCharacterReader, BcpTerminators, Dialect, KeyValueStore, QueryResult, SqlResult,
-};
+use eggdb_sql::{BcpCharacterReader, BcpTerminators, Dialect, QueryResult, SqlResult};
 use std::cell::Cell;
 use std::fs::File;
 use std::io::Read;
@@ -28,8 +26,8 @@ fn loaded_rows(result: &QueryResult) -> u64 {
         .unwrap_or(0)
 }
 
-fn load_bcp<S: KeyValueStore>(
-    session: &mut eggdb_sql::Session<'_, S>,
+fn load_bcp(
+    session: &mut eggdb_sql::Session<'_>,
     statement: &str,
     input: &mut dyn Read,
     terminators: BcpTerminators,

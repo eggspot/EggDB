@@ -17,7 +17,7 @@ impl BulkRows for Rows {
     }
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
+fn batch(session: &mut Session<'_>, text: &str) -> Vec<BatchStep> {
     let mut steps = Vec::new();
     session
         .execute_batch(text, &mut |step| {
@@ -28,7 +28,7 @@ fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
     steps
 }
 
-fn load(session: &mut Session<'_, MemoryStore>, rows: &mut dyn BulkRows) -> Vec<BatchStep> {
+fn load(session: &mut Session<'_>, rows: &mut dyn BulkRows) -> Vec<BatchStep> {
     let mut steps = Vec::new();
     session
         .execute_bulk_load(rows, &mut |step| {
@@ -39,7 +39,7 @@ fn load(session: &mut Session<'_, MemoryStore>, rows: &mut dyn BulkRows) -> Vec<
     steps
 }
 
-fn texts(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Vec<String>> {
+fn texts(session: &mut Session<'_>, text: &str) -> Vec<Vec<String>> {
     let mut last = Vec::new();
     session
         .execute(text, &mut |result: QueryResult| {
@@ -72,7 +72,7 @@ fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
 
-fn session_with_items(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session_with_items(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::SqlServer);
     batch(
         &mut session,

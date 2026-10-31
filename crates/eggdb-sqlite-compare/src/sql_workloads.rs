@@ -29,7 +29,7 @@ const EGGDB_TABLE: &str =
 const SQLITE_TABLE: &str =
     "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL)";
 
-type SqlSession<'s> = Session<'s, DatabaseStore<'s>>;
+type SqlSession<'s> = Session<'s>;
 
 fn insert_script(first: u64, rows: u64) -> String {
     let mut script = String::from("BEGIN;\n");
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(eggdb_rows, sqlite_rows);
     }
 
-    fn eggdb_text(session: &mut Session<'_, DatabaseStore<'_>>, sql: &str) -> Vec<String> {
+    fn eggdb_text(session: &mut Session<'_>, sql: &str) -> Vec<String> {
         let mut rows = Vec::new();
         session
             .execute(sql, &mut |result| {

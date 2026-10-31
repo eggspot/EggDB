@@ -4,13 +4,13 @@ use crate::tests::{fuzz, render};
 use crate::types::Value;
 use crate::{Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs.pop().unwrap_or_default())
 }
 
-fn state(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn state(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(output) => panic!("{sql} succeeded: {output}"),
         Err(error) => error.state().code().to_owned(),

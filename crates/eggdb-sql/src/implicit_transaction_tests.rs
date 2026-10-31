@@ -2,32 +2,32 @@ use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{Session, SqlError, TransactionStatus};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn state(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn state(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error.state().code().to_owned(),
     }
 }
 
-fn count(session: &mut Session<'_, MemoryStore>) -> String {
+fn count(session: &mut Session<'_>) -> String {
     let shown = last(session, "SELECT count(*) FROM t");
     shown.lines().nth(1).unwrap_or_default().to_owned()
 }
 
-fn with_table(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn with_table(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);
     last(&mut session, "CREATE TABLE t (id integer PRIMARY KEY)");
     session

@@ -3,10 +3,9 @@ use crate::ast::Name;
 use crate::constraints::ConstraintClause;
 use crate::encoding::{TableDefinition, is_view_record, table_key};
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::store::KeyValueStore;
 use std::sync::Arc;
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(crate) fn keep_identity_values(&mut self, keep: bool) {
         self.keeps_identity_values = keep;
     }

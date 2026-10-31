@@ -840,7 +840,7 @@ fn constraint_clauses_are_built_from_the_catalog() {
            CONSTRAINT c_check CHECK (id > 0))",
     );
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
-    let clause = |session: &mut Session<'_, MemoryStore>, name: &str| {
+    let clause = |session: &mut Session<'_>, name: &str| {
         session
             .oracle_constraint_clause("c", name)
             .unwrap()

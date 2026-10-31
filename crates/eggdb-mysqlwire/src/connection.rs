@@ -226,7 +226,7 @@ struct Connection<'a, 's, S: KeyValueStore + 's> {
     wire: Wire<'a>,
     shared: &'a Shared<'a>,
     store: &'s S,
-    session: Session<'s, S>,
+    session: Session<'s>,
     user: String,
     connection_id: u32,
     capabilities: u32,
@@ -240,7 +240,7 @@ fn new_session<'s, S: KeyValueStore + 's>(
     user: &str,
     database: &str,
     connection_id: u32,
-) -> Session<'s, S> {
+) -> Session<'s> {
     let mut session = Session::with_dialect(store, Dialect::MySql);
     session.identify(user, database);
     session.set_connection_id(connection_id);

@@ -43,13 +43,13 @@ BEGIN
   :new.sal := 0;
 END;";
 
-fn run(session: &mut Session<'_, MemoryStore>, text: &str) {
+fn run(session: &mut Session<'_>, text: &str) {
     session
         .execute(text, &mut |_: QueryResult| {})
         .unwrap_or_else(|error| panic!("{text}: {error}"));
 }
 
-fn texts(session: &mut Session<'_, MemoryStore>, query: &str) -> Vec<Vec<String>> {
+fn texts(session: &mut Session<'_>, query: &str) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     session
         .execute(query, &mut |result: QueryResult| {
@@ -72,7 +72,7 @@ fn rows(expected: &[&[&str]]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn session_with_units(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session_with_units(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
     run(
         &mut session,

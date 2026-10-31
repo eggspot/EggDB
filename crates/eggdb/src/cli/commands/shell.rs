@@ -196,7 +196,7 @@ struct Shell<'s> {
     file: String,
     stem: String,
     db: &'s Database,
-    sql: eggdb_sql::Session<'s, DatabaseStore<'s>>,
+    sql: eggdb_sql::Session<'s>,
     buffer: String,
     entry: String,
     mode: ResultMode,

@@ -481,11 +481,7 @@ impl<O: DatabaseOpener> Call<'_, O> {
         }
     }
 
-    fn as_agent<S: KeyValueStore>(
-        &self,
-        session: &mut Session<'_, S>,
-        limits: &CallLimits,
-    ) -> Result<(), ToolError> {
+    fn as_agent(&self, session: &mut Session<'_>, limits: &CallLimits) -> Result<(), ToolError> {
         match self.agent_role {
             Some(role) => session
                 .identify_role(role, self.database_name)

@@ -83,7 +83,7 @@ fn malformed_schedules_are_refused() {
     }
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn run(session: &mut Session<'_>, sql: &str) -> String {
     let mut out = Vec::new();
     session
         .execute(sql, &mut |result| out.push(render(&result)))

@@ -6,7 +6,7 @@
 //! printed bytes are compared by CI's `pg-catalog` job (`scripts/pg-catalog/check.sh`).
 
 use eggdb::Database;
-use eggdb::sql::{Dialect, QueryResult, Session, Store, Value};
+use eggdb::sql::{Dialect, QueryResult, Session, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -103,7 +103,7 @@ fn restored(directory: &TempDirectory) -> PathBuf {
     file
 }
 
-fn results(session: &mut Session<'_, Store<'_>>, sql: &str) -> Result<QueryResult, String> {
+fn results(session: &mut Session<'_>, sql: &str) -> Result<QueryResult, String> {
     let mut found = None;
     session
         .execute(sql, &mut |result| found = Some(result))
@@ -115,7 +115,7 @@ fn shown(value: &Value) -> String {
     value.to_text().unwrap_or_default()
 }
 
-fn relation_oids(session: &mut Session<'_, Store<'_>>) -> HashMap<String, String> {
+fn relation_oids(session: &mut Session<'_>) -> HashMap<String, String> {
     let result = results(
         session,
         "SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c \

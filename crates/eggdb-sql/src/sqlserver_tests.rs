@@ -1,7 +1,7 @@
 use crate::memory_store::MemoryStore;
 use crate::{BatchStep, Dialect, QueryResult, Session, SqlError, Value};
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<BatchStep>, SqlError> {
+fn batch(session: &mut Session<'_>, text: &str) -> Result<Vec<BatchStep>, SqlError> {
     let mut steps = Vec::new();
     session.execute_batch(text, &mut |step| {
         steps.push(step);
@@ -10,7 +10,7 @@ fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<Batch
     Ok(steps)
 }
 
-fn values(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Vec<Value>> {
+fn values(session: &mut Session<'_>, text: &str) -> Vec<Vec<Value>> {
     let mut last = None;
     session
         .execute(text, &mut |result: QueryResult| last = Some(result.rows))
@@ -595,7 +595,7 @@ fn stored(store: &MemoryStore, relation: &str) -> Vec<u8> {
         .unwrap()
 }
 
-fn error_of(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+fn error_of(session: &mut Session<'_>, text: &str) -> SqlError {
     session.execute(text, &mut |_| {}).expect_err(text)
 }
 
@@ -1048,7 +1048,7 @@ fn hostile_views_and_checks_in_transact_sql_return_errors_and_never_panic() {
 }
 
 fn parameterized(
-    session: &mut Session<'_, MemoryStore>,
+    session: &mut Session<'_>,
     text: &str,
     parameters: &[crate::NamedParameter],
 ) -> Result<Vec<BatchStep>, SqlError> {
@@ -1295,7 +1295,7 @@ fn a_connection_reset_rolls_back_and_restores_the_options_of_a_new_login() {
     );
 }
 
-fn column_types(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Option<crate::SqlType>> {
+fn column_types(session: &mut Session<'_>, text: &str) -> Vec<Option<crate::SqlType>> {
     let mut last = None;
     session
         .execute(text, &mut |result: QueryResult| last = result.columns)

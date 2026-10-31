@@ -64,7 +64,7 @@ pub struct EggdbResult {
     pub values: *const EggdbValue,
 }
 
-type SqlSession = Session<'static, Store<'static>>;
+type SqlSession = Session<'static>;
 
 const OID_BOOL: u32 = 16;
 const OID_BYTEA: u32 = 17;

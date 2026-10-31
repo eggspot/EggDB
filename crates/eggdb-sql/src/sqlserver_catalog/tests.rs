@@ -13,7 +13,7 @@ const FIXTURE: [&str; 7] = [
     "ALTER TABLE [sales].[Orders] WITH NOCHECK ADD CONSTRAINT [CK_Orders_Total] CHECK ([Total] >= 0)",
 ];
 
-fn shop(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn shop(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::SqlServer);
     session.identify("eggdb", "shop");
     for statement in FIXTURE {
@@ -22,7 +22,7 @@ fn shop(store: &MemoryStore) -> Session<'_, MemoryStore> {
     session
 }
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<BatchStep>, SqlError> {
+fn batch(session: &mut Session<'_>, text: &str) -> Result<Vec<BatchStep>, SqlError> {
     let mut steps = Vec::new();
     session.execute_batch(text, &mut |step| {
         steps.push(step);
@@ -31,7 +31,7 @@ fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<Batch
     Ok(steps)
 }
 
-fn results(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<QueryResult> {
+fn results(session: &mut Session<'_>, text: &str) -> Vec<QueryResult> {
     batch(session, text)
         .unwrap_or_else(|error| panic!("{text}: {error}"))
         .into_iter()
@@ -42,7 +42,7 @@ fn results(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<QueryResul
         .collect()
 }
 
-fn rows(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Vec<Value>> {
+fn rows(session: &mut Session<'_>, text: &str) -> Vec<Vec<Value>> {
     results(session, text)
         .into_iter()
         .rev()
@@ -51,7 +51,7 @@ fn rows(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Vec<Value>> {
         .unwrap_or_default()
 }
 
-fn error_code(session: &mut Session<'_, MemoryStore>, text: &str) -> Option<u16> {
+fn error_code(session: &mut Session<'_>, text: &str) -> Option<u16> {
     match batch(session, text) {
         Err(error) => error.vendor_code(),
         Ok(steps) => steps
@@ -707,7 +707,7 @@ const ROUTINES: [&str; 4] = [
     "CREATE FUNCTION dbo.Totals () RETURNS @Result TABLE ([Total] DECIMAL(10, 2)) AS BEGIN INSERT INTO @Result SELECT [Total] FROM sales.Orders RETURN END",
 ];
 
-fn shop_with_routines(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn shop_with_routines(store: &MemoryStore) -> Session<'_> {
     let mut session = shop(store);
     for routine in ROUTINES {
         results(&mut session, routine);

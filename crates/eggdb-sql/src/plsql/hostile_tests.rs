@@ -246,7 +246,7 @@ const HANDLERS: &[&str] = &[
     "EXCEPTION WHEN NO_DATA_FOUND OR VALUE_ERROR THEN RAISE;",
 ];
 
-fn count_of(session: &mut Session<'_, MemoryStore>, text: &str) -> String {
+fn count_of(session: &mut Session<'_>, text: &str) -> String {
     let mut found = None;
     session
         .execute(text, &mut |result: QueryResult| {

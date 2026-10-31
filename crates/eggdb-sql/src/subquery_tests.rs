@@ -3,20 +3,20 @@ use crate::tests::{fuzz, render};
 use crate::{Dialect, Session, SqlError};
 use std::collections::BTreeMap;
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn sorted_rows(session: &mut Session<'_, MemoryStore>, sql: &str) -> Vec<String> {
+fn sorted_rows(session: &mut Session<'_>, sql: &str) -> Vec<String> {
     let output = last(session, sql);
     let mut lines: Vec<String> = output.lines().map(str::to_owned).collect();
     lines.pop();
@@ -56,7 +56,7 @@ fn sql_value(value: Option<i64>) -> String {
     value.map_or_else(|| "NULL".to_owned(), |value| value.to_string())
 }
 
-fn load(session: &mut Session<'_, MemoryStore>, name: &str, rows: &[Row], indexed: bool) {
+fn load(session: &mut Session<'_>, name: &str, rows: &[Row], indexed: bool) {
     last(
         session,
         &format!("CREATE TABLE {name} (id integer PRIMARY KEY, a integer, b integer)"),
@@ -753,7 +753,7 @@ fn hostile_subquery_and_set_operation_statements_never_panic_in_any_dialect() {
     }
 }
 
-fn code(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn code(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => match error.vendor_code() {

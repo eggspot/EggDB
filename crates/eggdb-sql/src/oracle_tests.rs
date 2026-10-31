@@ -5,7 +5,7 @@ use crate::types::SqlType;
 use crate::{Dialect, QueryResult, Session, SqlError, Value};
 use std::sync::Arc;
 
-fn values(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Vec<Value>> {
+fn values(session: &mut Session<'_>, text: &str) -> Vec<Vec<Value>> {
     let mut last = None;
     session
         .execute(text, &mut |result: QueryResult| last = Some(result.rows))
@@ -13,7 +13,7 @@ fn values(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Vec<Value>>
     last.unwrap_or_default()
 }
 
-fn failure(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+fn failure(session: &mut Session<'_>, text: &str) -> SqlError {
     session
         .execute(text, &mut |_| {})
         .expect_err("the statement fails")
@@ -168,7 +168,7 @@ fn to_char_is_refused_before_it_builds_past_the_value_limit() {
 fn merge_is_destructive_when_on_does_not_restrict_the_rows_it_updates_or_deletes() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
-    let classify = |session: &mut Session<'_, MemoryStore>, text: &str| {
+    let classify = |session: &mut Session<'_>, text: &str| {
         session
             .destructive_statement(text)
             .map(|found| found.is_some())
@@ -261,8 +261,7 @@ fn merge_resolves_names_against_both_tables() {
         "CREATE TABLE s (id NUMBER, v NUMBER, w NUMBER)",
     );
     values(&mut session, "INSERT INTO s VALUES (1, 10, 100)");
-    let code =
-        |session: &mut Session<'_, MemoryStore>, text: &str| failure(session, text).vendor_code();
+    let code = |session: &mut Session<'_>, text: &str| failure(session, text).vendor_code();
     assert_eq!(
         code(
             &mut session,
@@ -411,7 +410,7 @@ fn a_source_named_with_its_owner_is_referred_to_by_its_own_name() {
     );
 }
 
-fn rendered(session: &mut Session<'_, MemoryStore>, text: &str) -> String {
+fn rendered(session: &mut Session<'_>, text: &str) -> String {
     let mut last = String::new();
     session
         .execute(text, &mut |result: QueryResult| {

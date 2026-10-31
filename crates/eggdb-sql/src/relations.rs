@@ -3,7 +3,7 @@ use crate::error::{SqlError, SqlState};
 use crate::schema::{TableSchema, ViewSchema, quoted};
 use crate::store::ScanDirection;
 use crate::types::Value;
-use crate::{KeyValueStore, Session, SqlResult};
+use crate::{Session, SqlResult};
 
 type RowVisitor<'a> = dyn FnMut(&[u8], Vec<Value>) -> SqlResult<bool> + 'a;
 
@@ -109,7 +109,7 @@ fn name_within(name: &str, schema: &str) -> String {
         .to_owned()
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     /// Every table and view in the catalog, as this session sees them, in order of schema and
     /// then name.
     pub fn relations(&mut self) -> SqlResult<Vec<Relation>> {

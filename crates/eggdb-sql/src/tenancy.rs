@@ -50,7 +50,7 @@ mod tests {
     use crate::tests::render;
     use crate::{Session, SqlError};
 
-    fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+    fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
         let mut outputs = Vec::new();
         session.execute(sql, &mut |result| outputs.push(render(&result)))?;
         Ok(outputs.pop().unwrap_or_default())

@@ -88,18 +88,18 @@ impl CopyChannel for Client {
     }
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlResult<String> {
+fn run(session: &mut Session<'_>, sql: &str) -> SqlResult<String> {
     let mut last = String::new();
     session.execute(sql, &mut |result| last = render(&result))?;
     Ok(last)
 }
 
-fn rows(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn rows(session: &mut Session<'_>, sql: &str) -> String {
     run(session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"))
 }
 
 fn copy_in_chunks(
-    session: &mut Session<'_, MemoryStore>,
+    session: &mut Session<'_>,
     sql: &str,
     data: &str,
     chunk: usize,
@@ -117,11 +117,11 @@ fn copy_in_chunks(
     Ok(tag)
 }
 
-fn copy_in(session: &mut Session<'_, MemoryStore>, sql: &str, data: &str) -> SqlResult<String> {
+fn copy_in(session: &mut Session<'_>, sql: &str, data: &str) -> SqlResult<String> {
     copy_in_chunks(session, sql, data, 7)
 }
 
-fn copy_out(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlResult<String> {
+fn copy_out(session: &mut Session<'_>, sql: &str) -> SqlResult<String> {
     let mut client = Client::default();
     let mut tag = String::new();
     session.execute_with_copy(
@@ -139,7 +139,7 @@ fn copy_out(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlResult<Stri
     ))
 }
 
-fn script(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlResult<Vec<String>> {
+fn script(session: &mut Session<'_>, text: &str) -> SqlResult<Vec<String>> {
     let mut client = Client::default();
     let mut shown = Vec::new();
     let outcome = session.execute_script(
@@ -377,7 +377,7 @@ fn random_bytes_never_panic_the_reader() {
     }
 }
 
-fn typed_table(session: &mut Session<'_, MemoryStore>) {
+fn typed_table(session: &mut Session<'_>) {
     rows(
         session,
         "CREATE TABLE typed (id integer PRIMARY KEY, name text NOT NULL, price numeric(6,2), at timestamp, ok boolean, raw bytea, tag uuid, doc jsonb)",
@@ -1176,7 +1176,7 @@ fn copy_reads_a_catalog_relation_and_never_writes_one() {
 }
 
 fn copy_in_bytes(
-    session: &mut Session<'_, MemoryStore>,
+    session: &mut Session<'_>,
     sql: &str,
     data: &[u8],
     chunk: usize,
@@ -1194,7 +1194,7 @@ fn copy_in_bytes(
     Ok(last.unwrap_or_else(|| QueryResult::command("")))
 }
 
-fn copy_out_bytes(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlResult<Vec<u8>> {
+fn copy_out_bytes(session: &mut Session<'_>, sql: &str) -> SqlResult<Vec<u8>> {
     let mut client = Client::default();
     session.execute_with_copy(sql, &mut |_| true, &mut client)?;
     assert!(client.finished_out, "{sql}");

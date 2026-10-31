@@ -9,7 +9,6 @@ use crate::execute::Relation;
 use crate::lexer::{Token, tokenize_from, tokenize_in};
 use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
-use crate::store::KeyValueStore;
 use crate::tsql::Program;
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
@@ -168,7 +167,7 @@ pub(super) fn uncommittable_at_batch_end() -> SqlError {
     .with_sqlserver_code(3998)
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     /// Runs `text` as a Transact-SQL batch, the way SQL Server runs a batch a client sends: the
     /// whole batch is parsed first, so a syntax error runs nothing and is returned as the
     /// error; then its statements run in the order its batch logic gives (`DECLARE`d

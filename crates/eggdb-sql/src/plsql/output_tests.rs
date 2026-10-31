@@ -1,7 +1,7 @@
 use crate::memory_store::MemoryStore;
 use crate::{Dialect, QueryResult, Session, SqlError};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
     run(
         &mut session,
@@ -10,13 +10,13 @@ fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
     session
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, text: &str) {
+fn run(session: &mut Session<'_>, text: &str) {
     session
         .execute(text, &mut |_: QueryResult| {})
         .unwrap_or_else(|error| panic!("{text}: {error}"));
 }
 
-fn failure(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+fn failure(session: &mut Session<'_>, text: &str) -> SqlError {
     session
         .execute(text, &mut |_| {})
         .expect_err("the block fails")

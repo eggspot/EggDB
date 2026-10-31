@@ -52,7 +52,7 @@ pub const SQLITE_OPEN_CREATE: c_int = 0x04;
 const VERSION: &CStr = c"3.45.0-eggdb";
 const VERSION_NUMBER: c_int = 3_045_000;
 
-type SqlSession = Session<'static, Store<'static>>;
+type SqlSession = Session<'static>;
 
 /// An open database connection (`sqlite3`).
 pub struct Sqlite3 {

@@ -46,7 +46,7 @@ mod tests {
     use crate::memory_store::MemoryStore;
     use crate::{Session, Value};
 
-    fn diagram(session: &mut Session<'_, MemoryStore>, format: &str) -> String {
+    fn diagram(session: &mut Session<'_>, format: &str) -> String {
         let mut text = String::new();
         session
             .execute(
