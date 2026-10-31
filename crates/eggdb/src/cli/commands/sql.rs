@@ -16,6 +16,19 @@ use std::io::Read;
 
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
+        if self.request.file.join(super::archive::MANIFEST).is_file() {
+            let directory = self.request.file.clone();
+            let at = self.request.restore.at.clone();
+            let copy = super::archive::archived_copy(&directory, at.as_deref())
+                .map_err(|message| Failure::usage(message, Some(crate::cli::args::CommandName::Sql)))?;
+            self.request.file = copy;
+            self.request.read_only = true;
+        } else if self.request.restore.at.is_some() {
+            return Err(Failure::usage(
+                "--at reads a past point from a directory eggdb backup archived into; give that directory".to_owned(),
+                Some(crate::cli::args::CommandName::Sql),
+            ));
+        }
         let text = self.sql_text()?;
         let json = self.format == Format::Json;
         let script = !matches!(self.request.sql, Some(SqlSource::Command(_)));

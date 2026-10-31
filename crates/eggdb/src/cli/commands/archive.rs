@@ -136,6 +136,28 @@ fn manifest(directory: &Path) -> std::io::Result<Vec<Archived>> {
         .collect())
 }
 
+/// The archived copy in `directory` taken at or before `at` (the newest without it), after
+/// checking its SHA-256 against the manifest.
+pub(super) fn archived_copy(directory: &Path, at: Option<&str>) -> Result<PathBuf, String> {
+    let shown = render::text(directory.display().to_string().as_bytes());
+    let limit = match at {
+        Some(text) => Some(parse_time(text).ok_or_else(|| format!("--at {text}: give a time such as 2026-10-31T12:00:00Z"))?),
+        None => None,
+    };
+    let entries = manifest(directory).map_err(|error| format!("cannot read {shown}/{MANIFEST}: {error}"))?;
+    let chosen = entries
+        .iter()
+        .filter(|entry| limit.is_none_or(|limit| entry.taken_at_ms <= limit))
+        .max_by_key(|entry| entry.taken_at_ms)
+        .ok_or_else(|| format!("{shown} holds no archived copy taken at or before that time"))?;
+    let source = directory.join(&chosen.file);
+    let actual = file_sha256(&source).map_err(|error| format!("cannot read {}: {error}", chosen.file))?;
+    if actual != chosen.sha256 {
+        return Err(format!("{} has changed since it was archived (its SHA-256 differs from the manifest); pick an earlier copy with --at", chosen.file));
+    }
+    Ok(source)
+}
+
 impl Session<'_> {
     pub(super) fn backup_into_directory(&mut self, directory: &Path) -> Result<Exit, Failure> {
         let shown = render::text(directory.display().to_string().as_bytes());
@@ -183,26 +205,13 @@ impl Session<'_> {
     }
 
     pub(super) fn restore_from_archive(&mut self, directory: &Path, at: Option<&str>) -> Result<Exit, Failure> {
-        let usage = |message: String| Failure::usage(message, Some(crate::cli::args::CommandName::Restore));
-        let shown = render::text(directory.display().to_string().as_bytes());
-        let limit = match at {
-            Some(text) => Some(parse_time(text).ok_or_else(|| usage(format!("--at {text}: give a time such as 2026-10-31T12:00:00Z")))?),
-            None => None,
-        };
-        let entries = manifest(directory).map_err(|error| usage(format!("cannot read {shown}/{MANIFEST}: {error}")))?;
-        let chosen = entries
-            .iter()
-            .filter(|entry| limit.is_none_or(|limit| entry.taken_at_ms <= limit))
-            .max_by_key(|entry| entry.taken_at_ms)
-            .ok_or_else(|| Failure::database(format!("{shown} holds no archived copy taken at or before that time"), Exit::DatabaseError))?;
-        let source = directory.join(&chosen.file);
-        let actual = file_sha256(&source).map_err(|error| Failure::database(format!("cannot read {}: {error}", chosen.file), Exit::DatabaseError))?;
-        if actual != chosen.sha256 {
-            return Err(Failure::database(
-                format!("{} has changed since it was archived (its SHA-256 differs from the manifest); restore an earlier copy with --at", chosen.file),
-                Exit::DatabaseError,
-            ));
-        }
+        let source = archived_copy(directory, at).map_err(|message| Failure::database(message, Exit::DatabaseError))?;
+        let chosen_file = source.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let taken_at_ms = manifest(directory)
+            .ok()
+            .and_then(|entries| entries.into_iter().find(|entry| entry.file == chosen_file).map(|entry| entry.taken_at_ms))
+            .unwrap_or(0);
+        let chosen = Archived { file: chosen_file, taken_at_ms, sha256: String::new() };
         let target = self.request.file.clone();
         if std::fs::symlink_metadata(&target).is_ok() {
             return Err(Failure::coded("already_exists", format!("{} exists; restoring an archived copy writes a new file", self.file), Exit::DatabaseError));
