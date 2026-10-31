@@ -71,7 +71,11 @@ jobs:
           echo "EGGDB_SMOKE_SQLCMD=$tool" >> "$GITHUB_ENV"
       - name: Smoke test the eggdb command
         run: cargo build -p eggdb && scripts/smoke-test.sh target/debug/eggdb
-      - name: Check the C API from C, C++ and Python
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Check the C API from C, C++ and Python, and the Python, .NET and Java drivers
         run: cargo build -p eggdb-capi && scripts/c-api/check.sh target/debug "$RUNNER_TEMP/c-api"
       - name: Docs
         run: cargo doc --workspace --no-deps

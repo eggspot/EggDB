@@ -6,7 +6,9 @@ usage="usage: scripts/c-api/check.sh <directory of the built eggdb-capi library>
 Compiles crates/eggdb-capi/tests/c/api_check.c against include/eggdb.h and the shared library
 with the system C compiler (CC, default cc; warnings are errors), checks that the header also
 compiles as C++ (CXX, default c++), and runs the program. Then runs
-examples/python/eggdb_ctypes.py with PYTHON (default python3) against the same library.
+examples/python/eggdb_ctypes.py and the Python driver's tests with PYTHON (default python3)
+against the same library, and the .NET and Java drivers' check programs where dotnet and a
+Java 22 or newer javac are installed.
 NO_C_COMPILER=1 leaves out the C and C++ steps, for Windows runners without one."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
@@ -44,5 +46,10 @@ if command -v dotnet >/dev/null 2>&1; then
     || { cat "$work/dotnet-build.log" >&2; exit 1; }
   cp "$library" "$work/dotnet/"
   dotnet "$work/dotnet/EggDB.Data.Check.dll"
+fi
+if command -v javac >/dev/null 2>&1 && javac --release 22 -version >/dev/null 2>&1; then
+  javac --release 22 -d "$work/java" $(find "$root/drivers/java/src" "$root/drivers/java/check" -name '*.java')
+  cp -R "$root/drivers/java/src/META-INF" "$work/java/"
+  java --enable-native-access=ALL-UNNAMED -Deggdb.library="$library" -cp "$work/java" Check
 fi
 echo "c-api check: passed"
