@@ -1453,9 +1453,19 @@ impl<'t> Parser<'t> {
                 );
             };
             self.at += 1;
-            if self.take(&TokenKind::Comma) {
-                return Err(self.not_supported("current_setting with missing_ok"));
-            }
+            let missing_ok = if self.take(&TokenKind::Comma) {
+                if self.take_word("true") {
+                    true
+                } else if self.take_word("false") {
+                    false
+                } else {
+                    return Err(self.not_supported(
+                        "current_setting with a missing_ok other than true or false",
+                    ));
+                }
+            } else {
+                false
+            };
             self.expect(&TokenKind::RightParen)?;
             let defaults;
             let settings = match self.settings {
@@ -1465,7 +1475,16 @@ impl<'t> Parser<'t> {
                     &defaults
                 }
             };
-            let value = settings.get(setting)?;
+            let value = match settings.get(setting) {
+                Ok(value) => value,
+                Err(_) if missing_ok => {
+                    return Ok(Some(Expr {
+                        kind: ExprKind::Literal(Literal::Null),
+                        position: name.position,
+                    }));
+                }
+                Err(error) => return Err(error),
+            };
             return Ok(Some(Expr {
                 kind: ExprKind::SessionValue {
                     name: "current_setting",

@@ -33,8 +33,7 @@ $$;
 CREATE FUNCTION eggdb_tenancy.isolate(schema_name text, table_name text, tenant_column text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', schema_name, table_name);
-    EXECUTE format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', schema_name, table_name);
-    EXECUTE format('CREATE POLICY eggdb_tenant ON %I.%I USING (%I = current_setting(%L)) WITH CHECK (%I = current_setting(%L))', schema_name, table_name, tenant_column, 'eggdb.tenant', tenant_column, 'eggdb.tenant');
+    EXECUTE format('CREATE POLICY eggdb_tenant ON %I.%I USING (%I = current_setting(%L, true)) WITH CHECK (%I = current_setting(%L, true))', schema_name, table_name, tenant_column, 'eggdb.tenant', tenant_column, 'eggdb.tenant');
     EXECUTE format('CREATE TRIGGER eggdb_tenant_quota BEFORE INSERT ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_tenancy.enforce_quota()', schema_name, table_name);
     INSERT INTO eggdb_tenancy.isolated (table_schema, table_name, tenant_column) VALUES (schema_name, table_name, tenant_column);
 END

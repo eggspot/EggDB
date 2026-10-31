@@ -2553,7 +2553,7 @@ SELECT eggdb_coordination.release('scheduler', 'node-a');
 INSERT INTO eggdb_coordination.flags (flag_key, variants, default_variant, targeting)
     VALUES ('new-checkout', '{"on": true, "off": false}', 'off',
             '[{"attribute": "country", "in": ["VN"], "variant": "on"}]');
-SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "VN"}');
+SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "VN"}'::jsonb);
 ```
 
 - `acquire(lease, holder, ttl)` returns a fencing token when the holder gets or renews the

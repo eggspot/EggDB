@@ -134,6 +134,13 @@ fn run_statement(
             binding.names(&*writer, tables, std::slice::from_mut(&mut create.table))?;
             crate::triggers::create_trigger(writer, tables, &create)
         }
+        Statement::RowSecurity(mut statement) => {
+            let mut names = [statement.table_mut().clone()];
+            binding.names(&*writer, tables, &mut names)?;
+            let [resolved] = names;
+            *statement.table_mut() = resolved;
+            crate::row_security::run(writer, settings, &statement)
+        }
         Statement::DropTrigger(mut drop) => {
             if let Some(table) = &mut drop.table {
                 binding.names(&*writer, tables, std::slice::from_mut(table))?;

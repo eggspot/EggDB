@@ -26,9 +26,8 @@ fn pipelines_become_nested_sql() {
         "SELECT DISTINCT \"Big\" FROM (SELECT *, (CASE WHEN \"N\" > 5 THEN 'yes' ELSE 'no' END) AS \"Big\" FROM (SELECT * FROM \"T\") AS q1) AS q2"
     );
     assert_eq!(
-        translate("T | where Note !contains 'it''s_%'").unwrap(),
-        "SELECT * FROM (SELECT * FROM \"T\") AS q1 WHERE \"Note\" NOT ILIKE '%it''''s\\_\\%%'"
-            .replace("''''", "'''")
+        translate("T | where Note !contains 'it\\'s_%'").unwrap(),
+        "SELECT * FROM (SELECT * FROM \"T\") AS q1 WHERE \"Note\" NOT ILIKE '%it''s\\_\\%%'"
     );
 }
 

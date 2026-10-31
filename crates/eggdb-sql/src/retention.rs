@@ -181,7 +181,7 @@ mod tests {
                 "SELECT waiting_for, erased_rows FROM eggdb_retention.erasure_requests"
             )
             .unwrap(),
-            "waiting_for|erased_rows\nlegal hold case-42|\nSELECT 1"
+            "waiting_for|erased_rows\nlegal hold case-42|NULL\nSELECT 1"
         );
         run(&mut session, "SELECT eggdb_retention.lift_hold('case-42')").unwrap();
         assert_eq!(

@@ -1,6 +1,7 @@
 pub(crate) const COORDINATION_SCRIPT: &str = r#"
 CREATE SCHEMA eggdb_coordination;
-CREATE SEQUENCE eggdb_coordination.fencing_tokens;
+CREATE TABLE eggdb_coordination.fencing (only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row), last_token bigint NOT NULL);
+INSERT INTO eggdb_coordination.fencing (last_token) VALUES (0);
 CREATE TABLE eggdb_coordination.leases (lease_name text PRIMARY KEY, holder text NOT NULL, fencing_token bigint NOT NULL, expires_at timestamptz NOT NULL);
 CREATE TABLE eggdb_coordination.flags (flag_key text PRIMARY KEY, enabled boolean NOT NULL DEFAULT true, variants jsonb NOT NULL, default_variant text NOT NULL, targeting jsonb NOT NULL DEFAULT '[]'::jsonb);
 CREATE FUNCTION eggdb_coordination.acquire(wanted text, candidate text, ttl interval) RETURNS bigint LANGUAGE plpgsql AS $$
@@ -15,7 +16,7 @@ BEGIN
     END IF;
     SELECT l.holder, l.fencing_token, l.expires_at INTO current_holder, current_token, current_expiry FROM eggdb_coordination.leases l WHERE l.lease_name = wanted FOR UPDATE;
     IF current_holder IS NULL THEN
-        token := nextval('eggdb_coordination.fencing_tokens');
+        UPDATE eggdb_coordination.fencing SET last_token = last_token + 1 RETURNING last_token INTO token;
         INSERT INTO eggdb_coordination.leases VALUES (wanted, candidate, token, now() + ttl);
         RETURN token;
     END IF;
@@ -26,7 +27,7 @@ BEGIN
     IF current_expiry > now() THEN
         RETURN NULL;
     END IF;
-    token := nextval('eggdb_coordination.fencing_tokens');
+    UPDATE eggdb_coordination.fencing SET last_token = last_token + 1 RETURNING last_token INTO token;
     UPDATE eggdb_coordination.leases SET holder = candidate, fencing_token = token, expires_at = now() + ttl WHERE lease_name = wanted;
     RETURN token;
 END
@@ -94,7 +95,7 @@ mod tests {
         let store = installed();
         let mut session = Session::new(&store);
         assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-a', interval '30 seconds') AS token").unwrap(), "token\n1\nSELECT 1");
-        assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-b', interval '30 seconds') AS token").unwrap(), "token\n\nSELECT 1");
+        assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-b', interval '30 seconds') AS token").unwrap(), "token\nNULL\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-a', interval '30 seconds') AS token").unwrap(), "token\n1\nSELECT 1");
         assert_eq!(
             run(
@@ -115,7 +116,7 @@ mod tests {
                 "SELECT eggdb_coordination.leader('scheduler') AS leader"
             )
             .unwrap(),
-            "leader\n\nSELECT 1"
+            "leader\nNULL\nSELECT 1"
         );
         assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-b', interval '30 seconds') AS token").unwrap(), "token\n2\nSELECT 1");
         assert_eq!(
@@ -149,7 +150,7 @@ mod tests {
         let mut session = Session::new(&store);
         run(&mut session, r##"INSERT INTO eggdb_coordination.flags (flag_key, variants, default_variant, targeting) VALUES ('new-checkout', '{"on": true, "off": false}', 'off', '[{"attribute": "country", "in": ["VN", "SE"], "variant": "on"}]'), ('banner', '{"blue": "#00f"}', 'blue', '[]')"##).unwrap();
         let resolve = |session: &mut Session<'_, MemoryStore>, key: &str, context: &str| {
-            run(session, &format!("SELECT eggdb_coordination.evaluate_flag('{key}', '{context}') ->> 'reason' AS reason")).unwrap()
+            run(session, &format!("SELECT eggdb_coordination.evaluate_flag('{key}', '{context}'::jsonb) ->> 'reason' AS reason")).unwrap()
         };
         assert_eq!(
             resolve(&mut session, "new-checkout", r#"{"country": "VN"}"#),
@@ -168,7 +169,7 @@ mod tests {
             "reason\nERROR\nSELECT 1"
         );
         assert_eq!(
-            run(&mut session, r#"SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "SE"}') -> 'value' AS value"#).unwrap(),
+            run(&mut session, r#"SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "SE"}'::jsonb) -> 'value' AS value"#).unwrap(),
             "value\ntrue\nSELECT 1"
         );
         run(

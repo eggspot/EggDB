@@ -20,22 +20,24 @@ END
 $$;
 CREATE FUNCTION eggdb_migration.compare(source_schema text, source_table text, target_schema text, target_table text, key_column text) RETURNS TABLE (row_key text, difference text) LANGUAGE plpgsql AS $$
 DECLARE
-    found record;
+    checked record;
 BEGIN
-    FOR found IN EXECUTE format('SELECT s.%I::text AS k FROM %I.%I s WHERE NOT EXISTS (SELECT 1 FROM %I.%I t WHERE t.%I = s.%I) ORDER BY s.%I', key_column, source_schema, source_table, target_schema, target_table, key_column, key_column, key_column) LOOP
-        row_key := found.k;
+    FOR checked IN EXECUTE format('SELECT s.%I::text AS k FROM %I.%I s WHERE NOT EXISTS (SELECT 1 FROM %I.%I t WHERE t.%I = s.%I) ORDER BY s.%I', key_column, source_schema, source_table, target_schema, target_table, key_column, key_column, key_column) LOOP
+        row_key := checked.k;
         difference := 'missing in target';
         RETURN NEXT;
     END LOOP;
-    FOR found IN EXECUTE format('SELECT t.%I::text AS k FROM %I.%I t WHERE NOT EXISTS (SELECT 1 FROM %I.%I s WHERE s.%I = t.%I) ORDER BY t.%I', key_column, target_schema, target_table, source_schema, source_table, key_column, key_column, key_column) LOOP
-        row_key := found.k;
+    FOR checked IN EXECUTE format('SELECT t.%I::text AS k FROM %I.%I t WHERE NOT EXISTS (SELECT 1 FROM %I.%I s WHERE s.%I = t.%I) ORDER BY t.%I', key_column, target_schema, target_table, source_schema, source_table, key_column, key_column, key_column) LOOP
+        row_key := checked.k;
         difference := 'missing in source';
         RETURN NEXT;
     END LOOP;
-    FOR found IN EXECUTE format('SELECT s.%I::text AS k FROM %I.%I s JOIN %I.%I t ON t.%I = s.%I WHERE to_jsonb(s) <> to_jsonb(t) ORDER BY s.%I', key_column, source_schema, source_table, target_schema, target_table, key_column, key_column, key_column) LOOP
-        row_key := found.k;
-        difference := 'different';
-        RETURN NEXT;
+    FOR checked IN EXECUTE format('SELECT s.%I::text AS k, to_jsonb(s) AS source_row, to_jsonb(t) AS target_row FROM %I.%I s JOIN %I.%I t ON t.%I = s.%I ORDER BY s.%I', key_column, source_schema, source_table, target_schema, target_table, key_column, key_column, key_column) LOOP
+        IF checked.source_row <> checked.target_row THEN
+            row_key := checked.k;
+            difference := 'different';
+            RETURN NEXT;
+        END IF;
     END LOOP;
 END
 $$;

@@ -134,10 +134,33 @@ pub(crate) fn to_json_text(value: &Value) -> SqlResult<String> {
             out.push(']');
             out
         }
+        Value::Defined(defined) => match defined.as_ref() {
+            crate::types::DefinedValue::Record(record) => record_object(record)?,
+            _ => quoted(&value.to_text().unwrap_or_default()),
+        },
         other => quoted(&other.to_text().unwrap_or_default()),
     };
     crate::memory::check_value_bytes(text.len())?;
     Ok(text)
+}
+
+fn record_object(record: &crate::records::RecordValue) -> SqlResult<String> {
+    let mut names = crate::records::field_names(record);
+    if names.len() != record.fields.len() {
+        names = (1..=record.fields.len()).map(|at| format!("f{at}")).collect();
+    }
+    let mut out = String::from("{");
+    for (at, (name, field)) in names.iter().zip(&record.fields).enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        out.push_str(&quoted(name));
+        out.push(':');
+        out.push_str(&to_json_text(field)?);
+        crate::memory::check_value_bytes(out.len())?;
+    }
+    out.push('}');
+    Ok(out)
 }
 
 fn to_jsonb_text(value: &Value) -> SqlResult<String> {

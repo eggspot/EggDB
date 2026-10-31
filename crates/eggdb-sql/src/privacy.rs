@@ -162,6 +162,7 @@ mod tests {
 
     #[test]
     fn ff1_tokens_keep_the_format_and_decrypt_back() {
+        crate::memory_store::use_seeded_random_bytes();
         let store = MemoryStore::default();
         let mut session = Session::new(&store);
         let key = "'\\x2b7e151628aed2a6abf7158809cf4f3c'::bytea";
@@ -185,6 +186,7 @@ mod tests {
 
     #[test]
     fn laplace_noise_is_centred_and_scaled_by_sensitivity_over_epsilon() {
+        crate::memory_store::use_seeded_random_bytes();
         let store = MemoryStore::default();
         let mut session = Session::new(&store);
         let summary = run(&mut session, "SELECT abs(avg(x)) < 0.2 AS centred, avg(abs(x)) BETWEEN 1.6 AND 2.4 AS scaled FROM (SELECT laplace_noise(1, 0.5) AS x FROM generate_series(1, 4000)) s").unwrap();
@@ -194,6 +196,7 @@ mod tests {
 
     #[test]
     fn k_anonymity_is_the_smallest_group_of_quasi_identifiers() {
+        crate::memory_store::use_seeded_random_bytes();
         let store = MemoryStore::default();
         let mut session = Session::new(&store);
         for sql in [

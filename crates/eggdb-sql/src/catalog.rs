@@ -24,11 +24,11 @@ END
 $$;
 CREATE FUNCTION eggdb_catalog.upstream(asset text) RETURNS TABLE (upstream_asset text, hops integer) LANGUAGE plpgsql AS $$
 BEGIN
-    RETURN QUERY WITH RECURSIVE walked (found, distance) AS (
+    RETURN QUERY WITH RECURSIVE walked (reached, distance) AS (
         SELECT l.source_asset, 1 FROM eggdb_catalog.lineage l WHERE l.target_asset = asset
         UNION
-        SELECT l.source_asset, w.distance + 1 FROM eggdb_catalog.lineage l JOIN walked w ON l.target_asset = w.found WHERE w.distance < 100
-    ) SELECT found, min(distance) FROM walked GROUP BY found ORDER BY 2, 1;
+        SELECT l.source_asset, w.distance + 1 FROM eggdb_catalog.lineage l JOIN walked w ON l.target_asset = w.reached WHERE w.distance < 100
+    ) SELECT reached, min(distance) FROM walked GROUP BY reached ORDER BY 2, 1;
 END
 $$;
 CREATE FUNCTION eggdb_catalog.openlineage_event(job text, event_type text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -69,6 +69,7 @@ mod tests {
     }
 
     fn catalog() -> MemoryStore {
+        crate::memory_store::use_seeded_random_bytes();
         let store = MemoryStore::default();
         let mut session = Session::new(&store);
         for sql in [
@@ -125,7 +126,7 @@ mod tests {
             "upstream_asset|hops\npublic.customers|1\npublic.orders|1\ncrm.contacts|2\nSELECT 3"
         );
         assert_eq!(
-            run(&mut session, "SELECT e -> 'inputs' AS inputs, e -> 'job' ->> 'name' AS job, e ->> 'eventType' AS type FROM eggdb_catalog.openlineage_event('build_mart', 'COMPLETE') AS e").unwrap(),
+            run(&mut session, "SELECT e -> 'inputs' AS inputs, e -> 'job' ->> 'name' AS job, e ->> 'eventType' AS type FROM (SELECT eggdb_catalog.openlineage_event('build_mart', 'COMPLETE') AS e) AS event").unwrap(),
             "inputs|job|type\n[{\"name\": \"public.customers\", \"namespace\": \"eggdb\"}, {\"name\": \"public.orders\", \"namespace\": \"eggdb\"}]|build_mart|COMPLETE\nSELECT 1"
         );
         assert!(

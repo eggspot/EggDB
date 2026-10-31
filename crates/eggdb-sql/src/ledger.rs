@@ -4,16 +4,19 @@ CREATE TABLE eggdb_ledger.chains (
     table_schema text NOT NULL,
     table_name text NOT NULL,
     last_hash text NOT NULL,
+    last_seq bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (table_schema, table_name)
 );
 CREATE FUNCTION eggdb_ledger.append() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     previous text;
+    sequence bigint;
 BEGIN
-    SELECT c.last_hash INTO previous FROM eggdb_ledger.chains c WHERE c.table_schema = TG_TABLE_SCHEMA AND c.table_name = TG_TABLE_NAME;
+    SELECT c.last_hash, c.last_seq INTO previous, sequence FROM eggdb_ledger.chains c WHERE c.table_schema = TG_TABLE_SCHEMA AND c.table_name = TG_TABLE_NAME;
+    NEW.ledger_seq := sequence + 1;
     NEW.ledger_previous := previous;
     NEW.ledger_hash := encode(sha256(previous || ((to_jsonb(NEW) - 'ledger_hash') - 'ledger_previous')::text), 'hex');
-    UPDATE eggdb_ledger.chains SET last_hash = NEW.ledger_hash WHERE table_schema = TG_TABLE_SCHEMA AND table_name = TG_TABLE_NAME;
+    UPDATE eggdb_ledger.chains SET last_hash = NEW.ledger_hash, last_seq = NEW.ledger_seq WHERE table_schema = TG_TABLE_SCHEMA AND table_name = TG_TABLE_NAME;
     RETURN NEW;
 END
 $$;
@@ -24,7 +27,7 @@ END
 $$;
 CREATE FUNCTION eggdb_ledger.protect(schema_name text, table_name text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
-    EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_seq bigserial', schema_name, table_name);
+    EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_seq bigint', schema_name, table_name);
     EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_previous text', schema_name, table_name);
     EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_hash text', schema_name, table_name);
     EXECUTE format('CREATE TRIGGER eggdb_ledger_append BEFORE INSERT ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_ledger.append()', schema_name, table_name);
