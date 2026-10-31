@@ -958,6 +958,23 @@ impl<'t> Parser<'t> {
                     name,
                 )))
             }
+            "truncate" if !self.sqlite() => {
+                self.at += 1;
+                self.take_word("table");
+                self.take_word("only");
+                let name = self.table_name()?;
+                if self.take(&TokenKind::Comma) {
+                    return Err(self.not_supported("TRUNCATE of several tables in one statement"));
+                }
+                if self.take_word("restart") || self.take_word("continue") {
+                    self.expect_word("identity")?;
+                }
+                if self.take_word("cascade") {
+                    return Err(self.not_supported("TRUNCATE ... CASCADE"));
+                }
+                self.take_word("restrict");
+                Ok(Statement::Truncate(TableReference::named(name, None)))
+            }
             "alter" | "truncate" | "release" | "copy" | "grant" | "revoke" | "prepare"
             | "execute" | "vacuum" | "discard" | "listen" | "notify" | "unlisten"
             | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),

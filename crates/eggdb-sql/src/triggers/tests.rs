@@ -620,7 +620,7 @@ fn sqlserver_sys_triggers_lists_triggers() {
             "SELECT t.name, OBJECT_NAME(t.parent_id), t.is_disabled, t.is_instead_of_trigger, o.type
              FROM sys.triggers AS t JOIN sys.objects AS o ON o.object_id = t.object_id"
         ),
-        vec!["soft_delete|orders|1|1|TR"]
+        vec!["soft_delete|orders|t|t|TR"]
     );
 }
 

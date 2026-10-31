@@ -596,7 +596,11 @@ impl<'t> Parser<'t> {
         if self.sqlite() {
             return Err(self.unexpected());
         }
-        Ok(vec![self.trigger_item(1)?])
+        let step = self.trigger_item(1)?;
+        if self.at > 0 && self.tokens.get(self.at - 1).is_some_and(|token| token.kind == TokenKind::Semicolon) {
+            self.at -= 1;
+        }
+        Ok(vec![step])
     }
 
     fn trigger_items(&mut self, depth: usize, stops: &[&str]) -> SqlResult<Vec<BodyStep>> {
@@ -812,11 +816,7 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn trigger_primary(&mut self) -> SqlResult<Option<Expr>> {
-        let sqlserver_trigger = self.sqlserver()
-            && self
-                .batch
-                .is_some_and(|batch| batch.updated_columns.is_some());
-        if self.trigger_frame.is_none() && !self.sqlite() && !sqlserver_trigger {
+        if self.trigger_frame.is_none() && !self.sqlite() && !self.sqlserver() {
             return Ok(None);
         }
         let position = self.position();
@@ -828,7 +828,7 @@ impl<'t> Parser<'t> {
         if self.sqlite() && word == "raise" && call {
             return self.sqlite_raise(position).map(Some);
         }
-        if sqlserver_trigger && word == "update" && call {
+        if self.sqlserver() && word == "update" && call {
             self.at += 2;
             let column = self.name()?;
             self.expect(&TokenKind::RightParen)?;

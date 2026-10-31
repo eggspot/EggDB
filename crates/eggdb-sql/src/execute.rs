@@ -1963,6 +1963,49 @@ fn literal_value(literal: &LiteralToken<'_>, column: &Column, position: usize) -
     assign(value, column).map_err(|error| error.at_if_unplaced(position))
 }
 
+fn view_literal(literal: &LiteralToken<'_>, position: usize) -> InsertValue {
+    let literal = match literal {
+        LiteralToken::Null => crate::ast::Literal::Null,
+        LiteralToken::Boolean(flag) => crate::ast::Literal::Boolean(*flag),
+        LiteralToken::Integer(number) => crate::ast::Literal::Integer(*number),
+        LiteralToken::Decimal(text) => crate::ast::Literal::Decimal(text.to_string()),
+        LiteralToken::String(text) => crate::ast::Literal::String(text.to_string()),
+    };
+    InsertValue::Expr(Expr {
+        kind: ExprKind::Literal(literal),
+        position,
+    })
+}
+
+fn insert_literals_into_view(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &LiteralRows<'_>,
+) -> SqlResult<QueryResult> {
+    let mut rows = Vec::with_capacity(insert.rows);
+    let mut literals = Vec::with_capacity(insert.width);
+    let mut at = insert.first_row();
+    for _ in 0..insert.rows {
+        insert.next_row(&mut at, &mut literals);
+        rows.push(
+            literals
+                .iter()
+                .map(|(position, literal)| view_literal(literal, *position))
+                .collect(),
+        );
+    }
+    let statement = Insert {
+        table: insert.table.clone(),
+        columns: None,
+        source: InsertSource::Values(rows),
+        returning: None,
+        on_duplicate: OnDuplicate::Fail,
+        rollback_on_conflict: false,
+        overriding: None,
+    };
+    self::insert(writer, tables, &statement)
+}
+
 fn insert_literals_routed(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -2011,6 +2054,9 @@ pub(crate) fn insert_literals(
     tables: &mut TableCache,
     insert: &LiteralRows<'_>,
 ) -> SqlResult<QueryResult> {
+    if crate::updatable_views::is_view(writer, tables, &insert.table)? {
+        return insert_literals_into_view(writer, tables, insert);
+    }
     let table = tables.require_target(writer, &insert.table.name, "insert into")?;
     if insert.width > table.columns.len() {
         return Err(SqlError::syntax(
