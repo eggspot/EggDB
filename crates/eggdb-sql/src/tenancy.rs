@@ -1,7 +1,3 @@
-/// The statements `CREATE EXTENSION eggdb_tenancy` runs (D234): a list of tenants with their
-/// row quotas, the tables isolated by tenant, `eggdb_tenancy.isolate` to put a table under a
-/// policy keyed on the session's `eggdb.tenant` setting, and the trigger that keeps each tenant
-/// within its quota.
 pub(crate) const TENANCY_SCRIPT: &str = r"
 CREATE SCHEMA eggdb_tenancy;
 CREATE TABLE eggdb_tenancy.tenants (
