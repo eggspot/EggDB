@@ -188,6 +188,8 @@ mod view_change_tests;
 #[cfg(test)]
 mod visible_tables_tests;
 #[cfg(test)]
+mod time_series_tests;
+#[cfg(test)]
 mod window_tests;
 #[cfg(test)]
 mod with_statement_tests;

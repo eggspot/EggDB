@@ -141,6 +141,15 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         "make_time" => Some(SqlType::Time(None)),
         "make_timestamp" => Some(SqlType::Timestamp(None)),
         "make_interval" => Some(SqlType::INTERVAL),
+        "time_bucket" => match argument_type(1) {
+            Some(SqlType::Date) => Some(SqlType::Date),
+            Some(SqlType::TimestampTz(_)) => Some(SqlType::TimestampTz(None)),
+            Some(SqlType::SmallInt) => Some(SqlType::SmallInt),
+            Some(SqlType::Integer) => Some(SqlType::Integer),
+            Some(SqlType::BigInt) => Some(SqlType::BigInt),
+            Some(_) => Some(SqlType::Timestamp(None)),
+            None => None,
+        },
         "date_bin" => match argument_type(1) {
             Some(SqlType::TimestampTz(_)) => Some(SqlType::TimestampTz(None)),
             Some(_) => Some(SqlType::Timestamp(None)),

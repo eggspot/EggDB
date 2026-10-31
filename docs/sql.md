@@ -2222,6 +2222,23 @@ constraint and event triggers, SQL Server DDL and logon triggers, Oracle compoun
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
 fire on `TRUNCATE` too.
 
+## Time series: time_bucket
+
+`time_bucket(width, time [, offset | origin])` puts a time in its bucket as TimescaleDB does:
+buckets of `width` counted from 2000-01-03 (a Monday, so weekly buckets start on Mondays), or
+from `origin`, or shifted by an `offset` interval. Month and year widths bucket by calendar
+month from January 2000. It takes `timestamp`, `timestamptz` (bucketed in UTC) and `date`,
+returning the same type, and integers (`time_bucket(10, 23)` is 20). PostgreSQL's `date_bin`
+works too.
+
+```sql
+SELECT time_bucket('15 minutes', at) AS bucket, avg(value)
+FROM readings GROUP BY bucket ORDER BY bucket;
+```
+
+Not yet: `time_bucket_gapfill`, `locf` and `interpolate`, the `first` and `last` aggregates,
+hypertables with automatic time partitions, retention policies and continuous aggregates.
+
 ## Scheduled jobs (pg_cron)
 
 `CREATE EXTENSION pg_cron` installs the `cron` schema as the pg_cron extension has it (D200):

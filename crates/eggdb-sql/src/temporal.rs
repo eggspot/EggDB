@@ -184,7 +184,8 @@ fn age_instant(value: &Value) -> Option<SqlResult<i64>> {
     })
 }
 
-pub(crate) const CONSTRUCTORS: [&str; 8] = [
+pub(crate) const CONSTRUCTORS: [&str; 9] = [
+    "time_bucket",
     "make_date",
     "make_time",
     "make_timestamp",
@@ -370,6 +371,75 @@ fn date_bin(stride: &Interval, source: &Value, origin: &Value) -> Option<SqlResu
     }))
 }
 
+const TIME_BUCKET_ORIGIN_DAYS: i64 = 2;
+
+fn bucket_error(message: &str) -> SqlError {
+    SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message)
+}
+
+fn time_bucket(width: &Interval, source: &Value, origin: Option<&Value>) -> Option<SqlResult<Value>> {
+    if matches!(source, Value::Null) || matches!(origin, Some(Value::Null)) {
+        return Some(Ok(Value::Null));
+    }
+    let date = matches!(source, Value::Date(_));
+    let (micros, zoned) = match binned_instant(source, None)? {
+        Ok(found) => found,
+        Err(error) => return Some(Err(error)),
+    };
+    let (origin_micros, offset_micros) = match origin {
+        None => (None, 0i128),
+        Some(Value::Interval(offset)) if offset.months == 0 => {
+            (None, i128::from(offset.days) * i128::from(MICROS_PER_DAY) + i128::from(offset.micros))
+        }
+        Some(Value::Interval(_)) => return Some(Err(bucket_error("time_bucket offsets cannot contain months or years"))),
+        Some(other) => match binned_instant(other, Some(zoned))? {
+            Ok((found, _)) => (Some(found), 0),
+            Err(error) => return Some(Err(error)),
+        },
+    };
+    let bucketed = if width.months != 0 {
+        if width.days != 0 || width.micros != 0 || width.months < 0 {
+            return Some(Err(bucket_error("month intervals cannot have day or time component")));
+        }
+        let origin_days = origin_micros.map_or(0, |origin| datetime::timestamp_to_date(origin));
+        let (origin_year, origin_month, _) = datetime::civil_from_days(i64::from(origin_days));
+        let shifted = i128::from(micros) - offset_micros;
+        let (year, month, _) = datetime::civil_from_days(shifted.div_euclid(i128::from(MICROS_PER_DAY)) as i64);
+        let index = (year * 12 + month - 1) - (origin_year * 12 + origin_month - 1);
+        let start = index.div_euclid(i64::from(width.months)) * i64::from(width.months) + origin_year * 12 + origin_month - 1;
+        let days = datetime::days_from_civil(start.div_euclid(12), start.rem_euclid(12) + 1, 1);
+        i128::from(days) * i128::from(MICROS_PER_DAY) + offset_micros
+    } else {
+        let step = i128::from(width.days) * i128::from(MICROS_PER_DAY) + i128::from(width.micros);
+        if step <= 0 {
+            return Some(Err(bucket_error("interval must be greater than zero")));
+        }
+        let origin = origin_micros.map_or(i128::from(TIME_BUCKET_ORIGIN_DAYS) * i128::from(MICROS_PER_DAY) + offset_micros, i128::from);
+        origin + (i128::from(micros) - origin).div_euclid(step) * step
+    };
+    Some(datetime::checked_timestamp(bucketed).map(|micros| match (date, zoned) {
+        (true, _) => Value::Date(datetime::timestamp_to_date(micros)),
+        (false, true) => Value::TimestampTz(micros),
+        (false, false) => Value::Timestamp(micros),
+    }))
+}
+
+fn integer_bucket(width: &Value, value: &Value, offset: &Value) -> Option<SqlResult<Value>> {
+    let (Some(width_number), Some(number), Some(offset_number)) = (width.as_integer(), value.as_integer(), offset.as_integer()) else {
+        return matches!((width, value, offset), (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null)).then_some(Ok(Value::Null));
+    };
+    if width_number <= 0 {
+        return Some(Err(bucket_error("width must be greater than zero")));
+    }
+    let bucket = (i128::from(number) - i128::from(offset_number)).div_euclid(i128::from(width_number)) * i128::from(width_number)
+        + i128::from(offset_number);
+    Some(Ok(match value {
+        Value::SmallInt(_) => i16::try_from(bucket).map(Value::SmallInt).unwrap_or(Value::Null),
+        Value::Integer(_) => i32::try_from(bucket).map(Value::Integer).unwrap_or(Value::Null),
+        _ => i64::try_from(bucket).map(Value::BigInt).unwrap_or(Value::Null),
+    }))
+}
+
 fn made_interval(values: &[Value]) -> Option<SqlResult<Value>> {
     let integer = |at: usize| values.get(at).map_or(Some(0), Value::as_integer);
     let (years, months, weeks, days) = (integer(0)?, integer(1)?, integer(2)?, integer(3)?);
@@ -430,6 +500,18 @@ fn constructed(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         ("date_bin", [Value::Interval(stride), source, origin]) => {
             date_bin(stride, source, origin)?
         }
+        ("time_bucket", [Value::Interval(width), source]) => time_bucket(width, source, None)?,
+        ("time_bucket", [Value::Interval(width), source, origin]) => {
+            time_bucket(width, source, Some(origin))?
+        }
+        ("time_bucket", [Value::Text(width), source, rest @ ..]) if rest.len() <= 1 => {
+            match Interval::parse(width, None) {
+                Ok(width) => time_bucket(&width, source, rest.first())?,
+                Err(error) => Err(error),
+            }
+        }
+        ("time_bucket", [width, value]) => integer_bucket(width, value, &Value::Integer(0))?,
+        ("time_bucket", [width, value, offset]) => integer_bucket(width, value, offset)?,
         ("isfinite", [Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)]) => {
             Ok(Value::Boolean(true))
         }
