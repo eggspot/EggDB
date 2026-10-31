@@ -60,6 +60,10 @@ mod ring {
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    mod net;
+
+    pub(crate) use net::NetRing;
+
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) const BUILT: bool = true;
 
@@ -219,18 +223,7 @@ mod ring {
     }
 
     #[derive(Debug)]
-    struct InFlight {
-        op: IoOp<OsFile>,
-        user_data: u64,
-    }
-
-    /// One io_uring instance, used by one queue at a time.
-    #[derive(Debug)]
-    pub(crate) struct Ring {
-        slots: Vec<Option<InFlight>>,
-        free_slots: Vec<usize>,
-        in_kernel: usize,
-        ready: VecDeque<IoCompletion<OsFile>>,
+    struct RawRing {
         sq_head: *const AtomicU32,
         sq_tail: *const AtomicU32,
         sq_mask: u32,
@@ -247,10 +240,10 @@ mod ring {
 
     // SAFETY: the raw pointers point into mappings the ring owns, and only the ring's single owner
     // uses them, so moving the ring to another thread is sound.
-    unsafe impl Send for Ring {}
+    unsafe impl Send for RawRing {}
 
-    impl Ring {
-        pub(crate) fn new(capacity: usize) -> Result<Self> {
+    impl RawRing {
+        fn new(capacity: usize, needed_features: u32) -> Result<Self> {
             let entries = u32::try_from(capacity.next_power_of_two())
                 .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
             #[cfg(all(test, target_os = "linux"))]
@@ -278,7 +271,7 @@ mod ring {
             }
             // SAFETY: io_uring_setup returned a new file descriptor that nothing else owns.
             let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-            let needed = IORING_FEAT_SINGLE_MMAP | IORING_FEAT_RW_CUR_POS;
+            let needed = IORING_FEAT_SINGLE_MMAP | needed_features;
             if params.features & needed != needed {
                 return Err(Error::new(ErrorKind::Unsupported));
             }
@@ -298,10 +291,6 @@ mod ring {
             // SAFETY: as above, for the completion ring's mask.
             let cq_mask = unsafe { *rings.at::<u32>(params.cq_off.ring_mask) };
             Ok(Self {
-                slots: Vec::new(),
-                free_slots: Vec::new(),
-                in_kernel: 0,
-                ready: VecDeque::new(),
                 sq_head: rings.at(params.sq_off.head),
                 sq_tail: rings.at(params.sq_off.tail),
                 sq_mask,
@@ -314,6 +303,140 @@ mod ring {
                 submissions: Some(submissions),
                 rings: Some(rings),
                 fd,
+            })
+        }
+
+        fn tail(&self) -> u32 {
+            // SAFETY: the tail lies in the ring mapping, which lives as long as `self`; we are
+            // its only writer, so a relaxed load reads our own last store.
+            unsafe { &*self.sq_tail }.load(Ordering::Relaxed)
+        }
+
+        fn unsubmitted(&self) -> u32 {
+            // SAFETY: the head lies in the ring mapping; the kernel moves it as it consumes entries.
+            let head = unsafe { &*self.sq_head }.load(Ordering::Acquire);
+            self.tail().wrapping_sub(head)
+        }
+
+        fn is_full(&self) -> bool {
+            self.unsubmitted() > self.sq_mask
+        }
+
+        fn push(&mut self, submission: Submission) -> u32 {
+            let tail = self.tail();
+            let index = tail & self.sq_mask;
+            // SAFETY: `index` is masked to the ring's size, so the entry lies inside the mapping of
+            // submission entries, which lives as long as `self` and which the kernel reads only
+            // after the tail moves past the entry.
+            unsafe { self.sqes.wrapping_add(index as usize).write(submission) };
+            // SAFETY: the index array has one `u32` per entry, and `index` is masked to it.
+            unsafe { self.sq_array.wrapping_add(index as usize).write(index) };
+            // SAFETY: the tail lies in the ring mapping; the release store publishes the entry.
+            unsafe { &*self.sq_tail }.store(tail.wrapping_add(1), Ordering::Release);
+            tail
+        }
+
+        fn withdraw(&mut self, tail: u32) {
+            // SAFETY: the tail lies in the ring mapping, which lives as long as `self`. The
+            // kernel did not consume the entry and reads the ring only inside io_uring_enter, so
+            // moving the tail back withdraws it.
+            unsafe { &*self.sq_tail }.store(tail, Ordering::Release);
+        }
+
+        fn consumed_since(&self, tail: u32) -> bool {
+            // SAFETY: the head lies in the ring mapping; the kernel moves it as it consumes entries.
+            unsafe { &*self.sq_head }.load(Ordering::Acquire) != tail
+        }
+
+        fn take_completions(&mut self, taken: &mut Vec<Completion>) {
+            // SAFETY: we are the completion ring head's only writer.
+            let mut head = unsafe { &*self.cq_head }.load(Ordering::Relaxed);
+            // SAFETY: the acquire load of the kernel's tail makes the entries before it visible.
+            let tail = unsafe { &*self.cq_tail }.load(Ordering::Acquire);
+            while head != tail {
+                // SAFETY: `head` is masked to the completion ring's size and lies before the tail,
+                // so the kernel has written this entry and will not touch it until the head moves.
+                let completion = unsafe {
+                    self.cqes
+                        .wrapping_add((head & self.cq_mask) as usize)
+                        .read()
+                };
+                taken.push(completion);
+                head = head.wrapping_add(1);
+            }
+            // SAFETY: the release store hands the consumed entries back to the kernel.
+            unsafe { &*self.cq_head }.store(head, Ordering::Release);
+        }
+
+        fn enter(&self, to_submit: c_uint, min_complete: c_uint, flags: c_uint) -> Result<c_uint> {
+            loop {
+                match self.enter_once(to_submit, min_complete, flags, ptr::null(), 0) {
+                    Err(error) if error.raw_os_error() == Some(EINTR) => {}
+                    entered => return entered.map_err(Error::from),
+                }
+            }
+        }
+
+        fn enter_once(
+            &self,
+            to_submit: c_uint,
+            min_complete: c_uint,
+            flags: c_uint,
+            argument: *const c_void,
+            argument_size: usize,
+        ) -> io::Result<c_uint> {
+            // SAFETY: io_uring_enter on our own ring descriptor; `argument` is null or points to
+            // `argument_size` bytes that live for the whole call.
+            let entered = unsafe {
+                syscall(
+                    SYS_IO_URING_ENTER,
+                    c_long::from(self.fd.as_raw_fd()),
+                    to_submit as c_long,
+                    min_complete as c_long,
+                    flags as c_long,
+                    argument,
+                    argument_size,
+                )
+            };
+            if entered >= 0 {
+                Ok(c_uint::try_from(entered).unwrap_or(c_uint::MAX))
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+
+        fn leak(&mut self) {
+            std::mem::forget(self.rings.take());
+            std::mem::forget(self.submissions.take());
+        }
+    }
+
+    #[derive(Debug)]
+    struct InFlight {
+        op: IoOp<OsFile>,
+        user_data: u64,
+    }
+
+    /// One io_uring instance, used by one queue at a time.
+    #[derive(Debug)]
+    pub(crate) struct Ring {
+        raw: RawRing,
+        slots: Vec<Option<InFlight>>,
+        free_slots: Vec<usize>,
+        in_kernel: usize,
+        ready: VecDeque<IoCompletion<OsFile>>,
+        taken: Vec<Completion>,
+    }
+
+    impl Ring {
+        pub(crate) fn new(capacity: usize) -> Result<Self> {
+            Ok(Self {
+                raw: RawRing::new(capacity, IORING_FEAT_RW_CUR_POS)?,
+                slots: Vec::new(),
+                free_slots: Vec::new(),
+                in_kernel: 0,
+                ready: VecDeque::new(),
+                taken: Vec::new(),
             })
         }
 
@@ -335,29 +458,14 @@ mod ring {
             if slot == self.slots.len() {
                 self.slots.push(None);
             }
-            let submission = submission_for(&mut op, slot as u64);
-            // SAFETY: the tail lies in the ring mapping, which lives as long as `self`; we are
-            // its only writer, so a relaxed load reads our own last store.
-            let tail = unsafe { &*self.sq_tail }.load(Ordering::Relaxed);
-            let index = tail & self.sq_mask;
-            // SAFETY: `index` is masked to the ring's size, so the entry lies inside the mapping of
-            // submission entries, which lives as long as `self` and which the kernel reads only
-            // after the tail moves past the entry.
-            unsafe { self.sqes.wrapping_add(index as usize).write(submission) };
-            // SAFETY: the index array has one `u32` per entry, and `index` is masked to it.
-            unsafe { self.sq_array.wrapping_add(index as usize).write(index) };
-            // SAFETY: the tail lies in the ring mapping; the release store publishes the entry.
-            unsafe { &*self.sq_tail }.store(tail.wrapping_add(1), Ordering::Release);
-            let entered = self.enter(1, 0, 0);
-            if self.consumed_since(tail) {
+            let tail = self.raw.push(submission_for(&mut op, slot as u64));
+            let entered = self.raw.enter(1, 0, 0);
+            if self.raw.consumed_since(tail) {
                 self.slots[slot] = Some(InFlight { op, user_data });
                 self.in_kernel += 1;
                 return Ok(());
             }
-            // SAFETY: the tail lies in the ring mapping, which lives as long as `self`. The
-            // kernel did not consume the entry and reads the ring only inside io_uring_enter, so
-            // moving the tail back withdraws it.
-            unsafe { &*self.sq_tail }.store(tail, Ordering::Release);
+            self.raw.withdraw(tail);
             self.free_slots.push(slot);
             let error = entered
                 .err()
@@ -376,31 +484,16 @@ mod ring {
             while completions.len() - before < min {
                 let wanted = min - (completions.len() - before);
                 let wanted = c_uint::try_from(wanted).unwrap_or(c_uint::MAX);
-                self.enter(0, wanted, IORING_ENTER_GETEVENTS)?;
+                self.raw.enter(0, wanted, IORING_ENTER_GETEVENTS)?;
                 self.drain(completions);
             }
             Ok(())
         }
 
-        fn consumed_since(&self, tail: u32) -> bool {
-            // SAFETY: the head lies in the ring mapping; the kernel moves it as it consumes entries.
-            unsafe { &*self.sq_head }.load(Ordering::Acquire) != tail
-        }
-
         fn drain(&mut self, completions: &mut Vec<IoCompletion<OsFile>>) {
-            // SAFETY: we are the completion ring head's only writer.
-            let mut head = unsafe { &*self.cq_head }.load(Ordering::Relaxed);
-            // SAFETY: the acquire load of the kernel's tail makes the entries before it visible.
-            let tail = unsafe { &*self.cq_tail }.load(Ordering::Acquire);
-            while head != tail {
-                // SAFETY: `head` is masked to the completion ring's size and lies before the tail,
-                // so the kernel has written this entry and will not touch it until the head moves.
-                let completion = unsafe {
-                    self.cqes
-                        .wrapping_add((head & self.cq_mask) as usize)
-                        .read()
-                };
-                head = head.wrapping_add(1);
+            let mut taken = std::mem::take(&mut self.taken);
+            self.raw.take_completions(&mut taken);
+            for completion in taken.drain(..) {
                 let finished = usize::try_from(completion.user_data)
                     .ok()
                     .and_then(|slot| Some((slot, self.slots.get_mut(slot)?.take()?)));
@@ -414,32 +507,7 @@ mod ring {
                     });
                 }
             }
-            // SAFETY: the release store hands the consumed entries back to the kernel.
-            unsafe { &*self.cq_head }.store(head, Ordering::Release);
-        }
-
-        fn enter(&self, to_submit: c_uint, min_complete: c_uint, flags: c_uint) -> Result<c_uint> {
-            loop {
-                // SAFETY: io_uring_enter on our own ring descriptor, with no signal mask.
-                let entered = unsafe {
-                    syscall(
-                        SYS_IO_URING_ENTER,
-                        c_long::from(self.fd.as_raw_fd()),
-                        to_submit as c_long,
-                        min_complete as c_long,
-                        flags as c_long,
-                        ptr::null::<c_void>(),
-                        0_usize,
-                    )
-                };
-                if entered >= 0 {
-                    return Ok(c_uint::try_from(entered).unwrap_or(c_uint::MAX));
-                }
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(EINTR) {
-                    return Err(error.into());
-                }
-            }
+            self.taken = taken;
         }
     }
 
@@ -449,10 +517,9 @@ mod ring {
             while self.in_kernel > 0 {
                 self.drain(&mut finished);
                 finished.clear();
-                if self.in_kernel > 0 && self.enter(0, 1, IORING_ENTER_GETEVENTS).is_err() {
+                if self.in_kernel > 0 && self.raw.enter(0, 1, IORING_ENTER_GETEVENTS).is_err() {
                     std::mem::forget(std::mem::take(&mut self.slots));
-                    std::mem::forget(self.rings.take());
-                    std::mem::forget(self.submissions.take());
+                    self.raw.leak();
                     return;
                 }
             }
@@ -536,14 +603,48 @@ mod ring {
 mod unsupported {
     use crate::error::{Error, ErrorKind, Result};
     use crate::io::{IoCompletion, IoOp, RejectedOp};
+    use crate::net::NetCompletion;
+    use crate::net::NetOp;
     use crate::os_fs::OsFile;
+    use crate::os_net::{OsListener, OsStream};
     use std::convert::Infallible;
+    use std::time::Instant;
 
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) const BUILT: bool = false;
 
     #[derive(Debug)]
     pub(crate) struct Ring(Infallible);
+
+    #[derive(Debug)]
+    pub(crate) struct NetRing(Infallible);
+
+    impl NetRing {
+        pub(crate) fn new(_capacity: usize) -> Result<Self> {
+            Err(Error::new(ErrorKind::Unsupported))
+        }
+
+        pub(crate) fn submit(
+            &mut self,
+            _op: NetOp<OsListener, OsStream>,
+            _user_data: u64,
+        ) {
+            match self.0 {}
+        }
+
+        pub(crate) fn reap(
+            &mut self,
+            _completions: &mut Vec<NetCompletion<OsListener, OsStream>>,
+            _min: usize,
+            _deadline: Option<Instant>,
+        ) -> Result<()> {
+            match self.0 {}
+        }
+
+        pub(crate) fn cancel(&mut self, _user_data: u64) -> bool {
+            match self.0 {}
+        }
+    }
 
     impl Ring {
         pub(crate) fn new(_capacity: usize) -> Result<Self> {

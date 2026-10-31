@@ -36,6 +36,8 @@ cfg_select! {
                 mod epoll;
                 use epoll as native;
                 pub(crate) use epoll::{accept, prepare_listener, suppress_sigpipe};
+                #[cfg(target_os = "linux")]
+                pub(crate) use epoll::connect_without_waiting;
             }
             _ => {
                 mod plain_unix;
@@ -46,6 +48,8 @@ cfg_select! {
         }
 
         pub(crate) use queue::{NATIVE, ReadinessQueue, supports};
+        #[cfg(target_os = "linux")]
+        pub(crate) use queue::{Connecting, finished_connecting};
     }
     _ => {
         mod std_sockets;

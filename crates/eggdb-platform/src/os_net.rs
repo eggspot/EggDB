@@ -3,6 +3,7 @@ use crate::net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
     NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
 };
+use crate::os_io_uring::NetRing;
 use crate::os_net_readiness::{
     NATIVE, ReadinessQueue, accept, prepare_listener, supports, suppress_sigpipe,
 };
@@ -19,7 +20,8 @@ use std::time::{Duration, Instant};
 /// `poll(2)` ([`NetBackend::Poll`]), and a connect still waits for the operating system inside
 /// `reap`. Elsewhere they run [`NetBackend::Portable`]: `reap` retries the operations that
 /// would block, backing off between rounds, and a connect waits for the operating system inside
-/// `reap`. [`OsNetQueue::backend`] says which one a queue runs.
+/// `reap`. On Linux, [`NetBackend::IoUring`] runs a queue's operations as io_uring completions
+/// when asked for. [`OsNetQueue::backend`] says which one a queue runs.
 /// Connections have Nagle's algorithm turned off, as database protocols send small requests
 /// and answers, and never raise `SIGPIPE`, so a process embedding EggDB is not stopped by a
 /// peer that went away.
@@ -50,6 +52,7 @@ impl Network for OsNetwork {
         let capacity = options.validated()?;
         let engine = match options.requested_backend().or(NATIVE) {
             Some(NetBackend::Portable) | None => Engine::Portable(Vec::new()),
+            Some(NetBackend::IoUring) => Engine::Uring(Box::new(NetRing::new(capacity)?)),
             Some(backend) if supports(backend) => {
                 Engine::Readiness(Box::new(ReadinessQueue::new(capacity, backend)?))
             }
@@ -136,6 +139,7 @@ pub struct OsNetQueue {
 enum Engine {
     Portable(Vec<Waiting>),
     Readiness(Box<ReadinessQueue>),
+    Uring(Box<NetRing>),
 }
 
 impl OsNetQueue {
@@ -147,6 +151,7 @@ impl OsNetQueue {
         match &self.engine {
             Engine::Portable(_) => NetBackend::Portable,
             Engine::Readiness(queue) => queue.backend(),
+            Engine::Uring(_) => NetBackend::IoUring,
         }
     }
 
@@ -209,6 +214,7 @@ impl OsNetQueue {
                 Ok(())
             }
             Engine::Readiness(queue) => queue.reap(completions, left, deadline),
+            Engine::Uring(ring) => ring.reap(completions, left, deadline),
         };
         let reaped = completions.len() - before;
         self.in_flight -= reaped;
@@ -231,6 +237,7 @@ impl NetQueue for OsNetQueue {
         match &mut self.engine {
             Engine::Portable(waiting) => waiting.push(Waiting { op, user_data }),
             Engine::Readiness(queue) => queue.submit(op, user_data),
+            Engine::Uring(ring) => ring.submit(op, user_data),
         }
         self.in_flight += 1;
         Ok(())
@@ -255,7 +262,7 @@ impl NetQueue for OsNetQueue {
 
     fn cancel(&mut self, user_data: u64) -> Result<()> {
         let before = self.canceled.len();
-        match &mut self.engine {
+        let still_running = match &mut self.engine {
             Engine::Portable(waiting) => {
                 let mut index = 0;
                 while let Some(next) = waiting.get(index) {
@@ -270,10 +277,16 @@ impl NetQueue for OsNetQueue {
                         index += 1;
                     }
                 }
+                false
             }
-            Engine::Readiness(queue) => queue.cancel(user_data, &mut self.canceled),
-        }
-        if self.canceled.len() > before
+            Engine::Readiness(queue) => {
+                queue.cancel(user_data, &mut self.canceled);
+                false
+            }
+            Engine::Uring(ring) => ring.cancel(user_data),
+        };
+        if still_running
+            || self.canceled.len() > before
             || self
                 .canceled
                 .iter()
@@ -355,6 +368,12 @@ mod tests {
         backends.extend(NATIVE);
         if supports(NetBackend::Poll) && NATIVE != Some(NetBackend::Poll) {
             backends.push(NetBackend::Poll);
+        }
+        if OsNetwork::new()
+            .net_queue(options(NetBackend::IoUring))
+            .is_ok()
+        {
+            backends.push(NetBackend::IoUring);
         }
         backends
     }
@@ -501,7 +520,7 @@ mod tests {
                 }
                 assert_eq!(queue.in_flight(), 4 - accepted.len(), "{backend:?}");
             }
-            if backend == NetBackend::Portable {
+            if matches!(backend, NetBackend::Portable | NetBackend::IoUring) {
                 accepted.sort_unstable();
             }
             assert_eq!(accepted, [0, 1, 2, 3], "{backend:?}");
@@ -604,5 +623,51 @@ mod tests {
             }
             assert_eq!(queue.in_flight(), 0);
         }
+    }
+
+    #[test]
+    fn a_queue_dropped_with_operations_in_flight_gives_back_their_buffers_and_sockets() {
+        for backend in backends() {
+            let network = OsNetwork::new();
+            let listener = Arc::new(network.listen(any_port()).unwrap());
+            let mut queue = network.net_queue(options(backend)).unwrap();
+            let (server, client) = connected_pair(&mut queue, &listener);
+            let server = Arc::new(server);
+            for user_data in 0..3 {
+                let accept = NetOp::Accept {
+                    listener: Arc::clone(&listener),
+                };
+                queue.submit(accept, user_data).unwrap();
+            }
+            let receive = NetOp::Receive {
+                stream: Arc::clone(&server),
+                buffer: vec![0; 16].into(),
+            };
+            queue.submit(receive, 3).unwrap();
+            queue.reap(&mut Vec::new(), 0).unwrap();
+            drop(queue);
+            assert_eq!(Arc::strong_count(&listener), 1, "{backend:?}");
+            assert_eq!(Arc::strong_count(&server), 1, "{backend:?}");
+            drop(client);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn io_uring_is_chosen_only_on_request() {
+        let automatic = OsNetwork::new().net_queue(NetQueueOptions::new()).unwrap();
+        assert_ne!(automatic.backend(), NetBackend::IoUring);
+        if let Ok(queue) = OsNetwork::new().net_queue(options(NetBackend::IoUring)) {
+            assert_eq!(queue.backend(), NetBackend::IoUring);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn io_uring_is_refused_off_linux() {
+        let error = OsNetwork::new()
+            .net_queue(options(NetBackend::IoUring))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 }
