@@ -1,3 +1,4 @@
+use crate::bignum::equal_bit;
 use super::arithmetic::FieldElement;
 
 const CURVE_B: [u8; 32] = [
@@ -119,9 +120,7 @@ impl ProjectivePoint {
     fn lookup(table: &[Self; WINDOW_ENTRIES], index: u8) -> Self {
         let mut selected = Self::identity();
         for (position, entry) in (0u64..).zip(table) {
-            let difference = position ^ u64::from(index);
-            let equal = ((difference | difference.wrapping_neg()) >> 63) ^ 1;
-            selected = Self::select(equal, entry, &selected);
+            selected = Self::select(equal_bit(position, u64::from(index)), entry, &selected);
         }
         selected
     }

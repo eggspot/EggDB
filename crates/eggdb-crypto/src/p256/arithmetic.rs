@@ -1,3 +1,5 @@
+use crate::bignum::{add_with_carry, mask_of, multiply_add, subtract_with_borrow};
+
 type Limbs = [u64; 4];
 
 const ONE: Limbs = [1, 0, 0, 0];
@@ -47,21 +49,6 @@ const ORDER: Modulus = Modulus {
     ],
 };
 
-fn add_with_carry(a: u64, b: u64, carry: u64) -> (u64, u64) {
-    let wide = u128::from(a) + u128::from(b) + u128::from(carry);
-    (wide as u64, (wide >> 64) as u64)
-}
-
-fn subtract_with_borrow(a: u64, b: u64, borrow: u64) -> (u64, u64) {
-    let wide = u128::from(a).wrapping_sub(u128::from(b) + u128::from(borrow));
-    (wide as u64, (wide >> 127) as u64)
-}
-
-fn multiply_add(accumulator: u64, a: u64, b: u64, carry: u64) -> (u64, u64) {
-    let wide = u128::from(accumulator) + u128::from(a) * u128::from(b) + u128::from(carry);
-    (wide as u64, (wide >> 64) as u64)
-}
-
 fn add_limbs(a: &Limbs, b: &Limbs) -> (Limbs, u64) {
     let mut sum = [0u64; 4];
     let mut carry = 0;
@@ -78,10 +65,6 @@ fn subtract_limbs(a: &Limbs, b: &Limbs) -> (Limbs, u64) {
         (*difference, borrow) = subtract_with_borrow(a, b, borrow);
     }
     (difference, borrow)
-}
-
-fn mask_of(bit: u64) -> u64 {
-    0u64.wrapping_sub(bit & 1)
 }
 
 fn select_limbs(bit: u64, if_one: &Limbs, if_zero: &Limbs) -> Limbs {
