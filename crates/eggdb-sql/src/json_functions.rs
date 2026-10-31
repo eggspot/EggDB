@@ -147,7 +147,9 @@ pub(crate) fn to_json_text(value: &Value) -> SqlResult<String> {
 fn record_object(record: &crate::records::RecordValue) -> SqlResult<String> {
     let mut names = crate::records::field_names(record);
     if names.len() != record.fields.len() {
-        names = (1..=record.fields.len()).map(|at| format!("f{at}")).collect();
+        names = (1..=record.fields.len())
+            .map(|at| format!("f{at}"))
+            .collect();
     }
     let mut out = String::from("{");
     for (at, (name, field)) in names.iter().zip(&record.fields).enumerate() {

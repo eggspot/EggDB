@@ -4,13 +4,128 @@ use crate::session::OutputColumn;
 use crate::set_returning::GeneratedRows;
 use crate::types::Value;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct TableVariable {
     pub(crate) columns: Vec<OutputColumn>,
     pub(crate) rows: Vec<Vec<Value>>,
+    pub(crate) rules: TableVariableRules,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct TableVariableRules {
+    pub(crate) required: Vec<usize>,
+    pub(crate) keys: Vec<UniqueKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UniqueKey {
+    pub(crate) columns: Vec<usize>,
+    pub(crate) primary: bool,
+}
+
+impl TableVariable {
+    pub(crate) fn declared(columns: Vec<OutputColumn>, rules: TableVariableRules) -> Self {
+        Self {
+            columns,
+            rows: Vec::new(),
+            rules,
+        }
+    }
+
+    pub(crate) fn change_rows(
+        &mut self,
+        name: &str,
+        change: impl FnOnce(&mut Vec<Vec<Value>>),
+    ) -> SqlResult<()> {
+        if self.rules == TableVariableRules::default() {
+            change(&mut self.rows);
+            return Ok(());
+        }
+        let before = self.rows.clone();
+        change(&mut self.rows);
+        let checked = self.check_rules(name);
+        if checked.is_err() {
+            self.rows = before;
+        }
+        checked
+    }
+
+    fn check_rules(&self, name: &str) -> SqlResult<()> {
+        for row in &self.rows {
+            for &column in &self.rules.required {
+                if row.get(column).is_none_or(Value::is_null) {
+                    return Err(self.null_violation(name, column, row));
+                }
+            }
+        }
+        for key in &self.rules.keys {
+            let mut seen = HashSet::with_capacity(self.rows.len());
+            for row in &self.rows {
+                let values: Vec<Option<String>> = key
+                    .columns
+                    .iter()
+                    .map(|&column| row.get(column).and_then(Value::to_text))
+                    .collect();
+                if !seen.insert(values) {
+                    return Err(self.duplicate_key(name, key, row));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn column_name(&self, column: usize) -> &str {
+        self.columns
+            .get(column)
+            .map_or("", |column| column.name.as_str())
+    }
+
+    fn null_violation(&self, name: &str, column: usize, row: &[Value]) -> SqlError {
+        SqlError::new(
+            SqlState::NOT_NULL_VIOLATION,
+            format!(
+                "null value in column \"{}\" of relation \"{name}\" violates not-null constraint",
+                self.column_name(column)
+            ),
+        )
+        .with_detail(format!("Failing row contains ({}).", shown_values(row)))
+    }
+
+    fn duplicate_key(&self, name: &str, key: &UniqueKey, row: &[Value]) -> SqlError {
+        let names: Vec<&str> = key
+            .columns
+            .iter()
+            .map(|&column| self.column_name(column))
+            .collect();
+        let values: Vec<Value> = key
+            .columns
+            .iter()
+            .filter_map(|&column| row.get(column).cloned())
+            .collect();
+        let suffix = if key.primary { "pkey" } else { "key" };
+        let constraint = format!("{name}_{}_{suffix}", names.join("_"));
+        SqlError::new(
+            SqlState::UNIQUE_VIOLATION,
+            format!("duplicate key value violates unique constraint \"{constraint}\""),
+        )
+        .with_detail(format!(
+            "Key ({})=({}) already exists.",
+            names.join(", "),
+            shown_values(&values)
+        ))
+        .with_table(name)
+    }
+}
+
+fn shown_values(row: &[Value]) -> String {
+    let shown: Vec<String> = row
+        .iter()
+        .map(|value| value.to_text().unwrap_or_else(|| "null".into()))
+        .collect();
+    shown.join(", ")
 }
 
 pub(crate) type TableVariables = Arc<HashMap<String, TableVariable>>;

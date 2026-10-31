@@ -171,8 +171,18 @@ impl Parser<'_> {
         if let Some(target) = self.privileges_target().filter(|target| {
             matches!(
                 target.as_str(),
-                "schema" | "database" | "sequence" | "function" | "procedure" | "routine"
-                    | "language" | "type" | "domain" | "tablespace" | "foreign" | "large"
+                "schema"
+                    | "database"
+                    | "sequence"
+                    | "function"
+                    | "procedure"
+                    | "routine"
+                    | "language"
+                    | "type"
+                    | "domain"
+                    | "tablespace"
+                    | "foreign"
+                    | "large"
                     | "all"
             )
         }) {

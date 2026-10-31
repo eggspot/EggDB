@@ -597,7 +597,12 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         }
         let step = self.trigger_item(1)?;
-        if self.at > 0 && self.tokens.get(self.at - 1).is_some_and(|token| token.kind == TokenKind::Semicolon) {
+        if self.at > 0
+            && self
+                .tokens
+                .get(self.at - 1)
+                .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
             self.at -= 1;
         }
         Ok(vec![step])

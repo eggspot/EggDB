@@ -58,6 +58,7 @@ pub(crate) enum Declaration {
     Table {
         name: String,
         columns: Vec<OutputColumn>,
+        rules: crate::table_variables::TableVariableRules,
     },
 }
 

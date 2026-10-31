@@ -16,6 +16,7 @@ pub(crate) enum TsqlReturns {
     Table {
         variable: String,
         columns: Vec<(String, SqlType)>,
+        rules: crate::table_variables::TableVariableRules,
     },
 }
 

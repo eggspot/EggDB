@@ -184,7 +184,12 @@ fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
         vec![(0, "Result".to_owned())]
     } else if query.appended {
         std::iter::once((0, "Append".to_owned()))
-            .chain(query.sources.iter().map(|source| (1, postgresql_scan(source))))
+            .chain(
+                query
+                    .sources
+                    .iter()
+                    .map(|source| (1, postgresql_scan(source))),
+            )
             .collect()
     } else {
         postgresql_tree(query, query.sources.len() - 1)

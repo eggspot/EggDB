@@ -192,8 +192,11 @@ impl Parser<'_> {
             {
                 return Err(refused);
             }
-            if let Statement::SqlServer(SqlServerStatement::DeclareTable { name, columns }) =
-                &statement
+            if let Statement::SqlServer(SqlServerStatement::DeclareTable {
+                name,
+                columns,
+                rules,
+            }) = &statement
             {
                 builder.tables.push(Declaration::Table {
                     name: name.text.clone(),
@@ -204,6 +207,7 @@ impl Parser<'_> {
                             sql_type: Some(*sql_type),
                         })
                         .collect(),
+                    rules: rules.clone(),
                 });
             }
             chooses_dialect(&statement)

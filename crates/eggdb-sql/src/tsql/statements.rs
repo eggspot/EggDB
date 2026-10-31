@@ -99,11 +99,14 @@ pub(crate) fn declare(
                     context.variables.push(variable.clone());
                 }
             }
-            Declaration::Table { name, columns } => {
-                tables.entry(name.clone()).or_insert_with(|| TableVariable {
-                    columns: columns.clone(),
-                    rows: Vec::new(),
-                });
+            Declaration::Table {
+                name,
+                columns,
+                rules,
+            } => {
+                tables
+                    .entry(name.clone())
+                    .or_insert_with(|| TableVariable::declared(columns.clone(), rules.clone()));
             }
         }
     }

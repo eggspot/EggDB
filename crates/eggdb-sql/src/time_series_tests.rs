@@ -10,7 +10,11 @@ fn same(store: &MemoryStore, sql: &str, expected: &str) {
             .execute(text, &mut |result| out.push(render(&result)))
             .unwrap_or_else(|error| panic!("{text}: {error}"));
         out.iter()
-            .map(|shown| shown.split_once('\n').map_or(shown.clone(), |(_, rows)| rows.to_owned()))
+            .map(|shown| {
+                shown
+                    .split_once('\n')
+                    .map_or(shown.clone(), |(_, rows)| rows.to_owned())
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };

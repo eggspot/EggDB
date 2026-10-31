@@ -86,6 +86,13 @@ fn view_level(
     label: String,
     verb: &str,
 ) -> SqlResult<Level> {
+    if crate::constraints::current_dialect() == crate::dialect::Dialect::Sqlite {
+        return Err(SqlError::new(
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!("cannot modify {} because it is a view", display(&view.name)),
+        )
+        .with_sqlite_code(1));
+    }
     let (mut query, _) =
         crate::name_resolution::parse_view(view, None, crate::parser::Nesting::default())?;
     crate::name_resolution::resolve_view_body(

@@ -425,6 +425,7 @@ pub(crate) enum SqlServerStatement {
     DeclareTable {
         name: Name,
         columns: Vec<(Name, SqlType)>,
+        rules: crate::table_variables::TableVariableRules,
     },
     InsertVariable {
         variable: Name,

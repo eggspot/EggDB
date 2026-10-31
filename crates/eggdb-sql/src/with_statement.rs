@@ -344,6 +344,7 @@ fn record(
                     TableVariable {
                         columns: renamed(columns, column_names, name)?,
                         rows,
+                        rules: crate::table_variables::TableVariableRules::default(),
                     },
                 );
                 Some(variable)

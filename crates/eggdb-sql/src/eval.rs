@@ -741,6 +741,11 @@ impl Evaluator<'_> {
     }
 
     fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
+        if crate::constraints::current_dialect() == crate::Dialect::Sqlite
+            && self.declared_type(expr) == Some(SqlType::Dynamic)
+        {
+            return Some(SqlType::Dynamic);
+        }
         value.sql_type().or_else(|| self.declared_type(expr))
     }
 
@@ -1631,6 +1636,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "jsonb_strip_nulls" | "jsonb_pretty" => &[JSONB],
         "json_strip_nulls" => &[JSON],
         "json_extract_path" | "json_extract_path_text" => &[JSON],
+        crate::json_functions::OPENJSON_VALUE | crate::json_functions::OPENJSON_JSON => &[None],
         "jsonb_extract_path" | "jsonb_extract_path_text" => &[JSONB],
         "row_to_json" => &[None, BOOLEAN],
         "concat" | "concat_ws" | "json_build_object" | "jsonb_build_object"
@@ -2095,6 +2101,12 @@ pub(crate) fn compare_truth(left: &Value, right: &Value, symbol: &str) -> SqlRes
             return Err(error);
         }
         let dialect = crate::constraints::current_dialect();
+        if dialect == crate::Dialect::Sqlite {
+            if left.is_null() || right.is_null() {
+                return Ok(None);
+            }
+            return Ok(Some(ordering_holds(symbol, compare_values(left, right))));
+        }
         if dialect != crate::Dialect::SqlServer && dialect != crate::Dialect::Oracle {
             return Err(error);
         }
@@ -2126,14 +2138,18 @@ fn engine_compare_truth(left: &Value, right: &Value, symbol: &str) -> SqlResult<
         return Ok(None);
     }
     let ordering = compare_checked(left, right, symbol)?;
-    Ok(Some(match symbol {
+    Ok(Some(ordering_holds(symbol, ordering)))
+}
+
+fn ordering_holds(symbol: &str, ordering: Ordering) -> bool {
+    match symbol {
         "=" => ordering == Ordering::Equal,
         "<>" => ordering != Ordering::Equal,
         "<" => ordering == Ordering::Less,
         "<=" => ordering != Ordering::Greater,
         ">" => ordering == Ordering::Greater,
         _ => ordering != Ordering::Less,
-    }))
+    }
 }
 
 fn wider_integer(left: SqlType, right: SqlType) -> SqlType {

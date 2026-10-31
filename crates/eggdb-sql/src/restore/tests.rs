@@ -1041,7 +1041,11 @@ fn identity_columns_of_skipped_tables_and_their_setval_are_consequences() {
         ]
     );
     assert_eq!(
-        report.skipped.iter().map(|object| (object.kind.as_str(), object.name.as_str())).collect::<Vec<_>>(),
+        report
+            .skipped
+            .iter()
+            .map(|object| (object.kind.as_str(), object.name.as_str()))
+            .collect::<Vec<_>>(),
         [("table", "public.m")]
     );
     assert_eq!((report.tables_skipped, report.rows_skipped), (1, 0));

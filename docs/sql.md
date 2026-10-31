@@ -3498,8 +3498,10 @@ Reference Manual's documented behaviour) marks these as differing until they are
 - `1 / 0` is error 1365 where MySQL's `SELECT` gives `NULL` with a warning.
 - Text compares byte by byte (`'a' = 'A'` is false) where `utf8mb4_0900_ai_ci` ignores case and
   accents; collations come with D30.
-- A `TIME` outside `-838:59:59` to `838:59:59` is an error (`22008`) where MySQL's non-strict
-  modes clip it with a warning, and `HOUR()`, `TIME_TO_SEC()` and the other `TIME` functions are
+- A view made with `ALGORITHM=TEMPTABLE` still takes `INSERT`, `UPDATE` and `DELETE` when its
+  query could; MySQL refuses them (error 1288).
+- A `TIME` outside `-838:59:59` to `838:59:59` is an error (`22007`, error 1292) where MySQL's
+  non-strict modes clip it with a warning, and `HOUR()`, `TIME_TO_SEC()` and the other `TIME` functions are
   missing.
 
 And more, not in the suite yet:
@@ -3752,8 +3754,9 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   triggers, `INSERT ... EXEC` of dynamic SQL, `SET eggdb.dialect` inside a block or dynamic SQL, and a `DECLARE` whose value
   reads a variable the same `DECLARE` declares are 40517. A `SELECT` whose value reads a variable
   the same `SELECT` assigns (`SELECT @s = @s + name FROM t`) is 40517; `SELECT @s += name FROM t`
-  gives SQL Server's result. A table variable's columns take no constraints, defaults or identity
-  and `NOT NULL` is not checked. `EXEC` of anything but the catalog procedures, `sp_executesql`
+  gives SQL Server's result. A table variable's columns take `NOT NULL`, `PRIMARY KEY` and
+  `UNIQUE` (on a column or over several), checked on every `INSERT` and `UPDATE` (515, 2627), but
+  no defaults, checks or identity. `EXEC` of anything but the catalog procedures, `sp_executesql`
   and `sp_unprepare`; rolling back to a save point (`SAVE TRANSACTION` is recorded);
   `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part names and other databases.
 - A batch that loops forever over TDS cannot be stopped by the client's attention signal while it

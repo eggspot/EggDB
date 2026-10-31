@@ -438,6 +438,46 @@ SELECT id, name FROM @t ORDER BY id",
 }
 
 #[test]
+fn table_variable_keys_and_not_null_columns_refuse_the_whole_statement() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    let steps = batch(
+        &mut session,
+        "DECLARE @t TABLE (id int PRIMARY KEY, code nvarchar(5) NOT NULL, tag int UNIQUE)
+INSERT INTO @t VALUES (1, N'a', 10), (2, N'b', 20)
+INSERT INTO @t VALUES (3, N'c', 30), (1, N'd', 40)
+INSERT INTO @t VALUES (4, NULL, 50)
+UPDATE @t SET tag = 10 WHERE id = 2
+UPDATE @t SET id = id + 1
+SELECT id, code, tag FROM @t ORDER BY id",
+    );
+    assert_eq!(errors(&steps), vec![Some(2627), Some(515), Some(2627)]);
+    assert_eq!(
+        last_rows(&steps),
+        vec![
+            vec![Value::Integer(2), text("a"), Value::Integer(10)],
+            vec![Value::Integer(3), text("b"), Value::Integer(20)]
+        ]
+    );
+    let steps = batch(
+        &mut session,
+        "DECLARE @k TABLE (a int, b int, PRIMARY KEY (a, b))
+INSERT INTO @k VALUES (1, 1), (1, 2)
+INSERT INTO @k VALUES (1, 2)
+SELECT COUNT(*) FROM @k",
+    );
+    assert_eq!(errors(&steps), vec![Some(2627)]);
+    assert_eq!(last_rows(&steps), vec![vec![Value::Integer(2)]]);
+    let multiple = refused(
+        &mut session,
+        "DECLARE @m TABLE (a int PRIMARY KEY, b int PRIMARY KEY)",
+    );
+    assert_eq!(multiple.sqlserver_number(), Some(8110));
+    let defaulted = refused(&mut session, "DECLARE @d TABLE (a int DEFAULT 1)");
+    assert_eq!(defaulted.state().code(), "0A000");
+}
+
+#[test]
 fn dynamic_sql_runs_in_its_own_scope_with_parameters_and_outputs() {
     let store = MemoryStore::default();
     let mut session = session(&store);

@@ -14,7 +14,11 @@ fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
         .execute(sql, &mut |result| out.push(render(&result)))
         .unwrap_or_else(|error| panic!("{sql}: {error}"));
     out.iter()
-        .map(|shown| shown.split_once('\n').map_or(shown.clone(), |(_, rows)| rows.to_owned()))
+        .map(|shown| {
+            shown
+                .split_once('\n')
+                .map_or(shown.clone(), |(_, rows)| rows.to_owned())
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

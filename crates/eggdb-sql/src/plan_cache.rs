@@ -290,7 +290,9 @@ impl PlanCache {
             return;
         }
         let template = match parsed {
-            Statement::Select(select) if end == shape.stop && !names_columns_by_text(select, dialect) => {
+            Statement::Select(select)
+                if end == shape.stop && !names_columns_by_text(select, dialect) =>
+            {
                 let mut template = select.clone();
                 literals_come_from_tokens(&mut template, tokens, shape).then_some(template)
             }

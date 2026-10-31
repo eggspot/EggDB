@@ -81,7 +81,11 @@ mod tests {
             "no tenant chosen must fail closed"
         );
         assert!(
-            run(&mut session, "INSERT INTO notes (tenant, body) VALUES ('acme', 'early')").is_err(),
+            run(
+                &mut session,
+                "INSERT INTO notes (tenant, body) VALUES ('acme', 'early')"
+            )
+            .is_err(),
             "no tenant chosen must fail closed"
         );
         run(&mut session, "SET eggdb.tenant = 'acme'").unwrap();

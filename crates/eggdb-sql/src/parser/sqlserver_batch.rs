@@ -8,6 +8,7 @@ use crate::ast::{
 use crate::bulk_load::InsertBulk;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
+use crate::table_variables::{TableVariableRules, UniqueKey};
 use crate::types::SqlType;
 
 const MAX_RAISERROR_ARGUMENTS: usize = 20;
@@ -357,55 +358,134 @@ impl Parser<'_> {
 
     fn declare_table(&mut self, name: Name) -> SqlResult<Statement> {
         self.check_new_variable(&name)?;
-        let columns = self.table_variable_columns(&name.text)?;
+        let (columns, rules) = self.table_variable_columns(&name.text)?;
         self.declared_tables.push(name.text.clone());
         Ok(Statement::SqlServer(SqlServerStatement::DeclareTable {
             name,
             columns,
+            rules,
         }))
     }
 
     pub(super) fn table_variable_columns(
         &mut self,
         table: &str,
-    ) -> SqlResult<Vec<(Name, SqlType)>> {
+    ) -> SqlResult<(Vec<(Name, SqlType)>, TableVariableRules)> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns: Vec<(Name, SqlType)> = Vec::new();
+        let mut rules = TableVariableRules::default();
+        let mut table_keys: Vec<(Vec<Name>, bool, usize)> = Vec::new();
         loop {
-            let column = self.name_part()?;
-            if columns
-                .iter()
-                .any(|(existing, _)| existing.text == column.text)
-            {
-                return Err(SqlError::new(
-                    SqlState::DUPLICATE_COLUMN,
-                    format!(
-                        "Column names in each table must be unique. Column name '{}' in table '{}' is specified more than once.",
-                        column.text, table
-                    ),
-                )
-                .with_sqlserver_code(2705)
-                .at(column.position));
-            }
-            let sql_type = self.sqlserver_type()?;
-            if self.take_word("not") {
-                self.expect_word("null")?;
+            let entry_position = self.position();
+            if let Some(primary) = self.table_variable_key_start() {
+                let names = self.parenthesized_names()?;
+                table_keys.push((names, primary, entry_position));
             } else {
-                self.take_word("null");
+                let column = self.name_part()?;
+                if columns
+                    .iter()
+                    .any(|(existing, _)| existing.text == column.text)
+                {
+                    return Err(duplicate_variable_column(&column, table));
+                }
+                let sql_type = self.sqlserver_type()?;
+                let index = columns.len();
+                self.table_variable_column_rules(index, &mut rules, table)?;
+                columns.push((column, sql_type));
             }
-            if !matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RightParen) {
-                return Err(not_supported(
-                    "Constraints, defaults and identity in a table variable",
-                )
-                .at(self.position()));
-            }
-            columns.push((column, sql_type));
             if !self.take(&TokenKind::Comma) {
                 break;
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(columns)
+        for (names, primary, position) in table_keys {
+            let mut key = Vec::with_capacity(names.len());
+            for name in names {
+                let Some(index) = columns
+                    .iter()
+                    .position(|(column, _)| column.text.eq_ignore_ascii_case(&name.text))
+                else {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_COLUMN,
+                        format!(
+                            "Column name '{}' does not exist in the target table or view.",
+                            name.text
+                        ),
+                    )
+                    .with_sqlserver_code(1911)
+                    .at(name.position));
+                };
+                key.push(index);
+            }
+            add_variable_key(&mut rules, key, primary, table)
+                .map_err(|error| error.at(position))?;
+        }
+        Ok((columns, rules))
+    }
+
+    fn table_variable_key_start(&mut self) -> Option<bool> {
+        let primary = if self.is_word("primary") && self.is_word_at(1, "key") {
+            self.at += 2;
+            true
+        } else if self.is_word("unique")
+            && (self.peek_kind_at(1) == &TokenKind::LeftParen
+                || self.is_word_at(1, "clustered")
+                || self.is_word_at(1, "nonclustered"))
+        {
+            self.at += 1;
+            false
+        } else {
+            return None;
+        };
+        if !self.take_word("clustered") {
+            self.take_word("nonclustered");
+        }
+        Some(primary)
+    }
+
+    fn parenthesized_names(&mut self) -> SqlResult<Vec<Name>> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut names = Vec::new();
+        loop {
+            names.push(self.name_part()?);
+            if !self.take_word("asc") {
+                self.take_word("desc");
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(names)
+    }
+
+    fn table_variable_column_rules(
+        &mut self,
+        index: usize,
+        rules: &mut TableVariableRules,
+        table: &str,
+    ) -> SqlResult<()> {
+        loop {
+            let position = self.position();
+            if self.take_word("not") {
+                self.expect_word("null")?;
+                if !rules.required.contains(&index) {
+                    rules.required.push(index);
+                }
+            } else if self.take_word("null") {
+            } else if let Some(primary) = self.table_variable_key_start() {
+                add_variable_key(rules, vec![index], primary, table)
+                    .map_err(|error| error.at(position))?;
+            } else if self.take_word("unique") {
+                add_variable_key(rules, vec![index], false, table)?;
+            } else if matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RightParen) {
+                return Ok(());
+            } else {
+                return Err(
+                    not_supported("Defaults, checks and identity in a table variable").at(position),
+                );
+            }
+        }
     }
 
     pub(super) fn at_insert_into_variable(&self) -> bool {
@@ -923,4 +1003,40 @@ impl Parser<'_> {
             generated: Some(Box::new(generated)),
         })
     }
+}
+
+fn duplicate_variable_column(column: &Name, table: &str) -> SqlError {
+    SqlError::new(
+        SqlState::DUPLICATE_COLUMN,
+        format!(
+            "Column names in each table must be unique. Column name '{}' in table '{}' is specified more than once.",
+            column.text, table
+        ),
+    )
+    .with_sqlserver_code(2705)
+    .at(column.position)
+}
+
+fn add_variable_key(
+    rules: &mut TableVariableRules,
+    columns: Vec<usize>,
+    primary: bool,
+    table: &str,
+) -> SqlResult<()> {
+    if primary {
+        if rules.keys.iter().any(|key| key.primary) {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                format!("Cannot add multiple PRIMARY KEY constraints to table '{table}'."),
+            )
+            .with_sqlserver_code(8110));
+        }
+        for &column in &columns {
+            if !rules.required.contains(&column) {
+                rules.required.push(column);
+            }
+        }
+    }
+    rules.keys.push(UniqueKey { columns, primary });
+    Ok(())
 }

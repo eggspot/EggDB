@@ -524,9 +524,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 self.set_identity_insert(table, *on)
             }
             SqlServerStatement::Execute(call) => self.run_execute(call),
-            SqlServerStatement::DeclareTable { name, columns } => {
-                self.declare_table_variable(name, columns)
-            }
+            SqlServerStatement::DeclareTable {
+                name,
+                columns,
+                rules,
+            } => self.declare_table_variable(name, columns, rules),
             SqlServerStatement::InsertVariable {
                 variable,
                 columns,

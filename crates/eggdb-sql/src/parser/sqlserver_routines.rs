@@ -329,12 +329,16 @@ impl Parser<'_> {
             let variable = variable.as_ref().to_owned();
             self.at += 1;
             self.expect_word("table")?;
-            let columns = self
-                .table_variable_columns(&variable)?
+            let (columns, rules) = self.table_variable_columns(&variable)?;
+            let columns = columns
                 .into_iter()
                 .map(|(column, sql_type)| (column.text, sql_type))
                 .collect();
-            return Ok(TsqlReturns::Table { variable, columns });
+            return Ok(TsqlReturns::Table {
+                variable,
+                columns,
+                rules,
+            });
         }
         if self.take_word("table") {
             return Ok(TsqlReturns::InlineTable);
@@ -405,7 +409,10 @@ impl Parser<'_> {
         let parenthesized = self.take(&TokenKind::LeftParen);
         let start = self.peek().start;
         let position = self.position();
-        if !self.is_word("select") && !self.is_word("with") && !matches!(self.peek_kind(), TokenKind::LeftParen) {
+        if !self.is_word("select")
+            && !self.is_word("with")
+            && !matches!(self.peek_kind(), TokenKind::LeftParen)
+        {
             return Err(SqlError::new(
                 SqlState::INVALID_FUNCTION_DEFINITION,
                 "The RETURN statement of an inline table-valued function must be a SELECT query.",

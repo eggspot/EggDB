@@ -450,7 +450,6 @@ SELECT date('now') IS NOT NULL
 date('now') IS NOT NULL
 1
 SELECT 1
-... differs
 
 chapter "SELECT": filtering, grouping, ordering and LIMIT
 ok
@@ -1229,13 +1228,13 @@ SELECT 2
 error 42P07
 CREATE VIEW v33 AS SELECT 1
 
-error 0A000
+ok
 CREATE TEMP VIEW t33v AS SELECT 1
 
-error 0A000
+error 42P01 1
 SELECT * FROM temp.v33
 
-error 0A000
+error 55000 1
 DELETE FROM v33
 
 ok

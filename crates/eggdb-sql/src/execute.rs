@@ -2945,7 +2945,11 @@ fn union_branches(query: &Select) -> Option<Vec<&Select>> {
     }
     let mut out = Vec::new();
     leaves(&derived.query.body, &mut out)?;
-    (out.len() > 1 && !out.iter().any(|leaf| crate::subquery::needs_preparation(leaf))).then_some(out)
+    (out.len() > 1
+        && !out
+            .iter()
+            .any(|leaf| crate::subquery::needs_preparation(leaf)))
+    .then_some(out)
 }
 
 pub(crate) fn explain(

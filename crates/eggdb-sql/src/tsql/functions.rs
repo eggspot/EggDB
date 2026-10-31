@@ -263,9 +263,9 @@ pub(crate) fn invoke_function(
     let returned = match &returns {
         TsqlReturns::InlineTable => run.inline_table(definition, arguments),
         TsqlReturns::Scalar(declared) => run.scalar(definition, &returns, arguments, *declared),
-        TsqlReturns::Table { variable, columns } => {
-            run.table(definition, &returns, arguments, variable, columns)
-        }
+        TsqlReturns::Table {
+            variable, columns, ..
+        } => run.table(definition, &returns, arguments, variable, columns),
         TsqlReturns::Status => Err(not_a_function(definition)),
     };
     returned.map_err(SqlError::without_position)
@@ -374,19 +374,22 @@ impl FunctionRun<'_, '_> {
         let program = self.compiled(definition, returns)?;
         let mut tables: HashMap<String, TableVariable> = HashMap::new();
         declare(&mut self.context, &mut tables, &program);
-        if let TsqlReturns::Table { variable, columns } = returns {
+        if let TsqlReturns::Table {
+            variable,
+            columns,
+            rules,
+        } = returns
+        {
+            let columns = columns
+                .iter()
+                .map(|(name, sql_type)| OutputColumn {
+                    name: name.clone(),
+                    sql_type: Some(*sql_type),
+                })
+                .collect();
             tables.insert(
                 variable.clone(),
-                TableVariable {
-                    columns: columns
-                        .iter()
-                        .map(|(name, sql_type)| OutputColumn {
-                            name: name.clone(),
-                            sql_type: Some(*sql_type),
-                        })
-                        .collect(),
-                    rows: Vec::new(),
-                },
+                TableVariable::declared(columns, rules.clone()),
             );
         }
         self.variables = Arc::new(tables);
@@ -675,10 +678,8 @@ impl FunctionRun<'_, '_> {
         Ok(())
     }
 
-    fn writable_rows(&mut self, variable: &Name) -> Option<&mut Vec<Vec<Value>>> {
-        Arc::make_mut(&mut self.variables)
-            .get_mut(&variable.text)
-            .map(|found| &mut found.rows)
+    fn writable_variable(&mut self, variable: &Name) -> Option<&mut TableVariable> {
+        Arc::make_mut(&mut self.variables).get_mut(&variable.text)
     }
 
     fn insert(
@@ -711,8 +712,8 @@ impl FunctionRun<'_, '_> {
             }
         };
         let appended = filled_rows(&targets, width, rows)?;
-        if let Some(rows) = self.writable_rows(variable) {
-            rows.extend(appended);
+        if let Some(target) = self.writable_variable(variable) {
+            target.change_rows(&variable.text, |rows| rows.extend(appended))?;
         }
         Ok(())
     }
@@ -749,16 +750,16 @@ impl FunctionRun<'_, '_> {
         let values: Vec<Expr> = assignments.iter().map(|(_, value)| value.clone()).collect();
         let matching = self.matching_rows(variable, filter, &values)?;
         let changes = changed_rows(&columns, matching)?;
-        if let Some(rows) = self.writable_rows(variable) {
-            apply_changes(rows, changes);
+        if let Some(target) = self.writable_variable(variable) {
+            target.change_rows(&variable.text, |rows| apply_changes(rows, changes))?;
         }
         Ok(())
     }
 
     fn delete(&mut self, variable: &Name, filter: Option<&Expr>) -> SqlResult<()> {
         let matching = self.matching_rows(variable, filter, &[])?;
-        if let Some(rows) = self.writable_rows(variable) {
-            remove_rows(rows, matching);
+        if let Some(target) = self.writable_variable(variable) {
+            remove_rows(&mut target.rows, matching);
         }
         Ok(())
     }

@@ -12,7 +12,7 @@ use crate::lexer::{Token, TokenKind, tokenize_in};
 use crate::name_resolution::Binding;
 use crate::parser::{Parameters, Parser};
 use crate::store::KeyValueStore;
-use crate::table_variables::{TableVariable, TableVariables};
+use crate::table_variables::{TableVariable, TableVariableRules, TableVariables};
 use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
     BatchContext, CaughtError, DynamicBatch, Instruction, MAX_DYNAMIC_NESTING, MatchingRow,
@@ -624,6 +624,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 TableVariable {
                     columns: columns.clone(),
                     rows: call.new_rows.clone(),
+                    rules: TableVariableRules::default(),
                 },
             );
             tables.insert(
@@ -631,6 +632,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 TableVariable {
                     columns,
                     rows: call.old_rows.clone(),
+                    rules: TableVariableRules::default(),
                 },
             );
         }
@@ -1025,18 +1027,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &mut self,
         name: &Name,
         columns: &[(Name, SqlType)],
+        rules: &crate::table_variables::TableVariableRules,
     ) -> SqlResult<QueryResult> {
         if !self.table_variables.contains_key(&name.text) {
-            let variable = TableVariable {
-                columns: columns
-                    .iter()
-                    .map(|(column, sql_type)| super::OutputColumn {
-                        name: column.text.clone(),
-                        sql_type: Some(*sql_type),
-                    })
-                    .collect(),
-                rows: Vec::new(),
-            };
+            let columns = columns
+                .iter()
+                .map(|(column, sql_type)| super::OutputColumn {
+                    name: column.text.clone(),
+                    sql_type: Some(*sql_type),
+                })
+                .collect();
+            let variable = TableVariable::declared(columns, rules.clone());
             self.writable_table_variables()
                 .insert(name.text.clone(), variable);
         }
@@ -1104,7 +1105,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let appended = crate::tsql::filled_rows(&targets, width, rows)?;
         let inserted = appended.len();
         if let Some(target) = self.writable_table_variables().get_mut(&variable.text) {
-            target.rows.extend(appended);
+            target.change_rows(&variable.text, |rows| rows.extend(appended))?;
         }
         Ok(QueryResult::command(format!("INSERT 0 {inserted}")))
     }
@@ -1144,7 +1145,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let changes = crate::tsql::changed_rows(&columns, matching)?;
         let updated = changes.len();
         if let Some(target) = self.writable_table_variables().get_mut(&variable.text) {
-            crate::tsql::apply_changes(&mut target.rows, changes);
+            target.change_rows(&variable.text, |rows| {
+                crate::tsql::apply_changes(rows, changes)
+            })?;
         }
         Ok(QueryResult::command(format!("UPDATE {updated}")))
     }
