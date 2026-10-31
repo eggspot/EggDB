@@ -120,6 +120,7 @@ pub(crate) fn invoke(
         RoutineLanguage::PlPgSql => format!("PL/pgSQL function {}", definition.signature()),
         RoutineLanguage::Sql => format!("SQL function \"{}\"", base_name(&definition.name)),
         RoutineLanguage::PlSql => format!("\"{}\"", crate::plsql::shown_object(&definition.name)),
+        RoutineLanguage::MySql => format!("{} {}", definition.kind.keyword(), base_name(&definition.name)),
         RoutineLanguage::Tsql => {
             return crate::tsql::invoke_function(
                 writer,
@@ -132,7 +133,7 @@ pub(crate) fn invoke(
     };
     let mut run = Run::new(writer, tables, settings, &definition, label);
     let program = match definition.language {
-        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => {
+        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql | RoutineLanguage::MySql => {
             Some(crate::routines::compiled_program(run.tables, &definition)?)
         }
         RoutineLanguage::Sql | RoutineLanguage::Tsql => None,
@@ -512,7 +513,7 @@ impl<'r> Run<'r> {
         let definition = self.definition;
         let procedural = matches!(
             definition.language,
-            RoutineLanguage::PlPgSql | RoutineLanguage::PlSql
+            RoutineLanguage::PlPgSql | RoutineLanguage::PlSql | RoutineLanguage::MySql
         );
         let label = Some(base_name(&definition.name).to_owned());
         let mut inputs = arguments.into_iter();
@@ -786,6 +787,8 @@ impl<'r> Run<'r> {
     fn dialect(&self) -> Dialect {
         if self.oracle {
             Dialect::Oracle
+        } else if self.definition.dialect == Dialect::MySql {
+            Dialect::MySql
         } else {
             Dialect::PostgreSql
         }

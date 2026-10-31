@@ -2529,6 +2529,28 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             Statement::AlterRoutine(alter) => self.write("ALTER FUNCTION", |writer, tables| {
                 crate::routines::alter_routine(writer, tables, alter, dialect)
             }),
+            Statement::Call(call) if dialect == Dialect::MySql => {
+                let mut assigned = Vec::new();
+                let result = self.write("CALL", |writer, tables| {
+                    for argument in &mut call.arguments {
+                        binding.condition(&*writer, tables, argument)?;
+                    }
+                    let (result, sources) = crate::routines::call_procedure_outputs(writer, tables, &settings, call)?;
+                    let row = result.rows.first().cloned().unwrap_or_default();
+                    for (value, source) in row.into_iter().zip(sources) {
+                        if let Some(name) = source.and_then(|at| call.user_variables.get(at).cloned().flatten()) {
+                            assigned.push((name, value));
+                        }
+                    }
+                    Ok(QueryResult::command("CALL"))
+                });
+                if result.is_ok() {
+                    for (name, value) in assigned {
+                        Arc::make_mut(&mut self.settings).mysql.set_user(&name, value);
+                    }
+                }
+                result
+            }
             Statement::Call(call) => self.write_plsql("CALL", |writer, tables| {
                 for argument in &mut call.arguments {
                     binding.condition(&*writer, tables, argument)?;

@@ -60,9 +60,18 @@ impl<'t> Parser<'t> {
     pub(super) fn call_routine(&mut self) -> SqlResult<Statement> {
         self.at += 1;
         let name = self.table_name()?;
-        self.expect(&TokenKind::LeftParen)?;
         let mut arguments = Vec::new();
         let mut argument_names: Vec<Option<String>> = Vec::new();
+        let mut user_variables: Vec<Option<String>> = Vec::new();
+        if self.mysql() && !matches!(self.peek_kind(), TokenKind::LeftParen) {
+            return Ok(Statement::Call(CallRoutine {
+                name,
+                arguments,
+                argument_names,
+                user_variables,
+            }));
+        }
+        self.expect(&TokenKind::LeftParen)?;
         if !self.take(&TokenKind::RightParen) {
             loop {
                 if arguments.len() >= MAX_PARAMETERS {
@@ -88,6 +97,7 @@ impl<'t> Parser<'t> {
                     ));
                 }
                 argument_names.push(named.map(|parameter| parameter.text));
+                user_variables.push(self.user_variable_argument());
                 arguments.push(self.expression()?);
                 if !self.take(&TokenKind::Comma) {
                     break;
@@ -99,7 +109,18 @@ impl<'t> Parser<'t> {
             name,
             arguments,
             argument_names,
+            user_variables,
         }))
+    }
+
+    fn user_variable_argument(&self) -> Option<String> {
+        if !self.mysql() || !matches!(self.peek_kind_at(1), TokenKind::Comma | TokenKind::RightParen) {
+            return None;
+        }
+        match self.peek_kind() {
+            TokenKind::Variable(name) if !name.starts_with("@@") => Some(super::mysql::variable_name(name).to_owned()),
+            _ => None,
+        }
     }
 
     fn do_block(&mut self) -> SqlResult<Statement> {

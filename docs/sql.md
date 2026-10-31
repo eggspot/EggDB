@@ -681,6 +681,26 @@ SELECT @@VERSION
   Invalid object name 'missing'.` in `eggdb sql`, and the same fields in TDS's ERROR token.
   Features EggDB lacks are 40517 (`... is not supported in this version of EggDB.`).
 
+## MySQL stored procedures and functions
+
+In the MySQL dialect, `CREATE PROCEDURE` and `CREATE FUNCTION` take MySQL's syntax (D199):
+`DEFINER = ...`, `IN`, `OUT` and `INOUT` parameters, `RETURNS` with a MySQL type, and the
+characteristics (`DETERMINISTIC`, `CONTAINS SQL`, `READS SQL DATA`, `MODIFIES SQL DATA`, `SQL
+SECURITY`, `COMMENT`, `LANGUAGE SQL`). The body is one statement or a compound statement:
+
+- `[label:] BEGIN ... END [label]` with `DECLARE name[, ...] type [DEFAULT expr]` first;
+- `SET local = expr[, ...]`, `SELECT ... INTO local[, ...]` and any SQL statement;
+- `IF ... THEN ... ELSEIF ... ELSE ... END IF` and both forms of `CASE ... END CASE` (no
+  matching branch and no `ELSE` fails with SQLSTATE `20000`, as in MySQL);
+- `[label:] WHILE ... DO ... END WHILE`, `REPEAT ... UNTIL ... END REPEAT`, `LOOP ... END LOOP`,
+  with `LEAVE label` and `ITERATE label`;
+- `RETURN expr` in functions and `SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ...`.
+
+`CALL name(...)` (or `CALL name` without parentheses) runs a procedure; an `OUT` or `INOUT`
+argument written as a user variable (`@total`) receives the value. `DROP PROCEDURE` and `DROP
+FUNCTION` take `IF EXISTS`. Not yet: `DECLARE ... HANDLER`, cursors, named conditions,
+`GET DIAGNOSTICS`, `RESIGNAL`, setting user or system variables inside a body, and events.
+
 ## Connecting with mysql
 
 `eggdb serve --mysql-listen <address>` also serves the file over MySQL's client/server protocol

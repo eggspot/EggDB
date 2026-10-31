@@ -71,6 +71,7 @@ pub(crate) fn language_oid(language: RoutineLanguage) -> u32 {
         RoutineLanguage::PlPgSql => PLPGSQL_LANGUAGE,
         RoutineLanguage::Tsql => TSQL_LANGUAGE,
         RoutineLanguage::PlSql => PLSQL_LANGUAGE,
+        RoutineLanguage::MySql => SQL_LANGUAGE,
     }
 }
 

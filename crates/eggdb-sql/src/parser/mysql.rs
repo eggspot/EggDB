@@ -115,7 +115,7 @@ pub(super) fn is_clause_word(word: &str) -> bool {
     )
 }
 
-fn variable_name(name: &str) -> &str {
+pub(super) fn variable_name(name: &str) -> &str {
     name.trim_start_matches('@')
 }
 
@@ -178,6 +178,9 @@ impl<'t> Parser<'t> {
             return Ok(None);
         };
         let statement = match word.as_ref() {
+            "create" if self.creates_mysql_routine() => self.mysql_create_routine()?,
+            "drop" if self.is_word_at(1, "procedure") || self.is_word_at(1, "function") => self.mysql_drop_routine()?,
+            "call" => self.call_routine()?,
             "show" => self.mysql_show()?,
             "describe" | "desc" => {
                 self.at += 1;

@@ -154,6 +154,7 @@ pub(crate) struct CallRoutine {
     pub(crate) name: Name,
     pub(crate) arguments: Vec<Expr>,
     pub(crate) argument_names: Vec<Option<String>>,
+    pub(crate) user_variables: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

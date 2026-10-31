@@ -63,6 +63,7 @@ pub(crate) enum RoutineLanguage {
     PlPgSql,
     Tsql,
     PlSql,
+    MySql,
 }
 
 impl RoutineLanguage {
@@ -72,6 +73,7 @@ impl RoutineLanguage {
             Self::PlPgSql => "plpgsql",
             Self::Tsql => "tsql",
             Self::PlSql => "plsql",
+            Self::MySql => "mysql",
         }
     }
 }
@@ -564,6 +566,7 @@ fn check_body(definition: &RoutineDefinition, body_position: Option<usize>) -> S
     match definition.language {
         RoutineLanguage::Sql => tokenize_in(&definition.body, definition.dialect).map(drop),
         RoutineLanguage::PlPgSql => crate::plpgsql::check(definition, body_position),
+        RoutineLanguage::MySql => crate::parser::mysql_program(definition).map(drop),
         RoutineLanguage::Tsql | RoutineLanguage::PlSql => Ok(()),
     }
 }
@@ -868,6 +871,8 @@ pub(crate) fn alter_routine(
 
 #[cfg(test)]
 mod calls_tests;
+#[cfg(test)]
+mod mysql_tests;
 #[cfg(test)]
 mod sqlserver_tests;
 #[cfg(test)]

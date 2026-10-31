@@ -687,6 +687,9 @@ pub(crate) fn compile_for_run(definition: &RoutineDefinition) -> SqlResult<Progr
     if definition.language == RoutineLanguage::PlSql {
         return crate::plsql::compile(definition);
     }
+    if definition.language == RoutineLanguage::MySql {
+        return crate::parser::mysql_program(definition);
+    }
     compile(definition).map_err(|error| compilation_error(definition, None, error))
 }
 
