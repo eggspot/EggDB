@@ -259,7 +259,16 @@ What it reads, on top of the statements of "What runs today":
   `substring`, `upper`, `lower` (ASCII only, as SQLite's), `trim`, `ltrim`, `rtrim`, `replace`,
   `instr`, `abs`, `round`, scalar `min` and `max`, `random`, `hex`, `quote`, `printf` and
   `format`, `like`, `glob`, `sqlite_version()` (`3.46.0`), `last_insert_rowid`, `changes`,
-  `total_changes`, and the aggregates `count`, `sum`, `avg`, `min` and `max`.
+  `total_changes`, `unicode`, `char`, `sign`, and the aggregates `count`, `sum`, `avg`, `min`
+  and `max`.
+- **Dates and times** as SQLite's documented date and time functions: `date`, `time`,
+  `datetime`, `julianday`, `unixepoch`, `strftime` (every documented `%` field) and
+  `timediff`, on time values in the documented text formats (with a `Z` or `±HH:MM` zone),
+  `'now'` (the statement's time) and numbers, with every modifier: `±N days|hours|minutes|
+  seconds|months|years`, `±HH:MM[:SS.SSS]`, `±YYYY-MM-DD[ HH:MM:SS]`, `start of
+  day|month|year`, `weekday N`, `unixepoch`, `julianday`, `auto`, `localtime` and `utc` (in
+  the session's time zone), `subsec`, `ceiling` and `floor`. An invalid value or modifier
+  gives `NULL`, as in SQLite.
 - **Values print as SQLite prints them**: reals with up to 15 significant digits and a decimal
   point (`2.0`, `0.333333333333333`, `1.0e+20`).
 - **Errors** with SQLite's wording and result codes: `Error: near "FORM": syntax error`, `no

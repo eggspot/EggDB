@@ -2415,6 +2415,28 @@ fn sqlite_functions_stay_inside_the_sqlite_dialect() {
 }
 
 #[test]
+fn sqlite_date_and_time_functions_follow_their_modifiers() {
+    let store = MemoryStore::default();
+    let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    assert_eq!(
+        last(
+            &mut sqlite,
+            "SELECT date('2023-01-31', '+1 month') AS d, datetime(1092941466, 'unixepoch') AS t, \
+             strftime('%Y/%j', '2024-03-05') AS f, unixepoch('2004-01-01 02:34:56') AS u"
+        ),
+        "d|t|f|u\n2023-03-03|2004-08-19 18:51:06|2024/065|1072924496\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut sqlite, "SELECT date('nonsense') IS NULL AS invalid, length(date('now')) AS n"),
+        "invalid|n\n1|10\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut sqlite, "SELECT unicode('Ä') AS u, char(72, 105) AS c, sign(-3) AS s"),
+        "u|c|s\n196|Hi|-1\nSELECT 1"
+    );
+}
+
+#[test]
 fn sqlite_parameters_number_like_sqlite_and_unbound_ones_are_null() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);

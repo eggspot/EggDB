@@ -233,6 +233,9 @@ pub(crate) fn truth(value: &Value) -> Value {
 }
 
 pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
+    if let Some(function) = crate::sqlite_datetime::DateFunction::of_internal_name(name) {
+        return Ok(crate::sqlite_datetime::call(function, values));
+    }
     let text = |index: usize| values.get(index).and_then(text_of);
     let any_null = values.iter().any(Value::is_null);
     let null = Value::Null;
@@ -325,6 +328,32 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             let digits = values.get(1).and_then(integer_of).unwrap_or(0);
             Value::Double(rounded(number, digits))
         }
+        "sqlite_strftime" => crate::sqlite_datetime::strftime(values),
+        "sqlite_timediff" => crate::sqlite_datetime::timediff(values),
+        "sqlite_unicode" => match text(0) {
+            Some(text) if !any_null => text
+                .chars()
+                .next()
+                .map_or(Value::Null, |first| Value::BigInt(i64::from(u32::from(first)))),
+            _ => Value::Null,
+        },
+        "sqlite_char" => Value::Text(
+            values
+                .iter()
+                .filter_map(integer_of)
+                .filter_map(|code| u32::try_from(code).ok().and_then(char::from_u32))
+                .collect(),
+        ),
+        "sqlite_sign" => match first {
+            Value::Null => Value::Null,
+            Value::Text(text) if text.trim().parse::<f64>().is_err() => Value::Null,
+            other => match number_of(other) {
+                Some(number) if number > 0.0 => Value::BigInt(1),
+                Some(number) if number < 0.0 => Value::BigInt(-1),
+                Some(_) => Value::BigInt(0),
+                None => Value::Null,
+            },
+        },
         "sqlite_hex" => {
             let bytes = text(0).unwrap_or_default();
             within_limit(bytes.len().saturating_mul(2))?;

@@ -96,6 +96,7 @@ mod set_operations;
 mod set_returning;
 mod settings;
 mod sqlite_errors;
+mod sqlite_datetime;
 mod sqlite_functions;
 mod sqlserver_catalog;
 mod sqlserver_conversion;

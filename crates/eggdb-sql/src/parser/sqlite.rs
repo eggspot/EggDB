@@ -741,12 +741,24 @@ impl<'t> Parser<'t> {
             "printf" | "format" => ("sqlite_printf", &[]),
             "like" => ("like", &[2]),
             "glob" => ("glob", &[2]),
+            "date" => ("sqlite_date", &[]),
+            "time" => ("sqlite_time", &[]),
+            "datetime" => ("sqlite_datetime", &[]),
+            "julianday" => ("sqlite_julianday", &[]),
+            "unixepoch" => ("sqlite_unixepoch", &[]),
+            "strftime" => ("sqlite_strftime", &[]),
+            "timediff" => ("sqlite_timediff", &[2]),
+            "unicode" => ("sqlite_unicode", &[1]),
+            "char" => ("sqlite_char", &[]),
+            "sign" => ("sqlite_sign", &[1]),
             _ => return Ok(None),
         };
         let arguments = self.call_arguments()?;
         let count_ok = if counts.is_empty() {
             match internal {
                 "coalesce" => arguments.len() >= 2,
+                "sqlite_date" | "sqlite_time" | "sqlite_datetime" | "sqlite_julianday"
+                | "sqlite_unixepoch" | "sqlite_char" => true,
                 _ => !arguments.is_empty(),
             }
         } else {
