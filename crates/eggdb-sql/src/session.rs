@@ -14,7 +14,7 @@ pub(crate) use oracle::create_text as oracle_create_text;
 pub(crate) use sqlite::create_text as sqlite_create_text;
 
 use crate::ast::{
-    CopyDirection, CopySource, CopyStatement, DiscardTarget, MySqlStatement, Name,
+    CopyDirection, CopySource, CopyStatement, DiscardTarget, Explain, MySqlStatement, Name,
     SqlServerStatement, Statement,
 };
 use crate::bulk_load::BulkRows;
@@ -2029,6 +2029,62 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }
     }
 
+    fn explain_analyze(
+        &mut self,
+        explain: &Explain,
+        io: &mut CopyIo<'_, '_>,
+    ) -> SqlResult<QueryResult> {
+        let settings = Arc::clone(&self.settings);
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: true,
+            target_privilege: Some(crate::roles::target_privilege(&explain.statement)),
+        };
+        let planning = std::time::Instant::now();
+        let mut planned = (*explain.statement).clone();
+        let plan = self.read(|reader, tables| {
+            binding.statement(reader, tables, &mut planned)?;
+            execute::explain(reader, tables, &planned)
+        })?;
+        let planning = planning.elapsed();
+        let started = std::time::Instant::now();
+        let mut statement = (*explain.statement).clone();
+        let result = self.run(&mut statement, io)?;
+        let execution = started.elapsed();
+        let rows = if result.columns.is_some() {
+            result.rows.len() as u64
+        } else {
+            result
+                .tag
+                .rsplit(' ')
+                .next()
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0)
+        };
+        Ok(crate::explain::render_analyzed(&plan, rows, planning, execution))
+    }
+
+    /// The `log_min_duration_statement` threshold: statements that take at least this long are
+    /// worth logging, or `None` when it is off (`-1`, the default).
+    pub fn slow_statement_threshold(&self) -> Option<std::time::Duration> {
+        let value = self.settings.get("log_min_duration_statement").ok()?;
+        let value = value.trim();
+        let (number, unit) = value
+            .find(|character: char| !character.is_ascii_digit() && character != '-')
+            .map_or((value, "ms"), |split| (&value[..split], value[split..].trim()));
+        let number: i64 = number.parse().ok()?;
+        if number < 0 {
+            return None;
+        }
+        let millis = match unit {
+            "ms" => number,
+            "s" => number.checked_mul(1000)?,
+            "min" => number.checked_mul(60_000)?,
+            _ => return None,
+        };
+        Some(std::time::Duration::from_millis(u64::try_from(millis).ok()?))
+    }
+
     fn run(
         &mut self,
         statement: &mut Statement,
@@ -2359,6 +2415,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 }
                 crate::indexes::drop_index(writer, tables, drop, dialect)
             }),
+            Statement::Explain(explain) if explain.analyze => {
+                let explain = explain.clone();
+                self.explain_analyze(&explain, io)
+            }
             Statement::Explain(explain) => self
                 .read(|reader, tables| {
                     binding.statement(reader, tables, &mut explain.statement)?;

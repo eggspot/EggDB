@@ -2415,6 +2415,42 @@ fn sqlite_functions_stay_inside_the_sqlite_dialect() {
 }
 
 #[test]
+fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE t (id integer PRIMARY KEY, n integer)").unwrap();
+    run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
+    let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t WHERE n > 1");
+    let lines: Vec<&str> = plan.lines().collect();
+    assert!(lines[1].ends_with("(actual rows=2 loops=1)"), "{plan}");
+    assert!(lines[lines.len() - 3].starts_with("Planning Time: "), "{plan}");
+    assert!(lines[lines.len() - 2].starts_with("Execution Time: "), "{plan}");
+    assert_eq!(lines[lines.len() - 1], "EXPLAIN");
+    let plan = last(&mut session, "EXPLAIN (ANALYZE, COSTS OFF) DELETE FROM t WHERE id = 3");
+    assert!(plan.lines().nth(1).unwrap().ends_with("(actual rows=1 loops=1)"), "{plan}");
+    assert_eq!(last(&mut session, "SELECT count(*) FROM t"), "count\n2\nSELECT 1");
+    assert_eq!(
+        fails(&mut session, "EXPLAIN (FORMAT JSON) SELECT 1").state(),
+        crate::SqlState::FEATURE_NOT_SUPPORTED
+    );
+}
+
+#[test]
+fn the_slow_statement_threshold_follows_log_min_duration_statement() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(session.slow_statement_threshold(), None);
+    for (value, millis) in [("250", Some(250)), ("'2s'", Some(2000)), ("0", Some(0)), ("-1", None)] {
+        run(&mut session, &format!("SET log_min_duration_statement = {value}")).unwrap();
+        assert_eq!(
+            session.slow_statement_threshold(),
+            millis.map(std::time::Duration::from_millis),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn sqlite_date_and_time_functions_follow_their_modifiers() {
     let store = MemoryStore::default();
     let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);

@@ -1179,7 +1179,31 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         self.reported = now;
     }
 
+    fn log_if_slow(&self, started: Instant, text: &str) {
+        let Some(threshold) = self.session.slow_statement_threshold() else {
+            return;
+        };
+        let took = started.elapsed();
+        if took < threshold {
+            return;
+        }
+        let shown: String = text.chars().take(1024).collect();
+        (self.shared.log)(&format!(
+            "{}  duration: {:.3} ms  statement: {}",
+            self.wire.peer(),
+            took.as_secs_f64() * 1000.0,
+            printable(&shown)
+        ));
+    }
+
     fn simple_query(&mut self, text: &str) -> bool {
+        let started = Instant::now();
+        let keep_going = self.simple_query_timed(text);
+        self.log_if_slow(started, text);
+        keep_going
+    }
+
+    fn simple_query_timed(&mut self, text: &str) -> bool {
         self.session.start_implicit_transaction();
         let mut results = 0usize;
         let mut sent = true;

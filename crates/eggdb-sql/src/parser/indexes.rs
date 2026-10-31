@@ -333,8 +333,39 @@ impl Parser<'_> {
         }))
     }
 
+    fn explain_options(&mut self) -> SqlResult<bool> {
+        let mut analyze = false;
+        loop {
+            if self.take_word("analyze") || self.take_word("analyse") {
+                analyze = !(self.take_word("false") || self.take_word("off"));
+                let _ = self.take_word("true") || self.take_word("on");
+            } else if self.take_word("format") {
+                if !self.take_word("text") {
+                    return Err(self.not_supported("EXPLAIN formats other than TEXT"));
+                }
+            } else if ["verbose", "costs", "timing", "buffers", "summary", "settings", "wal"]
+                .iter()
+                .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+                let _ = self.take_word("true")
+                    || self.take_word("false")
+                    || self.take_word("on")
+                    || self.take_word("off");
+            } else {
+                return Err(self.unexpected());
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(analyze)
+    }
+
     pub(super) fn explain(&mut self) -> SqlResult<Statement> {
         self.expect_word("explain")?;
+        let mut analyze = false;
         let style = if self.sqlite() {
             if !(self.is_word("query") && self.is_word_at(1, "plan")) {
                 return Err(self.not_supported("EXPLAIN without QUERY PLAN (bytecode listings)"));
@@ -345,7 +376,11 @@ impl Parser<'_> {
             if self.oracle() {
                 return Err(self.not_supported("EXPLAIN PLAN"));
             }
-            if self.peek_kind() == &TokenKind::LeftParen
+            if self.postgresql() && (self.take_word("analyze") || self.take_word("analyse")) {
+                analyze = true;
+            } else if self.postgresql() && self.take(&TokenKind::LeftParen) {
+                analyze = self.explain_options()?;
+            } else if self.peek_kind() == &TokenKind::LeftParen
                 || self.is_word("analyze")
                 || self.is_word("verbose")
                 || self.is_word("format")
@@ -363,6 +398,7 @@ impl Parser<'_> {
         let statement = self.statement_body()?;
         Ok(Statement::Explain(Explain {
             style,
+            analyze,
             statement: Box::new(statement),
         }))
     }

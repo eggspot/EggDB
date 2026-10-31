@@ -68,6 +68,27 @@ pub(crate) fn render(query: &ExplainedQuery, style: ExplainStyle, dialect: Diale
     QueryResult::rows(tag, columns(style, dialect), rows)
 }
 
+/// `EXPLAIN ANALYZE` in PostgreSQL's text form: the plan, the rows the statement returned or
+/// changed on its top line, and the planning and execution times.
+pub(crate) fn render_analyzed(
+    query: &ExplainedQuery,
+    rows: u64,
+    planning: std::time::Duration,
+    execution: std::time::Duration,
+) -> QueryResult {
+    let mut lines = postgresql_lines(query);
+    if let Some(top) = lines.first_mut() {
+        top.push_str(&format!(" (actual rows={rows} loops=1)"));
+    }
+    lines.push(format!("Planning Time: {:.3} ms", planning.as_secs_f64() * 1000.0));
+    lines.push(format!("Execution Time: {:.3} ms", execution.as_secs_f64() * 1000.0));
+    QueryResult::rows(
+        "EXPLAIN".to_owned(),
+        columns(ExplainStyle::Plan, Dialect::PostgreSql),
+        lines.into_iter().map(|line| vec![Value::Text(line)]).collect(),
+    )
+}
+
 fn key_name(table: &TableDefinition, key: KeyChoice, dialect: Dialect) -> String {
     match (key, dialect) {
         (KeyChoice::Index(position), _) => table.indexes[position].name.clone(),

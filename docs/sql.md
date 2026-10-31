@@ -1802,6 +1802,16 @@ block that created a table leaves no table.
 - **Isolation levels.** `SET TRANSACTION`, `BEGIN ISOLATION LEVEL` and each dialect's forms are
   accepted. Every block runs serializably today, which meets every level's guarantees.
 
+## EXPLAIN ANALYZE and the slow-statement log
+
+`EXPLAIN ANALYZE` (or `EXPLAIN (ANALYZE[, COSTS OFF, ...])`) runs the statement and prints its
+plan with the rows it returned or changed, and the planning and execution times, as
+PostgreSQL does; an `UPDATE` or `DELETE` under it changes the data. Setting
+`log_min_duration_statement` (milliseconds, or with `ms`, `s` or `min`; `-1` turns it off) makes
+`eggdb serve` log every simple query that takes at least that long, with the client's address,
+the duration and the statement, in PostgreSQL's `duration: ... ms  statement: ...` form.
+Statement statistics per normalized query (`pg_stat_statements`) are not kept yet.
+
 ## LISTEN and NOTIFY
 
 Sessions of `eggdb serve` can signal each other as PostgreSQL's do: `LISTEN channel`,
