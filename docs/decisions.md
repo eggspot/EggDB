@@ -201,3 +201,4 @@ its full title with its status.
 - [D174](decisions/D174.md) SQL inside an embedded write transaction (`WriteTransaction::sql`) through a store that borrows it, with each statement's writes undone when it fails
 - [D175](decisions/D175.md) Databases in memory (`Database::in_memory`, `:memory:`) on the platform layer's memory file through `DatabaseFile`; `PageFile::create_in`/`open_in`
 - [D176](decisions/D176.md) One-line installers (`install.sh`, `install.ps1`) that check `SHA256SUMS`, run and timed by CI's `installers` job on three systems
+- [D177](decisions/D177.md) `eggdb-redis-compare` in its own workspace with our own RESP client; set and get against a Redis-compatible server, reported not gated, CI job `redis-compare`

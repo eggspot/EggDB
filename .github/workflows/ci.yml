@@ -138,6 +138,46 @@ jobs:
       - name: Test against musl, as the default Linux release is built
         run: cargo test --workspace --target x86_64-unknown-linux-musl
 
+  redis-compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    env:
+      COMPARE_MANIFEST: crates/eggdb-redis-compare/Cargo.toml
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            crates/eggdb-redis-compare/target
+          key: cargo-redis-compare-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'crates/eggdb-redis-compare/Cargo.lock') }}
+      - name: Format and lint
+        run: |
+          cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
+          cargo clippy --manifest-path "$COMPARE_MANIFEST" --release --locked --all-targets -- -D warnings
+      - name: EggDB against Redis
+        run: |
+          mkdir -p compare-results
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- --results compare-results/eggdb-redis-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep the Redis comparison results of this change
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: redis-compare-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: compare-results/
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: warn
+
   installers:
     strategy:
       fail-fast: false
@@ -738,7 +778,7 @@ jobs:
             cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
 
   check:
-    needs: [lint-and-test, platforms, musl, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
+    needs: [lint-and-test, platforms, musl, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
