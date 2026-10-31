@@ -1281,23 +1281,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
-          path: first
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          path: second
       - name: Install the pinned toolchain
-        working-directory: first
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Build the same commit twice in different places and compare the binaries
+      - name: Build the same commit twice from scratch and compare the binaries
         env:
           SOURCE_DATE_EPOCH: "0"
         run: |
-          for copy in first second; do
-            (cd "$copy" && RUSTFLAGS="--remap-path-prefix=$PWD/$copy=/eggdb --remap-path-prefix=$HOME=/home" cargo build --release -p eggdb)
-          done
-          sha256sum first/target/release/eggdb second/target/release/eggdb
-          cmp first/target/release/eggdb second/target/release/eggdb
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/eggdb --remap-path-prefix=$HOME=/home"
+          cargo build --release -p eggdb --target-dir "$RUNNER_TEMP/first"
+          cargo build --release -p eggdb --target-dir "$RUNNER_TEMP/second"
+          sha256sum "$RUNNER_TEMP/first/release/eggdb" "$RUNNER_TEMP/second/release/eggdb"
+          cmp "$RUNNER_TEMP/first/release/eggdb" "$RUNNER_TEMP/second/release/eggdb"
 
   check:
     needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible]
