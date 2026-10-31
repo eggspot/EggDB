@@ -16,8 +16,12 @@ fn files_sqlite_writes_read_back_row_for_row() {
         let _ = std::fs::remove_file(&path);
         let connection = Connection::open(&path).unwrap();
         if wal {
-            connection.pragma_update(None, "journal_mode", "WAL").unwrap();
-            connection.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+            connection
+                .pragma_update(None, "journal_mode", "WAL")
+                .unwrap();
+            connection
+                .pragma_update(None, "wal_autocheckpoint", 0)
+                .unwrap();
         }
         connection
             .execute_batch(
@@ -28,7 +32,11 @@ fn files_sqlite_writes_read_back_row_for_row() {
             .unwrap();
         let long = "x".repeat(20_000);
         for id in 1..=300i64 {
-            let body = if id == 7 { long.clone() } else { format!("note {id}") };
+            let body = if id == 7 {
+                long.clone()
+            } else {
+                format!("note {id}")
+            };
             connection
                 .execute(
                     "INSERT INTO notes VALUES (?1, ?2, ?3, ?4)",
@@ -39,8 +47,16 @@ fn files_sqlite_writes_read_back_row_for_row() {
         let file = SqliteFile::open(&path).unwrap();
         let schema = file.schema().unwrap();
         let table = schema.iter().find(|entry| entry.name == "notes").unwrap();
-        assert!(schema.iter().any(|entry| entry.kind == "index" && entry.name == "notes_score"));
-        assert!(schema.iter().any(|entry| entry.kind == "view" && entry.name == "best"));
+        assert!(
+            schema
+                .iter()
+                .any(|entry| entry.kind == "index" && entry.name == "notes_score")
+        );
+        assert!(
+            schema
+                .iter()
+                .any(|entry| entry.kind == "view" && entry.name == "best")
+        );
         let rows = file.rows(table.root_page).unwrap();
         assert_eq!(rows.len(), 300, "wal: {wal}");
         assert_eq!(rows[0].rowid, 3);

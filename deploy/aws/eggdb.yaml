@@ -54,24 +54,31 @@ Resources:
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: EggDB's PostgreSQL port
+      GroupDescription: EggDB PostgreSQL port
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 5432
           ToPort: 5432
           CidrIp: !Ref AllowedCidr
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
   Instance:
     Type: AWS::EC2::Instance
     Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref Profile
       SubnetId: !Ref SubnetId
       SecurityGroupIds:
         - !Ref SecurityGroup
-      MetadataOptions:
-        HttpTokens: required
       BlockDeviceMappings:
         - DeviceName: /dev/sdf
           Ebs:

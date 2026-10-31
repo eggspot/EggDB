@@ -11,7 +11,10 @@ const ENTRIES: u64 = 100_000;
 const PIPELINE: u64 = 100;
 
 fn temporary_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("eggdb-redis-compare-{name}-{}.db", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "eggdb-redis-compare-{name}-{}.db",
+        std::process::id()
+    ))
 }
 
 fn database(name: &str) -> Result<Database, String> {

@@ -40,7 +40,7 @@ jobs:
             echo "::error::cargo tree listed no crates for eggdb"
             exit 1
           fi
-          foreign=$(echo "$shipped" | grep -v -E '^eggdb(-[a-z]+)?$' || true)
+          foreign=$(echo "$shipped" | grep -v -E '^eggdb(-[a-z0-9]+)*$' || true)
           if [ -n "$foreign" ]; then
             echo "::error::third-party crates in what ships (D1): $foreign"
             exit 1
@@ -1338,6 +1338,7 @@ jobs:
             curl --retry 3 -fsSL -o "$RUNNER_TEMP/ucd/$file" "https://www.unicode.org/Public/16.0.0/ucd/$file"
           done
           python3 -I scripts/unicode/generate.py "$RUNNER_TEMP/ucd" "$RUNNER_TEMP/tables.rs"
+          rustfmt --edition 2024 "$RUNNER_TEMP/tables.rs"
           diff -u crates/eggdb-text/src/tables.rs "$RUNNER_TEMP/tables.rs"
           EGGDB_UNICODE_NORMALIZATION_TEST="$RUNNER_TEMP/ucd/NormalizationTest.txt" cargo test -p eggdb-text
 
