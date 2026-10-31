@@ -187,6 +187,18 @@ always-true condition that names a column (`WHERE id IS NOT NULL`) runs without 
 client may be set to accept for you. Give `--allow-write` only to agents you would let change the
 data, and keep a backup.
 
+## Over HTTP, from eggdb serve
+
+`eggdb serve app.db --mcp-listen 127.0.0.1:8765 --mcp-token-file mcp-token.txt` also serves MCP
+over its Streamable HTTP transport at `http://127.0.0.1:8765/mcp`, next to the SQL listeners and
+on the same open database (D189). Agents send each JSON-RPC message as a `POST` with
+`Authorization: Bearer <token>`, the first line of the token file (at least 16 characters; `openssl
+rand -hex 32` makes one). The `initialize` answer carries an `Mcp-Session-Id` header that later
+requests send back; `DELETE /mcp` with it ends the session. The endpoint is read-only, answers
+`POST` only (no event streams yet), refuses requests that carry an `Origin` header (web pages),
+keeps up to 64 sessions, and listens only on a loopback address until it has TLS. Every call is
+recorded in the audit log as for `eggdb mcp`.
+
 ## Errors
 
 A refused or failed call is a tool result with `isError: true` and

@@ -56,6 +56,9 @@ pub(super) fn metrics_text(databases: &[(&str, &Database)]) -> String {
 }
 
 pub(super) fn answer(request: &eggdb_http::Request, databases: &[(&str, &Database)]) -> eggdb_http::Response {
+    if request.method != "GET" && request.method != "HEAD" {
+        return eggdb_http::Response::text(405, "the metrics endpoint answers GET and HEAD");
+    }
     match request.path.as_str() {
         "/metrics" => eggdb_http::Response::ok(
             "text/plain; version=0.0.4; charset=utf-8",

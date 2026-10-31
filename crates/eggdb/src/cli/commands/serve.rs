@@ -96,6 +96,29 @@ impl Session<'_> {
             })?),
             None => None,
         };
+        let mcp_listener = match (options.mcp_listen, &options.mcp_token_file) {
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(usage(
+                    "--mcp-listen and --mcp-token-file go together: agents must send the token as a Bearer token".to_owned(),
+                ));
+            }
+            (Some(address), Some(token_file)) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--mcp-listen {address}: the MCP endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                let token = super::serve_mcp::read_token(token_file).map_err(usage)?;
+                let listener = std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for MCP on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?;
+                Some((listener, token))
+            }
+        };
         let mysql_listener = match options.mysql_listen {
             Some(address) => Some(self.listener(
                 "--mysql-listen",
@@ -265,6 +288,23 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
+            let mcp_endpoint = mcp_listener.as_ref().map(|(_, token)| {
+                super::serve_mcp::McpEndpoint::new(
+                    &mcp_opener,
+                    &config.database,
+                    token.clone(),
+                    eggdb_mcp::audit::audit_path_for(&self.request.file),
+                )
+            });
+            let mcp_server = scope.spawn(|| match (&mcp_listener, &mcp_endpoint) {
+                (Some((listener, _)), Some(endpoint)) => eggdb_http::serve(
+                    listener,
+                    &|request| endpoint.answer(request),
+                    &stop_signals::requested,
+                ),
+                _ => Ok(()),
+            });
             let tds_server = scope.spawn(|| match (&tds_listener, &tds_config) {
                 (Some(listener), Some(config)) => {
                     let log = move |line: &str| {
@@ -290,6 +330,7 @@ impl Session<'_> {
             let mysql = mysql_server.join().unwrap_or_else(|_| unexpected());
             let tds = tds_server.join().unwrap_or_else(|_| unexpected());
             let _ = metrics_server.join();
+            let _ = mcp_server.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))

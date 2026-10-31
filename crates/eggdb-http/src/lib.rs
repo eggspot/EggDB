@@ -1,6 +1,6 @@
 //! A small HTTP/1.1 server written from RFC 9110 and RFC 9112: one request per connection,
-//! `GET` and `HEAD` only, with every length and wait bounded so a hostile client cannot hold a
-//! thread or memory for long.
+//! bodies only with `Content-Length` and at most 1 MiB, with every length and wait bounded so a
+//! hostile client cannot hold a thread or memory for long.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -13,6 +13,7 @@ const MAX_HEADERS: usize = 100;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const MAX_CONNECTIONS: usize = 16;
+const MAX_BODY_BYTES: usize = 1 << 20;
 
 /// A request's line and headers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +26,8 @@ pub struct Request {
     pub query: Option<String>,
     /// The header fields, names in lower case, in order.
     pub headers: Vec<(String, String)>,
+    /// The body, empty when the request has none.
+    pub body: Vec<u8>,
 }
 
 impl Request {
@@ -46,6 +49,8 @@ pub struct Response {
     pub content_type: String,
     /// The body.
     pub body: Vec<u8>,
+    /// More header fields to send, such as a session identifier.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Response {
@@ -55,6 +60,7 @@ impl Response {
             status: 200,
             content_type: content_type.to_owned(),
             body: body.into(),
+            headers: Vec::new(),
         }
     }
 
@@ -64,7 +70,16 @@ impl Response {
             status,
             content_type: "text/plain; charset=utf-8".to_owned(),
             body: format!("{text}\n").into_bytes(),
+            headers: Vec::new(),
         }
+    }
+
+    /// The same response with header `name: value` added; values with line breaks are dropped.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        if !value.contains(['\r', '\n']) && !name.contains(['\r', '\n', ':']) {
+            self.headers.push((name.to_owned(), value.to_owned()));
+        }
+        self
     }
 }
 
@@ -94,6 +109,10 @@ impl std::error::Error for HttpError {}
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        413 => "Content Too Large",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -107,7 +126,8 @@ fn head_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n").map(|at| at + 4)
 }
 
-/// Reads a request's head from `stream`, at most 16 KiB.
+/// Reads a request from `stream`: its head, at most 16 KiB, and a body of at most 1 MiB given
+/// by `Content-Length` (chunked bodies are refused).
 pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {
     let mut head = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -154,12 +174,36 @@ pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {
         Some((path, query)) => (path, Some(query.to_owned())),
         None => (target, None),
     };
-    Ok(Request {
+    let mut request = Request {
         method: method.to_owned(),
         path: path.to_owned(),
         query,
         headers,
-    })
+        body: Vec::new(),
+    };
+    if request.header("transfer-encoding").is_some() {
+        return Err(HttpError::Malformed);
+    }
+    let length = match request.header("content-length") {
+        None => 0,
+        Some(text) => text.parse::<usize>().map_err(|_| HttpError::Malformed)?,
+    };
+    if length > MAX_BODY_BYTES {
+        return Err(HttpError::TooLarge);
+    }
+    let mut body = head[end..].to_vec();
+    if body.len() > length {
+        body.truncate(length);
+    }
+    while body.len() < length {
+        let count = stream.read(&mut chunk).map_err(|_| HttpError::Closed)?;
+        if count == 0 {
+            return Err(HttpError::Closed);
+        }
+        body.extend_from_slice(&chunk[..count.min(length - body.len())]);
+    }
+    request.body = body;
+    Ok(request)
 }
 
 /// Writes `response` to `stream`, without its body for a `HEAD` request, and asks the client to
@@ -169,13 +213,17 @@ pub fn write_response(
     response: &Response,
     head_only: bool,
 ) -> io::Result<()> {
-    let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
         response.status,
         reason(response.status),
         response.content_type,
         response.body.len()
     );
+    for (name, value) in &response.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     if !head_only {
         stream.write_all(&response.body)?;
@@ -190,13 +238,12 @@ fn serve_one(mut stream: TcpStream, handler: &(dyn Fn(&Request) -> Response + Sy
         return;
     }
     let response = match read_request(&mut stream) {
-        Ok(request) if request.method == "GET" || request.method == "HEAD" => {
+        Ok(request) => {
             let response = handler(&request);
             let _ = write_response(&mut stream, &response, request.method == "HEAD");
             return;
         }
-        Ok(_) => Response::text(405, "only GET and HEAD are served"),
-        Err(HttpError::TooLarge) => Response::text(431, "the request head is too large"),
+        Err(HttpError::TooLarge) => Response::text(431, "the request is too large"),
         Err(HttpError::Malformed) => Response::text(400, "not an HTTP/1.1 request"),
         Err(HttpError::Closed) => return,
     };
@@ -272,6 +319,18 @@ mod tests {
         ] {
             assert_eq!(read_request(&mut &bytes[..]), Err(expected), "{bytes:?}");
         }
+        let posted = read_request(&mut &b"POST /x HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcdef"[..]).unwrap();
+        assert_eq!(posted.body, b"abc");
+        for hostile in [
+            &b"POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n"[..],
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            assert_eq!(read_request(&mut &hostile[..]), Err(HttpError::Malformed));
+        }
+        assert_eq!(
+            read_request(&mut &b"POST / HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n"[..]),
+            Err(HttpError::TooLarge)
+        );
         let endless = vec![b'a'; MAX_HEAD_BYTES + 10];
         assert_eq!(read_request(&mut &endless[..]), Err(HttpError::TooLarge));
         let mut many = b"GET / HTTP/1.1\r\n".to_vec();
@@ -304,7 +363,15 @@ mod tests {
             scope.spawn(|| {
                 serve(
                     &listener,
-                    &|request| Response::ok("text/plain", request.path.clone()),
+                    &|request| {
+                        let body = String::from_utf8_lossy(&request.body);
+                        let shown = if body.is_empty() {
+                            request.path.clone()
+                        } else {
+                            format!("{} {body}", request.path)
+                        };
+                        Response::ok("text/plain", shown)
+                    },
                     &|| stopped.load(Ordering::Acquire),
                 )
                 .unwrap();
@@ -315,10 +382,12 @@ mod tests {
             client.read_to_string(&mut answer).unwrap();
             assert!(answer.ends_with("/hello"), "{answer}");
             let mut posting = TcpStream::connect(address).unwrap();
-            posting.write_all(b"POST / HTTP/1.1\r\n\r\n").unwrap();
-            let mut refused = String::new();
-            posting.read_to_string(&mut refused).unwrap();
-            assert!(refused.starts_with("HTTP/1.1 405"));
+            posting
+                .write_all(b"POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+                .unwrap();
+            let mut echoed = String::new();
+            posting.read_to_string(&mut echoed).unwrap();
+            assert!(echoed.ends_with("/echo hello"), "{echoed}");
             stopped.store(true, Ordering::Release);
         });
     }

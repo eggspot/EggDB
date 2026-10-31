@@ -209,6 +209,8 @@ impl CommandName {
             | OptionName::MysqlListen
             | OptionName::TdsListen
             | OptionName::MetricsListen
+            | OptionName::McpListen
+            | OptionName::McpTokenFile
             | OptionName::LogBatches
             | OptionName::User
             | OptionName::Database
@@ -348,6 +350,8 @@ enum OptionName {
     MysqlListen,
     TdsListen,
     MetricsListen,
+    McpListen,
+    McpTokenFile,
     LogBatches,
     Dialect,
     User,
@@ -415,6 +419,8 @@ impl OptionName {
             b"mysql-listen" => Self::MysqlListen,
             b"tds-listen" => Self::TdsListen,
             b"metrics-listen" => Self::MetricsListen,
+            b"mcp-listen" => Self::McpListen,
+            b"mcp-token-file" => Self::McpTokenFile,
             b"log-batches" => Self::LogBatches,
             b"dialect" => Self::Dialect,
             b"user" => Self::User,
@@ -647,6 +653,8 @@ pub(crate) struct ServeOptions {
     pub(crate) mysql_listen: Option<SocketAddr>,
     pub(crate) tds_listen: Option<SocketAddr>,
     pub(crate) metrics_listen: Option<SocketAddr>,
+    pub(crate) mcp_listen: Option<SocketAddr>,
+    pub(crate) mcp_token_file: Option<PathBuf>,
     pub(crate) log_batches: bool,
     pub(crate) user: Option<String>,
     pub(crate) password_file: Option<ExportFile>,
@@ -1064,6 +1072,11 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.metrics_listen =
                     Some(parse_listen(&option.spelled, value, 9187).map_err(usage)?);
             }
+            OptionName::McpListen => {
+                request.serve.mcp_listen =
+                    Some(parse_listen(&option.spelled, value, 8765).map_err(usage)?);
+            }
+            OptionName::McpTokenFile => request.serve.mcp_token_file = Some(PathBuf::from(value)),
             OptionName::Dialect => {
                 let name = value.to_str().unwrap_or_default();
                 request.dialect = eggdb_sql::Dialect::named(name).ok_or_else(|| {
