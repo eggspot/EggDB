@@ -18,6 +18,7 @@
 //! else answers SQLSTATE `0A000` (feature not supported). The guide is `docs/sql.md` in the
 //! repository.
 
+pub mod activity;
 mod advisory_locks;
 mod aggregate;
 mod alter;

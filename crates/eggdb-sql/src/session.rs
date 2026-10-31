@@ -379,6 +379,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     savepoints: savepoints::Savepoints,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
     notifications: crate::notifications::Notifications,
+    _open: crate::activity::OpenSession,
     temporary: crate::temporary::TemporaryObjects,
     deferred: crate::deferred_checks::DeferredState,
     pending_user_types: Option<Arc<crate::user_types::Registry>>,
@@ -449,6 +450,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             ),
             temporary: crate::temporary::TemporaryObjects::default(),
             notifications: crate::notifications::Notifications::default(),
+            _open: crate::activity::OpenSession::new(),
             deferred: crate::deferred_checks::DeferredState::default(),
             pending_user_types: None,
             plan_cache: crate::plan_cache::PlanCache::default(),
@@ -1604,6 +1606,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             crate::deferred_checks::enter(&self.deferred.modes);
             let result = with_raised_notices(self.run(&mut statement, &mut io));
             let result = self.keep_deferred(result);
+            crate::activity::statement_finished(result.is_ok());
             let raised = crate::notifications::take_raised();
             if result.is_ok() {
                 let in_block = !matches!(self.block, Block::None);
@@ -2836,11 +2839,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         }
                         self.temporary.commit();
                         sequences::mark_changes_committed();
+                        crate::activity::committed();
                         Ok(result)
                     }
                     Err(error) => {
                         let _ = writer.rollback();
                         self.temporary.rollback();
+                        crate::activity::rolled_back();
                         Err(error)
                     }
                 }
@@ -2934,6 +2939,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 }
                 self.temporary.commit();
                 self.notifications.commit();
+                crate::activity::committed();
                 self.pending_sequences.clear();
                 sequences::mark_changes_committed();
                 let committed = QueryResult::command("COMMIT");
@@ -2960,6 +2966,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
         self.notifications.rollback();
+        crate::activity::rolled_back();
         self.deferred.clear();
         self.save_points.clear();
         self.savepoints.clear();

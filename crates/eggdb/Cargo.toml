@@ -20,6 +20,7 @@ egg-allocator = []
 [dependencies]
 eggdb-auth = { path = "../eggdb-auth" }
 eggdb-commands = { path = "../eggdb-commands" }
+eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }

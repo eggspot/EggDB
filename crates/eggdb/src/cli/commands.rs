@@ -25,6 +25,7 @@ mod row;
 mod follow;
 mod follow_sql_server;
 mod serve;
+mod serve_metrics;
 mod serve_tls;
 mod shell;
 mod shell_copy;

@@ -208,6 +208,7 @@ impl CommandName {
             OptionName::Listen
             | OptionName::MysqlListen
             | OptionName::TdsListen
+            | OptionName::MetricsListen
             | OptionName::LogBatches
             | OptionName::User
             | OptionName::Database
@@ -346,6 +347,7 @@ enum OptionName {
     Listen,
     MysqlListen,
     TdsListen,
+    MetricsListen,
     LogBatches,
     Dialect,
     User,
@@ -412,6 +414,7 @@ impl OptionName {
             b"listen" => Self::Listen,
             b"mysql-listen" => Self::MysqlListen,
             b"tds-listen" => Self::TdsListen,
+            b"metrics-listen" => Self::MetricsListen,
             b"log-batches" => Self::LogBatches,
             b"dialect" => Self::Dialect,
             b"user" => Self::User,
@@ -643,6 +646,7 @@ pub(crate) struct ServeOptions {
     pub(crate) listen: Option<SocketAddr>,
     pub(crate) mysql_listen: Option<SocketAddr>,
     pub(crate) tds_listen: Option<SocketAddr>,
+    pub(crate) metrics_listen: Option<SocketAddr>,
     pub(crate) log_batches: bool,
     pub(crate) user: Option<String>,
     pub(crate) password_file: Option<ExportFile>,
@@ -1055,6 +1059,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::TdsListen => {
                 request.serve.tds_listen =
                     Some(parse_listen(&option.spelled, value, 1433).map_err(usage)?);
+            }
+            OptionName::MetricsListen => {
+                request.serve.metrics_listen =
+                    Some(parse_listen(&option.spelled, value, 9187).map_err(usage)?);
             }
             OptionName::Dialect => {
                 let name = value.to_str().unwrap_or_default();

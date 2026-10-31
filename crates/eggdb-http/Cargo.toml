@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-http"
+description = "EggDB's own HTTP/1.1 server (RFC 9110 and RFC 9112), small and bounded, for the metrics endpoint and later HTTP APIs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

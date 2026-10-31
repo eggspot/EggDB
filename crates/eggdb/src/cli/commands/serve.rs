@@ -87,6 +87,15 @@ impl Session<'_> {
             )?),
             None => None,
         };
+        let metrics_listener = match options.metrics_listen {
+            Some(address) => Some(std::net::TcpListener::bind(address).map_err(|error| {
+                Failure::database(
+                    format!("cannot listen for metrics on {address}: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?),
+            None => None,
+        };
         let mysql_listener = match options.mysql_listen {
             Some(address) => Some(self.listener(
                 "--mysql-listen",
@@ -206,8 +215,8 @@ impl Session<'_> {
             .iter()
             .map(|(name, other)| (name.clone(), DatabaseStore(other)))
             .collect();
-        let mut served: Vec<(&str, &DatabaseStore<'_>)> = vec![(config.database.as_str(), &store)];
-        served.extend(other_stores.iter().map(|(name, other)| (name.as_str(), other)));
+        let mut pg_databases: Vec<(&str, &DatabaseStore<'_>)> = vec![(config.database.as_str(), &store)];
+        pg_databases.extend(other_stores.iter().map(|(name, other)| (name.as_str(), other)));
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
@@ -217,7 +226,7 @@ impl Session<'_> {
                     let _ = events.send(stamped(line));
                 };
                 eggdb_pgwire::serve_databases(
-                    &served,
+                    &pg_databases,
                     &listener,
                     local_listener.as_ref(),
                     &config,
@@ -244,6 +253,18 @@ impl Session<'_> {
                     Ok(0)
                 }
             });
+            let metrics_databases: Vec<(&str, &eggdb::Database)> =
+                std::iter::once((config.database.as_str(), &*db))
+                    .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
+                    .collect();
+            let metrics_server = scope.spawn(|| match &metrics_listener {
+                Some(listener) => eggdb_http::serve(
+                    listener,
+                    &|request| super::serve_metrics::answer(request, &metrics_databases),
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
             let tds_server = scope.spawn(|| match (&tds_listener, &tds_config) {
                 (Some(listener), Some(config)) => {
                     let log = move |line: &str| {
@@ -268,6 +289,7 @@ impl Session<'_> {
             let postgresql = server.join().unwrap_or_else(|_| unexpected());
             let mysql = mysql_server.join().unwrap_or_else(|_| unexpected());
             let tds = tds_server.join().unwrap_or_else(|_| unexpected());
+            let _ = metrics_server.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))
