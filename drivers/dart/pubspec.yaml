@@ -1,0 +1,5 @@
+name: eggdb
+description: EggDB embedded in Dart through EggDB's C API with dart:ffi alone.
+version: 0.1.0
+environment:
+  sdk: ">=3.0.0 <4.0.0"

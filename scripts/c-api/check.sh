@@ -7,7 +7,7 @@ Compiles crates/eggdb-capi/tests/c/api_check.c against include/eggdb.h and the s
 with the system C compiler (CC, default cc; warnings are errors), checks that the header also
 compiles as C++ (CXX, default c++), and runs the program. Then runs
 examples/python/eggdb_ctypes.py and the Python driver's tests with PYTHON (default python3)
-against the same library, the Node.js and Go drivers' tests where Node's headers and Go are installed, and
+against the same library, the Node.js, Go, C++, Ruby, PHP and Dart drivers' checks where their tools are installed, and
 the .NET and Java drivers' check programs where dotnet and a Java 22 or newer javac are installed.
 NO_C_COMPILER=1 leaves out the C and C++ steps, for Windows runners without one."
 
@@ -60,6 +60,25 @@ if [ "${NO_C_COMPILER:-}" != 1 ] && [ -f "$node_include/node_api.h" ]; then
 fi
 if [ "${NO_C_COMPILER:-}" != 1 ] && command -v go >/dev/null 2>&1; then
   (cd "$root/drivers/go" && CGO_ENABLED=1 CGO_LDFLAGS="-L$library_dir -Wl,-rpath,$library_dir" go test ./...)
+fi
+if [ "${NO_C_COMPILER:-}" != 1 ]; then
+  "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I "$include" -I "$root/drivers/cpp" \
+    "$root/drivers/cpp/check.cpp" -L "$library_dir" -leggdb_capi -Wl,-rpath,"$library_dir" \
+    -o "$work/cpp_check"
+  "$work/cpp_check"
+fi
+if command -v ruby >/dev/null 2>&1; then
+  EGGDB_LIBRARY="$library" ruby "$root/drivers/ruby/test/eggdb_test.rb"
+fi
+if command -v php >/dev/null 2>&1 && php -m | grep -qx FFI; then
+  EGGDB_LIBRARY="$library" php -d ffi.enable=1 "$root/drivers/php/tests/check.php"
+fi
+if command -v swift >/dev/null 2>&1 && [ "$(uname -s)" = Darwin ]; then
+  (cd "$root/drivers/swift" && swift test --scratch-path "$work/swift" \
+    -Xlinker -L"$library_dir" -Xlinker -rpath -Xlinker "$library_dir")
+fi
+if command -v dart >/dev/null 2>&1; then
+  EGGDB_LIBRARY="$library" dart run "$root/drivers/dart/test/check.dart"
 fi
 if command -v javac >/dev/null 2>&1 && javac --release 22 -version >/dev/null 2>&1; then
   javac --release 22 -d "$work/java" $(find "$root/drivers/java/src" "$root/drivers/java/check" -name '*.java')
