@@ -206,3 +206,4 @@ its full title with its status.
 - [D179](decisions/D179.md) Vectorized execution starts with batched ungrouped integer aggregates (count, sum, min, max) through SIMD-friendly lane kernels
 - [D180](decisions/D180.md) Our own reader of SQLite's file format (`eggdb-sqlite-format`, WAL included), and SQLite files opened by the command line as copies in memory
 - [D181](decisions/D181.md) SQLite's C API as `libsqlite3` (`eggdb-sqlite3`) with our own `sqlite3.h`, on the SQLite dialect
+- [D182](decisions/D182.md) Official drivers as thin layers over the C API: Python DB-API through ctypes and a .NET ADO.NET provider through P/Invoke, tested in CI

@@ -37,4 +37,6 @@ if [ "${NO_C_COMPILER:-}" != 1 ]; then
 fi
 
 "${PYTHON:-python3}" "$root/examples/python/eggdb_ctypes.py" --library "$library"
+EGGDB_LIBRARY="$library" PYTHONPATH="$root/drivers/python" \
+  "${PYTHON:-python3}" -m unittest discover -s "$root/drivers/python/tests" -t "$root/drivers/python"
 echo "c-api check: passed"
