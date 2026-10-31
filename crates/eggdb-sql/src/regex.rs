@@ -1431,3 +1431,28 @@ pub(crate) fn operator(
         },
     }
 }
+
+/// Whether `pattern` matches somewhere in `text`, with the option letters MongoDB's `$regex`
+/// takes: `i` ignores case, `m` makes `^` and `$` match at line breaks, `s` lets `.` match a
+/// newline, `x` ignores whitespace in the pattern. The pattern is read as this crate's regular
+/// expressions (PostgreSQL's advanced flavour, close to Perl's for common patterns).
+pub fn regex_matches_with_flags(text: &str, pattern: &str, flags: &str) -> Result<bool, String> {
+    let mut options = Options::default();
+    let mut multiline = false;
+    let mut dot_all = false;
+    for letter in flags.chars() {
+        match letter {
+            'i' => options.case = CaseSensitivity::Insensitive,
+            'm' => multiline = true,
+            's' => dot_all = true,
+            'x' => options.expanded = true,
+            'u' => {}
+            other => return Err(format!("invalid flag in regex options: {other}")),
+        }
+    }
+    options.newline_excluded = !dot_all;
+    options.line_anchors = multiline;
+    compiled_with(pattern, options)
+        .and_then(|regex| regex.is_match(text, &mut StepBudget::new(MATCH_STEPS)))
+        .map_err(|error| error.message().to_owned())
+}

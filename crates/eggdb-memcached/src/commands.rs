@@ -1,5 +1,5 @@
 use crate::item::{Item, expiry_of};
-use eggdb_resp::{KeysRead, KeysWrite, Keyspace};
+use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_KEY_BYTES: usize = 250;

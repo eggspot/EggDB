@@ -1,0 +1,19 @@
+[package]
+name = "eggdb-mongowire"
+description = "EggDB's server for the MongoDB wire protocol (OP_MSG, and OP_QUERY for the handshake), written from MongoDB's public protocol documentation, with SCRAM-SHA-256 and CRUD commands over EggDB's document model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-auth = { path = "../eggdb-auth" }
+eggdb-bson = { path = "../eggdb-bson" }
+eggdb-documents = { path = "../eggdb-documents" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+
+[dev-dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }

@@ -1,3 +1,8 @@
+//! The key-value transaction interface EggDB's key-value and document servers share: a server
+//! runs each command as one read or write transaction on a numbered database of byte keys, and
+//! the `eggdb` binary backs it with collections of the served file. [`MemoryKeyspace`] keeps the
+//! keys in memory, for tests.
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -7,6 +12,18 @@ pub trait KeysRead {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
     /// Every key, in byte order.
     fn keys(&self) -> Result<Vec<Vec<u8>>, String>;
+    /// Every key starting with `prefix` and its stored bytes, in key order.
+    fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        let mut found = Vec::new();
+        for key in self.keys()? {
+            if key.starts_with(prefix)
+                && let Some(value) = self.get(&key)?
+            {
+                found.push((key, value));
+            }
+        }
+        Ok(found)
+    }
 }
 
 /// Changes one database's keys within a transaction.
@@ -19,8 +36,8 @@ pub trait KeysWrite: KeysRead {
     fn clear(&mut self) -> Result<(), String>;
 }
 
-/// Where the keys of the RESP server's databases (0 to 15) live: each command runs in one
-/// read or write transaction, so it is atomic. A write whose body fails changes nothing.
+/// Where a server's numbered databases of keys live: each command runs in one read or write
+/// transaction, so it is atomic. A write whose body fails changes nothing.
 pub trait Keyspace {
     /// Runs `body` on a snapshot of database `db`.
     fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String>;
@@ -45,6 +62,15 @@ impl KeysRead for MemoryKeys<'_> {
 
     fn keys(&self) -> Result<Vec<Vec<u8>>, String> {
         Ok(self.map.keys().cloned().collect())
+    }
+
+    fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        Ok(self
+            .map
+            .range(prefix.to_vec()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
     }
 }
 

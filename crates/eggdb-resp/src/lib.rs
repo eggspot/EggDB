@@ -7,7 +7,7 @@ mod aggregates;
 mod aof;
 mod commands;
 mod eviction;
-mod keyspace;
+use eggdb_keyspace as keyspace;
 mod protocol;
 mod pubsub;
 mod server;

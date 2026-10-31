@@ -168,6 +168,28 @@ impl Session<'_> {
             None => None,
         };
         let es_password = eggdb_crypto::sha256(password.as_bytes());
+        let mongo_listener = match options.mongo_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--mongo-listen {address}: the MongoDB-compatible listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for MongoDB clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let mongo_config = match &mongo_listener {
+            Some(_) => Some(super::serve_mongo::config(&config.user, &password, config.max_connections).map_err(|error| {
+                Failure::database(format!("cannot prepare the MongoDB-compatible listener: {error}"), Exit::DatabaseError)
+            })?),
+            None => None,
+        };
         let resp_password = resp_listener
             .as_ref()
             .map(|_| eggdb_crypto::sha256(password.as_bytes()));
@@ -393,6 +415,17 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let mongo_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::MONGO_COLLECTIONS,
+            };
+            let mongo_store = eggdb_documents::Store::new(&mongo_database, super::serve_mongo::store_seed());
+            let mongo_server = scope.spawn(|| match (&mongo_listener, &mongo_config) {
+                (Some(listener), Some(mongo_config)) => {
+                    eggdb_mongowire::serve(&mongo_store, listener, mongo_config, &stop_signals::requested)
+                }
+                _ => Ok(()),
+            });
             let resp_limited = options.resp_max_memory.and_then(|limit| {
                 let policy = options.resp_eviction.unwrap_or(eggdb_resp::EvictionPolicy::NoEviction);
                 eggdb_resp::EvictingKeyspace::new(&resp_database, limit, policy).ok()
@@ -445,6 +478,7 @@ impl Session<'_> {
             let _ = resp_server.join();
             let _ = memcached_server.join();
             let _ = es_server.join();
+            let _ = mongo_server.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))

@@ -39,14 +39,13 @@ pub mod client;
 mod connection;
 mod notifications;
 pub mod messages;
-mod scram;
 mod server;
 pub mod types;
 mod wire;
 pub mod replication;
 
 pub use connection::{MAX_AUTHENTICATION_MESSAGE_BYTES, MAX_MESSAGE_BYTES};
-pub use scram::{
+pub use eggdb_auth::scram::{
     MIN_SCRAM_ITERATIONS, SCRAM_SALT_BYTES, SCRAM_SHA_256, SCRAM_SHA_256_PLUS, ScramExchange, ScramFailure,
     ScramVerifier,
 };

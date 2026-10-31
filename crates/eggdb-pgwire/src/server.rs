@@ -1,6 +1,6 @@
 use crate::backend_keys::BackendKeys;
 use crate::connection::{refuse_too_many, serve_connection};
-use crate::scram::ScramVerifier;
+use eggdb_auth::scram::ScramVerifier;
 use crate::wire::Wire;
 use eggdb_sql::KeyValueStore;
 use std::collections::VecDeque;

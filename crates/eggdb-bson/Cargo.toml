@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-bson"
+description = "BSON for EggDB, from the public BSON specification: values and documents, reading with every length and depth checked, writing, the MongoDB-compatible comparison order, and relaxed Extended JSON output."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

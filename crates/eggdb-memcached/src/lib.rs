@@ -13,7 +13,7 @@ pub use server::{ServerConfig, serve, serve_stream};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eggdb_resp::MemoryKeyspace;
+    use eggdb_keyspace::MemoryKeyspace;
     use std::sync::atomic::AtomicU64;
 
     fn converse(shared: &Shared<'_>, input: &[u8]) -> String {

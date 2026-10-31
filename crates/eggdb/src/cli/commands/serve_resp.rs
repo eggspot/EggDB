@@ -9,6 +9,7 @@ pub(super) struct DatabaseKeyspace<'d> {
 pub(super) const RESP_COLLECTIONS: &str = "resp";
 pub(super) const MEMCACHED_COLLECTIONS: &str = "memcached";
 pub(super) const ES_COLLECTIONS: &str = "es";
+pub(super) const MONGO_COLLECTIONS: &str = "mongo";
 
 fn failed(error: &eggdb::Error) -> String {
     format!("ERR {error}")
@@ -35,6 +36,16 @@ impl KeysRead for ReadKeys<'_> {
             .map(|entry| entry.map(|(key, _)| key).map_err(|error| failed(&error)))
             .collect()
     }
+
+    fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        let Some(collection) = &self.collection else {
+            return Ok(Vec::new());
+        };
+        collection
+            .scan_prefix(prefix)
+            .map(|entry| entry.map_err(|error| failed(&error)))
+            .collect()
+    }
 }
 
 struct WriteKeys<'t, 'db> {
@@ -50,6 +61,13 @@ impl KeysRead for WriteKeys<'_, '_> {
         self.collection
             .scan_prefix(b"")
             .map(|entry| entry.map(|(key, _)| key).map_err(|error| failed(&error)))
+            .collect()
+    }
+
+    fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        self.collection
+            .scan_prefix(prefix)
+            .map(|entry| entry.map_err(|error| failed(&error)))
             .collect()
     }
 }

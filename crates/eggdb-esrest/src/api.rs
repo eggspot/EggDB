@@ -1,7 +1,7 @@
 use crate::json_out::{Out, escaped, written};
 use crate::query::{Stats, numbers, parse, score, term_buckets};
 use eggdb_http::{Request, Response};
-use eggdb_resp::{KeysRead, KeysWrite, Keyspace};
+use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 use eggdb_sql::json::{Json, JsonSyntaxError, Node, parse_document};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -154,22 +154,21 @@ fn write<T>(keyspace: &dyn Keyspace, body: impl FnOnce(&mut dyn KeysWrite) -> Re
 
 fn documents_of(keys: &dyn KeysRead, index: &str) -> Result<Vec<(String, u64, String)>, String> {
     let prefix = document_prefix(index);
-    let mut found = Vec::new();
-    for key in keys.keys()? {
-        if let Some(id) = key.strip_prefix(prefix.as_slice()) {
-            if let Some((version, source)) = keys.get(&key)?.as_deref().and_then(unstored) {
-                found.push((String::from_utf8_lossy(id).into_owned(), version, source));
-            }
-        }
-    }
-    Ok(found)
+    Ok(keys
+        .scan(&prefix)?
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let (version, source) = unstored(&value)?;
+            Some((String::from_utf8_lossy(&key[prefix.len()..]).into_owned(), version, source))
+        })
+        .collect())
 }
 
 fn indices_of(keys: &dyn KeysRead) -> Result<Vec<String>, String> {
     Ok(keys
-        .keys()?
+        .scan(&[INDEX_RECORD])?
         .into_iter()
-        .filter_map(|key| key.strip_prefix(&[INDEX_RECORD][..]).map(|name| String::from_utf8_lossy(name).into_owned()))
+        .map(|(key, _)| String::from_utf8_lossy(&key[1..]).into_owned())
         .collect())
 }
 

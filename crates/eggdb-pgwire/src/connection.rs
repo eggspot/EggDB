@@ -3,7 +3,7 @@ use crate::messages::{
     parse_message, parse_sasl_initial_response, parse_startup,
 };
 use crate::backend_keys::SECRET_KEY_BYTES;
-use crate::scram::{ScramExchange, ScramFailure, ScramVerifier};
+use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::types::{
     TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,

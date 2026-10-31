@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-documents"
+description = "EggDB's document model: collections of BSON documents on EggDB's key-value transactions, with MongoDB-compatible query filters, update operators, projections and sorting, written from MongoDB's public documentation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-bson = { path = "../eggdb-bson" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-sql = { path = "../eggdb-sql" }

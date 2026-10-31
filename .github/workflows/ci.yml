@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli, redis-py, pymemcache and opensearch-py (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py and pymongo (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -271,6 +271,28 @@ jobs:
           client.indices.delete(index="books")
           assert not client.indices.exists(index="books")
           print("opensearch-py: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from pymongo import MongoClient, ASCENDING, DESCENDING
+          client = MongoClient("mongodb://eggdb:ci-resp-password@127.0.0.1:27018/?authSource=admin&directConnection=true")
+          db = client.app
+          assert client.admin.command("ping")["ok"] == 1.0
+          people = db.people
+          result = people.insert_many([{"name": "Ada", "age": 36, "tags": ["math"]}, {"name": "Grace", "age": 45, "tags": ["navy", "code"]}, {"name": "Linus", "age": 28}])
+          assert len(result.inserted_ids) == 3
+          assert people.find_one({"name": "Ada"})["age"] == 36
+          assert [p["name"] for p in people.find({"age": {"$gte": 30}}).sort("age", DESCENDING)] == ["Grace", "Ada"]
+          assert people.count_documents({"tags": "code"}) == 1
+          assert people.update_one({"name": "Linus"}, {"$inc": {"age": 1}, "$push": {"tags": "kernel"}}).modified_count == 1
+          assert people.find_one({"name": "Linus"}, {"_id": 0, "age": 1}) == {"age": 29}
+          totals = list(people.aggregate([{"$group": {"_id": None, "total": {"$sum": "$age"}}}]))
+          assert totals[0]["total"] == 110, totals
+          people.create_index([("name", ASCENDING)])
+          assert "name_1" in people.index_information()
+          assert people.delete_many({"age": {"$lt": 40}}).deleted_count == 2
+          assert sorted(db.list_collection_names()) == ["people"]
+          db.drop_collection("people")
+          print("pymongo: passed")
           PY
 
   redis-compare:

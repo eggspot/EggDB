@@ -1,6 +1,6 @@
 use crate::Api;
 use eggdb_http::{Request, Response};
-use eggdb_resp::MemoryKeyspace;
+use eggdb_keyspace::MemoryKeyspace;
 
 const PASSWORD: &str = "secret";
 

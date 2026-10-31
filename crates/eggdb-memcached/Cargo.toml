@@ -10,4 +10,4 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-eggdb-resp = { path = "../eggdb-resp" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
