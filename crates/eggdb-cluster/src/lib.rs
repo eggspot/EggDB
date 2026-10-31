@@ -4,8 +4,10 @@
 //! writes to a shard's old home after a move. [`rebalance`] plans the fewest moves that even out
 //! the shards per node (keeping region-pinned shards in their region), and [`ShardMove`] moves
 //! one shard online: copy, catch up, then cut over in one epoch step. [`transaction`] commits
-//! changes that span shards with two-phase commit.
+//! changes that span shards with two-phase commit. [`quorum`] replicates keys without a leader:
+//! any node takes writes, quorums decide success, and replicas converge.
 
+pub mod quorum;
 mod shards;
 pub mod transaction;
 
