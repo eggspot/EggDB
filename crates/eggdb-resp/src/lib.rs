@@ -7,13 +7,17 @@ mod aggregates;
 mod commands;
 mod keyspace;
 mod protocol;
+mod pubsub;
 mod server;
+mod streams;
+mod transactions;
 mod value;
 
 pub use commands::{Client, Context, execute};
 pub use keyspace::{KeysRead, KeysWrite, Keyspace, MemoryKeyspace};
 pub use protocol::{ProtocolError, Reply, RequestReader, format_double};
 pub use server::{ServerConfig, serve};
+pub use transactions::execute_with_transactions;
 pub use value::{Data, Entry, SortedSet};
 
 #[cfg(test)]

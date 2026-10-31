@@ -50,7 +50,19 @@ impl SortedSet {
     }
 }
 
-/// A value of one of the five types.
+/// A stream's entry identifier: milliseconds and a sequence number.
+pub type StreamId = (u64, u64);
+
+/// A stream: entries of field-value pairs in identifier order, and the last identifier given.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Stream {
+    /// The highest identifier ever added.
+    pub last: StreamId,
+    /// The entries.
+    pub entries: BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>>,
+}
+
+/// A value of one of the six types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Data {
     /// A string (bytes).
@@ -63,6 +75,8 @@ pub enum Data {
     Set(BTreeSet<Vec<u8>>),
     /// A sorted set.
     SortedSet(SortedSet),
+    /// A stream.
+    Stream(Stream),
 }
 
 impl Data {
@@ -74,6 +88,7 @@ impl Data {
             Self::List(_) => "list",
             Self::Set(_) => "set",
             Self::SortedSet(_) => "zset",
+            Self::Stream(_) => "stream",
         }
     }
 
@@ -85,6 +100,7 @@ impl Data {
             Self::List(list) => list.is_empty(),
             Self::Set(set) => set.is_empty(),
             Self::SortedSet(set) => set.is_empty(),
+            Self::Stream(_) => false,
         }
     }
 }
@@ -141,6 +157,7 @@ impl Entry {
             Data::List(_) => 2,
             Data::Set(_) => 3,
             Data::SortedSet(_) => 4,
+            Data::Stream(_) => 5,
         };
         let mut out = vec![FORMAT_VERSION, kind];
         out.extend_from_slice(&self.expires_at_ms.unwrap_or(0).to_le_bytes());
@@ -170,6 +187,20 @@ impl Entry {
                 for (member, score) in &set.scores {
                     out.extend_from_slice(&score.to_le_bytes());
                     put_bytes(&mut out, member);
+                }
+            }
+            Data::Stream(stream) => {
+                out.extend_from_slice(&stream.last.0.to_le_bytes());
+                out.extend_from_slice(&stream.last.1.to_le_bytes());
+                out.extend_from_slice(&(stream.entries.len() as u32).to_le_bytes());
+                for ((millis, sequence), pairs) in &stream.entries {
+                    out.extend_from_slice(&millis.to_le_bytes());
+                    out.extend_from_slice(&sequence.to_le_bytes());
+                    out.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+                    for (field, value) in pairs {
+                        put_bytes(&mut out, field);
+                        put_bytes(&mut out, value);
+                    }
                 }
             }
         }
@@ -221,6 +252,24 @@ impl Entry {
                     set.insert(cursor.bytes()?, score);
                 }
                 Data::SortedSet(set)
+            }
+            5 => {
+                let mut word = || -> Option<u64> { Some(u64::from_le_bytes(cursor.take(8)?.try_into().ok()?)) };
+                let last = (word()?, word()?);
+                let count = cursor.count()?;
+                let mut entries = BTreeMap::new();
+                for _ in 0..count {
+                    let millis = u64::from_le_bytes(cursor.take(8)?.try_into().ok()?);
+                    let sequence = u64::from_le_bytes(cursor.take(8)?.try_into().ok()?);
+                    let pairs_count = cursor.count()?;
+                    let mut pairs = Vec::with_capacity(pairs_count.min(1024));
+                    for _ in 0..pairs_count {
+                        let field = cursor.bytes()?;
+                        pairs.push((field, cursor.bytes()?));
+                    }
+                    entries.insert((millis, sequence), pairs);
+                }
+                Data::Stream(Stream { last, entries })
             }
             _ => return None,
         };

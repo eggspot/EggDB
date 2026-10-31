@@ -38,6 +38,10 @@ pub enum Reply {
     Map(Vec<(Reply, Reply)>),
     /// Members: RESP3's `~`, an array in RESP2.
     Set(Vec<Reply>),
+    /// Out-of-band data such as a published message: RESP3's `>`, an array in RESP2.
+    Push(Vec<Reply>),
+    /// Keyed results: a map in RESP3, an array of two-element arrays in RESP2 (as `XREAD`).
+    PairArray(Vec<(Reply, Reply)>),
 }
 
 impl Reply {
@@ -95,7 +99,15 @@ impl Reply {
                     Self::bulk(text).encode(out, resp3);
                 }
             }
-            Self::Map(pairs) => {
+            Self::PairArray(pairs) if !resp3 => {
+                out.extend_from_slice(format!("*{}\r\n", pairs.len()).as_bytes());
+                for (key, value) in pairs {
+                    out.extend_from_slice(b"*2\r\n");
+                    key.encode(out, resp3);
+                    value.encode(out, resp3);
+                }
+            }
+            Self::Map(pairs) | Self::PairArray(pairs) => {
                 if resp3 {
                     out.extend_from_slice(format!("%{}\r\n", pairs.len()).as_bytes());
                 } else {
@@ -106,8 +118,13 @@ impl Reply {
                     value.encode(out, resp3);
                 }
             }
-            Self::Set(items) => {
-                out.extend_from_slice(format!("{}{}\r\n", if resp3 { '~' } else { '*' }, items.len()).as_bytes());
+            Self::Set(items) | Self::Push(items) => {
+                let mark = match (self, resp3) {
+                    (Self::Set(_), true) => '~',
+                    (Self::Push(_), true) => '>',
+                    _ => '*',
+                };
+                out.extend_from_slice(format!("{mark}{}\r\n", items.len()).as_bytes());
                 for item in items {
                     item.encode(out, resp3);
                 }

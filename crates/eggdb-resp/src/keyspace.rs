@@ -21,7 +21,7 @@ pub trait KeysWrite: KeysRead {
 
 /// Where the keys of the RESP server's databases (0 to 15) live: each command runs in one
 /// read or write transaction, so it is atomic. A write whose body fails changes nothing.
-pub trait Keyspace: Sync {
+pub trait Keyspace {
     /// Runs `body` on a snapshot of database `db`.
     fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String>;
     /// Runs `body` in a write transaction on database `db`, committing when it succeeds.

@@ -12,10 +12,8 @@ impl Harness {
         Self {
             keyspace: MemoryKeyspace::default(),
             client: Client {
-                db: 0,
-                resp3: false,
                 authenticated: true,
-                name: None,
+                ..Client::default()
             },
             now_ms: 1_000_000,
             password: None,
@@ -143,4 +141,48 @@ fn a_server_answers_a_pipelined_client_over_tcp() {
         assert_eq!(answer, "+OK\r\n$2\r\nhi\r\n+OK\r\n");
         stopped.store(true, std::sync::atomic::Ordering::Release);
     });
+}
+
+#[test]
+fn transactions_queue_and_run_together_and_watch_aborts_them() {
+    let mut redis = Harness::new();
+    let mut run = |line: &str| {
+        let arguments: Vec<Vec<u8>> = line.split(' ').map(|word| word.as_bytes().to_vec()).collect();
+        let context = Context {
+            keyspace: &redis.keyspace,
+            password_sha256: None,
+            now_ms: redis.now_ms,
+        };
+        let mut out = Vec::new();
+        execute_with_transactions(&context, &mut redis.client, &arguments).encode(&mut out, false);
+        String::from_utf8(out).unwrap().replace("\r\n", "|")
+    };
+    assert_eq!(run("MULTI"), "+OK|");
+    assert_eq!(run("SET a 1"), "+QUEUED|");
+    assert_eq!(run("INCR a"), "+QUEUED|");
+    assert_eq!(run("EXEC"), "*2|+OK|:2|");
+    assert_eq!(run("WATCH a"), "+OK|");
+    assert_eq!(run("SET a 5"), "+OK|");
+    assert_eq!(run("MULTI"), "+OK|");
+    assert_eq!(run("INCR a"), "+QUEUED|");
+    assert_eq!(run("EXEC"), "*-1|");
+    assert_eq!(run("GET a"), "$1|5|");
+    assert_eq!(run("EXEC"), "-ERR EXEC without MULTI|");
+}
+
+#[test]
+fn streams_add_range_read_and_trim() {
+    let mut redis = Harness::new();
+    redis.now_ms = 5;
+    assert_eq!(redis.text("XADD s * a 1"), "$3|5-0|");
+    assert_eq!(redis.text("XADD s * b 2"), "$3|5-1|");
+    assert_eq!(redis.text("XADD s 3-0 c 3"), "-ERR The ID specified in XADD is equal or smaller than the target stream top item|");
+    assert_eq!(redis.text("XADD s 9-9 c 3"), "$3|9-9|");
+    assert_eq!(redis.text("XLEN s"), ":3|");
+    assert_eq!(redis.text("XRANGE s - + COUNT 1"), "*1|*2|$3|5-0|*2|$1|a|$1|1|");
+    assert_eq!(redis.text("XREVRANGE s + (5-1"), "*1|*2|$3|9-9|*2|$1|c|$1|3|");
+    assert_eq!(redis.text("XREAD STREAMS s 5-0"), "*1|*2|$1|s|*2|*2|$3|5-1|*2|$1|b|$1|2|*2|$3|9-9|*2|$1|c|$1|3|");
+    assert_eq!(redis.text("XREAD STREAMS s $"), "*-1|");
+    assert_eq!(redis.text("XTRIM s MAXLEN 1"), ":2|");
+    assert_eq!(redis.text("TYPE s"), "+stream|");
 }

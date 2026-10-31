@@ -9,8 +9,9 @@ pub(crate) const NOT_INTEGER: &str = "ERR value is not an integer or out of rang
 const NOT_FLOAT: &str = "ERR value is not a valid float";
 pub(crate) const SYNTAX: &str = "ERR syntax error";
 
-/// One connection's state: its database, protocol version and login.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One connection's state: its database, protocol version, login, and a transaction it is
+/// queueing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Client {
     /// The selected database, 0 to 15.
     pub db: u32,
@@ -20,6 +21,12 @@ pub struct Client {
     pub authenticated: bool,
     /// The name it gave with `CLIENT SETNAME`.
     pub name: Option<Vec<u8>>,
+    /// The commands queued since `MULTI`, or `None` outside a transaction.
+    pub queued: Option<Vec<Vec<Vec<u8>>>>,
+    /// Whether a queued command was refused, so `EXEC` aborts.
+    pub queue_failed: bool,
+    /// The keys `WATCH` saw, with their database and stored bytes then.
+    pub watched: Vec<(u32, Vec<u8>, Option<Vec<u8>>)>,
 }
 
 /// What a connection needs from the server to run its commands.
@@ -120,7 +127,7 @@ pub(crate) fn writing(
     }
 }
 
-fn glob(pattern: &[u8], text: &[u8]) -> bool {
+pub(crate) fn glob(pattern: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0, 0);
     let (mut star, mut star_text) = (None, 0);
     while t < text.len() {
@@ -565,8 +572,9 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             Reply::ok()
         }
         _ => crate::aggregates::execute(context, db, name, args)
+            .or_else(|| crate::streams::execute(context, db, name, args))
             .unwrap_or_else(|| {
-                if crate::aggregates::is_known(name) || is_known(name) {
+                if crate::aggregates::is_known(name) || crate::streams::is_known(name) || is_known(name) {
                     wrong_arguments(name)
                 } else {
                     Reply::Error(format!("ERR unknown command '{name}'"))
