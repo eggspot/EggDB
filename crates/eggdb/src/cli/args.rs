@@ -211,6 +211,8 @@ impl CommandName {
             | OptionName::MetricsListen
             | OptionName::McpListen
             | OptionName::RespListen
+            | OptionName::RespMaxMemory
+            | OptionName::RespEviction
             | OptionName::McpTokenFile
             | OptionName::LogBatches
             | OptionName::User
@@ -353,6 +355,8 @@ enum OptionName {
     MetricsListen,
     McpListen,
     RespListen,
+    RespMaxMemory,
+    RespEviction,
     McpTokenFile,
     LogBatches,
     Dialect,
@@ -423,6 +427,8 @@ impl OptionName {
             b"metrics-listen" => Self::MetricsListen,
             b"mcp-listen" => Self::McpListen,
             b"resp-listen" => Self::RespListen,
+            b"resp-max-memory" => Self::RespMaxMemory,
+            b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
             b"log-batches" => Self::LogBatches,
             b"dialect" => Self::Dialect,
@@ -659,6 +665,8 @@ pub(crate) struct ServeOptions {
     pub(crate) mcp_listen: Option<SocketAddr>,
     pub(crate) mcp_token_file: Option<PathBuf>,
     pub(crate) resp_listen: Option<SocketAddr>,
+    pub(crate) resp_max_memory: Option<u64>,
+    pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
     pub(crate) user: Option<String>,
     pub(crate) password_file: Option<ExportFile>,
@@ -1081,6 +1089,18 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     Some(parse_listen(&option.spelled, value, 8765).map_err(usage)?);
             }
             OptionName::McpTokenFile => request.serve.mcp_token_file = Some(PathBuf::from(value)),
+            OptionName::RespMaxMemory => {
+                request.serve.resp_max_memory = Some(parse_size(&option.spelled, value).map_err(usage)? as u64);
+            }
+            OptionName::RespEviction => {
+                let name = value.to_str().unwrap_or_default();
+                request.serve.resp_eviction = Some(eggdb_resp::EvictionPolicy::named(name).ok_or_else(|| {
+                    usage(format!(
+                        "{} {name}: use noeviction, allkeys-lru, allkeys-lfu, allkeys-random, volatile-lru, volatile-lfu, volatile-random or volatile-ttl",
+                        option.spelled
+                    ))
+                })?);
+            }
             OptionName::RespListen => {
                 request.serve.resp_listen =
                     Some(parse_listen(&option.spelled, value, 6379).map_err(usage)?);

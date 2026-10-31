@@ -5,6 +5,7 @@
 
 mod aggregates;
 mod commands;
+mod eviction;
 mod keyspace;
 mod protocol;
 mod pubsub;
@@ -14,6 +15,7 @@ mod transactions;
 mod value;
 
 pub use commands::{Client, Context, execute};
+pub use eviction::{EvictingKeyspace, EvictionPolicy};
 pub use keyspace::{KeysRead, KeysWrite, Keyspace, MemoryKeyspace};
 pub use protocol::{ProtocolError, Reply, RequestReader, format_double};
 pub use server::{ServerConfig, serve};

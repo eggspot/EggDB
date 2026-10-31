@@ -324,14 +324,22 @@ impl Session<'_> {
                 ),
                 _ => Ok(()),
             });
-            let resp_keyspace = super::serve_resp::DatabaseKeyspace { db: &db };
+            let resp_database = super::serve_resp::DatabaseKeyspace { db: &db };
+            let resp_limited = options.resp_max_memory.and_then(|limit| {
+                let policy = options.resp_eviction.unwrap_or(eggdb_resp::EvictionPolicy::NoEviction);
+                eggdb_resp::EvictingKeyspace::new(&resp_database, limit, policy).ok()
+            });
+            let resp_keyspace: &(dyn eggdb_resp::Keyspace + Sync) = match &resp_limited {
+                Some(limited) => limited,
+                None => &resp_database,
+            };
             let resp_config = eggdb_resp::ServerConfig {
                 password_sha256: resp_password,
                 max_connections: config.max_connections,
             };
             let resp_server = scope.spawn(|| match &resp_listener {
                 Some(listener) => eggdb_resp::serve(
-                    &resp_keyspace,
+                    resp_keyspace,
                     listener,
                     &resp_config,
                     &stop_signals::requested,

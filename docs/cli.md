@@ -1019,7 +1019,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address>] [--read-only] [--create]
+eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1054,6 +1054,7 @@ eggdb serve --create app.db
 | `--metrics-listen <address>` | serves Prometheus metrics at `http://<address>/metrics` (default port 9187) over our own HTTP/1.1: sessions open, statements, errors, commits and rollbacks, and per database the file size, free pages, cache pages, cache hits and misses and the log since the last checkpoint. The metrics hold no data, but put the address where only your monitoring can reach it |
 | `--mcp-listen <address>`, `--mcp-token-file <file>` | serves MCP over Streamable HTTP at `http://<address>/mcp` (default port 8765), read-only, to agents that send the file's token as a Bearer token; loopback addresses only for now ([mcp.md](mcp.md), D189) |
 | `--resp-listen <address>` | serves the RESP protocol (default port 6379) so `redis-cli` and Redis clients work on the file: strings, hashes, lists, sets and sorted sets with expiry, `AUTH` with the server's password, RESP2 and RESP3; each RESP database is the collection `resp<n>`; loopback addresses only for now (D193) |
+| `--resp-max-memory <size>`, `--resp-eviction <policy>` | keeps the RESP keys' stored bytes under the size (as `maxmemory`), evicting by the policy after each write that crosses it: `allkeys-lru`, `allkeys-lfu`, `allkeys-random`, `volatile-lru`, `volatile-lfu`, `volatile-random`, `volatile-ttl`, or `noeviction` (the default), which refuses writes with `OOM` instead (D193) |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
 | `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, so slow or failing logins cannot take every slot; a 17th gets `53300` too |
 | `--socket-dir <directory>` | also accept PostgreSQL connections on a Unix socket in that directory, named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory> -p <port>` connects; the socket is readable and writable by its owner only, a stale socket file is replaced, and it is removed at stop. Not on Windows yet |
