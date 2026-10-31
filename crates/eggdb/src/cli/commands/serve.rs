@@ -310,7 +310,7 @@ impl Session<'_> {
             }
             None => None,
         };
-        let observability_password = eggdb_crypto::sha256(password.as_bytes());
+        let server_password_sha256 = eggdb_crypto::sha256(password.as_bytes());
         let rest_listener = match options.rest_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -576,7 +576,7 @@ impl Session<'_> {
                 std::iter::once((config.database.as_str(), &*db))
                     .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
                     .collect();
-            let observability_endpoint = eggdb_observability::Endpoint::new(&store, &config.user, observability_password, &config.database);
+            let observability_endpoint = eggdb_observability::Endpoint::new(&store, &config.user, server_password_sha256, &config.database);
             let observability_server = scope.spawn(|| match &observability_listener {
                 Some(listener) => eggdb_http::serve_with_body_limit(
                     listener,
@@ -586,7 +586,7 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
-            let rest_endpoint = eggdb_api::Endpoint::new(&store, &config.user, observability_password, &config.database, "public");
+            let rest_endpoint = eggdb_api::Endpoint::new(&store, &config.user, server_password_sha256, &config.database, "public");
             let rest_server = scope.spawn(|| match &rest_listener {
                 Some(listener) => eggdb_http::serve_with_body_limit(
                     listener,
