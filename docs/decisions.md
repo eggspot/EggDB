@@ -215,3 +215,4 @@ its full title with its status.
 - [D188](decisions/D188.md) Our own HTTP/1.1 crate `eggdb-http` (bounded, GET/HEAD), process-wide session counters in `eggdb_sql::activity`, and `eggdb serve --metrics-listen` serving Prometheus `/metrics`
 - [D189](decisions/D189.md) MCP over Streamable HTTP inside `eggdb serve` (`--mcp-listen`, `--mcp-token-file`): one MCP server per session id, Bearer token, `Origin` refused, read-only and loopback-only until TLS
 - [D190](decisions/D190.md) Agents as stored roles: `ServerConfig::agent_role` runs MCP calls as a role, picked per token in `--mcp-token-file`, so grants, row security and `LOGIN` apply; key-value tools withdrawn for roles; MCP prompts
+- [D191](decisions/D191.md) Our own GUI toolkit `eggdb-gui`: software rasterizer, our own TrueType reader over the system's fonts (listed by the platform layer), PNG encoder, the main window from Fable's `docs/ux/gui.md`, tested offscreen with a box typeface

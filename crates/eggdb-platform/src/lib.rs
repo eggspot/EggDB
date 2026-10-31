@@ -39,6 +39,7 @@ mod clock;
 mod cpus;
 mod database_file;
 mod error;
+pub mod fonts;
 mod fs;
 mod io;
 mod memory;
