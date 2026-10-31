@@ -1277,7 +1277,7 @@ END;
 - **Functions in SQL**: a standalone or package function is called in any expression (`SELECT
   annual(sal) FROM emp`, `SELECT pkg.total() FROM dual`, named arguments with `=>`); it reads what
   the calling statement sees and cannot write, commit or roll back (`ORA-14552`). Calls nest at
-  most 100 deep.
+  most 32 deep, as SQL Server nests them, so a runaway recursion ends with an error long before the stack does.
 - **Packages**: a package's state (variables, open cursors) belongs to the session; the body's
   initialization runs once, at the first use in the session, and again after `CREATE OR
   REPLACE`. Public items are `pkg.item` outside the package and plain names inside it;
@@ -2670,7 +2670,7 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
 - Bodies are checked at `CREATE` (unless `check_function_bodies` is off, as `pg_dump` sets it),
   with PostgreSQL's messages; the SQL statements inside run when they are reached.
 
-Limits (D45): calls nest at most 100 deep (`54001`), every loop and statement can be cancelled,
+Limits (D45): calls nest at most 32 deep (`54001`), every loop and statement can be cancelled,
 a body nests at most 64 levels and holds at most 100,000 statements, a routine's text is at most
 1 MiB, and a routine holds at most 1000 open cursors. Not yet: `COMMIT` and `ROLLBACK` in
 procedures (`0A000`), refcursors returned to the caller, polymorphic types (`anyelement`),

@@ -51,8 +51,15 @@ fn succeeds(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep
 }
 
 fn fails_with(session: &mut Session<'_, MemoryStore>, text: &str, number: u32) {
-    let steps = batch(session, text);
-    assert_eq!(errors(&steps), vec![Some(number)], "{text}");
+    let mut steps = Vec::new();
+    let found = match session.execute_batch(text, &mut |step| {
+        steps.push(step);
+        true
+    }) {
+        Err(error) => vec![error.sqlserver_number()],
+        Ok(()) => errors(&steps),
+    };
+    assert_eq!(found, vec![Some(number)], "{text}");
 }
 
 fn integers(values: &[&[i32]]) -> Vec<Vec<Value>> {

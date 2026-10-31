@@ -405,7 +405,15 @@ impl Parser<'_> {
         let parenthesized = self.take(&TokenKind::LeftParen);
         let start = self.peek().start;
         let position = self.position();
-        let statement = self.statement()?;
+        if !self.is_word("select") && !self.is_word("with") && !matches!(self.peek_kind(), TokenKind::LeftParen) {
+            return Err(SqlError::new(
+                SqlState::INVALID_FUNCTION_DEFINITION,
+                "The RETURN statement of an inline table-valued function must be a SELECT query.",
+            )
+            .with_sqlserver_code(156)
+            .at(position));
+        }
+        let statement = self.query_statement()?;
         if !matches!(statement, Statement::Select(_) | Statement::Query(_)) {
             return Err(SqlError::new(
                 SqlState::INVALID_FUNCTION_DEFINITION,

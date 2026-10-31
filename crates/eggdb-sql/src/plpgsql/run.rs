@@ -42,7 +42,7 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-pub(crate) const MAX_ROUTINE_DEPTH: usize = 100;
+pub(crate) const MAX_ROUTINE_DEPTH: usize = 32;
 const MAX_OPEN_CURSORS: usize = 1_000;
 const MAX_ARRAY_GROWTH: i64 = 1 << 20;
 const INLINE_NAME: &str = "inline_code_block";

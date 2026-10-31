@@ -1119,7 +1119,8 @@ pub(crate) fn mentions_correlated(expr: &Expr) -> bool {
     matches!(
         &expr.kind,
         ExprKind::Subquery(subquery) if matches!(subquery.state, SubqueryState::Correlated { .. })
-    ) || children(expr).into_iter().any(mentions_correlated)
+    ) || matches!(&expr.kind, ExprKind::Function { name, .. } if name == crate::routines::ROUTINE_CALL)
+        || children(expr).into_iter().any(mentions_correlated)
 }
 
 fn reads_derived_tables(select: &Select) -> bool {
