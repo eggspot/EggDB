@@ -18,6 +18,10 @@ pub(crate) struct Frames {
 }
 
 impl Frames {
+    pub(crate) fn lock_in_memory(&mut self) -> eggdb_platform::Result<()> {
+        self.region.lock()
+    }
+
     pub(crate) fn new(
         memory: &impl Memory,
         count: usize,

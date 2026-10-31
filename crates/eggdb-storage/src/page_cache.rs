@@ -112,6 +112,12 @@ pub struct PageCache<F: File> {
 }
 
 impl<F: File> PageCache<F> {
+    /// Keeps the cache's memory in RAM, never swapped out, for as long as the cache lives.
+    /// Fails with the platform's error when the process may not lock that much memory.
+    pub fn lock_in_memory(&mut self) -> Result<(), StorageError> {
+        self.frames.lock_in_memory().map_err(StorageError::from)
+    }
+
     /// Puts `file` behind a cache of `size`, taking its memory from `memory` now and never
     /// again. A size of no pages, or of more pages than [`u32::MAX`], is refused with
     /// [`StorageError::InvalidCacheSize`], and memory that can't be had fails with the

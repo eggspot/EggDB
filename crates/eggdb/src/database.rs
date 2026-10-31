@@ -246,12 +246,15 @@ impl Database {
             .map_err(|error| explain_open_error(error, options))?;
         let page_size = file.page_size();
         options.check_cache_holds(page_size)?;
-        let cache = PageCache::new(
+        let mut cache = PageCache::new(
             file,
             &OsMemory::new(),
             CacheSize::Bytes(options.cache_bytes),
         )
         .map_err(Error::storage)?;
+        if options.lock_cache {
+            cache.lock_in_memory().map_err(Error::storage)?;
+        }
         let clock = options.clock.clock();
         let store = Store::new(cache, Arc::clone(&clock));
         let features = store.superblock().map_err(Error::storage)?.features;

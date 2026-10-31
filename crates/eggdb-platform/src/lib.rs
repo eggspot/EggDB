@@ -146,5 +146,5 @@ pub use sim_memory::SimMemory;
 pub use sim_net::{SimHost, SimListener, SimNetQueue, SimNetwork, SimStream};
 pub use threads::{SpawnedThread, ThreadOptions};
 pub use topology::{
-    CacheId, CoreId, CpuLocation, CpuTopology, NumaNodeId, PackageId, SiblingNumbering,
+    CacheId, CoreId, CoreKind, CpuLocation, CpuTopology, NumaNodeId, PackageId, SiblingNumbering,
 };

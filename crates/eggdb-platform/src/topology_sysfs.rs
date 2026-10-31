@@ -42,6 +42,7 @@ pub(crate) fn read(file: &dyn Fn(&str) -> Option<String>) -> CpuTopology {
         numa_nodes,
         last_level_caches,
         cache_line_size,
+        kinds: core_kinds(file),
     }
     .into_topology()
 }
@@ -117,6 +118,19 @@ fn grouped(
 
 fn topology_file(cpu: CpuId, name: &str) -> String {
     format!("cpu/cpu{}/topology/{name}", cpu.index())
+}
+
+fn core_kinds(file: &dyn Fn(&str) -> Option<String>) -> Option<BTreeMap<CpuId, crate::topology::CoreKind>> {
+    let performance = list(file, "../cpu_core/cpus")?;
+    let efficiency = list(file, "../cpu_atom/cpus").unwrap_or_default();
+    let mut kinds = BTreeMap::new();
+    for cpu in performance.iter() {
+        kinds.insert(cpu, crate::topology::CoreKind::Performance);
+    }
+    for cpu in efficiency.iter() {
+        kinds.insert(cpu, crate::topology::CoreKind::Efficiency);
+    }
+    Some(kinds)
 }
 
 fn list(file: &dyn Fn(&str) -> Option<String>, path: &str) -> Option<CpuSet> {
@@ -379,5 +393,20 @@ mod tests {
             assert_eq!(topology.cpus().len(), placed);
             assert_numbered_densely(&topology);
         }
+    }
+
+    #[test]
+    fn a_hybrid_processor_names_its_performance_cores_and_others_name_none() {
+        let mut files = two_packages_of_two_cores_with_two_threads();
+        assert_eq!(read_files(&files).performance_cpus(), None);
+        files.insert("../cpu_core/cpus".to_owned(), "0-3\n".to_owned());
+        files.insert("../cpu_atom/cpus".to_owned(), "4-7\n".to_owned());
+        let topology = read_files(&files);
+        let performance: CpuSet = (0..4).map(cpu).collect();
+        assert_eq!(topology.performance_cpus(), Some(performance));
+        assert_eq!(
+            topology.location(cpu(5)).and_then(|location| location.kind()),
+            Some(crate::CoreKind::Efficiency)
+        );
     }
 }

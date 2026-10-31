@@ -40,6 +40,7 @@ fn main() -> eggdb::Result<()> {
 | `read_only(bool)` | `false` | opens for reading only; several read-only opens can share the file |
 | `durability(Durability)` | `Full` | how commits wait for the disk (below) |
 | `cache_bytes(usize)` | 16 MiB | the page cache; also the most one write transaction can change, a large value included |
+| `lock_cache(bool)` | off | keep the page cache in RAM, never swapped out (`mlock`, `VirtualLock`); the open fails when the process may not lock that much |
 | `snapshot_memory_bytes(usize)` | the cache's size | memory for pages that open read transactions still need |
 | `auto_checkpoint_log_bytes(Option<u64>)` | 1 MiB | log written before a commit checkpoints by itself; `None` turns it off |
 | `page_size_bytes(usize)` | 4096 | the page size of a new file, a power of two up to 65,536 |

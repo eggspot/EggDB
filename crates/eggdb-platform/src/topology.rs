@@ -42,6 +42,15 @@ topology_id!(
     NumaNodeId
 );
 
+/// What kind of core a CPU is on a hybrid processor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreKind {
+    /// A performance core.
+    Performance,
+    /// An efficiency core.
+    Efficiency,
+}
+
 /// Where one logical CPU sits in the machine. Anything the operating system does not report is
 /// `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +60,7 @@ pub struct CpuLocation {
     package: Option<PackageId>,
     numa_node: Option<NumaNodeId>,
     last_level_cache: Option<CacheId>,
+    kind: Option<CoreKind>,
 }
 
 impl CpuLocation {
@@ -62,7 +72,21 @@ impl CpuLocation {
             package: None,
             numa_node: None,
             last_level_cache: None,
+            kind: None,
         }
+    }
+
+    /// The same location on a core of `kind`.
+    pub const fn with_kind(self, kind: CoreKind) -> Self {
+        Self {
+            kind: Some(kind),
+            ..self
+        }
+    }
+
+    /// The kind of core, on a hybrid processor that reports it.
+    pub const fn kind(&self) -> Option<CoreKind> {
+        self.kind
     }
 
     /// The same location on `core`.
@@ -300,6 +324,24 @@ impl CpuTopology {
         self.cache_line_size
     }
 
+    /// The CPUs on performance cores of a hybrid processor, or `None` when the processor is not
+    /// hybrid or does not say which cores are which.
+    pub fn performance_cpus(&self) -> Option<CpuSet> {
+        let mut any_kind = false;
+        let mut performance = CpuSet::new();
+        for location in self.locations() {
+            match location.kind() {
+                Some(CoreKind::Performance) => {
+                    any_kind = true;
+                    performance.insert(location.cpu());
+                }
+                Some(CoreKind::Efficiency) => any_kind = true,
+                None => {}
+            }
+        }
+        (any_kind && !performance.is_empty()).then_some(performance)
+    }
+
     /// The NUMA nodes that have CPUs, in increasing order.
     pub fn numa_nodes(&self) -> Vec<NumaNodeId> {
         let mut nodes: Vec<NumaNodeId> = self
@@ -401,6 +443,7 @@ pub(crate) struct TopologyReport {
     pub(crate) numa_nodes: Option<BTreeMap<CpuId, NumaNodeId>>,
     pub(crate) last_level_caches: Option<BTreeMap<CpuId, u32>>,
     pub(crate) cache_line_size: Option<NonZeroUsize>,
+    pub(crate) kinds: Option<BTreeMap<CpuId, CoreKind>>,
 }
 
 #[cfg(any(test, target_os = "linux", target_os = "android", windows))]
@@ -437,6 +480,9 @@ impl TopologyReport {
                 }
                 if let Some(cache) = number(&self.last_level_caches, cpu) {
                     location = location.with_last_level_cache(CacheId(cache));
+                }
+                if let Some(kind) = self.kinds.as_ref().and_then(|kinds| kinds.get(&cpu)) {
+                    location = location.with_kind(*kind);
                 }
                 location
             })

@@ -72,6 +72,7 @@ pub struct Options {
     pub(crate) page_size_bytes: usize,
     pub(crate) write_timeout: Duration,
     pub(crate) clock: ClockChoice,
+    pub(crate) lock_cache: bool,
 }
 
 #[derive(Clone, Default)]
@@ -120,6 +121,7 @@ impl Options {
             page_size_bytes: PageSize::DEFAULT.bytes(),
             write_timeout: DEFAULT_WRITE_TIMEOUT,
             clock: ClockChoice::default(),
+            lock_cache: false,
         }
     }
 
@@ -155,6 +157,16 @@ impl Options {
     /// open with [`ErrorKind::InvalidOption`].
     pub fn cache_bytes(mut self, bytes: usize) -> Self {
         self.cache_bytes = bytes;
+        self
+    }
+
+    /// Keeps the page cache in RAM, never swapped out (`mlock` on Unix systems, `VirtualLock` on
+    /// Windows), so a busy machine never pages the database's hot data to disk. Off by default.
+    /// When the process may not lock that much memory, the open fails with
+    /// [`ErrorKind::OutOfMemory`](crate::ErrorKind::OutOfMemory); raise `ulimit -l` or the
+    /// working-set size, or lower [`Options::cache_bytes`].
+    pub fn lock_cache(mut self, lock: bool) -> Self {
+        self.lock_cache = lock;
         self
     }
 

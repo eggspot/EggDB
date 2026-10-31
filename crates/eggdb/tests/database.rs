@@ -354,3 +354,21 @@ fn a_damaged_page_is_reported_as_corrupt_never_as_wrong_data() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Corrupt, "{error}");
 }
+
+#[test]
+fn a_database_can_keep_its_page_cache_locked_in_memory() {
+    let file = common::TempPath::new("lock-cache");
+    let opened = eggdb::Database::open_with(
+        file.path(),
+        eggdb::Options::new().create_if_missing(true).cache_bytes(256 * 1024).lock_cache(true),
+    );
+    match opened {
+        Ok(db) => {
+            let mut write = db.begin_write().unwrap();
+            write.put(b"locked", b"yes").unwrap();
+            write.commit().unwrap();
+            assert_eq!(db.begin_read().unwrap().get(b"locked").unwrap().as_deref(), Some(&b"yes"[..]));
+        }
+        Err(error) => assert!(error.to_string().contains("lock"), "{error}"),
+    }
+}

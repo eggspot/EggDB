@@ -42,6 +42,14 @@ pub(crate) fn release(ptr: NonNull<u8>, len: usize) {
     platform::release(ptr, len);
 }
 
+pub(crate) fn lock(ptr: NonNull<u8>, len: usize) -> Result<()> {
+    platform::lock(ptr, len)
+}
+
+pub(crate) fn unlock(ptr: NonNull<u8>, len: usize) {
+    platform::unlock(ptr, len);
+}
+
 fn checked_power_of_two(size: usize) -> Option<usize> {
     size.is_power_of_two().then_some(size)
 }
@@ -170,6 +178,30 @@ mod platform {
             offset: i64,
         ) -> *mut c_void;
         fn munmap(addr: *mut c_void, len: usize) -> c_int;
+        fn mlock(addr: *const c_void, len: usize) -> c_int;
+        fn munlock(addr: *const c_void, len: usize) -> c_int;
+    }
+
+    pub(super) fn lock(ptr: NonNull<u8>, len: usize) -> Result<()> {
+        // SAFETY: `ptr` and `len` describe one live mapping owned by the caller; mlock only
+        // changes whether its pages may be swapped out.
+        let result = unsafe { mlock(ptr.as_ptr().cast(), len) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        Err(Error::new(
+            match error.kind() {
+                std::io::ErrorKind::OutOfMemory | std::io::ErrorKind::PermissionDenied => ErrorKind::OutOfMemory,
+                _ => ErrorKind::Unsupported,
+            },
+            format!("cannot lock {len} bytes in memory: {error} (raise the locked-memory limit, ulimit -l)"),
+        ))
+    }
+
+    pub(super) fn unlock(ptr: NonNull<u8>, len: usize) {
+        // SAFETY: `ptr` and `len` describe one live mapping owned by the caller.
+        let _ = unsafe { munlock(ptr.as_ptr().cast(), len) };
     }
 
     pub(super) fn page_size() -> usize {
@@ -353,6 +385,28 @@ mod platform {
             protect: u32,
         ) -> *mut c_void;
         fn VirtualFree(address: *mut c_void, size: usize, free_type: u32) -> i32;
+        fn VirtualLock(address: *mut c_void, size: usize) -> i32;
+        fn VirtualUnlock(address: *mut c_void, size: usize) -> i32;
+    }
+
+    pub(super) fn lock(ptr: NonNull<u8>, len: usize) -> Result<()> {
+        // SAFETY: `ptr` and `len` describe one live allocation owned by the caller; VirtualLock
+        // only keeps its pages resident.
+        if unsafe { VirtualLock(ptr.as_ptr().cast(), len) } != 0 {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorKind::OutOfMemory,
+            format!(
+                "cannot lock {len} bytes in memory: {} (the process's working set is too small)",
+                std::io::Error::last_os_error()
+            ),
+        ))
+    }
+
+    pub(super) fn unlock(ptr: NonNull<u8>, len: usize) {
+        // SAFETY: `ptr` and `len` describe one live allocation owned by the caller.
+        let _ = unsafe { VirtualUnlock(ptr.as_ptr().cast(), len) };
     }
 
     #[link(name = "advapi32")]
@@ -528,6 +582,12 @@ mod platform {
 mod platform {
     use super::{Error, ErrorKind, MemoryRegion, NonNull, PageMode, Result};
 
+    pub(super) fn lock(_: NonNull<u8>, len: usize) -> Result<()> {
+        Err(Error::new(ErrorKind::Unsupported, format!("locking {len} bytes in memory is not supported on this platform")))
+    }
+
+    pub(super) fn unlock(_: NonNull<u8>, _: usize) {}
+
     #[cfg(any(
         target_os = "illumos",
         target_os = "solaris",
@@ -598,6 +658,31 @@ mod tests {
             "Hugepagesize: 99999999999999999999 kB\n",
         ] {
             assert_eq!(parse_huge_page_size(meminfo), None, "{meminfo:?}");
+        }
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod locking_tests {
+    use crate::{Memory, OsMemory, PageMode};
+
+    #[test]
+    fn a_page_locks_in_memory_and_unlocks_when_asked_or_dropped() {
+        let memory = OsMemory;
+        let mut region = memory.allocate(memory.page_size(), PageMode::Normal).expect("one page");
+        assert!(!region.is_locked());
+        match region.lock() {
+            Ok(()) => {
+                assert!(region.is_locked());
+                region[0] = 7;
+                region.unlock();
+                assert!(!region.is_locked());
+                region.lock().expect("locks again");
+            }
+            Err(error) => assert!(
+                matches!(error.kind(), crate::ErrorKind::OutOfMemory | crate::ErrorKind::Unsupported),
+                "{error}"
+            ),
         }
     }
 }
