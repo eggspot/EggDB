@@ -212,7 +212,7 @@ jobs:
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
           target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 --cql-listen 127.0.0.1:9043 --s3-listen 127.0.0.1:9001 --dynamodb-listen 127.0.0.1:8001 --observability-listen 127.0.0.1:8087 &
-          for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
+          for _ in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
           test "$(cli GET greeting)" = hello
@@ -587,7 +587,7 @@ jobs:
       - name: Install the pinned toolchain and the cross targets
         run: |
           rustup show active-toolchain || rustup toolchain install
-          rustup target add $TARGETS
+          echo "$TARGETS" | xargs rustup target add
       - uses: actions/cache@v5
         with:
           path: |
@@ -1108,16 +1108,34 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
-      - name: Test the platform layer, the storage engine and the embedded API natively in ${{ matrix.os }} (a VM through vmactions, MIT, test tooling only)
-        uses: vmactions/${{ matrix.os }}-vm@v1
+      - name: Test the platform layer, the storage engine and the embedded API natively in freebsd (a VM through vmactions, MIT, test tooling only)
+        if: matrix.os == 'freebsd'
+        uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: |
-            case "${{ matrix.os }}" in
-              freebsd) pkg install -y curl bash ;;
-              netbsd) /usr/sbin/pkg_add curl bash ;;
-              omnios) pkg install curl gcc13 || true ;;
-            esac
+          prepare: pkg install -y curl bash
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
+      - name: Test the platform layer, the storage engine and the embedded API natively in netbsd (a VM through vmactions, MIT, test tooling only)
+        if: matrix.os == 'netbsd'
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: /usr/sbin/pkg_add curl bash
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
+      - name: Test the platform layer, the storage engine and the embedded API natively in omnios (a VM through vmactions, MIT, test tooling only)
+        if: matrix.os == 'omnios'
+        uses: vmactions/omnios-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install curl gcc13 || true
           run: |
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
             . "$HOME/.cargo/env"
@@ -1149,7 +1167,7 @@ jobs:
           ls -l web/eggdb.wasm
           node web/test.mjs web/eggdb.wasm
           python3 -m http.server 8000 --bind 127.0.0.1 --directory web &
-          for attempt in $(seq 1 50); do curl -sf http://127.0.0.1:8000/test.html > /dev/null && break; sleep 0.2; done
+          for _ in $(seq 1 50); do curl -sf http://127.0.0.1:8000/test.html > /dev/null && break; sleep 0.2; done
           google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/test.html > "$RUNNER_TEMP/dom.html"
           cat "$RUNNER_TEMP/dom.html"
           grep -q "eggdb-browser-test: passed" "$RUNNER_TEMP/dom.html"

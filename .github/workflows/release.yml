@@ -114,7 +114,7 @@ jobs:
           fi
           binary_bytes=$(wc -c < "$PACKAGE/eggdb$EXE" | tr -d ' ')
           archive_bytes=$(wc -c < "$archive" | tr -d ' ')
-          printf '| `%s` | %s | %s |\n' "$TARGET" "$binary_bytes" "$archive_bytes" > "$PACKAGE.size"
+          printf '| %s | %s | %s |\n' "\`$TARGET\`" "$binary_bytes" "$archive_bytes" > "$PACKAGE.size"
           rm -r "$PACKAGE"
       - name: Build the C API library
         if: matrix.capi
@@ -177,9 +177,11 @@ jobs:
             echo '| Target | Binary (bytes) | Download (bytes) |'
             echo '|--------|----------------|------------------|'
             sort ./*.size
-            echo
-            echo 'Each archive is checked by `SHA256SUMS` and carries a signed build provenance'
-            echo 'attestation: `gh attestation verify <archive> -R eggspot/EggDB`.'
+            cat <<'PROVENANCE'
+
+          Each archive is checked by `SHA256SUMS` and carries a signed build provenance
+          attestation: `gh attestation verify <archive> -R eggspot/EggDB`.
+          PROVENANCE
           } > ../release-notes.md
           rm ./*.size
       - uses: actions/attest-build-provenance@v4.2.2
