@@ -1148,3 +1148,45 @@ fn unique_indexes_are_not_constraints_and_identity_defaults_stay_put() {
     last(&mut session, "DROP INDEX t_code_idx");
     last(&mut session, "INSERT INTO t (code) VALUES ('a')");
 }
+
+#[test]
+fn administration_tools_find_their_statistics_views_extensions_and_functions() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    run(&mut session, "CREATE TABLE items (id integer PRIMARY KEY, name text)").unwrap();
+    assert!(last(&mut session, "SELECT count(*) FROM pg_stat_activity WHERE state = 'active'").contains('1'));
+    assert!(last(&mut session, "SELECT datname FROM pg_stat_database").contains("shapes"));
+    assert!(last(&mut session, "SELECT extname, extversion FROM pg_extension").contains("plpgsql"));
+    assert!(last(&mut session, "SELECT has_database_privilege(current_database(), 'CREATE'), has_table_privilege('items', 'SELECT'), has_schema_privilege('public', 'USAGE')").contains('t'));
+    assert!(last(&mut session, "SELECT pg_is_in_recovery()").contains('f'));
+    assert!(last(&mut session, "SELECT pg_size_pretty(10240::bigint)").contains("10 kB"));
+    for relation in [
+        "pg_locks",
+        "pg_prepared_xacts",
+        "pg_event_trigger",
+        "pg_foreign_data_wrapper",
+        "pg_foreign_server",
+        "pg_foreign_table",
+        "pg_user_mapping",
+        "pg_cast",
+        "pg_aggregate",
+        "pg_operator",
+        "pg_shdescription",
+        "pg_replication_slots",
+        "pg_stat_replication",
+        "pg_partitioned_table",
+        "pg_subscription",
+        "pg_stat_user_tables",
+        "pg_stat_user_indexes",
+        "pg_ts_config",
+        "pg_ts_dict",
+        "pg_ts_parser",
+        "pg_ts_template",
+        "pg_conversion",
+        "pg_opfamily",
+    ] {
+        run(&mut session, &format!("SELECT * FROM pg_catalog.{relation}")).unwrap_or_else(|error| panic!("{relation}: {error:?}"));
+    }
+    assert!(last(&mut session, "SELECT usename, usesuper FROM pg_user").contains('t'));
+    assert!(last(&mut session, "SELECT count(*) FROM pg_class WHERE relname = 'pg_stat_activity' AND relkind = 'v'").contains('1'));
+}

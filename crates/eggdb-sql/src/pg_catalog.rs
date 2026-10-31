@@ -1,5 +1,6 @@
 mod deparse;
 mod functions;
+mod monitoring;
 mod oids;
 mod relations;
 mod routines;
@@ -20,6 +21,7 @@ use crate::information_schema::InformationRelation;
 use crate::oracle_dictionary::OracleRelation;
 use crate::sqlserver_catalog::SqlServerRelation;
 pub(crate) use deparse::{check_text, default_text};
+pub(crate) use monitoring::{function as monitoring_function, result_type as monitoring_result_type};
 pub(crate) use functions::{
     argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
 };
@@ -196,6 +198,7 @@ pub(crate) enum CatalogRelation {
     Information(InformationRelation),
     SqlServer(SqlServerRelation),
     Oracle(OracleRelation),
+    Monitoring(monitoring::MonitoringRelation),
 }
 
 pub(crate) struct CatalogColumn {
@@ -318,6 +321,7 @@ impl CatalogRelation {
             Self::Language => "pg_language",
             Self::Range => "pg_range",
             Self::Information(relation) => relation.name(),
+            Self::Monitoring(relation) => relation.name(),
             Self::SqlServer(relation) => relation.name(),
             Self::Oracle(relation) => relation.name(),
         }
@@ -336,6 +340,7 @@ impl CatalogRelation {
         Self::IN_PG_CATALOG
             .into_iter()
             .chain(InformationRelation::ALL.into_iter().map(Self::Information))
+            .chain(monitoring::MonitoringRelation::ALL.into_iter().map(Self::Monitoring))
     }
 
     pub(crate) fn oid(self) -> u32 {
@@ -372,11 +377,15 @@ impl CatalogRelation {
             Self::Language => 2612,
             Self::Range => 3541,
             Self::Information(relation) => relation.oid(),
+            Self::Monitoring(relation) => relation.oid(),
             Self::SqlServer(_) | Self::Oracle(_) => 0,
         }
     }
 
     pub(crate) fn is_view(self) -> bool {
+        if let Self::Monitoring(relation) = self {
+            return relation.is_view();
+        }
         matches!(
             self,
             Self::Roles
@@ -398,6 +407,7 @@ impl CatalogRelation {
         Self::IN_PG_CATALOG
             .into_iter()
             .find(|relation| relation.name() == name)
+            .or_else(|| monitoring::MonitoringRelation::named(name).map(Self::Monitoring))
     }
 
     pub(crate) fn column_named(self, name: &str) -> Option<usize> {
@@ -438,6 +448,7 @@ impl CatalogRelation {
             Self::Language => &LANGUAGE_COLUMNS,
             Self::Range => &RANGE_COLUMNS,
             Self::Information(relation) => relation.columns(),
+            Self::Monitoring(relation) => relation.columns(),
             Self::SqlServer(relation) => relation.columns(),
             Self::Oracle(relation) => relation.columns(),
         }

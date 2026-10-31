@@ -1378,6 +1378,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::pg_catalog::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::pg_catalog::monitoring_function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::ranges::function(name, &values) {
             return result;
         }
