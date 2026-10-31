@@ -692,10 +692,10 @@ fn a_last_page_that_names_a_next_page_or_holds_bytes_past_the_value_is_refused()
 fn a_chain_leading_to_a_page_of_another_type_or_layout_is_refused() {
     let (fs, model) = damaged(|cache| {
         let chain = chain_of(cache, b"a");
-        let mut page = cache.write(chain[3]).unwrap();
+        let mut page = cache.write(chain[0]).unwrap();
         let header = page.header();
         page.set_header(PageHeader {
-            layout: 2,
+            layout: overflow::COMPRESSED_LAYOUT + 1,
             ..header
         })
         .unwrap();
@@ -705,6 +705,22 @@ fn a_chain_leading_to_a_page_of_another_type_or_layout_is_refused() {
         &model,
         b"a",
         corrupt_overflow("the page has an unknown layout"),
+    );
+    let (fs, model) = damaged(|cache| {
+        let chain = chain_of(cache, b"a");
+        let mut page = cache.write(chain[3]).unwrap();
+        let header = page.header();
+        page.set_header(PageHeader {
+            layout: overflow::COMPRESSED_LAYOUT,
+            ..header
+        })
+        .unwrap();
+    });
+    assert_refused(
+        &fs,
+        &model,
+        b"a",
+        corrupt_overflow("the page's layout differs from its chain's"),
     );
     let (fs, model) = damaged(|cache| {
         let chain = chain_of(cache, b"a");

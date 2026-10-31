@@ -442,6 +442,6 @@ fn a_connection_reads_oracle_sql_after_set_eggdb_dialect_and_keeps_its_transacti
         rows(&client.batch("SELECT COUNT(*) AS n FROM emp")),
         vec![vec![Some("1".to_owned())]]
     );
-    let back = client.batch("SET eggdb.dialect = sqlserver\nSELECT TOP 1 name FROM emp");
+    let back = client.batch("SET eggdb.dialect = sqlserver;\nSELECT TOP 1 name FROM emp");
     assert_eq!(rows(&back), vec![vec![Some("Ada".to_owned())]], "{back:?}");
 }

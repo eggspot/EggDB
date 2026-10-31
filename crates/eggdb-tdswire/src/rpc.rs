@@ -840,7 +840,7 @@ mod tests {
                 parameter("", 0, &nvarchar("SELECT @p1")),
                 parameter("", 0, &nvarchar("@p1 int")),
                 parameter("@p1", 1, &[0x26, 4, 4, 0xFE, 0xFF, 0xFF, 0xFF]),
-                parameter("@p2", 0, &[0x6A, 5, 5, 2, 0, 0xE2, 0x04, 0, 0]),
+                parameter("@p2", 0, &[0x6A, 5, 5, 2, 5, 0, 0xE2, 0x04, 0, 0]),
                 parameter("@p3", 0, &[0x26, 8, 0]),
                 parameter("@p4", 0, &plp),
                 parameter("@p5", 0, &[0x6F, 8, 8, 0xAC, 0x8E, 0, 0, 0x2C, 0x01, 0, 0]),

@@ -50,8 +50,25 @@ fn members_without(node: &Node, left_out: &[&str]) -> Vec<(String, String)> {
     members
         .iter()
         .filter(|(name, _)| !left_out.contains(&name.as_str()))
-        .map(|(name, value)| (name.clone(), format!("{:?}", value.value)))
+        .map(|(name, value)| (name.clone(), without_positions(value)))
         .collect()
+}
+
+fn without_positions(node: &Node) -> String {
+    match &node.value {
+        Json::Array(items) => {
+            let items: Vec<String> = items.iter().map(without_positions).collect();
+            format!("[{}]", items.join(","))
+        }
+        Json::Object(members) => {
+            let members: Vec<String> = members
+                .iter()
+                .map(|(name, value)| format!("{name:?}:{}", without_positions(value)))
+                .collect();
+            format!("{{{}}}", members.join(","))
+        }
+        other => format!("{other:?}"),
+    }
 }
 
 fn names(node: &Node) -> Vec<String> {
@@ -252,6 +269,8 @@ fn import_csv_dry_run_loads_into_a_copy_and_reports_the_rows() {
         "people (name)",
         "--header",
         "--dry-run",
+        "--format",
+        "text",
     ]);
     assert_eq!(
         succeeded(&as_text),

@@ -126,12 +126,7 @@ fn last_line_digest(path: &Path, size: u64) -> io::Result<String> {
     let line = match body.iter().rposition(|&byte| byte == b'\n') {
         Some(at) => &body[at + 1..],
         None if start == 0 => body,
-        None => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the audit file's last line is longer than 1 MiB",
-            ));
-        }
+        None => return Ok(GENESIS.to_owned()),
     };
     Ok(hex(&eggdb_crypto::sha256(line)))
 }

@@ -1315,13 +1315,20 @@ pub(crate) fn insert(
                 }
             }
             Some(conflict) => match (&insert.on_duplicate, &updates) {
-                (OnDuplicate::Ignore, _) => warnings.push(Warning {
-                    level: "Warning",
-                    code: 1062,
-                    message: crate::mysql_errors::translate(conflict.error(&table, &row), "", "")
+                (OnDuplicate::Ignore, _) => {
+                    warnings.push(Warning {
+                        level: "Warning",
+                        code: 1062,
+                        message: crate::mysql_errors::translate(
+                            conflict.error(&table, &row),
+                            "",
+                            "",
+                        )
                         .message()
                         .to_owned(),
-                }),
+                    });
+                    continue;
+                }
                 (OnDuplicate::Replace, _) => {
                     let mut conflict = Some(conflict);
                     while let Some(found) = conflict {
@@ -1350,8 +1357,16 @@ pub(crate) fn insert(
                         existing_key: &conflict.row_key,
                     };
                     let fired = update_firing.as_mut().map(|firing| (firing, &mut *tables));
-                    affected += stored.update_existing(writer, scope, upsert, fired)?;
+                    let outcome = stored.update_existing(writer, scope, upsert, fired)?;
                     stored.forget_generated_ids();
+                    affected += outcome.affected_rows();
+                    let Some(updated) = outcome.into_row() else {
+                        continue;
+                    };
+                    if let Some(projection) = &returning {
+                        result_rows.push(projection.project(&updated)?);
+                    }
+                    continue;
                 }
                 _ => return Err(conflict.error(&table, &row)),
             },
@@ -1388,6 +1403,31 @@ pub(crate) fn insert(
     result.last_insert_rowid = last_rowid;
     result.last_identity_value = last_identity;
     Ok(result)
+}
+
+enum UpsertOutcome {
+    Skipped,
+    Unchanged(Vec<Value>),
+    Changed(Vec<Value>),
+}
+
+impl UpsertOutcome {
+    fn affected_rows(&self) -> usize {
+        let counts_twice = constraints::current_dialect() != Dialect::PostgreSql;
+        match self {
+            Self::Skipped => 0,
+            Self::Unchanged(_) if counts_twice => 0,
+            Self::Changed(_) if counts_twice => 2,
+            Self::Unchanged(_) | Self::Changed(_) => 1,
+        }
+    }
+
+    fn into_row(self) -> Option<Vec<Value>> {
+        match self {
+            Self::Skipped => None,
+            Self::Unchanged(row) | Self::Changed(row) => Some(row),
+        }
+    }
 }
 
 fn check_generated_always(
@@ -1759,7 +1799,7 @@ impl<'a> StoredRows<'a> {
         scope: Scope<'_>,
         upsert: Upsert<'_>,
         mut firing: Option<(&mut Firing, &mut TableCache)>,
-    ) -> SqlResult<usize> {
+    ) -> SqlResult<UpsertOutcome> {
         let Upsert {
             updates,
             inserted,
@@ -1793,7 +1833,7 @@ impl<'a> StoredRows<'a> {
                 Some(&mut combined),
             )? == RowOutcome::Skip
         {
-            return Ok(0);
+            return Ok(UpsertOutcome::Skipped);
         }
         if combined == existing {
             if let Some((firing, tables)) = firing {
@@ -1804,7 +1844,7 @@ impl<'a> StoredRows<'a> {
                     Some(combined.as_slice()),
                 )?;
             }
-            return Ok(0);
+            return Ok(UpsertOutcome::Unchanged(combined));
         }
         check_not_null(table, &combined)?;
         if let Some(checks) = self.checks {
@@ -1850,7 +1890,7 @@ impl<'a> StoredRows<'a> {
                 Some(combined.as_slice()),
             )?;
         }
-        Ok(2)
+        Ok(UpsertOutcome::Changed(combined))
     }
 
     pub(crate) fn insert(

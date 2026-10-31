@@ -169,7 +169,7 @@ fn a_whole_file_export_carries_its_collections_into_an_import() {
         "s:1",
         "{\"user\":1}",
     ]);
-    ok(&["put", &file, "-C", "sessions", "0x00ff", "0xdead"]);
+    ok(&["put", &file, "-C", "sessions", "0x00ff", "0xbeef"]);
     let export = ok(&["export", &file]);
     let text = stdout(&export);
     let lines: Vec<&str> = text.lines().collect();
@@ -179,7 +179,7 @@ fn a_whole_file_export_carries_its_collections_into_an_import() {
         [
             "{\"key\":\"user:1\",\"value\":\"Ada\"}",
             "{\"collection\":\"cache\"}",
-            "{\"collection\":\"sessions\",\"key_hex\":\"00ff\",\"value_hex\":\"dead\"}",
+            "{\"collection\":\"sessions\",\"key_hex\":\"00ff\",\"value_hex\":\"beef\"}",
             "{\"collection\":\"sessions\",\"key\":\"s:1\",\"value\":\"{\\\"user\\\":1}\"}",
             "{\"entries\":3}",
         ]

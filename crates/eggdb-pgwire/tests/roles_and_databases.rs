@@ -96,7 +96,9 @@ fn notifications_reach_listeners_at_commit_and_while_they_are_idle() {
     let mut server = TestServer::start(8);
     let (mut listener, _) = Client::login(server.address);
     let (mut sender, _) = Client::login(server.address);
-    assert_eq!(tags(&listener.query("LISTEN jobs")), "LISTEN");
+    let listening = listener.query("LISTEN jobs");
+    assert_eq!(tags(&listening), "CZ");
+    assert_eq!(listening[0].text(), "LISTEN");
     let replies = sender.query("BEGIN; NOTIFY jobs, 'one'; SELECT pg_notify('jobs', 'two')");
     assert_eq!(error_code(&replies), None, "{}", tags(&replies));
     let early: Vec<_> = listener

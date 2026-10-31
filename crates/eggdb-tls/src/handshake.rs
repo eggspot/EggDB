@@ -1115,11 +1115,20 @@ mod tests {
     }
 
     #[test]
-    fn every_truncation_of_a_client_hello_is_an_error() {
+    fn every_truncation_of_a_client_hello_is_an_error_except_the_one_ending_before_its_extensions()
+    {
         let message = sample_client_hello().encode();
         let body = message_body(&message);
+        let mut bare = sample_client_hello();
+        bare.extensions.clear();
+        let extensions_start = message_body(&bare.encode()).len() - 2;
         for cut in 0..body.len() {
-            assert!(ClientHello::decode(&body[..cut]).is_err(), "cut at {cut}");
+            let decoded = ClientHello::decode(&body[..cut]);
+            if cut == extensions_start {
+                assert!(decoded.unwrap().extensions.is_empty(), "cut at {cut}");
+            } else {
+                assert!(decoded.is_err(), "cut at {cut}");
+            }
         }
     }
 

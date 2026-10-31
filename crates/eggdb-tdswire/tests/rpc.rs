@@ -425,7 +425,8 @@ fn transaction_manager_requests_begin_commit_and_roll_back_with_their_descriptor
     let saved = client.transaction(9, &[1, b's', 0]);
     assert!(errors(&saved).is_empty(), "{saved:?}");
     let to_save_point = client.transaction(8, &[1, b's', 0, 0]);
-    assert_eq!(errors(&to_save_point)[0].0, 40517);
+    assert!(errors(&to_save_point).is_empty(), "{to_save_point:?}");
+    assert!(environment_changes(&to_save_point).is_empty());
     let rolled_back_whole = client.transaction(8, &[0, 0]);
     assert_eq!(environment_changes(&rolled_back_whole), vec![10]);
     let distributed = client.transaction(1, &[]);

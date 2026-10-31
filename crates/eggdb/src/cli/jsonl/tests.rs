@@ -507,7 +507,7 @@ fn version_2_tags_entries_with_their_collection_and_keeps_empty_collections() {
     write_entry(&mut out, b"user:1", b"Ada").unwrap();
     write_collection_line(&mut out, "cache").unwrap();
     write_entry_in(&mut out, Some("sessions"), b"s:1", b"{\"user\":1}").unwrap();
-    write_entry_in(&mut out, Some("sessions"), &[0x00, 0xff], &[0xde, 0xad]).unwrap();
+    write_entry_in(&mut out, Some("sessions"), &[0x00, 0xff], &[0xbe, 0xef]).unwrap();
     write_trailer(&mut out, 3).unwrap();
     assert_eq!(
         String::from_utf8(out.clone()).unwrap(),
@@ -515,7 +515,7 @@ fn version_2_tags_entries_with_their_collection_and_keeps_empty_collections() {
          {\"key\":\"user:1\",\"value\":\"Ada\"}\n\
          {\"collection\":\"cache\"}\n\
          {\"collection\":\"sessions\",\"key\":\"s:1\",\"value\":\"{\\\"user\\\":1}\"}\n\
-         {\"collection\":\"sessions\",\"key_hex\":\"00ff\",\"value_hex\":\"dead\"}\n\
+         {\"collection\":\"sessions\",\"key_hex\":\"00ff\",\"value_hex\":\"beef\"}\n\
          {\"entries\":3}\n"
     );
     let mut input = &out[..];

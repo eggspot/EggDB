@@ -478,6 +478,16 @@ SELECT COUNT(*) FROM @k",
 }
 
 #[test]
+fn a_batch_of_more_statements_than_one_statement_may_hold_selects_runs_each() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    let text: String = (0..1100).map(|n| format!("SELECT {n}\n")).collect();
+    let steps = batch(&mut session, &text);
+    assert!(errors(&steps).is_empty());
+    assert_eq!(last_rows(&steps), vec![vec![Value::Integer(1099)]]);
+}
+
+#[test]
 fn dynamic_sql_runs_in_its_own_scope_with_parameters_and_outputs() {
     let store = MemoryStore::default();
     let mut session = session(&store);

@@ -101,6 +101,8 @@ fn the_login_and_queries_run_over_tls_after_an_ssl_request() {
     flags |= CLIENT_SSL;
     response[..4].copy_from_slice(&flags.to_le_bytes());
     write_packet(&mut tls, 2, &response);
+    let (_, fast) = read_packet(&mut tls).expect("fast auth");
+    assert_eq!(fast, [0x01, 0x03]);
     let (_, ok) = read_packet(&mut tls).expect("login answer");
     assert_eq!(ok[0], 0x00, "login over TLS succeeds: {ok:?}");
 

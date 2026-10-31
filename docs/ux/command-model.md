@@ -62,6 +62,7 @@ file holds only EggDB's own tables, and the registry test checks them against th
 | `serve` | kept | shipped |
 | `shell` | kept | shipped |
 | `restore` | kept | shipped; the core verb's "bring back" meaning, from a dump |
+| `follow` | kept | the implied noun's own verb: the file kept in step with a running database (D162) |
 | `mcp` | kept | shipped |
 | `audit` | kept | shipped |
 | `help` | kept | shipped |
@@ -109,6 +110,7 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `serve` | destroy | text, json | records: where it listens, then that it stopped | |
 | `shell` | destroy | none | none: its own `--mode table\|expanded\|csv` | |
 | `restore` | change | text, json | one object, the restore report | |
+| `follow` | change | text, json | records: the copy, each applied source transaction, then the summary at stop | |
 | `collection list` | read | text, json | one object, `file` and `collections` | |
 | `collection add` | change | text, json | one object, `file`, `collection`, `added` | |
 | `collection delete` | destroy | text, json | one object, `file`, `collection`, `deleted` | |

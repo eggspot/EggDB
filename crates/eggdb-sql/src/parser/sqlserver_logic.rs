@@ -182,6 +182,7 @@ impl Parser<'_> {
                 _ => {}
             }
         }
+        self.queries = 0;
         let at = self.resume_point();
         let first_word = self.first_word_upper();
         let chooses = if self.literal_rows().is_none() {

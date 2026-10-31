@@ -140,20 +140,21 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         after: Option<&[u8]>,
         visit: &mut RowVisitor<'_>,
     ) -> SqlResult<()> {
-        let RelationKind::Table(table) = &relation.kind else {
+        let RelationKind::Table(_) = &relation.kind else {
             return Err(SqlError::new(
                 SqlState::WRONG_OBJECT_TYPE,
                 format!("\"{}\" is a view, which has no stored rows", relation.name),
             ));
         };
-        let stored_name = table.name.clone();
+        let stored_name = crate::schemas::qualified(&relation.schema, &relation.name);
+        let shown_name = relation.sql_name();
         self.read(|reader, tables| {
             let Some(crate::execute::Relation::Table(definition)) =
                 tables.relation(reader, &stored_name)?
             else {
                 return Err(SqlError::new(
                     SqlState::UNDEFINED_TABLE,
-                    format!("relation \"{stored_name}\" does not exist"),
+                    format!("relation \"{shown_name}\" does not exist"),
                 ));
             };
             let prefix = rows_prefix(definition.id);
@@ -320,5 +321,27 @@ mod tests {
             .read_stored_rows(&view, None, &mut |_, _| Ok(true))
             .unwrap_err();
         assert_eq!(refused.state(), SqlState::WRONG_OBJECT_TYPE);
+    }
+
+    #[test]
+    fn stored_rows_of_a_table_in_another_schema_are_read_by_its_schema_and_name() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        session
+            .execute(
+                "CREATE SCHEMA sales; CREATE TABLE sales.orders (id integer PRIMARY KEY); \
+                 INSERT INTO sales.orders VALUES (2), (1)",
+                &mut |_| {},
+            )
+            .unwrap();
+        let orders = find_relation(session.relations().unwrap(), "sales.orders").unwrap();
+        let mut ids = Vec::new();
+        session
+            .read_stored_rows(&orders, None, &mut |_, values| {
+                ids.push(values[0].clone());
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(ids, vec![Value::Integer(1), Value::Integer(2)]);
     }
 }

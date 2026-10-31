@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&png[12..16], b"IHDR");
         assert_eq!(&png[16..20], &300u32.to_be_bytes());
-        assert!(png.len() > 300 * 301 * 3);
+        assert!(png.len() > 300 * (1 + 300 * 3));
         assert!(png.ends_with(&[0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]));
     }
 }

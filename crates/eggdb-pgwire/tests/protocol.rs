@@ -346,6 +346,7 @@ ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES shop.customers(id);
 REVOKE USAGE ON SCHEMA public FROM PUBLIC;
 GRANT ALL ON SCHEMA public TO PUBLIC;
+CREATE ROLE reader;
 GRANT SELECT ON TABLE shop.order_totals TO reader;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA shop GRANT SELECT ON TABLES TO reader;
 ";

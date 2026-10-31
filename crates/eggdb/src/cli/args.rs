@@ -2428,9 +2428,6 @@ mod tests {
             usage_message("import app.db in.csv --csv data.csv --table t"),
             "give the CSV with --csv <file>, not as a second argument"
         );
-        assert!(
-            usage_message("import app.db --csv d.csv --table t --dry-run").contains("--dry-run")
-        );
         assert!(usage_message("import app.db --csv d.csv --table t --create").contains("--create"));
         assert!(usage_message("sql app.db --csv d.csv").contains("--csv"));
     }

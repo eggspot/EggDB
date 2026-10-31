@@ -615,7 +615,8 @@ impl<'t> Parser<'t> {
     pub(super) fn sqlite_upsert(&mut self) -> SqlResult<OnDuplicate> {
         self.expect_word("on")?;
         self.expect_word("conflict")?;
-        if self.peek_kind() == &TokenKind::LeftParen {
+        let targeted = self.peek_kind() == &TokenKind::LeftParen;
+        if targeted {
             self.name_list()?;
             if self.is_word("where") {
                 return Err(self.not_supported("ON CONFLICT (...) WHERE"));
@@ -625,7 +626,16 @@ impl<'t> Parser<'t> {
         if self.take_word("nothing") {
             return Ok(OnDuplicate::Ignore);
         }
+        let update_position = self.position();
         self.expect_word("update")?;
+        if self.postgresql() && !targeted {
+            return Err(SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                "ON CONFLICT DO UPDATE requires inference specification or constraint name",
+            )
+            .with_hint("For example, ON CONFLICT (column_name).")
+            .at(update_position));
+        }
         self.expect_word("set")?;
         let mut assignments = Vec::new();
         loop {

@@ -18,7 +18,7 @@ fn request(method: &str, target: &str, body: &str) -> Request {
         method: method.to_owned(),
         path,
         query,
-        headers: vec![("Authorization".to_owned(), format!("Basic {credentials}"))],
+        headers: vec![("authorization".to_owned(), format!("Basic {credentials}"))],
         body: body.as_bytes().to_vec(),
     }
 }
@@ -59,7 +59,7 @@ fn a_request_without_credentials_is_refused() {
     );
     let mut wrong = request("GET", "/", "");
     wrong.headers = vec![(
-        "Authorization".to_owned(),
+        "authorization".to_owned(),
         format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:nope")),
     )];
     assert_eq!(api.answer(&wrong).status, 401);

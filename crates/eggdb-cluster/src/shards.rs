@@ -61,13 +61,21 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+fn mixed_high_bits(mut hash: u64) -> u64 {
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^ (hash >> 33)
+}
+
 /// The shard that holds `key` under `strategy`, or `None` when the key does not fit it (a time
 /// key shorter than 8 bytes, or a region the map does not know).
 pub fn route(strategy: &Strategy, key: &[u8]) -> Option<ShardId> {
     match strategy {
         Strategy::Hash { shards } => {
             let shards = u64::from((*shards).max(1));
-            Some(((fnv1a(key) as u128 * shards as u128) >> 64) as ShardId)
+            Some(((mixed_high_bits(fnv1a(key)) as u128 * shards as u128) >> 64) as ShardId)
         }
         Strategy::Range { bounds } => {
             Some(bounds.partition_point(|bound| bound.as_slice() <= key) as ShardId)

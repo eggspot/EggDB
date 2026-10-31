@@ -1337,6 +1337,11 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   as it was before the statement, then inserts the rows in the query's order through the path of
   `INSERT ... VALUES` (conversions, defaults, identity, constraints, `RETURNING`), in every
   dialect (D138).
+- `INSERT ... ON CONFLICT [(columns)] DO NOTHING | DO UPDATE SET column = expr, ...` (`EXCLUDED`
+  names the row that was proposed; `DO UPDATE` needs the columns, as in PostgreSQL). `RETURNING`
+  gives the inserted and the updated rows, not the skipped ones, and each counts once in the
+  tag. Not yet: `ON CONSTRAINT name`, `WHERE` on the target or the update, and the conflict is
+  any unique key's, not only the one the columns name.
 - `VALUES (expr, ...), (expr, ...) [ORDER BY ...] [LIMIT ...] [OFFSET ...]` as a statement, an
   operand of `UNION`, `INTERSECT` and `EXCEPT`, a subquery (`x IN (VALUES (1), (2))`), a `WITH`
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,

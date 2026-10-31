@@ -79,7 +79,7 @@ const fn verb(name: &'static str, means: &'static str, usual_effect: Effect) -> 
 pub const KEPT_NAMES: &[&str] = &[
     "create", "put", "get", "del", "scan", "ttl", "expire", "persist", "incr", "decr", "cas",
     "check", "stats", "backup", "compact", "ui", "export", "import", "sql", "serve", "shell",
-    "restore", "mcp", "audit", "help", "version",
+    "restore", "follow", "mcp", "audit", "help", "version",
 ];
 
 /// The nouns of `eggdb`'s `<noun> <verb>` commands: `collection` (D139), `table` and `row`

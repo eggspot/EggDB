@@ -2270,6 +2270,49 @@ fn coalesce_has_the_common_type_of_its_arguments() {
 }
 
 #[test]
+fn postgresql_upserts_skip_or_update_the_conflicting_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE stock (sku text PRIMARY KEY, units integer NOT NULL)",
+    );
+    last(&mut session, "INSERT INTO stock VALUES ('egg', 1)");
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO stock VALUES ('egg', 5) ON CONFLICT DO NOTHING"
+        ),
+        "INSERT 0 0"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO stock VALUES ('egg', 5), ('jam', 1) ON CONFLICT DO NOTHING RETURNING sku"
+        ),
+        "sku\njam\nINSERT 0 1"
+    );
+    last(&mut session, "DELETE FROM stock WHERE sku = 'jam'");
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO stock AS s VALUES ('egg', 2), ('milk', 3) \
+             ON CONFLICT (sku) DO UPDATE SET units = s.units + EXCLUDED.units RETURNING units",
+        ),
+        "units\n3\n3\nINSERT 0 2"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT sku, units FROM stock ORDER BY sku"),
+        "sku|units\negg|3\nmilk|3\nSELECT 2"
+    );
+    let untargeted = fails(
+        &mut session,
+        "INSERT INTO stock VALUES ('egg', 1) ON CONFLICT DO UPDATE SET units = 0",
+    );
+    assert_eq!(untargeted.state(), crate::SqlState::SYNTAX_ERROR);
+}
+
+#[test]
 fn hostile_sqlite_input_returns_errors_and_never_panics() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);

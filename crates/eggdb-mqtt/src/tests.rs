@@ -44,8 +44,11 @@ fn publish(topic: &str, payload: &str, qos: u8, retain: bool) -> Vec<u8> {
     encode(3, (qos << 1) | u8::from(retain), &body)
 }
 
-fn subscribe(filter: &str, qos: u8) -> Vec<u8> {
+fn subscribe(version: u8, filter: &str, qos: u8) -> Vec<u8> {
     let mut body = 1u16.to_be_bytes().to_vec();
+    if version >= 5 {
+        body.push(0);
+    }
     put_string(&mut body, filter.as_bytes());
     body.push(qos);
     encode(8, 2, &body)
@@ -85,7 +88,7 @@ fn clients_connect_publish_and_receive_retained_messages() {
     assert_eq!(kinds, [2, 4, 5, 7, 13]);
     assert_eq!(answers[0].1, [0, 0]);
     let mut input = connect(5, "secret", None);
-    input.extend(subscribe("home/+/temp", 1));
+    input.extend(subscribe(5, "home/+/temp", 1));
     input.extend(encode(14, 0, &[]));
     let (_, answers) = session(&broker, 2, input);
     let kinds: Vec<u8> = answers.iter().map(|(kind, _)| *kind).collect();
@@ -106,7 +109,7 @@ fn wrong_passwords_are_refused_and_wills_are_published_on_abnormal_ends() {
     {
         let shared: Arc<Mutex<dyn Write + Send>> = watcher_output.clone();
         let mut input = connect(4, "secret", None);
-        input.extend(subscribe("status/#", 0));
+        input.extend(subscribe(4, "status/#", 0));
         serve_stream(
             &broker,
             &config(),
@@ -122,7 +125,7 @@ fn wrong_passwords_are_refused_and_wills_are_published_on_abnormal_ends() {
     session(&broker, 4, retained_will);
     let (_, answers) = session(&broker, 5, {
         let mut input = connect(4, "secret", None);
-        input.extend(subscribe("status/#", 0));
+        input.extend(subscribe(4, "status/#", 0));
         input
     });
     assert!(
@@ -148,7 +151,7 @@ fn hostile_bytes_end_the_session_without_panicking() {
     let keyspace = MemoryKeyspace::default();
     let broker = Broker::new(&keyspace);
     let mut valid = connect(5, "secret", Some(("w", "x")));
-    valid.extend(subscribe("a/#", 1));
+    valid.extend(subscribe(5, "a/#", 1));
     valid.extend(publish("a/b", "payload", 1, true));
     for cut in 0..valid.len() {
         session(&broker, 9, valid[..cut].to_vec());

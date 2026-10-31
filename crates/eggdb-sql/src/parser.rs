@@ -2728,7 +2728,7 @@ impl<'t> Parser<'t> {
         if self.mysql() && self.is_word("on") {
             on_duplicate = self.on_duplicate_key_update(on_duplicate)?;
         }
-        if self.sqlite() && self.is_word("on") {
+        if (self.sqlite() || self.postgresql()) && self.is_word("on") {
             on_duplicate = self.sqlite_upsert()?;
         }
         if self.is_word("on") {

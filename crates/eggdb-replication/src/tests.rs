@@ -159,7 +159,7 @@ impl Rng {
 #[test]
 fn simulated_partitions_never_lose_a_synchronous_commit_on_failover() {
     for seed in 1..=40u64 {
-        let mut rng = Rng(seed * 0x9e37_79b9_7f4a_7c15);
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let mut primary = Primary::new(
             1,
             0,

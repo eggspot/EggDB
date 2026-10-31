@@ -149,6 +149,7 @@ fn a_copy_of_an_encrypted_file_stays_encrypted_with_the_same_key() {
     assert!(!holds(&raw_contents(&fs, "copy"), SECRET));
     let copy = reopened(&fs, "copy", Some(&KEY)).unwrap();
     assert!(read_secret(&copy).unwrap().starts_with(SECRET));
+    drop(copy);
     assert!(matches!(
         reopened(&fs, "copy", Some(&[3; 32])),
         Err(StorageError::WrongKey)
