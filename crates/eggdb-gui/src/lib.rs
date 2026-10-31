@@ -6,7 +6,10 @@
 
 mod canvas;
 mod color;
+pub mod editor;
 mod font;
+pub mod grid;
+pub mod highlight;
 pub mod main_window;
 pub mod png;
 mod system_faces;

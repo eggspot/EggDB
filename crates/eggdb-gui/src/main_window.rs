@@ -133,15 +133,6 @@ enum Button {
     Ghost,
 }
 
-fn is_keyword(word: &str) -> bool {
-    matches!(
-        word.to_ascii_uppercase().as_str(),
-        "SELECT" | "FROM" | "WHERE" | "ORDER" | "BY" | "GROUP" | "JOIN" | "ON" | "AS" | "AND"
-            | "OR" | "NOT" | "INSERT" | "INTO" | "VALUES" | "UPDATE" | "SET" | "DELETE" | "LIMIT"
-            | "CREATE" | "TABLE" | "NULL" | "IS" | "IN" | "DESC" | "ASC"
-    )
-}
-
 /// Draws `window` into a new 1280 × 800 canvas in `theme`, as `docs/ux/gui.md` lays it out.
 pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
     let mut canvas = Canvas::new(WIDTH, HEIGHT, theme.bg0);
@@ -286,34 +277,35 @@ fn editor(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let theme = paint.theme;
     let faces = paint.faces;
     paint.rect(260.0, 80.0, 1020.0, 300.0, theme.bg0);
-    paint.rect(308.0, 88.0, 972.0, 20.0, theme.bg1);
-    paint.text_right(faces.mono, "1", 296.0, 88.0, CODE, theme.text_secondary);
-    let mut pen = 320.0;
-    let mut word = String::new();
-    let flush = |paint: &mut Painter<'_, '_>, word: &mut String, pen: &mut f32| {
-        if word.is_empty() {
-            return;
+    let lines: Vec<&str> = window.sql.split('\n').collect();
+    let caret_line = lines.len() - 1;
+    let mut in_comment = false;
+    let mut caret_x = 320.0;
+    for (number, line) in lines.iter().enumerate().take(14) {
+        let top = 88.0 + 20.0 * number as f32;
+        if number == caret_line {
+            paint.rect(308.0, top, 972.0, 20.0, theme.bg1);
         }
-        let color = if is_keyword(word) {
-            theme.syntax_keyword
-        } else if word.chars().all(|character| character.is_ascii_digit()) {
-            theme.syntax_number
-        } else {
-            theme.text_primary
-        };
-        *pen = paint.text(faces.mono, word, *pen, 88.0, CODE, color);
-        word.clear();
-    };
-    for character in window.sql.chars() {
-        if character.is_alphanumeric() || character == '_' {
-            word.push(character);
-        } else {
-            flush(paint, &mut word, &mut pen);
-            pen = paint.text(faces.mono, &character.to_string(), pen, 88.0, CODE, theme.text_primary);
+        let number_color = if number == caret_line { theme.text_primary } else { theme.text_secondary };
+        let number_color = if lines.len() == 1 { theme.text_secondary } else { number_color };
+        paint.text_right(faces.mono, &(number + 1).to_string(), 296.0, top, CODE, number_color);
+        let mut pen = 320.0;
+        for (range, kind) in crate::highlight::tokens(line, &mut in_comment) {
+            let color = match kind {
+                crate::highlight::TokenKind::Keyword => theme.syntax_keyword,
+                crate::highlight::TokenKind::String => theme.syntax_string,
+                crate::highlight::TokenKind::Number => theme.syntax_number,
+                crate::highlight::TokenKind::Comment => theme.syntax_comment,
+                crate::highlight::TokenKind::Plain => theme.text_primary,
+            };
+            pen = paint.text(faces.mono, &line[range], pen, top, CODE, color);
+        }
+        if number == caret_line {
+            caret_x = pen;
         }
     }
-    flush(paint, &mut word, &mut pen);
-    paint.rect(pen.round(), 88.0, 2.0, 20.0, theme.accent);
+    let caret_top = 88.0 + 20.0 * caret_line.min(13) as f32;
+    paint.rect(caret_x.round(), caret_top, 2.0, 20.0, theme.accent);
     paint.rect(260.0, 380.0, 1020.0, 6.0, theme.bg2);
     paint.rect(260.0, 382.0, 1020.0, 1.0, theme.border);
 }
