@@ -163,7 +163,7 @@ jobs:
       - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers, the command registry and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-commands -p eggdb-mcp -p eggdb-tdswire -p eggdb --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-tls -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-commands -p eggdb-mcp -p eggdb-tdswire -p eggdb --all-targets --target "$target" -- -D warnings
           done
 
   bench:
@@ -544,8 +544,55 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  tls-clients:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-tls-clients-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Get psql 17 (postgres:17 image), the mysql client and go-sqlcmd v1.10.0 (MIT), checked against its SHA-256 (test clients only, never shipped)
+        run: |
+          docker pull --quiet postgres:17
+          command -v mysql || { sudo apt-get update && sudo apt-get install -y mysql-client; }
+          mkdir -p "$RUNNER_TEMP/go-sqlcmd"
+          cd "$RUNNER_TEMP/go-sqlcmd"
+          curl --retry 3 -fsSL -o sqlcmd-linux-amd64.tar.bz2 https://github.com/microsoft/go-sqlcmd/releases/download/v1.10.0/sqlcmd-linux-amd64.tar.bz2
+          echo "92516d98c63d99b0994de5b61350c91f6915f9b76f139a59039fbcb225c2e987  sqlcmd-linux-amd64.tar.bz2" | sha256sum -c -
+          tar -xjf sqlcmd-linux-amd64.tar.bz2
+          tool=$(find "$PWD" -maxdepth 2 -type f -name sqlcmd | head -n 1)
+          [ -n "$tool" ] || { echo "::error::no sqlcmd in the go-sqlcmd archive"; exit 1; }
+          echo "SQLCMD=$tool" >> "$GITHUB_ENV"
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Connect psql, mysql and sqlcmd to eggdb serve over TLS
+        run: |
+          mkdir -p "$RUNNER_TEMP/tls-clients"
+          PSQL="docker run --rm -i --network host -v $RUNNER_TEMP/tls-clients:$RUNNER_TEMP/tls-clients -e PGPASSWORD postgres:17 psql" \
+            scripts/tls-clients/check.sh target/debug/eggdb "$RUNNER_TEMP/tls-clients"
+      - name: Keep the server log and client outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tls-clients-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/tls-clients/*.out
+            ${{ runner.temp }}/tls-clients/*.err
+          retention-days: 7
+          if-no-files-found: ignore
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

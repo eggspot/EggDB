@@ -603,6 +603,44 @@ header as C++11, runs the program and then `examples/python/eggdb_ctypes.py`; CI
 `lint-and-test` (Linux) and `platforms` (macOS; the Python part on Windows), and the release
 workflow on the release libraries of the Linux and macOS targets its runners can load.
 
+## TLS (D161)
+
+- **Cryptography.** Every primitive in `eggdb-crypto` is checked against its standard's vectors
+  (FIPS 180-4, RFC 4231, RFC 5869, RFC 8439, FIPS 197 and the GCM specification, RFC 7748,
+  RFC 6979) and against Project Wycheproof's cases for AES-GCM, ChaCha20-Poly1305, X25519, P-256
+  ECDH and ECDSA, and RSA PKCS#1 v1.5 and PSS. The cases are kept in
+  `crates/eggdb-crypto/tests/data`.
+- **TLS 1.3 against RFC 8448.** `crates/eggdb-tls/tests/rfc8448.rs` checks every published value
+  of RFC 8448's "Simple 1-RTT Handshake": hellos decoded and re-encoded byte for byte, every
+  secret, key and IV, both Finished messages, the CertificateVerify signature, and every
+  protected record sealed and opened exactly.
+- **Handshakes over sockets.** `tests/handshake.rs` runs real TLS 1.3 and TLS 1.2 handshakes over
+  loopback TCP and covers:
+  - data in both directions;
+  - channel binding and exported keys agreeing on both sides;
+  - wrong names and unknown authorities refused, with the alert each side sees;
+  - ALPN;
+  - key updates;
+  - the version limits;
+  - garbage instead of a ClientHello.
+- **Hostile input.** `tests/hostile.rs` mutates every handshake decoder's input, the record layer's
+  and the handshake buffer's, and feeds a server mutated ClientHellos. None may panic.
+- **Protocols.** `crates/eggdb-pgwire/tests/tls.rs` covers SSLRequest, direct TLS with and without
+  ALPN, SCRAM-SHA-256-PLUS with a right and a wrong channel binding, and the downgrade check.
+  `crates/eggdb-mysqlwire/tests/tls.rs` covers the SSL request and a query over TLS.
+  `crates/eggdb-tdswire/tests/tls.rs` covers full encryption, login-only encryption, plaintext
+  from loopback, and TDS 8 strict.
+- **`eggdb serve`.** `crates/eggdb/tests/serve.rs` checks the option rules, and a self-signed
+  server on `0.0.0.0` whose printed fingerprint matches the certificate it serves.
+- **Real clients.** CI's `tls-clients` job runs `scripts/tls-clients/check.sh`, which connects
+  real clients to `eggdb serve` with a certificate from a test authority made by openssl:
+  - psql 17 with `sslmode=verify-full`, by SSLRequest and by direct TLS;
+  - the mysql client with `--ssl-mode=VERIFY_CA`;
+  - go-sqlcmd with `-N true` and `-N strict`;
+  - psql with `sslmode=require` against `--tls-self-signed`.
+- **Benchmarks.** `eggdb-bench` measures `tls.record_seal` (16 KiB records under AES-128-GCM and
+  ChaCha20-Poly1305) and `tls.handshake` (one TLS 1.3 handshake over loopback).
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.
