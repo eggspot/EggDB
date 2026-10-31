@@ -22,6 +22,7 @@ mod explain;
 mod mcp;
 mod restore;
 mod restore_aof;
+mod restore_mongodump;
 mod row;
 mod follow;
 mod follow_sql_server;

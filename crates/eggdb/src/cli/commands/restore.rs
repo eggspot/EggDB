@@ -152,6 +152,11 @@ impl Session<'_> {
         {
             return self.restore_aof(path);
         }
+        if let Some(path) = &path
+            && let Some(layout) = super::restore_mongodump::layout_of(path)
+        {
+            return self.restore_mongodump(path, layout);
+        }
         let mut file = None;
         let mut size = 0;
         if let Some(path) = &path {

@@ -469,3 +469,18 @@ commands and the ones that failed. Serve the result with `eggdb serve app.eggdb 
 For Redis 7's multi-part AOF, restore the incremental `.aof` files in order. RDB snapshots are
 not read yet: Redis does not publish a specification of the RDB format, so `BGREWRITEAOF` (or
 `appendonly yes`) in the old server is the way to get a file to restore.
+
+## From MongoDB: a `mongodump` directory
+
+`eggdb restore app.eggdb dump/` restores what `mongodump --out dump/` writes (D197): a
+directory per database holding, per collection, a `.bson` file of its documents and a
+`.metadata.json` file of its indexes. Point it at the whole dump, at one database's directory,
+or at one collection's `.bson` file (its database is the directory it sits in). Each collection
+is created, its documents inserted in batches (a document whose `_id` is already there is
+counted as failed, as `mongorestore` reports a duplicate key), and its index definitions
+recorded. The `admin`, `config` and `local` databases and `system.*` collections are left out.
+The report counts databases, collections, documents, failures and indexes. Serve the result
+with `eggdb serve app.eggdb --mongo-listen` and point `mongosh` or your driver at it.
+
+Not read yet: `mongodump --gzip` output (run `gunzip -r dump/` first), `--archive` files (dump
+to a directory instead), and unique indexes other than `_id`, which are reported as left out.

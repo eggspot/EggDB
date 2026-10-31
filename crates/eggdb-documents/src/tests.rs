@@ -273,3 +273,44 @@ fn indexes_are_recorded_and_listed() {
     assert_eq!(store.drop_indexes("app", "people", "name_1").unwrap(), 2);
     assert_eq!(store.drop_indexes("app", "people", "nope").unwrap_err().code, 27);
 }
+
+#[test]
+fn extended_json_reads_canonical_and_relaxed_forms() {
+    let parsed = crate::parse_extended_json(
+        r#"{"_id": {"$oid": "5f1b2c3d4e5f60718293a4b5"}, "n": 1, "big": {"$numberLong": "9007199254740993"}, "d": 2.5,
+            "when": {"$date": "2020-02-29T12:30:00.250Z"}, "old": {"$date": {"$numberLong": "-1000"}},
+            "bin": {"$binary": {"base64": "AQID", "subType": "04"}}, "re": {"$regularExpression": {"pattern": "^a", "options": "i"}},
+            "nested": {"list": [true, null, {"$numberDouble": "Infinity"}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(parsed.get("_id"), Some(&Bson::ObjectId([0x5f, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71, 0x82, 0x93, 0xa4, 0xb5])));
+    assert_eq!(parsed.get("n"), Some(&Bson::Int32(1)));
+    assert_eq!(parsed.get("big"), Some(&Bson::Int64(9_007_199_254_740_993)));
+    assert_eq!(parsed.get("when"), Some(&Bson::DateTime(1_582_979_400_250)));
+    assert_eq!(parsed.get("old"), Some(&Bson::DateTime(-1000)));
+    assert_eq!(parsed.get("bin"), Some(&Bson::Binary { subtype: 4, bytes: vec![1, 2, 3] }));
+    assert!(crate::parse_extended_json(r#"{"_id": {"$oid": "zz"}}"#).is_err());
+    assert!(crate::parse_extended_json("[1]").is_err());
+    assert!(crate::parse_extended_json(&"[".repeat(500)).is_err());
+}
+
+#[test]
+fn a_mongodump_collection_restores_with_its_indexes() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    let mut dump = Vec::new();
+    for n in 0..2_500 {
+        doc(vec![("_id", Bson::Int32(n)), ("name", text(&format!("user {n}")))]).write(&mut dump);
+    }
+    doc(vec![("_id", Bson::Int32(7))]).write(&mut dump);
+    let metadata = r#"{"indexes": [{"v": {"$numberInt": "2"}, "key": {"_id": {"$numberInt": "1"}}, "name": "_id_"},
+        {"v": 2, "key": {"name": 1}, "name": "name_1"}, {"v": 2, "key": {"email": 1}, "name": "email_1", "unique": true}],
+        "uuid": "0123", "collectionName": "users"}"#;
+    let restored = crate::restore_collection(&store, "app", "users", dump.as_slice(), Some(metadata)).unwrap();
+    assert_eq!((restored.documents, restored.failed, restored.indexes), (2_500, 1, 1));
+    assert!(restored.first_error.unwrap().contains("E11000"));
+    assert_eq!(restored.skipped_indexes.len(), 1);
+    let truncated = &dump[..dump.len() - 3];
+    assert!(crate::restore_collection(&store, "app", "broken", truncated, None).is_err());
+    assert!(crate::restore_collection(&store, "app", "hostile", [0xff, 0xff, 0xff, 0x7f].as_slice(), None).is_err());
+}
