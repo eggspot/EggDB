@@ -204,7 +204,8 @@ More tracks (D46), and any further missing capability is added here without aski
   embedding. Started: scheduled reports and alerts to webhooks through `eggdb_bi`
   (D238).
 - **ETL and ELT pipelines:** our own connectors, transformations, orchestration and change data
-  capture.
+  capture. Started: [connectors.md](connectors.md) and a compatibility job
+  running dbt against EggDB (D239).
 - **Big-data compatibility:** a Spark connector, an Iceberg REST catalog, federated SQL and Kafka
   Connect.
 

@@ -1,0 +1,5 @@
+name: eggdb_check
+version: "1.0"
+config-version: 2
+profile: eggdb
+model-paths: ["models"]

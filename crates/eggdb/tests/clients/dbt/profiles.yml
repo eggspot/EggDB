@@ -1,0 +1,13 @@
+eggdb:
+  target: local
+  outputs:
+    local:
+      type: postgres
+      host: 127.0.0.1
+      port: 55432
+      user: eggdb
+      password: "{{ env_var('EGGDB_PASSWORD') }}"
+      dbname: eggdb
+      schema: analytics
+      threads: 1
+      sslmode: disable

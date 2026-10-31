@@ -1312,6 +1312,49 @@ jobs:
           diff -u crates/eggdb-text/src/tables.rs "$RUNNER_TEMP/tables.rs"
           EGGDB_UNICODE_NORMALIZATION_TEST="$RUNNER_TEMP/ucd/NormalizationTest.txt" cargo test -p eggdb-text
 
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-compatibility-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Install dbt-postgres (test tool only, never shipped)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet dbt-postgres==1.8.2
+      - name: Run third-party tools against eggdb serve and report the matrix (D44, D239)
+        env:
+          EGGDB_PASSWORD: ci-compatibility
+        run: |
+          cargo build -p eggdb
+          target/debug/eggdb serve "$RUNNER_TEMP/compat.eggdb" --create --listen 127.0.0.1:55432 &
+          sleep 2
+          PGPASSWORD="$EGGDB_PASSWORD" psql "host=127.0.0.1 port=55432 user=eggdb dbname=eggdb sslmode=disable" \
+            -c "CREATE TABLE orders (id integer PRIMARY KEY, placed_on date NOT NULL, total numeric NOT NULL)" \
+            -c "INSERT INTO orders VALUES (1, '2026-10-30', 12.5), (2, '2026-10-30', 3), (3, '2026-10-31', 8)" || true
+          report() { echo "| $1 | $2 |" >> "$GITHUB_STEP_SUMMARY"; }
+          echo "| Tool | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          cd crates/eggdb/tests/clients/dbt
+          for step in debug run test; do
+            if "$RUNNER_TEMP/tools/bin/dbt" "$step" --profiles-dir . > "$RUNNER_TEMP/dbt-$step.log" 2>&1; then
+              report "dbt-postgres 1.8.2: dbt $step" "passes"
+            else
+              report "dbt-postgres 1.8.2: dbt $step" "fails"
+              tail -n 30 "$RUNNER_TEMP/dbt-$step.log"
+            fi
+          done
+
   check:
     needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode]
     if: always()
