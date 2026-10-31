@@ -658,8 +658,35 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  unix-vms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [freebsd, netbsd, omnios]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Test the platform layer, the storage engine and the embedded API natively in ${{ matrix.os }} (a VM through vmactions, MIT, test tooling only)
+        uses: vmactions/${{ matrix.os }}-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            case "${{ matrix.os }}" in
+              freebsd) pkg install -y curl bash ;;
+              netbsd) /usr/sbin/pkg_add curl bash ;;
+              omnios) pkg install curl gcc13 || true ;;
+            esac
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite]
+    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -641,6 +641,13 @@ workflow on the release libraries of the Linux and macOS targets its runners can
 - **Benchmarks.** `eggdb-bench` measures `tls.record_seal` (16 KiB records under AES-128-GCM and
   ChaCha20-Poly1305) and `tls.handshake` (one TLS 1.3 handshake over loopback).
 
+## Other Unix systems (part 4.M1-3)
+
+CI's `unix-vms` job runs the platform layer's, the storage engine's and the embedded API's tests
+natively in FreeBSD, NetBSD and OmniOS (illumos) virtual machines, with the pinned toolchain.
+The `cross` job checks that the rest builds for those targets and for Solaris. OpenBSD and
+DragonFly have no prebuilt Rust standard library (tier 3), so neither job covers them yet.
+
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
   opening and checking don't panic.
