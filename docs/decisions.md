@@ -232,3 +232,4 @@ its full title with its status.
 - [D205](decisions/D205.md) AI starts local and model-free: `eggdb-ai` hashed embeddings (`eggdb_embed`), reciprocal rank fusion (`rrf_score`) and chunking; ONNX models and opt-in remote providers come later
 - [D206](decisions/D206.md) Property graphs in our own `eggdb-graph` on the shared keyspace (`graph0`), a Cypher subset from openCypher with Neo4j status codes, algorithms as a library; SQL/PGQ and graph views over tables next
 - [D207](decisions/D207.md) Bolt 5.0 and 4.4 in our own `eggdb-bolt` (`eggdb serve --bolt-listen`); statements commit one at a time, so ROLLBACK after a write is refused; routing refused, loopback only
+- [D208](decisions/D208.md) Point-in-time restore starts with archived, verified snapshots (`eggdb backup <file> <directory>`, `eggdb restore <new> <directory> --at <time>`); continuous log shipping is a format slice of its own

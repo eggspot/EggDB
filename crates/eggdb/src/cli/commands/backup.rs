@@ -16,6 +16,9 @@ impl Session<'_> {
         let copy = self.request.copy.clone().unwrap_or_default();
         let copy_display = copy.display().to_string();
         let copy_shown = render::text(copy_display.as_bytes());
+        if copy.is_dir() {
+            return self.backup_into_directory(&copy);
+        }
         self.refuse_backup_destination(&copy, &copy_shown)?;
         let started = Instant::now();
         let db = match self.open_shared_or(Access::ReadOnly) {

@@ -11,6 +11,7 @@ use eggdb_storage::{BTree, PageSize, StorageError};
 use std::io::{Read, Write};
 use std::ops::Bound;
 
+mod archive;
 mod audit;
 mod backup;
 mod collection;

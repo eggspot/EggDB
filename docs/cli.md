@@ -50,7 +50,7 @@ eggdb <command> <file> [arguments] [options]
 | `cas <file> <key> (<expected> \| --if-absent) (<new> \| --delete)` | for writing | replaces the value only while it is `<expected>`; exits 1 when it is not |
 | `check <file>` | read-only | reads every page and reports the file's health |
 | `stats <file>` | read-only | the page size, pages, file size, last commit and log, without reading a page |
-| `backup <file> <copy>` | read-only | writes a copy of the last commit to the new file `<copy>`, while other readers keep working (below) |
+| `backup <file> <copy>` | read-only | writes a copy of the last commit to the new file `<copy>`, while other readers keep working (below); given a directory, archives a timestamped, verified copy into it and records it in its `manifest.jsonl`, and `eggdb restore <new> <directory> [--at <time>]` restores the newest copy taken at or before the time (D208) |
 | `compact <file>` | read-only | rewrites the file without free or leaked pages and swaps it in atomically, while readers in other programs keep working (below) |
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below); with `--table <name> --parquet <out>`, the table's rows as a Parquet file (D202) |

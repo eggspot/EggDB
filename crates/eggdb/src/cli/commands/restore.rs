@@ -153,6 +153,15 @@ impl Session<'_> {
             return self.restore_aof(path);
         }
         if let Some(path) = &path
+            && path.join(super::archive::MANIFEST).is_file()
+        {
+            let at = self.request.restore.at.clone();
+            return self.restore_from_archive(path, at.as_deref());
+        }
+        if self.request.restore.at.is_some() {
+            return Err(usage("--at picks a copy from a directory eggdb backup archived into; give that directory".to_owned()));
+        }
+        if let Some(path) = &path
             && let Some(layout) = super::restore_mongodump::layout_of(path)
         {
             return self.restore_mongodump(path, layout);

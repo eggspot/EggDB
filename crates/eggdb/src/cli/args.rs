@@ -238,7 +238,7 @@ impl CommandName {
             ),
             OptionName::Define => matches!(self, Self::Restore | Self::Sql),
             OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
-            OptionName::Report => self == Self::Restore,
+            OptionName::Report | OptionName::At => self == Self::Restore,
             OptionName::Mode => self == Self::Shell,
             OptionName::DryRun => matches!(self, Self::Import | Self::Restore),
             OptionName::Table | OptionName::Parquet => matches!(self, Self::Import | Self::Export),
@@ -393,6 +393,7 @@ enum OptionName {
     RowTerminator,
     KeepNulls,
     Report,
+    At,
     TimeLimit,
     AllowWrite,
     Tables,
@@ -470,6 +471,7 @@ impl OptionName {
             b"row-terminator" => Self::RowTerminator,
             b"keep-nulls" => Self::KeepNulls,
             b"report" => Self::Report,
+            b"at" => Self::At,
             b"time-limit" => Self::TimeLimit,
             b"allow-write" => Self::AllowWrite,
             b"tables" => Self::Tables,
@@ -615,6 +617,7 @@ pub(crate) struct RestoreOptions {
     pub(crate) report: Option<PathBuf>,
     pub(crate) keep_going: bool,
     pub(crate) defines: Vec<(String, String)>,
+    pub(crate) at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1055,6 +1058,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::KeepGoing => request.shell.keep_going = true,
             OptionName::Report => request.restore.report = Some(PathBuf::from(value)),
+            OptionName::At => request.restore.at = Some(value.to_string_lossy().into_owned()),
             OptionName::Dialect if command == CommandName::Restore => {
                 request.dialect = check_restore_dialect(value).map_err(usage)?;
             }
