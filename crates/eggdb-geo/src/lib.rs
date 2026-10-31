@@ -5,11 +5,13 @@
 
 mod algorithms;
 mod geojson;
+mod tiles;
 mod wkb;
 mod wkt;
 
 pub use algorithms::{area, contains, distance, envelope, intersects, length, sphere_distance};
 pub use geojson::to_geojson;
+pub use tiles::{WEB_MERCATOR_RADIUS, from_web_mercator, geohash, tile_envelope, to_web_mercator};
 pub use wkb::{from_wkb, to_wkb};
 pub use wkt::{from_wkt, to_wkt};
 

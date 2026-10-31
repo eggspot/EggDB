@@ -2237,11 +2237,15 @@ Geometries are written as WKT or EWKT text (`'SRID=4326;POINT(-71.06 42.36)'`) o
 - measuring (planar, in the coordinates' units): `ST_Distance`, `ST_Area`, `ST_Length`, and
   `ST_DistanceSphere` in metres for longitude/latitude points;
 - predicates: `ST_DWithin`, `ST_Contains`, `ST_Within`, `ST_Intersects`, `ST_Disjoint`,
-  `ST_Equals`.
+  `ST_Equals`;
+- web maps (D250): `ST_TileEnvelope(zoom, x, y)` gives an XYZ map tile's square in Web
+  Mercator (SRID 3857), `ST_Transform(geometry, srid)` projects between longitude/latitude
+  (4326) and Web Mercator (3857) on its sphere, and `ST_GeoHash(point [, precision])` gives a
+  point's geohash (20 characters unless a precision from 1 to 20 is given).
 
 Geometries of two different SRIDs are refused, as in PostGIS. Not yet: a stored geometry type
 (values are text, shown as EWKT rather than hex EWKB), spatial indexes (R-tree/GiST), Z and M
-coordinates, geography measures on the spheroid, transformations between SRIDs, set operations
+coordinates, geography measures on the spheroid, transformations between other SRIDs, set operations
 (`ST_Union`, `ST_Intersection`, `ST_Buffer`), and SQL Server's `geometry` methods.
 
 ## Vectors (pgvector)

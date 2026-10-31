@@ -77,3 +77,22 @@ fn geojson_writes_rfc_7946_objects() {
         r#"{"type":"GeometryCollection","geometries":[{"type":"Point","coordinates":[1,1]}]}"#
     );
 }
+
+#[test]
+fn web_mercator_tiles_and_geohashes_match_their_definitions() {
+    use crate::{from_web_mercator, geohash, tile_envelope, to_web_mercator};
+    let Geometry::Polygon(world) = tile_envelope(0, 0, 0).unwrap() else { unreachable!() };
+    assert!((world[0][2].x - 20_037_508.342_789_244).abs() < 1e-6 && (world[0][0].y + 20_037_508.342_789_244).abs() < 1e-6);
+    let Geometry::Polygon(tile) = tile_envelope(1, 1, 0).unwrap() else { unreachable!() };
+    assert_eq!((tile[0][0].x, tile[0][1].y), (0.0, 20_037_508.342_789_244));
+    assert!(tile_envelope(2, 4, 0).is_err() && tile_envelope(31, 0, 0).is_err());
+    let hanoi = Geometry::Point(Some(Coord { x: 105.8542, y: 21.0285 }));
+    let Geometry::Point(Some(projected)) = to_web_mercator(&hanoi).unwrap() else { unreachable!() };
+    assert!((projected.x - 11_783_635.642).abs() < 0.01 && (projected.y - 2_395_277.233).abs() < 0.01, "{projected:?}");
+    let Geometry::Point(Some(back)) = from_web_mercator(&Geometry::Point(Some(projected))).unwrap() else { unreachable!() };
+    assert!((back.x - 105.8542).abs() < 1e-9 && (back.y - 21.0285).abs() < 1e-9);
+    assert!(to_web_mercator(&Geometry::Point(Some(Coord { x: 0.0, y: 89.0 }))).is_err());
+    assert_eq!(geohash(Coord { x: -5.6, y: 42.6 }, 5).unwrap(), "ezs42");
+    assert_eq!(geohash(Coord { x: 10.40744, y: 57.64911 }, 11).unwrap(), "u4pruydqqvj");
+    assert!(geohash(Coord { x: 0.0, y: 0.0 }, 0).is_err());
+}

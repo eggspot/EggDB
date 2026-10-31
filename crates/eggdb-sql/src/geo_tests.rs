@@ -34,3 +34,22 @@ fn geometry_columns_answer_spatial_queries() {
         run(&mut session, "SELECT 'a' AS name UNION ALL SELECT 'b'")
     );
 }
+
+#[test]
+fn tiles_web_mercator_and_geohashes_serve_web_maps() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(&mut session, "SELECT ST_AsEWKT(ST_TileEnvelope(1, 1, 0))"),
+        run(&mut session, "SELECT 'SRID=3857;POLYGON((0 0,0 20037508.342789244,20037508.342789244 20037508.342789244,20037508.342789244 0,0 0))'")
+    );
+    assert_eq!(run(&mut session, "SELECT ST_SRID(ST_Transform(ST_SetSRID(ST_MakePoint(105.8542, 21.0285), 4326), 3857))"), run(&mut session, "SELECT 3857"));
+    assert_eq!(
+        run(&mut session, "SELECT round(ST_X(ST_Transform(ST_Transform('SRID=4326;POINT(105.8542 21.0285)', 3857), 4326))::numeric, 6)"),
+        run(&mut session, "SELECT 105.854200")
+    );
+    assert_eq!(run(&mut session, "SELECT ST_GeoHash(ST_MakePoint(-5.6, 42.6), 5)"), run(&mut session, "SELECT 'ezs42'"));
+    for bad in ["SELECT ST_TileEnvelope(1, 2, 0)", "SELECT ST_Transform('POINT(1 2)', 3857)", "SELECT ST_Transform('SRID=4326;POINT(1 2)', 2154)", "SELECT ST_GeoHash('LINESTRING(0 0,1 1)')"] {
+        assert!(session.execute(bad, &mut |_| {}).is_err(), "{bad}");
+    }
+}

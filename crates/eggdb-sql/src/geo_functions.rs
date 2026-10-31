@@ -4,7 +4,7 @@ use crate::types::{SqlType, Value};
 use eggdb_geo::{Coord, Geometry, Spatial};
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 33] = [
+pub(crate) const FUNCTIONS: [&str; 36] = [
     "st_geomfromtext",
     "st_geometryfromtext",
     "st_geomfromewkt",
@@ -38,6 +38,9 @@ pub(crate) const FUNCTIONS: [&str; 33] = [
     "st_geometrytype",
     "st_isempty",
     "st_equals",
+    "st_transform",
+    "st_tileenvelope",
+    "st_geohash",
 ];
 
 /// The result type of a spatial function.
@@ -50,6 +53,10 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         name if FUNCTIONS.contains(&name) => SqlType::Text,
         _ => return None,
     })
+}
+
+fn argument_error(error: eggdb_geo::GeoError) -> SqlError {
+    SqlError::new(SqlState::INVALID_PARAMETER_VALUE, error.0)
 }
 
 fn geo_error(error: eggdb_geo::GeoError) -> SqlError {
@@ -239,6 +246,45 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
         ("st_npoints", [_]) => Value::Integer(i32::try_from(spatial(0)?.geometry.coords().len()).unwrap_or(i32::MAX)),
         ("st_geometrytype", [_]) => Value::Text(spatial(0)?.geometry.type_name().to_owned()),
         ("st_isempty", [_]) => Value::Boolean(spatial(0)?.geometry.is_empty()),
+        ("st_transform", [_, target]) => {
+            let source = spatial(0)?;
+            let geometry = match (source.srid, srid_of(target)?) {
+                (from, to) if from == to => source.geometry,
+                (Some(4326), Some(3857)) => eggdb_geo::to_web_mercator(&source.geometry).map_err(argument_error)?,
+                (Some(3857), Some(4326)) => eggdb_geo::from_web_mercator(&source.geometry).map_err(argument_error)?,
+                (None, _) => return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "ST_Transform: Input geometry has unknown (0) SRID")),
+                (Some(from), to) => {
+                    return Err(SqlError::new(
+                        SqlState::FEATURE_NOT_SUPPORTED,
+                        format!("ST_Transform from SRID {from} to {} is not supported yet; EggDB transforms between 4326 and 3857", to.unwrap_or(0)),
+                    ));
+                }
+            };
+            geometry_value(&Spatial { srid: srid_of(target)?, geometry })
+        }
+        ("st_tileenvelope", [zoom, x, y]) => {
+            let whole = |value: &Value, what: &str| -> SqlResult<u64> {
+                let number = number(value)?;
+                if number.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&number) {
+                    Ok(number as u64)
+                } else {
+                    Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("ST_TileEnvelope: {what} must be a non-negative whole number")))
+                }
+            };
+            let zoom = u32::try_from(whole(zoom, "the zoom")?).unwrap_or(u32::MAX);
+            let geometry = eggdb_geo::tile_envelope(zoom, whole(x, "x")?, whole(y, "y")?).map_err(argument_error)?;
+            geometry_value(&Spatial { srid: Some(3857), geometry })
+        }
+        ("st_geohash", [_, ..]) if arguments.len() <= 2 => {
+            let precision = match arguments.get(1) {
+                Some(value) => number(value)? as usize,
+                None => 20,
+            };
+            match spatial(0)?.geometry {
+                Geometry::Point(Some(coord)) => Value::Text(eggdb_geo::geohash(coord, precision).map_err(argument_error)?),
+                _ => return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "ST_GeoHash takes a point here")),
+            }
+        }
         _ => {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

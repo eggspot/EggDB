@@ -225,5 +225,6 @@ From the third gap review (D47–D58), each after its foundations:
 - **Streaming (D55)** follows the messaging work (M16).
 - **Content (D56)** follows full-text search. Started: `extract_text` for Office and
   OpenDocument files on our own DEFLATE and ZIP (D249).
-- **Science and GIS (D57)** follow analytics.
+- **Science and GIS (D57)** follow analytics. Started: map tiles, Web Mercator and geohashes
+  (D250).
 - **Hyperscale operations (D58)** follow clusters.
