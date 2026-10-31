@@ -1274,8 +1274,33 @@ jobs:
       - name: Measure each build profile against its budget (D6, D34)
         run: scripts/footprint.sh
 
+  reproducible:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          path: first
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          path: second
+      - name: Install the pinned toolchain
+        working-directory: first
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the same commit twice in different places and compare the binaries
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        run: |
+          for copy in first second; do
+            (cd "$copy" && RUSTFLAGS="--remap-path-prefix=$PWD/$copy=/eggdb --remap-path-prefix=$HOME=/home" cargo build --release -p eggdb)
+          done
+          sha256sum first/target/release/eggdb second/target/release/eggdb
+          cmp first/target/release/eggdb second/target/release/eggdb
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
