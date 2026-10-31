@@ -1802,6 +1802,16 @@ block that created a table leaves no table.
 - **Isolation levels.** `SET TRANSACTION`, `BEGIN ISOLATION LEVEL` and each dialect's forms are
   accepted. Every block runs serializably today, which meets every level's guarantees.
 
+## LISTEN and NOTIFY
+
+Sessions of `eggdb serve` can signal each other as PostgreSQL's do: `LISTEN channel`,
+`UNLISTEN channel` (or `*`), `NOTIFY channel, 'payload'` and `pg_notify(channel, payload)`.
+Notifications are delivered when the sending transaction commits (and dropped when it rolls
+back), once per distinct channel and payload in a transaction, to every session listening on the
+channel, the sender included. A listener receives them before its next `ReadyForQuery`, and while
+it sits idle within a fifth of a second, so psql prints them and drivers' notification APIs see
+them. Channels are up to 63 bytes and payloads under 8,000 bytes, as in PostgreSQL.
+
 ## Roles and privileges
 
 Superusers (embedded use and the server's own user) can create roles and grant them table

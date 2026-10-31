@@ -378,6 +378,7 @@ pub struct Session<'s, S: KeyValueStore + 's> {
     save_points: Vec<String>,
     savepoints: savepoints::Savepoints,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
+    notifications: crate::notifications::Notifications,
     temporary: crate::temporary::TemporaryObjects,
     deferred: crate::deferred_checks::DeferredState,
     pending_user_types: Option<Arc<crate::user_types::Registry>>,
@@ -447,6 +448,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 std::ptr::from_ref(store).addr(),
             ),
             temporary: crate::temporary::TemporaryObjects::default(),
+            notifications: crate::notifications::Notifications::default(),
             deferred: crate::deferred_checks::DeferredState::default(),
             pending_user_types: None,
             plan_cache: crate::plan_cache::PlanCache::default(),
@@ -639,6 +641,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         if self.dialect == Dialect::Oracle {
             let _ = self.refresh_oracle_user_schema();
         }
+    }
+
+    /// The channels this session listens on (`LISTEN`).
+    pub fn listening_channels(&self) -> Vec<String> {
+        self.notifications.listening().iter().cloned().collect()
+    }
+
+    /// Takes the notifications this session's committed transactions sent, oldest first, for
+    /// the server to deliver to the sessions listening on their channels.
+    pub fn take_notifications(&mut self) -> Vec<crate::Notification> {
+        self.notifications.take_committed()
     }
 
     /// Names every database the server serves, which `pg_database` lists beside this one.
@@ -1443,6 +1456,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             );
             let _clock = crate::datetime::enter_statement(settings.time_zone);
             let _regex = crate::regex::enter_statement();
+            let _notify = crate::notifications::enter_statement();
             let _bytes = crate::bytea::enter_dialect(self.dialect);
             let _values = crate::memory::enter_value_limit(self.max_value_bytes);
             let _rows = crate::memory::enter_row_limit(self.max_row_bytes);
@@ -1590,6 +1604,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             crate::deferred_checks::enter(&self.deferred.modes);
             let result = with_raised_notices(self.run(&mut statement, &mut io));
             let result = self.keep_deferred(result);
+            let raised = crate::notifications::take_raised();
+            if result.is_ok() {
+                let in_block = !matches!(self.block, Block::None);
+                for notification in raised {
+                    self.notifications.queue(notification, in_block)?;
+                }
+            }
             if let (Some(start), Some(consumed)) = (data_start, io.consumed) {
                 inline_end = Some(start + consumed);
             }
@@ -2087,6 +2108,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         .is_some_and(|from| crate::parser::is_schema_table(&from.first)) =>
             {
                 self.select_schema(select, false)
+            }
+            Statement::Listen(channel) => {
+                self.notifications.listen(&channel.text);
+                Ok(QueryResult::command("LISTEN"))
+            }
+            Statement::Unlisten(channel) => {
+                self.notifications
+                    .unlisten(channel.as_ref().map(|channel| channel.text.as_str()));
+                Ok(QueryResult::command("UNLISTEN"))
+            }
+            Statement::Notify { channel, payload } => {
+                let notification = crate::notifications::checked(
+                    &channel.text,
+                    payload.as_deref().unwrap_or_default(),
+                )?;
+                let in_block = !matches!(self.block, Block::None);
+                self.notifications.queue(notification, in_block)?;
+                Ok(QueryResult::command("NOTIFY"))
             }
             Statement::Role(role) => {
                 let mut role = role.clone();
@@ -2660,6 +2699,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 {
                     let _ = writer.rollback();
                     self.temporary.rollback();
+                    self.notifications.rollback();
                 }
                 result
             }
@@ -2841,14 +2881,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     if let Err(error) = checked {
                         let _ = writer.rollback();
                         self.temporary.rollback();
+                        self.notifications.rollback();
                         return Err(error);
                     }
                 }
                 if let Err(error) = writer.commit() {
                     self.temporary.rollback();
+                    self.notifications.rollback();
                     return Err(error);
                 }
                 self.temporary.commit();
+                self.notifications.commit();
                 self.pending_sequences.clear();
                 sequences::mark_changes_committed();
                 let committed = QueryResult::command("COMMIT");
@@ -2858,8 +2901,14 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     committed
                 })
             }
-            Block::Reading(_) => Ok(QueryResult::command("COMMIT")),
-            Block::Failed => Ok(QueryResult::command("ROLLBACK")),
+            Block::Reading(_) => {
+                self.notifications.commit();
+                Ok(QueryResult::command("COMMIT"))
+            }
+            Block::Failed => {
+                self.notifications.rollback();
+                Ok(QueryResult::command("ROLLBACK"))
+            }
             Block::None if self.mysql() || self.oracle() => Ok(QueryResult::command("COMMIT")),
             Block::None => {
                 Ok(QueryResult::command("COMMIT").with_notice(NO_TRANSACTION_WARNING.into()))
@@ -2868,6 +2917,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
+        self.notifications.rollback();
         self.deferred.clear();
         self.save_points.clear();
         self.savepoints.clear();

@@ -899,6 +899,34 @@ impl<'t> Parser<'t> {
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
             "lock" if self.postgresql() || self.oracle() => self.lock_table(),
+            "listen" if self.postgresql() => {
+                self.at += 1;
+                Ok(Statement::Listen(self.name()?))
+            }
+            "unlisten" if self.postgresql() => {
+                self.at += 1;
+                if self.take_operator("*") {
+                    return Ok(Statement::Unlisten(None));
+                }
+                Ok(Statement::Unlisten(Some(self.name()?)))
+            }
+            "notify" if self.postgresql() => {
+                self.at += 1;
+                let channel = self.name()?;
+                let payload = if self.take(&TokenKind::Comma) {
+                    match self.peek_kind() {
+                        TokenKind::String(text) => {
+                            let text = text.as_ref().to_owned();
+                            self.at += 1;
+                            Some(text)
+                        }
+                        _ => return Err(self.unexpected()),
+                    }
+                } else {
+                    None
+                };
+                Ok(Statement::Notify { channel, payload })
+            }
             "analyze" | "analyse" => self.analyze(),
             "savepoint" => {
                 self.at += 1;

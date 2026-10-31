@@ -691,6 +691,8 @@ pub(crate) struct Connection<'a, 's, S: KeyValueStore + 's> {
     lost: Option<Lost>,
     cancel: CancelSignal,
     idle: bool,
+    process_id: i32,
+    listening: bool,
 }
 
 pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
@@ -815,16 +817,52 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         lost: None,
         cancel,
         idle: true,
+        process_id,
+        listening: false,
     };
     connection.ready_for_query();
     if connection.wire.flush().is_ok() {
         connection.run();
     }
+    shared.notifications.remove(process_id);
     let _ = connection.session.close();
 }
 
 impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
+    fn exchange_notifications(&mut self) {
+        let channels = self.session.listening_channels();
+        self.listening = !channels.is_empty();
+        let sent = self.session.take_notifications();
+        if !self.listening && sent.is_empty() {
+            return;
+        }
+        let delivered = self
+            .shared
+            .notifications
+            .exchange(self.process_id, channels, sent);
+        self.write_notifications(delivered);
+    }
+
+    fn write_notifications(&mut self, delivered: Vec<crate::notifications::Delivered>) {
+        for notification in delivered {
+            self.wire.outbox.notification_response(
+                notification.sender,
+                &notification.channel,
+                &notification.payload,
+            );
+        }
+    }
+
+    fn deliver_while_idle(&mut self) {
+        let delivered = self.shared.notifications.waiting(self.process_id);
+        if !delivered.is_empty() {
+            self.write_notifications(delivered);
+            let _ = self.wire.flush();
+        }
+    }
+
     fn ready_for_query(&mut self) {
+        self.exchange_notifications();
         self.idle = true;
         let status = match self.session.transaction_status() {
             TransactionStatus::Idle => b'I',
@@ -836,6 +874,10 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
 
     fn run(&mut self) {
         loop {
+            if self.idle && self.listening && matches!(self.wire.wait_for_message(), Ok(false)) {
+                self.deliver_while_idle();
+                continue;
+            }
             let (tag, body) = match self.wire.read_message(MAX_MESSAGE_BYTES) {
                 Ok(message) => message,
                 Err(WireError::Stopping) => {

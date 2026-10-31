@@ -1491,6 +1491,17 @@ impl Evaluator<'_> {
             }
             ("lower", [Value::Text(text)]) => Ok(Value::Text(text.to_lowercase())),
             ("upper", [Value::Text(text)]) => Ok(Value::Text(text.to_uppercase())),
+            ("pg_notify", [channel, payload]) => {
+                let text = |value: &Value| match value {
+                    Value::Null => String::new(),
+                    Value::Text(text) => text.clone(),
+                    other => crate::Dialect::PostgreSql
+                        .value_text(other)
+                        .unwrap_or_default(),
+                };
+                crate::notifications::raise(&text(channel), &text(payload))
+                    .map(|()| Value::Text(String::new()))
+            }
             ("pg_sleep", [Value::Null]) => Ok(Value::Null),
             ("pg_sleep", [seconds]) => match seconds.as_float() {
                 Some(seconds) => crate::cancel::sleep(seconds).map(|()| Value::Text(String::new())),
@@ -1553,6 +1564,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "initcap" | "reverse" | "ascii" | "md5" | "quote_literal" => &[TEXT],
         "chr" => &[INTEGER],
         "pg_sleep" => &[DOUBLE],
+        "pg_notify" => &[TEXT, TEXT],
         "overlay" => &[TEXT, TEXT, INTEGER, INTEGER],
         "substr" => &[None, INTEGER, INTEGER],
         "format" => &[TEXT],

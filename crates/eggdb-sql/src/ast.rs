@@ -24,6 +24,12 @@ pub(crate) enum Statement {
     Savepoint(SavepointCommand),
     Analyze(Vec<Name>),
     Role(crate::roles::RoleStatement),
+    Listen(Name),
+    Unlisten(Option<Name>),
+    Notify {
+        channel: Name,
+        payload: Option<String>,
+    },
     Set {
         name: String,
         value: Option<String>,

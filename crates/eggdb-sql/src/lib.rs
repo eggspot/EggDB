@@ -96,6 +96,7 @@ mod set_operations;
 mod set_returning;
 mod settings;
 mod sqlite_errors;
+mod notifications;
 mod roles;
 mod sqlite_datetime;
 mod sqlite_functions;
@@ -208,6 +209,7 @@ pub use pg_binary::{decode_pg_binary_text, encode_pg_binary};
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use plsql::ServerOutputReader;
 pub use random::{RandomSource, set_random_source};
+pub use notifications::Notification;
 pub use roles::{ScramParts, StoredRole, login_verifier, parse_scram_verifier, stored_role, stored_roles};
 pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};
 pub use restore::{

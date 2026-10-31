@@ -135,6 +135,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) backend_keys: BackendKeys,
     pub(crate) unauthenticated: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
+    pub(crate) notifications: crate::notifications::NotificationHub,
 }
 
 pub(crate) struct Slot<'c>(&'c AtomicUsize);
@@ -218,6 +219,7 @@ pub fn serve_databases<S: KeyValueStore + Sync>(
         backend_keys: BackendKeys::new(),
         unauthenticated: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
+        notifications: crate::notifications::NotificationHub::default(),
     };
     let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);

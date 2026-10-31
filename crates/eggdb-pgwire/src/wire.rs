@@ -179,6 +179,35 @@ impl<'a> Wire<'a> {
         self.stream.peer_is_loopback()
     }
 
+    pub(crate) fn wait_for_message(&mut self) -> Result<bool, WireError> {
+        if self.peeked.is_some() {
+            return Ok(true);
+        }
+        let wait = self.next_wait()?;
+        if wait != self.read_timeout {
+            self.set_read_timeout(wait)?;
+        }
+        let mut byte = [0u8; 1];
+        match self.stream.read(&mut byte) {
+            Ok(0) => Err(WireError::Closed),
+            Ok(_) => {
+                self.peeked = Some(byte[0]);
+                Ok(true)
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(_) => Err(WireError::Io),
+        }
+    }
+
     pub(crate) fn peek_byte(&mut self) -> Result<u8, WireError> {
         if let Some(byte) = self.peeked {
             return Ok(byte);

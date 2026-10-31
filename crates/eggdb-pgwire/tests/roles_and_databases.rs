@@ -79,3 +79,40 @@ fn each_database_of_a_server_is_reached_by_its_name() {
     assert_eq!(refused.code(), "3D000");
     server.stop();
 }
+
+#[test]
+fn notifications_reach_listeners_at_commit_and_while_they_are_idle() {
+    let mut server = TestServer::start(8);
+    let (mut listener, _) = Client::login(server.address);
+    let (mut sender, _) = Client::login(server.address);
+    assert_eq!(tags(&listener.query("LISTEN jobs")), "LISTEN");
+    let replies = sender.query("BEGIN; NOTIFY jobs, 'one'; SELECT pg_notify('jobs', 'two')");
+    assert_eq!(error_code(&replies), None, "{}", tags(&replies));
+    let early: Vec<_> = listener
+        .query("SELECT 1")
+        .into_iter()
+        .filter(|message| message.tag == b'A')
+        .collect();
+    assert!(early.is_empty(), "nothing arrives before the commit");
+    sender.query("COMMIT");
+    let mut payloads = Vec::new();
+    while payloads.len() < 2 {
+        let message = listener.read().expect("a notification while idle");
+        assert_eq!(message.tag, b'A');
+        let text = String::from_utf8(message.body[4..].to_vec()).unwrap();
+        let mut fields = text.split('\0');
+        assert_eq!(fields.next(), Some("jobs"));
+        payloads.push(fields.next().unwrap_or_default().to_owned());
+    }
+    assert_eq!(payloads, ["one", "two"]);
+    sender.query("BEGIN; NOTIFY jobs, 'lost'; ROLLBACK");
+    listener.query("UNLISTEN *");
+    sender.query("NOTIFY jobs, 'after'");
+    let after: Vec<_> = listener
+        .query("SELECT 1")
+        .into_iter()
+        .filter(|message| message.tag == b'A')
+        .collect();
+    assert!(after.is_empty());
+    server.stop();
+}

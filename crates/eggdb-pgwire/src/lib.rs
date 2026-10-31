@@ -37,6 +37,7 @@
 mod backend_keys;
 pub mod client;
 mod connection;
+mod notifications;
 pub mod messages;
 mod scram;
 mod server;

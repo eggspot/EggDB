@@ -583,6 +583,17 @@ impl Outbox {
     }
 
     /// `ReadyForQuery` with the transaction status byte, `I`, `T` or `E`.
+    /// `NotificationResponse`: a notification from the backend `sender` on `channel`.
+    pub fn notification_response(&mut self, sender: i32, channel: &str, payload: &str) {
+        self.message(b'A', |body| {
+            body.extend_from_slice(&sender.to_be_bytes());
+            body.extend_from_slice(channel.as_bytes());
+            body.push(0);
+            body.extend_from_slice(payload.as_bytes());
+            body.push(0);
+        });
+    }
+
     pub fn ready_for_query(&mut self, status: u8) {
         self.message(b'Z', |body| body.push(status));
     }
