@@ -1775,6 +1775,48 @@ a block rolls the block back at once and the session answers `25P02` until `ROLL
 of a failed block reports `ROLLBACK`, as PostgreSQL does. DDL is transactional: a rolled-back
 block that created a table leaves no table.
 
+## Partitioned tables
+A table can be split into partitions by range, list or hash, as PostgreSQL does:
+
+```sql
+CREATE TABLE measurements (id integer NOT NULL, at date NOT NULL, v integer,
+                           PRIMARY KEY (id, at)) PARTITION BY RANGE (at);
+CREATE TABLE measurements_2025 PARTITION OF measurements
+    FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+CREATE TABLE measurements_rest PARTITION OF measurements DEFAULT;
+ALTER TABLE measurements ATTACH PARTITION old_rows FOR VALUES FROM (MINVALUE) TO ('2025-01-01');
+ALTER TABLE measurements DETACH PARTITION old_rows;
+```
+
+- **Strategies.** `RANGE` over one or more columns (`FROM` inclusive, `TO` exclusive, `MINVALUE`
+  and `MAXVALUE`), `LIST` over one column (`NULL` may be listed), `HASH` over one or more columns
+  (`MODULUS` and `REMAINDER`), and a `DEFAULT` partition for rows no other partition takes. A
+  partition may itself be partitioned. Partition keys are columns; expressions in a key are
+  refused for now.
+- **Rows go where they belong.** `INSERT`, `COPY` and `INSERT ... SELECT` into the partitioned
+  table route each row to its partition. A row no partition takes fails with `23514`, `no
+  partition of relation ... found for row`, and a row written straight into a partition must
+  fit its bound (`violates partition constraint`). `UPDATE`, `DELETE` and `TRUNCATE` on the
+  partitioned table reach every partition. An `UPDATE` that would move a row to another
+  partition is refused for now.
+- **Pruning.** A query reads only the partitions its `WHERE` can match: comparisons, `BETWEEN`,
+  `IN` and `IS NULL` on the key against constants. `EXPLAIN` lists the partitions read; when one
+  is left, the query reads it directly and uses its indexes.
+- **Constraints.** A primary key or unique constraint of a partitioned table must include every
+  key column, and each partition gets its own. `PARTITION OF` copies the parent's columns,
+  defaults, primary key, unique constraints and checks. `AUTO_INCREMENT` and identity columns are
+  refused in partitioned tables for now; `serial` columns share their sequence.
+- **Catalogs and restores.** `pg_class` shows `relkind` `p` and `relispartition`, `pg_inherits`
+  links partitions to their parent, `pg_partitioned_table`, `pg_get_partkeydef` and
+  `pg_get_expr(relpartbound, oid)` describe them, and `pg_dump` files restore with their
+  partitions (`ATTACH PARTITION`).
+- **MySQL and Oracle.** `PARTITION BY RANGE|LIST|HASH|KEY (...)` with named partitions inside
+  `CREATE TABLE` (`VALUES LESS THAN`, `VALUES IN`, `PARTITIONS n`, Oracle's `VALUES (DEFAULT)`)
+  makes one partition per name, stored as a table named `<table>#P#<partition>`.
+- **Hash values.** Hash partitions assign rows by EggDB's own hash of the key, not PostgreSQL's,
+  so a `COPY` of a hash partition's rows from a `pg_dump` is routed through the partitioned
+  table, as `pg_dump --load-via-partition-root` would.
+
 ## User-defined types and domains
 
 In the PostgreSQL dialect (D152), as PostgreSQL's manual describes them:
@@ -2622,6 +2664,12 @@ argument type names joined by `, `, typmods left out) and the whole `CREATE` tex
 1 MiB). Loading parses the `CREATE` text again and checks that kind and identity match; a record
 that does not, or holds two overloads with one identity, is damaged, and a damaged record is an
 error naming it, never a panic.
+
+A partitioned table and each of its partitions have one record under the catalog prefix, `0x0E`
+and the table's internal name (D169): record version `1`, a flag byte (`1` partitioned, `2` a
+partition), the strategy and key column names when partitioned, and the parent's name and the
+bound when a partition. Bound values are kept as text and read back in the key column's type. A
+damaged record is an error naming it, never a panic.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating

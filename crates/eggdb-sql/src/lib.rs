@@ -154,6 +154,8 @@ mod sql_speed_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]
+mod partition_tests;
+#[cfg(test)]
 mod regex_tests;
 #[cfg(test)]
 mod schema_tests;

@@ -654,7 +654,14 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   PL/SQL packages are one record per package (catalog prefix, `0x0D`, the package's internal
   name) with record version 1: a shape byte (0 specification only, 1 with a body), then the
   specification's `CREATE` text and, with a body, the body's `CREATE` text, each a varint
-  length and UTF-8 bytes.
+  length and UTF-8 bytes. Partitioning is one record per partitioned table or partition
+  (catalog prefix, `0x0E`, the table's internal name) with record version 1 (D169): a flag byte
+  (`1` the table is partitioned, `2` it is a partition), then, when partitioned, the strategy
+  (`1` range, `2` list, `3` hash) and its key's column names, and, when a partition, its parent's
+  internal name and bound (`1` range: two value lists; `2` list: one; `3` hash: modulus and
+  remainder as varints; `4` default). Each bound value is a byte (`0` the value as text, `1`
+  NULL, `2` MINVALUE, `3` MAXVALUE) and, for `0`, the text. Rows stay in each partition's own
+  table; a partitioned table holds none.
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.
