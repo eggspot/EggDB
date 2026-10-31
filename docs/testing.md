@@ -307,6 +307,20 @@ in each dialect. `a_killed_process_keeps_a_triggers_changes_with_its_statement` 
 `crates/eggdb/tests/sql.rs` kills `eggdb sql` while it inserts into a table whose trigger writes a
 log and checks that the table and the log always hold the same rows.
 
+## PL/SQL (D160)
+The Oracle suite's PL/SQL chapters (`crates/eggdb-sql/correctness/oracle.test`) run examples
+written from the PL/SQL Language Reference: blocks and control statements, error handling,
+procedures and functions (also called from SQL), packages with session state, explicit and
+`FOR` cursors with their attributes, collections with `BULK COLLECT` and `FORALL`, dynamic SQL,
+triggers and the dictionary views. `crates/eggdb-sql/src/plsql/` tests the compiler
+(`compile_tests.rs`), the interpreter (`run_tests.rs`, `collection_tests.rs`, `call_tests.rs`),
+packages, `DBMS_OUTPUT`, triggers, DDL, the restore of HR's `hr_code.sql` and more of the
+reference's examples printed through `DBMS_OUTPUT` (`reference_tests.rs`). `hostile_tests.rs`
+compiles 20,000 units built from PL/SQL fragments as blocks, package bodies, procedures and
+trigger bodies (each fails with `ORA-06550`, never a panic), runs 2,000 blocks built from valid
+and broken statements and checks the session still works, and drives runaway recursion,
+failing package initialization, overflowing `DBMS_OUTPUT` and oversized collections to errors.
+
 ## Typed values: numbers, dates and JSON (D111)
 The exact decimal is checked against a schoolbook decimal reference written in its tests (400
 random pairs of up to 80 digits through `+ - * / %`) and against `i128` (3,000 pairs, with their

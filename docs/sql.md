@@ -1173,6 +1173,111 @@ CI's `oracle-apps` job restores HR's installer unchanged, serves it as the user 
 through pgjdbc with `-c eggdb.dialect=oracle`, comparing their output with
 `scripts/oracle-apps/expected-*.out`.
 
+## PL/SQL blocks, procedures, functions and packages
+
+In the Oracle dialect (roadmap 33e, D160), PL/SQL runs as Oracle's PL/SQL Language Reference
+documents it: anonymous blocks, standalone procedures and functions, packages with a
+specification and a body, and triggers ([Triggers](#triggers)). It runs through `eggdb sql
+--dialect oracle` (a script's PL/SQL units end at a `/` line, as in SQL*Plus), `eggdb shell
+--dialect oracle`, the embedded API, a PostgreSQL or TDS connection that chose Oracle's dialect
+and `eggdb restore --dialect oracle`; there is no Oracle wire protocol (D108).
+
+```sql
+CREATE OR REPLACE PROCEDURE raise_salary (p_empno IN NUMBER, p_amount IN NUMBER, p_new_sal OUT NUMBER) IS
+BEGIN
+  UPDATE emp SET sal = sal + p_amount WHERE empno = p_empno;
+  SELECT sal INTO p_new_sal FROM emp WHERE empno = p_empno;
+END raise_salary;
+/
+SET SERVEROUTPUT ON
+DECLARE
+  v_sal emp.sal%TYPE;
+BEGIN
+  raise_salary(7839, 100, v_sal);
+  DBMS_OUTPUT.PUT_LINE('new salary ' || v_sal);
+EXCEPTION
+  WHEN NO_DATA_FOUND THEN
+    RAISE_APPLICATION_ERROR(-20001, 'no such employee');
+END;
+/
+```
+
+- **Statements**: `CREATE [OR REPLACE] [EDITIONABLE | NONEDITIONABLE] PROCEDURE name [(parameter
+  [IN | OUT | IN OUT] [NOCOPY] type [{:= | DEFAULT} expression], ...)] [AUTHID ...] {IS | AS}
+  declarations BEGIN ... [EXCEPTION ...] END [name];`, the same for `FUNCTION ... RETURN type`
+  with `DETERMINISTIC`, `PIPELINED`, `PARALLEL_ENABLE`, `RESULT_CACHE`, `ACCESSIBLE BY`,
+  `SHARING` and `DEFAULT COLLATION` accepted; `CREATE [OR REPLACE] PACKAGE name {IS | AS} ... END
+  [name];` and `CREATE [OR REPLACE] PACKAGE BODY name {IS | AS} ... [BEGIN initialization] END
+  [name];`; `DROP PROCEDURE`, `DROP FUNCTION`, `DROP PACKAGE [BODY]`; `ALTER PROCEDURE |
+  FUNCTION | PACKAGE ... COMPILE` (compiles the unit again and reports its errors); `CALL name(arguments)` and
+  SQL*Plus's `EXECUTE name(arguments)`; anonymous blocks `[DECLARE ...] BEGIN ... END;`, also
+  labelled (`<<name>>`). Oracle's DDL rules hold: a name is used by one table, view, procedure,
+  function or package (`ORA-00955`), a missing one is `ORA-04043`, a body needs its
+  specification, and DDL commits.
+- **Declarations**: variables and `CONSTANT`s with `NOT NULL` and defaults, every Oracle type plus
+  `PLS_INTEGER`, `BINARY_INTEGER`, `NATURAL`, `POSITIVE`, `SIMPLE_INTEGER`, `SIGNTYPE` and
+  `BOOLEAN`; `%TYPE` and `%ROWTYPE` on columns, tables, cursors and variables (a `%TYPE` parameter
+  follows its column when the column changes); `TYPE ... IS RECORD` with field defaults; `SUBTYPE`;
+  cursors with parameters and defaults; `REF CURSOR` and `SYS_REFCURSOR`; exceptions with
+  `PRAGMA EXCEPTION_INIT`; and nested procedures and functions, which see the variables of the
+  block that declares them.
+- **Statements in a block**: assignment, `IF ... ELSIF ... ELSE`, simple and searched `CASE`
+  (`CASE_NOT_FOUND`), `LOOP`, `WHILE`, numeric `FOR` (`REVERSE`), cursor `FOR` loops over a cursor
+  or a query, `EXIT [WHEN]`, `CONTINUE [WHEN]`, labels on blocks and loops (`outer.x` names a
+  hidden variable), `NULL`, `RETURN`, procedure calls with positional and named (`=>`)
+  arguments and `OUT`/`IN OUT` results, embedded `SELECT ... INTO` (`NO_DATA_FOUND`,
+  `TOO_MANY_ROWS`), `INSERT`, `UPDATE`, `DELETE` and `MERGE`, `OPEN`,
+  `FETCH ... INTO`, `CLOSE`, cursor attributes `%FOUND`, `%NOTFOUND`, `%ROWCOUNT` and `%ISOPEN`
+  on cursors and on `SQL`, `EXECUTE IMMEDIATE ... [INTO] [USING]` (also of PL/SQL and DDL),
+  `OPEN ... FOR` a query or a string, `COMMIT` and `ROLLBACK` (the transaction ends that way when
+  the statement that ran the block finishes), and DDL through `EXECUTE IMMEDIATE`.
+- **Collections**: associative arrays (`INDEX BY PLS_INTEGER | VARCHAR2(n)`), nested tables and
+  `VARRAY`s with constructors, `v(i)`, `v(i).field`, the methods `COUNT`, `FIRST`, `LAST`,
+  `NEXT`, `PRIOR`, `EXISTS`, `LIMIT`, `EXTEND`, `TRIM` and `DELETE`, Oracle's errors
+  (`COLLECTION_IS_NULL`, `SUBSCRIPT_BEYOND_COUNT`, `SUBSCRIPT_OUTSIDE_LIMIT`, `NO_DATA_FOUND`
+  for a missing element), `SELECT` and `FETCH ... BULK COLLECT INTO [LIMIT n]`, and `FORALL` over
+  a range, `INDICES OF` and `VALUES OF` with `SAVE EXCEPTIONS`, `SQL%BULK_ROWCOUNT` and
+  `SQL%BULK_EXCEPTIONS`.
+- **Exceptions**: the predefined exceptions by name with their Oracle numbers, user exceptions,
+  `RAISE`, `RAISE;` in a handler, `WHEN a OR b`, `WHEN OTHERS`, `SQLCODE` and `SQLERRM [(n)]`, and
+  `RAISE_APPLICATION_ERROR(-20000 .. -20999, message [, TRUE])`. A handled exception undoes only
+  the statement that failed, as in Oracle; an unhandled one reaches the client with Oracle's
+  number and one `ORA-06512: at "SCHEMA.UNIT", line N` (or `at line N` for a block) per unit it
+  left. Line numbers count from the unit's `PROCEDURE`, `FUNCTION`, `PACKAGE` or `TRIGGER`
+  keyword, as `USER_SOURCE` shows the unit.
+- **Functions in SQL**: a standalone or package function is called in any expression (`SELECT
+  annual(sal) FROM emp`, `SELECT pkg.total() FROM dual`, named arguments with `=>`); it reads what
+  the calling statement sees and cannot write, commit or roll back (`ORA-14552`). Calls nest at
+  most 100 deep.
+- **Packages**: a package's state (variables, open cursors) belongs to the session; the body's
+  initialization runs once, at the first use in the session, and again after `CREATE OR
+  REPLACE`. Public items are `pkg.item` outside the package and plain names inside it;
+  subprograms can be overloaded; private items stay private; a package exception with
+  `EXCEPTION_INIT` is caught by `WHEN pkg.e` or by its number.
+- **`DBMS_OUTPUT`**: `PUT_LINE`, `PUT`, `NEW_LINE`, `ENABLE [(size)]`, `DISABLE` and `GET_LINE`. The
+  lines are kept for the session and printed by `eggdb sql` after `SET SERVEROUTPUT ON` and by
+  the Oracle shell; the embedded API reads them with `Session::take_server_output()` after
+  `enable_server_output`. `ENABLE(n)` limits the buffer to `n` bytes (`ORU-10027` beyond), a line
+  holds at most 32,767 bytes (`ORU-10028`).
+- **Compile errors**: a unit is compiled at `CREATE`; one that does not compile is refused with
+  `ORA-06550: line L, column C:` and the `PLS-` message (`PLS-00201: identifier 'X' must be
+  declared`, `PLS-00103: Encountered the symbol ...`, `PLS-00363` for assigning an `IN`
+  parameter), where Oracle would create it invalid. Wrong arguments in a call are `ORA-06553
+  PLS-306`.
+- **Dictionary**: `USER_SOURCE`, `USER_PROCEDURES`, `USER_ARGUMENTS`, `USER_TRIGGERS`,
+  `USER_ERRORS` (always empty) and the PL/SQL objects in `USER_OBJECTS`, also as `ALL_` and
+  `DBA_` views ([Known differences from Oracle](#known-differences-from-oracle)).
+- **Limits** (D45): blocks nest at most 64 deep, a unit holds at most 1 MiB of text, a collection
+  4,194,304 elements, a session 1,000 package states, a unit 1,000 open cursors; past a limit is
+  an error, never a crash.
+
+Not supported yet (`0A000`, or `ORA-06550` with the reason at `CREATE`): `GOTO`, `PRAGMA
+AUTONOMOUS_TRANSACTION`, call specifications (`LANGUAGE`, `EXTERNAL`), user-defined aggregates,
+`PIPE ROW` and pipelined functions in `TABLE(...)`, collections in SQL (`TABLE(v)`, `MEMBER OF`),
+`OUT` binds in `EXECUTE IMMEDIATE ... USING`, `COMMIT` and `ROLLBACK` through `EXECUTE
+IMMEDIATE`, object types (`CREATE TYPE`), compound triggers, and Oracle-supplied packages other
+than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
+
 ## What runs today
 
 **Statements**
@@ -2878,8 +2983,8 @@ And more, not in the suite yet:
   classes and bare columns in aggregate queries.
 
 ## Known differences from Oracle
-The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 507 cases from Oracle's SQL
-Language Reference, never Oracle's software) marks these as differing until they are fixed:
+The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 610 cases from Oracle's SQL
+Language Reference and PL/SQL Language Reference, never Oracle's software) marks these as differing until they are fixed:
 - `EXPLAIN PLAN FOR` and `DBMS_XPLAN`, bitmap, function-based and reverse-key indexes, and the
   primary key's index in `USER_INDEXES` (EggDB keeps the primary key as the table's own order).
 - `ROWNUM` in the select list, `ORDER BY` or anywhere but `WHERE` conditions joined by `AND`.
@@ -2948,6 +3053,20 @@ And more, not in the suite yet:
   `USER_TRIGGERS` shows `TRIGGER_TYPE`, `TRIGGERING_EVENT`, `DESCRIPTION`, `WHEN_CLAUSE`,
   `TRIGGER_BODY` and `STATUS`. `USER_ERRORS` is always empty, since EggDB refuses a unit that
   does not compile instead of keeping it invalid.
+- PL/SQL (D160): in a SQL statement inside PL/SQL, a variable or parameter wins over a column
+  of the same name (Oracle takes the column), so prefix variables (`p_`, `v_`) as Oracle's own
+  guides advise. A unit that does not compile is refused, not created invalid. `COMMIT` and
+  `ROLLBACK` in a block or procedure end the transaction when the statement that ran it
+  finishes, so an error after an in-block `COMMIT` rolls back the whole statement. A package
+  replaced by another session gets a fresh state silently where Oracle raises `ORA-04068` once.
+  A standalone function without parameters is called with `()` (`v := f();`; a bare `f` is read
+  as a column), package functions work either way. A deleted nested-table element leaves no
+  gap, so `EXTEND` and assignment count from the last element; `c%ROWCOUNT` inside a cursor
+  `FOR` loop over `c` is `ORA-01001`; collection subscripts in SQL cannot name columns;
+  three-part names (`schema.pkg.proc`, `pkg.rec.field`) are not resolved; `SELECT ... INTO
+  v(i)` of several columns into a record element and `DBMS_OUTPUT.GET_LINES` are not
+  supported; `CALL DBMS_OUTPUT.PUT_LINE(...)` outside PL/SQL is not answered. Triggers never
+  fire themselves again and the mutating-table check (`ORA-04091`) is not made.
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
 - Not supported yet: `CONNECT BY`, outer joins with `(+)`, `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database

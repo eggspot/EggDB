@@ -1126,9 +1126,11 @@ eggdb restore app.db app.sql --keep-going --report restore.json
   ... SQLFILE=` output, installers such as Oracle's sample schemas): statements end at `;` or a
   `/` line, PL/SQL units at a `/` line; `DEFINE`, `&name` substitution, `@`, `@@` and `START`
   (regular files only), `CONNECT` (the schema, never a login) and `EXIT` act, other SQL*Plus
-  commands are listed as client commands; users become schemas, blocks of `INSERT`, `UPDATE`,
-  `DELETE` and `COMMIT` run as one transaction, other PL/SQL is skipped and listed, and a
-  constraint disabled and enabled again is dropped and re-added. `--define name=value` (repeat
+  commands are listed as client commands; users become schemas, PL/SQL runs (procedures,
+  functions, packages and triggers are created and anonymous blocks run; a unit that does not
+  compile, a block with a substitution variable that has no value and a block calling an
+  Oracle-supplied package EggDB does not have are skipped and listed), and a constraint
+  disabled and enabled again is dropped and re-added. `--define name=value` (repeat
   it) gives a substitution variable. A Data Pump `.dmp`, `exp` or RMAN file is refused by its
   content with the `impdp ... SQLFILE=` route ([migrate.md](migrate.md#oracle), D127).
 
