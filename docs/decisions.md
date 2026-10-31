@@ -204,3 +204,4 @@ its full title with its status.
 - [D177](decisions/D177.md) `eggdb-redis-compare` in its own workspace with our own RESP client; set and get against a Redis-compatible server, reported not gated, CI job `redis-compare`
 - [D178](decisions/D178.md) `ANALYZE` row counts in a catalog record (`0x10`) shown as `reltuples`; `approx_count_distinct` by a HyperLogLog sketch
 - [D179](decisions/D179.md) Vectorized execution starts with batched ungrouped integer aggregates (count, sum, min, max) through SIMD-friendly lane kernels
+- [D180](decisions/D180.md) Our own reader of SQLite's file format (`eggdb-sqlite-format`, WAL included), and SQLite files opened by the command line as copies in memory

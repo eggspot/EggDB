@@ -8,7 +8,7 @@ use super::reports::{self, Damage};
 use super::ui;
 use eggdb::{Database, Error, ErrorKind, Options};
 use eggdb_storage::{BTree, PageSize, StorageError};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::ops::Bound;
 
 mod audit;
@@ -738,6 +738,20 @@ impl<'a> Session<'a> {
         let options = self.database_options(access, cache_for_command);
         if self.request.file.as_os_str() == IN_MEMORY_FILE {
             return Database::in_memory_with(options.read_only(false));
+        }
+        if super::sqlite_import::is_sqlite_file(&self.request.file) {
+            let db = Database::in_memory_with(options.read_only(false))?;
+            let warnings = super::sqlite_import::import(&db, &self.request.file)?;
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "eggdb: {} is an SQLite file; EggDB read it into memory, and changes are not written back to it",
+                self.request.file.display()
+            );
+            for warning in warnings {
+                let _ = writeln!(stderr, "eggdb: {warning}");
+            }
+            return Ok(db);
         }
         Database::open_with(&self.request.file, options)
     }

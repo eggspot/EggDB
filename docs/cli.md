@@ -698,6 +698,11 @@ The file name `:memory:` runs on a database in memory, as SQLite's does: `eggdb 
 starts empty, writes nothing to disk, and is gone when the command ends. Every command that
 opens a database takes it.
 
+A file in SQLite's format (`eggdb sql app.sqlite`) is read into a database in memory, with its
+tables, rows, indexes, views and triggers, and any committed pages still in its `-wal` file.
+The SQL then runs on that copy, and a line on stderr says that changes are not written back to
+the SQLite file. A statement EggDB refuses is skipped with a note on stderr.
+
 `eggdb sql` runs SQL statements on the file: from `-c "<sql>"`, from a script file, or from
 stdin (a script of `-`, or none at all when stdin is not a terminal). This release runs the
 first parts of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with

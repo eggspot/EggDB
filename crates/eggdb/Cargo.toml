@@ -24,6 +24,7 @@ eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }
+eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }
 eggdb-storage = { path = "../eggdb-storage" }
 eggdb-tdswire = { path = "../eggdb-tdswire" }
 eggdb-tls = { path = "../eggdb-tls" }

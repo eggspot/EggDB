@@ -7,6 +7,7 @@ mod jsonl;
 mod output;
 mod render;
 mod reports;
+mod sqlite_import;
 mod ui;
 
 use args::{CommandName, Format, Invocation};
