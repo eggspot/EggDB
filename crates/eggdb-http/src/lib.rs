@@ -1,5 +1,6 @@
 //! A small HTTP/1.1 server written from RFC 9110 and RFC 9112: one request per connection,
-//! bodies only with `Content-Length` and at most 1 MiB, with every length and wait bounded so a
+//! bodies only with `Content-Length` and at most 1 MiB unless a listener sets its own limit
+//! (with `100 Continue` for clients that wait for it), with every length and wait bounded so a
 //! hostile client cannot hold a thread or memory for long. A minimal client posts to plain
 //! `http://` URLs, for webhooks.
 
@@ -134,8 +135,14 @@ fn head_end(bytes: &[u8]) -> Option<usize> {
 /// Reads a request from `stream`: its head, at most 16 KiB, and a body of at most 1 MiB given
 /// by `Content-Length` (chunked bodies are refused).
 pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {
+    read_request_limited(stream, MAX_BODY_BYTES, &mut || {})
+}
+
+/// Reads a request as [`read_request`] does, with a body of at most `max_body_bytes`, calling
+/// `on_continue` before reading the body of a request that asks for `100 Continue`.
+pub fn read_request_limited(stream: &mut impl Read, max_body_bytes: usize, on_continue: &mut dyn FnMut()) -> Result<Request, HttpError> {
     let mut head = Vec::new();
-    let mut chunk = [0u8; 1024];
+    let mut chunk = [0u8; 8192];
     let end = loop {
         if let Some(end) = head_end(&head) {
             break end;
@@ -193,8 +200,11 @@ pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {
         None => 0,
         Some(text) => text.parse::<usize>().map_err(|_| HttpError::Malformed)?,
     };
-    if length > MAX_BODY_BYTES {
+    if length > max_body_bytes {
         return Err(HttpError::TooLarge);
+    }
+    if length > 0 && head.len() == end && request.header("expect").is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue")) {
+        on_continue();
     }
     let mut body = head[end..].to_vec();
     if body.len() > length {
@@ -212,19 +222,22 @@ pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {
 }
 
 /// Writes `response` to `stream`, without its body for a `HEAD` request, and asks the client to
-/// close the connection.
+/// close the connection. A `Content-Length` among the response's headers replaces the body's
+/// length, so a `HEAD` answer can state the length of a body it does not carry.
 pub fn write_response(
     stream: &mut impl Write,
     response: &Response,
     head_only: bool,
 ) -> io::Result<()> {
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
         response.status,
         reason(response.status),
         response.content_type,
-        response.body.len()
     );
+    if !response.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-length")) {
+        head.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
+    }
     for (name, value) in &response.headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -236,13 +249,19 @@ pub fn write_response(
     stream.flush()
 }
 
-fn serve_one(mut stream: TcpStream, handler: &(dyn Fn(&Request) -> Response + Sync)) {
+fn serve_one(mut stream: TcpStream, handler: &(dyn Fn(&Request) -> Response + Sync), max_body_bytes: usize) {
     if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(READ_TIMEOUT)).is_err()
     {
         return;
     }
-    let response = match read_request(&mut stream) {
+    let Ok(mut interim) = stream.try_clone() else {
+        return;
+    };
+    let mut send_continue = || {
+        let _ = interim.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+    };
+    let response = match read_request_limited(&mut stream, max_body_bytes, &mut send_continue) {
         Ok(request) => {
             let response = handler(&request);
             let _ = write_response(&mut stream, &response, request.method == "HEAD");
@@ -261,6 +280,16 @@ pub fn serve(
     listener: &TcpListener,
     handler: &(dyn Fn(&Request) -> Response + Sync),
     stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
+    serve_with_body_limit(listener, handler, stop, MAX_BODY_BYTES)
+}
+
+/// Serves requests as [`serve`] does, accepting bodies of at most `max_body_bytes`.
+pub fn serve_with_body_limit(
+    listener: &TcpListener,
+    handler: &(dyn Fn(&Request) -> Response + Sync),
+    stop: &(dyn Fn() -> bool + Sync),
+    max_body_bytes: usize,
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
@@ -290,7 +319,7 @@ pub fn serve(
             let spawned = std::thread::Builder::new()
                 .name("eggdb-http".to_owned())
                 .spawn_scoped(scope, move || {
-                    serve_one(stream, handler);
+                    serve_one(stream, handler, max_body_bytes);
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {
@@ -304,6 +333,40 @@ pub fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_body_limit_is_kept_and_a_waiting_client_is_told_to_continue() {
+        let mut continued = 0;
+        let request = read_request_limited(
+            &mut &b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n"[..],
+            1,
+            &mut || continued += 1,
+        );
+        assert_eq!((request, continued), (Err(HttpError::TooLarge), 0));
+        let body = vec![7u8; 2_000_000];
+        let mut bytes = b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n".to_vec();
+        let head = bytes.len();
+        bytes.extend_from_slice(&body);
+        let mut reader = SplitReader { bytes: &bytes, head };
+        let request = read_request_limited(&mut reader, 4_000_000, &mut || continued += 1).unwrap();
+        assert_eq!((request.body.len(), continued), (2_000_000, 1));
+    }
+
+    struct SplitReader<'b> {
+        bytes: &'b [u8],
+        head: usize,
+    }
+
+    impl Read for SplitReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = if self.head > 0 { self.head } else { self.bytes.len() };
+            let count = buffer.len().min(limit).min(self.bytes.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            self.head = self.head.saturating_sub(count);
+            Ok(count)
+        }
+    }
 
     #[test]
     fn a_request_head_parses_and_hostile_ones_are_refused() {

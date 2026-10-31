@@ -1,4 +1,4 @@
-use crate::md5::md5_hex;
+use eggdb_auth::sigv4::{self, SigV4Error, SignedRequest};
 use eggdb_http::{Request, Response};
 use eggdb_keyspace::Keyspace;
 use eggdb_queues::{QueueError, Queues};
@@ -75,6 +75,10 @@ fn number(body: &Node, name: &str) -> Option<u64> {
     }
 }
 
+fn md5_hex(bytes: &[u8]) -> String {
+    hex(&eggdb_crypto::md5_checksum(bytes))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -126,8 +130,13 @@ impl<'k> Endpoint<'k> {
 
     /// Answers one HTTP request.
     pub fn answer(&self, request: &Request) -> Response {
-        if !crate::sigv4::verify(request, &self.access_key, &self.secret) {
-            return failure(403, "InvalidClientTokenId", "The security token included in the request is invalid.");
+        let signed = SignedRequest { method: &request.method, path: &request.path, query: request.query.as_deref(), headers: &request.headers, body: &request.body };
+        let now = i64::try_from(now_ms() / 1000).unwrap_or(i64::MAX);
+        match sigv4::verify(&signed, &self.access_key, &self.secret, now) {
+            Ok(()) => {}
+            Err(SigV4Error::TimeSkewed) => return failure(403, "SignatureDoesNotMatch", "Signature expired: the request's date is more than 15 minutes from the server's time."),
+            Err(SigV4Error::UnknownAccessKey) => return failure(403, "InvalidClientTokenId", "The security token included in the request is invalid."),
+            Err(error) => return failure(403, "SignatureDoesNotMatch", &error.to_string()),
         }
         let Some(action) = request.header("x-amz-target").and_then(|target| target.strip_prefix("AmazonSQS.")) else {
             return failure(400, "InvalidAction", "Only the AWS JSON 1.0 protocol (X-Amz-Target) is supported.");

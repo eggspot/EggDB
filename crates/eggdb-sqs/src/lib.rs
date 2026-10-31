@@ -6,8 +6,6 @@
 //! trademark of Amazon; EggDB is compatible with its API.
 
 mod api;
-mod md5;
-mod sigv4;
 
 pub use api::Endpoint;
 

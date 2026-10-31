@@ -35,6 +35,7 @@ eggdb-nats = { path = "../eggdb-nats" }
 eggdb-sqs = { path = "../eggdb-sqs" }
 eggdb-stomp = { path = "../eggdb-stomp" }
 eggdb-cql = { path = "../eggdb-cql" }
+eggdb-s3 = { path = "../eggdb-s3" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
 eggdb-queues = { path = "../eggdb-queues" }
 eggdb-parquet = { path = "../eggdb-parquet" }

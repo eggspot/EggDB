@@ -1,6 +1,5 @@
 use crate::Endpoint;
-use crate::md5::md5_hex;
-use crate::sigv4::sign;
+use eggdb_auth::sigv4::{SignedRequest, authorization, format_amz_date};
 use eggdb_http::Request;
 use eggdb_keyspace::MemoryKeyspace;
 
@@ -12,7 +11,11 @@ fn call(endpoint: &Endpoint<'_>, action: &str, body: &str, secret: &str) -> (u16
         headers: vec![("host".to_owned(), "127.0.0.1:9324".to_owned()), ("x-amz-target".to_owned(), format!("AmazonSQS.{action}"))],
         body: body.as_bytes().to_vec(),
     };
-    sign(&mut request, "eggdb", secret, "20261031T120000Z", "us-east-1");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    request.headers.push(("x-amz-date".to_owned(), format_amz_date(i64::try_from(now).unwrap())));
+    let signed = SignedRequest { method: &request.method, path: &request.path, query: None, headers: &request.headers, body: &request.body };
+    let value = authorization(&signed, &["host", "x-amz-date", "x-amz-target"], "eggdb", secret, "us-east-1", "sqs").unwrap();
+    request.headers.push(("authorization".to_owned(), value));
     let response = endpoint.answer(&request);
     (response.status, String::from_utf8(response.body).unwrap())
 }
@@ -24,13 +27,6 @@ fn field<'t>(text: &'t str, name: &str) -> &'t str {
 }
 
 #[test]
-fn md5_matches_rfc_1321() {
-    assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
-    assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
-    assert_eq!(md5_hex(&[b'a'; 100]), "36a92cc94a9e0fa21f625f8bfb007adf");
-}
-
-#[test]
 fn a_queue_sends_receives_and_deletes_messages() {
     let keyspace = MemoryKeyspace::default();
     let endpoint = Endpoint::new(&keyspace, "http://127.0.0.1:9324", "eggdb", "secret");
@@ -39,7 +35,7 @@ fn a_queue_sends_receives_and_deletes_messages() {
     let url = field(&created, "QueueUrl").to_owned();
     assert_eq!(url, "http://127.0.0.1:9324/000000000000/jobs");
     let (_, sent) = call(&endpoint, "SendMessage", &format!(r#"{{"QueueUrl":"{url}","MessageBody":"hello"}}"#), "secret");
-    assert_eq!(field(&sent, "MD5OfMessageBody"), md5_hex(b"hello"));
+    assert_eq!(field(&sent, "MD5OfMessageBody"), "5d41402abc4b2a76b9719d911017c592");
     let (_, received) = call(&endpoint, "ReceiveMessage", &format!(r#"{{"QueueUrl":"{url}","MaxNumberOfMessages":10}}"#), "secret");
     assert_eq!(field(&received, "Body"), "hello");
     let handle = field(&received, "ReceiptHandle").to_owned();

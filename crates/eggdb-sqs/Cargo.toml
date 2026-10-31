@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+eggdb-auth = { path = "../eggdb-auth" }
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }

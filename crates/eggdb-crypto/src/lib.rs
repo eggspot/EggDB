@@ -37,6 +37,7 @@ mod gcm;
 mod hash;
 mod hkdf;
 mod hmac;
+mod md5;
 mod p256;
 mod pbkdf2;
 mod poly1305;
@@ -55,6 +56,7 @@ pub use gcm::AesGcm;
 pub use hash::{HashFunction, MAX_HASH_BLOCK_BYTES, MAX_HASH_DIGEST_BYTES};
 pub use hkdf::{HkdfError, hkdf_expand, hkdf_extract};
 pub use hmac::{Hmac, HmacSha256, hmac, hmac_sha256};
+pub use md5::md5_checksum;
 pub use p256::{
     EcdsaP256Signature, P256_COMPRESSED_POINT_BYTES, P256_ELEMENT_BYTES,
     P256_UNCOMPRESSED_POINT_BYTES, P256Error, P256PrivateKey, P256PublicKey, ecdsa_p256_sign,

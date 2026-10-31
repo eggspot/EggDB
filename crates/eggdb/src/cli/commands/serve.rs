@@ -269,6 +269,23 @@ impl Session<'_> {
             None => None,
         };
         let sqs_secret = sqs_listener.as_ref().map(|_| password.clone());
+        let s3_listener = match options.s3_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--s3-listen {address}: the S3-compatible endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for S3 clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let s3_secret = s3_listener.as_ref().map(|_| password.clone());
         let cql_listener = match options.cql_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -628,6 +645,20 @@ impl Session<'_> {
                 }
                 _ => None,
             };
+            let object_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::OBJECT_COLLECTIONS,
+            };
+            let s3_endpoint = s3_secret.as_ref().map(|secret| eggdb_s3::Endpoint::new(&object_database, &config.user, secret));
+            let s3_server = scope.spawn(|| match (&s3_listener, &s3_endpoint) {
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
+                    listener,
+                    &|request| endpoint.answer(request),
+                    &stop_signals::requested,
+                    eggdb_s3::MAX_REQUEST_BYTES,
+                ),
+                _ => Ok(()),
+            });
             let sqs_server = scope.spawn(|| match (&sqs_listener, &sqs_endpoint) {
                 (Some(listener), Some(endpoint)) => {
                     eggdb_http::serve(listener, &|request| endpoint.answer(request), &stop_signals::requested)
@@ -719,6 +750,7 @@ impl Session<'_> {
             let _ = cql_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = sqs_server.join();
+            let _ = s3_server.join();
             let _ = job_scheduler.join();
             let _ = cdc_delivery.join();
             postgresql

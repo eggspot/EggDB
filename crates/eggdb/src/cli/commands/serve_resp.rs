@@ -14,6 +14,7 @@ pub(super) const GRAPH_COLLECTIONS: &str = "graph";
 pub(super) const KAFKA_COLLECTIONS: &str = "kafka";
 pub(super) const QUEUE_COLLECTIONS: &str = "queue";
 pub(super) const MQTT_COLLECTIONS: &str = "mqtt";
+pub(super) const OBJECT_COLLECTIONS: &str = "objects";
 
 fn failed(error: &eggdb::Error) -> String {
     format!("ERR {error}")
