@@ -220,8 +220,7 @@ impl Session<'_> {
         Ok(Exit::Done)
     }
 
-    pub(super) fn export_parquet(&mut self, target: &Path) -> Result<Exit, Failure> {
-        let shown = render::text(target.display().to_string().as_bytes());
+    fn table_columns(&mut self) -> Result<Result<(String, Vec<Column>, u64), Exit>, Failure> {
         let table = self.request.csv.table.clone().unwrap_or_default();
         let query = format!("SELECT * FROM {table}");
         let db = self.open(Access::ReadOnly, None)?;
@@ -233,7 +232,7 @@ impl Session<'_> {
         if let Err(error) = outcome {
             print_error(&mut self.messages, &error, &query);
             self.close(db)?;
-            return Ok(exit_for(&error));
+            return Ok(Err(exit_for(&error)));
         }
         self.close(db)?;
         let (described, found_rows) = found.map_or((None, Vec::new()), |result: QueryResult| (result.columns, result.rows));
@@ -247,15 +246,41 @@ impl Session<'_> {
             }
         }
         let columns: Vec<Column> = names.iter().zip(by_column).map(|((name, sql_type), values)| column_of(name, *sql_type, values)).collect();
+        Ok(Ok((table, columns, rows)))
+    }
+
+    fn written(&mut self, table: &str, shown: &str, rows: u64) -> Exit {
+        match self.format {
+            Format::Json => self.out.text(&JsonObject::new().string("table", table).string("to", shown).number("rows", rows).line()),
+            _ => self.out.text(&format!("exported {} rows of {table} to {shown}\n", render::count(rows))),
+        }
+        Exit::Done
+    }
+
+    pub(super) fn export_parquet(&mut self, target: &Path) -> Result<Exit, Failure> {
+        let shown = render::text(target.display().to_string().as_bytes());
+        let (table, columns, rows) = match self.table_columns()? {
+            Ok(found) => found,
+            Err(exit) => return Ok(exit),
+        };
         let bytes = eggdb_parquet::write(&columns)
             .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
         std::fs::write(target, bytes)
             .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
-        match self.format {
-            Format::Json => self.out.text(&JsonObject::new().string("table", &table).string("to", &shown).number("rows", rows).line()),
-            _ => self.out.text(&format!("exported {} rows of {table} to {shown}\n", render::count(rows))),
-        }
-        Ok(Exit::Done)
+        Ok(self.written(&table, &shown, rows))
+    }
+
+    pub(super) fn export_arrow(&mut self, target: &Path) -> Result<Exit, Failure> {
+        let shown = render::text(target.display().to_string().as_bytes());
+        let (table, columns, rows) = match self.table_columns()? {
+            Ok(found) => found,
+            Err(exit) => return Ok(exit),
+        };
+        let bytes = eggdb_arrow::write_stream(&columns)
+            .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
+        std::fs::write(target, bytes)
+            .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
+        Ok(self.written(&table, &shown, rows))
     }
 }
 

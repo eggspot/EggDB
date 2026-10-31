@@ -264,3 +264,4 @@ its full title with its status.
 - [D237](decisions/D237.md) Console first piece: `CREATE EXTENSION eggdb_console` with `er_diagram(schema, 'mermaid' | 'dot')` from `information_schema`; console screens, notebooks, query builder and wizards wait for their Fable designs
 - [D238](decisions/D238.md) BI first piece: `CREATE EXTENSION eggdb_bi` reports and alerts run by pg_cron, queued as JSON and posted by `eggdb serve` to targets `EGGDB_REPORT_TARGETS` allows; dashboards and the semantic layer left
 - [D239](decisions/D239.md) Connectors: tools reach EggDB through the protocols it speaks (`docs/connectors.md`), proven by a non-gating `compatibility` CI job starting with dbt; native plugins and an Iceberg catalog left
+- [D240](decisions/D240.md) More dialects: each is its own part; first the Arrow IPC stream writer `eggdb-arrow` (own FlatBuffers) behind `eggdb export --arrow`, read back by pyarrow in CI; QUALIFY, the dialects and Flight SQL left

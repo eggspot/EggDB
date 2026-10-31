@@ -178,7 +178,7 @@ More tracks that run alongside the milestones, each starting where its dependenc
   fuel, memory and call-depth limits (D232).
 - **Time travel, derived data and change streams (D28):** after transactions (M3) and the server
   (M6).
-- **Interchange and lakehouse (D29):** after columnar storage (M11).
+- **Interchange and lakehouse (D29):** after columnar storage (M11). Started: Apache Arrow IPC streams from `eggdb export --arrow` (D240).
 - **Text and locales (D30):** collation with SQL (M5), analyzers with full-text search (M8).
   Started: Unicode normalization, case folding and case- and accent-insensitive comparison from
   Unicode's own data, with `normalize()` in SQL (D233).

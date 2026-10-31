@@ -1355,8 +1355,42 @@ jobs:
             fi
           done
 
+  arrow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-arrow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Read an exported Arrow stream with pyarrow (test tool only, never shipped)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/arrow"
+          "$RUNNER_TEMP/arrow/bin/pip" install --quiet pyarrow==17.0.0
+          cargo build -p eggdb
+          target/debug/eggdb sql "$RUNNER_TEMP/eggs.eggdb" --create -c "CREATE TABLE eggs (id bigint PRIMARY KEY, name text, fresh boolean, price numeric(9,2), laid timestamptz); INSERT INTO eggs VALUES (1, 'brown', true, 1.50, '2026-10-31T08:00:00Z'), (2, NULL, false, NULL, NULL)"
+          target/debug/eggdb export "$RUNNER_TEMP/eggs.eggdb" --table eggs --arrow "$RUNNER_TEMP/eggs.arrows"
+          "$RUNNER_TEMP/arrow/bin/python" - "$RUNNER_TEMP/eggs.arrows" <<'PY'
+          import sys
+          import pyarrow.ipc
+          table = pyarrow.ipc.open_stream(sys.argv[1]).read_all()
+          assert table.column_names == ["id", "name", "fresh", "price", "laid"], table.schema
+          rows = table.to_pylist()
+          assert rows[0]["id"] == 1 and rows[0]["name"] == "brown" and rows[0]["fresh"] is True, rows
+          assert str(rows[0]["price"]) == "1.50" and rows[1]["name"] is None and rows[1]["price"] is None, rows
+          print("pyarrow read the Arrow stream:", table.schema)
+          PY
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode, arrow]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

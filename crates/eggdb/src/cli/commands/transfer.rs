@@ -29,6 +29,9 @@ impl Session<'_> {
         if let Some(target) = self.request.csv.parquet.clone() {
             return self.export_parquet(&target);
         }
+        if let Some(target) = self.request.csv.arrow.clone() {
+            return self.export_arrow(&target);
+        }
         if let Some(dialect) = self.request.csv.sql_dump {
             return self.export_sql(dialect);
         }

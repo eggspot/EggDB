@@ -257,6 +257,7 @@ impl CommandName {
             OptionName::Mode => self == Self::Shell,
             OptionName::DryRun => matches!(self, Self::Import | Self::Restore),
             OptionName::Table | OptionName::Parquet => matches!(self, Self::Import | Self::Export),
+            OptionName::Arrow => self == Self::Export,
             OptionName::SqlDump => self == Self::Export,
             OptionName::OnConflict
             | OptionName::Csv
@@ -416,6 +417,7 @@ enum OptionName {
     Mode,
     Csv,
     Parquet,
+    Arrow,
     SqlDump,
     Table,
     Header,
@@ -509,6 +511,7 @@ impl OptionName {
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
             b"parquet" => Self::Parquet,
+            b"arrow" => Self::Arrow,
             b"sql" => Self::SqlDump,
             b"table" => Self::Table,
             b"header" => Self::Header,
@@ -687,6 +690,7 @@ pub(crate) struct CsvOptions {
     pub(crate) row_terminator: Option<String>,
     pub(crate) keep_nulls: bool,
     pub(crate) parquet: Option<PathBuf>,
+    pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
 }
 
@@ -1327,6 +1331,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
+            OptionName::Arrow => request.csv.arrow = Some(PathBuf::from(value)),
             OptionName::SqlDump => {
                 request.csv.sql_dump = Some(match value.to_str().unwrap_or_default() {
                     "postgresql" | "postgres" => eggdb_sql::Dialect::PostgreSql,
@@ -1868,6 +1873,15 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     if csv.sql_dump.is_some() {
         if csv.parquet.is_some() || csv.table.is_some() {
             return Err("--sql writes every table; it does not go with --parquet or --table".to_owned());
+        }
+        return Ok(());
+    }
+    if csv.arrow.is_some() {
+        if csv.parquet.is_some() || csv.source.is_some() || request.export_file.is_some() {
+            return Err("--arrow <file> writes the table alone: give it without --parquet, --csv or a second argument".to_owned());
+        }
+        if csv.table.is_none() {
+            return Err("--arrow needs --table <name>, the table to write".to_owned());
         }
         return Ok(());
     }
