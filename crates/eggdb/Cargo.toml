@@ -25,6 +25,7 @@ eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }
+eggdb-resp = { path = "../eggdb-resp" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }
 eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }

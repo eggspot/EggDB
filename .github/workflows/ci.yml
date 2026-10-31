@@ -186,6 +186,57 @@ jobs:
           PGPASSWORD=ci-password psql "host=127.0.0.1 port=15433 user=eggdb dbname=eggdb sslmode=require" \
             -tAc "SELECT count(*) FROM t" | grep -qx 1
 
+  resp-clients:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Install redis-cli and redis-py (test tools only, never shipped)
+        run: |
+          command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
+          python3 -m venv "$RUNNER_TEMP/resp"
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8
+      - name: Serve a database over RESP and talk to it with redis-cli and redis-py
+        run: |
+          cargo build -p eggdb
+          export EGGDB_PASSWORD=ci-resp-password
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 &
+          for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
+          cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
+          test "$(cli SET greeting hello)" = OK
+          test "$(cli GET greeting)" = hello
+          test "$(cli INCRBY visits 5)" = 5
+          cli HSET user:1 name Ada lang Rust
+          test "$(cli HGET user:1 name)" = Ada
+          cli RPUSH queue a b c
+          test "$(cli LRANGE queue 0 -1 | tr '\n' ' ')" = "a b c "
+          cli ZADD board 10 ada 20 grace
+          test "$(cli ZRANGE board 0 -1 | tr '\n' ' ')" = "ada grace "
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import redis
+          r = redis.Redis(port=6380, password="ci-resp-password", protocol=3)
+          assert r.set("k", "v", ex=60)
+          assert r.get("k") == b"v"
+          assert 0 < r.ttl("k") <= 60
+          assert r.hgetall("user:1") == {b"name": b"Ada", b"lang": b"Rust"}
+          assert r.smembers("nothing") == set()
+          pipe = r.pipeline()
+          pipe.incr("n").incr("n").get("n")
+          assert pipe.execute() == [1, 2, b"2"]
+          print("redis-py over RESP3: passed")
+          PY
+
   redis-compare:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -826,7 +877,7 @@ jobs:
             cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
 
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

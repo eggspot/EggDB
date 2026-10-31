@@ -210,6 +210,7 @@ impl CommandName {
             | OptionName::TdsListen
             | OptionName::MetricsListen
             | OptionName::McpListen
+            | OptionName::RespListen
             | OptionName::McpTokenFile
             | OptionName::LogBatches
             | OptionName::User
@@ -351,6 +352,7 @@ enum OptionName {
     TdsListen,
     MetricsListen,
     McpListen,
+    RespListen,
     McpTokenFile,
     LogBatches,
     Dialect,
@@ -420,6 +422,7 @@ impl OptionName {
             b"tds-listen" => Self::TdsListen,
             b"metrics-listen" => Self::MetricsListen,
             b"mcp-listen" => Self::McpListen,
+            b"resp-listen" => Self::RespListen,
             b"mcp-token-file" => Self::McpTokenFile,
             b"log-batches" => Self::LogBatches,
             b"dialect" => Self::Dialect,
@@ -655,6 +658,7 @@ pub(crate) struct ServeOptions {
     pub(crate) metrics_listen: Option<SocketAddr>,
     pub(crate) mcp_listen: Option<SocketAddr>,
     pub(crate) mcp_token_file: Option<PathBuf>,
+    pub(crate) resp_listen: Option<SocketAddr>,
     pub(crate) log_batches: bool,
     pub(crate) user: Option<String>,
     pub(crate) password_file: Option<ExportFile>,
@@ -1077,6 +1081,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     Some(parse_listen(&option.spelled, value, 8765).map_err(usage)?);
             }
             OptionName::McpTokenFile => request.serve.mcp_token_file = Some(PathBuf::from(value)),
+            OptionName::RespListen => {
+                request.serve.resp_listen =
+                    Some(parse_listen(&option.spelled, value, 6379).map_err(usage)?);
+            }
             OptionName::Dialect => {
                 let name = value.to_str().unwrap_or_default();
                 request.dialect = eggdb_sql::Dialect::named(name).ok_or_else(|| {

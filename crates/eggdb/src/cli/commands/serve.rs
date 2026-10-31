@@ -119,6 +119,25 @@ impl Session<'_> {
                 Some((listener, tokens))
             }
         };
+        let resp_listener = match options.resp_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--resp-listen {address}: the RESP listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for RESP on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let resp_password = resp_listener
+            .as_ref()
+            .map(|_| eggdb_crypto::sha256(password.as_bytes()));
         let mysql_listener = match options.mysql_listen {
             Some(address) => Some(self.listener(
                 "--mysql-listen",
@@ -305,6 +324,22 @@ impl Session<'_> {
                 ),
                 _ => Ok(()),
             });
+            let resp_keyspace = super::serve_resp::DatabaseKeyspace { db: &db };
+            let resp_config = eggdb_resp::ServerConfig {
+                password_sha256: resp_password,
+                max_connections: config.max_connections,
+            };
+            let resp_server = scope.spawn(|| match &resp_listener {
+                Some(listener) => eggdb_resp::serve(
+                    &resp_keyspace,
+                    listener,
+                    &resp_config,
+                    &stop_signals::requested,
+                    &|_| {},
+                )
+                .map(|_| ()),
+                None => Ok(()),
+            });
             let tds_server = scope.spawn(|| match (&tds_listener, &tds_config) {
                 (Some(listener), Some(config)) => {
                     let log = move |line: &str| {
@@ -331,6 +366,7 @@ impl Session<'_> {
             let tds = tds_server.join().unwrap_or_else(|_| unexpected());
             let _ = metrics_server.join();
             let _ = mcp_server.join();
+            let _ = resp_server.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))
