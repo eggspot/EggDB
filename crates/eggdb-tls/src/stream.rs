@@ -220,6 +220,13 @@ impl<S: Read + Write> TlsStream<S> {
     }
 }
 
+fn is_retryable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+    )
+}
+
 fn fail<S: Read + Write>(layer: &mut RecordLayer<S>, error: TlsError) -> TlsError {
     if let Some(alert) = error.alert_to_send() {
         layer.send_alert(alert);
@@ -242,6 +249,7 @@ impl<S: Read + Write> Read for TlsStream<S> {
             match self.fill_received() {
                 Ok(true) => {}
                 Ok(false) => return Ok(0),
+                Err(TlsError::Io(error)) if is_retryable(&error) => return Err(error),
                 Err(error) => return Err(self.fail_with(error)),
             }
         }

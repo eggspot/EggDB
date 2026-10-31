@@ -5,10 +5,15 @@
 //! - [`serve`] runs a server over any [`eggdb_sql::KeyValueStore`]: one thread and one
 //!   [`eggdb_sql::Session`] per connection, a bounded number of connections, and a graceful
 //!   stop.
-//! - [`listen_on_loopback`] opens its listener and refuses every address but loopback: until
-//!   EggDB has TLS, only this machine can connect (D102).
-//! - Every connection authenticates with SCRAM-SHA-256 ([`ScramVerifier`], [`ScramExchange`]);
-//!   there is no unauthenticated mode. `SSLRequest` and `GSSENCRequest` are answered `N`.
+//! - [`listen`] opens its listener: on any address when the server has TLS, where connections
+//!   from other machines must use it, and only on loopback without TLS (D161, superseding part
+//!   of D102); [`listen_on_loopback`] is the loopback-only form.
+//! - TLS 1.3 and 1.2 from [`eggdb_tls`]: `SSLRequest` is answered `S` when [`ServerConfig::tls`]
+//!   is set (`N` otherwise), and PostgreSQL 17's direct TLS with ALPN `postgresql` is accepted.
+//!   `GSSENCRequest` is answered `N`.
+//! - Every connection authenticates with SCRAM-SHA-256 ([`ScramVerifier`], [`ScramExchange`]),
+//!   and over TLS also SCRAM-SHA-256-PLUS with `tls-server-end-point` channel binding; there is
+//!   no unauthenticated mode.
 //! - [`messages`] parses every frontend message and builds the backend ones, refusing
 //!   truncated, oversized or inconsistent input with an error, never a panic.
 //! - The simple query protocol and the extended one (`Parse`, `Bind`, `Describe`, `Execute`,
@@ -36,10 +41,10 @@ mod wire;
 
 pub use connection::{MAX_AUTHENTICATION_MESSAGE_BYTES, MAX_MESSAGE_BYTES};
 pub use scram::{
-    MIN_SCRAM_ITERATIONS, SCRAM_SALT_BYTES, SCRAM_SHA_256, ScramExchange, ScramFailure,
+    MIN_SCRAM_ITERATIONS, SCRAM_SALT_BYTES, SCRAM_SHA_256, SCRAM_SHA_256_PLUS, ScramExchange, ScramFailure,
     ScramVerifier,
 };
 pub use server::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
-    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen_on_loopback, serve,
+    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve,
 };

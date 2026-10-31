@@ -151,6 +151,18 @@ impl TestServer {
     }
 
     pub fn start_with(max_connections: usize, authentication_timeout: Duration) -> Self {
+        Self::start_configured(max_connections, authentication_timeout, None)
+    }
+
+    pub fn start_with_tls(tls: Arc<eggdb_tls::ServerConfig>) -> Self {
+        Self::start_configured(8, Duration::from_secs(5), Some(tls))
+    }
+
+    fn start_configured(
+        max_connections: usize,
+        authentication_timeout: Duration,
+        tls: Option<Arc<eggdb_tls::ServerConfig>>,
+    ) -> Self {
         let listener: TcpListener =
             eggdb_pgwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
         let address = listener.local_addr().unwrap();
@@ -162,6 +174,7 @@ impl TestServer {
             database: DATABASE.to_owned(),
             max_connections,
             authentication_timeout,
+            tls,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);

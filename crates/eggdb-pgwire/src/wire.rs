@@ -1,4 +1,5 @@
 use crate::messages::{MAX_STARTUP_PACKET_BYTES, Outbox};
+use eggdb_tls::{PrefixedStream, SessionInfo, TlsStream};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
@@ -10,6 +11,55 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 const REFUSAL_LINGER: Duration = Duration::from_millis(200);
 const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) enum WireStream {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<PrefixedStream<TcpStream>>>),
+    Detached,
+}
+
+impl WireStream {
+    fn tcp(&self) -> Option<&TcpStream> {
+        match self {
+            Self::Plain(stream) => Some(stream),
+            Self::Tls(stream) => Some(stream.get_ref().get_ref()),
+            Self::Detached => None,
+        }
+    }
+}
+
+fn detached() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "the TLS handshake failed")
+}
+
+impl Read for WireStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+            Self::Detached => Err(detached()),
+        }
+    }
+}
+
+impl Write for WireStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+            Self::Detached => Err(detached()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+            Self::Detached => Err(detached()),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum WireError {
@@ -21,7 +71,8 @@ pub(crate) enum WireError {
 }
 
 pub(crate) struct Wire<'a> {
-    stream: TcpStream,
+    stream: WireStream,
+    peeked: Option<u8>,
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
     pub(crate) outbox: Outbox,
@@ -39,7 +90,8 @@ impl<'a> Wire<'a> {
         stream.set_read_timeout(Some(POLL_INTERVAL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self {
-            stream,
+            stream: WireStream::Plain(stream),
+            peeked: None,
             stop,
             deadline,
             outbox: Outbox::new(),
@@ -63,15 +115,26 @@ impl<'a> Wire<'a> {
         }
     }
 
+    fn set_read_timeout(&mut self, wait: Duration) -> Result<(), WireError> {
+        let stream = self.stream.tcp().ok_or(WireError::Io)?;
+        stream
+            .set_read_timeout(Some(wait))
+            .map_err(|_| WireError::Io)?;
+        self.read_timeout = wait;
+        Ok(())
+    }
+
     fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), WireError> {
         let mut filled = 0;
+        if let (Some(byte), Some(first)) = (self.peeked, buffer.first_mut()) {
+            *first = byte;
+            self.peeked = None;
+            filled = 1;
+        }
         while filled < buffer.len() {
             let wait = self.next_wait()?;
             if wait != self.read_timeout {
-                self.stream
-                    .set_read_timeout(Some(wait))
-                    .map_err(|_| WireError::Io)?;
-                self.read_timeout = wait;
+                self.set_read_timeout(wait)?;
             }
             match self.stream.read(&mut buffer[filled..]) {
                 Ok(0) => return Err(WireError::Closed),
@@ -138,16 +201,22 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn close_after_refusal(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Write);
+        if let WireStream::Tls(stream) = &mut self.stream {
+            let _ = stream.close();
+        }
+        let Some(mut stream) = self.stream.tcp() else {
+            return;
+        };
+        let _ = stream.shutdown(Shutdown::Write);
         let deadline = Instant::now() + REFUSAL_LINGER;
         let mut buffer = [0u8; 8 * 1024];
         let mut discarded = 0;
         while discarded < REFUSAL_LINGER_BYTES {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || self.stream.set_read_timeout(Some(left)).is_err() {
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
                 return;
             }
-            match self.stream.read(&mut buffer) {
+            match stream.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(count) => discarded += count,
                 Err(error)
@@ -164,7 +233,57 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn peer(&self) -> String {
         self.stream
-            .peer_addr()
-            .map_or_else(|_| "an unknown address".to_owned(), |peer| peer.to_string())
+            .tcp()
+            .and_then(|stream| stream.peer_addr().ok())
+            .map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string())
+    }
+
+    pub(crate) fn peer_is_loopback(&self) -> bool {
+        self.stream
+            .tcp()
+            .and_then(|stream| stream.peer_addr().ok())
+            .is_some_and(|peer| peer.ip().is_loopback())
+    }
+
+    pub(crate) fn peek_byte(&mut self) -> Result<u8, WireError> {
+        if let Some(byte) = self.peeked {
+            return Ok(byte);
+        }
+        let mut byte = [0u8; 1];
+        self.read_exact(&mut byte)?;
+        self.peeked = Some(byte[0]);
+        Ok(byte[0])
+    }
+
+    pub(crate) fn start_tls(&mut self, config: &eggdb_tls::ServerConfig) -> Result<(), String> {
+        let prefix: Vec<u8> = self.peeked.take().into_iter().collect();
+        let WireStream::Plain(stream) = std::mem::replace(&mut self.stream, WireStream::Detached)
+        else {
+            return Err("TLS was requested twice".to_owned());
+        };
+        let timeout = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+            .unwrap_or(TLS_HANDSHAKE_TIMEOUT);
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| error.to_string())?;
+        let tls = TlsStream::accept(PrefixedStream::new(prefix, stream), config)
+            .map_err(|error| error.to_string())?;
+        tls.get_ref()
+            .get_ref()
+            .set_read_timeout(Some(POLL_INTERVAL))
+            .map_err(|error| error.to_string())?;
+        self.read_timeout = POLL_INTERVAL;
+        self.stream = WireStream::Tls(Box::new(tls));
+        Ok(())
+    }
+
+    pub(crate) fn tls(&self) -> Option<&SessionInfo> {
+        match &self.stream {
+            WireStream::Tls(stream) => Some(stream.info()),
+            _ => None,
+        }
     }
 }

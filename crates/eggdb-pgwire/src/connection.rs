@@ -3,7 +3,7 @@ use crate::messages::{
     parse_message, parse_sasl_initial_response, parse_startup,
 };
 use crate::backend_keys::SECRET_KEY_BYTES;
-use crate::scram::{SCRAM_SHA_256, ScramExchange, ScramFailure, ScramVerifier};
+use crate::scram::{ScramExchange, ScramFailure, ScramVerifier};
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::types::{
     TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,
@@ -331,7 +331,44 @@ fn cancel_running_statement(
     }
 }
 
+const TLS_RECORD_HANDSHAKE: u8 = 0x16;
+const POSTGRESQL_APPLICATION_PROTOCOL: &[u8] = b"postgresql";
+
+fn start_tls(wire: &mut Wire<'_>, shared: &Shared<'_>, config: &eggdb_tls::ServerConfig) -> bool {
+    match wire.start_tls(config) {
+        Ok(()) => true,
+        Err(error) => {
+            (shared.log)(&format!("{}  TLS handshake failed: {error}", wire.peer()));
+            false
+        }
+    }
+}
+
+fn start_direct_tls(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<bool> {
+    let config = shared.config.tls.as_deref()?;
+    match wire.peek_byte() {
+        Ok(TLS_RECORD_HANDSHAKE) => {}
+        Ok(_) => return Some(true),
+        Err(_) => return Some(false),
+    }
+    if !start_tls(wire, shared, config) {
+        return Some(false);
+    }
+    let negotiated = wire.tls().and_then(|info| info.application_protocol.as_deref());
+    if negotiated != Some(POSTGRESQL_APPLICATION_PROTOCOL) {
+        (shared.log)(&format!(
+            "{}  direct TLS connection refused: the client did not ask for the postgresql protocol with ALPN",
+            wire.peer()
+        ));
+        return Some(false);
+    }
+    Some(true)
+}
+
 fn read_startup(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<Startup> {
+    if start_direct_tls(wire, shared) == Some(false) {
+        return None;
+    }
     for _ in 0..=MAX_ENCRYPTION_REQUESTS {
         let body = match wire.read_startup_packet() {
             Ok(body) => body,
@@ -346,6 +383,24 @@ fn read_startup(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<Startup> {
             Err(_) => return None,
         };
         match parse_startup(&body) {
+            Ok(StartupRequest::Ssl) if wire.tls().is_some() => {
+                fatal(
+                    wire,
+                    SqlState::PROTOCOL_VIOLATION,
+                    "SSLRequest on a connection that already uses TLS",
+                );
+                return None;
+            }
+            Ok(StartupRequest::Ssl) if shared.config.tls.is_some() => {
+                wire.outbox.accept_encryption();
+                if wire.flush().is_err() {
+                    return None;
+                }
+                let config = shared.config.tls.as_deref()?;
+                if !start_tls(wire, shared, config) {
+                    return None;
+                }
+            }
             Ok(StartupRequest::Ssl | StartupRequest::GssEncryption) => {
                 wire.outbox.refuse_encryption();
                 if wire.flush().is_err() {
@@ -378,6 +433,14 @@ fn read_startup(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<Startup> {
                         .find(|(key, _)| key == name)
                         .map(|(_, value)| value.clone())
                 };
+                if wire.tls().is_none() && !wire.peer_is_loopback() {
+                    fatal(
+                        wire,
+                        SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+                        "EggDB accepts connections from other machines only over TLS: connect with sslmode=require or stronger",
+                    );
+                    return None;
+                }
                 let Some(user) = value_of("user").filter(|user| !user.is_empty()) else {
                     fatal(
                         wire,
@@ -487,7 +550,10 @@ fn authenticate(wire: &mut Wire<'_>, shared: &Shared<'_>, user: &str) -> Authent
         return AuthenticationOutcome::Refused;
     }
     let mut exchange = ScramExchange::new(verifier, &nonce);
-    wire.outbox.authentication_sasl(&[SCRAM_SHA_256]);
+    if let Some(binding) = wire.tls().and_then(|info| info.tls_server_end_point()) {
+        exchange = exchange.with_channel_binding(binding);
+    }
+    wire.outbox.authentication_sasl(exchange.mechanisms());
     if wire.flush().is_err() {
         return AuthenticationOutcome::Refused;
     }
@@ -501,7 +567,7 @@ fn authenticate(wire: &mut Wire<'_>, shared: &Shared<'_>, user: &str) -> Authent
             return AuthenticationOutcome::Refused;
         }
     };
-    if initial.mechanism != SCRAM_SHA_256 {
+    if exchange.select_mechanism(&initial.mechanism).is_err() {
         fatal(
             wire,
             SqlState::PROTOCOL_VIOLATION,

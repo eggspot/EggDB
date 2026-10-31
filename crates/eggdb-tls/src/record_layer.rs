@@ -28,6 +28,7 @@ pub(crate) struct RecordLayer<S> {
     read: Protection,
     write: Protection,
     handshake: HandshakeBuffer,
+    incoming: Vec<u8>,
     pending_output: Vec<u8>,
     record_version: u16,
     pub(crate) ignore_change_cipher_spec: bool,
@@ -40,6 +41,7 @@ impl<S: Read + Write> RecordLayer<S> {
             read: Protection::Plaintext,
             write: Protection::Plaintext,
             handshake: HandshakeBuffer::new(),
+            incoming: Vec::new(),
             pending_output: Vec::new(),
             record_version,
             ignore_change_cipher_spec: false,
@@ -81,18 +83,19 @@ impl<S: Read + Write> RecordLayer<S> {
         self.handshake.is_empty()
     }
 
-    fn read_exact_or_eof(&mut self, buffer: &mut [u8]) -> Result<bool, TlsError> {
-        let mut filled = 0;
-        while filled < buffer.len() {
-            match self.stream.read(&mut buffer[filled..]) {
-                Ok(0) if filled == 0 => return Ok(false),
+    fn fill_incoming(&mut self, wanted: usize) -> Result<bool, TlsError> {
+        let mut chunk = [0u8; 4096];
+        while self.incoming.len() < wanted {
+            let room = (wanted - self.incoming.len()).max(RECORD_HEADER_BYTES).min(chunk.len());
+            match self.stream.read(&mut chunk[..room]) {
+                Ok(0) if self.incoming.is_empty() => return Ok(false),
                 Ok(0) => {
                     return Err(TlsError::Io(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "the peer closed the connection inside a TLS record",
                     )));
                 }
-                Ok(read) => filled += read,
+                Ok(read) => self.incoming.extend_from_slice(&chunk[..read]),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(TlsError::Io(error)),
             }
@@ -101,10 +104,10 @@ impl<S: Read + Write> RecordLayer<S> {
     }
 
     /// The next record's content type and plaintext, or `None` when the peer closed the stream
-    /// between records.
+    /// between records. A read timeout of the stream comes back as an I/O error with the record
+    /// read so far kept, so the call can be repeated.
     pub(crate) fn read_record(&mut self) -> Result<Option<(u8, Vec<u8>)>, TlsError> {
-        let mut header_bytes = [0u8; RECORD_HEADER_BYTES];
-        if !self.read_exact_or_eof(&mut header_bytes)? {
+        if !self.fill_incoming(RECORD_HEADER_BYTES)? {
             return Ok(None);
         }
         let limit = match self.read {
@@ -112,11 +115,14 @@ impl<S: Read + Write> RecordLayer<S> {
             Protection::Tls13(_) => MAX_TLS13_CIPHERTEXT_BYTES,
             Protection::Tls12(_) => MAX_TLS12_CIPHERTEXT_BYTES,
         };
+        let mut header_bytes = [0u8; RECORD_HEADER_BYTES];
+        header_bytes.copy_from_slice(&self.incoming[..RECORD_HEADER_BYTES]);
         let header = RecordHeader::parse(&header_bytes, limit)?;
-        let mut payload = vec![0u8; header.length];
-        if !self.read_exact_or_eof(&mut payload)? && header.length > 0 {
+        let total = RECORD_HEADER_BYTES + header.length;
+        if !self.fill_incoming(total)? {
             return Err(TlsError::Io(std::io::ErrorKind::UnexpectedEof.into()));
         }
+        let mut payload: Vec<u8> = self.incoming.drain(..total).skip(RECORD_HEADER_BYTES).collect();
         let content = match &mut self.read {
             Protection::Plaintext => {
                 if header.content_type == content_type::APPLICATION_DATA {

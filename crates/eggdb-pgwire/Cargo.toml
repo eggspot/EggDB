@@ -13,3 +13,4 @@ workspace = true
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }
+eggdb-tls = { path = "../eggdb-tls" }

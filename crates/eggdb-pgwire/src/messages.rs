@@ -513,6 +513,11 @@ impl Outbox {
         self.bytes.push(b'N');
     }
 
+    /// `S`: the answer to an `SSLRequest` when TLS is set up; the TLS handshake follows.
+    pub fn accept_encryption(&mut self) {
+        self.bytes.push(b'S');
+    }
+
     /// `AuthenticationOk`.
     pub fn authentication_ok(&mut self) {
         self.message(b'R', |body| body.extend_from_slice(&0i32.to_be_bytes()));

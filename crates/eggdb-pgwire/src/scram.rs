@@ -4,9 +4,14 @@ use eggdb_crypto::{
 };
 use std::fmt;
 
-/// The SASL mechanism this server offers (RFC 7677). `SCRAM-SHA-256-PLUS` needs TLS channel
-/// binding, which comes with TLS (D102).
+/// The SASL mechanism this server always offers (RFC 7677).
 pub const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
+
+/// SCRAM-SHA-256 bound to the TLS connection with `tls-server-end-point` (RFC 5929), offered on
+/// TLS connections.
+pub const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
+
+const TLS_SERVER_END_POINT_FLAG: &str = "p=tls-server-end-point";
 
 /// The fewest PBKDF2 iterations a verifier may use: RFC 7677's minimum and PostgreSQL's default.
 pub const MIN_SCRAM_ITERATIONS: u32 = 4096;
@@ -95,6 +100,8 @@ pub struct ScramExchange {
     verifier: ScramVerifier,
     server_nonce: String,
     state: ExchangeState,
+    channel_binding: Option<Vec<u8>>,
+    plus_selected: bool,
 }
 
 #[derive(Debug)]
@@ -124,7 +131,62 @@ impl ScramExchange {
             verifier,
             server_nonce: base64_encode(server_nonce_bytes),
             state: ExchangeState::AwaitingClientFirst,
+            channel_binding: None,
+            plus_selected: false,
         }
+    }
+
+    /// An exchange on a TLS connection whose `tls-server-end-point` binding data is `binding`:
+    /// [`SCRAM_SHA_256_PLUS`] is offered too.
+    pub fn with_channel_binding(mut self, binding: Vec<u8>) -> Self {
+        self.channel_binding = Some(binding);
+        self
+    }
+
+    /// The mechanisms to offer, strongest first.
+    pub fn mechanisms(&self) -> &'static [&'static str] {
+        if self.channel_binding.is_some() {
+            &[SCRAM_SHA_256_PLUS, SCRAM_SHA_256]
+        } else {
+            &[SCRAM_SHA_256]
+        }
+    }
+
+    /// Accepts the client's choice of `mechanism`, or refuses one this exchange does not offer.
+    pub fn select_mechanism(&mut self, mechanism: &str) -> Result<(), ScramFailure> {
+        if !self.mechanisms().contains(&mechanism) {
+            return Err(ScramFailure::Malformed(
+                "client selected an invalid SASL authentication mechanism".into(),
+            ));
+        }
+        self.plus_selected = mechanism == SCRAM_SHA_256_PLUS;
+        Ok(())
+    }
+
+    fn check_gs2_flag(&self, flag: &str) -> Result<(), ScramFailure> {
+        let negotiation_error =
+            || ScramFailure::Malformed("SCRAM channel binding negotiation error".into());
+        match flag {
+            "n" if !self.plus_selected => Ok(()),
+            "y" if !self.plus_selected && self.channel_binding.is_none() => Ok(()),
+            TLS_SERVER_END_POINT_FLAG if self.plus_selected => Ok(()),
+            _ if flag.starts_with("p=") && self.plus_selected => Err(ScramFailure::Unsupported(
+                "only the tls-server-end-point channel binding is supported".into(),
+            )),
+            "n" | "y" => Err(negotiation_error()),
+            _ if flag.starts_with("p=") => Err(negotiation_error()),
+            _ => Err(ScramFailure::Malformed("the GS2 header is malformed".into())),
+        }
+    }
+
+    fn expected_binding(&self, gs2_header: &str) -> Vec<u8> {
+        let mut expected = gs2_header.as_bytes().to_vec();
+        if gs2_header.starts_with("p=")
+            && let Some(binding) = &self.channel_binding
+        {
+            expected.extend_from_slice(binding);
+        }
+        expected
     }
 
     /// Reads the client-first-message and returns the server-first-message.
@@ -136,6 +198,7 @@ impl ScramExchange {
         let text = std::str::from_utf8(message)
             .map_err(|_| ScramFailure::Malformed("the SCRAM message is not UTF-8".into()))?;
         let (gs2_header, client_first_bare) = split_gs2_header(text)?;
+        self.check_gs2_flag(gs2_header.split(',').next().unwrap_or_default())?;
         let mut attributes = client_first_bare.split(',');
         match attributes.next() {
             Some(user) if user.starts_with("n=") => {}
@@ -196,7 +259,8 @@ impl ScramExchange {
             .ok_or_else(|| {
                 ScramFailure::Malformed("the client-final-message has no channel binding".into())
             })?;
-        if binding.as_bytes() != base64_encode(gs2_header.as_bytes()).as_bytes() {
+        let expected_binding = base64_encode(&self.expected_binding(&gs2_header));
+        if !constant_time_eq(binding.as_bytes(), expected_binding.as_bytes()) {
             return Err(ScramFailure::Malformed(
                 "the channel binding does not match the client-first-message".into(),
             ));
@@ -235,14 +299,8 @@ fn split_gs2_header(text: &str) -> Result<(&str, &str), ScramFailure> {
     let malformed = || ScramFailure::Malformed("the GS2 header is malformed".into());
     let first_comma = text.find(',').ok_or_else(malformed)?;
     let flag = &text[..first_comma];
-    match flag {
-        "n" | "y" => {}
-        _ if flag.starts_with("p=") => {
-            return Err(ScramFailure::Unsupported(
-                "channel binding is not supported without TLS".into(),
-            ));
-        }
-        _ => return Err(malformed()),
+    if !matches!(flag, "n" | "y") && !flag.starts_with("p=") {
+        return Err(malformed());
     }
     let rest = &text[first_comma + 1..];
     let second_comma = rest.find(',').ok_or_else(malformed)?;
@@ -332,8 +390,12 @@ mod tests {
                 "{message:?}"
             );
         }
+        let mut exchange = rfc_7677_exchange(b"pencil");
+        assert!(matches!(
+            exchange.client_first(b"p=tls-server-end-point,,n=,r=abc"),
+            Err(ScramFailure::Malformed(_))
+        ));
         for message in [
-            "p=tls-server-end-point,,n=,r=abc",
             "n,a=admin,n=,r=abc",
             "n,,m=x,n=,r=abc",
         ] {
@@ -371,5 +433,37 @@ mod tests {
     fn iteration_counts_below_the_minimum_are_raised() {
         let verifier = ScramVerifier::derive(b"pw", b"salt", 1);
         assert_eq!(verifier.iterations, super::MIN_SCRAM_ITERATIONS);
+    }
+
+    #[test]
+    fn channel_binding_flags_follow_the_selected_mechanism() {
+        let plus = || rfc_7677_exchange(b"pencil").with_channel_binding(vec![7; 32]);
+        let mut exchange = plus();
+        assert_eq!(exchange.mechanisms(), &[super::SCRAM_SHA_256_PLUS, super::SCRAM_SHA_256]);
+        exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).unwrap();
+        assert!(exchange.client_first(b"p=tls-server-end-point,,n=,r=abc").is_ok());
+
+        let mut exchange = plus();
+        exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).unwrap();
+        assert!(matches!(exchange.client_first(b"n,,n=,r=abc"), Err(ScramFailure::Malformed(_))));
+
+        let mut exchange = plus();
+        exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).unwrap();
+        assert!(matches!(
+            exchange.client_first(b"p=tls-unique,,n=,r=abc"),
+            Err(ScramFailure::Unsupported(_))
+        ));
+
+        let mut exchange = plus();
+        exchange.select_mechanism(super::SCRAM_SHA_256).unwrap();
+        assert!(matches!(exchange.client_first(b"y,,n=,r=abc"), Err(ScramFailure::Malformed(_))));
+
+        let mut exchange = plus();
+        exchange.select_mechanism(super::SCRAM_SHA_256).unwrap();
+        assert!(exchange.client_first(b"n,,n=,r=abc").is_ok());
+
+        let mut exchange = rfc_7677_exchange(b"pencil");
+        assert!(exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).is_err());
+        assert!(exchange.client_first(b"y,,n=,r=abc").is_ok());
     }
 }
