@@ -94,6 +94,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "eggdb-tls"
+version = "0.1.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-platform",
+]
+
+[[package]]
 name = "eggdb-ui"
 version = "0.1.0"
 dependencies = [
