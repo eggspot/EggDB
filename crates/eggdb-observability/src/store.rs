@@ -2,6 +2,8 @@ use crate::line_protocol::{FieldValue, Point};
 use eggdb_sql::{KeyValueStore, QueryResult, Session, SqlError, Value};
 use std::collections::BTreeMap;
 
+type SamplesByLabels = BTreeMap<Vec<(String, String)>, Vec<(i64, f64)>>;
+
 pub(crate) const SCHEMA: &str = "metrics";
 const ROWS_PER_INSERT: usize = 500;
 const UNIX_EPOCH_FROM_2000_MICROS: i64 = 946_684_800_000_000;
@@ -19,25 +21,41 @@ fn table(measurement: &str) -> String {
 }
 
 pub(crate) fn timestamp_literal(unix_micros: i64) -> String {
-    let text = Value::TimestampTz(unix_micros.saturating_sub(UNIX_EPOCH_FROM_2000_MICROS)).to_text().unwrap_or_default();
+    let text = Value::TimestampTz(unix_micros.saturating_sub(UNIX_EPOCH_FROM_2000_MICROS))
+        .to_text()
+        .unwrap_or_default();
     format!("{}::timestamptz", literal(&text))
 }
 
-pub(crate) fn run<S: KeyValueStore>(session: &mut Session<'_, S>, sql: &str) -> Result<Vec<QueryResult>, String> {
+pub(crate) fn run<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+    sql: &str,
+) -> Result<Vec<QueryResult>, String> {
     let mut results = Vec::new();
-    session.execute(sql, &mut |result| results.push(result)).map_err(|error: SqlError| error.message().to_owned())?;
+    session
+        .execute(sql, &mut |result| results.push(result))
+        .map_err(|error: SqlError| error.message().to_owned())?;
     Ok(results)
 }
 
 fn rows<S: KeyValueStore>(session: &mut Session<'_, S>, sql: &str) -> Result<QueryResult, String> {
-    run(session, sql)?.into_iter().rev().find(|result| result.columns.is_some()).ok_or_else(|| "the query returned no rows".to_owned())
+    run(session, sql)?
+        .into_iter()
+        .rev()
+        .find(|result| result.columns.is_some())
+        .ok_or_else(|| "the query returned no rows".to_owned())
 }
 
 /// Every column of every metrics table: table, column and `information_schema` data type.
-pub(crate) fn catalog<S: KeyValueStore>(session: &mut Session<'_, S>) -> Result<BTreeMap<String, Vec<(String, String)>>, String> {
+pub(crate) fn catalog<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+) -> Result<BTreeMap<String, Vec<(String, String)>>, String> {
     let result = rows(
         session,
-        &format!("SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = {} ORDER BY table_name, ordinal_position", literal(SCHEMA)),
+        &format!(
+            "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = {} ORDER BY table_name, ordinal_position",
+            literal(SCHEMA)
+        ),
     )?;
     let mut tables: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for row in &result.rows {
@@ -60,8 +78,10 @@ fn sql_type(value: &FieldValue) -> &'static str {
 fn fits(existing: &str, value: &FieldValue) -> bool {
     matches!(
         (existing, value),
-        ("double precision", FieldValue::Float(_) | FieldValue::Integer(_) | FieldValue::Unsigned(_))
-            | ("bigint", FieldValue::Integer(_))
+        (
+            "double precision",
+            FieldValue::Float(_) | FieldValue::Integer(_) | FieldValue::Unsigned(_)
+        ) | ("bigint", FieldValue::Integer(_))
             | ("numeric", FieldValue::Integer(_) | FieldValue::Unsigned(_))
             | ("text", FieldValue::Text(_))
             | ("boolean", FieldValue::Boolean(_))
@@ -78,19 +98,35 @@ fn value_sql(value: &FieldValue) -> String {
     }
 }
 
-fn insert_all<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &mut BTreeMap<String, Vec<(String, String)>>, by_measurement: &BTreeMap<&str, Vec<&Point>>) -> Result<(), String> {
+fn insert_all<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+    tables: &mut BTreeMap<String, Vec<(String, String)>>,
+    by_measurement: &BTreeMap<&str, Vec<&Point>>,
+) -> Result<(), String> {
     for (measurement, points) in by_measurement {
         let columns = tables.entry((*measurement).to_owned()).or_default();
         if columns.is_empty() {
-            run(session, &format!("CREATE TABLE IF NOT EXISTS {} (\"time\" timestamptz NOT NULL)", table(measurement)))?;
+            run(
+                session,
+                &format!(
+                    "CREATE TABLE IF NOT EXISTS {} (\"time\" timestamptz NOT NULL)",
+                    table(measurement)
+                ),
+            )?;
             columns.push(("time".to_owned(), "timestamp with time zone".to_owned()));
         }
         let mut order: Vec<String> = Vec::new();
         for point in points {
             let tags = point.tags.iter().map(|(key, _)| (key, "text", None));
-            let fields = point.fields.iter().map(|(key, value)| (key, sql_type(value), Some(value)));
+            let fields = point
+                .fields
+                .iter()
+                .map(|(key, value)| (key, sql_type(value), Some(value)));
             for (key, wanted, value) in tags.chain(fields) {
-                let existing = columns.iter().find(|(name, _)| name == key).map(|(_, data_type)| data_type.clone());
+                let existing = columns
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, data_type)| data_type.clone());
                 match existing {
                     Some(existing) => {
                         let compatible = match value {
@@ -98,11 +134,20 @@ fn insert_all<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &mut BTree
                             None => existing == "text",
                         };
                         if !compatible {
-                            return Err(format!("field type conflict: {key} of {measurement} is {existing}, not {wanted}"));
+                            return Err(format!(
+                                "field type conflict: {key} of {measurement} is {existing}, not {wanted}"
+                            ));
                         }
                     }
                     None => {
-                        run(session, &format!("ALTER TABLE {} ADD COLUMN {} {wanted}", table(measurement), identifier(key)))?;
+                        run(
+                            session,
+                            &format!(
+                                "ALTER TABLE {} ADD COLUMN {} {wanted}",
+                                table(measurement),
+                                identifier(key)
+                            ),
+                        )?;
                         columns.push((key.clone(), wanted.to_owned()));
                     }
                 }
@@ -111,7 +156,9 @@ fn insert_all<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &mut BTree
                 }
             }
         }
-        let names: Vec<String> = std::iter::once("\"time\"".to_owned()).chain(order.iter().map(|key| identifier(key))).collect();
+        let names: Vec<String> = std::iter::once("\"time\"".to_owned())
+            .chain(order.iter().map(|key| identifier(key)))
+            .collect();
         for batch in points.chunks(ROWS_PER_INSERT) {
             let rows: Vec<String> = batch
                 .iter()
@@ -123,14 +170,28 @@ fn insert_all<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &mut BTree
                             .iter()
                             .find(|(tag, _)| tag == key)
                             .map(|(_, value)| literal(value))
-                            .or_else(|| point.fields.iter().find(|(field, _)| field == key).map(|(_, value)| value_sql(value)))
+                            .or_else(|| {
+                                point
+                                    .fields
+                                    .iter()
+                                    .find(|(field, _)| field == key)
+                                    .map(|(_, value)| value_sql(value))
+                            })
                             .unwrap_or_else(|| "NULL".to_owned());
                         cells.push(cell);
                     }
                     format!("({})", cells.join(", "))
                 })
                 .collect();
-            run(session, &format!("INSERT INTO {} ({}) VALUES {}", table(measurement), names.join(", "), rows.join(", ")))?;
+            run(
+                session,
+                &format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    table(measurement),
+                    names.join(", "),
+                    rows.join(", ")
+                ),
+            )?;
         }
     }
     Ok(())
@@ -138,7 +199,10 @@ fn insert_all<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &mut BTree
 
 /// Writes `points` into their measurements' tables, creating tables and columns as tags and
 /// fields first appear, all in one transaction.
-pub(crate) fn write<S: KeyValueStore>(session: &mut Session<'_, S>, points: &[Point]) -> Result<usize, String> {
+pub(crate) fn write<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+    points: &[Point],
+) -> Result<usize, String> {
     if points.is_empty() {
         return Ok(0);
     }
@@ -146,7 +210,10 @@ pub(crate) fn write<S: KeyValueStore>(session: &mut Session<'_, S>, points: &[Po
     let mut tables = catalog(session)?;
     let mut by_measurement: BTreeMap<&str, Vec<&Point>> = BTreeMap::new();
     for point in points {
-        by_measurement.entry(point.measurement.as_str()).or_default().push(point);
+        by_measurement
+            .entry(point.measurement.as_str())
+            .or_default()
+            .push(point);
     }
     run(session, "BEGIN")?;
     match insert_all(session, &mut tables, &by_measurement) {
@@ -183,20 +250,41 @@ fn number(value: &Value) -> Option<f64> {
 
 /// The samples of metric `name` from `start_ms` (exclusive) to `end_ms` (inclusive), as series
 /// split by their tag values. A metric is a table with a `value` column, or `<table>_<field>`.
-pub(crate) fn read<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &BTreeMap<String, Vec<(String, String)>>, name: &str, start_ms: i64, end_ms: i64) -> Result<Vec<Series>, String> {
+pub(crate) fn read<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+    tables: &BTreeMap<String, Vec<(String, String)>>,
+    name: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<Series>, String> {
     let located = match tables.get(name) {
-        Some(columns) if columns.iter().any(|(column, _)| column == "value") => Some((name.to_owned(), "value".to_owned(), columns)),
-        _ => name.char_indices().filter(|(_, character)| *character == '_').find_map(|(at, _)| {
-            let (table, field) = (&name[..at], &name[at + 1..]);
-            let columns = tables.get(table)?;
-            columns.iter().any(|(column, data_type)| column == field && data_type != "text").then(|| (table.to_owned(), field.to_owned(), columns))
-        }),
+        Some(columns) if columns.iter().any(|(column, _)| column == "value") => {
+            Some((name.to_owned(), "value".to_owned(), columns))
+        }
+        _ => name
+            .char_indices()
+            .filter(|(_, character)| *character == '_')
+            .find_map(|(at, _)| {
+                let (table, field) = (&name[..at], &name[at + 1..]);
+                let columns = tables.get(table)?;
+                columns
+                    .iter()
+                    .any(|(column, data_type)| column == field && data_type != "text")
+                    .then(|| (table.to_owned(), field.to_owned(), columns))
+            }),
     };
     let Some((table_name, field, columns)) = located else {
         return Ok(Vec::new());
     };
-    let tags: Vec<&String> = columns.iter().filter(|(column, data_type)| data_type == "text" && column != "time").map(|(column, _)| column).collect();
-    let selected: Vec<String> = std::iter::once("\"time\"".to_owned()).chain(std::iter::once(identifier(&field))).chain(tags.iter().map(|tag| identifier(tag))).collect();
+    let tags: Vec<&String> = columns
+        .iter()
+        .filter(|(column, data_type)| data_type == "text" && column != "time")
+        .map(|(column, _)| column)
+        .collect();
+    let selected: Vec<String> = std::iter::once("\"time\"".to_owned())
+        .chain(std::iter::once(identifier(&field)))
+        .chain(tags.iter().map(|tag| identifier(tag)))
+        .collect();
     let result = rows(
         session,
         &format!(
@@ -208,7 +296,7 @@ pub(crate) fn read<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &BTre
             identifier(&field)
         ),
     )?;
-    let mut series: BTreeMap<Vec<(String, String)>, Vec<(i64, f64)>> = BTreeMap::new();
+    let mut series: SamplesByLabels = BTreeMap::new();
     for row in &result.rows {
         let Some(Value::TimestampTz(micros)) = row.first() else {
             continue;
@@ -223,7 +311,13 @@ pub(crate) fn read<S: KeyValueStore>(session: &mut Session<'_, S>, tables: &BTre
             }
         }
         labels[1..].sort();
-        series.entry(labels).or_default().push(((micros + UNIX_EPOCH_FROM_2000_MICROS).div_euclid(1000), value));
+        series.entry(labels).or_default().push((
+            (micros + UNIX_EPOCH_FROM_2000_MICROS).div_euclid(1000),
+            value,
+        ));
     }
-    Ok(series.into_iter().map(|(labels, samples)| Series { labels, samples }).collect())
+    Ok(series
+        .into_iter()
+        .map(|(labels, samples)| Series { labels, samples })
+        .collect())
 }

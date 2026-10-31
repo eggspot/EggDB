@@ -137,7 +137,9 @@ pub(crate) fn load(
         stored
             .insert(writer, &mut row)
             .map_err(|error| with_row(error, number))?;
-        children.push(&row).map_err(|error| with_row(error, number))?;
+        children
+            .push(&row)
+            .map_err(|error| with_row(error, number))?;
         count = number;
         if !deferred_parents && children.len() >= FOREIGN_KEY_BATCH_ROWS {
             children.check_and_forget(writer, tables)?;

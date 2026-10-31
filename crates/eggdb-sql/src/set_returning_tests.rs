@@ -353,6 +353,15 @@ fn window_ranking_functions_number_rows_and_describe_as_bigint() {
 fn foreign_sources_stay_off_until_the_program_allows_them() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    assert_eq!(state(&mut session, "SELECT * FROM eggdb_foreign('postgresql://elsewhere/db', 'SELECT 1')"), "0A000");
-    assert_eq!(state(&mut session, "SELECT * FROM eggdb_foreign(1)"), "42883");
+    assert_eq!(
+        state(
+            &mut session,
+            "SELECT * FROM eggdb_foreign('postgresql://elsewhere/db', 'SELECT 1')"
+        ),
+        "0A000"
+    );
+    assert_eq!(
+        state(&mut session, "SELECT * FROM eggdb_foreign(1)"),
+        "42883"
+    );
 }

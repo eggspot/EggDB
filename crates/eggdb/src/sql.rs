@@ -30,9 +30,10 @@ use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
 use eggdb_sql::StoreFailure;
 pub use eggdb_sql::{
     ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck, IndexColumnOrder,
-    IndexSchema, Interval, IntervalFields, Numeric, NumericModifier, OneStatementError, OneStatementRefusal, OutputColumn,
-    Parameter, QueryResult, RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType,
-    TableSchema, TransactionStatus, Value, ViewColumnSchema, ViewSchema, sqlite_result_code_name,
+    IndexSchema, Interval, IntervalFields, Numeric, NumericModifier, OneStatementError,
+    OneStatementRefusal, OutputColumn, Parameter, QueryResult, RESERVED_KEY_PREFIX, Session,
+    SqlError, SqlResult, SqlState, SqlType, TableSchema, TransactionStatus, Value,
+    ViewColumnSchema, ViewSchema, sqlite_result_code_name,
 };
 use eggdb_sql::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use std::ops::Bound;
@@ -251,6 +252,21 @@ pub struct TransactionReader<'s, 't, 'db>(std::cell::Ref<'s, &'t mut WriteTransa
 pub struct TransactionWriter<'s, 't, 'db> {
     transaction: std::cell::RefMut<'s, &'t mut WriteTransaction<'db>>,
     undo: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+impl std::fmt::Debug for TransactionReader<'_, '_, '_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TransactionReader")
+    }
+}
+
+impl std::fmt::Debug for TransactionWriter<'_, '_, '_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransactionWriter")
+            .field("undo_entries", &self.undo.len())
+            .finish_non_exhaustive()
+    }
 }
 
 fn in_use() -> SqlError {

@@ -331,10 +331,9 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
         "sqlite_strftime" => crate::sqlite_datetime::strftime(values),
         "sqlite_timediff" => crate::sqlite_datetime::timediff(values),
         "sqlite_unicode" => match text(0) {
-            Some(text) if !any_null => text
-                .chars()
-                .next()
-                .map_or(Value::Null, |first| Value::BigInt(i64::from(u32::from(first)))),
+            Some(text) if !any_null => text.chars().next().map_or(Value::Null, |first| {
+                Value::BigInt(i64::from(u32::from(first)))
+            }),
             _ => Value::Null,
         },
         "sqlite_char" => Value::Text(

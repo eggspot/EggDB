@@ -27,18 +27,16 @@ mod tests;
 mod trigger_tests;
 
 pub(crate) use compiled_packages::{
-    CompiledPackage, PackageCache, compiled_package, current_package_routines,
-    enter_package_scope, leave_package_scope, member_program, package_member_routines,
-    resolve_compiled_package,
+    CompiledPackage, PackageCache, compiled_package, current_package_routines, enter_package_scope,
+    leave_package_scope, member_program, package_member_routines, resolve_compiled_package,
 };
 pub(crate) use exceptions::{
-    APPLICATION_ERROR_HIGHEST, APPLICATION_ERROR_LOWEST, NORMAL_COMPLETION, NO_DATA_FOUND_CODE,
-    PredefinedException, USER_EXCEPTION_CODE, USER_EXCEPTION_MESSAGE, application_error_code,
-    predefined_by_code, predefined_by_name, sqlcode_of, sqlerrm_of,
+    NO_DATA_FOUND_CODE, NORMAL_COMPLETION, USER_EXCEPTION_CODE, USER_EXCEPTION_MESSAGE,
+    application_error_code, predefined_by_code, predefined_by_name, sqlcode_of, sqlerrm_of,
 };
 pub(crate) use packages::{
     StoredPackage, alter_package, create_package, drop_package, every_package, parse_package,
-    resolve_package, stored_package,
+    stored_package,
 };
 pub use session_state::ServerOutputReader;
 pub(crate) use session_state::{
@@ -129,6 +127,7 @@ impl PlsqlRoutine {
             .join(", ")
     }
 
+    #[cfg(test)]
     pub(crate) fn declared_type(&self, parameter: usize) -> Option<&DeclaredType> {
         self.declared.get(parameter)
     }
@@ -300,8 +299,11 @@ pub(crate) fn compilation_error(unit: &str, error: SqlError) -> SqlError {
     let position = error.position().unwrap_or(0).min(unit.len());
     let (line, column) = line_and_column(unit, position);
     let reason = compilation_reason(unit, &error);
-    SqlError::new(error.state(), format!("line {line}, column {column}:\n{reason}"))
-        .with_oracle_code(COMPILATION_ERROR_CODE)
+    SqlError::new(
+        error.state(),
+        format!("line {line}, column {column}:\n{reason}"),
+    )
+    .with_oracle_code(COMPILATION_ERROR_CODE)
 }
 
 pub(crate) fn line_and_column(unit: &str, position: usize) -> (usize, usize) {

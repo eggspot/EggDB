@@ -576,7 +576,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         if self.settings.sqlserver.transaction_count > 0
             && self.save_points.iter().any(|saved| saved == &name.text)
         {
-            if let Some(at) = self.save_points.iter().rposition(|saved| saved == &name.text) {
+            if let Some(at) = self
+                .save_points
+                .iter()
+                .rposition(|saved| saved == &name.text)
+            {
                 self.save_points.truncate(at + 1);
             }
             return self
@@ -671,7 +675,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             },
             _ => Value::Null,
         };
-        let Some(handle) = handle.as_integer().and_then(|handle| i32::try_from(handle).ok())
+        let Some(handle) = handle
+            .as_integer()
+            .and_then(|handle| i32::try_from(handle).ok())
         else {
             return Err(SqlError::new(
                 SqlState::INVALID_PARAMETER_VALUE,

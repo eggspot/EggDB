@@ -12,8 +12,12 @@ use crate::types::SqlType;
 
 const MAX_RAISERROR_ARGUMENTS: usize = 20;
 
-const ACCEPTED_BULK_OPTIONS: [&str; 4] =
-    ["tablock", "check_constraints", "fire_triggers", "keepidentity"];
+const ACCEPTED_BULK_OPTIONS: [&str; 4] = [
+    "tablock",
+    "check_constraints",
+    "fire_triggers",
+    "keepidentity",
+];
 
 fn unknown_bulk_option(shown: &str, position: usize) -> SqlError {
     SqlError::new(
@@ -128,9 +132,7 @@ impl Parser<'_> {
             let statement = self.expression()?;
             self.expect(&TokenKind::RightParen)?;
             if self.is_word("as") || self.is_word("at") {
-                return Err(
-                    not_supported("EXEC (...) AS USER, AS LOGIN or AT").at(self.position())
-                );
+                return Err(not_supported("EXEC (...) AS USER, AS LOGIN or AT").at(self.position()));
             }
             return Ok(Statement::SqlServer(SqlServerStatement::ExecuteDynamic(
                 DynamicSql {
@@ -165,15 +167,14 @@ impl Parser<'_> {
         if self.peek_kind() == &TokenKind::LeftParen {
             return Err(not_supported("EXEC of a character string (dynamic SQL)").at(position));
         }
-        let status_variable = if self.at_variable(0)
-            && matches!(self.peek_kind_at(1), TokenKind::Operator("="))
-        {
-            let variable = self.variable_name()?;
-            self.at += 1;
-            Some(variable)
-        } else {
-            None
-        };
+        let status_variable =
+            if self.at_variable(0) && matches!(self.peek_kind_at(1), TokenKind::Operator("=")) {
+                let variable = self.variable_name()?;
+                self.at += 1;
+                Some(variable)
+            } else {
+                None
+            };
         if self.peek_kind() == &TokenKind::LeftParen {
             return Err(not_supported("EXEC of a character string (dynamic SQL)").at(position));
         }
@@ -279,7 +280,7 @@ impl Parser<'_> {
                 .declared_variables
                 .iter()
                 .any(|variable| variable.name == name.text)
-            || self.declared_tables.iter().any(|table| *table == name.text)
+            || self.declared_tables.contains(&name.text)
         {
             return Err(already_declared(&name.text, name.position));
         }
@@ -296,8 +297,7 @@ impl Parser<'_> {
                 self.at += table_at;
                 return self.declare_table(name);
             }
-        } else if matches!(self.peek_kind(), TokenKind::Word(_)) && self.is_word_at(1, "cursor")
-        {
+        } else if matches!(self.peek_kind(), TokenKind::Word(_)) && self.is_word_at(1, "cursor") {
             return Err(not_supported("DECLARE CURSOR").at(position));
         }
         let mut declarations: Vec<VariableDeclaration> = Vec::new();
@@ -337,7 +337,10 @@ impl Parser<'_> {
             };
             self.check_new_variable(&name)?;
             self.declared_variables
-                .push(crate::tsql::ScalarVariable::declared_as(name.text.clone(), declared));
+                .push(crate::tsql::ScalarVariable::declared_as(
+                    name.text.clone(),
+                    declared,
+                ));
             declarations.push(VariableDeclaration {
                 name,
                 declared,
@@ -362,7 +365,10 @@ impl Parser<'_> {
         }))
     }
 
-    pub(super) fn table_variable_columns(&mut self, table: &str) -> SqlResult<Vec<(Name, SqlType)>> {
+    pub(super) fn table_variable_columns(
+        &mut self,
+        table: &str,
+    ) -> SqlResult<Vec<(Name, SqlType)>> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns: Vec<(Name, SqlType)> = Vec::new();
         loop {
@@ -525,7 +531,10 @@ impl Parser<'_> {
         } else {
             return Ok(());
         };
-        Err(not_supported(&format!("{statement} of a table variable with {clause}")).at(self.position()))
+        Err(
+            not_supported(&format!("{statement} of a table variable with {clause}"))
+                .at(self.position()),
+        )
     }
 
     fn assignment_operator(&mut self) -> SqlResult<Option<BinaryOperator>> {

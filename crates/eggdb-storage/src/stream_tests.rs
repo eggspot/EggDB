@@ -62,7 +62,16 @@ fn read_in_pieces(reader: &mut impl Read, piece: usize) -> Vec<u8> {
 fn streamed_values_read_back_whole_and_in_pieces_of_any_size() {
     let (store, tree) = created();
     let per_page = overflow::data_bytes_per_page(PageSize::DEFAULT);
-    let lengths = [0, 1, 700, per_page - 1, per_page, per_page + 1, 5 * per_page + 17, 150_000];
+    let lengths = [
+        0,
+        1,
+        700,
+        per_page - 1,
+        per_page,
+        per_page + 1,
+        5 * per_page + 17,
+        150_000,
+    ];
     let mut write = store.begin_write().unwrap();
     for (index, len) in lengths.iter().enumerate() {
         let value = patterned(*len);
@@ -80,11 +89,18 @@ fn streamed_values_read_back_whole_and_in_pieces_of_any_size() {
     for (index, len) in lengths.iter().enumerate() {
         let key = format!("value{index}");
         let expected = patterned(*len);
-        assert_eq!(read.get(&tree, key.as_bytes()).unwrap(), Some(expected.clone()));
+        assert_eq!(
+            read.get(&tree, key.as_bytes()).unwrap(),
+            Some(expected.clone())
+        );
         for piece in [1, 7, per_page, 70_000] {
             let mut reader = read.value_reader(&tree, key.as_bytes()).unwrap().unwrap();
             assert_eq!(reader.len(), *len as u64);
-            assert_eq!(read_in_pieces(&mut reader, piece), expected, "len {len} piece {piece}");
+            assert_eq!(
+                read_in_pieces(&mut reader, piece),
+                expected,
+                "len {len} piece {piece}"
+            );
             assert_eq!(reader.remaining(), 0);
         }
     }
@@ -114,14 +130,22 @@ fn a_reader_keeps_its_snapshot_while_the_value_is_replaced() {
     assert_eq!([start, rest].concat(), first);
     drop(reader);
     drop(read);
-    assert_eq!(store.begin_read().unwrap().get(&tree, b"big").unwrap(), Some(second));
+    assert_eq!(
+        store.begin_read().unwrap().get(&tree, b"big").unwrap(),
+        Some(second)
+    );
 }
 
 #[test]
 fn a_source_that_ends_early_or_runs_long_rolls_the_transaction_back() {
     let (store, tree) = created();
     let value = patterned(30_000);
-    for (declared, given) in [(30_000_u64, 29_999), (30_000, 30_000 + 1), (500, 400), (500, 501)] {
+    for (declared, given) in [
+        (30_000_u64, 29_999),
+        (30_000, 30_000 + 1),
+        (500, 400),
+        (500, 501),
+    ] {
         let mut write = store.begin_write().unwrap();
         write.put(&tree, b"kept", b"before").unwrap();
         let source = patterned(given);
@@ -139,7 +163,12 @@ fn a_source_that_ends_early_or_runs_long_rolls_the_transaction_back() {
     drop(read);
     let mut write = store.begin_write().unwrap();
     write
-        .put_from_reader(&tree, b"streamed", value.len() as u64, &mut value.as_slice())
+        .put_from_reader(
+            &tree,
+            b"streamed",
+            value.len() as u64,
+            &mut value.as_slice(),
+        )
         .unwrap();
     write.commit().unwrap();
     assert_eq!(store.check().unwrap().leaked_pages, 0);
@@ -149,7 +178,10 @@ fn a_source_that_ends_early_or_runs_long_rolls_the_transaction_back() {
 fn limits_are_checked_before_anything_is_read() {
     let (store, tree) = created();
     let mut write = store.begin_write().unwrap();
-    let mut never_read = Trickle { bytes: &[], step: 1 };
+    let mut never_read = Trickle {
+        bytes: &[],
+        step: 1,
+    };
     let too_large = BTree::MAX_VALUE_BYTES as u64 + 1;
     assert!(matches!(
         write.put_from_reader(&tree, b"k", too_large, &mut never_read),

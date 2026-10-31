@@ -101,7 +101,7 @@ fn below_thousand(value: u64, out: &mut Vec<String>) {
     }
     if rest < 20 {
         out.push(ONES[rest as usize].to_owned());
-    } else if rest % 10 == 0 {
+    } else if rest.is_multiple_of(10) {
         out.push(TENS[(rest / 10) as usize].to_owned());
     } else {
         out.push(format!(
@@ -184,9 +184,7 @@ pub(crate) fn spelled_year(year: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ordinal_suffix, roman, roman_value, spelled, spelled_ordinal, spelled_year,
-    };
+    use super::{ordinal_suffix, roman, roman_value, spelled, spelled_ordinal, spelled_year};
 
     #[test]
     fn roman_numerals_cover_one_to_3999_both_ways() {

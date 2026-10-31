@@ -274,7 +274,10 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
         assert_eq!(run(trigger), Some(Effect::OtherDdl), "{trigger}");
     }
     assert!(matches!(
-        classify_sqlserver("CREATE TRIGGER audit ON DATABASE FOR CREATE_TABLE AS SELECT 1", &known),
+        classify_sqlserver(
+            "CREATE TRIGGER audit ON DATABASE FOR CREATE_TABLE AS SELECT 1",
+            &known
+        ),
         Action::Skip(_)
     ));
     assert_eq!(
@@ -348,7 +351,10 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
         Action::Run(Effect::Sequence("dbo.Numbers".to_owned()))
     );
     assert_eq!(
-        classify_sqlserver("CREATE TYPE [dbo].[Phone] FROM [nvarchar](20) NOT NULL", &known),
+        classify_sqlserver(
+            "CREATE TYPE [dbo].[Phone] FROM [nvarchar](20) NOT NULL",
+            &known
+        ),
         Action::Ignore(Ignored::Other("alias types"))
     );
     assert_eq!(
@@ -382,7 +388,10 @@ fn the_classifier_runs_skips_or_ignores_by_leading_words() {
         );
     }
     assert_eq!(run("EXEC dbo.Something 1"), Some(Effect::Data));
-    assert_eq!(run("EXECUTE [sales].[Refresh] @all = 1"), Some(Effect::Data));
+    assert_eq!(
+        run("EXECUTE [sales].[Refresh] @all = 1"),
+        Some(Effect::Data)
+    );
     for (text, kind) in [
         ("CREATE SYNONYM [dbo].[s] FOR [x].[y]", "synonym"),
         ("CREATE TYPE [dbo].[t] AS TABLE (a int)", "type"),
@@ -453,7 +462,11 @@ fn xml_alias_and_numeric_identity_columns_are_rewritten_to_types_eggdb_has() {
         rewrite.text,
         "CREATE TABLE [dbo].[T](\n\t[Id] bigint IDENTITY(1,1) NOT NULL,\n\t[Big] [decimal](24, 0) NULL,\n\t[Body] nvarchar(max) NULL,\n\t[Home] [nvarchar](20) NULL,\n\t[Work] [nvarchar](20) NOT NULL,\n\t[Note] nvarchar(max) NULL,\n PRIMARY KEY ([Id])\n)"
     );
-    let objects: Vec<&str> = rewrite.notes.iter().map(|note| note.object.as_str()).collect();
+    let objects: Vec<&str> = rewrite
+        .notes
+        .iter()
+        .map(|note| note.object.as_str())
+        .collect();
     assert_eq!(objects, ["dbo.T.Id", "dbo.T.Body", "dbo.T.Note"]);
     assert!(!rewrite.identity_not_kept);
     let wide = rewritten_table(
@@ -504,9 +517,14 @@ fn a_batch_over_4_mib_without_go_restores_statement_by_statement() {
     );
     let one_large = format!("SELECT N'{}'\nGO\n", "y".repeat(5 << 20));
     let refused = restore(&MemoryStore::default(), one_large.as_bytes(), false);
-    let error = refused.error.expect("a statement over 4 MiB that is not data");
+    let error = refused
+        .error
+        .expect("a statement over 4 MiB that is not data");
     assert!(
-        error.error.message().contains("is not an INSERT, UPDATE or DELETE"),
+        error
+            .error
+            .message()
+            .contains("is not an INSERT, UPDATE or DELETE"),
         "{}",
         error.error
     );
@@ -520,7 +538,10 @@ fn identity_shapes_eggdb_refuses_restore_without_the_property_and_their_identity
     let report = restore(&store, script, false);
     assert_eq!(report.error, None, "{report:?}");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
-    assert_eq!((report.tables, report.rows, report.tables_skipped), (4, 4, 0));
+    assert_eq!(
+        (report.tables, report.rows, report.tables_skipped),
+        (4, 4, 0)
+    );
     let differences: Vec<(&str, &str)> = report
         .differences
         .iter()
@@ -531,7 +552,10 @@ fn identity_shapes_eggdb_refuses_restore_without_the_property_and_their_identity
     assert!(differences[1].0 == "dbo.Pair.Id" && differences[1].1.starts_with("IDENTITY not kept"));
     assert_eq!(
         differences[2],
-        ("dbo.Big.Id", "IDENTITY of numeric(10, 0) kept as a bigint column")
+        (
+            "dbo.Big.Id",
+            "IDENTITY of numeric(10, 0) kept as a bigint column"
+        )
     );
     assert!(differences[3].0 == "dbo.Wide.Id" && differences[3].1.starts_with("IDENTITY not kept"));
     assert!(
@@ -591,7 +615,11 @@ fn alias_types_restore_as_their_base_types_with_their_nullability() {
                 "type dbo.Phone",
                 "an alias type: its columns are created as [nvarchar](20) NOT NULL"
             ),
-            (3, "type dbo.Flag", "an alias type: its columns are created as [bit]"),
+            (
+                3,
+                "type dbo.Flag",
+                "an alias type: its columns are created as [bit]"
+            ),
         ]
     );
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
@@ -658,7 +686,10 @@ fn descriptions_become_comments_and_char_builds_line_breaks() {
         "t|c\nOur people|Full name\nSELECT 1"
     );
     assert_eq!(
-        query(&store, "SELECT name = E'line one\\r\\nline two' AS kept FROM people"),
+        query(
+            &store,
+            "SELECT name = E'line one\\r\\nline two' AS kept FROM people"
+        ),
         "kept\nt\nSELECT 1"
     );
 }
@@ -681,7 +712,10 @@ fn transact_sql_scripts_split_into_batches_at_go_without_running_sqlcmd_commands
     let big = format!("SELECT 1\n{}GO\n", "INSERT t VALUES (1)\n".repeat(80_000));
     assert_eq!(sqlserver_batches(&big).unwrap().len(), 1);
     let error = sqlserver_batches("SELECT 1\nGO\n:setvar a 1\nSELECT '$(a)'\n").unwrap_err();
-    assert!(error.message().contains(":setvar is a sqlcmd command"), "{error}");
+    assert!(
+        error.message().contains(":setvar is a sqlcmd command"),
+        "{error}"
+    );
     assert!(sqlserver_batches("").unwrap().is_empty());
 }
 

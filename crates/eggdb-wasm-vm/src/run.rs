@@ -26,7 +26,11 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { fuel: 10_000_000, max_memory_pages: 256, max_call_depth: 512 }
+        Self {
+            fuel: 10_000_000,
+            max_memory_pages: 256,
+            max_call_depth: 512,
+        }
     }
 }
 
@@ -65,9 +69,14 @@ impl std::fmt::Display for Trap {
             Trap::IntegerOverflow => f.write_str("the function's integer division overflowed"),
             Trap::CallDepth => f.write_str("the function's calls nested too deeply"),
             Trap::NoSuchExport(name) => write!(f, "the module exports no function named {name}"),
-            Trap::WrongArguments => f.write_str("the arguments do not match the function's parameters"),
+            Trap::WrongArguments => {
+                f.write_str("the arguments do not match the function's parameters")
+            }
             Trap::Invalid(what) => write!(f, "the function's code is invalid: {what}"),
-            Trap::Unsupported(opcode) => write!(f, "the function uses instruction 0x{opcode:02x}, which is not supported yet"),
+            Trap::Unsupported(opcode) => write!(
+                f,
+                "the function uses instruction 0x{opcode:02x}, which is not supported yet"
+            ),
         }
     }
 }
@@ -110,7 +119,9 @@ fn block_arity(reader: &mut Reader<'_>) -> Result<usize, Trap> {
     match reader.byte()? {
         0x40 => Ok(0),
         I32 | I64 => Ok(1),
-        _ => Err(Trap::Invalid("a block type other than empty or one integer")),
+        _ => Err(Trap::Invalid(
+            "a block type other than empty or one integer",
+        )),
     }
 }
 
@@ -161,7 +172,13 @@ fn find_targets(code: &[u8]) -> Result<BTreeMap<usize, Targets>, Trap> {
             }
             0x0b => {
                 if let Some((start, otherwise)) = open.pop() {
-                    targets.insert(start, Targets { otherwise, end: position });
+                    targets.insert(
+                        start,
+                        Targets {
+                            otherwise,
+                            end: position,
+                        },
+                    );
                 }
             }
             _ => {}
@@ -192,24 +209,52 @@ impl Instance {
     /// Prepares `module` to run, with memory no larger than `limits` allows.
     pub fn new(module: Module, limits: &Limits) -> Result<Self, Trap> {
         let pages = module.memory.map_or(0, |(minimum, _)| minimum);
-        let max_pages = module.memory.and_then(|(_, maximum)| maximum).unwrap_or(u32::MAX).min(limits.max_memory_pages);
+        let max_pages = module
+            .memory
+            .and_then(|(_, maximum)| maximum)
+            .unwrap_or(u32::MAX)
+            .min(limits.max_memory_pages);
         if pages > max_pages {
             return Err(Trap::MemoryOutOfBounds);
         }
         let mut memory = vec![0u8; pages as usize * PAGE];
         for (offset, bytes) in &module.data {
             let start = *offset as usize;
-            let end = start.checked_add(bytes.len()).filter(|end| *end <= memory.len()).ok_or(Trap::MemoryOutOfBounds)?;
+            let end = start
+                .checked_add(bytes.len())
+                .filter(|end| *end <= memory.len())
+                .ok_or(Trap::MemoryOutOfBounds)?;
             memory[start..end].copy_from_slice(bytes);
         }
-        let targets = module.functions.iter().map(|function| find_targets(&function.code)).collect::<Result<Vec<_>, _>>()?;
+        let targets = module
+            .functions
+            .iter()
+            .map(|function| find_targets(&function.code))
+            .collect::<Result<Vec<_>, _>>()?;
         let globals = module.globals.iter().map(|global| global.init).collect();
-        Ok(Self { module: Rc::new(module), memory, max_pages, globals, targets: Rc::new(targets) })
+        Ok(Self {
+            module: Rc::new(module),
+            memory,
+            max_pages,
+            globals,
+            targets: Rc::new(targets),
+        })
     }
 
     /// Calls the exported function `name` with `arguments`, within `limits`.
-    pub fn call(&mut self, name: &str, arguments: &[Value], limits: &Limits) -> Result<Option<Value>, Trap> {
-        let index = self.module.exports.iter().find(|(export, _)| export == name).map(|(_, index)| *index).ok_or_else(|| Trap::NoSuchExport(name.to_owned()))?;
+    pub fn call(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        limits: &Limits,
+    ) -> Result<Option<Value>, Trap> {
+        let index = self
+            .module
+            .exports
+            .iter()
+            .find(|(export, _)| export == name)
+            .map(|(_, index)| *index)
+            .ok_or_else(|| Trap::NoSuchExport(name.to_owned()))?;
         let function = &self.module.functions[index as usize];
         let signature = &self.module.types[function.type_index as usize];
         if signature.params.len() != arguments.len() {
@@ -227,18 +272,32 @@ impl Instance {
         let mut fuel = limits.fuel;
         self.invoke(index, &mut stack, &mut fuel, 0, limits)?;
         Ok(match result_type {
-            Some(I32) => Some(Value::I32(as_i32(stack.pop().ok_or(Trap::Invalid("no result"))?))),
-            Some(_) => Some(Value::I64(stack.pop().ok_or(Trap::Invalid("no result"))? as i64)),
+            Some(I32) => Some(Value::I32(as_i32(
+                stack.pop().ok_or(Trap::Invalid("no result"))?,
+            ))),
+            Some(_) => Some(Value::I64(
+                stack.pop().ok_or(Trap::Invalid("no result"))? as i64
+            )),
             None => None,
         })
     }
 
-    fn invoke(&mut self, index: u32, stack: &mut Vec<u64>, fuel: &mut u64, depth: usize, limits: &Limits) -> Result<(), Trap> {
+    fn invoke(
+        &mut self,
+        index: u32,
+        stack: &mut Vec<u64>,
+        fuel: &mut u64,
+        depth: usize,
+        limits: &Limits,
+    ) -> Result<(), Trap> {
         if depth >= limits.max_call_depth {
             return Err(Trap::CallDepth);
         }
         let module = Rc::clone(&self.module);
-        let function = module.functions.get(index as usize).ok_or(Trap::Invalid("a call to a function that does not exist"))?;
+        let function = module
+            .functions
+            .get(index as usize)
+            .ok_or(Trap::Invalid("a call to a function that does not exist"))?;
         let signature = &module.types[function.type_index as usize];
         let parameters = signature.params.len();
         if stack.len() < parameters {
@@ -247,7 +306,11 @@ impl Instance {
         let mut locals = stack.split_off(stack.len() - parameters);
         locals.extend(std::iter::repeat_n(0, function.locals.len()));
         let all_targets = Rc::clone(&self.targets);
-        let frame = Frame { code: &function.code, targets: &all_targets[index as usize], locals };
+        let frame = Frame {
+            code: &function.code,
+            targets: &all_targets[index as usize],
+            locals,
+        };
         let base = stack.len();
         self.execute(frame, stack, fuel, depth, limits, signature.results.len())?;
         if stack.len() != base + signature.results.len() {
@@ -256,7 +319,12 @@ impl Instance {
         Ok(())
     }
 
-    fn address(&self, reader: &mut Reader<'_>, stack: &mut Vec<u64>, size: usize) -> Result<usize, Trap> {
+    fn address(
+        &self,
+        reader: &mut Reader<'_>,
+        stack: &mut Vec<u64>,
+        size: usize,
+    ) -> Result<usize, Trap> {
         reader.u32()?;
         let offset = u64::from(reader.u32()?);
         let base = u64::from(as_i32(stack.pop().ok_or(Trap::Invalid("an empty stack"))?) as u32);
@@ -273,10 +341,21 @@ impl Instance {
         u64::from_le_bytes(bytes)
     }
 
-    fn execute(&mut self, mut frame: Frame<'_>, stack: &mut Vec<u64>, fuel: &mut u64, depth: usize, limits: &Limits, results: usize) -> Result<(), Trap> {
+    fn execute(
+        &mut self,
+        mut frame: Frame<'_>,
+        stack: &mut Vec<u64>,
+        fuel: &mut u64,
+        depth: usize,
+        limits: &Limits,
+        results: usize,
+    ) -> Result<(), Trap> {
         let base = stack.len();
         let mut labels: Vec<Label> = Vec::new();
-        let mut reader = Reader { bytes: frame.code, at: 0 };
+        let mut reader = Reader {
+            bytes: frame.code,
+            at: 0,
+        };
         let pop = |stack: &mut Vec<u64>| stack.pop().ok_or(Trap::Invalid("an empty stack"));
         loop {
             if *fuel == 0 {
@@ -290,18 +369,40 @@ impl Instance {
                 0x01 => {}
                 0x02 | 0x03 => {
                     let arity = block_arity(&mut reader)?;
-                    let end = frame.targets.get(&position).ok_or(Trap::Invalid("a block without an end"))?.end;
+                    let end = frame
+                        .targets
+                        .get(&position)
+                        .ok_or(Trap::Invalid("a block without an end"))?
+                        .end;
                     let looping = opcode == 0x03;
-                    labels.push(Label { looping, height: stack.len(), arity: if looping { 0 } else { arity }, target: if looping { position } else { end + 1 } });
+                    labels.push(Label {
+                        looping,
+                        height: stack.len(),
+                        arity: if looping { 0 } else { arity },
+                        target: if looping { position } else { end + 1 },
+                    });
                 }
                 0x04 => {
                     let arity = block_arity(&mut reader)?;
                     let condition = pop(stack)?;
-                    let targets = *frame.targets.get(&position).ok_or(Trap::Invalid("an if without an end"))?;
+                    let targets = *frame
+                        .targets
+                        .get(&position)
+                        .ok_or(Trap::Invalid("an if without an end"))?;
                     if condition as u32 != 0 {
-                        labels.push(Label { looping: false, height: stack.len(), arity, target: targets.end + 1 });
+                        labels.push(Label {
+                            looping: false,
+                            height: stack.len(),
+                            arity,
+                            target: targets.end + 1,
+                        });
                     } else if let Some(otherwise) = targets.otherwise {
-                        labels.push(Label { looping: false, height: stack.len(), arity, target: targets.end + 1 });
+                        labels.push(Label {
+                            looping: false,
+                            height: stack.len(),
+                            arity,
+                            target: targets.end + 1,
+                        });
                         reader.at = otherwise + 1;
                     } else {
                         reader.at = targets.end + 1;
@@ -316,7 +417,7 @@ impl Instance {
                         return Ok(());
                     }
                 }
-                0x0c | 0x0d | 0x0e | 0x0f => {
+                0x0c..=0x0f => {
                     let depth_to = match opcode {
                         0x0c => reader.u32()? as usize,
                         0x0d => {
@@ -341,13 +442,23 @@ impl Instance {
                         _ => labels.len(),
                     };
                     if depth_to >= labels.len() {
-                        let kept = stack.split_off(stack.len().checked_sub(results).ok_or(Trap::Invalid("an empty stack"))?);
+                        let kept = stack.split_off(
+                            stack
+                                .len()
+                                .checked_sub(results)
+                                .ok_or(Trap::Invalid("an empty stack"))?,
+                        );
                         stack.truncate(base);
                         stack.extend(kept);
                         return Ok(());
                     }
                     let label = labels[labels.len() - 1 - depth_to];
-                    let kept = stack.split_off(stack.len().checked_sub(label.arity).ok_or(Trap::Invalid("an empty stack"))?);
+                    let kept = stack.split_off(
+                        stack
+                            .len()
+                            .checked_sub(label.arity)
+                            .ok_or(Trap::Invalid("an empty stack"))?,
+                    );
                     stack.truncate(label.height);
                     stack.extend(kept);
                     labels.truncate(labels.len() - depth_to - usize::from(!label.looping));
@@ -372,20 +483,42 @@ impl Instance {
                 }
                 0x20 => {
                     let index = reader.u32()? as usize;
-                    stack.push(*frame.locals.get(index).ok_or(Trap::Invalid("a local that does not exist"))?);
+                    stack.push(
+                        *frame
+                            .locals
+                            .get(index)
+                            .ok_or(Trap::Invalid("a local that does not exist"))?,
+                    );
                 }
                 0x21 | 0x22 => {
                     let index = reader.u32()? as usize;
-                    let value = if opcode == 0x22 { *stack.last().ok_or(Trap::Invalid("an empty stack"))? } else { pop(stack)? };
-                    *frame.locals.get_mut(index).ok_or(Trap::Invalid("a local that does not exist"))? = value;
+                    let value = if opcode == 0x22 {
+                        *stack.last().ok_or(Trap::Invalid("an empty stack"))?
+                    } else {
+                        pop(stack)?
+                    };
+                    *frame
+                        .locals
+                        .get_mut(index)
+                        .ok_or(Trap::Invalid("a local that does not exist"))? = value;
                 }
                 0x23 => {
                     let index = reader.u32()? as usize;
-                    stack.push(*self.globals.get(index).ok_or(Trap::Invalid("a global that does not exist"))?);
+                    stack.push(
+                        *self
+                            .globals
+                            .get(index)
+                            .ok_or(Trap::Invalid("a global that does not exist"))?,
+                    );
                 }
                 0x24 => {
                     let index = reader.u32()? as usize;
-                    if !self.module.globals.get(index).is_some_and(|global| global.mutable) {
+                    if !self
+                        .module
+                        .globals
+                        .get(index)
+                        .is_some_and(|global| global.mutable)
+                    {
                         return Err(Trap::Invalid("a write to an immutable global"));
                     }
                     self.globals[index] = pop(stack)?;
@@ -409,7 +542,11 @@ impl Instance {
                     let start = self.address(&mut reader, stack, size)?;
                     let raw = self.load(start, size);
                     let bits = size as u32 * 8;
-                    let value = if signed && bits < 64 { (((raw << (64 - bits)) as i64) >> (64 - bits)) as u64 } else { raw };
+                    let value = if signed && bits < 64 {
+                        (((raw << (64 - bits)) as i64) >> (64 - bits)) as u64
+                    } else {
+                        raw
+                    };
                     stack.push(if wide { value } else { u64::from(value as u32) });
                 }
                 0x36..=0x3e => {
@@ -432,7 +569,10 @@ impl Instance {
                     reader.byte()?;
                     let more = as_i32(pop(stack)?) as u32;
                     let current = (self.memory.len() / PAGE) as u32;
-                    match current.checked_add(more).filter(|pages| *pages <= self.max_pages) {
+                    match current
+                        .checked_add(more)
+                        .filter(|pages| *pages <= self.max_pages)
+                    {
                         Some(pages) => {
                             self.memory.resize(pages as usize * PAGE, 0);
                             stack.push(u64::from(current));
@@ -505,7 +645,9 @@ impl Instance {
                             if right == 0 {
                                 return Err(Trap::DivideByZero);
                             }
-                            (left as i32).checked_div(right as i32).ok_or(Trap::IntegerOverflow)? as u32
+                            (left as i32)
+                                .checked_div(right as i32)
+                                .ok_or(Trap::IntegerOverflow)? as u32
                         }
                         0x6e => left.checked_div(right).ok_or(Trap::DivideByZero)?,
                         0x6f => {
@@ -545,7 +687,9 @@ impl Instance {
                             if right == 0 {
                                 return Err(Trap::DivideByZero);
                             }
-                            (left as i64).checked_div(right as i64).ok_or(Trap::IntegerOverflow)? as u64
+                            (left as i64)
+                                .checked_div(right as i64)
+                                .ok_or(Trap::IntegerOverflow)? as u64
                         }
                         0x80 => left.checked_div(right).ok_or(Trap::DivideByZero)?,
                         0x81 => {

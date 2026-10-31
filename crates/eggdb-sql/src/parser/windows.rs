@@ -76,7 +76,9 @@ impl Parser<'_> {
         }
         if !matches!(expr.kind, ExprKind::Aggregate { .. }) {
             let message = if windowed {
-                format!("OVER specified, but {name} is not a window function nor an aggregate function")
+                format!(
+                    "OVER specified, but {name} is not a window function nor an aggregate function"
+                )
             } else if filtered {
                 format!("FILTER specified, but {name} is not an aggregate function")
             } else {
@@ -132,10 +134,10 @@ impl Parser<'_> {
             .at(position));
         }
         if distinct {
-            return Err(
-                SqlError::not_supported("DISTINCT is not implemented for window functions")
-                    .at(position),
-            );
+            return Err(SqlError::not_supported(
+                "DISTINCT is not implemented for window functions",
+            )
+            .at(position));
         }
         let arguments = match argument {
             None => Vec::new(),
@@ -175,11 +177,7 @@ impl Parser<'_> {
         name: &Name,
     ) -> SqlResult<Expr> {
         if !function.accepts_arguments(arguments.len()) {
-            return Err(no_such_function(
-                &name.text,
-                arguments.len(),
-                name.position,
-            ));
+            return Err(no_such_function(&name.text, arguments.len(), name.position));
         }
         if filter.is_some() {
             return Err(SqlError::not_supported(
@@ -370,7 +368,10 @@ impl Parser<'_> {
         }
         if !(self.is_word("within") && self.is_word_at(1, "group")) {
             return Err(wrong_kind(
-                format!("WITHIN GROUP is required for ordered-set aggregate {}", name.text),
+                format!(
+                    "WITHIN GROUP is required for ordered-set aggregate {}",
+                    name.text
+                ),
                 name.position,
             ));
         }

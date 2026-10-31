@@ -14,13 +14,71 @@ pub enum TokenKind {
 }
 
 const KEYWORDS: &[&str] = &[
-    "ADD", "ALL", "ALTER", "AND", "AS", "ASC", "BEGIN", "BETWEEN", "BY", "CASE", "COMMIT",
-    "CREATE", "CROSS", "DEFAULT", "DELETE", "DESC", "DISTINCT", "DROP", "ELSE", "END", "EXISTS",
-    "EXPLAIN", "FALSE", "FOREIGN", "FROM", "FULL", "GROUP", "HAVING", "IN", "INDEX", "INNER",
-    "INSERT", "INTO", "IS", "JOIN", "KEY", "LEFT", "LIKE", "LIMIT", "NOT", "NULL", "OFFSET", "ON",
-    "OR", "ORDER", "OUTER", "PRIMARY", "REFERENCES", "RETURNING", "RIGHT", "ROLLBACK", "SELECT",
-    "SET", "TABLE", "THEN", "TRUE", "UNION", "UNIQUE", "UPDATE", "USING", "VALUES", "VIEW",
-    "WHEN", "WHERE", "WITH",
+    "ADD",
+    "ALL",
+    "ALTER",
+    "AND",
+    "AS",
+    "ASC",
+    "BEGIN",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "COMMIT",
+    "CREATE",
+    "CROSS",
+    "DEFAULT",
+    "DELETE",
+    "DESC",
+    "DISTINCT",
+    "DROP",
+    "ELSE",
+    "END",
+    "EXISTS",
+    "EXPLAIN",
+    "FALSE",
+    "FOREIGN",
+    "FROM",
+    "FULL",
+    "GROUP",
+    "HAVING",
+    "IN",
+    "INDEX",
+    "INNER",
+    "INSERT",
+    "INTO",
+    "IS",
+    "JOIN",
+    "KEY",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "NOT",
+    "NULL",
+    "OFFSET",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "PRIMARY",
+    "REFERENCES",
+    "RETURNING",
+    "RIGHT",
+    "ROLLBACK",
+    "SELECT",
+    "SET",
+    "TABLE",
+    "THEN",
+    "TRUE",
+    "UNION",
+    "UNIQUE",
+    "UPDATE",
+    "USING",
+    "VALUES",
+    "VIEW",
+    "WHEN",
+    "WHERE",
+    "WITH",
 ];
 
 fn is_keyword(word: &str) -> bool {
@@ -124,7 +182,10 @@ mod tests {
     #[test]
     fn a_block_comment_carries_over_lines() {
         let mut open = false;
-        assert_eq!(tokens("a /* b", &mut open).last().map(|(_, kind)| *kind), Some(TokenKind::Comment));
+        assert_eq!(
+            tokens("a /* b", &mut open).last().map(|(_, kind)| *kind),
+            Some(TokenKind::Comment)
+        );
         assert!(open);
         let next = tokens("c */ d", &mut open);
         assert_eq!(next[0].1, TokenKind::Comment);

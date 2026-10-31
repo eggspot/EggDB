@@ -242,13 +242,20 @@ fn kv_get_and_kv_scan_return_what_get_and_scan_print() {
     let _audit = audit_of(file.path());
     let mut mcp = Mcp::start(file.path(), &[]);
 
-    for (arguments, key) in [(r#"{"key":"user:2"}"#, "user:2"), (r#"{"key_hex":"00ff"}"#, "0x00ff")] {
+    for (arguments, key) in [
+        (r#"{"key":"user:2"}"#, "user:2"),
+        (r#"{"key_hex":"00ff"}"#, "0x00ff"),
+    ] {
         let answer = mcp.call("kv_get", arguments);
         let result = structured(&answer, false);
         assert_eq!(scalar(at(result, &["found"])), "true");
         let printed = lines(&succeeded(&eggdb(&["get", &path, key, "--json"])));
         assert_eq!(printed.len(), 1);
-        assert_eq!(as_its_twin_prints_it(at(result, &["entry"])), canonical(&printed[0]), "{key}");
+        assert_eq!(
+            as_its_twin_prints_it(at(result, &["entry"])),
+            canonical(&printed[0]),
+            "{key}"
+        );
         for removed in envelope("kv_get") {
             assert!(member(result, removed).is_some(), "kv_get has no {removed}");
         }
@@ -261,8 +268,14 @@ fn kv_get_and_kv_scan_return_what_get_and_scan_print() {
 
     for (arguments, options) in [
         (r#"{"prefix":"user:"}"#, vec!["--prefix", "user:"]),
-        (r#"{"start":"user:2","end":"zebra"}"#, vec!["--from", "user:2", "--to", "zebra"]),
-        (r#"{"prefix":"user:","keys_only":true}"#, vec!["--prefix", "user:", "--keys-only"]),
+        (
+            r#"{"start":"user:2","end":"zebra"}"#,
+            vec!["--from", "user:2", "--to", "zebra"],
+        ),
+        (
+            r#"{"prefix":"user:","keys_only":true}"#,
+            vec!["--prefix", "user:", "--keys-only"],
+        ),
         (r#"{"max_entries":2}"#, vec!["--limit", "2"]),
     ] {
         let answer = mcp.call("kv_scan", arguments);
@@ -278,7 +291,10 @@ fn kv_get_and_kv_scan_return_what_get_and_scan_print() {
         assert_eq!(from_tool, from_twin, "{arguments}");
         for removed in envelope("kv_scan") {
             if *removed != "next_start_hex" {
-                assert!(member(result, removed).is_some(), "kv_scan has no {removed}");
+                assert!(
+                    member(result, removed).is_some(),
+                    "kv_scan has no {removed}"
+                );
             }
         }
     }
@@ -309,7 +325,10 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
     let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
 
     for (dialect, sql) in [
-        ("postgresql", "SELECT id, name, born, admin FROM users ORDER BY id"),
+        (
+            "postgresql",
+            "SELECT id, name, born, admin FROM users ORDER BY id",
+        ),
         ("mysql", "SELECT id, name, admin FROM users ORDER BY id"),
         ("postgresql", "SELECT count(*) AS n, max(id) FROM users"),
     ] {
@@ -317,7 +336,13 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
         let answer = mcp.call("run_sql", &arguments);
         let result = structured(&answer, false);
         let printed = lines(&succeeded(&eggdb(&[
-            "sql", &path, "--json", "--dialect", dialect, "-c", sql,
+            "sql",
+            &path,
+            "--json",
+            "--dialect",
+            dialect,
+            "-c",
+            sql,
         ])));
         assert_eq!(printed.len(), 1, "{sql}");
         assert_eq!(
@@ -327,7 +352,10 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
         );
     }
 
-    let answer = mcp.call("write_sql", r#"{"sql":"INSERT INTO users VALUES (3, 'Eve', NULL, NULL)"}"#);
+    let answer = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO users VALUES (3, 'Eve', NULL, NULL)"}"#,
+    );
     let written = structured(&answer, false);
     assert_eq!(scalar(at(written, &["committed"])), "true");
     let printed = lines(&succeeded(&eggdb(&[
@@ -338,7 +366,10 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
         "INSERT INTO users VALUES (4, 'Bob', NULL, NULL)",
     ])));
     assert_eq!(printed.len(), 1);
-    assert_eq!(canonical_without(written, envelope("write_sql")), canonical(&printed[0]));
+    assert_eq!(
+        canonical_without(written, envelope("write_sql")),
+        canonical(&printed[0])
+    );
 
     let wrong = "SELECT * FROM nowhere";
     let refused = mcp.call("run_sql", &format!(r#"{{"sql":{wrong:?}}}"#));
@@ -444,24 +475,36 @@ fn the_table_tools_return_what_table_list_show_and_sample_print() {
     let _audit = audit_of(file.path());
     let mut mcp = Mcp::start(file.path(), &[]);
 
-    for (arguments, options) in [("{}", vec![]), (r#"{"schema":"sales"}"#, vec!["--schema", "sales"])] {
+    for (arguments, options) in [
+        ("{}", vec![]),
+        (r#"{"schema":"sales"}"#, vec!["--schema", "sales"]),
+    ] {
         let answer = mcp.call("list_tables", arguments);
         let result = structured(&answer, false);
         let mut from_tool: Vec<String> = members_of(result, "tables")
             .iter()
             .map(|table| with_kind(table, "table"))
             .collect();
-        from_tool.extend(members_of(result, "views").iter().map(|view| with_kind(view, "view")));
+        from_tool.extend(
+            members_of(result, "views")
+                .iter()
+                .map(|view| with_kind(view, "view")),
+        );
         let mut args = vec!["table", "list", path.as_str(), "--json"];
         args.extend(options.iter().copied());
-        let printed: Vec<String> = lines(&succeeded(&eggdb(&args))).iter().map(canonical).collect();
+        let printed: Vec<String> = lines(&succeeded(&eggdb(&args)))
+            .iter()
+            .map(canonical)
+            .collect();
         assert_eq!(from_tool, printed, "{arguments}");
     }
 
     for name in ["users", "USERS", "sales.totals"] {
         let answer = mcp.call("describe_table", &format!(r#"{{"table":{name:?}}}"#));
         let result = structured(&answer, false);
-        let printed = lines(&succeeded(&eggdb(&["table", "show", &path, name, "--json"])));
+        let printed = lines(&succeeded(&eggdb(&[
+            "table", "show", &path, name, "--json",
+        ])));
         assert_eq!(printed.len(), 1);
         assert_eq!(
             canonical_without(result, envelope("describe_table")),
@@ -471,15 +514,33 @@ fn the_table_tools_return_what_table_list_show_and_sample_print() {
     }
 
     for (max_rows, limit) in [(10, "10"), (2, "2")] {
-        let answer = mcp.call("sample_rows", &format!(r#"{{"table":"users","max_rows":{max_rows}}}"#));
+        let answer = mcp.call(
+            "sample_rows",
+            &format!(r#"{{"table":"users","max_rows":{max_rows}}}"#),
+        );
         let result = structured(&answer, false);
-        let printed = lines(&succeeded(&eggdb(&["table", "sample", &path, "users", "-n", limit, "--json"])));
+        let printed = lines(&succeeded(&eggdb(&[
+            "table", "sample", &path, "users", "-n", limit, "--json",
+        ])));
         assert_eq!(printed.len(), 1);
         let line = &printed[0];
-        assert_eq!(canonical(at(result, &["rows"])), canonical(at(line, &["rows"])), "{limit}");
-        assert_eq!(canonical(at(result, &["columns"])), canonical(at(line, &["columns"])));
-        assert_eq!(scalar(at(result, &["truncated"])), scalar(at(line, &["truncated"])));
-        assert_eq!(scalar(at(result, &["returned_rows"])), scalar(at(line, &["row_count"])));
+        assert_eq!(
+            canonical(at(result, &["rows"])),
+            canonical(at(line, &["rows"])),
+            "{limit}"
+        );
+        assert_eq!(
+            canonical(at(result, &["columns"])),
+            canonical(at(line, &["columns"]))
+        );
+        assert_eq!(
+            scalar(at(result, &["truncated"])),
+            scalar(at(line, &["truncated"]))
+        );
+        assert_eq!(
+            scalar(at(result, &["returned_rows"])),
+            scalar(at(line, &["row_count"]))
+        );
         if max_rows == 10 {
             assert_eq!(
                 canonical_without(result, envelope("sample_rows")),
@@ -495,7 +556,11 @@ fn the_table_tools_return_what_table_list_show_and_sample_print() {
         assert_eq!(twin.status.code(), Some(1), "{verb}");
         let (code, category) = code_and_category(&one_error(&twin));
         assert_eq!(code, "table_not_found");
-        assert_eq!(category, tool_error.1, "the same category as the tool's {}", tool_error.0);
+        assert_eq!(
+            category, tool_error.1,
+            "the same category as the tool's {}",
+            tool_error.0
+        );
         assert_eq!(
             scalar(at(&one_error(&twin), &["error", "fix_command"])),
             format!("eggdb table list {path}")
@@ -522,7 +587,13 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
         );
         let result = structured(&answer, false);
         let printed = lines(&succeeded(&eggdb(&[
-            "explain", &path, "--json", "--dialect", dialect, "-c", sql,
+            "explain",
+            &path,
+            "--json",
+            "--dialect",
+            dialect,
+            "-c",
+            sql,
         ])));
         assert_eq!(printed.len(), 1, "{dialect}");
         assert_eq!(
@@ -534,26 +605,54 @@ fn explain_query_and_run_sql_return_what_explain_and_sql_read_only_print() {
     for (arguments, args) in [
         (
             r#"{"sql":"SELECT 1","dialect":"oracle"}"#,
-            vec!["explain", path.as_str(), "--json", "--dialect", "oracle", "-c", "SELECT 1"],
+            vec![
+                "explain",
+                path.as_str(),
+                "--json",
+                "--dialect",
+                "oracle",
+                "-c",
+                "SELECT 1",
+            ],
         ),
         (
             r#"{"sql":"SELECT 1; SELECT 2"}"#,
-            vec!["explain", path.as_str(), "--json", "-c", "SELECT 1; SELECT 2"],
+            vec![
+                "explain",
+                path.as_str(),
+                "--json",
+                "-c",
+                "SELECT 1; SELECT 2",
+            ],
         ),
     ] {
         let answer = mcp.call("explain_query", arguments);
         let tool_error = code_and_category(structured(&answer, true));
         let twin = eggdb(&args);
-        assert_eq!(code_and_category(&one_error(&twin)), tool_error, "{arguments}");
+        assert_eq!(
+            code_and_category(&one_error(&twin)),
+            tool_error,
+            "{arguments}"
+        );
     }
     let doubled = eggdb(&["explain", &path, "-c", "EXPLAIN SELECT 1"]);
     assert_eq!(doubled.status.code(), Some(2));
     let text_plan = succeeded(&eggdb(&["explain", &path, "-c", "SELECT * FROM users"]));
-    assert!(text_plan.ends_with(")\n\n"), "no tag line after the plan: {text_plan}");
+    assert!(
+        text_plan.ends_with(")\n\n"),
+        "no tag line after the plan: {text_plan}"
+    );
 
     let select = "SELECT id, name FROM users ORDER BY id";
     let answer = mcp.call("run_sql", &format!(r#"{{"sql":{select:?}}}"#));
-    let printed = lines(&succeeded(&eggdb(&["sql", &path, "--read-only", "--json", "-c", select])));
+    let printed = lines(&succeeded(&eggdb(&[
+        "sql",
+        &path,
+        "--read-only",
+        "--json",
+        "-c",
+        select,
+    ])));
     assert_eq!(printed.len(), 1);
     assert_eq!(
         canonical_without(structured(&answer, false), envelope("run_sql")),
@@ -605,7 +704,15 @@ fn row_list_returns_what_row_list_prints_page_by_page() {
         };
         let answer = mcp.call("row_list", &arguments);
         let result = structured(&answer, false);
-        let mut args = vec!["row", "list", path.as_str(), "users", "--limit", "2", "--json"];
+        let mut args = vec![
+            "row",
+            "list",
+            path.as_str(),
+            "users",
+            "--limit",
+            "2",
+            "--json",
+        ];
         if let Some(cursor) = &after {
             args.extend(["--after", cursor.as_str()]);
         }
@@ -626,7 +733,10 @@ fn row_list_returns_what_row_list_prints_page_by_page() {
         assert_eq!(members_of(result, "columns").len(), 3);
         for removed in envelope("row_list") {
             if *removed != "truncated_by" {
-                assert!(member(result, removed).is_some(), "row_list has no {removed}");
+                assert!(
+                    member(result, removed).is_some(),
+                    "row_list has no {removed}"
+                );
             }
         }
         pages += 1;
@@ -639,7 +749,9 @@ fn row_list_returns_what_row_list_prints_page_by_page() {
 
     let whole = mcp.call("row_list", r#"{"table":"users"}"#);
     let whole = structured(&whole, false);
-    let printed = lines(&succeeded(&eggdb(&["row", "list", &path, "users", "--json"])));
+    let printed = lines(&succeeded(&eggdb(&[
+        "row", "list", &path, "users", "--json",
+    ])));
     let from_tool: Vec<String> = members_of(whole, "items").iter().map(canonical).collect();
     assert_eq!(from_tool, printed.iter().map(canonical).collect::<Vec<_>>());
     assert_eq!(scalar(at(whole, &["truncated"])), "false");
@@ -649,7 +761,9 @@ fn row_list_returns_what_row_list_prints_page_by_page() {
     assert!(members_of(structured(&empty, false), "items").is_empty());
     assert!(succeeded(&eggdb(&["row", "list", &path, "orders", "--json"])).is_empty());
 
-    let first = lines(&succeeded(&eggdb(&["row", "list", &path, "users", "-n", "1", "--json"])));
+    let first = lines(&succeeded(&eggdb(&[
+        "row", "list", &path, "users", "-n", "1", "--json",
+    ])));
     let users_cursor = scalar(at(&first[1], &["next_cursor"]));
     for (arguments, args) in [
         (
@@ -658,18 +772,38 @@ fn row_list_returns_what_row_list_prints_page_by_page() {
         ),
         (
             format!(r#"{{"table":"orders","after":{users_cursor:?}}}"#),
-            vec!["row", "list", path.as_str(), "orders", "--json", "--after", users_cursor.as_str()],
+            vec![
+                "row",
+                "list",
+                path.as_str(),
+                "orders",
+                "--json",
+                "--after",
+                users_cursor.as_str(),
+            ],
         ),
         (
             r#"{"table":"users","after":"42"}"#.to_owned(),
-            vec!["row", "list", path.as_str(), "users", "--json", "--after", "42"],
+            vec![
+                "row",
+                "list",
+                path.as_str(),
+                "users",
+                "--json",
+                "--after",
+                "42",
+            ],
         ),
     ] {
         let answer = mcp.call("row_list", &arguments);
         let tool_error = code_and_category(structured(&answer, true));
         let twin = eggdb(&args);
         assert!(twin.stdout.is_empty(), "{arguments}");
-        assert_eq!(code_and_category(&one_error(&twin)), tool_error, "{arguments}");
+        assert_eq!(
+            code_and_category(&one_error(&twin)),
+            tool_error,
+            "{arguments}"
+        );
     }
     let missing = mcp.call("row_list", r#"{"table":"nowhere"}"#);
     let tool_error = code_and_category(structured(&missing, true));
@@ -735,11 +869,19 @@ fn every_example_of_a_reading_command_runs_against_a_temporary_file() {
             .unwrap()
     };
     for setup in [
-        &["sql", "--create", "app.db", "-c", "CREATE TABLE users (id integer PRIMARY KEY, name text); INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace'); CREATE TABLE orders (id integer PRIMARY KEY, placed_at timestamp); CREATE SCHEMA sales; CREATE VIEW sales.totals AS SELECT count(*) AS n FROM orders; CREATE TABLE sales.orders (id integer PRIMARY KEY)"][..],
+        &[
+            "sql",
+            "--create",
+            "app.db",
+            "-c",
+            "CREATE TABLE users (id integer PRIMARY KEY, name text); INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace'); CREATE TABLE orders (id integer PRIMARY KEY, placed_at timestamp); CREATE SCHEMA sales; CREATE VIEW sales.totals AS SELECT count(*) AS n FROM orders; CREATE TABLE sales.orders (id integer PRIMARY KEY)",
+        ][..],
         &["put", "app.db", "user:1", "Ada"],
         &["put", "app.db", "0x00ff", "0x01"],
         &["collection", "add", "app.db", "sessions"],
-        &["put", "app.db", "-C", "sessions", "s:1", "x", "--ttl", "30m"],
+        &[
+            "put", "app.db", "-C", "sessions", "s:1", "x", "--ttl", "30m",
+        ],
     ] {
         succeeded(&run(setup));
     }
@@ -750,7 +892,9 @@ fn every_example_of_a_reading_command_runs_against_a_temporary_file() {
         }
         for example in command.examples {
             let one_command = example.starts_with("eggdb ")
-                && !["|", "<", ">", "$(", "&&"].iter().any(|shell| example.contains(shell));
+                && !["|", "<", ">", "$(", "&&"]
+                    .iter()
+                    .any(|shell| example.contains(shell));
             if !one_command {
                 continue;
             }

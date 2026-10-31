@@ -55,7 +55,10 @@ fn too_many_packages() -> SqlError {
 }
 
 impl PlsqlSession {
-    pub(crate) fn package_shells(&mut self, compiled: &Arc<CompiledPackage>) -> Option<PackageShells> {
+    pub(crate) fn package_shells(
+        &mut self,
+        compiled: &Arc<CompiledPackage>,
+    ) -> Option<PackageShells> {
         let at = self
             .packages
             .iter()
@@ -101,7 +104,11 @@ impl PlsqlSession {
             .retain(|instance| instance.compiled.name != name);
     }
 
-    pub(crate) fn instance_mut(&mut self, name: &str, generation: u64) -> Option<&mut PackageInstance> {
+    pub(crate) fn instance_mut(
+        &mut self,
+        name: &str,
+        generation: u64,
+    ) -> Option<&mut PackageInstance> {
         self.packages
             .iter_mut()
             .find(|instance| instance.generation == generation && instance.compiled.name == name)
@@ -230,7 +237,12 @@ pub(crate) fn enter_session(session: &SharedPlsqlSession) -> EnteredPlsqlSession
 }
 
 pub(crate) fn with_session<T>(use_it: impl FnOnce(&mut PlsqlSession) -> T) -> Option<T> {
-    let session = CURRENT.with(|current| current.try_borrow().ok().and_then(|current| current.clone()))?;
+    let session = CURRENT.with(|current| {
+        current
+            .try_borrow()
+            .ok()
+            .and_then(|current| current.clone())
+    })?;
     let mut state = session.lock().unwrap_or_else(PoisonError::into_inner);
     Some(use_it(&mut state))
 }

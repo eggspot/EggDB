@@ -11,16 +11,43 @@ fn sample() -> Document {
         ("score".to_owned(), Bson::Double(9.5)),
         ("big".to_owned(), Bson::Int64(1 << 40)),
         ("address".to_owned(), Bson::Document(inner)),
-        ("tags".to_owned(), Bson::Array(vec![Bson::String("a".to_owned()), Bson::Null])),
-        ("photo".to_owned(), Bson::Binary { subtype: 0, bytes: vec![1, 2, 3] }),
+        (
+            "tags".to_owned(),
+            Bson::Array(vec![Bson::String("a".to_owned()), Bson::Null]),
+        ),
+        (
+            "photo".to_owned(),
+            Bson::Binary {
+                subtype: 0,
+                bytes: vec![1, 2, 3],
+            },
+        ),
         ("active".to_owned(), Bson::Boolean(true)),
         ("born".to_owned(), Bson::DateTime(-4_000_000_000_000)),
-        ("pattern".to_owned(), Bson::Regex { pattern: "^a".to_owned(), options: "i".to_owned() }),
-        ("stamp".to_owned(), Bson::Timestamp { time: 7, increment: 2 }),
+        (
+            "pattern".to_owned(),
+            Bson::Regex {
+                pattern: "^a".to_owned(),
+                options: "i".to_owned(),
+            },
+        ),
+        (
+            "stamp".to_owned(),
+            Bson::Timestamp {
+                time: 7,
+                increment: 2,
+            },
+        ),
         ("price".to_owned(), Bson::Decimal128([0; 16])),
         ("low".to_owned(), Bson::MinKey),
         ("high".to_owned(), Bson::MaxKey),
-        ("code".to_owned(), Bson::JavaScriptWithScope { code: "x".to_owned(), scope: Document::new() }),
+        (
+            "code".to_owned(),
+            Bson::JavaScriptWithScope {
+                code: "x".to_owned(),
+                scope: Document::new(),
+            },
+        ),
     ])
 }
 
@@ -43,7 +70,10 @@ fn the_specification_example_reads() {
 fn every_truncation_and_corruption_is_an_error_not_a_panic() {
     let bytes = sample().to_bytes();
     for length in 0..bytes.len() {
-        assert!(Document::from_bytes(&bytes[..length]).is_err(), "length {length}");
+        assert!(
+            Document::from_bytes(&bytes[..length]).is_err(),
+            "length {length}"
+        );
     }
     for at in 0..bytes.len() {
         for flip in [0x01u8, 0x80, 0xff] {
@@ -87,12 +117,21 @@ fn types_compare_in_the_documented_order() {
         Bson::String("a".to_owned()),
         Bson::Document(Document::new()),
         Bson::Array(Vec::new()),
-        Bson::Binary { subtype: 0, bytes: Vec::new() },
+        Bson::Binary {
+            subtype: 0,
+            bytes: Vec::new(),
+        },
         Bson::ObjectId([0; 12]),
         Bson::Boolean(false),
         Bson::DateTime(0),
-        Bson::Timestamp { time: 0, increment: 0 },
-        Bson::Regex { pattern: String::new(), options: String::new() },
+        Bson::Timestamp {
+            time: 0,
+            increment: 0,
+        },
+        Bson::Regex {
+            pattern: String::new(),
+            options: String::new(),
+        },
         Bson::MaxKey,
     ];
     for pair in ordered.windows(2) {
@@ -102,11 +141,23 @@ fn types_compare_in_the_documented_order() {
 
 #[test]
 fn numbers_compare_by_value_across_types() {
-    assert_eq!(compare(&Bson::Int32(2), &Bson::Double(2.0)), Ordering::Equal);
+    assert_eq!(
+        compare(&Bson::Int32(2), &Bson::Double(2.0)),
+        Ordering::Equal
+    );
     assert_eq!(compare(&Bson::Int64(2), &Bson::Double(2.5)), Ordering::Less);
-    assert_eq!(compare(&Bson::Int64(i64::MAX), &Bson::Double(9.3e18)), Ordering::Less);
-    assert_eq!(compare(&Bson::Int64(i64::MAX), &Bson::Int64(i64::MAX - 1)), Ordering::Greater);
-    assert_eq!(compare(&Bson::Double(f64::NAN), &Bson::Int32(i32::MIN)), Ordering::Less);
+    assert_eq!(
+        compare(&Bson::Int64(i64::MAX), &Bson::Double(9.3e18)),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare(&Bson::Int64(i64::MAX), &Bson::Int64(i64::MAX - 1)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare(&Bson::Double(f64::NAN), &Bson::Int32(i32::MIN)),
+        Ordering::Less
+    );
 }
 
 #[test]
@@ -122,6 +173,12 @@ fn object_ids_are_unique_and_start_with_the_time() {
 fn relaxed_extended_json_shows_each_type() {
     let text = relaxed_json(&sample());
     assert!(text.starts_with("{\"_id\": {\"$oid\": \"010101010101010101010101\"}, \"name\": \"Ada\", \"age\": 36, \"score\": 9.5"), "{text}");
-    assert!(text.contains("\"photo\": {\"$binary\": {\"base64\": \"AQID\", \"subType\": \"00\"}}"), "{text}");
-    assert!(text.contains("\"born\": {\"$date\": {\"$numberLong\": \"-4000000000000\"}}"), "{text}");
+    assert!(
+        text.contains("\"photo\": {\"$binary\": {\"base64\": \"AQID\", \"subType\": \"00\"}}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"born\": {\"$date\": {\"$numberLong\": \"-4000000000000\"}}"),
+        "{text}"
+    );
 }

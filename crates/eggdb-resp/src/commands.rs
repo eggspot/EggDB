@@ -1,10 +1,10 @@
 use crate::keyspace::{KeysRead, KeysWrite, Keyspace};
 use crate::protocol::{Reply, format_double};
-use crate::value::{Data, Entry, SortedSet};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use crate::value::{Data, Entry};
 
 const DATABASES: u32 = 16;
-pub(crate) const WRONG_TYPE: &str = "WRONGTYPE Operation against a key holding the wrong kind of value";
+pub(crate) const WRONG_TYPE: &str =
+    "WRONGTYPE Operation against a key holding the wrong kind of value";
 pub(crate) const NOT_INTEGER: &str = "ERR value is not an integer or out of range";
 const NOT_FLOAT: &str = "ERR value is not a valid float";
 pub(crate) const SYNTAX: &str = "ERR syntax error";
@@ -41,12 +41,16 @@ pub struct Context<'k> {
 
 impl std::fmt::Debug for Context<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Context").field("now_ms", &self.now_ms).finish_non_exhaustive()
+        f.debug_struct("Context")
+            .field("now_ms", &self.now_ms)
+            .finish_non_exhaustive()
     }
 }
 
 fn wrong_arguments(name: &str) -> Reply {
-    Reply::Error(format!("ERR wrong number of arguments for '{name}' command"))
+    Reply::Error(format!(
+        "ERR wrong number of arguments for '{name}' command"
+    ))
 }
 
 pub(crate) fn integer(bytes: &[u8]) -> Result<i64, String> {
@@ -73,7 +77,8 @@ pub(crate) fn load(keys: &dyn KeysRead, key: &[u8], now: u64) -> Result<Option<E
     match keys.get(key)? {
         None => Ok(None),
         Some(bytes) => {
-            let entry = Entry::decode(&bytes).ok_or_else(|| "ERR the stored value is damaged".to_owned())?;
+            let entry = Entry::decode(&bytes)
+                .ok_or_else(|| "ERR the stored value is damaged".to_owned())?;
             Ok((!entry.expired(now)).then_some(entry))
         }
     }
@@ -198,7 +203,9 @@ fn class(pattern: &[u8], byte: u8) -> Option<(bool, usize)> {
         } else {
             pattern[at]
         };
-        if pattern.get(at + 1) == Some(&b'-') && pattern.get(at + 2).is_some_and(|high| *high != b']') {
+        if pattern.get(at + 1) == Some(&b'-')
+            && pattern.get(at + 2).is_some_and(|high| *high != b']')
+        {
             let high = pattern[at + 2];
             if (low.min(high)..=low.max(high)).contains(&byte) {
                 matched = true;
@@ -234,8 +241,16 @@ fn as_string(entry: Option<&Entry>) -> Result<Option<&Vec<u8>>, String> {
 
 pub(crate) fn range_of(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
     let len = len as i64;
-    let start = if start < 0 { (len + start).max(0) } else { start };
-    let stop = if stop < 0 { len + stop } else { stop.min(len - 1) };
+    let start = if start < 0 {
+        (len + start).max(0)
+    } else {
+        start
+    };
+    let stop = if stop < 0 {
+        len + stop
+    } else {
+        stop.min(len - 1)
+    };
     (start <= stop && start < len).then_some((start as usize, stop as usize))
 }
 
@@ -256,12 +271,17 @@ pub fn execute(context: &Context<'_>, client: &mut Client, arguments: &[Vec<u8>]
 }
 
 fn check_password(context: &Context<'_>, given: &[u8]) -> bool {
-    context
-        .password_sha256
-        .is_some_and(|expected| eggdb_crypto::constant_time_eq(expected, &eggdb_crypto::sha256(given)))
+    context.password_sha256.is_some_and(|expected| {
+        eggdb_crypto::constant_time_eq(expected, &eggdb_crypto::sha256(given))
+    })
 }
 
-fn connection_command(context: &Context<'_>, client: &mut Client, name: &str, args: &[Vec<u8>]) -> Option<Reply> {
+fn connection_command(
+    context: &Context<'_>,
+    client: &mut Client,
+    name: &str,
+    args: &[Vec<u8>],
+) -> Option<Reply> {
     Some(match name {
         "ping" => match args {
             [] => Reply::Status("PONG".to_owned()),
@@ -365,14 +385,23 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
     let now = context.now_ms;
     match (name, args.len()) {
         ("get", 1) => reading(context, db, |keys| {
-            Ok(Reply::Bulk(as_string(load(keys, &args[0], now)?.as_ref())?.cloned()))
+            Ok(Reply::Bulk(
+                as_string(load(keys, &args[0], now)?.as_ref())?.cloned(),
+            ))
         }),
         ("set", count) if count >= 2 => set(context, db, args),
         ("setnx", 2) => writing(context, db, |keys| {
             if load(keys, &args[0], now)?.is_some() {
                 return Ok(Reply::Integer(0));
             }
-            save(keys, &args[0], &Entry { data: Data::String(args[1].clone()), expires_at_ms: None })?;
+            save(
+                keys,
+                &args[0],
+                &Entry {
+                    data: Data::String(args[1].clone()),
+                    expires_at_ms: None,
+                },
+            )?;
             Ok(Reply::Integer(1))
         }),
         ("setex" | "psetex", 3) => {
@@ -380,12 +409,20 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
                 Ok(amount) if amount > 0 => amount as u64,
                 _ => return Reply::Error(format!("ERR invalid expire time in '{name}' command")),
             };
-            let millis = if name == "setex" { amount.saturating_mul(1000) } else { amount };
+            let millis = if name == "setex" {
+                amount.saturating_mul(1000)
+            } else {
+                amount
+            };
             writing(context, db, |keys| {
-                save(keys, &args[0], &Entry {
-                    data: Data::String(args[2].clone()),
-                    expires_at_ms: Some(now.saturating_add(millis)),
-                })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::String(args[2].clone()),
+                        expires_at_ms: Some(now.saturating_add(millis)),
+                    },
+                )?;
                 Ok(Reply::ok())
             })
         }
@@ -393,7 +430,10 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             let mut values = Vec::with_capacity(args.len());
             for key in args {
                 let value = match load(keys, key, now)? {
-                    Some(Entry { data: Data::String(bytes), .. }) => Some(bytes),
+                    Some(Entry {
+                        data: Data::String(bytes),
+                        ..
+                    }) => Some(bytes),
                     _ => None,
                 };
                 values.push(Reply::Bulk(value));
@@ -402,13 +442,31 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
         }),
         ("mset", count) if count >= 2 && count % 2 == 0 => writing(context, db, |keys| {
             for pair in args.chunks(2) {
-                save(keys, &pair[0], &Entry { data: Data::String(pair[1].clone()), expires_at_ms: None })?;
+                save(
+                    keys,
+                    &pair[0],
+                    &Entry {
+                        data: Data::String(pair[1].clone()),
+                        expires_at_ms: None,
+                    },
+                )?;
             }
             Ok(Reply::ok())
         }),
-        ("incr" | "decr", 1) => increment(context, db, &args[0], if name == "incr" { 1 } else { -1 }),
+        ("incr" | "decr", 1) => {
+            increment(context, db, &args[0], if name == "incr" { 1 } else { -1 })
+        }
         ("incrby" | "decrby", 2) => match integer(&args[1]) {
-            Ok(by) => increment(context, db, &args[0], if name == "incrby" { by } else { by.saturating_neg() }),
+            Ok(by) => increment(
+                context,
+                db,
+                &args[0],
+                if name == "incrby" {
+                    by
+                } else {
+                    by.saturating_neg()
+                },
+            ),
             Err(error) => Reply::Error(error),
         },
         ("incrbyfloat", 2) => match float(&args[1]) {
@@ -423,10 +481,14 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
                     return Err("ERR increment would produce NaN or Infinity".to_owned());
                 }
                 let text = format_double(next);
-                save(keys, &args[0], &Entry {
-                    data: Data::String(text.clone().into_bytes()),
-                    expires_at_ms: entry.and_then(|entry| entry.expires_at_ms),
-                })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::String(text.clone().into_bytes()),
+                        expires_at_ms: entry.and_then(|entry| entry.expires_at_ms),
+                    },
+                )?;
                 Ok(Reply::bulk(text))
             }),
             Err(error) => Reply::Error(error),
@@ -436,33 +498,50 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             let mut value = as_string(entry.as_ref())?.cloned().unwrap_or_default();
             value.extend_from_slice(&args[1]);
             let length = value.len();
-            save(keys, &args[0], &Entry {
-                data: Data::String(value),
-                expires_at_ms: entry.and_then(|entry| entry.expires_at_ms),
-            })?;
+            save(
+                keys,
+                &args[0],
+                &Entry {
+                    data: Data::String(value),
+                    expires_at_ms: entry.and_then(|entry| entry.expires_at_ms),
+                },
+            )?;
             Ok(Reply::Integer(length as i64))
         }),
         ("strlen", 1) => reading(context, db, |keys| {
-            Ok(Reply::Integer(as_string(load(keys, &args[0], now)?.as_ref())?.map_or(0, Vec::len) as i64))
+            Ok(Reply::Integer(
+                as_string(load(keys, &args[0], now)?.as_ref())?.map_or(0, Vec::len) as i64,
+            ))
         }),
         ("getrange", 3) => {
             let (Ok(start), Ok(stop)) = (integer(&args[1]), integer(&args[2])) else {
                 return Reply::Error(NOT_INTEGER.to_owned());
             };
             reading(context, db, |keys| {
-                let value = as_string(load(keys, &args[0], now)?.as_ref())?.cloned().unwrap_or_default();
+                let value = as_string(load(keys, &args[0], now)?.as_ref())?
+                    .cloned()
+                    .unwrap_or_default();
                 Ok(Reply::bulk(match range_of(value.len(), start, stop) {
                     Some((from, to)) => value[from..=to].to_vec(),
                     None => Vec::new(),
                 }))
             })
         }
-        ("getset" | "getdel", count) if (name == "getset" && count == 2) || (name == "getdel" && count == 1) => {
+        ("getset" | "getdel", count)
+            if (name == "getset" && count == 2) || (name == "getdel" && count == 1) =>
+        {
             writing(context, db, |keys| {
                 let entry = load(keys, &args[0], now)?;
                 let old = as_string(entry.as_ref())?.cloned();
                 if name == "getset" {
-                    save(keys, &args[0], &Entry { data: Data::String(args[1].clone()), expires_at_ms: None })?;
+                    save(
+                        keys,
+                        &args[0],
+                        &Entry {
+                            data: Data::String(args[1].clone()),
+                            expires_at_ms: None,
+                        },
+                    )?;
                 } else if old.is_some() {
                     keys.delete(&args[0])?;
                 }
@@ -489,7 +568,11 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             Ok(Reply::Integer(found))
         }),
         ("type", 1) => reading(context, db, |keys| {
-            Ok(Reply::Status(load(keys, &args[0], now)?.map_or("none", |entry| entry.data.type_name()).to_owned()))
+            Ok(Reply::Status(
+                load(keys, &args[0], now)?
+                    .map_or("none", |entry| entry.data.type_name())
+                    .to_owned(),
+            ))
         }),
         ("expire" | "pexpire" | "expireat" | "pexpireat", 2) => {
             let Ok(amount) = integer(&args[1]) else {
@@ -517,10 +600,20 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
         ("ttl" | "pttl", 1) => reading(context, db, |keys| {
             Ok(Reply::Integer(match load(keys, &args[0], now)? {
                 None => -2,
-                Some(Entry { expires_at_ms: None, .. }) => -1,
-                Some(Entry { expires_at_ms: Some(at), .. }) => {
+                Some(Entry {
+                    expires_at_ms: None,
+                    ..
+                }) => -1,
+                Some(Entry {
+                    expires_at_ms: Some(at),
+                    ..
+                }) => {
                     let left = at.saturating_sub(now);
-                    if name == "ttl" { (left.div_ceil(1000)) as i64 } else { left as i64 }
+                    if name == "ttl" {
+                        (left.div_ceil(1000)) as i64
+                    } else {
+                        left as i64
+                    }
                 }
             }))
         }),
@@ -543,7 +636,11 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             }
             keys.delete(&args[0])?;
             save(keys, &args[1], &entry)?;
-            Ok(if name == "rename" { Reply::ok() } else { Reply::Integer(1) })
+            Ok(if name == "rename" {
+                Reply::ok()
+            } else {
+                Reply::Integer(1)
+            })
         }),
         ("keys", 1) => reading(context, db, |keys| {
             let matched = live_keys(keys, now)?
@@ -554,7 +651,9 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             Ok(Reply::Array(Some(matched)))
         }),
         ("scan", count) if count >= 1 => scan(context, db, args),
-        ("dbsize", 0) => reading(context, db, |keys| Ok(Reply::Integer(live_keys(keys, now)?.len() as i64))),
+        ("dbsize", 0) => reading(context, db, |keys| {
+            Ok(Reply::Integer(live_keys(keys, now)?.len() as i64))
+        }),
         ("flushdb", _) => writing(context, db, |keys| {
             keys.clear()?;
             Ok(Reply::ok())
@@ -574,7 +673,10 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
         _ => crate::aggregates::execute(context, db, name, args)
             .or_else(|| crate::streams::execute(context, db, name, args))
             .unwrap_or_else(|| {
-                if crate::aggregates::is_known(name) || crate::streams::is_known(name) || is_known(name) {
+                if crate::aggregates::is_known(name)
+                    || crate::streams::is_known(name)
+                    || is_known(name)
+                {
                     wrong_arguments(name)
                 } else {
                     Reply::Error(format!("ERR unknown command '{name}'"))
@@ -586,10 +688,38 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
 fn is_known(name: &str) -> bool {
     matches!(
         name,
-        "get" | "set" | "setnx" | "setex" | "psetex" | "mget" | "mset" | "incr" | "decr" | "incrby"
-            | "decrby" | "incrbyfloat" | "append" | "strlen" | "getrange" | "getset" | "getdel"
-            | "del" | "unlink" | "exists" | "type" | "expire" | "pexpire" | "expireat"
-            | "pexpireat" | "ttl" | "pttl" | "persist" | "rename" | "renamenx" | "keys" | "scan"
+        "get"
+            | "set"
+            | "setnx"
+            | "setex"
+            | "psetex"
+            | "mget"
+            | "mset"
+            | "incr"
+            | "decr"
+            | "incrby"
+            | "decrby"
+            | "incrbyfloat"
+            | "append"
+            | "strlen"
+            | "getrange"
+            | "getset"
+            | "getdel"
+            | "del"
+            | "unlink"
+            | "exists"
+            | "type"
+            | "expire"
+            | "pexpire"
+            | "expireat"
+            | "pexpireat"
+            | "ttl"
+            | "pttl"
+            | "persist"
+            | "rename"
+            | "renamenx"
+            | "keys"
+            | "scan"
             | "dbsize"
     )
 }
@@ -605,10 +735,14 @@ fn increment(context: &Context<'_>, db: u32, key: &[u8], by: i64) -> Reply {
         let next = current
             .checked_add(by)
             .ok_or_else(|| "ERR increment or decrement would overflow".to_owned())?;
-        save(keys, key, &Entry {
-            data: Data::String(next.to_string().into_bytes()),
-            expires_at_ms: entry.and_then(|entry| entry.expires_at_ms),
-        })?;
+        save(
+            keys,
+            key,
+            &Entry {
+                data: Data::String(next.to_string().into_bytes()),
+                expires_at_ms: entry.and_then(|entry| entry.expires_at_ms),
+            },
+        )?;
         Ok(Reply::Integer(next))
     })
 }
@@ -648,7 +782,11 @@ fn set(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
     }
     writing(context, db, |keys| {
         let existing = load(keys, &args[0], now)?;
-        let old = if get { as_string(existing.as_ref())?.cloned() } else { None };
+        let old = if get {
+            as_string(existing.as_ref())?.cloned()
+        } else {
+            None
+        };
         if (only_new && existing.is_some()) || (only_existing && existing.is_none()) {
             return Ok(if get { Reply::Bulk(old) } else { Reply::null() });
         }
@@ -657,7 +795,14 @@ fn set(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
         } else {
             expires
         };
-        save(keys, &args[0], &Entry { data: Data::String(args[1].clone()), expires_at_ms })?;
+        save(
+            keys,
+            &args[0],
+            &Entry {
+                data: Data::String(args[1].clone()),
+                expires_at_ms,
+            },
+        )?;
         Ok(if get { Reply::Bulk(old) } else { Reply::ok() })
     })
 }
@@ -670,13 +815,20 @@ fn scan(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
     let (mut pattern, mut count, mut kind) = (None, 10usize, None);
     let mut options = args[1..].iter();
     while let Some(option) = options.next() {
-        match String::from_utf8_lossy(option).to_ascii_lowercase().as_str() {
+        match String::from_utf8_lossy(option)
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "match" => pattern = options.next().cloned(),
             "count" => match options.next().map(|value| integer(value)) {
                 Some(Ok(value)) if value > 0 => count = value as usize,
                 _ => return Reply::Error(SYNTAX.to_owned()),
             },
-            "type" => kind = options.next().map(|value| String::from_utf8_lossy(value).to_ascii_lowercase()),
+            "type" => {
+                kind = options
+                    .next()
+                    .map(|value| String::from_utf8_lossy(value).to_ascii_lowercase())
+            }
             _ => return Reply::Error(SYNTAX.to_owned()),
         }
     }
@@ -692,7 +844,10 @@ fn scan(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
             if pattern.as_ref().is_some_and(|pattern| !glob(pattern, key)) {
                 continue;
             }
-            if kind.as_ref().is_some_and(|kind| kind != entry.data.type_name()) {
+            if kind
+                .as_ref()
+                .is_some_and(|kind| kind != entry.data.type_name())
+            {
                 continue;
             }
             found.push(Reply::bulk(key.clone()));

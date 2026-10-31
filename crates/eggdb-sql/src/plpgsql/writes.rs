@@ -24,7 +24,11 @@ impl UndoLog {
         }
     }
 
-    pub(crate) fn roll_back(&mut self, writer: &mut dyn KeyValueWrite, mark: usize) -> SqlResult<()> {
+    pub(crate) fn roll_back(
+        &mut self,
+        writer: &mut dyn KeyValueWrite,
+        mark: usize,
+    ) -> SqlResult<()> {
         while self.entries.len() > mark {
             let Some((key, previous)) = self.entries.pop() else {
                 break;

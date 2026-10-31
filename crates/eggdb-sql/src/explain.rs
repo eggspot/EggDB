@@ -80,12 +80,21 @@ pub(crate) fn render_analyzed(
     if let Some(top) = lines.first_mut() {
         top.push_str(&format!(" (actual rows={rows} loops=1)"));
     }
-    lines.push(format!("Planning Time: {:.3} ms", planning.as_secs_f64() * 1000.0));
-    lines.push(format!("Execution Time: {:.3} ms", execution.as_secs_f64() * 1000.0));
+    lines.push(format!(
+        "Planning Time: {:.3} ms",
+        planning.as_secs_f64() * 1000.0
+    ));
+    lines.push(format!(
+        "Execution Time: {:.3} ms",
+        execution.as_secs_f64() * 1000.0
+    ));
     QueryResult::rows(
         "EXPLAIN".to_owned(),
         columns(ExplainStyle::Plan, Dialect::PostgreSql),
-        lines.into_iter().map(|line| vec![Value::Text(line)]).collect(),
+        lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line)])
+            .collect(),
     )
 }
 

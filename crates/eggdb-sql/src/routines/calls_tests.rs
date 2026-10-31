@@ -75,9 +75,18 @@ fn overloads_are_chosen_by_argument_types_and_ties_are_refused() {
             "CREATE FUNCTION kind(b boolean) RETURNS text LANGUAGE sql RETURN 'boolean'",
         ],
     );
-    assert_eq!(answer(&mut session, "SELECT kind(1)"), "kind\ninteger\nSELECT 1");
-    assert_eq!(answer(&mut session, "SELECT kind('a'::text)"), "kind\ntext\nSELECT 1");
-    assert_eq!(answer(&mut session, "SELECT kind(true)"), "kind\nboolean\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT kind(1)"),
+        "kind\ninteger\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT kind('a'::text)"),
+        "kind\ntext\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT kind(true)"),
+        "kind\nboolean\nSELECT 1"
+    );
 }
 
 #[test]
@@ -93,7 +102,10 @@ fn functions_run_once_per_row_in_select_lists_and_filters() {
         ],
     );
     assert_eq!(
-        answer(&mut session, "SELECT full_name(first, last) FROM people ORDER BY id"),
+        answer(
+            &mut session,
+            "SELECT full_name(first, last) FROM people ORDER BY id"
+        ),
         "full_name\nAda Lovelace\nAlan Turing\nSELECT 2"
     );
     assert_eq!(
@@ -104,7 +116,10 @@ fn functions_run_once_per_row_in_select_lists_and_filters() {
         "id\n2\nSELECT 1"
     );
     assert_eq!(
-        answer(&mut session, "UPDATE people SET last = full_name(last, 'X') WHERE id = 1"),
+        answer(
+            &mut session,
+            "UPDATE people SET last = full_name(last, 'X') WHERE id = 1"
+        ),
         "UPDATE 1"
     );
     assert_eq!(
@@ -129,17 +144,29 @@ fn set_returning_functions_fill_from_and_select_lists() {
         answer(&mut session, "SELECT * FROM evens(3)"),
         "evens\n2\n4\n6\nSELECT 3"
     );
-    assert_eq!(answer(&mut session, "SELECT evens(2)"), "evens\n2\n4\nSELECT 2");
+    assert_eq!(
+        answer(&mut session, "SELECT evens(2)"),
+        "evens\n2\n4\nSELECT 2"
+    );
     assert_eq!(
         answer(&mut session, "SELECT label FROM pairs(2) WHERE k = 2"),
         "label\nitem 2\nSELECT 1"
     );
     assert_eq!(
-        answer(&mut session, "SELECT * FROM pairs(1) WITH ORDINALITY AS p(a, b)"),
+        answer(
+            &mut session,
+            "SELECT * FROM pairs(1) WITH ORDINALITY AS p(a, b)"
+        ),
         "a|b|ordinality\n1|item 1|1\nSELECT 1"
     );
-    assert_eq!(answer(&mut session, "SELECT * FROM pairs(0)"), "k|label\nSELECT 0");
-    assert_eq!(answer(&mut session, "SELECT count(*) FROM evens(0)"), "count\n0\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT * FROM pairs(0)"),
+        "k|label\nSELECT 0"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM evens(0)"),
+        "count\n0\nSELECT 1"
+    );
 }
 
 #[test]
@@ -153,13 +180,22 @@ fn a_select_of_a_volatile_function_may_write() {
              BEGIN INSERT INTO log VALUES (m); RETURN (SELECT count(*) FROM log); END $$",
         ],
     );
-    assert_eq!(answer(&mut session, "SELECT remember('a')"), "remember\n1\nSELECT 1");
-    assert_eq!(answer(&mut session, "SELECT remember('b')"), "remember\n2\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT remember('a')"),
+        "remember\n1\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT remember('b')"),
+        "remember\n2\nSELECT 1"
+    );
     answer(&mut session, "CREATE TABLE source (id integer)");
     answer(&mut session, "INSERT INTO source VALUES (1)");
     let error = refusal(&mut session, "SELECT remember('c' || id) FROM source");
     assert_eq!(error.state(), SqlState::FEATURE_NOT_SUPPORTED);
-    assert_eq!(answer(&mut session, "SELECT count(*) FROM log"), "count\n2\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM log"),
+        "count\n2\nSELECT 1"
+    );
 }
 
 #[test]
@@ -184,7 +220,10 @@ fn call_runs_procedures_and_returns_their_output_parameters() {
         "balance\n70\n30\nSELECT 2"
     );
     assert_eq!(
-        answer(&mut session, "CALL transfer(amount => 5, source => 2, target => 1)"),
+        answer(
+            &mut session,
+            "CALL transfer(amount => 5, source => 2, target => 1)"
+        ),
         "CALL"
     );
     assert_eq!(
@@ -232,7 +271,10 @@ fn do_blocks_run_once_and_report_their_notices() {
          RAISE NOTICE 'done'; END $$",
     );
     assert!(output.contains("done"), "{output}");
-    assert_eq!(answer(&mut session, "SELECT count(*) FROM t"), "count\n3\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM t"),
+        "count\n3\nSELECT 1"
+    );
     let error = refusal(&mut session, "DO LANGUAGE sql $$ SELECT 1 $$");
     assert_eq!(error.state(), SqlState::FEATURE_NOT_SUPPORTED);
     let error = refusal(&mut session, "DO LANGUAGE plpgsql");
@@ -255,9 +297,15 @@ fn schema_qualified_and_variadic_calls_resolve() {
              AS 'SELECT 1 UNION ALL SELECT 2'",
         ],
     );
-    assert_eq!(answer(&mut session, "SELECT app.total(1, 2, 3)"), "total\n6\nSELECT 1");
     assert_eq!(
-        answer(&mut session, "SELECT * FROM app.numbers() AS n(v) ORDER BY v"),
+        answer(&mut session, "SELECT app.total(1, 2, 3)"),
+        "total\n6\nSELECT 1"
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT * FROM app.numbers() AS n(v) ORDER BY v"
+        ),
         "v\n1\n2\nSELECT 2"
     );
 }
@@ -267,8 +315,10 @@ fn runaway_recursion_stops_at_the_depth_limit() {
     let store = MemoryStore::default();
     let mut session = session_with(
         &store,
-        &["CREATE FUNCTION forever(n integer) RETURNS integer LANGUAGE plpgsql \
-           AS $$ BEGIN RETURN forever(n + 1); END $$"],
+        &[
+            "CREATE FUNCTION forever(n integer) RETURNS integer LANGUAGE plpgsql \
+           AS $$ BEGIN RETURN forever(n + 1); END $$",
+        ],
     );
     let error = refusal(&mut session, "SELECT forever(1)");
     assert_eq!(error.state(), SqlState::STATEMENT_TOO_COMPLEX);
@@ -280,7 +330,10 @@ fn call_and_do_need_confirmation_from_agents() {
         let found = crate::destructive::destructive_statement(text, Dialect::PostgreSql)
             .unwrap_or_else(|error| panic!("{text}: {error:?}"))
             .unwrap_or_else(|| panic!("{text} is not destructive"));
-        assert_eq!(found.parts[0].kind, crate::destructive::DestructiveKind::RunCode);
+        assert_eq!(
+            found.parts[0].kind,
+            crate::destructive::DestructiveKind::RunCode
+        );
     }
 }
 

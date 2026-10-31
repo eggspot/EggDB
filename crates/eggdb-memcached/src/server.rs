@@ -1,4 +1,7 @@
-use crate::commands::{Mode, Shared, Stored, arithmetic, check_key, delete, flush_all, get, storage, touch, MAX_ITEM_BYTES};
+use crate::commands::{
+    MAX_ITEM_BYTES, Mode, Shared, Stored, arithmetic, check_key, delete, flush_all, get, storage,
+    touch,
+};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,7 +15,9 @@ const VERSION: &str = "1.6.0 EggDB";
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 struct StopAware<'s> {
@@ -27,7 +32,11 @@ impl Read for StopAware<'_> {
                 return Ok(0);
             }
             match self.stream.read(buffer) {
-                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
                 other => return other,
             }
         }
@@ -36,7 +45,10 @@ impl Read for StopAware<'_> {
 
 fn line(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
-    let read = reader.by_ref().take(MAX_LINE_BYTES as u64 + 1).read_until(b'\n', &mut line)?;
+    let read = reader
+        .by_ref()
+        .take(MAX_LINE_BYTES as u64 + 1)
+        .read_until(b'\n', &mut line)?;
     if read == 0 {
         return Ok(None);
     }
@@ -76,7 +88,11 @@ fn server_error(message: String) -> Vec<u8> {
 
 /// Runs one connection's commands from `reader` and writes the answers to `writer`; returns
 /// when the client quits or the input ends.
-pub fn serve_stream(shared: &Shared<'_>, reader: impl Read, writer: &mut impl Write) -> io::Result<()> {
+pub fn serve_stream(
+    shared: &Shared<'_>,
+    reader: impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
     let mut reader = BufReader::new(reader);
     loop {
         let Some(request) = (match line(&mut reader) {
@@ -89,7 +105,10 @@ pub fn serve_stream(shared: &Shared<'_>, reader: impl Read, writer: &mut impl Wr
         }) else {
             return Ok(());
         };
-        let words: Vec<&[u8]> = request.split(|byte| *byte == b' ').filter(|word| !word.is_empty()).collect();
+        let words: Vec<&[u8]> = request
+            .split(|byte| *byte == b' ')
+            .filter(|word| !word.is_empty())
+            .collect();
         let Some(command) = words.first() else {
             continue;
         };
@@ -99,9 +118,11 @@ pub fn serve_stream(shared: &Shared<'_>, reader: impl Read, writer: &mut impl Wr
             b"set" | b"add" | b"replace" | b"append" | b"prepend" | b"cas" => {
                 let is_cas = *command == b"cas";
                 let expected_words = if is_cas { 6 } else { 5 };
-                let (Some(flags), Some(exptime), Some(length)) =
-                    (number::<u32>(words.get(2)), number::<i64>(words.get(3)), number::<usize>(words.get(4)))
-                else {
+                let (Some(flags), Some(exptime), Some(length)) = (
+                    number::<u32>(words.get(2)),
+                    number::<i64>(words.get(3)),
+                    number::<usize>(words.get(4)),
+                ) else {
                     writer.write_all(b"CLIENT_ERROR bad command line format\r\n")?;
                     continue;
                 };
@@ -157,12 +178,19 @@ pub fn serve_stream(shared: &Shared<'_>, reader: impl Read, writer: &mut impl Wr
                     writer.write_all(b"ERROR\r\n")?;
                     continue;
                 }
-                let keys: Vec<Vec<u8>> = words[first_key..].iter().map(|key| key.to_vec()).collect();
+                let keys: Vec<Vec<u8>> =
+                    words[first_key..].iter().map(|key| key.to_vec()).collect();
                 match get(shared, &keys, exptime, now) {
                     Ok(found) => {
                         let mut out = Vec::new();
                         for (key, item) in found {
-                            value_block(&mut out, &key, item.flags, &item.data, with_cas.then_some(item.cas));
+                            value_block(
+                                &mut out,
+                                &key,
+                                item.flags,
+                                &item.data,
+                                with_cas.then_some(item.cas),
+                            );
                         }
                         out.extend_from_slice(b"END\r\n");
                         out
@@ -177,11 +205,13 @@ pub fn serve_stream(shared: &Shared<'_>, reader: impl Read, writer: &mut impl Wr
             },
             b"incr" | b"decr" if words.len() >= 3 => match number::<u64>(words.get(2)) {
                 None => b"CLIENT_ERROR invalid numeric delta argument\r\n".to_vec(),
-                Some(delta) => match arithmetic(shared, words[1], delta, *command == b"incr", now) {
-                    Ok(Some(value)) => format!("{value}\r\n").into_bytes(),
-                    Ok(None) => b"NOT_FOUND\r\n".to_vec(),
-                    Err(error) => server_error(error),
-                },
+                Some(delta) => {
+                    match arithmetic(shared, words[1], delta, *command == b"incr", now) {
+                        Ok(Some(value)) => format!("{value}\r\n").into_bytes(),
+                        Ok(None) => b"NOT_FOUND\r\n".to_vec(),
+                        Err(error) => server_error(error),
+                    }
+                }
             },
             b"touch" if words.len() >= 3 => match number::<i64>(words.get(2)) {
                 None => b"CLIENT_ERROR invalid exptime argument\r\n".to_vec(),
@@ -216,7 +246,9 @@ pub fn serve_stream(shared: &Shared<'_>, reader: impl Read, writer: &mut impl Wr
                                 meta.push_str(&format!(" c{}", item.cas));
                             }
                             if wants(b't') {
-                                let ttl = item.expires_at_ms.map_or(-1, |at| (at.saturating_sub(now) / 1000) as i64);
+                                let ttl = item
+                                    .expires_at_ms
+                                    .map_or(-1, |at| (at.saturating_sub(now) / 1000) as i64);
                                 meta.push_str(&format!(" t{ttl}"));
                             }
                             if wants(b's') {
@@ -245,7 +277,9 @@ pub fn serve_stream(shared: &Shared<'_>, reader: impl Read, writer: &mut impl Wr
                 }
             }
             b"ms" if words.len() >= 3 => {
-                let Some(length) = number::<usize>(words.get(2)).filter(|length| *length <= MAX_ITEM_BYTES) else {
+                let Some(length) =
+                    number::<usize>(words.get(2)).filter(|length| *length <= MAX_ITEM_BYTES)
+                else {
                     writer.write_all(b"CLIENT_ERROR bad data chunk\r\n")?;
                     return Ok(());
                 };
@@ -304,7 +338,9 @@ pub fn serve(
                     continue;
                 }
             };
-            if stream.set_nonblocking(false).is_err() || stream.set_read_timeout(Some(READ_POLL)).is_err() {
+            if stream.set_nonblocking(false).is_err()
+                || stream.set_read_timeout(Some(READ_POLL)).is_err()
+            {
                 continue;
             }
             if active.fetch_add(1, Ordering::AcqRel) >= config.max_connections {

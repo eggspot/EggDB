@@ -209,7 +209,10 @@ fn rewritten_element(
         return Element::Kept;
     };
     let object = format!("{table}.{column}");
-    if tokens.get(1).is_some_and(|spanned| spanned.token.is_word("as")) {
+    if tokens
+        .get(1)
+        .is_some_and(|spanned| spanned.token.is_word("as"))
+    {
         rewrite
             .notes
             .push(DifferenceNote::new(object, "computed column not kept"));

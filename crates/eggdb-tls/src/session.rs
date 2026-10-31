@@ -49,7 +49,10 @@ pub(crate) struct Tls13Traffic {
 
 impl std::fmt::Debug for Tls13Traffic {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Tls13Traffic").field("hash", &self.hash).finish_non_exhaustive()
+        formatter
+            .debug_struct("Tls13Traffic")
+            .field("hash", &self.hash)
+            .finish_non_exhaustive()
     }
 }
 
@@ -63,7 +66,10 @@ pub(crate) struct Tls12Traffic {
 
 impl std::fmt::Debug for Tls12Traffic {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Tls12Traffic").field("hash", &self.hash).finish_non_exhaustive()
+        formatter
+            .debug_struct("Tls12Traffic")
+            .field("hash", &self.hash)
+            .finish_non_exhaustive()
     }
 }
 

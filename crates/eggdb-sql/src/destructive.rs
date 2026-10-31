@@ -165,9 +165,9 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
             })
         }
         Statement::AlterTable(alter) => altered(&alter.name, &alter.actions),
-        Statement::MaterializedView(crate::ast::MaterializedViewCommand::Drop { names, .. }) => {
-            dropped(DestructiveKind::DropView, names, false)
-        }
+        Statement::MaterializedView(crate::ast::MaterializedViewCommand::Drop {
+            names, ..
+        }) => dropped(DestructiveKind::DropView, names, false),
         Statement::MaterializedView(_) | Statement::InstallExtension { .. } => None,
         Statement::CreateTable(_)
         | Statement::Insert(_)

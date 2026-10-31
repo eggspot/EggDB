@@ -5,6 +5,8 @@ use crate::store::ScanDirection;
 use crate::types::Value;
 use crate::{KeyValueStore, Session, SqlResult};
 
+type RowVisitor<'a> = dyn FnMut(&[u8], Vec<Value>) -> SqlResult<bool> + 'a;
+
 /// The most rows a description counts one by one; a table with more says only that it has
 /// more ([`Relation::bounded_count_statement`]).
 pub const EXACT_ROW_COUNT_UP_TO: i64 = 10_000;
@@ -136,7 +138,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &mut self,
         relation: &Relation,
         after: Option<&[u8]>,
-        visit: &mut dyn FnMut(&[u8], Vec<Value>) -> SqlResult<bool>,
+        visit: &mut RowVisitor<'_>,
     ) -> SqlResult<()> {
         let RelationKind::Table(table) = &relation.kind else {
             return Err(SqlError::new(
@@ -238,7 +240,10 @@ mod tests {
             "SELECT count(*) FROM (SELECT 1 FROM app.items LIMIT 10001) AS counted"
         );
         let apes = find_relation(relations.clone(), "Apes").unwrap();
-        assert_eq!(apes.first_rows_statement(11), "SELECT * FROM \"Apes\" LIMIT 11");
+        assert_eq!(
+            apes.first_rows_statement(11),
+            "SELECT * FROM \"Apes\" LIMIT 11"
+        );
         assert!(find_relation(relations.clone(), "apes").is_none());
         assert!(find_relation(relations, "nothing").is_none());
     }
@@ -281,7 +286,10 @@ mod tests {
                 Ok(true)
             })
             .unwrap();
-        assert_eq!(rest, vec![vec![Value::Integer(5), Value::Text("e".to_owned())]]);
+        assert_eq!(
+            rest,
+            vec![vec![Value::Integer(5), Value::Text("e".to_owned())]]
+        );
         let mut beyond = 0;
         session
             .read_stored_rows(&table, Some(&[0xff; 40][..]), &mut |_, _| {

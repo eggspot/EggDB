@@ -1,4 +1,6 @@
-use super::{ParameterMode, ReturnType, RoutineKind, RoutineLanguage, RoutineReturns, parse_definition};
+use super::{
+    ParameterMode, ReturnType, RoutineKind, RoutineLanguage, RoutineReturns, parse_definition,
+};
 use crate::dialect::Dialect;
 use crate::memory_store::MemoryStore;
 use crate::sqlserver_types::{Length, SqlServerType};
@@ -97,7 +99,10 @@ fn scalar_inline_and_multi_statement_functions_parse() {
         multi.returns,
         RoutineReturns::Table(vec![
             ("n".to_owned(), SqlType::Integer),
-            ("label".to_owned(), SqlServerType::NVarChar(Length::Given(20)).engine_type()),
+            (
+                "label".to_owned(),
+                SqlServerType::NVarChar(Length::Given(20)).engine_type()
+            ),
         ])
     );
 }
@@ -106,12 +111,32 @@ fn scalar_inline_and_multi_statement_functions_parse() {
 fn routine_headers_follow_sqlserver_rules() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    fails_with(&mut session, "SELECT 1; CREATE PROCEDURE p AS SELECT 1", 111);
-    fails_with(&mut session, "CREATE FUNCTION f (@a int OUTPUT) RETURNS int AS BEGIN RETURN 1 END", 181);
-    fails_with(&mut session, "CREATE FUNCTION f () RETURNS int AS BEGIN DECLARE @x int = 1 END", 455);
-    fails_with(&mut session, "CREATE PROCEDURE p @a int, @a int AS SELECT 1", 134);
+    fails_with(
+        &mut session,
+        "SELECT 1; CREATE PROCEDURE p AS SELECT 1",
+        111,
+    );
+    fails_with(
+        &mut session,
+        "CREATE FUNCTION f (@a int OUTPUT) RETURNS int AS BEGIN RETURN 1 END",
+        181,
+    );
+    fails_with(
+        &mut session,
+        "CREATE FUNCTION f () RETURNS int AS BEGIN DECLARE @x int = 1 END",
+        455,
+    );
+    fails_with(
+        &mut session,
+        "CREATE PROCEDURE p @a int, @a int AS SELECT 1",
+        134,
+    );
     fails_with(&mut session, "SELECT 1; RETURN 5", 178);
-    fails_with(&mut session, "CREATE PROCEDURE p @a int READONLY AS SELECT 1", 346);
+    fails_with(
+        &mut session,
+        "CREATE PROCEDURE p @a int READONLY AS SELECT 1",
+        346,
+    );
 }
 
 #[test]
@@ -119,14 +144,32 @@ fn procedures_and_functions_share_one_name_space_with_tables() {
     let store = MemoryStore::default();
     let mut session = session(&store);
     succeeds(&mut session, "CREATE TABLE orders (id int)");
-    succeeds(&mut session, "CREATE PROCEDURE dbo.get_orders AS SELECT id FROM orders");
-    fails_with(&mut session, "CREATE PROCEDURE get_orders AS SELECT 1", 2714);
-    fails_with(&mut session, "CREATE FUNCTION get_orders () RETURNS int AS BEGIN RETURN 1 END", 2714);
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE dbo.get_orders AS SELECT id FROM orders",
+    );
+    fails_with(
+        &mut session,
+        "CREATE PROCEDURE get_orders AS SELECT 1",
+        2714,
+    );
+    fails_with(
+        &mut session,
+        "CREATE FUNCTION get_orders () RETURNS int AS BEGIN RETURN 1 END",
+        2714,
+    );
     fails_with(&mut session, "CREATE PROCEDURE orders AS SELECT 1", 2714);
-    fails_with(&mut session, "CREATE OR ALTER PROCEDURE orders AS SELECT 1", 2010);
+    fails_with(
+        &mut session,
+        "CREATE OR ALTER PROCEDURE orders AS SELECT 1",
+        2010,
+    );
     fails_with(&mut session, "ALTER PROCEDURE missing AS SELECT 1", 208);
     succeeds(&mut session, "ALTER PROCEDURE get_orders AS SELECT 2");
-    succeeds(&mut session, "CREATE OR ALTER PROCEDURE get_orders AS SELECT 3");
+    succeeds(
+        &mut session,
+        "CREATE OR ALTER PROCEDURE get_orders AS SELECT 3",
+    );
     fails_with(
         &mut session,
         "CREATE OR ALTER FUNCTION get_orders () RETURNS int AS BEGIN RETURN 1 END",
@@ -135,7 +178,10 @@ fn procedures_and_functions_share_one_name_space_with_tables() {
     fails_with(&mut session, "DROP FUNCTION get_orders", 3705);
     succeeds(&mut session, "DROP PROCEDURE get_orders");
     fails_with(&mut session, "DROP PROC get_orders", 3701);
-    succeeds(&mut session, "DROP PROCEDURE IF EXISTS get_orders, also_missing");
+    succeeds(
+        &mut session,
+        "DROP PROCEDURE IF EXISTS get_orders, also_missing",
+    );
 }
 
 #[test]
@@ -149,7 +195,10 @@ fn altered_procedures_keep_a_create_statement_as_their_text() {
         .read(|reader, _| super::every_routine(reader))
         .unwrap();
     assert_eq!(routines.len(), 1);
-    assert_eq!(routines[0].routines[0].text, "CREATE PROCEDURE p AS SELECT 2");
+    assert_eq!(
+        routines[0].routines[0].text,
+        "CREATE PROCEDURE p AS SELECT 2"
+    );
 }
 
 #[test]

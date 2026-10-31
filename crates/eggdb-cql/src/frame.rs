@@ -33,7 +33,9 @@ pub(crate) fn take_request(buffer: &mut Vec<u8>) -> Result<Option<Request>, Stri
     };
     let length = u32::from_be_bytes([header[5], header[6], header[7], header[8]]) as usize;
     if length > MAX_BODY {
-        return Err(format!("a frame body of {length} bytes is larger than 16 MiB"));
+        return Err(format!(
+            "a frame body of {length} bytes is larger than 16 MiB"
+        ));
     }
     if header[0] & 0x80 != 0 {
         return Err("a client sent a response frame".to_owned());
@@ -81,7 +83,11 @@ impl<'b> Body<'b> {
     }
 
     fn take(&mut self, count: usize) -> Result<&'b [u8], String> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or_else(|| CUT_SHORT.to_owned())?;
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or_else(|| CUT_SHORT.to_owned())?;
         let taken = &self.bytes[self.at..end];
         self.at = end;
         Ok(taken)
@@ -103,17 +109,22 @@ impl<'b> Body<'b> {
 
     pub(crate) fn long(&mut self) -> Result<i64, String> {
         let raw = self.take(8)?;
-        Ok(i64::from_be_bytes(raw.try_into().map_err(|_| CUT_SHORT.to_owned())?))
+        Ok(i64::from_be_bytes(
+            raw.try_into().map_err(|_| CUT_SHORT.to_owned())?,
+        ))
     }
 
     pub(crate) fn string(&mut self) -> Result<String, String> {
         let length = usize::from(self.short()?);
-        String::from_utf8(self.take(length)?.to_vec()).map_err(|_| "a string is not UTF-8".to_owned())
+        String::from_utf8(self.take(length)?.to_vec())
+            .map_err(|_| "a string is not UTF-8".to_owned())
     }
 
     pub(crate) fn long_string(&mut self) -> Result<String, String> {
-        let length = usize::try_from(self.int()?).map_err(|_| "a long string has a negative length".to_owned())?;
-        String::from_utf8(self.take(length)?.to_vec()).map_err(|_| "a long string is not UTF-8".to_owned())
+        let length = usize::try_from(self.int()?)
+            .map_err(|_| "a long string has a negative length".to_owned())?;
+        String::from_utf8(self.take(length)?.to_vec())
+            .map_err(|_| "a long string is not UTF-8".to_owned())
     }
 
     pub(crate) fn bytes(&mut self) -> Result<Option<Vec<u8>>, String> {
@@ -121,7 +132,10 @@ impl<'b> Body<'b> {
         if length < 0 {
             return Ok(None);
         }
-        Ok(Some(self.take(usize::try_from(length).unwrap_or(usize::MAX))?.to_vec()))
+        Ok(Some(
+            self.take(usize::try_from(length).unwrap_or(usize::MAX))?
+                .to_vec(),
+        ))
     }
 
     pub(crate) fn short_bytes(&mut self) -> Result<Vec<u8>, String> {
@@ -131,12 +145,9 @@ impl<'b> Body<'b> {
 
     pub(crate) fn string_map(&mut self) -> Result<Vec<(String, String)>, String> {
         let count = self.short()?;
-        (0..count).map(|_| Ok((self.string()?, self.string()?))).collect()
-    }
-
-    pub(crate) fn string_list(&mut self) -> Result<Vec<String>, String> {
-        let count = self.short()?;
-        (0..count).map(|_| self.string()).collect()
+        (0..count)
+            .map(|_| Ok((self.string()?, self.string()?)))
+            .collect()
     }
 }
 
@@ -159,7 +170,8 @@ impl Out {
     pub(crate) fn string(&mut self, value: &str) -> &mut Self {
         let length = u16::try_from(value.len()).unwrap_or(u16::MAX);
         self.short(length);
-        self.bytes.extend_from_slice(&value.as_bytes()[..usize::from(length)]);
+        self.bytes
+            .extend_from_slice(&value.as_bytes()[..usize::from(length)]);
         self
     }
 

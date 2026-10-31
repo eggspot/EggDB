@@ -1357,9 +1357,9 @@ impl<S: Source> Ui<S> {
             .find(|row| row.key == viewer.key)
             .and_then(|row| row.time_to_live)
             .map(|left| format!("expires in {} ", format_time_left(left)));
-        let expires_width = expires
-            .as_deref()
-            .map_or(0, |text| u16::try_from(text_width(text) + 1).unwrap_or(width));
+        let expires_width = expires.as_deref().map_or(0, |text| {
+            u16::try_from(text_width(text) + 1).unwrap_or(width)
+        });
         self.put(
             frame,
             col + 1,
@@ -1877,8 +1877,7 @@ fn help_lines<S: Source>(ui: &Ui<S>) -> Vec<String> {
     ]);
     if ui.read_only() {
         lines.push(
-            "Opened read-only: e, a, d, t, + and - are off; start without --read-only."
-                .to_owned(),
+            "Opened read-only: e, a, d, t, + and - are off; start without --read-only.".to_owned(),
         );
     }
     lines.extend([

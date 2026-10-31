@@ -66,10 +66,18 @@ impl EggAllocator {
     fn reserve(&self, bytes: usize) -> bool {
         let mut held = FROM_SYSTEM.load(Ordering::Relaxed);
         loop {
-            let Some(after) = held.checked_add(bytes).filter(|after| *after <= self.budget) else {
+            let Some(after) = held
+                .checked_add(bytes)
+                .filter(|after| *after <= self.budget)
+            else {
                 return false;
             };
-            match FROM_SYSTEM.compare_exchange_weak(held, after, Ordering::Relaxed, Ordering::Relaxed) {
+            match FROM_SYSTEM.compare_exchange_weak(
+                held,
+                after,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => return true,
                 Err(now) => held = now,
             }
@@ -232,7 +240,10 @@ fn class_of_size(size: usize) -> usize {
 
 fn small_class(layout: Layout) -> Option<usize> {
     let size = if layout.align() > SMALLEST_STEP {
-        layout.size().max(layout.align()).checked_next_power_of_two()?
+        layout
+            .size()
+            .max(layout.align())
+            .checked_next_power_of_two()?
     } else {
         layout.size()
     };
@@ -543,19 +554,31 @@ mod tests {
         // SAFETY: the layout has a non-zero size.
         let zeroed = unsafe { ALLOCATOR.alloc_zeroed(layout) };
         // SAFETY: the block holds 100 bytes.
-        assert!(unsafe { std::slice::from_raw_parts(zeroed, 100) }.iter().all(|byte| *byte == 0));
+        assert!(
+            unsafe { std::slice::from_raw_parts(zeroed, 100) }
+                .iter()
+                .all(|byte| *byte == 0)
+        );
         // SAFETY: the block holds 100 bytes.
         unsafe { ptr::write_bytes(zeroed, 7, 100) };
         // SAFETY: allocated above with `layout`; the new size is non-zero.
         let grown = unsafe { ALLOCATOR.realloc(zeroed, layout, 100_000) };
         assert!(!grown.is_null());
         // SAFETY: the first 100 bytes were copied over.
-        assert!(unsafe { std::slice::from_raw_parts(grown, 100) }.iter().all(|byte| *byte == 7));
+        assert!(
+            unsafe { std::slice::from_raw_parts(grown, 100) }
+                .iter()
+                .all(|byte| *byte == 7)
+        );
         let grown_layout = Layout::from_size_align(100_000, 8).unwrap();
         // SAFETY: allocated by the realloc above with this layout.
         let shrunk = unsafe { ALLOCATOR.realloc(grown, grown_layout, 50) };
         // SAFETY: the first 50 bytes were copied over.
-        assert!(unsafe { std::slice::from_raw_parts(shrunk, 50) }.iter().all(|byte| *byte == 7));
+        assert!(
+            unsafe { std::slice::from_raw_parts(shrunk, 50) }
+                .iter()
+                .all(|byte| *byte == 7)
+        );
         // SAFETY: allocated by the realloc above with this layout.
         unsafe { ALLOCATOR.dealloc(shrunk, Layout::from_size_align(50, 8).unwrap()) };
     }
@@ -586,7 +609,9 @@ mod tests {
                     for block in chunk {
                         // SAFETY: each block was allocated above with this layout and is
                         // freed once.
-                        unsafe { ALLOCATOR.dealloc(ptr::with_exposed_provenance_mut(*block), layout) };
+                        unsafe {
+                            ALLOCATOR.dealloc(ptr::with_exposed_provenance_mut(*block), layout)
+                        };
                     }
                 });
             }

@@ -21,7 +21,9 @@ pub struct Api<'k> {
 
 impl std::fmt::Debug for Api<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Api").field("user", &self.user).finish_non_exhaustive()
+        f.debug_struct("Api")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
     }
 }
 
@@ -40,7 +42,10 @@ impl From<String> for Failure {
 
 impl From<JsonSyntaxError> for Failure {
     fn from(error: JsonSyntaxError) -> Self {
-        Self::BadRequest(format!("failed to parse the request body: {} at byte {}", error.message, error.position))
+        Self::BadRequest(format!(
+            "failed to parse the request body: {} at byte {}",
+            error.message, error.position
+        ))
     }
 }
 
@@ -117,7 +122,9 @@ fn valid_index(name: &str) -> bool {
         && name != ".."
         && !name.starts_with(['-', '_', '+'])
         && name.chars().all(|character| {
-            !character.is_uppercase() && !"\\/*?\"<>| ,#:".contains(character) && !character.is_control()
+            !character.is_uppercase()
+                && !"\\/*?\"<>| ,#:".contains(character)
+                && !character.is_control()
         })
 }
 
@@ -128,7 +135,10 @@ fn query_flag(request: &Request, name: &str) -> Option<String> {
     })
 }
 
-fn read<T>(keyspace: &dyn Keyspace, body: impl FnOnce(&dyn KeysRead) -> Result<T, String>) -> Result<T, String> {
+fn read<T>(
+    keyspace: &dyn Keyspace,
+    body: impl FnOnce(&dyn KeysRead) -> Result<T, String>,
+) -> Result<T, String> {
     let mut body = Some(body);
     let mut out = None;
     keyspace.read(0, &mut |keys| {
@@ -140,7 +150,10 @@ fn read<T>(keyspace: &dyn Keyspace, body: impl FnOnce(&dyn KeysRead) -> Result<T
     out.ok_or_else(|| "the read did not run".to_owned())
 }
 
-fn write<T>(keyspace: &dyn Keyspace, body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, String>) -> Result<T, String> {
+fn write<T>(
+    keyspace: &dyn Keyspace,
+    body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, String>,
+) -> Result<T, String> {
     let mut body = Some(body);
     let mut out = None;
     keyspace.write(0, &mut |keys| {
@@ -159,7 +172,11 @@ fn documents_of(keys: &dyn KeysRead, index: &str) -> Result<Vec<(String, u64, St
         .into_iter()
         .filter_map(|(key, value)| {
             let (version, source) = unstored(&value)?;
-            Some((String::from_utf8_lossy(&key[prefix.len()..]).into_owned(), version, source))
+            Some((
+                String::from_utf8_lossy(&key[prefix.len()..]).into_owned(),
+                version,
+                source,
+            ))
         })
         .collect())
 }
@@ -195,7 +212,10 @@ impl<'k> Api<'k> {
     }
 
     fn authorized(&self, request: &Request) -> bool {
-        let Some(encoded) = request.header("authorization").and_then(|value| value.strip_prefix("Basic ")) else {
+        let Some(encoded) = request
+            .header("authorization")
+            .and_then(|value| value.strip_prefix("Basic "))
+        else {
             return false;
         };
         let Ok(decoded) = eggdb_crypto::base64_decode(encoded.trim().as_bytes()) else {
@@ -207,11 +227,17 @@ impl<'k> Api<'k> {
         let Some((user, password)) = text.split_once(':') else {
             return false;
         };
-        user == self.user && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(password.as_bytes()), &self.password_sha256)
+        user == self.user
+            && eggdb_crypto::constant_time_eq(
+                &eggdb_crypto::sha256(password.as_bytes()),
+                &self.password_sha256,
+            )
     }
 
     fn new_id(&self) -> String {
-        let mut value = self.next_id.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+        let mut value = self
+            .next_id
+            .fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         let mut id = String::with_capacity(20);
         for _ in 0..20 {
@@ -226,10 +252,18 @@ impl<'k> Api<'k> {
     /// Answers one request.
     pub fn answer(&self, request: &Request) -> Response {
         if !self.authorized(request) {
-            return error(401, "security_exception", "missing authentication credentials for REST request")
-                .with_header("WWW-Authenticate", "Basic realm=\"eggdb\"");
+            return error(
+                401,
+                "security_exception",
+                "missing authentication credentials for REST request",
+            )
+            .with_header("WWW-Authenticate", "Basic realm=\"eggdb\"");
         }
-        let parts: Vec<&str> = request.path.split('/').filter(|part| !part.is_empty()).collect();
+        let parts: Vec<&str> = request
+            .path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect();
         let method = request.method.as_str();
         let outcome = match (method, parts.as_slice()) {
             ("GET" | "HEAD", []) => Ok(self.root()),
@@ -268,9 +302,12 @@ impl<'k> Api<'k> {
     }
 
     fn root(&self) -> Response {
-        json(200, format!(
-            "{{\"name\":\"eggdb\",\"cluster_name\":\"eggdb\",\"cluster_uuid\":\"eggdb\",\"version\":{{\"distribution\":\"eggdb\",\"number\":\"{VERSION}\",\"minimum_wire_compatibility_version\":\"7.10.0\",\"minimum_index_compatibility_version\":\"7.0.0\"}},\"tagline\":\"EggDB, compatible with the Elasticsearch and OpenSearch REST APIs\"}}"
-        ))
+        json(
+            200,
+            format!(
+                "{{\"name\":\"eggdb\",\"cluster_name\":\"eggdb\",\"cluster_uuid\":\"eggdb\",\"version\":{{\"distribution\":\"eggdb\",\"number\":\"{VERSION}\",\"minimum_wire_compatibility_version\":\"7.10.0\",\"minimum_index_compatibility_version\":\"7.0.0\"}},\"tagline\":\"EggDB, compatible with the Elasticsearch and OpenSearch REST APIs\"}}"
+            ),
+        )
     }
 
     fn cat_indices(&self) -> Answer {
@@ -310,7 +347,12 @@ impl<'k> Api<'k> {
                 .value
                 .clone()
                 .into_object()
-                .and_then(|members| members.into_iter().find(|(key, _)| key == "mappings").map(|(_, node)| written(&node)))
+                .and_then(|members| {
+                    members
+                        .into_iter()
+                        .find(|(key, _)| key == "mappings")
+                        .map(|(_, node)| written(&node))
+                })
                 .unwrap_or_else(|| "{}".to_owned())
         };
         let created = write(self.keyspace, |keys| {
@@ -321,12 +363,19 @@ impl<'k> Api<'k> {
             Ok(true)
         })?;
         if !created {
-            return Ok(error(400, "resource_already_exists_exception", &format!("index [{index}] already exists")));
+            return Ok(error(
+                400,
+                "resource_already_exists_exception",
+                &format!("index [{index}] already exists"),
+            ));
         }
-        Ok(json(200, format!(
-            "{{\"acknowledged\":true,\"shards_acknowledged\":true,\"index\":{}}}",
-            escaped(index)
-        )))
+        Ok(json(
+            200,
+            format!(
+                "{{\"acknowledged\":true,\"shards_acknowledged\":true,\"index\":{}}}",
+                escaped(index)
+            ),
+        ))
     }
 
     fn delete_index(&self, index: &str) -> Answer {
@@ -348,7 +397,9 @@ impl<'k> Api<'k> {
     }
 
     fn index_exists(&self, index: &str) -> Answer {
-        let exists = read(self.keyspace, |keys| Ok(keys.get(&index_key(index))?.is_some()))?;
+        let exists = read(self.keyspace, |keys| {
+            Ok(keys.get(&index_key(index))?.is_some())
+        })?;
         Ok(json(if exists { 200 } else { 404 }, String::new()))
     }
 
@@ -357,24 +408,43 @@ impl<'k> Api<'k> {
         let Some(mappings) = mappings else {
             return Ok(missing_index(index));
         };
-        Ok(json(200, format!(
-            "{{{}:{{\"aliases\":{{}},\"mappings\":{},\"settings\":{{\"index\":{{\"number_of_shards\":\"1\",\"number_of_replicas\":\"0\"}}}}}}}}",
-            escaped(index),
-            String::from_utf8_lossy(&mappings)
-        )))
+        Ok(json(
+            200,
+            format!(
+                "{{{}:{{\"aliases\":{{}},\"mappings\":{},\"settings\":{{\"index\":{{\"number_of_shards\":\"1\",\"number_of_replicas\":\"0\"}}}}}}}}",
+                escaped(index),
+                String::from_utf8_lossy(&mappings)
+            ),
+        ))
     }
 
-    fn index_document(&self, index: &str, id: &str, request: &Request, create_only: bool) -> Answer {
+    fn index_document(
+        &self,
+        index: &str,
+        id: &str,
+        request: &Request,
+        create_only: bool,
+    ) -> Answer {
         let body = String::from_utf8_lossy(&request.body).into_owned();
         let parsed = match parse_document(&body) {
             Ok(parsed) if matches!(parsed.value, Json::Object(_)) => parsed,
-            _ => return Ok(error(400, "mapper_parsing_exception", "failed to parse: the document is not a JSON object")),
+            _ => {
+                return Ok(error(
+                    400,
+                    "mapper_parsing_exception",
+                    "failed to parse: the document is not a JSON object",
+                ));
+            }
         };
         let source = written(&parsed);
         let outcome = write(self.keyspace, |keys| {
             ensure_index(keys, index)?;
             let key = document_key(index, id);
-            let previous = keys.get(&key)?.as_deref().and_then(unstored).map(|(version, _)| version);
+            let previous = keys
+                .get(&key)?
+                .as_deref()
+                .and_then(unstored)
+                .map(|(version, _)| version);
             if create_only && previous.is_some() {
                 return Ok(None);
             }
@@ -383,29 +453,60 @@ impl<'k> Api<'k> {
             Ok(Some((version, previous.is_none())))
         })?;
         let Some((version, created)) = outcome else {
-            return Ok(error(409, "version_conflict_engine_exception", &format!("[{id}]: version conflict, document already exists")));
+            return Ok(error(
+                409,
+                "version_conflict_engine_exception",
+                &format!("[{id}]: version conflict, document already exists"),
+            ));
         };
-        Ok(json(if created { 201 } else { 200 }, write_result(index, id, version, if created { "created" } else { "updated" })))
+        Ok(json(
+            if created { 201 } else { 200 },
+            write_result(
+                index,
+                id,
+                version,
+                if created { "created" } else { "updated" },
+            ),
+        ))
     }
 
     fn get_document(&self, index: &str, id: &str, head: bool) -> Answer {
-        let found = read(self.keyspace, |keys| Ok(keys.get(&document_key(index, id))?.as_deref().and_then(unstored)))?;
+        let found = read(self.keyspace, |keys| {
+            Ok(keys
+                .get(&document_key(index, id))?
+                .as_deref()
+                .and_then(unstored))
+        })?;
         Ok(match found {
             Some(_) if head => json(200, String::new()),
-            Some((version, source)) => json(200, format!(
-                "{{\"_index\":{},\"_id\":{},\"_version\":{version},\"_seq_no\":{},\"_primary_term\":1,\"found\":true,\"_source\":{source}}}",
-                escaped(index),
-                escaped(id),
-                version - 1
-            )),
-            None => json(404, format!("{{\"_index\":{},\"_id\":{},\"found\":false}}", escaped(index), escaped(id))),
+            Some((version, source)) => json(
+                200,
+                format!(
+                    "{{\"_index\":{},\"_id\":{},\"_version\":{version},\"_seq_no\":{},\"_primary_term\":1,\"found\":true,\"_source\":{source}}}",
+                    escaped(index),
+                    escaped(id),
+                    version - 1
+                ),
+            ),
+            None => json(
+                404,
+                format!(
+                    "{{\"_index\":{},\"_id\":{},\"found\":false}}",
+                    escaped(index),
+                    escaped(id)
+                ),
+            ),
         })
     }
 
     fn delete_document(&self, index: &str, id: &str) -> Answer {
         let removed = write(self.keyspace, |keys| {
             let key = document_key(index, id);
-            let version = keys.get(&key)?.as_deref().and_then(unstored).map(|(version, _)| version);
+            let version = keys
+                .get(&key)?
+                .as_deref()
+                .and_then(unstored)
+                .map(|(version, _)| version);
             if version.is_some() {
                 keys.delete(&key)?;
             }
@@ -421,9 +522,16 @@ impl<'k> Api<'k> {
         let body = String::from_utf8_lossy(&request.body).into_owned();
         let parsed = parse_document(&body)?;
         let Some(Json::Object(changes)) = parsed.value.clone().into_object().and_then(|members| {
-            members.into_iter().find(|(key, _)| key == "doc").map(|(_, node)| node.value)
+            members
+                .into_iter()
+                .find(|(key, _)| key == "doc")
+                .map(|(_, node)| node.value)
         }) else {
-            return Ok(error(400, "action_request_validation_exception", "Validation Failed: 1: script or doc is missing;"));
+            return Ok(error(
+                400,
+                "action_request_validation_exception",
+                "Validation Failed: 1: script or doc is missing;",
+            ));
         };
         let outcome = write(self.keyspace, |keys| {
             let key = document_key(index, id);
@@ -440,13 +548,21 @@ impl<'k> Api<'k> {
                     None => members.push((name.clone(), value.clone())),
                 }
             }
-            let merged = written(&Node { value: Json::Object(members), start: 0, end: 0 });
+            let merged = written(&Node {
+                value: Json::Object(members),
+                start: 0,
+                end: 0,
+            });
             keys.put(&key, &stored(version + 1, &merged))?;
             Ok(Some(version + 1))
         })?;
         Ok(match outcome {
             Some(version) => json(200, write_result(index, id, version, "updated")),
-            None => error(404, "document_missing_exception", &format!("[{id}]: document missing")),
+            None => error(
+                404,
+                "document_missing_exception",
+                &format!("[{id}]: document missing"),
+            ),
         })
     }
 
@@ -458,20 +574,36 @@ impl<'k> Api<'k> {
         while let Some(action_line) = lines.next() {
             let action = parse_document(action_line)?;
             let Json::Object(members) = action.value else {
-                return Ok(error(400, "illegal_argument_exception", "Malformed action/metadata line"));
+                return Ok(error(
+                    400,
+                    "illegal_argument_exception",
+                    "Malformed action/metadata line",
+                ));
             };
             let Some((kind, meta)) = members.into_iter().next() else {
-                return Ok(error(400, "illegal_argument_exception", "Malformed action/metadata line"));
+                return Ok(error(
+                    400,
+                    "illegal_argument_exception",
+                    "Malformed action/metadata line",
+                ));
             };
-            let field = |name: &str| meta.value.clone().into_object().and_then(|members| {
-                members.into_iter().find(|(key, _)| key == name).and_then(|(_, node)| match node.value {
-                    Json::String(text) => Some(text),
-                    Json::Number(text) => Some(text),
-                    _ => None,
+            let field = |name: &str| {
+                meta.value.clone().into_object().and_then(|members| {
+                    members.into_iter().find(|(key, _)| key == name).and_then(
+                        |(_, node)| match node.value {
+                            Json::String(text) => Some(text),
+                            Json::Number(text) => Some(text),
+                            _ => None,
+                        },
+                    )
                 })
-            });
+            };
             let Some(index) = field("_index").or_else(|| default_index.map(str::to_owned)) else {
-                return Ok(error(400, "action_request_validation_exception", "Validation Failed: 1: index is missing;"));
+                return Ok(error(
+                    400,
+                    "action_request_validation_exception",
+                    "Validation Failed: 1: index is missing;",
+                ));
             };
             let id = field("_id").unwrap_or_else(|| self.new_id());
             let document = if kind == "delete" { None } else { lines.next() };
@@ -487,16 +619,31 @@ impl<'k> Api<'k> {
                 "create" => self.index_document(&index, &id, &fake, true)?,
                 "update" => self.update_document(&index, &id, &fake)?,
                 "delete" => self.delete_document(&index, &id)?,
-                other => return Ok(error(400, "illegal_argument_exception", &format!("Malformed action/metadata line [{other}]"))),
+                other => {
+                    return Ok(error(
+                        400,
+                        "illegal_argument_exception",
+                        &format!("Malformed action/metadata line [{other}]"),
+                    ));
+                }
             };
             failed |= response.status >= 300 && !(kind == "delete" && response.status == 404);
             items.push(format!(
                 "{{{}:{}}}",
                 escaped(&kind),
-                String::from_utf8_lossy(&response.body).trim_end_matches('}').to_owned() + &format!(",\"status\":{}}}", response.status)
+                String::from_utf8_lossy(&response.body)
+                    .trim_end_matches('}')
+                    .to_owned()
+                    + &format!(",\"status\":{}}}", response.status)
             ));
         }
-        Ok(json(200, format!("{{\"took\":0,\"errors\":{failed},\"items\":[{}]}}", items.join(","))))
+        Ok(json(
+            200,
+            format!(
+                "{{\"took\":0,\"errors\":{failed},\"items\":[{}]}}",
+                items.join(",")
+            ),
+        ))
     }
 
     fn search(&self, index: Option<&str>, request: &Request, count_only: bool) -> Answer {
@@ -506,16 +653,27 @@ impl<'k> Api<'k> {
         } else {
             Some(parse_document(&body_text)?)
         };
-        let member = |name: &str| body.as_ref().and_then(|body| body.value.clone().into_object()).and_then(|members| {
-            members.into_iter().find(|(key, _)| key == name).map(|(_, node)| node)
-        });
+        let member = |name: &str| {
+            body.as_ref()
+                .and_then(|body| body.value.clone().into_object())
+                .and_then(|members| {
+                    members
+                        .into_iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, node)| node)
+                })
+        };
         let query = match member("query") {
             Some(node) => match parse(&node, 0) {
                 Ok(query) => query,
                 Err(reason) => return Ok(error(400, "parsing_exception", &reason)),
             },
             None => match query_flag(request, "q") {
-                Some(text) => crate::query::Query::Match { fields: vec!["*".to_owned()], terms: crate::query::analyze(&text.replace('+', " ")), all: false },
+                Some(text) => crate::query::Query::Match {
+                    fields: vec!["*".to_owned()],
+                    terms: crate::query::analyze(&text.replace('+', " ")),
+                    all: false,
+                },
                 None => crate::query::Query::MatchAll,
             },
         };
@@ -531,7 +689,11 @@ impl<'k> Api<'k> {
         let size = number("size", DEFAULT_SIZE);
         let from = number("from", 0);
         if from.saturating_add(size) > MAX_RESULT_WINDOW {
-            return Ok(error(400, "illegal_argument_exception", "Result window is too large, from + size must be less than or equal to: [10000]"));
+            return Ok(error(
+                400,
+                "illegal_argument_exception",
+                "Result window is too large, from + size must be less than or equal to: [10000]",
+            ));
         }
         let gathered = read(self.keyspace, |keys| {
             let indices = match index {
@@ -556,29 +718,54 @@ impl<'k> Api<'k> {
         };
         let documents: Vec<(String, Node)> = gathered
             .iter()
-            .filter_map(|(_, id, source)| parse_document(source).ok().map(|node| (id.clone(), node)))
+            .filter_map(|(_, id, source)| {
+                parse_document(source).ok().map(|node| (id.clone(), node))
+            })
             .collect();
         let query = expand_wildcard_fields(query, &documents);
         let stats = Stats::of(&query, &documents);
         let mut hits: Vec<(f64, usize)> = documents
             .iter()
             .enumerate()
-            .filter_map(|(at, (id, source))| score(&query, id, source, &stats).map(|value| (value, at)))
+            .filter_map(|(at, (id, source))| {
+                score(&query, id, source, &stats).map(|value| (value, at))
+            })
             .collect();
         if count_only {
-            return Ok(json(200, format!("{{\"count\":{},\"_shards\":{{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0}}}}", hits.len())));
+            return Ok(json(
+                200,
+                format!(
+                    "{{\"count\":{},\"_shards\":{{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0}}}}",
+                    hits.len()
+                ),
+            ));
         }
         let sort_field = member("sort").and_then(|node| sort_of(&node));
         match &sort_field {
             Some((field, descending)) => hits.sort_by(|left, right| {
-                let value = |at: usize| crate::query::values_at(&documents[at].1, field).first().map(|node| node.value.clone());
+                let value = |at: usize| {
+                    crate::query::values_at(&documents[at].1, field)
+                        .first()
+                        .map(|node| node.value.clone())
+                };
                 let ordering = compare_values(value(left.1).as_ref(), value(right.1).as_ref());
-                if *descending { ordering.reverse() } else { ordering }
+                if *descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
             }),
-            None => hits.sort_by(|left, right| right.0.total_cmp(&left.0).then(left.1.cmp(&right.1))),
+            None => {
+                hits.sort_by(|left, right| right.0.total_cmp(&left.0).then(left.1.cmp(&right.1)))
+            }
         }
         let total = hits.len();
-        let max_score = hits.iter().map(|(value, _)| *value).fold(None, |best: Option<f64>, value| Some(best.map_or(value, |held| held.max(value))));
+        let max_score = hits
+            .iter()
+            .map(|(value, _)| *value)
+            .fold(None, |best: Option<f64>, value| {
+                Some(best.map_or(value, |held| held.max(value)))
+            });
         let mut out = Out::default();
         out.begin_object()
             .key("took")
@@ -628,7 +815,10 @@ impl<'k> Api<'k> {
     }
 }
 
-fn expand_wildcard_fields(query: crate::query::Query, documents: &[(String, Node)]) -> crate::query::Query {
+fn expand_wildcard_fields(
+    query: crate::query::Query,
+    documents: &[(String, Node)],
+) -> crate::query::Query {
     use crate::query::Query;
     match query {
         Query::Match { fields, terms, all } if fields.iter().any(|field| field == "*") => {
@@ -639,7 +829,11 @@ fn expand_wildcard_fields(query: crate::query::Query, documents: &[(String, Node
                 .collect();
             names.sort();
             names.dedup();
-            Query::Match { fields: names, terms, all }
+            Query::Match {
+                fields: names,
+                terms,
+                all,
+            }
         }
         other => other,
     }
@@ -647,9 +841,10 @@ fn expand_wildcard_fields(query: crate::query::Query, documents: &[(String, Node
 
 fn compare_values(left: Option<&Json>, right: Option<&Json>) -> std::cmp::Ordering {
     match (left, right) {
-        (Some(Json::Number(a)), Some(Json::Number(b))) => {
-            a.parse::<f64>().unwrap_or(0.0).total_cmp(&b.parse::<f64>().unwrap_or(0.0))
-        }
+        (Some(Json::Number(a)), Some(Json::Number(b))) => a
+            .parse::<f64>()
+            .unwrap_or(0.0)
+            .total_cmp(&b.parse::<f64>().unwrap_or(0.0)),
         (Some(Json::String(a)), Some(Json::String(b))) => a.cmp(b),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -668,7 +863,9 @@ fn sort_of(node: &Node) -> Option<(String, bool)> {
             let (field, spec) = members.into_iter().next()?;
             let descending = match spec.value {
                 Json::String(order) => order == "desc",
-                Json::Object(inner) => inner.iter().any(|(key, value)| key == "order" && value.value == Json::String("desc".to_owned())),
+                Json::Object(inner) => inner.iter().any(|(key, value)| {
+                    key == "order" && value.value == Json::String("desc".to_owned())
+                }),
                 _ => false,
             };
             Some((field, descending))
@@ -686,22 +883,34 @@ fn aggregate(out: &mut Out, aggregations: &Node, matched: &[&Node]) {
                 && let Some((kind, settings)) = kinds.first()
             {
                 let field = settings.value.clone().into_object().and_then(|members| {
-                    members.into_iter().find(|(key, _)| key == "field").and_then(|(_, node)| match node.value {
-                        Json::String(text) => Some(text),
-                        _ => None,
-                    })
+                    members
+                        .into_iter()
+                        .find(|(key, _)| key == "field")
+                        .and_then(|(_, node)| match node.value {
+                            Json::String(text) => Some(text),
+                            _ => None,
+                        })
                 });
                 let field = field.unwrap_or_default();
                 match kind.as_str() {
                     "terms" => {
                         let size = settings.value.clone().into_object().and_then(|members| {
-                            members.into_iter().find(|(key, _)| key == "size").and_then(|(_, node)| match node.value {
-                                Json::Number(text) => text.parse().ok(),
-                                _ => None,
-                            })
+                            members.into_iter().find(|(key, _)| key == "size").and_then(
+                                |(_, node)| match node.value {
+                                    Json::Number(text) => text.parse().ok(),
+                                    _ => None,
+                                },
+                            )
                         });
-                        out.key("doc_count_error_upper_bound").integer(0).key("sum_other_doc_count").integer(0).key("buckets").begin_array();
-                        for (key, numeric, count) in term_buckets(matched, &field, size.unwrap_or(10)) {
+                        out.key("doc_count_error_upper_bound")
+                            .integer(0)
+                            .key("sum_other_doc_count")
+                            .integer(0)
+                            .key("buckets")
+                            .begin_array();
+                        for (key, numeric, count) in
+                            term_buckets(matched, &field, size.unwrap_or(10))
+                        {
                             out.begin_object().key("key");
                             if numeric {
                                 out.raw(&key);
@@ -716,7 +925,8 @@ fn aggregate(out: &mut Out, aggregations: &Node, matched: &[&Node]) {
                         let values = numbers(matched, &field);
                         let value = match kind.as_str() {
                             "sum" => Some(values.iter().sum()),
-                            "avg" => (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64),
+                            "avg" => (!values.is_empty())
+                                .then(|| values.iter().sum::<f64>() / values.len() as f64),
                             "min" => values.iter().copied().reduce(f64::min),
                             "max" => values.iter().copied().reduce(f64::max),
                             _ => Some(values.len() as f64),
@@ -737,11 +947,18 @@ fn aggregate(out: &mut Out, aggregations: &Node, matched: &[&Node]) {
 }
 
 fn refreshed() -> Response {
-    json(200, "{\"_shards\":{\"total\":1,\"successful\":1,\"failed\":0}}".to_owned())
+    json(
+        200,
+        "{\"_shards\":{\"total\":1,\"successful\":1,\"failed\":0}}".to_owned(),
+    )
 }
 
 fn missing_index(index: &str) -> Response {
-    error(404, "index_not_found_exception", &format!("no such index [{index}]"))
+    error(
+        404,
+        "index_not_found_exception",
+        &format!("no such index [{index}]"),
+    )
 }
 
 fn write_result(index: &str, id: &str, version: u64, result: &str) -> String {

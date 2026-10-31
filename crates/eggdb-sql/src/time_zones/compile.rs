@@ -231,10 +231,16 @@ impl DaySpec {
             return Some(Self::Last(abbreviated(weekday, &WEEKDAYS)?));
         }
         if let Some((weekday, day)) = text.split_once(">=") {
-            return Some(Self::OnOrAfter(abbreviated(weekday, &WEEKDAYS)?, day_number(day)?));
+            return Some(Self::OnOrAfter(
+                abbreviated(weekday, &WEEKDAYS)?,
+                day_number(day)?,
+            ));
         }
         if let Some((weekday, day)) = text.split_once("<=") {
-            return Some(Self::OnOrBefore(abbreviated(weekday, &WEEKDAYS)?, day_number(day)?));
+            return Some(Self::OnOrBefore(
+                abbreviated(weekday, &WEEKDAYS)?,
+                day_number(day)?,
+            ));
         }
         Some(Self::Fixed(day_number(text)?))
     }
@@ -243,7 +249,8 @@ impl DaySpec {
         match self {
             Self::Fixed(day) => datetime::days_from_civil(year, month, day),
             Self::Last(weekday) => {
-                let last = datetime::days_from_civil(year, month, datetime::days_in_month(year, month));
+                let last =
+                    datetime::days_from_civil(year, month, datetime::days_in_month(year, month));
                 last - (weekday_of(last) - weekday).rem_euclid(7)
             }
             Self::OnOrAfter(weekday, day) => {
@@ -385,7 +392,7 @@ impl ZoneLine {
         };
         let rules = match duration(rules) {
             Some(save) => ZoneRules::Fixed(save),
-            None => ZoneRules::Named(*rules),
+            None => ZoneRules::Named(rules),
         };
         Some(Self {
             offset: duration(offset)?,
@@ -479,7 +486,10 @@ pub(super) fn shifts_between(
     let mut shifts = Vec::new();
     for year in first_year..=last_year {
         for change in changes_in_year(rules, year) {
-            let at = change.rule.at.universal(change.local, standard_offset, save);
+            let at = change
+                .rule
+                .at
+                .universal(change.local, standard_offset, save);
             save = change.rule.save;
             shifts.push(Shift {
                 at,
@@ -517,7 +527,9 @@ fn state_at(start: Option<i64>, standard_offset: i64, rules: &[Rule]) -> (i64, &
         .into_iter()
         .take_while(|shift| shift.at <= start)
         .last()
-        .map_or((0, standard_letters(rules)), |shift| (shift.save, shift.letters))
+        .map_or((0, standard_letters(rules)), |shift| {
+            (shift.save, shift.letters)
+        })
 }
 
 #[derive(Debug)]
@@ -625,7 +637,8 @@ pub(super) fn compile(source: &Source, first: usize) -> Option<Compiled> {
                 let rules = source.rules_named(name)?;
                 let (mut save, mut letters) = state_at(start, line.offset, &rules);
                 compiled.enter(start, local_time(line.offset, save, letters, line.format)?);
-                let first_year = start.map_or_else(|| earliest_year(&rules), |start| year_of(start) - 1);
+                let first_year =
+                    start.map_or_else(|| earliest_year(&rules), |start| year_of(start) - 1);
                 let last_year = line.until.map_or(LAST_LISTED_YEAR, Until::year);
                 'years: for year in first_year..=last_year {
                     for change in changes_in_year(&rules, year) {

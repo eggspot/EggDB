@@ -26,8 +26,7 @@ mod transaction;
 pub use database::{
     EGGDB_DURABILITY_FULL, EGGDB_DURABILITY_NORMAL, EGGDB_DURABILITY_OFF, EGGDB_OPEN_NO_CREATE,
     EGGDB_OPEN_READ_ONLY, EggdbBackupReport, EggdbCompactReport, EggdbDb, EggdbOptions,
-    eggdb_backup, eggdb_close, eggdb_compact, eggdb_compact_file, eggdb_open,
-    eggdb_remove_expired,
+    eggdb_backup, eggdb_close, eggdb_compact, eggdb_compact_file, eggdb_open, eggdb_remove_expired,
 };
 pub use scan::{
     EGGDB_SCAN_END_INCLUSIVE, EGGDB_SCAN_PREFIX, EGGDB_SCAN_REVERSE, EggdbEntry, EggdbScan,
@@ -35,8 +34,8 @@ pub use scan::{
 };
 pub use sql::{
     EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbParameter, EggdbResult,
-    EggdbSql, EggdbValue, eggdb_sql_close, eggdb_sql_execute, eggdb_sql_execute_with_parameters,
-    eggdb_sql_connect, eggdb_sql_open,
+    EggdbSql, EggdbValue, eggdb_sql_close, eggdb_sql_connect, eggdb_sql_execute,
+    eggdb_sql_execute_with_parameters, eggdb_sql_open,
 };
 pub use status::{
     EGGDB_ERR_ALREADY_EXISTS, EGGDB_ERR_CACHE_FULL, EGGDB_ERR_COLLECTION_NOT_FOUND,
@@ -45,9 +44,9 @@ pub use status::{
     EGGDB_ERR_INVALID_OPTION, EGGDB_ERR_IO, EGGDB_ERR_LOCKED, EGGDB_ERR_NEEDS_REOPEN,
     EGGDB_ERR_NOT_A_DATABASE, EGGDB_ERR_NOT_AN_INTEGER, EGGDB_ERR_NOT_FOUND, EGGDB_ERR_OTHER,
     EGGDB_ERR_OUT_OF_MEMORY, EGGDB_ERR_PERMISSION_DENIED, EGGDB_ERR_READ_ONLY,
-    EGGDB_ERR_READ_TRANSACTION, EGGDB_ERR_RESERVED_KEY, EGGDB_ERR_SNAPSHOT_TOO_OLD,
-    EGGDB_ERR_SQL, EGGDB_ERR_TOO_LARGE, EGGDB_ERR_TRANSACTION_FAILED, EGGDB_ERR_WRITER_ACTIVE,
-    EGGDB_OK, eggdb_last_error, eggdb_last_sqlstate, eggdb_status_name,
+    EGGDB_ERR_READ_TRANSACTION, EGGDB_ERR_RESERVED_KEY, EGGDB_ERR_SNAPSHOT_TOO_OLD, EGGDB_ERR_SQL,
+    EGGDB_ERR_TOO_LARGE, EGGDB_ERR_TRANSACTION_FAILED, EGGDB_ERR_WRITER_ACTIVE, EGGDB_OK,
+    eggdb_last_error, eggdb_last_sqlstate, eggdb_status_name,
 };
 pub use transaction::{
     EggdbTxn, eggdb_begin_read, eggdb_begin_write, eggdb_clear_expiry, eggdb_collection_names,
@@ -58,12 +57,11 @@ pub use transaction::{
 
 use std::ffi::{CStr, c_char};
 
-const VERSION: &CStr = match CStr::from_bytes_with_nul(
-    concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes(),
-) {
-    Ok(version) => version,
-    Err(_) => c"unknown",
-};
+const VERSION: &CStr =
+    match CStr::from_bytes_with_nul(concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()) {
+        Ok(version) => version,
+        Err(_) => c"unknown",
+    };
 
 /// The version of this EggDB library, such as `"0.1.0"`. The text is static.
 #[unsafe(no_mangle)]

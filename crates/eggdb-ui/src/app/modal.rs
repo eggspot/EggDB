@@ -288,7 +288,8 @@ impl<S: Source> Ui<S> {
     pub(super) fn confirm_expiry(&mut self, pending: Pending, left: Option<Duration>) {
         let key = pending.change.key().to_vec();
         let arrow = self.theme.symbol(Symbol::RightArrow);
-        let shown = |time: Option<Duration>| time.map_or_else(|| "never".to_owned(), format_time_left);
+        let shown =
+            |time: Option<Duration>| time.map_or_else(|| "never".to_owned(), format_time_left);
         let (title, after) = match &pending.change {
             Change::Expire { time_to_live, .. } => ("Set time to live", Some(*time_to_live)),
             _ => ("Clear time to live", None),

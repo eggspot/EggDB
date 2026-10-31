@@ -15,7 +15,10 @@ mod procedures;
 mod store;
 mod value;
 
-pub use algorithms::{connected_components, label_propagation, node_similarity, pagerank, shortest_path, triangle_count};
+pub use algorithms::{
+    connected_components, label_propagation, node_similarity, pagerank, shortest_path,
+    triangle_count,
+};
 pub use execute::display;
 pub use value::{Node, Relationship, Value, equals, order};
 
@@ -33,11 +36,17 @@ pub struct GraphError {
 
 impl GraphError {
     pub(crate) fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.to_owned(), message: message.into() }
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+        }
     }
 
     pub(crate) fn not_supported(what: &str) -> Self {
-        Self::new("Neo.ClientError.Statement.FeatureNotSupported", format!("{what} is not supported yet"))
+        Self::new(
+            "Neo.ClientError.Statement.FeatureNotSupported",
+            format!("{what} is not supported yet"),
+        )
     }
 }
 
@@ -66,33 +75,57 @@ const ROLLED_BACK: &str = "the graph query was rolled back";
 /// Runs a Cypher query with its `$parameters`, in a read transaction when it only reads and in
 /// a write transaction otherwise; a failing query changes nothing. With `read_only`, a query
 /// that writes fails before it runs.
-pub fn run(keyspace: &dyn Keyspace, query: &str, parameters: &[(String, Value)], read_only: bool) -> GraphResult<QueryResult> {
+pub fn run(
+    keyspace: &dyn Keyspace,
+    query: &str,
+    parameters: &[(String, Value)],
+    read_only: bool,
+) -> GraphResult<QueryResult> {
     let clauses = cypher::parse(query)?;
     let writes = clauses.iter().any(cypher::Clause::writes);
     let mut outcome: Option<GraphResult<QueryResult>> = None;
     let storage = if writes {
         if read_only {
-            return Err(GraphError::new("Neo.ClientError.Statement.AccessMode", "Writing in read access mode not allowed"));
+            return Err(GraphError::new(
+                "Neo.ClientError.Statement.AccessMode",
+                "Writing in read access mode not allowed",
+            ));
         }
         keyspace.write(0, &mut |keys| {
-            let mut executor = execute::Executor { access: execute::Access::Write(store::GraphWrite { keys }), parameters };
+            let mut executor = execute::Executor {
+                access: execute::Access::Write(store::GraphWrite { keys }),
+                parameters,
+            };
             let result = executor.run(&clauses);
             let failed = result.is_err();
             outcome = Some(result);
-            if failed { Err(ROLLED_BACK.to_owned()) } else { Ok(()) }
+            if failed {
+                Err(ROLLED_BACK.to_owned())
+            } else {
+                Ok(())
+            }
         })
     } else {
         keyspace.read(0, &mut |keys| {
-            let mut executor = execute::Executor { access: execute::Access::Read(store::GraphRead { keys }), parameters };
+            let mut executor = execute::Executor {
+                access: execute::Access::Read(store::GraphRead { keys }),
+                parameters,
+            };
             outcome = Some(executor.run(&clauses));
             Ok(())
         })
     };
     match (storage, outcome) {
         (_, Some(Err(error))) => Err(error),
-        (Err(message), _) => Err(GraphError::new("Neo.DatabaseError.General.UnknownError", message)),
+        (Err(message), _) => Err(GraphError::new(
+            "Neo.DatabaseError.General.UnknownError",
+            message,
+        )),
         (Ok(()), Some(result)) => result,
-        (Ok(()), None) => Err(GraphError::new("Neo.DatabaseError.General.UnknownError", "the query did not run")),
+        (Ok(()), None) => Err(GraphError::new(
+            "Neo.DatabaseError.General.UnknownError",
+            "the query did not run",
+        )),
     }
 }
 

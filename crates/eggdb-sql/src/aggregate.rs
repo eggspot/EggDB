@@ -78,9 +78,7 @@ fn unfiltered(argument: &Expr) -> Option<&Expr> {
 
 pub(crate) fn ordered_arguments(argument: Expr, order: Vec<OrderItem>) -> Expr {
     let position = argument.position;
-    let directions = encode_directions(
-        &order.iter().map(SortDirection::of).collect::<Vec<_>>(),
-    );
+    let directions = encode_directions(&order.iter().map(SortDirection::of).collect::<Vec<_>>());
     let mut arguments = Vec::with_capacity(order.len() + 2);
     arguments.push(argument);
     arguments.push(Expr {
@@ -109,7 +107,7 @@ fn ordered_parts(argument: &Expr) -> (&Expr, Option<(&str, &[Expr])>) {
 }
 
 #[derive(Clone)]
-struct OrderedInput {
+pub(crate) struct OrderedInput {
     keys: Vec<Value>,
     value: Value,
     extra: Option<Value>,
@@ -607,10 +605,8 @@ impl Analyzer<'_> {
         if let SubqueryState::Correlated { reads, grouped, .. } = &mut subquery.state {
             let mut map = Vec::with_capacity(reads.len());
             for &offset in reads.iter() {
-                let slot = if let Some(index) = self
-                    .key_offsets
-                    .iter()
-                    .position(|key| *key == Some(offset))
+                let slot = if let Some(index) =
+                    self.key_offsets.iter().position(|key| *key == Some(offset))
                 {
                     index
                 } else if self.dependent.iter().any(|range| range.contains(&offset)) {
@@ -1093,9 +1089,9 @@ impl Call {
         }
         let fraction = match inputs.first().and_then(|input| input.extra.as_ref()) {
             None | Some(Value::Null) => return Ok(Value::Null),
-            Some(value) => value.as_float().ok_or_else(|| {
-                undefined_aggregate(self.function, &value.type_name())
-            })?,
+            Some(value) => value
+                .as_float()
+                .ok_or_else(|| undefined_aggregate(self.function, &value.type_name()))?,
         };
         if !(0.0..=1.0).contains(&fraction) {
             return Err(SqlError::new(
@@ -1548,146 +1544,150 @@ impl Grouping {
             group.accumulators = crate::vector::run_batched(&batched, feed)?;
             groups.push(group);
         } else {
-        feed(&mut |row| {
-            let evaluator = Evaluator {
-                scope,
-                row,
-                correlation,
-            };
-            key.clear();
-            key_values.clear();
-            let mut integer_key = None;
-            let mut key_bytes = crate::memory::RowBytes::default();
-            if let [expr] = self.keys.as_slice() {
-                let value = evaluator.eval(expr, None)?;
-                key_bytes.add(&value)?;
-                integer_key = integer_group_key(&value);
-                if integer_key.is_none() {
-                    equality_key(&mut key, &value);
-                    key_bytes.add_bytes(key.len())?;
-                }
-                key_values.push(value);
-            } else {
-                for expr in &self.keys {
+            feed(&mut |row| {
+                let evaluator = Evaluator {
+                    scope,
+                    row,
+                    correlation,
+                };
+                key.clear();
+                key_values.clear();
+                let mut integer_key = None;
+                let mut key_bytes = crate::memory::RowBytes::default();
+                if let [expr] = self.keys.as_slice() {
                     let value = evaluator.eval(expr, None)?;
                     key_bytes.add(&value)?;
-                    let before = key.len();
-                    equality_key(&mut key, &value);
-                    key_bytes.add_bytes(key.len() - before)?;
+                    integer_key = integer_group_key(&value);
+                    if integer_key.is_none() {
+                        equality_key(&mut key, &value);
+                        key_bytes.add_bytes(key.len())?;
+                    }
                     key_values.push(value);
-                }
-            }
-            let found = if self.keys.is_empty() && !groups.is_empty() {
-                Some(&0)
-            } else if let Some(integer_key) = integer_key {
-                integer_index.get(&integer_key)
-            } else {
-                index.get(key.as_slice())
-            };
-            let at = match found {
-                Some(&at) => at,
-                None => {
-                    memory.charge_row(&key_values)?;
-                    memory.charge(key.len() + self.calls.len() * 64)?;
-                    let mut group = new_group(std::mem::take(&mut key_values), row);
-                    for value in &group.carried {
-                        key_bytes.add(value)?;
+                } else {
+                    for expr in &self.keys {
+                        let value = evaluator.eval(expr, None)?;
+                        key_bytes.add(&value)?;
+                        let before = key.len();
+                        equality_key(&mut key, &value);
+                        key_bytes.add_bytes(key.len() - before)?;
+                        key_values.push(value);
                     }
-                    memory.charge_row(&group.carried)?;
-                    group.held = key_bytes;
-                    groups.push(group);
-                    match integer_key {
-                        Some(integer_key) => integer_index.insert(integer_key, groups.len() - 1),
-                        None => index.insert(key.clone(), groups.len() - 1),
-                    };
-                    groups.len() - 1
                 }
-            };
-            let group = &mut groups[at];
-            for (number, call) in self.calls.iter().enumerate() {
-                let (condition, argument) = match &call.argument {
-                    Some(argument) => filtered_parts(argument),
-                    None => (None, None),
+                let found = if self.keys.is_empty() && !groups.is_empty() {
+                    Some(&0)
+                } else if let Some(integer_key) = integer_key {
+                    integer_index.get(&integer_key)
+                } else {
+                    index.get(key.as_slice())
                 };
-                if let Some(condition) = condition
-                    && evaluator.boolean(condition, "FILTER")? != Some(true)
-                {
-                    continue;
-                }
-                let Some(argument) = argument else {
-                    if let Accumulator::Count(count) = &mut group.accumulators[number] {
-                        *count += 1;
-                    }
-                    continue;
-                };
-                let (argument, order) = ordered_parts(argument);
-                let (value, delimiter) = match joined_parts(argument) {
-                    Some((value, fraction)) if call.function.is_ordered_set() => (
-                        evaluator.eval(value, None)?,
-                        Some(evaluator.eval(fraction, Some(SqlType::Double))?),
-                    ),
-                    Some((value, delimiter)) if call.function == AggregateFunction::StringAgg => {
-                        let value = evaluator.eval(value, Some(SqlType::Text))?;
-                        let hint = if matches!(value, Value::Bytea(_)) {
-                            SqlType::Bytea
-                        } else {
-                            SqlType::Text
+                let at = match found {
+                    Some(&at) => at,
+                    None => {
+                        memory.charge_row(&key_values)?;
+                        memory.charge(key.len() + self.calls.len() * 64)?;
+                        let mut group = new_group(std::mem::take(&mut key_values), row);
+                        for value in &group.carried {
+                            key_bytes.add(value)?;
+                        }
+                        memory.charge_row(&group.carried)?;
+                        group.held = key_bytes;
+                        groups.push(group);
+                        match integer_key {
+                            Some(integer_key) => {
+                                integer_index.insert(integer_key, groups.len() - 1)
+                            }
+                            None => index.insert(key.clone(), groups.len() - 1),
                         };
-                        (value, Some(evaluator.eval(delimiter, Some(hint))?))
+                        groups.len() - 1
                     }
-                    Some((key, member)) if call.function.builds_object() => (
-                        evaluator.eval(key, Some(SqlType::Text))?,
-                        Some(evaluator.eval(member, None)?),
-                    ),
-                    _ => (evaluator.eval(argument, None)?, None),
                 };
-                if value.is_null() && !call.function.keeps_nulls() {
-                    continue;
-                }
-                if call.distinct {
-                    distinct_key.clear();
-                    equality_key(&mut distinct_key, &value);
-                    if group.seen[number].contains(&distinct_key) {
+                let group = &mut groups[at];
+                for (number, call) in self.calls.iter().enumerate() {
+                    let (condition, argument) = match &call.argument {
+                        Some(argument) => filtered_parts(argument),
+                        None => (None, None),
+                    };
+                    if let Some(condition) = condition
+                        && evaluator.boolean(condition, "FILTER")? != Some(true)
+                    {
                         continue;
                     }
-                    memory.charge(distinct_key.len() + 32)?;
-                    group.seen[number].insert(distinct_key.clone());
-                }
-                let before = group.accumulators[number].held_bytes();
-                let accumulator = &mut group.accumulators[number];
-                match order {
-                    Some((_, keys)) => {
-                        let keys = keys
-                            .iter()
-                            .map(|key| evaluator.eval(key, None))
-                            .collect::<SqlResult<Vec<Value>>>()?;
-                        if let Accumulator::Ordered(inputs) = accumulator {
-                            inputs.push(OrderedInput {
-                                keys,
-                                value,
-                                extra: delimiter,
-                            });
+                    let Some(argument) = argument else {
+                        if let Accumulator::Count(count) = &mut group.accumulators[number] {
+                            *count += 1;
                         }
-                        Ok(())
+                        continue;
+                    };
+                    let (argument, order) = ordered_parts(argument);
+                    let (value, delimiter) = match joined_parts(argument) {
+                        Some((value, fraction)) if call.function.is_ordered_set() => (
+                            evaluator.eval(value, None)?,
+                            Some(evaluator.eval(fraction, Some(SqlType::Double))?),
+                        ),
+                        Some((value, delimiter))
+                            if call.function == AggregateFunction::StringAgg =>
+                        {
+                            let value = evaluator.eval(value, Some(SqlType::Text))?;
+                            let hint = if matches!(value, Value::Bytea(_)) {
+                                SqlType::Bytea
+                            } else {
+                                SqlType::Text
+                            };
+                            (value, Some(evaluator.eval(delimiter, Some(hint))?))
+                        }
+                        Some((key, member)) if call.function.builds_object() => (
+                            evaluator.eval(key, Some(SqlType::Text))?,
+                            Some(evaluator.eval(member, None)?),
+                        ),
+                        _ => (evaluator.eval(argument, None)?, None),
+                    };
+                    if value.is_null() && !call.function.keeps_nulls() {
+                        continue;
                     }
-                    None => call.feed(
-                        accumulator,
-                        value,
-                        delimiter,
-                        crate::json_functions::is_whole_row(argument),
-                    ),
+                    if call.distinct {
+                        distinct_key.clear();
+                        equality_key(&mut distinct_key, &value);
+                        if group.seen[number].contains(&distinct_key) {
+                            continue;
+                        }
+                        memory.charge(distinct_key.len() + 32)?;
+                        group.seen[number].insert(distinct_key.clone());
+                    }
+                    let before = group.accumulators[number].held_bytes();
+                    let accumulator = &mut group.accumulators[number];
+                    match order {
+                        Some((_, keys)) => {
+                            let keys = keys
+                                .iter()
+                                .map(|key| evaluator.eval(key, None))
+                                .collect::<SqlResult<Vec<Value>>>()?;
+                            if let Accumulator::Ordered(inputs) = accumulator {
+                                inputs.push(OrderedInput {
+                                    keys,
+                                    value,
+                                    extra: delimiter,
+                                });
+                            }
+                            Ok(())
+                        }
+                        None => call.feed(
+                            accumulator,
+                            value,
+                            delimiter,
+                            crate::json_functions::is_whole_row(argument),
+                        ),
+                    }
+                    .map_err(|error| error.at_if_unplaced(call.position))?;
+                    let grown = group.accumulators[number]
+                        .held_bytes()
+                        .saturating_sub(before);
+                    if grown > 0 {
+                        group.held.add_bytes(grown)?;
+                        memory.charge(grown)?;
+                    }
                 }
-                .map_err(|error| error.at_if_unplaced(call.position))?;
-                let grown = group.accumulators[number]
-                    .held_bytes()
-                    .saturating_sub(before);
-                if grown > 0 {
-                    group.held.add_bytes(grown)?;
-                    memory.charge(grown)?;
-                }
-            }
-            Ok(true)
-        })?;
+                Ok(true)
+            })?;
         }
         if groups.is_empty() && self.keys.is_empty() {
             groups.push(new_group(Vec::new(), &[]));

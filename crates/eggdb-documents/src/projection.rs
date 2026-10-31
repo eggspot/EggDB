@@ -16,7 +16,9 @@ pub fn parse_projection(spec: &Document) -> DocumentResult<Projection> {
     let mut paths = Vec::new();
     for (path, value) in spec.iter() {
         if matches!(value, Bson::Document(_)) || path.contains('$') {
-            return Err(DocumentError::not_implemented("projection operators and expressions are not supported yet"));
+            return Err(DocumentError::not_implemented(
+                "projection operators and expressions are not supported yet",
+            ));
         }
         let include = value.is_truthy();
         if path == "_id" {
@@ -32,21 +34,31 @@ pub fn parse_projection(spec: &Document) -> DocumentResult<Projection> {
         paths.push(path.clone());
     }
     let only_id_kept = inclusive.is_none() && keep_id && spec.contains_key("_id");
-    Ok(Projection { paths, inclusive: inclusive.unwrap_or(only_id_kept), keep_id })
+    Ok(Projection {
+        paths,
+        inclusive: inclusive.unwrap_or(only_id_kept),
+        keep_id,
+    })
 }
 
 impl DocumentError {
     fn new_projection_conflict(path: &str, include: bool) -> Self {
         let mode = if include { "inclusion" } else { "exclusion" };
         let other = if include { "exclusion" } else { "inclusion" };
-        Self::bad_value(format!("Cannot do {mode} on field {path} in {other} projection"))
+        Self::bad_value(format!(
+            "Cannot do {mode} on field {path} in {other} projection"
+        ))
     }
 }
 
 fn keep_paths(source: &Document, paths: &[Vec<&str>]) -> Document {
     let mut out = Document::new();
     for (name, value) in source.iter() {
-        let wanted: Vec<Vec<&str>> = paths.iter().filter(|parts| parts[0] == name).map(|parts| parts[1..].to_vec()).collect();
+        let wanted: Vec<Vec<&str>> = paths
+            .iter()
+            .filter(|parts| parts[0] == name)
+            .map(|parts| parts[1..].to_vec())
+            .collect();
         if wanted.is_empty() {
             continue;
         }
@@ -55,14 +67,18 @@ fn keep_paths(source: &Document, paths: &[Vec<&str>]) -> Document {
             continue;
         }
         match value {
-            Bson::Document(inner) => out.insert(name.clone(), Bson::Document(keep_paths(inner, &wanted))),
+            Bson::Document(inner) => {
+                out.insert(name.clone(), Bson::Document(keep_paths(inner, &wanted)))
+            }
             Bson::Array(items) => out.insert(
                 name.clone(),
                 Bson::Array(
                     items
                         .iter()
                         .filter_map(|item| match item {
-                            Bson::Document(inner) => Some(Bson::Document(keep_paths(inner, &wanted))),
+                            Bson::Document(inner) => {
+                                Some(Bson::Document(keep_paths(inner, &wanted)))
+                            }
                             _ => None,
                         })
                         .collect(),
@@ -77,12 +93,18 @@ fn keep_paths(source: &Document, paths: &[Vec<&str>]) -> Document {
 fn drop_paths(source: &Document, paths: &[Vec<&str>]) -> Document {
     let mut out = Document::new();
     for (name, value) in source.iter() {
-        let wanted: Vec<Vec<&str>> = paths.iter().filter(|parts| parts[0] == name).map(|parts| parts[1..].to_vec()).collect();
+        let wanted: Vec<Vec<&str>> = paths
+            .iter()
+            .filter(|parts| parts[0] == name)
+            .map(|parts| parts[1..].to_vec())
+            .collect();
         if wanted.iter().any(Vec::is_empty) {
             continue;
         }
         let kept = match value {
-            Bson::Document(inner) if !wanted.is_empty() => Bson::Document(drop_paths(inner, &wanted)),
+            Bson::Document(inner) if !wanted.is_empty() => {
+                Bson::Document(drop_paths(inner, &wanted))
+            }
             Bson::Array(items) if !wanted.is_empty() => Bson::Array(
                 items
                     .iter()
@@ -102,8 +124,16 @@ fn drop_paths(source: &Document, paths: &[Vec<&str>]) -> Document {
 impl Projection {
     /// The document as the projection shows it.
     pub fn apply(&self, document: &Document) -> Document {
-        let parts: Vec<Vec<&str>> = self.paths.iter().map(|path| path.split('.').collect()).collect();
-        let mut out = if self.inclusive { keep_paths(document, &parts) } else { drop_paths(document, &parts) };
+        let parts: Vec<Vec<&str>> = self
+            .paths
+            .iter()
+            .map(|path| path.split('.').collect())
+            .collect();
+        let mut out = if self.inclusive {
+            keep_paths(document, &parts)
+        } else {
+            drop_paths(document, &parts)
+        };
         if self.keep_id {
             if let Some(id) = document.get("_id") {
                 out.insert_first("_id", id.clone());

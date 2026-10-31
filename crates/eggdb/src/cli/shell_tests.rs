@@ -183,7 +183,11 @@ fn backslashes_and_tabs_in_sql_reach_the_table_unchanged() {
 fn collection_chooses_the_key_space_of_the_key_value_commands() {
     let directory = TempDirectory::new("shell-collection");
     let file = created(&directory);
-    let added = run_with(&["collection", "add", &file, "sessions"], b"", Terminal::default());
+    let added = run_with(
+        &["collection", "add", &file, "sessions"],
+        b"",
+        Terminal::default(),
+    );
     assert_eq!(added.exit, 0, "{}", text(&added.stderr));
     let script = "put k default\n\
         .collection\n\

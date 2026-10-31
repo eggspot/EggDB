@@ -146,7 +146,7 @@ impl AeadKind {
 /// An AEAD keyed for one direction of a connection.
 pub enum RecordAead {
     /// AES-GCM with a 128- or 256-bit key.
-    AesGcm(AesGcm),
+    AesGcm(Box<AesGcm>),
     /// ChaCha20-Poly1305.
     ChaCha20Poly1305(ChaCha20Poly1305),
 }
@@ -167,7 +167,9 @@ impl RecordAead {
             return None;
         }
         match kind {
-            AeadKind::Aes128Gcm | AeadKind::Aes256Gcm => AesGcm::new(key).ok().map(Self::AesGcm),
+            AeadKind::Aes128Gcm | AeadKind::Aes256Gcm => AesGcm::new(key)
+                .ok()
+                .map(|aead| Self::AesGcm(Box::new(aead))),
             AeadKind::ChaCha20Poly1305 => {
                 let key: &[u8; 32] = key.try_into().ok()?;
                 Some(Self::ChaCha20Poly1305(ChaCha20Poly1305::new(key)))
@@ -198,9 +200,7 @@ impl RecordAead {
     ) -> Result<(), AeadError> {
         match self {
             Self::AesGcm(aead) => aead.open_in_place(nonce, associated_data, buffer, tag),
-            Self::ChaCha20Poly1305(aead) => {
-                aead.open_in_place(nonce, associated_data, buffer, tag)
-            }
+            Self::ChaCha20Poly1305(aead) => aead.open_in_place(nonce, associated_data, buffer, tag),
         }
     }
 }
@@ -335,9 +335,15 @@ mod tests {
 
     #[test]
     fn chacha_suites_come_first_for_each_version() {
-        assert_eq!(CipherSuite::ALL[0], CipherSuite::Tls13ChaCha20Poly1305Sha256);
+        assert_eq!(
+            CipherSuite::ALL[0],
+            CipherSuite::Tls13ChaCha20Poly1305Sha256
+        );
         let first_tls12 = CipherSuite::ALL.into_iter().find(|suite| !suite.is_tls13());
-        assert_eq!(first_tls12.map(CipherSuite::aead), Some(AeadKind::ChaCha20Poly1305));
+        assert_eq!(
+            first_tls12.map(CipherSuite::aead),
+            Some(AeadKind::ChaCha20Poly1305)
+        );
     }
 
     #[test]

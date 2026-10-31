@@ -58,14 +58,30 @@ fn every_failed_check_is_refused_with_its_reason() {
     let keys = key_set("k1");
     let good = token(HEADER, CLAIMS);
     let mut tampered = good.clone();
-    tampered.insert_str(good.find('.').unwrap() + 1, "e");
+    tampered.insert(good.find('.').unwrap() + 1, 'e');
     let cases = [
         (good.clone(), 2100, JwtError::Expired),
         (good.clone(), 900, JwtError::Expired),
-        (token(r#"{"alg":"none"}"#, CLAIMS), 1500, JwtError::UnsupportedAlgorithm("none".into())),
-        (token(r#"{"alg":"HS256"}"#, CLAIMS), 1500, JwtError::UnsupportedAlgorithm("HS256".into())),
-        (token(r#"{"alg":"ES256","kid":"other"}"#, CLAIMS), 1500, JwtError::UnknownKey),
-        (token(r#"{"alg":"RS256","kid":"k1"}"#, CLAIMS), 1500, JwtError::BadSignature),
+        (
+            token(r#"{"alg":"none"}"#, CLAIMS),
+            1500,
+            JwtError::UnsupportedAlgorithm("none".into()),
+        ),
+        (
+            token(r#"{"alg":"HS256"}"#, CLAIMS),
+            1500,
+            JwtError::UnsupportedAlgorithm("HS256".into()),
+        ),
+        (
+            token(r#"{"alg":"ES256","kid":"other"}"#, CLAIMS),
+            1500,
+            JwtError::UnknownKey,
+        ),
+        (
+            token(r#"{"alg":"RS256","kid":"k1"}"#, CLAIMS),
+            1500,
+            JwtError::BadSignature,
+        ),
         (tampered, 1500, JwtError::Malformed),
         (
             token(HEADER, &CLAIMS.replace("login.example", "evil.example")),
@@ -82,7 +98,11 @@ fn every_failed_check_is_refused_with_its_reason() {
             1500,
             JwtError::NoUser,
         ),
-        (token(HEADER, &CLAIMS.replace(",\"exp\":2000", "")), 1500, JwtError::Expired),
+        (
+            token(HEADER, &CLAIMS.replace(",\"exp\":2000", "")),
+            1500,
+            JwtError::Expired,
+        ),
         ("a.b".to_owned(), 1500, JwtError::Malformed),
     ];
     for (token, now, expected) in cases {
@@ -109,7 +129,12 @@ fn a_flipped_signature_bit_fails() {
 
 #[test]
 fn key_sets_without_usable_keys_are_refused() {
-    for document in ["", "{}", r#"{"keys":[]}"#, r#"{"keys":[{"kty":"RSA","n":"AQ"}]}"#] {
+    for document in [
+        "",
+        "{}",
+        r#"{"keys":[]}"#,
+        r#"{"keys":[{"kty":"RSA","n":"AQ"}]}"#,
+    ] {
         assert!(JwtKeys::from_jwks(document).is_err(), "{document}");
     }
 }

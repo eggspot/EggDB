@@ -188,7 +188,9 @@ impl ScramExchange {
             )),
             "n" | "y" => Err(negotiation_error()),
             _ if flag.starts_with("p=") => Err(negotiation_error()),
-            _ => Err(ScramFailure::Malformed("the GS2 header is malformed".into())),
+            _ => Err(ScramFailure::Malformed(
+                "the GS2 header is malformed".into(),
+            )),
         }
     }
 
@@ -326,7 +328,6 @@ fn split_gs2_header(text: &str) -> Result<(&str, &str), ScramFailure> {
     Ok((&text[..header_length], &text[header_length..]))
 }
 
-
 /// The parts of a verifier in `pg_authid.rolpassword`'s form: iterations, salt, stored key and
 /// server key.
 pub type ScramParts = (u32, Vec<u8>, [u8; 32], [u8; 32]);
@@ -339,7 +340,9 @@ pub fn parse_scram_verifier(text: &str) -> Option<ScramParts> {
     let (iterations, salt) = head.split_once(':')?;
     let (stored, server) = keys.split_once(':')?;
     let iterations: u32 = iterations.parse().ok().filter(|count| *count > 0)?;
-    let salt = base64_decode(salt.as_bytes()).ok().filter(|salt| !salt.is_empty())?;
+    let salt = base64_decode(salt.as_bytes())
+        .ok()
+        .filter(|salt| !salt.is_empty())?;
     let stored: [u8; 32] = base64_decode(stored.as_bytes()).ok()?.try_into().ok()?;
     let server: [u8; 32] = base64_decode(server.as_bytes()).ok()?.try_into().ok()?;
     Some((iterations, salt, stored, server))
@@ -427,10 +430,7 @@ mod tests {
             exchange.client_first(b"p=tls-server-end-point,,n=,r=abc"),
             Err(ScramFailure::Malformed(_))
         ));
-        for message in [
-            "n,a=admin,n=,r=abc",
-            "n,,m=x,n=,r=abc",
-        ] {
+        for message in ["n,a=admin,n=,r=abc", "n,,m=x,n=,r=abc"] {
             let mut exchange = rfc_7677_exchange(b"pencil");
             assert!(
                 matches!(
@@ -471,16 +471,32 @@ mod tests {
     fn channel_binding_flags_follow_the_selected_mechanism() {
         let plus = || rfc_7677_exchange(b"pencil").with_channel_binding(vec![7; 32]);
         let mut exchange = plus();
-        assert_eq!(exchange.mechanisms(), &[super::SCRAM_SHA_256_PLUS, super::SCRAM_SHA_256]);
-        exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).unwrap();
-        assert!(exchange.client_first(b"p=tls-server-end-point,,n=,r=abc").is_ok());
+        assert_eq!(
+            exchange.mechanisms(),
+            &[super::SCRAM_SHA_256_PLUS, super::SCRAM_SHA_256]
+        );
+        exchange
+            .select_mechanism(super::SCRAM_SHA_256_PLUS)
+            .unwrap();
+        assert!(
+            exchange
+                .client_first(b"p=tls-server-end-point,,n=,r=abc")
+                .is_ok()
+        );
 
         let mut exchange = plus();
-        exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).unwrap();
-        assert!(matches!(exchange.client_first(b"n,,n=,r=abc"), Err(ScramFailure::Malformed(_))));
+        exchange
+            .select_mechanism(super::SCRAM_SHA_256_PLUS)
+            .unwrap();
+        assert!(matches!(
+            exchange.client_first(b"n,,n=,r=abc"),
+            Err(ScramFailure::Malformed(_))
+        ));
 
         let mut exchange = plus();
-        exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).unwrap();
+        exchange
+            .select_mechanism(super::SCRAM_SHA_256_PLUS)
+            .unwrap();
         assert!(matches!(
             exchange.client_first(b"p=tls-unique,,n=,r=abc"),
             Err(ScramFailure::Unsupported(_))
@@ -488,14 +504,21 @@ mod tests {
 
         let mut exchange = plus();
         exchange.select_mechanism(super::SCRAM_SHA_256).unwrap();
-        assert!(matches!(exchange.client_first(b"y,,n=,r=abc"), Err(ScramFailure::Malformed(_))));
+        assert!(matches!(
+            exchange.client_first(b"y,,n=,r=abc"),
+            Err(ScramFailure::Malformed(_))
+        ));
 
         let mut exchange = plus();
         exchange.select_mechanism(super::SCRAM_SHA_256).unwrap();
         assert!(exchange.client_first(b"n,,n=,r=abc").is_ok());
 
         let mut exchange = rfc_7677_exchange(b"pencil");
-        assert!(exchange.select_mechanism(super::SCRAM_SHA_256_PLUS).is_err());
+        assert!(
+            exchange
+                .select_mechanism(super::SCRAM_SHA_256_PLUS)
+                .is_err()
+        );
         assert!(exchange.client_first(b"y,,n=,r=abc").is_ok());
     }
 }

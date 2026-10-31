@@ -163,9 +163,7 @@ impl<'t> Parser<'t> {
             "enable" | "disable" if self.sqlserver() && self.is_word_at(1, "trigger") => {
                 self.sqlserver_enable_trigger().map(Some)
             }
-            "alter"
-                if (self.postgresql() || self.sqlserver()) && self.alters_table_triggers() =>
-            {
+            "alter" if (self.postgresql() || self.sqlserver()) && self.alters_table_triggers() => {
                 self.alter_table_triggers().map(Some)
             }
             _ => Ok(None),
@@ -656,7 +654,8 @@ impl<'t> Parser<'t> {
         if self.take_operator("=") || self.take_operator(":=") {
             return Ok(());
         }
-        if self.peek_kind() == &TokenKind::Colon && matches!(self.peek_kind_at(1), TokenKind::Operator(symbol) if *symbol == "=")
+        if self.peek_kind() == &TokenKind::Colon
+            && matches!(self.peek_kind_at(1), TokenKind::Operator(symbol) if *symbol == "=")
         {
             self.at += 2;
             return Ok(());

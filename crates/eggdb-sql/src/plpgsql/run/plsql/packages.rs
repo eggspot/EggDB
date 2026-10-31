@@ -140,7 +140,8 @@ impl Run<'_> {
             .as_ref()
             .and_then(|plsql| plsql.package.clone());
         if let Some(own) = own
-            && let Some(compiled) = crate::plsql::compiled_package(&*self.writer, self.tables, &own)?
+            && let Some(compiled) =
+                crate::plsql::compiled_package(&*self.writer, self.tables, &own)?
         {
             self.attach_package(compiled, true)?;
         }
@@ -234,9 +235,8 @@ impl Run<'_> {
 
     fn instantiate(&mut self, compiled: &Arc<CompiledPackage>) -> SqlResult<()> {
         self.share_packages();
-        let outcome = self.with_writer(|writer, tables, settings| {
-            initialize(writer, tables, settings, compiled)
-        });
+        let outcome = self
+            .with_writer(|writer, tables, settings| initialize(writer, tables, settings, compiled));
         self.adopt_packages();
         outcome
     }
@@ -258,9 +258,8 @@ impl Run<'_> {
             }
         }
         let shells: Vec<FrameVariable> = self.frame.variables.iter().map(variable_shell).collect();
-        let installed = with_session(|session| {
-            session.install_package(Arc::clone(compiled), shells, public)
-        });
+        let installed =
+            with_session(|session| session.install_package(Arc::clone(compiled), shells, public));
         if let Some(generation) = installed.transpose()? {
             self.plsql.packages.push(AttachedPackage {
                 name: compiled.name.clone(),
@@ -309,7 +308,12 @@ impl Run<'_> {
     }
 
     pub(in crate::plpgsql::run) fn share_packages(&mut self) {
-        if !self.plsql.packages.iter().any(|attached| attached.checked_out) {
+        if !self
+            .plsql
+            .packages
+            .iter()
+            .any(|attached| attached.checked_out)
+        {
             return;
         }
         let variables = &mut self.frame.variables;
@@ -322,12 +326,18 @@ impl Run<'_> {
                 else {
                     continue;
                 };
-                let range = variables.iter_mut().skip(attached.start).take(attached.count);
+                let range = variables
+                    .iter_mut()
+                    .skip(attached.start)
+                    .take(attached.count);
                 for (stored, variable) in instance.variables.iter_mut().zip(range) {
                     stored.value = std::mem::replace(&mut variable.value, Value::Null);
                 }
                 let prefix = format!("{}.", attached.label);
-                if cursors.iter().any(|cursor| cursor.name.starts_with(&prefix)) {
+                if cursors
+                    .iter()
+                    .any(|cursor| cursor.name.starts_with(&prefix))
+                {
                     let (owned, kept): (Vec<_>, Vec<_>) = std::mem::take(cursors)
                         .into_iter()
                         .partition(|cursor| cursor.name.starts_with(&prefix));
@@ -339,7 +349,12 @@ impl Run<'_> {
     }
 
     pub(in crate::plpgsql::run) fn adopt_packages(&mut self) {
-        if self.plsql.packages.iter().all(|attached| attached.checked_out) {
+        if self
+            .plsql
+            .packages
+            .iter()
+            .all(|attached| attached.checked_out)
+        {
             return;
         }
         let variables = &mut self.frame.variables;
@@ -352,7 +367,10 @@ impl Run<'_> {
                     continue;
                 };
                 attached.checked_out = true;
-                let range = variables.iter_mut().skip(attached.start).take(attached.count);
+                let range = variables
+                    .iter_mut()
+                    .skip(attached.start)
+                    .take(attached.count);
                 for (stored, variable) in instance.variables.iter_mut().zip(range) {
                     if stored.name == variable.name {
                         variable.value = std::mem::replace(&mut stored.value, Value::Null);

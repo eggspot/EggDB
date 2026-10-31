@@ -80,7 +80,10 @@ fn pkcs1_signatures_match_every_wycheproof_signing_case() {
         let [hash, modulus, public_exponent, private_exponent] = case.key[..] else {
             panic!("malformed key {:?}", case.key);
         };
-        if loaded.as_ref().is_none_or(|(fields, _)| *fields != case.key) {
+        if loaded
+            .as_ref()
+            .is_none_or(|(fields, _)| *fields != case.key)
+        {
             let key = RsaPrivateKey::new(
                 &bytes(modulus),
                 &bytes(public_exponent),
@@ -109,13 +112,15 @@ fn pkcs1_verification_passes_every_wycheproof_case() {
     let mut checked = 0;
     for case in cases(data) {
         let key = RsaPublicKey::new(&bytes(case.key[0]), &bytes(case.key[1])).unwrap();
-        let verified = rsa_pkcs1v15_verify::<Sha256>(
-            &key,
-            &Sha256::digest(&case.message),
-            &case.signature,
-        );
+        let verified =
+            rsa_pkcs1v15_verify::<Sha256>(&key, &Sha256::digest(&case.message), &case.signature);
         if case.result != "acceptable" {
-            assert_eq!(verified, case.result == "valid", "Wycheproof case {}", case.id);
+            assert_eq!(
+                verified,
+                case.result == "valid",
+                "Wycheproof case {}",
+                case.id
+            );
         }
         checked += 1;
     }
@@ -128,13 +133,14 @@ fn pss_verification_passes_every_wycheproof_case() {
     let mut checked = 0;
     for case in cases(data) {
         let key = RsaPublicKey::new(&bytes(case.key[0]), &bytes(case.key[1])).unwrap();
-        let verified = rsa_pss_verify::<Sha256>(
-            &key,
-            &Sha256::digest(&case.message),
-            &case.signature,
-            32,
+        let verified =
+            rsa_pss_verify::<Sha256>(&key, &Sha256::digest(&case.message), &case.signature, 32);
+        assert_eq!(
+            verified,
+            case.result == "valid",
+            "Wycheproof case {}",
+            case.id
         );
-        assert_eq!(verified, case.result == "valid", "Wycheproof case {}", case.id);
         checked += 1;
     }
     assert_eq!(checked, 108);
@@ -157,13 +163,33 @@ fn a_pss_signature_verifies_with_its_salt_length_only() {
     let salt = [0x5au8; 32];
     let signature = rsa_pss_sign::<Sha256>(&key, &digest, &salt).unwrap();
     assert_eq!(signature.len(), key.public_key().signature_bytes());
-    assert!(rsa_pss_verify::<Sha256>(key.public_key(), &digest, &signature, 32));
-    assert!(!rsa_pss_verify::<Sha256>(key.public_key(), &digest, &signature, 20));
+    assert!(rsa_pss_verify::<Sha256>(
+        key.public_key(),
+        &digest,
+        &signature,
+        32
+    ));
+    assert!(!rsa_pss_verify::<Sha256>(
+        key.public_key(),
+        &digest,
+        &signature,
+        20
+    ));
     let other = Sha256::digest(b"EggDB speaks TLS!");
-    assert!(!rsa_pss_verify::<Sha256>(key.public_key(), &other, &signature, 32));
+    assert!(!rsa_pss_verify::<Sha256>(
+        key.public_key(),
+        &other,
+        &signature,
+        32
+    ));
     let mut changed = signature.clone();
     changed[100] ^= 0x10;
-    assert!(!rsa_pss_verify::<Sha256>(key.public_key(), &digest, &changed, 32));
+    assert!(!rsa_pss_verify::<Sha256>(
+        key.public_key(),
+        &digest,
+        &changed,
+        32
+    ));
 }
 
 #[test]

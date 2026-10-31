@@ -29,7 +29,10 @@ const CONDITIONS: &[(&str, &str)] = &[
     ("invalid_grant_operation", "0LP01"),
     ("invalid_role_specification", "0P000"),
     ("diagnostics_exception", "0Z000"),
-    ("stacked_diagnostics_accessed_without_active_handler", "0Z002"),
+    (
+        "stacked_diagnostics_accessed_without_active_handler",
+        "0Z002",
+    ),
     ("case_not_found", "20000"),
     ("cardinality_violation", "21000"),
     ("data_exception", "22000"),
@@ -113,7 +116,10 @@ const CONDITIONS: &[(&str, &str)] = &[
     ("branch_transaction_already_active", "25002"),
     ("held_cursor_requires_same_isolation_level", "25008"),
     ("inappropriate_access_mode_for_branch_transaction", "25003"),
-    ("inappropriate_isolation_level_for_branch_transaction", "25004"),
+    (
+        "inappropriate_isolation_level_for_branch_transaction",
+        "25004",
+    ),
     ("no_active_sql_transaction_for_branch_transaction", "25005"),
     ("read_only_sql_transaction", "25006"),
     ("schema_and_data_statement_mixing_not_supported", "25007"),
@@ -286,17 +292,32 @@ mod tests {
     #[test]
     fn every_condition_code_is_a_valid_sqlstate() {
         for (name, code) in CONDITIONS {
-            assert!(SqlState::from_text(code).is_some(), "{name} has code {code}");
+            assert!(
+                SqlState::from_text(code).is_some(),
+                "{name} has code {code}"
+            );
         }
     }
 
     #[test]
     fn names_map_to_their_codes_and_back() {
-        assert_eq!(condition_states("division_by_zero"), [SqlState::DIVISION_BY_ZERO]);
-        assert_eq!(condition_states("unique_violation"), [SqlState::UNIQUE_VIOLATION]);
+        assert_eq!(
+            condition_states("division_by_zero"),
+            [SqlState::DIVISION_BY_ZERO]
+        );
+        assert_eq!(
+            condition_states("unique_violation"),
+            [SqlState::UNIQUE_VIOLATION]
+        );
         assert_eq!(condition_states("string_data_right_truncation").len(), 2);
         assert!(condition_states("no_such_condition").is_empty());
-        assert_eq!(condition_name(SqlState::RAISE_EXCEPTION), Some("raise_exception"));
-        assert_eq!(condition_name(SqlState::ASSERT_FAILURE), Some("assert_failure"));
+        assert_eq!(
+            condition_name(SqlState::RAISE_EXCEPTION),
+            Some("raise_exception")
+        );
+        assert_eq!(
+            condition_name(SqlState::ASSERT_FAILURE),
+            Some("assert_failure")
+        );
     }
 }

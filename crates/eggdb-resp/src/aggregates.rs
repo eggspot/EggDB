@@ -47,10 +47,44 @@ fn bulks(items: impl IntoIterator<Item = Vec<u8>>) -> Reply {
 }
 
 const NAMES: &[&str] = &[
-    "hset", "hmset", "hsetnx", "hget", "hmget", "hdel", "hgetall", "hkeys", "hvals", "hlen",
-    "hexists", "hincrby", "lpush", "rpush", "lpop", "rpop", "llen", "lrange", "lindex", "lset",
-    "lrem", "ltrim", "sadd", "srem", "smembers", "sismember", "scard", "sinter", "sunion",
-    "sdiff", "zadd", "zrem", "zscore", "zcard", "zrange", "zrank", "zincrby", "zrangebyscore",
+    "hset",
+    "hmset",
+    "hsetnx",
+    "hget",
+    "hmget",
+    "hdel",
+    "hgetall",
+    "hkeys",
+    "hvals",
+    "hlen",
+    "hexists",
+    "hincrby",
+    "lpush",
+    "rpush",
+    "lpop",
+    "rpop",
+    "llen",
+    "lrange",
+    "lindex",
+    "lset",
+    "lrem",
+    "ltrim",
+    "sadd",
+    "srem",
+    "smembers",
+    "sismember",
+    "scard",
+    "sinter",
+    "sunion",
+    "sdiff",
+    "zadd",
+    "zrem",
+    "zscore",
+    "zcard",
+    "zrange",
+    "zrank",
+    "zincrby",
+    "zrangebyscore",
     "zcount",
 ];
 
@@ -61,7 +95,12 @@ pub(crate) fn is_known(name: &str) -> bool {
 
 /// Runs a hash, list, set or sorted-set command, or `None` when `name` with this many
 /// arguments is not one.
-pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> Option<Reply> {
+pub(crate) fn execute(
+    context: &Context<'_>,
+    db: u32,
+    name: &str,
+    args: &[Vec<u8>],
+) -> Option<Reply> {
     let now = context.now_ms;
     Some(match (name, args.len()) {
         ("hset" | "hmset", count) if count >= 3 && count % 2 == 1 => writing(context, db, |keys| {
@@ -73,8 +112,19 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                     added += 1;
                 }
             }
-            save(keys, &args[0], &Entry { data: Data::Hash(map), expires_at_ms: expiry(entry.as_ref()) })?;
-            Ok(if name == "hset" { Reply::Integer(added) } else { Reply::ok() })
+            save(
+                keys,
+                &args[0],
+                &Entry {
+                    data: Data::Hash(map),
+                    expires_at_ms: expiry(entry.as_ref()),
+                },
+            )?;
+            Ok(if name == "hset" {
+                Reply::Integer(added)
+            } else {
+                Reply::ok()
+            })
         }),
         ("hsetnx", 3) => writing(context, db, |keys| {
             let entry = load(keys, &args[0], now)?;
@@ -83,38 +133,74 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                 return Ok(Reply::Integer(0));
             }
             map.insert(args[1].clone(), args[2].clone());
-            save(keys, &args[0], &Entry { data: Data::Hash(map), expires_at_ms: expiry(entry.as_ref()) })?;
+            save(
+                keys,
+                &args[0],
+                &Entry {
+                    data: Data::Hash(map),
+                    expires_at_ms: expiry(entry.as_ref()),
+                },
+            )?;
             Ok(Reply::Integer(1))
         }),
         ("hget", 2) => reading(context, db, |keys| {
-            Ok(Reply::Bulk(hash_of(load(keys, &args[0], now)?.as_ref())?.remove(&args[1])))
+            Ok(Reply::Bulk(
+                hash_of(load(keys, &args[0], now)?.as_ref())?.remove(&args[1]),
+            ))
         }),
         ("hmget", count) if count >= 2 => reading(context, db, |keys| {
             let map = hash_of(load(keys, &args[0], now)?.as_ref())?;
-            Ok(Reply::Array(Some(args[1..].iter().map(|field| Reply::Bulk(map.get(field).cloned())).collect())))
+            Ok(Reply::Array(Some(
+                args[1..]
+                    .iter()
+                    .map(|field| Reply::Bulk(map.get(field).cloned()))
+                    .collect(),
+            )))
         }),
         ("hdel", count) if count >= 2 => writing(context, db, |keys| {
             let entry = load(keys, &args[0], now)?;
             let mut map = hash_of(entry.as_ref())?;
-            let removed = args[1..].iter().filter(|field| map.remove(*field).is_some()).count();
+            let removed = args[1..]
+                .iter()
+                .filter(|field| map.remove(*field).is_some())
+                .count();
             if entry.is_some() {
-                save(keys, &args[0], &Entry { data: Data::Hash(map), expires_at_ms: expiry(entry.as_ref()) })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::Hash(map),
+                        expires_at_ms: expiry(entry.as_ref()),
+                    },
+                )?;
             }
             Ok(Reply::Integer(removed as i64))
         }),
         ("hgetall", 1) => reading(context, db, |keys| {
             let map = hash_of(load(keys, &args[0], now)?.as_ref())?;
-            Ok(Reply::Map(map.into_iter().map(|(field, value)| (Reply::bulk(field), Reply::bulk(value))).collect()))
+            Ok(Reply::Map(
+                map.into_iter()
+                    .map(|(field, value)| (Reply::bulk(field), Reply::bulk(value)))
+                    .collect(),
+            ))
         }),
         ("hkeys" | "hvals", 1) => reading(context, db, |keys| {
             let map = hash_of(load(keys, &args[0], now)?.as_ref())?;
-            Ok(if name == "hkeys" { bulks(map.into_keys()) } else { bulks(map.into_values()) })
+            Ok(if name == "hkeys" {
+                bulks(map.into_keys())
+            } else {
+                bulks(map.into_values())
+            })
         }),
         ("hlen", 1) => reading(context, db, |keys| {
-            Ok(Reply::Integer(hash_of(load(keys, &args[0], now)?.as_ref())?.len() as i64))
+            Ok(Reply::Integer(
+                hash_of(load(keys, &args[0], now)?.as_ref())?.len() as i64,
+            ))
         }),
         ("hexists", 2) => reading(context, db, |keys| {
-            Ok(Reply::Integer(i64::from(hash_of(load(keys, &args[0], now)?.as_ref())?.contains_key(&args[1]))))
+            Ok(Reply::Integer(i64::from(
+                hash_of(load(keys, &args[0], now)?.as_ref())?.contains_key(&args[1]),
+            )))
         }),
         ("hincrby", 3) => {
             let by = match integer(&args[2]) {
@@ -126,13 +212,22 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                 let mut map = hash_of(entry.as_ref())?;
                 let current = match map.get(&args[1]) {
                     None => 0,
-                    Some(value) => integer(value).map_err(|_| "ERR hash value is not an integer".to_owned())?,
+                    Some(value) => {
+                        integer(value).map_err(|_| "ERR hash value is not an integer".to_owned())?
+                    }
                 };
                 let next = current
                     .checked_add(by)
                     .ok_or_else(|| "ERR increment or decrement would overflow".to_owned())?;
                 map.insert(args[1].clone(), next.to_string().into_bytes());
-                save(keys, &args[0], &Entry { data: Data::Hash(map), expires_at_ms: expiry(entry.as_ref()) })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::Hash(map),
+                        expires_at_ms: expiry(entry.as_ref()),
+                    },
+                )?;
                 Ok(Reply::Integer(next))
             })
         }
@@ -147,14 +242,25 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                 }
             }
             let length = list.len();
-            save(keys, &args[0], &Entry { data: Data::List(list), expires_at_ms: expiry(entry.as_ref()) })?;
+            save(
+                keys,
+                &args[0],
+                &Entry {
+                    data: Data::List(list),
+                    expires_at_ms: expiry(entry.as_ref()),
+                },
+            )?;
             Ok(Reply::Integer(length as i64))
         }),
         ("lpop" | "rpop", count @ (1 | 2)) => {
             let wanted = if count == 2 {
                 match integer(&args[1]) {
                     Ok(wanted) if wanted >= 0 => Some(wanted as usize),
-                    _ => return Some(Reply::Error("ERR value is out of range, must be positive".to_owned())),
+                    _ => {
+                        return Some(Reply::Error(
+                            "ERR value is out of range, must be positive".to_owned(),
+                        ));
+                    }
                 }
             } else {
                 None
@@ -162,18 +268,33 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
             writing(context, db, |keys| {
                 let entry = load(keys, &args[0], now)?;
                 if entry.is_none() {
-                    return Ok(if wanted.is_some() { Reply::Array(None) } else { Reply::null() });
+                    return Ok(if wanted.is_some() {
+                        Reply::Array(None)
+                    } else {
+                        Reply::null()
+                    });
                 }
                 let mut list = list_of(entry.as_ref())?;
                 let mut popped = Vec::new();
                 for _ in 0..wanted.unwrap_or(1) {
-                    let item = if name == "lpop" { list.pop_front() } else { list.pop_back() };
+                    let item = if name == "lpop" {
+                        list.pop_front()
+                    } else {
+                        list.pop_back()
+                    };
                     match item {
                         Some(item) => popped.push(item),
                         None => break,
                     }
                 }
-                save(keys, &args[0], &Entry { data: Data::List(list), expires_at_ms: expiry(entry.as_ref()) })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::List(list),
+                        expires_at_ms: expiry(entry.as_ref()),
+                    },
+                )?;
                 Ok(match wanted {
                     Some(_) => bulks(popped),
                     None => Reply::Bulk(popped.into_iter().next()),
@@ -181,7 +302,9 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
             })
         }
         ("llen", 1) => reading(context, db, |keys| {
-            Ok(Reply::Integer(list_of(load(keys, &args[0], now)?.as_ref())?.len() as i64))
+            Ok(Reply::Integer(
+                list_of(load(keys, &args[0], now)?.as_ref())?.len() as i64,
+            ))
         }),
         ("lrange", 3) => {
             let (Ok(start), Ok(stop)) = (integer(&args[1]), integer(&args[2])) else {
@@ -201,8 +324,16 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
             };
             reading(context, db, |keys| {
                 let list = list_of(load(keys, &args[0], now)?.as_ref())?;
-                let at = if index < 0 { list.len() as i64 + index } else { index };
-                Ok(Reply::Bulk(usize::try_from(at).ok().and_then(|at| list.get(at).cloned())))
+                let at = if index < 0 {
+                    list.len() as i64 + index
+                } else {
+                    index
+                };
+                Ok(Reply::Bulk(
+                    usize::try_from(at)
+                        .ok()
+                        .and_then(|at| list.get(at).cloned()),
+                ))
             })
         }
         ("lset", 3) => {
@@ -215,13 +346,24 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                     return Err("ERR no such key".to_owned());
                 }
                 let mut list = list_of(entry.as_ref())?;
-                let at = if index < 0 { list.len() as i64 + index } else { index };
+                let at = if index < 0 {
+                    list.len() as i64 + index
+                } else {
+                    index
+                };
                 let slot = usize::try_from(at)
                     .ok()
                     .and_then(|at| list.get_mut(at))
                     .ok_or_else(|| "ERR index out of range".to_owned())?;
                 *slot = args[2].clone();
-                save(keys, &args[0], &Entry { data: Data::List(list), expires_at_ms: expiry(entry.as_ref()) })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::List(list),
+                        expires_at_ms: expiry(entry.as_ref()),
+                    },
+                )?;
                 Ok(Reply::ok())
             })
         }
@@ -232,10 +374,18 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
             writing(context, db, |keys| {
                 let entry = load(keys, &args[0], now)?;
                 let list = list_of(entry.as_ref())?;
-                let limit = if count == 0 { usize::MAX } else { count.unsigned_abs() as usize };
+                let limit = if count == 0 {
+                    usize::MAX
+                } else {
+                    count.unsigned_abs() as usize
+                };
                 let mut removed = 0;
                 let mut kept: Vec<Vec<u8>> = Vec::with_capacity(list.len());
-                let ordered: Vec<Vec<u8>> = if count < 0 { list.into_iter().rev().collect() } else { list.into_iter().collect() };
+                let ordered: Vec<Vec<u8>> = if count < 0 {
+                    list.into_iter().rev().collect()
+                } else {
+                    list.into_iter().collect()
+                };
                 for item in ordered {
                     if removed < limit && item == args[2] {
                         removed += 1;
@@ -247,7 +397,14 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                     kept.reverse();
                 }
                 if entry.is_some() {
-                    save(keys, &args[0], &Entry { data: Data::List(kept.into()), expires_at_ms: expiry(entry.as_ref()) })?;
+                    save(
+                        keys,
+                        &args[0],
+                        &Entry {
+                            data: Data::List(kept.into()),
+                            expires_at_ms: expiry(entry.as_ref()),
+                        },
+                    )?;
                 }
                 Ok(Reply::Integer(removed as i64))
             })
@@ -264,7 +421,14 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                     None => VecDeque::new(),
                 };
                 if entry.is_some() {
-                    save(keys, &args[0], &Entry { data: Data::List(kept), expires_at_ms: expiry(entry.as_ref()) })?;
+                    save(
+                        keys,
+                        &args[0],
+                        &Entry {
+                            data: Data::List(kept),
+                            expires_at_ms: expiry(entry.as_ref()),
+                        },
+                    )?;
                 }
                 Ok(Reply::ok())
             })
@@ -274,10 +438,23 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
             let mut set = set_of(entry.as_ref())?;
             let changed = args[1..]
                 .iter()
-                .filter(|member| if name == "sadd" { set.insert((*member).clone()) } else { set.remove(*member) })
+                .filter(|member| {
+                    if name == "sadd" {
+                        set.insert((*member).clone())
+                    } else {
+                        set.remove(*member)
+                    }
+                })
                 .count();
             if name == "sadd" || entry.is_some() {
-                save(keys, &args[0], &Entry { data: Data::Set(set), expires_at_ms: expiry(entry.as_ref()) })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::Set(set),
+                        expires_at_ms: expiry(entry.as_ref()),
+                    },
+                )?;
             }
             Ok(Reply::Integer(changed as i64))
         }),
@@ -286,10 +463,14 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
             Ok(Reply::Set(set.into_iter().map(Reply::bulk).collect()))
         }),
         ("sismember", 2) => reading(context, db, |keys| {
-            Ok(Reply::Integer(i64::from(set_of(load(keys, &args[0], now)?.as_ref())?.contains(&args[1]))))
+            Ok(Reply::Integer(i64::from(
+                set_of(load(keys, &args[0], now)?.as_ref())?.contains(&args[1]),
+            )))
         }),
         ("scard", 1) => reading(context, db, |keys| {
-            Ok(Reply::Integer(set_of(load(keys, &args[0], now)?.as_ref())?.len() as i64))
+            Ok(Reply::Integer(
+                set_of(load(keys, &args[0], now)?.as_ref())?.len() as i64,
+            ))
         }),
         ("sinter" | "sunion" | "sdiff", count) if count >= 1 => reading(context, db, |keys| {
             let mut sets = Vec::with_capacity(args.len());
@@ -312,18 +493,29 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
             let mut set = sorted_of(entry.as_ref())?;
             let removed = args[1..].iter().filter(|member| set.remove(member)).count();
             if entry.is_some() {
-                save(keys, &args[0], &Entry { data: Data::SortedSet(set), expires_at_ms: expiry(entry.as_ref()) })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::SortedSet(set),
+                        expires_at_ms: expiry(entry.as_ref()),
+                    },
+                )?;
             }
             Ok(Reply::Integer(removed as i64))
         }),
         ("zscore", 2) => reading(context, db, |keys| {
-            Ok(match sorted_of(load(keys, &args[0], now)?.as_ref())?.score(&args[1]) {
-                Some(score) => Reply::Double(score),
-                None => Reply::null(),
-            })
+            Ok(
+                match sorted_of(load(keys, &args[0], now)?.as_ref())?.score(&args[1]) {
+                    Some(score) => Reply::Double(score),
+                    None => Reply::null(),
+                },
+            )
         }),
         ("zcard", 1) => reading(context, db, |keys| {
-            Ok(Reply::Integer(sorted_of(load(keys, &args[0], now)?.as_ref())?.len() as i64))
+            Ok(Reply::Integer(
+                sorted_of(load(keys, &args[0], now)?.as_ref())?.len() as i64,
+            ))
         }),
         ("zincrby", 3) => {
             let by = match float(&args[1]) {
@@ -338,19 +530,30 @@ pub(crate) fn execute(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8
                     return Err("ERR resulting score is not a number (NaN)".to_owned());
                 }
                 set.insert(args[2].clone(), next);
-                save(keys, &args[0], &Entry { data: Data::SortedSet(set), expires_at_ms: expiry(entry.as_ref()) })?;
+                save(
+                    keys,
+                    &args[0],
+                    &Entry {
+                        data: Data::SortedSet(set),
+                        expires_at_ms: expiry(entry.as_ref()),
+                    },
+                )?;
                 Ok(Reply::Double(next))
             })
         }
         ("zrank", 2) => reading(context, db, |keys| {
             let ordered = sorted_of(load(keys, &args[0], now)?.as_ref())?.ordered();
-            Ok(match ordered.iter().position(|(_, member)| *member == args[1]) {
-                Some(rank) => Reply::Integer(rank as i64),
-                None => Reply::null(),
-            })
+            Ok(
+                match ordered.iter().position(|(_, member)| *member == args[1]) {
+                    Some(rank) => Reply::Integer(rank as i64),
+                    None => Reply::null(),
+                },
+            )
         }),
         ("zrange", count) if count >= 3 => zrange(context, db, args),
-        ("zrangebyscore" | "zcount", count) if (name == "zcount" && count == 3) || (name == "zrangebyscore" && count >= 3) => {
+        ("zrangebyscore" | "zcount", count)
+            if (name == "zcount" && count == 3) || (name == "zrangebyscore" && count >= 3) =>
+        {
             let (Ok(low), Ok(high)) = (score_bound(&args[1]), score_bound(&args[2])) else {
                 return Some(Reply::Error("ERR min or max is not a float".to_owned()));
             };
@@ -383,18 +586,32 @@ struct Bound {
 
 impl Bound {
     fn admits_low(self, score: f64) -> bool {
-        if self.exclusive { score > self.value } else { score >= self.value }
+        if self.exclusive {
+            score > self.value
+        } else {
+            score >= self.value
+        }
     }
 
     fn admits_high(self, score: f64) -> bool {
-        if self.exclusive { score < self.value } else { score <= self.value }
+        if self.exclusive {
+            score < self.value
+        } else {
+            score <= self.value
+        }
     }
 }
 
 fn score_bound(bytes: &[u8]) -> Result<Bound, String> {
     match bytes.strip_prefix(b"(") {
-        Some(rest) => Ok(Bound { value: float(rest)?, exclusive: true }),
-        None => Ok(Bound { value: float(bytes)?, exclusive: false }),
+        Some(rest) => Ok(Bound {
+            value: float(rest)?,
+            exclusive: true,
+        }),
+        None => Ok(Bound {
+            value: float(bytes)?,
+            exclusive: false,
+        }),
     }
 }
 
@@ -412,9 +629,13 @@ fn scored(items: Vec<(f64, Vec<u8>)>, with_scores: bool) -> Reply {
 fn zadd(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
     let now = context.now_ms;
     let mut at = 1;
-    let (mut only_new, mut only_existing, mut changed_count, mut increment) = (false, false, false, false);
+    let (mut only_new, mut only_existing, mut changed_count, mut increment) =
+        (false, false, false, false);
     while at < args.len() {
-        match String::from_utf8_lossy(&args[at]).to_ascii_lowercase().as_str() {
+        match String::from_utf8_lossy(&args[at])
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "nx" => only_new = true,
             "xx" => only_existing = true,
             "ch" => changed_count = true,
@@ -424,7 +645,11 @@ fn zadd(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
         at += 1;
     }
     let pairs = &args[at..];
-    if pairs.is_empty() || pairs.len() % 2 != 0 || (only_new && only_existing) || (increment && pairs.len() != 2) {
+    if pairs.is_empty()
+        || !pairs.len().is_multiple_of(2)
+        || (only_new && only_existing)
+        || (increment && pairs.len() != 2)
+    {
         return Reply::Error(SYNTAX.to_owned());
     }
     let mut parsed = Vec::with_capacity(pairs.len() / 2);
@@ -444,7 +669,11 @@ fn zadd(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
             if (only_new && existing.is_some()) || (only_existing && existing.is_none()) {
                 continue;
             }
-            let next = if increment { existing.unwrap_or(0.0) + score } else { score };
+            let next = if increment {
+                existing.unwrap_or(0.0) + score
+            } else {
+                score
+            };
             if next.is_nan() {
                 return Err("ERR resulting score is not a number (NaN)".to_owned());
             }
@@ -456,11 +685,22 @@ fn zadd(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
             set.insert(member, next);
             last = Some(next);
         }
-        save(keys, &args[0], &Entry { data: Data::SortedSet(set), expires_at_ms: expiry(entry.as_ref()) })?;
+        save(
+            keys,
+            &args[0],
+            &Entry {
+                data: Data::SortedSet(set),
+                expires_at_ms: expiry(entry.as_ref()),
+            },
+        )?;
         Ok(if increment {
             last.map_or(Reply::null(), Reply::Double)
         } else {
-            Reply::Integer(if changed_count { added + changed } else { added })
+            Reply::Integer(if changed_count {
+                added + changed
+            } else {
+                added
+            })
         })
     })
 }
@@ -472,7 +712,10 @@ fn zrange(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
     };
     let (mut with_scores, mut reverse) = (false, false);
     for option in &args[3..] {
-        match String::from_utf8_lossy(option).to_ascii_lowercase().as_str() {
+        match String::from_utf8_lossy(option)
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "withscores" => with_scores = true,
             "rev" => reverse = true,
             _ => return Reply::Error(SYNTAX.to_owned()),
@@ -484,7 +727,10 @@ fn zrange(context: &Context<'_>, db: u32, args: &[Vec<u8>]) -> Reply {
             ordered.reverse();
         }
         Ok(match range_of(ordered.len(), start, stop) {
-            Some((from, to)) => scored(ordered.into_iter().skip(from).take(to - from + 1).collect(), with_scores),
+            Some((from, to)) => scored(
+                ordered.into_iter().skip(from).take(to - from + 1).collect(),
+                with_scores,
+            ),
             None => Reply::Array(Some(Vec::new())),
         })
     })

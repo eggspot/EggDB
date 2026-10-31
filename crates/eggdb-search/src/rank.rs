@@ -33,7 +33,8 @@ pub fn bm25(frequencies: &[(u64, u64)], length: u64, documents: u64, average_len
     frequencies
         .iter()
         .map(|&(frequency, holding)| {
-            let idf = (1.0 + (documents as f64 - holding as f64 + 0.5) / (holding as f64 + 0.5)).ln();
+            let idf =
+                (1.0 + (documents as f64 - holding as f64 + 0.5) / (holding as f64 + 0.5)).ln();
             let frequency = frequency as f64;
             let norm = 1.0 - B + B * length as f64 / average_length.max(1.0);
             idf * frequency * (K1 + 1.0) / (frequency + K1 * norm)

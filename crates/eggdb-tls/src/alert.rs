@@ -87,12 +87,17 @@ impl AlertDescription {
             AlertDescription::CertificateRequired,
             AlertDescription::NoApplicationProtocol,
         ];
-        ALL.into_iter().find(|description| *description as u8 == code)
+        ALL.into_iter()
+            .find(|description| *description as u8 == code)
     }
 
     /// The two bytes of this alert, at the level TLS requires for it.
     pub fn encode(self) -> [u8; 2] {
-        let level = if self == Self::CloseNotify { level::WARNING } else { level::FATAL };
+        let level = if self == Self::CloseNotify {
+            level::WARNING
+        } else {
+            level::FATAL
+        };
         [level, self as u8]
     }
 }

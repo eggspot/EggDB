@@ -112,7 +112,8 @@ pub(crate) fn insert_instead_of_view(
     let Some(view) = view_of(&*writer, tables, &insert.table)? else {
         return Ok(None);
     };
-    let Some(mut firing) = Firing::for_view(&mut *writer, tables, &view, TriggerEvent::Insert, &[])?
+    let Some(mut firing) =
+        Firing::for_view(&mut *writer, tables, &view, TriggerEvent::Insert, &[])?
     else {
         return Ok(None);
     };
@@ -125,8 +126,11 @@ pub(crate) fn insert_instead_of_view(
         InsertSource::Values(rows) => {
             let mut values = Vec::with_capacity(rows.len());
             for row in rows {
-                let select =
-                    constant_select(row.iter().map(|value| value_expr(value, position)).collect());
+                let select = constant_select(
+                    row.iter()
+                        .map(|value| value_expr(value, position))
+                        .collect(),
+                );
                 let result = execute::select(&*writer, tables, &select, false)?;
                 values.push(result.rows.into_iter().next().unwrap_or_default());
             }
@@ -172,10 +176,15 @@ pub(crate) fn update_instead_of_view(
     };
     let position = update.table.name.position;
     let mut items = vec![wildcard(position)];
-    items.extend(update.assignments.iter().map(|(_, value)| SelectItem::Expr {
-        expr: value_expr(value, position),
-        alias: None,
-    }));
+    items.extend(
+        update
+            .assignments
+            .iter()
+            .map(|(_, value)| SelectItem::Expr {
+                expr: value_expr(value, position),
+                alias: None,
+            }),
+    );
     let select = select_over(&update.table, items, update.filter.clone());
     let rows = execute::select(&*writer, tables, &select, false)?.rows;
     let width = view.columns.len();
@@ -203,12 +212,17 @@ pub(crate) fn delete_instead_of_view(
     let Some(view) = view_of(&*writer, tables, &delete.table)? else {
         return Ok(None);
     };
-    let Some(mut firing) = Firing::for_view(&mut *writer, tables, &view, TriggerEvent::Delete, &[])?
+    let Some(mut firing) =
+        Firing::for_view(&mut *writer, tables, &view, TriggerEvent::Delete, &[])?
     else {
         return Ok(None);
     };
     let position = delete.table.name.position;
-    let select = select_over(&delete.table, vec![wildcard(position)], delete.filter.clone());
+    let select = select_over(
+        &delete.table,
+        vec![wildcard(position)],
+        delete.filter.clone(),
+    );
     let rows = execute::select(&*writer, tables, &select, false)?.rows;
     let mut count = 0usize;
     for row in rows {

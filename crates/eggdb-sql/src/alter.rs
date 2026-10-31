@@ -205,7 +205,9 @@ fn apply(
             tables,
             name,
             column,
-            default.as_ref().map(|default| (default, Dialect::PostgreSql)),
+            default
+                .as_ref()
+                .map(|default| (default, Dialect::PostgreSql)),
             dialect,
         )
         .map(|()| None),
@@ -1847,12 +1849,11 @@ fn drop_index_taken_over(
     };
     let table = current(writer, tables, name)?;
     let Some(index) = table.index_named(index_name).cloned() else {
-        return Err(SqlError::new(
-            SqlState::UNDEFINED_OBJECT,
-            "specified index does not exist",
-        )
-        .with_oracle_code(1418)
-        .at(using.position));
+        return Err(
+            SqlError::new(SqlState::UNDEFINED_OBJECT, "specified index does not exist")
+                .with_oracle_code(1418)
+                .at(using.position),
+        );
     };
     let mut wanted = Vec::with_capacity(columns.len());
     for column in columns {
@@ -2102,7 +2103,11 @@ fn rename_constraint(
         )
         .at(to.position));
     }
-    if let Some(check) = table.checks.iter_mut().find(|check| check.name == from.text) {
+    if let Some(check) = table
+        .checks
+        .iter_mut()
+        .find(|check| check.name == from.text)
+    {
         check.name = to.text.clone();
     } else if let Some(key) = table
         .foreign_keys
@@ -2111,13 +2116,17 @@ fn rename_constraint(
     {
         key.name = to.text.clone();
     } else if !table.primary_key.is_empty() && table.primary_key_constraint_name() == from.text {
-        table.primary_key_name =
-            (to.text != format!("{}_pkey", crate::schemas::base_name(&table.name)))
-                .then(|| to.text.clone());
+        table.primary_key_name = (to.text
+            != format!("{}_pkey", crate::schemas::base_name(&table.name)))
+        .then(|| to.text.clone());
     } else {
         let schema = crate::schemas::schema_of(&table.name).to_owned();
         check_index_name_free(writer, &schema, &to.text, to.position)?;
-        if let Some(index) = table.indexes.iter_mut().find(|index| index.name == from.text) {
+        if let Some(index) = table
+            .indexes
+            .iter_mut()
+            .find(|index| index.name == from.text)
+        {
             index.name = to.text.clone();
         }
     }
@@ -2134,7 +2143,8 @@ fn check_index_name_free(
 ) -> SqlResult<()> {
     let taken = indexes::every_table(writer)?.iter().any(|other| {
         crate::schemas::schema_of(&other.name) == schema
-            && (other.index_named(index).is_some() || crate::schemas::base_name(&other.name) == index)
+            && (other.index_named(index).is_some()
+                || crate::schemas::base_name(&other.name) == index)
     });
     if taken {
         return Err(SqlError::new(
@@ -2167,9 +2177,12 @@ fn owned_sequence(
     Ok(crate::sequences::every_sequence(writer)?
         .into_iter()
         .find(|(_, sequence)| {
-            sequence.owned_by.as_ref().is_some_and(|(owner, owner_column)| {
-                crate::schemas::normalized(owner) == table && owner_column == column
-            })
+            sequence
+                .owned_by
+                .as_ref()
+                .is_some_and(|(owner, owner_column)| {
+                    crate::schemas::normalized(owner) == table && owner_column == column
+                })
         })
         .map(|(name, _)| name))
 }

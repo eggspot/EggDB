@@ -16,7 +16,9 @@ pub(crate) enum Field {
 
 impl Builder {
     pub(crate) fn new() -> Self {
-        Self { reversed: Vec::new() }
+        Self {
+            reversed: Vec::new(),
+        }
     }
 
     fn len(&self) -> usize {
@@ -103,16 +105,26 @@ impl Builder {
         let table = self.len();
         let inline_size = u16::try_from(table - start).unwrap_or(u16::MAX);
         let mut vtable = Vec::with_capacity(4 + 2 * fields.len());
-        vtable.extend_from_slice(&u16::try_from(4 + 2 * fields.len()).unwrap_or(u16::MAX).to_le_bytes());
+        vtable.extend_from_slice(
+            &u16::try_from(4 + 2 * fields.len())
+                .unwrap_or(u16::MAX)
+                .to_le_bytes(),
+        );
         vtable.extend_from_slice(&inline_size.to_le_bytes());
         for position in &positions {
-            let offset = if *position == 0 { 0 } else { u16::try_from(table - position).unwrap_or(0) };
+            let offset = if *position == 0 {
+                0
+            } else {
+                u16::try_from(table - position).unwrap_or(0)
+            };
             vtable.extend_from_slice(&offset.to_le_bytes());
         }
         self.align(2, vtable.len());
         self.prepend(&vtable);
         let vtable_position = self.len();
-        let soffset = i32::try_from(vtable_position - table).unwrap_or(0).to_le_bytes();
+        let soffset = i32::try_from(vtable_position - table)
+            .unwrap_or(0)
+            .to_le_bytes();
         for (index, byte) in soffset.iter().enumerate() {
             self.reversed[table - 1 - index] = *byte;
         }

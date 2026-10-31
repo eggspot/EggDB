@@ -12,7 +12,10 @@ pub(crate) enum KeyValue {
 
 pub(crate) fn member<'n>(node: &'n Node, name: &str) -> Option<&'n Node> {
     match &node.value {
-        Json::Object(members) => members.iter().find(|(key, _)| key == name).map(|(_, node)| node),
+        Json::Object(members) => members
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, node)| node),
         _ => None,
     }
 }
@@ -28,7 +31,12 @@ pub(crate) fn key_value(attribute: &Node, wanted: &str) -> Result<KeyValue, Stri
     let value = match wanted {
         "S" => text(attribute, "S").map(|text| KeyValue::S(text.to_owned())),
         "B" => text(attribute, "B").map(|text| KeyValue::B(text.to_owned())),
-        _ => text(attribute, "N").and_then(|text| text.parse::<f64>().ok().filter(|number| number.is_finite()).map(KeyValue::N)),
+        _ => text(attribute, "N").and_then(|text| {
+            text.parse::<f64>()
+                .ok()
+                .filter(|number| number.is_finite())
+                .map(KeyValue::N)
+        }),
     };
     value.ok_or_else(|| format!("a key attribute must be of type {wanted}"))
 }
@@ -57,7 +65,11 @@ pub(crate) fn encode(value: &KeyValue, out: &mut Vec<u8>) {
         KeyValue::N(number) => {
             out.push(3);
             let bits = number.to_bits();
-            let ordered = if bits >> 63 == 1 { !bits } else { bits | (1 << 63) };
+            let ordered = if bits >> 63 == 1 {
+                !bits
+            } else {
+                bits | (1 << 63)
+            };
             out.extend_from_slice(&ordered.to_be_bytes());
         }
     }

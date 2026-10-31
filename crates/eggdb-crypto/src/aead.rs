@@ -39,11 +39,7 @@ impl ChaCha20Poly1305 {
         Self { key: *key }
     }
 
-    fn tag(
-        cipher: &ChaCha20,
-        associated_data: &[u8],
-        ciphertext: &[u8],
-    ) -> [u8; AEAD_TAG_BYTES] {
+    fn tag(cipher: &ChaCha20, associated_data: &[u8], ciphertext: &[u8]) -> [u8; AEAD_TAG_BYTES] {
         let mut one_time_key = [0u8; POLY1305_KEY_BYTES];
         one_time_key.copy_from_slice(&cipher.block(0)[..POLY1305_KEY_BYTES]);
         let mut mac = Poly1305::new(&one_time_key);

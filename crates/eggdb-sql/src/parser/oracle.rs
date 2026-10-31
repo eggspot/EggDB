@@ -7,9 +7,7 @@ use crate::encoding::{IdentitySeed, integer_type_range};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children;
 use crate::lexer::{TokenKind, swap_uniform_case};
-use crate::oracle_intervals::{
-    DEFAULT_LEADING_PRECISION, IntervalField, MAX_PRECISION, Qualifier,
-};
+use crate::oracle_intervals::{DEFAULT_LEADING_PRECISION, IntervalField, MAX_PRECISION, Qualifier};
 use crate::settings::Settings;
 use crate::types::{SqlType, Value};
 
@@ -422,9 +420,7 @@ impl<'t> Parser<'t> {
             arguments.first().and_then(constant),
             arguments.get(1).and_then(constant),
         ) else {
-            return Err(
-                self.not_supported("SYS_CONTEXT with arguments other than text constants")
-            );
+            return Err(self.not_supported("SYS_CONTEXT with arguments other than text constants"));
         };
         if !namespace.trim().eq_ignore_ascii_case("userenv") {
             return Ok(literal(Literal::Null, position));
@@ -480,12 +476,7 @@ impl<'t> Parser<'t> {
             }
             "merge" => self.merge(&super::merge::MergeRules::oracle())?,
             "alter" if self.is_word_at(1, "session") => self.alter_session()?,
-            "begin"
-                if matches!(
-                    self.peek_kind_at(1),
-                    TokenKind::End | TokenKind::Semicolon
-                ) =>
-            {
+            "begin" if matches!(self.peek_kind_at(1), TokenKind::End | TokenKind::Semicolon) => {
                 return Ok(None);
             }
             "start" | "end" | "abort" | "show" | "reset" | "values" | "table" | "listen"
@@ -616,9 +607,11 @@ impl<'t> Parser<'t> {
         };
         Ok(match (percent, with_ties) {
             (false, false) => not_below_zero(count),
-            (false, true) => {
-                oracle_function("oracle_fetch_with_ties", vec![not_below_zero(count)], position)
-            }
+            (false, true) => oracle_function(
+                "oracle_fetch_with_ties",
+                vec![not_below_zero(count)],
+                position,
+            ),
             (true, false) => oracle_function("oracle_fetch_percent", vec![count], position),
             (true, true) => {
                 oracle_function("oracle_fetch_percent_with_ties", vec![count], position)
@@ -674,8 +667,7 @@ impl<'t> Parser<'t> {
             "timestamp" => self.oracle_timestamp(start)?,
             "json" => SqlType::Jsonb,
             "interval" => self.oracle_interval_type(start)?,
-            "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector"
-            | "sdo_geometry" => {
+            "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector" | "sdo_geometry" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()
@@ -1020,9 +1012,9 @@ impl<'t> Parser<'t> {
                         let zone = self.oracle_settings(|settings| settings.time_zone);
                         let shown = match zone.region_name() {
                             Some(region) => region.to_owned(),
-                            None => crate::oracle_datetime::zone_text(
-                                zone.fixed_offset().unwrap_or(0),
-                            ),
+                            None => {
+                                crate::oracle_datetime::zone_text(zone.fixed_offset().unwrap_or(0))
+                            }
                         };
                         ("sessiontimezone", shown)
                     } else {

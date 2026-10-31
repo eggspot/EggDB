@@ -4,9 +4,9 @@ use crate::net::{
     NetStream, Network, RejectedNetOp, answered_at_once, net_queue_full,
 };
 use crate::os_io_uring::NetRing;
+use crate::os_iocp_net::NetPort;
 #[cfg(windows)]
 use crate::os_iocp_net::PortBinding;
-use crate::os_iocp_net::NetPort;
 use crate::os_net_readiness::{
     NATIVE, ReadinessQueue, accept, prepare_listener, supports, suppress_sigpipe,
 };

@@ -838,16 +838,25 @@ fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
     mcp.initialize();
     let listed = mcp.request("tools/list", "{}");
     let tools = canonical(get(&listed, &["result", "tools"]));
-    assert!(!tools.contains("kv_get") && !tools.contains("kv_scan"), "{tools}");
+    assert!(
+        !tools.contains("kv_get") && !tools.contains("kv_scan"),
+        "{tools}"
+    );
     let tables = mcp.call("list_tables", "{}");
     let shown = canonical(ok(&tables));
-    assert!(shown.contains("\"users\"") && shown.contains("\"user_names\""), "{shown}");
+    assert!(
+        shown.contains("\"users\"") && shown.contains("\"user_names\""),
+        "{shown}"
+    );
     assert!(!shown.contains("\"secrets\""), "{shown}");
     for (dialect, sql) in [
         ("postgresql", "SELECT code FROM secrets"),
         ("postgresql", "SELECT code FROM public.secrets"),
         ("postgresql", "SELECT * FROM users_and_secrets"),
-        ("postgresql", "SELECT * FROM users WHERE id IN (SELECT id FROM secrets)"),
+        (
+            "postgresql",
+            "SELECT * FROM users WHERE id IN (SELECT id FROM secrets)",
+        ),
         ("mysql", "SELECT code FROM secrets"),
         ("sqlite", "SELECT code FROM secrets"),
         ("sqlserver", "SELECT code FROM dbo.secrets"),
@@ -855,7 +864,10 @@ fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
     ] {
         let answer = run_sql(&mut mcp, dialect, sql);
         assert_eq!(error_code(&answer), "sql_error", "{dialect}: {sql}");
-        assert!(!canonical(&answer).contains("swordfish"), "{dialect}: {sql}");
+        assert!(
+            !canonical(&answer).contains("swordfish"),
+            "{dialect}: {sql}"
+        );
     }
     let hidden = mcp.call("describe_table", r#"{"table":"secrets"}"#);
     let missing = mcp.call("describe_table", r#"{"table":"no_such_table"}"#);
@@ -896,8 +908,16 @@ fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
             "SELECT count(*) FROM all_tables WHERE table_name = 'USERS'",
         ),
     ] {
-        assert_eq!(first_value(&mut mcp, dialect, hidden_sql), "0", "{hidden_sql}");
-        assert_eq!(first_value(&mut mcp, dialect, shown_sql), "1", "{shown_sql}");
+        assert_eq!(
+            first_value(&mut mcp, dialect, hidden_sql),
+            "0",
+            "{hidden_sql}"
+        );
+        assert_eq!(
+            first_value(&mut mcp, dialect, shown_sql),
+            "1",
+            "{shown_sql}"
+        );
     }
     let refused = mcp.call("kv_get", r#"{"key":"greeting"}"#);
     assert_eq!(error_code(&refused), "limited_to_tables");
@@ -927,18 +947,23 @@ fn startup_refuses_unknown_tables_tables_with_writes_and_a_bad_call_gap() {
     assert_eq!(unknown.status.code(), Some(1), "{}", stderr(&unknown));
     let message = stderr(&unknown);
     assert!(
-        message.contains("--tables names 'ordres' and 'USERS' (stored as 'users'): no table, view or sequence in"),
+        message.contains(
+            "--tables names 'ordres' and 'USERS' (stored as 'users'): no table, view or sequence in"
+        ),
         "{message}"
     );
     assert!(
-        message.contains("has these names. Names match as stored; fix them, or create the tables first."),
+        message.contains(
+            "has these names. Names match as stored; fix them, or create the tables first."
+        ),
         "{message}"
     );
     assert!(message.contains("eggdb table list"), "{message}");
     let one = eggdb(&["mcp", &path, "--tables", "ordres"]);
     assert_eq!(one.status.code(), Some(1));
     assert!(
-        stderr(&one).contains("has that name. Names match as stored; fix it, or create the table first."),
+        stderr(&one)
+            .contains("has that name. Names match as stored; fix it, or create the table first."),
         "{}",
         stderr(&one)
     );

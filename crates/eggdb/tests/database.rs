@@ -360,14 +360,20 @@ fn a_database_can_keep_its_page_cache_locked_in_memory() {
     let file = common::TempPath::new("lock-cache");
     let opened = eggdb::Database::open_with(
         file.path(),
-        eggdb::Options::new().create_if_missing(true).cache_bytes(256 * 1024).lock_cache(true),
+        eggdb::Options::new()
+            .create_if_missing(true)
+            .cache_bytes(256 * 1024)
+            .lock_cache(true),
     );
     match opened {
         Ok(db) => {
             let mut write = db.begin_write().unwrap();
             write.put(b"locked", b"yes").unwrap();
             write.commit().unwrap();
-            assert_eq!(db.begin_read().unwrap().get(b"locked").unwrap().as_deref(), Some(&b"yes"[..]));
+            assert_eq!(
+                db.begin_read().unwrap().get(b"locked").unwrap().as_deref(),
+                Some(&b"yes"[..])
+            );
         }
         Err(error) => assert!(error.to_string().contains("lock"), "{error}"),
     }
@@ -387,14 +393,20 @@ fn a_database_in_memory_works_and_leaves_no_file() {
     let copy = common::TempPath::new("memory-backup");
     db.backup_to(copy.path()).unwrap();
     let restored = eggdb::Database::open(copy.path()).unwrap();
-    assert_eq!(restored.get(1999u32.to_be_bytes()).unwrap(), Some(vec![7u8; 300]));
+    assert_eq!(
+        restored.get(1999u32.to_be_bytes()).unwrap(),
+        Some(vec![7u8; 300])
+    );
     assert_eq!(
         eggdb::Database::in_memory_with(eggdb::Options::new().read_only(true))
             .unwrap_err()
             .kind(),
         eggdb::ErrorKind::InvalidOption
     );
-    assert_eq!(db.compact().unwrap_err().kind(), eggdb::ErrorKind::InvalidOption);
+    assert_eq!(
+        db.compact().unwrap_err().kind(),
+        eggdb::ErrorKind::InvalidOption
+    );
 }
 
 #[test]
@@ -405,13 +417,19 @@ fn an_encrypted_database_opens_only_with_its_key_and_keeps_no_plaintext() {
     db.put("card", "4111 1111 1111 1111").unwrap();
     db.close().unwrap();
     let raw = std::fs::read(file.path()).unwrap();
-    assert!(!raw.windows(19).any(|window| window == b"4111 1111 1111 1111"));
+    assert!(
+        !raw.windows(19)
+            .any(|window| window == b"4111 1111 1111 1111")
+    );
     let error = Database::open(file.path()).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::PermissionDenied);
     let error =
         Database::open_with(file.path(), Options::new().encryption_key([7; 32])).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::PermissionDenied);
     let db = Database::open_with(file.path(), Options::new().encryption_key(key)).unwrap();
-    assert_eq!(db.get("card").unwrap(), Some(b"4111 1111 1111 1111".to_vec()));
+    assert_eq!(
+        db.get("card").unwrap(),
+        Some(b"4111 1111 1111 1111".to_vec())
+    );
     assert_eq!(db.check().unwrap().entries, 1);
 }

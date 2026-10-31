@@ -23,7 +23,10 @@ pub(crate) struct Matcher {
 
 impl Matcher {
     pub(crate) fn matches(&self, labels: &Labels) -> bool {
-        let value = labels.iter().find(|(name, _)| *name == self.name).map_or("", |(_, value)| value.as_str());
+        let value = labels
+            .iter()
+            .find(|(name, _)| *name == self.name)
+            .map_or("", |(_, value)| value.as_str());
         match self.op {
             MatchOp::Equal => value == self.value,
             MatchOp::NotEqual => value != self.value,
@@ -69,7 +72,10 @@ enum Token {
     Symbol(&'static str),
 }
 
-const SYMBOLS: [&str; 19] = ["==", "!=", "=~", "!~", ">=", "<=", "{", "}", "(", ")", "[", "]", ",", "=", "+", "-", "*", "/", ">"];
+const SYMBOLS: [&str; 19] = [
+    "==", "!=", "=~", "!~", ">=", "<=", "{", "}", "(", ")", "[", "]", ",", "=", "+", "-", "*", "/",
+    ">",
+];
 
 /// A duration such as `5m`, `1h30m` or `250ms`, in milliseconds.
 pub(crate) fn duration_ms(text: &str) -> Option<i64> {
@@ -85,9 +91,17 @@ pub(crate) fn duration_ms(text: &str) -> Option<i64> {
         }
         let amount: i64 = rest[..digits].parse().ok()?;
         rest = &rest[digits..];
-        let (unit, size) = [("ms", 1), ("s", 1000), ("m", 60_000), ("h", 3_600_000), ("d", 86_400_000), ("w", 604_800_000), ("y", 31_536_000_000)]
-            .into_iter()
-            .find(|(unit, _)| rest.starts_with(unit) && !(unit == &"m" && rest.starts_with("ms")))?;
+        let (unit, size) = [
+            ("ms", 1),
+            ("s", 1000),
+            ("m", 60_000),
+            ("h", 3_600_000),
+            ("d", 86_400_000),
+            ("w", 604_800_000),
+            ("y", 31_536_000_000),
+        ]
+        .into_iter()
+        .find(|(unit, _)| rest.starts_with(unit) && !(unit == &"m" && rest.starts_with("ms")))?;
         total = total.checked_add(amount.checked_mul(size)?)?;
         rest = &rest[unit.len()..];
     }
@@ -103,36 +117,65 @@ fn tokenize(text: &str) -> Result<Vec<Token>, String> {
         if byte.is_ascii_whitespace() {
             at += 1;
         } else if byte == b'#' {
-            at = text[at..].find('\n').map_or(bytes.len(), |offset| at + offset);
+            at = text[at..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| at + offset);
         } else if byte == b'[' {
-            let end = text[at..].find(']').map(|offset| at + offset).ok_or("a range is not closed")?;
+            let end = text[at..]
+                .find(']')
+                .map(|offset| at + offset)
+                .ok_or("a range is not closed")?;
             let inner = text[at + 1..end].trim();
-            tokens.push(Token::Duration(duration_ms(inner).filter(|ms| *ms > 0).ok_or_else(|| format!("bad duration {inner}"))?));
+            tokens.push(Token::Duration(
+                duration_ms(inner)
+                    .filter(|ms| *ms > 0)
+                    .ok_or_else(|| format!("bad duration {inner}"))?,
+            ));
             at = end + 1;
-        } else if byte.is_ascii_digit() || (byte == b'.' && bytes.get(at + 1).is_some_and(u8::is_ascii_digit)) {
-            let end = at + bytes[at..].iter().take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'.').count();
+        } else if byte.is_ascii_digit()
+            || (byte == b'.' && bytes.get(at + 1).is_some_and(u8::is_ascii_digit))
+        {
+            let end = at
+                + bytes[at..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'.')
+                    .count();
             let word = &text[at..end];
             let value = match word.parse::<f64>() {
                 Ok(number) => Token::Number(number),
-                Err(_) => Token::Duration(duration_ms(word).ok_or_else(|| format!("bad number {word}"))?),
+                Err(_) => {
+                    Token::Duration(duration_ms(word).ok_or_else(|| format!("bad number {word}"))?)
+                }
             };
             tokens.push(value);
             at = end;
         } else if byte.is_ascii_alphabetic() || byte == b'_' || byte == b':' {
-            let end = at + bytes[at..].iter().take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_' || **byte == b':').count();
+            let end = at
+                + bytes[at..]
+                    .iter()
+                    .take_while(|byte| {
+                        byte.is_ascii_alphanumeric() || **byte == b'_' || **byte == b':'
+                    })
+                    .count();
             tokens.push(Token::Name(text[at..end].to_owned()));
             at = end;
         } else if byte == b'"' || byte == b'\'' || byte == b'`' {
             let mut value = String::new();
             let mut index = at + 1;
             loop {
-                let character = text[index..].chars().next().ok_or("a string is not closed")?;
+                let character = text[index..]
+                    .chars()
+                    .next()
+                    .ok_or("a string is not closed")?;
                 index += character.len_utf8();
                 if character == char::from(byte) {
                     break;
                 }
                 if character == '\\' && byte != b'`' {
-                    let escaped = text[index..].chars().next().ok_or("a string is not closed")?;
+                    let escaped = text[index..]
+                        .chars()
+                        .next()
+                        .ok_or("a string is not closed")?;
                     index += escaped.len_utf8();
                     value.push(match escaped {
                         'n' => '\n',
@@ -145,14 +188,20 @@ fn tokenize(text: &str) -> Result<Vec<Token>, String> {
             }
             tokens.push(Token::Text(value));
             at = index;
-        } else if let Some(symbol) = SYMBOLS.iter().find(|symbol| text[at..].starts_with(**symbol)) {
+        } else if let Some(symbol) = SYMBOLS
+            .iter()
+            .find(|symbol| text[at..].starts_with(**symbol))
+        {
             tokens.push(Token::Symbol(symbol));
             at += symbol.len();
         } else if byte == b'<' {
             tokens.push(Token::Symbol("<"));
             at += 1;
         } else {
-            return Err(format!("unexpected character {:?}", text[at..].chars().next().unwrap_or(' ')));
+            return Err(format!(
+                "unexpected character {:?}",
+                text[at..].chars().next().unwrap_or(' ')
+            ));
         }
     }
     Ok(tokens)
@@ -195,7 +244,11 @@ impl Parser {
     }
 
     fn expect(&mut self, symbol: &str) -> Result<(), String> {
-        if self.eat(symbol) { Ok(()) } else { Err(format!("expected {symbol}")) }
+        if self.eat(symbol) {
+            Ok(())
+        } else {
+            Err(format!("expected {symbol}"))
+        }
     }
 
     fn names(&mut self) -> Result<Vec<String>, String> {
@@ -254,9 +307,16 @@ impl Parser {
     }
 
     fn selector(&mut self, name: String) -> Result<Expr, String> {
-        let mut matchers = if self.eat("{") { self.matchers()? } else { Vec::new() };
+        let mut matchers = if self.eat("{") {
+            self.matchers()?
+        } else {
+            Vec::new()
+        };
         let name = if name.is_empty() {
-            let position = matchers.iter().position(|matcher| matcher.name == "__name__" && matcher.op == MatchOp::Equal).ok_or("a selector needs a metric name")?;
+            let position = matchers
+                .iter()
+                .position(|matcher| matcher.name == "__name__" && matcher.op == MatchOp::Equal)
+                .ok_or("a selector needs a metric name")?;
             matchers.remove(position).value
         } else {
             name
@@ -274,11 +334,16 @@ impl Parser {
             self.at += 1;
             offset_ms = match self.next() {
                 Some(Token::Duration(ms)) => ms,
-                Some(Token::Number(seconds)) if seconds == 0.0 => 0,
+                Some(Token::Number(0.0)) => 0,
                 _ => return Err("expected a duration after offset".to_owned()),
             };
         }
-        Ok(Expr::Selector(Selector { name, matchers, range_ms, offset_ms }))
+        Ok(Expr::Selector(Selector {
+            name,
+            matchers,
+            range_ms,
+            offset_ms,
+        }))
     }
 
     fn primary(&mut self) -> Result<Expr, String> {
@@ -288,7 +353,11 @@ impl Parser {
         }
         let expr = match self.next() {
             Some(Token::Number(number)) => Expr::Number(number),
-            Some(Token::Symbol("-")) => Expr::Binary("*".to_owned(), Box::new(Expr::Number(-1.0)), Box::new(self.primary()?)),
+            Some(Token::Symbol("-")) => Expr::Binary(
+                "*".to_owned(),
+                Box::new(Expr::Number(-1.0)),
+                Box::new(self.primary()?),
+            ),
             Some(Token::Symbol("(")) => {
                 let inner = self.expression(0)?;
                 self.expect(")")?;
@@ -329,10 +398,7 @@ impl Parser {
 
     fn expression(&mut self, minimum: u8) -> Result<Expr, String> {
         let mut left = self.primary()?;
-        loop {
-            let Some(Token::Symbol(symbol)) = self.peek() else {
-                break;
-            };
+        while let Some(Token::Symbol(symbol)) = self.peek() {
             let symbol = *symbol;
             let Some(level) = precedence(symbol).filter(|level| *level > minimum) else {
                 break;
@@ -347,7 +413,11 @@ impl Parser {
 
 /// Parses a PromQL expression.
 pub(crate) fn parse(text: &str) -> Result<Expr, String> {
-    let mut parser = Parser { tokens: tokenize(text)?, at: 0, depth: 0 };
+    let mut parser = Parser {
+        tokens: tokenize(text)?,
+        at: 0,
+        depth: 0,
+    };
     let expr = parser.expression(0)?;
     if parser.at < parser.tokens.len() {
         return Err("unexpected text after the expression".to_owned());
@@ -359,8 +429,13 @@ pub(crate) fn parse(text: &str) -> Result<Expr, String> {
 pub(crate) fn selectors(expr: &Expr, out: &mut Vec<(String, i64)>) {
     match expr {
         Expr::Number(_) => {}
-        Expr::Selector(selector) => out.push((selector.name.clone(), selector.range_ms.unwrap_or(LOOKBACK_MS) + selector.offset_ms)),
-        Expr::Call(_, arguments) => arguments.iter().for_each(|argument| selectors(argument, out)),
+        Expr::Selector(selector) => out.push((
+            selector.name.clone(),
+            selector.range_ms.unwrap_or(LOOKBACK_MS) + selector.offset_ms,
+        )),
+        Expr::Call(_, arguments) => arguments
+            .iter()
+            .for_each(|argument| selectors(argument, out)),
         Expr::Aggregate(_, _, inner) => selectors(inner, out),
         Expr::Binary(_, left, right) => {
             selectors(left, out);
@@ -377,7 +452,11 @@ pub(crate) enum Data {
 }
 
 fn without_name(labels: &Labels) -> Labels {
-    labels.iter().filter(|(name, _)| name != "__name__").cloned().collect()
+    labels
+        .iter()
+        .filter(|(name, _)| name != "__name__")
+        .cloned()
+        .collect()
 }
 
 fn window(samples: &[(i64, f64)], start: i64, end: i64) -> &[(i64, f64)] {
@@ -386,7 +465,13 @@ fn window(samples: &[(i64, f64)], start: i64, end: i64) -> &[(i64, f64)] {
     &samples[from..to.max(from)]
 }
 
-fn extrapolated(samples: &[(i64, f64)], start: i64, end: i64, counter: bool, per_second: bool) -> Option<f64> {
+fn extrapolated(
+    samples: &[(i64, f64)],
+    start: i64,
+    end: i64,
+    counter: bool,
+    per_second: bool,
+) -> Option<f64> {
     if samples.len() < 2 {
         return None;
     }
@@ -411,8 +496,16 @@ fn extrapolated(samples: &[(i64, f64)], start: i64, end: i64, counter: bool, per
     }
     let threshold = average * 1.1;
     let mut interval = sampled;
-    interval += if to_start < threshold { to_start } else { average / 2.0 };
-    interval += if to_end < threshold { to_end } else { average / 2.0 };
+    interval += if to_start < threshold {
+        to_start
+    } else {
+        average / 2.0
+    };
+    interval += if to_end < threshold {
+        to_end
+    } else {
+        average / 2.0
+    };
     let mut factor = interval / sampled;
     if per_second {
         factor /= (end - start) as f64 / 1000.0;
@@ -420,7 +513,12 @@ fn extrapolated(samples: &[(i64, f64)], start: i64, end: i64, counter: bool, per
     Some(result * factor)
 }
 
-fn range_function(name: &str, samples: &[(i64, f64)], start: i64, end: i64) -> Result<Option<f64>, String> {
+fn range_function(
+    name: &str,
+    samples: &[(i64, f64)],
+    start: i64,
+    end: i64,
+) -> Result<Option<f64>, String> {
     let values = || samples.iter().map(|(_, value)| *value);
     Ok(match name {
         "rate" => extrapolated(samples, start, end, true, true),
@@ -428,12 +526,18 @@ fn range_function(name: &str, samples: &[(i64, f64)], start: i64, end: i64) -> R
         "delta" => extrapolated(samples, start, end, false, false),
         "irate" => match samples {
             [.., before, last] if last.0 > before.0 => {
-                let change = if last.1 < before.1 { last.1 } else { last.1 - before.1 };
+                let change = if last.1 < before.1 {
+                    last.1
+                } else {
+                    last.1 - before.1
+                };
                 Some(change / ((last.0 - before.0) as f64 / 1000.0))
             }
             _ => None,
         },
-        "avg_over_time" => (!samples.is_empty()).then(|| values().sum::<f64>() / samples.len() as f64),
+        "avg_over_time" => {
+            (!samples.is_empty()).then(|| values().sum::<f64>() / samples.len() as f64)
+        }
         "sum_over_time" => (!samples.is_empty()).then(|| values().sum()),
         "min_over_time" => values().reduce(f64::min),
         "max_over_time" => values().reduce(f64::max),
@@ -479,21 +583,46 @@ fn is_comparison(op: &str) -> bool {
 }
 
 /// Evaluates `expr` at `time_ms` over the series fetched for its selectors.
-pub(crate) fn evaluate(expr: &Expr, time_ms: i64, data: &BTreeMap<String, Vec<Series>>) -> Result<Data, String> {
+pub(crate) fn evaluate(
+    expr: &Expr,
+    time_ms: i64,
+    data: &BTreeMap<String, Vec<Series>>,
+) -> Result<Data, String> {
     match expr {
         Expr::Number(number) => Ok(Data::Scalar(*number)),
         Expr::Selector(selector) => {
             let at = time_ms - selector.offset_ms;
-            let series = data.get(&selector.name).map(Vec::as_slice).unwrap_or_default();
-            let chosen = series.iter().filter(|series| selector.matchers.iter().all(|matcher| matcher.matches(&series.labels)));
+            let series = data
+                .get(&selector.name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let chosen = series.iter().filter(|series| {
+                selector
+                    .matchers
+                    .iter()
+                    .all(|matcher| matcher.matches(&series.labels))
+            });
             match selector.range_ms {
                 Some(range) => Ok(Data::Matrix(
                     chosen
-                        .map(|series| (series.labels.clone(), window(&series.samples, at - range, at).to_vec()))
+                        .map(|series| {
+                            (
+                                series.labels.clone(),
+                                window(&series.samples, at - range, at).to_vec(),
+                            )
+                        })
                         .filter(|(_, samples)| !samples.is_empty())
                         .collect(),
                 )),
-                None => Ok(Data::Vector(chosen.filter_map(|series| window(&series.samples, at - LOOKBACK_MS, at).last().map(|(_, value)| (series.labels.clone(), *value))).collect())),
+                None => Ok(Data::Vector(
+                    chosen
+                        .filter_map(|series| {
+                            window(&series.samples, at - LOOKBACK_MS, at)
+                                .last()
+                                .map(|(_, value)| (series.labels.clone(), *value))
+                        })
+                        .collect(),
+                )),
             }
         }
         Expr::Call(name, arguments) => {
@@ -518,11 +647,17 @@ pub(crate) fn evaluate(expr: &Expr, time_ms: i64, data: &BTreeMap<String, Vec<Se
                 (Data::Vector(vector), _) => {
                     let mut out = Vec::with_capacity(vector.len());
                     for (labels, value) in vector {
-                        out.push((without_name(&labels), scalar_function(name, value).ok_or_else(|| format!("unknown function {name}"))?));
+                        out.push((
+                            without_name(&labels),
+                            scalar_function(name, value)
+                                .ok_or_else(|| format!("unknown function {name}"))?,
+                        ));
                     }
                     Ok(Data::Vector(out))
                 }
-                (Data::Scalar(value), _) => scalar_function(name, value).map(Data::Scalar).ok_or_else(|| format!("{name} does not take a scalar")),
+                (Data::Scalar(value), _) => scalar_function(name, value)
+                    .map(Data::Scalar)
+                    .ok_or_else(|| format!("{name} does not take a scalar")),
                 (Data::Matrix(_), _) => Err(format!("{name} needs a range selector")),
             }
         }
@@ -533,8 +668,14 @@ pub(crate) fn evaluate(expr: &Expr, time_ms: i64, data: &BTreeMap<String, Vec<Se
             let mut groups: BTreeMap<Labels, Vec<f64>> = BTreeMap::new();
             for (labels, value) in vector {
                 let key: Labels = match grouping {
-                    Some(Grouping::By(names)) => labels.into_iter().filter(|(name, _)| names.contains(name)).collect(),
-                    Some(Grouping::Without(names)) => labels.into_iter().filter(|(name, _)| name != "__name__" && !names.contains(name)).collect(),
+                    Some(Grouping::By(names)) => labels
+                        .into_iter()
+                        .filter(|(name, _)| names.contains(name))
+                        .collect(),
+                    Some(Grouping::Without(names)) => labels
+                        .into_iter()
+                        .filter(|(name, _)| name != "__name__" && !names.contains(name))
+                        .collect(),
                     None => Vec::new(),
                 };
                 groups.entry(key).or_default().push(value);
@@ -556,7 +697,10 @@ pub(crate) fn evaluate(expr: &Expr, time_ms: i64, data: &BTreeMap<String, Vec<Se
         }
         Expr::Binary(op, left, right) => {
             let comparison = is_comparison(op);
-            match (evaluate(left, time_ms, data)?, evaluate(right, time_ms, data)?) {
+            match (
+                evaluate(left, time_ms, data)?,
+                evaluate(right, time_ms, data)?,
+            ) {
                 (Data::Scalar(left), Data::Scalar(right)) => {
                     if comparison {
                         return Err("comparisons between scalars need the bool modifier, which is not supported yet".to_owned());
@@ -564,12 +708,37 @@ pub(crate) fn evaluate(expr: &Expr, time_ms: i64, data: &BTreeMap<String, Vec<Se
                     Ok(Data::Scalar(apply(op, left, right).unwrap_or(f64::NAN)))
                 }
                 (Data::Vector(vector), Data::Scalar(scalar)) => Ok(Data::Vector(
-                    vector.into_iter().filter_map(|(labels, value)| apply(op, value, scalar).map(|result| (if comparison { labels } else { without_name(&labels) }, result))).collect(),
+                    vector
+                        .into_iter()
+                        .filter_map(|(labels, value)| {
+                            apply(op, value, scalar).map(|result| {
+                                (
+                                    if comparison {
+                                        labels
+                                    } else {
+                                        without_name(&labels)
+                                    },
+                                    result,
+                                )
+                            })
+                        })
+                        .collect(),
                 )),
                 (Data::Scalar(scalar), Data::Vector(vector)) => Ok(Data::Vector(
                     vector
                         .into_iter()
-                        .filter_map(|(labels, value)| apply(op, scalar, value).map(|result| (if comparison { labels } else { without_name(&labels) }, if comparison { value } else { result })))
+                        .filter_map(|(labels, value)| {
+                            apply(op, scalar, value).map(|result| {
+                                (
+                                    if comparison {
+                                        labels
+                                    } else {
+                                        without_name(&labels)
+                                    },
+                                    if comparison { value } else { result },
+                                )
+                            })
+                        })
                         .collect(),
                 )),
                 (Data::Vector(left), Data::Vector(right)) => {
@@ -583,7 +752,16 @@ pub(crate) fn evaluate(expr: &Expr, time_ms: i64, data: &BTreeMap<String, Vec<Se
                         left.into_iter()
                             .filter_map(|(labels, value)| {
                                 let other = *by_labels.get(&without_name(&labels))?;
-                                apply(op, value, other).map(|result| (if comparison { labels } else { without_name(&labels) }, result))
+                                apply(op, value, other).map(|result| {
+                                    (
+                                        if comparison {
+                                            labels
+                                        } else {
+                                            without_name(&labels)
+                                        },
+                                        result,
+                                    )
+                                })
                             })
                             .collect(),
                     ))

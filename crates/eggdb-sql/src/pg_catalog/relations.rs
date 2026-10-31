@@ -5,15 +5,15 @@ use super::snapshot::{
 use super::{CatalogRelation, deparse, routines};
 use crate::arrays::{ArrayElement, ArrayValue};
 use crate::ast::ReferentialAction;
-use crate::encoding::{
-    CommentKind, IdentityGeneration, IndexMethod, SortOptions, TableDefinition,
-};
+use crate::encoding::{CommentKind, IdentityGeneration, IndexMethod, SortOptions, TableDefinition};
 use crate::error::SqlResult;
 use crate::memory::WorkMemory;
 use crate::session::OutputColumn;
 use crate::set_returning::GeneratedRows;
 use crate::store::KeyValueRead;
-use crate::triggers::{TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming};
+use crate::triggers::{
+    TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming,
+};
 use crate::types::{SqlType, Value};
 use std::collections::HashSet;
 
@@ -300,7 +300,11 @@ pub(crate) fn partitioned_table_rows(snapshot: &CatalogSnapshot) -> Vec<(u32, &'
                 crate::partitions::PartitionStrategy::List => "l",
                 crate::partitions::PartitionStrategy::Hash => "h",
             };
-            Some((table_oid(snapshot, table)?, strategy, key.columns.len() as i64))
+            Some((
+                table_oid(snapshot, table)?,
+                strategy,
+                key.columns.len() as i64,
+            ))
         })
         .collect()
 }
@@ -613,7 +617,9 @@ fn user_type_row(snapshot: &CatalogSnapshot, found: &crate::user_types::UserType
         )
         .set(
             "typtypmod",
-            int(i64::from(base_facts.as_ref().map_or(-1, |facts| facts.modifier))),
+            int(i64::from(
+                base_facts.as_ref().map_or(-1, |facts| facts.modifier),
+            )),
         )
         .set("typndims", int(0))
         .set(
@@ -759,7 +765,12 @@ fn builtin_type_rows() -> Vec<Vec<Value>> {
 
 fn proc_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let mut rows = builtin_proc_rows();
-    rows.extend(snapshot.routines.iter().map(|routine| routine_proc_row(snapshot, routine)));
+    rows.extend(
+        snapshot
+            .routines
+            .iter()
+            .map(|routine| routine_proc_row(snapshot, routine)),
+    );
     rows
 }
 
@@ -778,7 +789,10 @@ fn routine_proc_row(snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> Vec<V
         .set("prolang", oid(routines::language_oid(definition.language)))
         .set("procost", Value::Real(routines::ROUTINE_COST))
         .set("prorows", Value::Real(routines::estimated_rows(definition)))
-        .set("provariadic", oid(routines::variadic_element_oid(definition)))
+        .set(
+            "provariadic",
+            oid(routines::variadic_element_oid(definition)),
+        )
         .set("prosupport", regproc_none())
         .set("prokind", text(routines::kind_code(definition.kind)))
         .set("prosecdef", flag(definition.security_definer))
@@ -787,9 +801,18 @@ fn routine_proc_row(snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> Vec<V
         .set("proretset", flag(definition.returns.is_set()))
         .set("provolatile", text(definition.volatility.code()))
         .set("proparallel", text("u"))
-        .set("pronargs", small(routines::argument_count(definition) as i64))
-        .set("pronargdefaults", small(routines::default_count(definition) as i64))
-        .set("prorettype", oid(routines::result_type_oid(snapshot, definition)))
+        .set(
+            "pronargs",
+            small(routines::argument_count(definition) as i64),
+        )
+        .set(
+            "pronargdefaults",
+            small(routines::default_count(definition) as i64),
+        )
+        .set(
+            "prorettype",
+            oid(routines::result_type_oid(snapshot, definition)),
+        )
         .set("proargtypes", vector(ArrayElement::OidVector, inputs))
         .set("prosrc", text(&definition.body));
     let listed = routines::every_parameter(definition);
@@ -799,14 +822,20 @@ fn routine_proc_row(snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> Vec<V
                 "proallargtypes",
                 list(
                     ArrayElement::Oid,
-                    listed.iter().map(|parameter| oid(oids::type_oid(parameter.sql_type))).collect(),
+                    listed
+                        .iter()
+                        .map(|parameter| oid(oids::type_oid(parameter.sql_type)))
+                        .collect(),
                 ),
             )
             .set(
                 "proargmodes",
                 list(
                     ArrayElement::InternalChar,
-                    listed.iter().map(|parameter| text(parameter.mode)).collect(),
+                    listed
+                        .iter()
+                        .map(|parameter| text(parameter.mode))
+                        .collect(),
                 ),
             );
     }
@@ -815,7 +844,10 @@ fn routine_proc_row(snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> Vec<V
             "proargnames",
             list(
                 ArrayElement::Text,
-                listed.iter().map(|parameter| text(&parameter.name)).collect(),
+                listed
+                    .iter()
+                    .map(|parameter| text(&parameter.name))
+                    .collect(),
             ),
         );
     }
@@ -889,7 +921,11 @@ fn builtin_proc_rows() -> Vec<Vec<Value>> {
                     "proargtypes",
                     vector(
                         ArrayElement::OidVector,
-                        function.argument_types.iter().map(|&found| oid(found)).collect(),
+                        function
+                            .argument_types
+                            .iter()
+                            .map(|&found| oid(found))
+                            .collect(),
                     ),
                 )
                 .set("prosrc", text(function.name))
@@ -995,7 +1031,10 @@ fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("tgname", text(&definition.name))
                 .set("tgfoid", oid(trigger_function_oid(snapshot, definition)))
                 .set("tgtype", small(trigger_type(definition)))
-                .set("tgenabled", text(if definition.enabled { "O" } else { "D" }))
+                .set(
+                    "tgenabled",
+                    text(if definition.enabled { "O" } else { "D" }),
+                )
                 .set("tgisinternal", flag(false))
                 .set("tgconstrrelid", oid(0))
                 .set("tgconstrindid", oid(0))
@@ -1164,7 +1203,10 @@ fn constraint_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             .set("coninhcount", small(0))
             .set("connoinherit", flag(true));
         row = row
-            .set("condeferred", flag(table.is_initially_deferred(&constraint.name)))
+            .set(
+                "condeferred",
+                flag(table.is_initially_deferred(&constraint.name)),
+            )
             .set("convalidated", flag(table.is_validated(&constraint.name)));
         match constraint.source {
             ConstraintSource::Primary => {
@@ -1523,7 +1565,10 @@ fn time_zone_name_rows() -> Vec<Vec<Value>> {
             Some(
                 Row::new(CatalogRelation::TimezoneNames)
                     .set("name", text(name))
-                    .set("abbrev", text(&zone.abbreviation_at(now).unwrap_or_default()))
+                    .set(
+                        "abbrev",
+                        text(&zone.abbreviation_at(now).unwrap_or_default()),
+                    )
                     .set(
                         "utc_offset",
                         Value::Interval(crate::interval::Interval {

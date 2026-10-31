@@ -1,3 +1,5 @@
+//! MySQL clients over TLS: CLIENT_SSL upgrades and refused plaintext logins.
+
 mod common;
 
 use common::{DATABASE, PASSWORD, TestServer, USER, handshake_response};
@@ -23,8 +25,11 @@ fn tls_server() -> TestServer {
         not_after_unix_seconds: now + 3_600,
     };
     let (certificate, key) =
-        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill).expect("certificate");
-    TestServer::start_with_tls(Arc::new(ServerConfig::new(vec![certificate], key).expect("TLS config")))
+        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill)
+            .expect("certificate");
+    TestServer::start_with_tls(Arc::new(
+        ServerConfig::new(vec![certificate], key).expect("TLS config"),
+    ))
 }
 
 fn write_packet(stream: &mut impl Write, sequence: u8, payload: &[u8]) {
@@ -46,7 +51,11 @@ fn read_packet(stream: &mut impl Read) -> Option<(u8, Vec<u8>)> {
 fn server_greeting(stream: &mut TcpStream) -> ([u8; NONCE_BYTES], u32) {
     let (_, body) = read_packet(stream).expect("handshake");
     assert_eq!(body[0], 10);
-    let version_end = body[1..].iter().position(|&byte| byte == 0).expect("version") + 1;
+    let version_end = body[1..]
+        .iter()
+        .position(|&byte| byte == 0)
+        .expect("version")
+        + 1;
     let mut at = version_end + 1 + 4;
     let mut nonce = [0u8; NONCE_BYTES];
     nonce[..8].copy_from_slice(&body[at..at + 8]);
@@ -63,17 +72,30 @@ fn server_greeting(stream: &mut TcpStream) -> ([u8; NONCE_BYTES], u32) {
 fn the_login_and_queries_run_over_tls_after_an_ssl_request() {
     let server = tls_server();
     let mut tcp = TcpStream::connect(server.address).expect("connect");
-    tcp.set_read_timeout(Some(Duration::from_secs(20))).expect("timeout");
+    tcp.set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
     let (nonce, capabilities) = server_greeting(&mut tcp);
-    assert_ne!(capabilities & CLIENT_SSL, 0, "a server with TLS offers CLIENT_SSL");
+    assert_ne!(
+        capabilities & CLIENT_SSL,
+        0,
+        "a server with TLS offers CLIENT_SSL"
+    );
 
-    let full = handshake_response(USER, &caching_sha2_response(PASSWORD.as_bytes(), &nonce), DATABASE, CACHING_SHA2_PASSWORD);
+    let full = handshake_response(
+        USER,
+        &caching_sha2_response(PASSWORD.as_bytes(), &nonce),
+        DATABASE,
+        CACHING_SHA2_PASSWORD,
+    );
     let mut flags = u32::from_le_bytes([full[0], full[1], full[2], full[3]]) | CLIENT_SSL;
     let mut ssl_request = full[..32].to_vec();
     ssl_request[..4].copy_from_slice(&flags.to_le_bytes());
     write_packet(&mut tcp, 1, &ssl_request);
-    let mut tls = TlsStream::connect(tcp, &ClientConfig::new(ServerVerification::EncryptionOnly, "localhost"))
-        .expect("TLS handshake");
+    let mut tls = TlsStream::connect(
+        tcp,
+        &ClientConfig::new(ServerVerification::EncryptionOnly, "localhost"),
+    )
+    .expect("TLS handshake");
 
     let mut response = full;
     flags |= CLIENT_SSL;
@@ -102,7 +124,8 @@ fn the_login_and_queries_run_over_tls_after_an_ssl_request() {
 fn a_server_without_tls_does_not_offer_it() {
     let server = TestServer::start(4);
     let mut tcp = TcpStream::connect(server.address).expect("connect");
-    tcp.set_read_timeout(Some(Duration::from_secs(20))).expect("timeout");
+    tcp.set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
     let (_, capabilities) = server_greeting(&mut tcp);
     assert_eq!(capabilities & CLIENT_SSL, 0);
 }

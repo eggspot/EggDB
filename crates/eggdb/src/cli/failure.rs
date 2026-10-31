@@ -89,7 +89,7 @@ impl Failure {
 
     pub(crate) fn code(&self) -> &'static str {
         match self {
-            Self::Usage { code, .. } | Self::Database { code, .. } => *code,
+            Self::Usage { code, .. } | Self::Database { code, .. } => code,
             Self::OutputClosed | Self::OutputFailed { .. } => OUTPUT_FAILED_CODE,
         }
     }

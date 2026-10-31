@@ -42,13 +42,18 @@ impl SourceTable {
 }
 
 fn is_binary(data_type: &str) -> bool {
-    matches!(data_type, "binary" | "varbinary" | "image" | "timestamp" | "rowversion")
+    matches!(
+        data_type,
+        "binary" | "varbinary" | "image" | "timestamp" | "rowversion"
+    )
 }
 
 fn text_expression(column: &str, data_type: &str) -> String {
     let style = match data_type {
         "binary" | "varbinary" | "image" | "timestamp" | "rowversion" => Some(1),
-        "datetime" | "datetime2" | "smalldatetime" | "date" | "time" | "datetimeoffset" => Some(126),
+        "datetime" | "datetime2" | "smalldatetime" | "date" | "time" | "datetimeoffset" => {
+            Some(126)
+        }
         "float" | "real" => Some(3),
         "money" | "smallmoney" => Some(2),
         _ => None,
@@ -62,20 +67,34 @@ fn text_expression(column: &str, data_type: &str) -> String {
 fn literal(value: &Option<String>, data_type: &str) -> String {
     match value {
         None => "NULL".to_owned(),
-        Some(text) if is_binary(data_type) => format!("CONVERT(varbinary(max), {}, 1)", quote_unicode(text)),
+        Some(text) if is_binary(data_type) => {
+            format!("CONVERT(varbinary(max), {}, 1)", quote_unicode(text))
+        }
         Some(text) => quote_unicode(text),
     }
 }
 
-fn declared_type(data_type: &str, length: Option<&str>, precision: Option<&str>, scale: Option<&str>, datetime_precision: Option<&str>) -> String {
+fn declared_type(
+    data_type: &str,
+    length: Option<&str>,
+    precision: Option<&str>,
+    scale: Option<&str>,
+    datetime_precision: Option<&str>,
+) -> String {
     match data_type {
         "char" | "varchar" | "nchar" | "nvarchar" | "binary" | "varbinary" => match length {
             Some("-1") => format!("{data_type}(max)"),
             Some(length) => format!("{data_type}({length})"),
             None => data_type.to_owned(),
         },
-        "decimal" | "numeric" => format!("{data_type}({}, {})", precision.unwrap_or("18"), scale.unwrap_or("0")),
-        "datetime2" | "time" | "datetimeoffset" => format!("{data_type}({})", datetime_precision.unwrap_or("7")),
+        "decimal" | "numeric" => format!(
+            "{data_type}({}, {})",
+            precision.unwrap_or("18"),
+            scale.unwrap_or("0")
+        ),
+        "datetime2" | "time" | "datetimeoffset" => {
+            format!("{data_type}({})", datetime_precision.unwrap_or("7"))
+        }
         "timestamp" | "rowversion" => "binary(8)".to_owned(),
         other => other.to_owned(),
     }
@@ -106,7 +125,10 @@ impl Session<'_> {
     pub(super) fn follow_sql_server(&mut self) -> Result<Exit, Failure> {
         let usage = |message: String| Failure::usage(message, Some(CommandName::Follow));
         if self.request.follow.publication.is_some() {
-            return Err(usage("--publication is for PostgreSQL sources; SQL Server uses change tracking".to_owned()));
+            return Err(usage(
+                "--publication is for PostgreSQL sources; SQL Server uses change tracking"
+                    .to_owned(),
+            ));
         }
         let mut options = parse_sql_server_url(&self.request.follow.source).map_err(usage)?;
         options.password = self.source_password(PASSWORD_VARIABLE)?;
@@ -117,8 +139,13 @@ impl Session<'_> {
         let target = format!("{}:{}/{}", options.host, options.port, options.database);
         let existed = self.request.file.exists();
         let started = Instant::now();
-        let mut source = TdsClient::connect(&options).map_err(|error| tds_failure(&target, &error))?;
-        let query = |source: &mut TdsClient, sql: &str| source.batch(sql).map_err(|error| tds_failure(&target, &error));
+        let mut source =
+            TdsClient::connect(&options).map_err(|error| tds_failure(&target, &error))?;
+        let query = |source: &mut TdsClient, sql: &str| {
+            source
+                .batch(sql)
+                .map_err(|error| tds_failure(&target, &error))
+        };
         self.follow_event(
             JsonObject::new()
                 .string("event", "connected")
@@ -131,7 +158,11 @@ impl Session<'_> {
                 options.shown(),
                 self.file_display,
                 if existed { "" } else { " (created)" },
-                if source.encrypted() { "encrypted" } else { "not encrypted" }
+                if source.encrypted() {
+                    "encrypted"
+                } else {
+                    "not encrypted"
+                }
             ),
         );
         let tracking = match source.batch(
@@ -158,7 +189,13 @@ impl Session<'_> {
         let schema_filter = if self.request.follow.schemas.is_empty() {
             String::new()
         } else {
-            let names: Vec<String> = self.request.follow.schemas.iter().map(|name| quote_unicode(name)).collect();
+            let names: Vec<String> = self
+                .request
+                .follow
+                .schemas
+                .iter()
+                .map(|name| quote_unicode(name))
+                .collect();
             format!(" AND s.name IN ({})", names.join(", "))
         };
         let listed = first_rows(query(
@@ -183,7 +220,10 @@ impl Session<'_> {
                     untracked.len(),
                     untracked.join(", ")
                 ),
-                try_command: Some(format!("ALTER TABLE {} ENABLE CHANGE_TRACKING;", untracked[0])),
+                try_command: Some(format!(
+                    "ALTER TABLE {} ENABLE CHANGE_TRACKING;",
+                    untracked[0]
+                )),
                 exit: Exit::DatabaseError,
                 code: "source_failed",
             });
@@ -191,7 +231,11 @@ impl Session<'_> {
         let mut tables = Vec::new();
         for row in &listed {
             let (schema, name) = (text(&row[0]), text(&row[1]));
-            let filter = format!("TABLE_SCHEMA = {} AND TABLE_NAME = {}", quote_unicode(&schema), quote_unicode(&name));
+            let filter = format!(
+                "TABLE_SCHEMA = {} AND TABLE_NAME = {}",
+                quote_unicode(&schema),
+                quote_unicode(&name)
+            );
             let columns = first_rows(query(
                 &mut source,
                 &format!(
@@ -224,22 +268,39 @@ impl Session<'_> {
             .iter()
             .map(|row| text(&row[0]))
             .collect();
-            tables.push(SourceTable { schema, name, columns, key });
+            tables.push(SourceTable {
+                schema,
+                name,
+                columns,
+                key,
+            });
         }
-        let mut version: i64 = first_rows(query(&mut source, "SELECT CAST(CHANGE_TRACKING_CURRENT_VERSION() AS nvarchar(max))")?)
-            .first()
-            .and_then(|row| row.first())
-            .map(text)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
+        let mut version: i64 = first_rows(query(
+            &mut source,
+            "SELECT CAST(CHANGE_TRACKING_CURRENT_VERSION() AS nvarchar(max))",
+        )?)
+        .first()
+        .and_then(|row| row.first())
+        .map(text)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
 
-        let db = self.open(Access::Write { create: self.request.create }, None)?;
+        let db = self.open(
+            Access::Write {
+                create: self.request.create,
+            },
+            None,
+        )?;
         let store = DatabaseStore(&db);
         let mut session = store.session(Dialect::SqlServer);
         let mut run = |sql: &str| -> Result<(), Failure> {
-            session
-                .execute(sql, &mut |_| {})
-                .map_err(|error| source_failed(format!("cannot write into the file: {} ({})", error.message(), sql.chars().take(200).collect::<String>())))
+            session.execute(sql, &mut |_| {}).map_err(|error| {
+                source_failed(format!(
+                    "cannot write into the file: {} ({})",
+                    error.message(),
+                    sql.chars().take(200).collect::<String>()
+                ))
+            })
         };
         let mut counts = FollowCounts::default();
         let mut schemas: Vec<&str> = tables.iter().map(|table| table.schema.as_str()).collect();
@@ -278,8 +339,15 @@ impl Session<'_> {
                 .iter()
                 .map(|column| text_expression(&quote_name(&column.name), &column.data_type))
                 .collect();
-            let rows = first_rows(query(&mut source, &format!("SELECT {} FROM {}", selected.join(", "), table.qualified()))?);
-            let names: Vec<String> = table.columns.iter().map(|column| quote_name(&column.name)).collect();
+            let rows = first_rows(query(
+                &mut source,
+                &format!("SELECT {} FROM {}", selected.join(", "), table.qualified()),
+            )?);
+            let names: Vec<String> = table
+                .columns
+                .iter()
+                .map(|column| quote_name(&column.name))
+                .collect();
             run("BEGIN TRANSACTION")?;
             for chunk in rows.chunks(ROWS_PER_INSERT) {
                 let values: Vec<String> = chunk
@@ -293,7 +361,12 @@ impl Session<'_> {
                         format!("({})", literals.join(", "))
                     })
                     .collect();
-                run(&format!("INSERT INTO {} ({}) VALUES {}", table.qualified(), names.join(", "), values.join(", ")))?;
+                run(&format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    table.qualified(),
+                    names.join(", "),
+                    values.join(", ")
+                ))?;
             }
             run("COMMIT TRANSACTION")?;
             counts.tables += 1;
@@ -318,19 +391,30 @@ impl Session<'_> {
                 .number("tables", counts.tables)
                 .number("rows", counts.rows_copied)
                 .number("elapsed_ms", started.elapsed().as_millis() as u64),
-            &format!("  copied          {} tables, {} rows; now following\n", counts.tables, counts.rows_copied),
+            &format!(
+                "  copied          {} tables, {} rows; now following\n",
+                counts.tables, counts.rows_copied
+            ),
         );
 
         let _ = stop_signals::watch();
-        let poll = Duration::from_secs(self.request.follow.poll_seconds.unwrap_or(DEFAULT_POLL_SECONDS));
+        let poll = Duration::from_secs(
+            self.request
+                .follow
+                .poll_seconds
+                .unwrap_or(DEFAULT_POLL_SECONDS),
+        );
         let mut polls = 0u64;
         let reason = loop {
-            let current: i64 = first_rows(query(&mut source, "SELECT CAST(CHANGE_TRACKING_CURRENT_VERSION() AS nvarchar(max))")?)
-                .first()
-                .and_then(|row| row.first())
-                .map(text)
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(version);
+            let current: i64 = first_rows(query(
+                &mut source,
+                "SELECT CAST(CHANGE_TRACKING_CURRENT_VERSION() AS nvarchar(max))",
+            )?)
+            .first()
+            .and_then(|row| row.first())
+            .map(text)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(version);
             let mut statements = Vec::new();
             for table in &tables {
                 let minimum: i64 = first_rows(query(
@@ -363,14 +447,23 @@ impl Session<'_> {
                     .key
                     .iter()
                     .map(|key| {
-                        let data_type = table.columns.iter().find(|column| &column.name == key).map_or("", |column| column.data_type.as_str());
+                        let data_type = table
+                            .columns
+                            .iter()
+                            .find(|column| &column.name == key)
+                            .map_or("", |column| column.data_type.as_str());
                         text_expression(&format!("CT.{}", quote_name(key)), data_type)
                     })
                     .collect();
                 let row_texts: Vec<String> = table
                     .columns
                     .iter()
-                    .map(|column| text_expression(&format!("T.{}", quote_name(&column.name)), &column.data_type))
+                    .map(|column| {
+                        text_expression(
+                            &format!("T.{}", quote_name(&column.name)),
+                            &column.data_type,
+                        )
+                    })
                     .collect();
                 let changes = first_rows(query(
                     &mut source,
@@ -394,11 +487,19 @@ impl Session<'_> {
                         .iter()
                         .zip(key_values)
                         .map(|(key, value)| {
-                            let data_type = table.columns.iter().find(|column| &column.name == key).map_or("", |column| column.data_type.as_str());
+                            let data_type = table
+                                .columns
+                                .iter()
+                                .find(|column| &column.name == key)
+                                .map_or("", |column| column.data_type.as_str());
                             format!("{} = {}", quote_name(key), literal(value, data_type))
                         })
                         .collect();
-                    statements.push(format!("DELETE FROM {} WHERE {}", table.qualified(), condition.join(" AND ")));
+                    statements.push(format!(
+                        "DELETE FROM {} WHERE {}",
+                        table.qualified(),
+                        condition.join(" AND ")
+                    ));
                     let operation = text(&change[0]);
                     if operation == "D" {
                         counts.deletes += 1;
@@ -409,8 +510,16 @@ impl Session<'_> {
                     }
                     if text(&change[1]) == "1" {
                         let row = &change[2 + table.key.len()..];
-                        let values: Vec<String> = row.iter().zip(&table.columns).map(|(value, column)| literal(value, &column.data_type)).collect();
-                        let names: Vec<String> = table.columns.iter().map(|column| quote_name(&column.name)).collect();
+                        let values: Vec<String> = row
+                            .iter()
+                            .zip(&table.columns)
+                            .map(|(value, column)| literal(value, &column.data_type))
+                            .collect();
+                        let names: Vec<String> = table
+                            .columns
+                            .iter()
+                            .map(|column| quote_name(&column.name))
+                            .collect();
                         statements.push(format!(
                             "INSERT INTO {} ({}) VALUES ({})",
                             table.qualified(),
@@ -497,20 +606,47 @@ mod tests {
 
     #[test]
     fn types_are_declared_as_sql_server_writes_them() {
-        assert_eq!(declared_type("nvarchar", Some("-1"), None, None, None), "nvarchar(max)");
-        assert_eq!(declared_type("varchar", Some("40"), None, None, None), "varchar(40)");
-        assert_eq!(declared_type("decimal", None, Some("10"), Some("2"), None), "decimal(10, 2)");
-        assert_eq!(declared_type("datetime2", None, None, None, Some("3")), "datetime2(3)");
-        assert_eq!(declared_type("int", None, Some("10"), Some("0"), None), "int");
+        assert_eq!(
+            declared_type("nvarchar", Some("-1"), None, None, None),
+            "nvarchar(max)"
+        );
+        assert_eq!(
+            declared_type("varchar", Some("40"), None, None, None),
+            "varchar(40)"
+        );
+        assert_eq!(
+            declared_type("decimal", None, Some("10"), Some("2"), None),
+            "decimal(10, 2)"
+        );
+        assert_eq!(
+            declared_type("datetime2", None, None, None, Some("3")),
+            "datetime2(3)"
+        );
+        assert_eq!(
+            declared_type("int", None, Some("10"), Some("0"), None),
+            "int"
+        );
     }
 
     #[test]
     fn values_travel_as_text_and_binary_converts_back() {
-        assert_eq!(text_expression("[b]", "varbinary"), "CONVERT(nvarchar(max), [b], 1)");
-        assert_eq!(text_expression("[d]", "datetime2"), "CONVERT(nvarchar(max), [d], 126)");
+        assert_eq!(
+            text_expression("[b]", "varbinary"),
+            "CONVERT(nvarchar(max), [b], 1)"
+        );
+        assert_eq!(
+            text_expression("[d]", "datetime2"),
+            "CONVERT(nvarchar(max), [d], 126)"
+        );
         assert_eq!(text_expression("[n]", "int"), "CAST([n] AS nvarchar(max))");
-        assert_eq!(literal(&Some("0x0A".to_owned()), "varbinary"), "CONVERT(varbinary(max), N'0x0A', 1)");
+        assert_eq!(
+            literal(&Some("0x0A".to_owned()), "varbinary"),
+            "CONVERT(varbinary(max), N'0x0A', 1)"
+        );
         assert_eq!(literal(&None, "int"), "NULL");
-        assert_eq!(literal(&Some("O'Neil".to_owned()), "nvarchar"), "N'O''Neil'");
+        assert_eq!(
+            literal(&Some("O'Neil".to_owned()), "nvarchar"),
+            "N'O''Neil'"
+        );
     }
 }

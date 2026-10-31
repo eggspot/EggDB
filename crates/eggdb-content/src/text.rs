@@ -6,9 +6,27 @@ struct Style<'s> {
     spaces: &'s [&'s str],
 }
 
-const WORD: Style<'static> = Style { paragraphs: &["w:p"], text_inside: &["w:t"], tabs: &["w:tab"], breaks: &["w:br", "w:cr"], spaces: &[] };
-const SHARED_STRINGS: Style<'static> = Style { paragraphs: &["si"], text_inside: &["t"], tabs: &[], breaks: &[], spaces: &[] };
-const SLIDES: Style<'static> = Style { paragraphs: &["a:p"], text_inside: &["a:t"], tabs: &[], breaks: &["a:br"], spaces: &[] };
+const WORD: Style<'static> = Style {
+    paragraphs: &["w:p"],
+    text_inside: &["w:t"],
+    tabs: &["w:tab"],
+    breaks: &["w:br", "w:cr"],
+    spaces: &[],
+};
+const SHARED_STRINGS: Style<'static> = Style {
+    paragraphs: &["si"],
+    text_inside: &["t"],
+    tabs: &[],
+    breaks: &[],
+    spaces: &[],
+};
+const SLIDES: Style<'static> = Style {
+    paragraphs: &["a:p"],
+    text_inside: &["a:t"],
+    tabs: &[],
+    breaks: &["a:br"],
+    spaces: &[],
+};
 const OPEN_DOCUMENT: Style<'static> = Style {
     paragraphs: &["text:p", "text:h"],
     text_inside: &["text:p", "text:h"],
@@ -78,7 +96,11 @@ fn xml_text(xml: &str, style: &Style<'_>) -> String {
             rest = cdata.get(end + 3..).unwrap_or_default();
             continue;
         }
-        let terminator = if tag_text.starts_with("<!--") { "-->" } else { ">" };
+        let terminator = if tag_text.starts_with("<!--") {
+            "-->"
+        } else {
+            ">"
+        };
         let Some(close) = tag_text.find(terminator) else {
             break;
         };
@@ -89,7 +111,11 @@ fn xml_text(xml: &str, style: &Style<'_>) -> String {
         }
         let closing = tag.starts_with('/');
         let self_closing = tag.ends_with('/');
-        let name = tag.trim_start_matches('/').split(|character: char| character.is_whitespace() || character == '/').next().unwrap_or_default();
+        let name = tag
+            .trim_start_matches('/')
+            .split(|character: char| character.is_whitespace() || character == '/')
+            .next()
+            .unwrap_or_default();
         if closing {
             if style.text_inside.contains(&name) {
                 inside = inside.saturating_sub(1);
@@ -121,12 +147,20 @@ fn xml_text(xml: &str, style: &Style<'_>) -> String {
 }
 
 fn slide_number(name: &str) -> Option<u32> {
-    name.strip_prefix("ppt/slides/slide")?.strip_suffix(".xml")?.parse().ok()
+    name.strip_prefix("ppt/slides/slide")?
+        .strip_suffix(".xml")?
+        .parse()
+        .ok()
 }
 
-pub(crate) fn extract(archive: &crate::ZipArchive<'_>, limit: usize) -> Result<String, crate::ContentError> {
+pub(crate) fn extract(
+    archive: &crate::ZipArchive<'_>,
+    limit: usize,
+) -> Result<String, crate::ContentError> {
     let read = |name: &str| -> Result<Option<String>, crate::ContentError> {
-        Ok(archive.read(name, limit)?.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        Ok(archive
+            .read(name, limit)?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
     };
     if let Some(document) = read("word/document.xml")? {
         return Ok(xml_text(&document, &WORD));
@@ -134,7 +168,11 @@ pub(crate) fn extract(archive: &crate::ZipArchive<'_>, limit: usize) -> Result<S
     if let Some(strings) = read("xl/sharedStrings.xml")? {
         return Ok(xml_text(&strings, &SHARED_STRINGS));
     }
-    let mut slides: Vec<(u32, &str)> = archive.entries.iter().filter_map(|entry| slide_number(&entry.name).map(|number| (number, entry.name.as_str()))).collect();
+    let mut slides: Vec<(u32, &str)> = archive
+        .entries
+        .iter()
+        .filter_map(|entry| slide_number(&entry.name).map(|number| (number, entry.name.as_str())))
+        .collect();
     if !slides.is_empty() {
         slides.sort_unstable();
         let mut texts = Vec::new();

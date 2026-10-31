@@ -56,7 +56,9 @@ pub struct ShardMap {
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The shard that holds `key` under `strategy`, or `None` when the key does not fit it (a time
@@ -67,14 +69,19 @@ pub fn route(strategy: &Strategy, key: &[u8]) -> Option<ShardId> {
             let shards = u64::from((*shards).max(1));
             Some(((fnv1a(key) as u128 * shards as u128) >> 64) as ShardId)
         }
-        Strategy::Range { bounds } => Some(bounds.partition_point(|bound| bound.as_slice() <= key) as ShardId),
+        Strategy::Range { bounds } => {
+            Some(bounds.partition_point(|bound| bound.as_slice() <= key) as ShardId)
+        }
         Strategy::Time { bucket_ms } => {
             let time = u64::from_be_bytes(key.get(..8)?.try_into().ok()?);
             Some(u32::try_from(time / (*bucket_ms).max(1)).unwrap_or(u32::MAX))
         }
         Strategy::Region { regions } => {
             let name = key.split(|byte| *byte == 0).next()?;
-            regions.iter().position(|region| region.as_bytes() == name).map(|at| at as ShardId)
+            regions
+                .iter()
+                .position(|region| region.as_bytes() == name)
+                .map(|at| at as ShardId)
         }
     }
 }
@@ -97,26 +104,44 @@ impl ShardMap {
                 _ => None,
             };
             let candidates: Vec<NodeId> = match &region {
-                Some(region) => placement.nodes.iter().filter(|(_, at)| *at == region).map(|(node, _)| *node).collect(),
+                Some(region) => placement
+                    .nodes
+                    .iter()
+                    .filter(|(_, at)| *at == region)
+                    .map(|(node, _)| *node)
+                    .collect(),
                 None => nodes.clone(),
             };
-            let owner = candidates.get(id as usize % candidates.len().max(1)).copied().unwrap_or(0);
+            let owner = candidates
+                .get(id as usize % candidates.len().max(1))
+                .copied()
+                .unwrap_or(0);
             shards.insert(id, Shard { id, owner, region });
         }
-        Self { strategy, shards, epoch: 1 }
+        Self {
+            strategy,
+            shards,
+            epoch: 1,
+        }
     }
 
     /// The node that owns `key`, with the epoch to send along.
     pub fn owner(&self, key: &[u8]) -> Option<(NodeId, u64)> {
         let shard = route(&self.strategy, key)?;
-        self.shards.get(&shard).map(|shard| (shard.owner, self.epoch))
+        self.shards
+            .get(&shard)
+            .map(|shard| (shard.owner, self.epoch))
     }
 
     /// Adds a time shard on `owner` when a new bucket appears; returns its id.
     pub fn add_time_shard(&mut self, key: &[u8], owner: NodeId) -> Option<ShardId> {
         let id = route(&self.strategy, key)?;
-        if !self.shards.contains_key(&id) {
-            self.shards.insert(id, Shard { id, owner, region: None });
+        if let std::collections::btree_map::Entry::Vacant(e) = self.shards.entry(id) {
+            e.insert(Shard {
+                id,
+                owner,
+                region: None,
+            });
             self.epoch += 1;
         }
         Some(id)
@@ -141,30 +166,53 @@ impl ShardMap {
 /// shards off nodes no longer in `placement`, and never moving a region-pinned shard out of its
 /// region; as `(shard, from, to)`.
 pub fn rebalance(map: &ShardMap, placement: &Placement) -> Vec<(ShardId, NodeId, NodeId)> {
-    let mut owner: BTreeMap<ShardId, NodeId> = map.shards.values().map(|shard| (shard.id, shard.owner)).collect();
+    let mut owner: BTreeMap<ShardId, NodeId> = map
+        .shards
+        .values()
+        .map(|shard| (shard.id, shard.owner))
+        .collect();
     let eligible = |shard: ShardId, node: NodeId| {
-        let region = map.shards.get(&shard).and_then(|shard| shard.region.as_ref());
-        placement.nodes.get(&node).is_some_and(|at| region.is_none_or(|region| at == region))
+        let region = map
+            .shards
+            .get(&shard)
+            .and_then(|shard| shard.region.as_ref());
+        placement
+            .nodes
+            .get(&node)
+            .is_some_and(|at| region.is_none_or(|region| at == region))
     };
     let mut moves = Vec::new();
     for _ in 0..(map.shards.len() * 2 + placement.nodes.len() + 1) {
-        let mut load: BTreeMap<NodeId, usize> = placement.nodes.keys().map(|node| (*node, 0)).collect();
+        let mut load: BTreeMap<NodeId, usize> =
+            placement.nodes.keys().map(|node| (*node, 0)).collect();
         for node in owner.values() {
             if let Some(count) = load.get_mut(node) {
                 *count += 1;
             }
         }
         let least = |shard: ShardId, load: &BTreeMap<NodeId, usize>| {
-            load.iter().filter(|(node, _)| eligible(shard, **node)).min_by_key(|(node, count)| (**count, **node)).map(|(node, count)| (*node, *count))
+            load.iter()
+                .filter(|(node, _)| eligible(shard, **node))
+                .min_by_key(|(node, count)| (**count, **node))
+                .map(|(node, count)| (*node, *count))
         };
-        let orphan = owner.iter().find(|(_, node)| !placement.nodes.contains_key(node)).map(|(shard, node)| (*shard, *node));
+        let orphan = owner
+            .iter()
+            .find(|(_, node)| !placement.nodes.contains_key(node))
+            .map(|(shard, node)| (*shard, *node));
         let chosen = match orphan {
             Some((shard, from)) => least(shard, &load).map(|(to, _)| (shard, from, to)),
             None => {
-                let mut by_load: Vec<(ShardId, NodeId, usize)> = owner.iter().map(|(shard, node)| (*shard, *node, load.get(node).copied().unwrap_or(0))).collect();
-                by_load.sort_by_key(|(shard, node, count)| (std::cmp::Reverse(*count), *node, *shard));
+                let mut by_load: Vec<(ShardId, NodeId, usize)> = owner
+                    .iter()
+                    .map(|(shard, node)| (*shard, *node, load.get(node).copied().unwrap_or(0)))
+                    .collect();
+                by_load
+                    .sort_by_key(|(shard, node, count)| (std::cmp::Reverse(*count), *node, *shard));
                 by_load.into_iter().find_map(|(shard, from, from_load)| {
-                    least(shard, &load).filter(|(_, to_load)| to_load + 1 < from_load).map(|(to, _)| (shard, from, to))
+                    least(shard, &load)
+                        .filter(|(_, to_load)| to_load + 1 < from_load)
+                        .map(|(to, _)| (shard, from, to))
                 })
             }
         };
@@ -207,7 +255,13 @@ impl ShardMove {
     /// Starts moving `shard` to `to`.
     pub fn start(map: &ShardMap, shard: ShardId, to: NodeId) -> Option<Self> {
         let from = map.shards.get(&shard)?.owner;
-        Some(Self { shard, from, to, step: MoveStep::Copying, lag: 0 })
+        Some(Self {
+            shard,
+            from,
+            to,
+            step: MoveStep::Copying,
+            lag: 0,
+        })
     }
 
     /// A write was served by the old owner during the move.

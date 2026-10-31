@@ -7,7 +7,13 @@ use crate::session::OutputColumn;
 use crate::tsql::{Declaration, Instruction, Program, TryBlock, chooses_dialect};
 
 const MAX_CONTROL_NESTING: usize = 128;
-const TRANSACTION_WORDS: [&str; 5] = ["tran", "transaction", "distributed", "dialog", "conversation"];
+const TRANSACTION_WORDS: [&str; 5] = [
+    "tran",
+    "transaction",
+    "distributed",
+    "dialog",
+    "conversation",
+];
 const UNSET: usize = usize::MAX;
 
 struct Loop {
@@ -181,7 +187,8 @@ impl Parser<'_> {
         let chooses = if self.literal_rows().is_none() {
             let statement = self.statement()?;
             if self.function_body
-                && let Some(refused) = crate::tsql::refused_in_function(&statement, &first_word, position)
+                && let Some(refused) =
+                    crate::tsql::refused_in_function(&statement, &first_word, position)
             {
                 return Err(refused);
             }
@@ -224,10 +231,8 @@ impl Parser<'_> {
     }
 
     fn throws_again(&self) -> bool {
-        matches!(
-            self.peek_kind_at(1),
-            TokenKind::Semicolon | TokenKind::End
-        ) || matches!(self.peek_kind_at(1), TokenKind::Word(word)
+        matches!(self.peek_kind_at(1), TokenKind::Semicolon | TokenKind::End)
+            || matches!(self.peek_kind_at(1), TokenKind::Word(word)
             if super::sqlserver::starts_statement(word) || super::sqlserver::ends_a_block(word))
     }
 
@@ -282,7 +287,10 @@ impl Parser<'_> {
         builder.push(Instruction::Jump { to: test });
         builder.point_here(test);
         builder.end_here(test);
-        for jump in enclosing.map(|enclosing| enclosing.breaks).unwrap_or_default() {
+        for jump in enclosing
+            .map(|enclosing| enclosing.breaks)
+            .unwrap_or_default()
+        {
             builder.point_here(jump);
         }
         Ok(())

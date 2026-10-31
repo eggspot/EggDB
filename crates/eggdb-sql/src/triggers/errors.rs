@@ -69,7 +69,11 @@ pub(super) fn not_a_base_table(table: &str, dialect: Dialect) -> SqlError {
     }
 }
 
-pub(super) fn view_needs_instead_of(table: &str, timing: TriggerTiming, dialect: Dialect) -> SqlError {
+pub(super) fn view_needs_instead_of(
+    table: &str,
+    timing: TriggerTiming,
+    dialect: Dialect,
+) -> SqlError {
     let shown = base_name(table);
     match dialect {
         Dialect::Sqlite => sqlite(format!(
@@ -85,29 +89,39 @@ pub(super) fn view_needs_instead_of(table: &str, timing: TriggerTiming, dialect:
             "cannot create this trigger type on this type of view",
         )
         .with_oracle_code(25001),
-        _ => SqlError::new(SqlState::WRONG_OBJECT_TYPE, format!("\"{shown}\" is a view"))
-            .with_detail("Views cannot have row-level BEFORE or AFTER triggers."),
+        _ => SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            format!("\"{shown}\" is a view"),
+        )
+        .with_detail("Views cannot have row-level BEFORE or AFTER triggers."),
     }
 }
 
 pub(super) fn table_cannot_be_instead_of(table: &str, dialect: Dialect) -> SqlError {
     let shown = base_name(table);
     match dialect {
-        Dialect::Sqlite => sqlite(format!("cannot create INSTEAD OF trigger on table: {shown}")),
+        Dialect::Sqlite => sqlite(format!(
+            "cannot create INSTEAD OF trigger on table: {shown}"
+        )),
         Dialect::Oracle => SqlError::new(
             SqlState::WRONG_OBJECT_TYPE,
             "cannot create INSTEAD OF triggers on tables",
         )
         .with_oracle_code(25002),
-        _ => SqlError::new(SqlState::WRONG_OBJECT_TYPE, format!("\"{shown}\" is a table"))
-            .with_detail("Tables cannot have INSTEAD OF triggers."),
+        _ => SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            format!("\"{shown}\" is a table"),
+        )
+        .with_detail("Tables cannot have INSTEAD OF triggers."),
     }
 }
 
 pub(super) fn missing_referenced_trigger(name: &str) -> SqlError {
     mysql(
         3011,
-        format!("Referenced trigger '{name}' for the given action time and event type does not exist."),
+        format!(
+            "Referenced trigger '{name}' for the given action time and event type does not exist."
+        ),
     )
 }
 
@@ -190,14 +204,14 @@ pub(super) fn too_deep(dialect: Dialect) -> SqlError {
                 super::MAX_TRIGGER_DEPTH
             ),
         ),
-        Dialect::PostgreSql | Dialect::Oracle => {
-            SqlError::new(SqlState::STATEMENT_TOO_COMPLEX, "stack depth limit exceeded").with_hint(
-                format!(
-                    "Triggers fired by triggers nest at most {} deep in EggDB.",
-                    super::MAX_TRIGGER_DEPTH
-                ),
-            )
-        }
+        Dialect::PostgreSql | Dialect::Oracle => SqlError::new(
+            SqlState::STATEMENT_TOO_COMPLEX,
+            "stack depth limit exceeded",
+        )
+        .with_hint(format!(
+            "Triggers fired by triggers nest at most {} deep in EggDB.",
+            super::MAX_TRIGGER_DEPTH
+        )),
     }
 }
 
@@ -243,7 +257,12 @@ pub(super) fn not_in_trigger(what: &str, dialect: Dialect) -> SqlError {
     }
 }
 
-pub(super) fn missing_row(qualifier: &str, column: &str, dialect: Dialect, event: &str) -> SqlError {
+pub(super) fn missing_row(
+    qualifier: &str,
+    column: &str,
+    dialect: Dialect,
+    event: &str,
+) -> SqlError {
     match dialect {
         Dialect::MySql => mysql(
             1363,
@@ -260,7 +279,10 @@ pub(super) fn missing_column(qualifier: &str, column: &str, dialect: Dialect) ->
     match dialect {
         Dialect::MySql => SqlError::new(
             SqlState::MYSQL_COLUMN_NOT_FOUND,
-            format!("Unknown column '{column}' in '{}'", qualifier.to_ascii_uppercase()),
+            format!(
+                "Unknown column '{column}' in '{}'",
+                qualifier.to_ascii_uppercase()
+            ),
         )
         .with_vendor_code(1054),
         _ => sqlite(format!("no such column: {qualifier}.{column}")),
@@ -268,7 +290,10 @@ pub(super) fn missing_column(qualifier: &str, column: &str, dialect: Dialect) ->
 }
 
 pub(super) fn old_row_read_only(event: &str) -> SqlError {
-    mysql(1362, format!("Updating of OLD row is not allowed in {event} trigger"))
+    mysql(
+        1362,
+        format!("Updating of OLD row is not allowed in {event} trigger"),
+    )
 }
 
 pub(super) fn new_row_after() -> SqlError {

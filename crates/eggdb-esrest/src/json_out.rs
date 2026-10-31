@@ -17,7 +17,9 @@ pub(crate) fn escaped(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            control if (control as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", control as u32))
+            }
             other => out.push(other),
         }
     }
@@ -119,7 +121,10 @@ pub(crate) fn written(node: &Node) -> String {
         Json::Boolean(value) => value.to_string(),
         Json::Number(text) => text.clone(),
         Json::String(text) => escaped(text),
-        Json::Array(items) => format!("[{}]", items.iter().map(written).collect::<Vec<_>>().join(",")),
+        Json::Array(items) => format!(
+            "[{}]",
+            items.iter().map(written).collect::<Vec<_>>().join(",")
+        ),
         Json::Object(members) => format!(
             "{{{}}}",
             members

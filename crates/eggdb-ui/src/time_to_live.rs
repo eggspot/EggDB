@@ -39,11 +39,16 @@ pub fn parse_time_to_live(text: &str) -> Result<Duration, TimeToLiveError> {
         }
         let digits = &text[digits_start..position];
         let rest = &text[position..];
-        let Some(rank) = UNITS.iter().enumerate().rev().find_map(|(rank, (unit, _))| {
-            rest.starts_with(unit)
-                .then_some(rank)
-                .filter(|_| !(*unit == "m" && rest.starts_with("ms")))
-        }) else {
+        let Some(rank) = UNITS
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(rank, (unit, _))| {
+                rest.starts_with(unit)
+                    .then_some(rank)
+                    .filter(|_| !(*unit == "m" && rest.starts_with("ms")))
+            })
+        else {
             return Err(TimeToLiveError::NotATime);
         };
         if digits.is_empty() || smallest_used.is_some_and(|used| rank <= used) {
@@ -133,10 +138,28 @@ mod tests {
     #[test]
     fn bare_numbers_spaces_decimals_and_repeats_are_not_times() {
         for text in [
-            "", "30", "s", "1.5s", "1 s", " 1s", "1s ", "30m5h", "1s1s", "1w", "1y", "5M", "-1s",
-            "1sms", "99999999999999999999d", "1msm",
+            "",
+            "30",
+            "s",
+            "1.5s",
+            "1 s",
+            " 1s",
+            "1s ",
+            "30m5h",
+            "1s1s",
+            "1w",
+            "1y",
+            "5M",
+            "-1s",
+            "1sms",
+            "99999999999999999999d",
+            "1msm",
         ] {
-            assert_eq!(parse_time_to_live(text), Err(TimeToLiveError::NotATime), "{text}");
+            assert_eq!(
+                parse_time_to_live(text),
+                Err(TimeToLiveError::NotATime),
+                "{text}"
+            );
         }
         assert_eq!(parse_time_to_live("0s"), Err(TimeToLiveError::Zero));
         assert_eq!(parse_time_to_live("0h0m"), Err(TimeToLiveError::Zero));
@@ -180,7 +203,10 @@ mod tests {
             let printed = format_time_left(left);
             let read = parse_time_to_live(&printed).unwrap();
             assert!(read <= left.max(Duration::from_millis(1)), "{printed}");
-            assert!(left.saturating_sub(read) < Duration::from_secs(1), "{printed}");
+            assert!(
+                left.saturating_sub(read) < Duration::from_secs(1),
+                "{printed}"
+            );
         }
     }
 

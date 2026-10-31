@@ -34,23 +34,55 @@ fn invalid(message: impl Into<String>) -> SqlError {
 fn ff1(name: &str, values: &[Value]) -> SqlResult<Value> {
     let (text, key, tweak, radix) = match values {
         [Value::Text(text), Value::Bytea(key), Value::Bytea(tweak)] => (text, key, tweak, 10),
-        [Value::Text(text), Value::Bytea(key), Value::Bytea(tweak), Value::Integer(radix)] => (text, key, tweak, *radix),
-        _ => return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes (text, bytea key, bytea tweak [, integer radix])"))),
+        [
+            Value::Text(text),
+            Value::Bytea(key),
+            Value::Bytea(tweak),
+            Value::Integer(radix),
+        ] => (text, key, tweak, *radix),
+        _ => {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("{name} takes (text, bytea key, bytea tweak [, integer radix])"),
+            ));
+        }
     };
-    let radix = u32::try_from(radix).ok().filter(|radix| (2..=36).contains(radix)).ok_or_else(|| invalid(format!("{name} takes a radix from 2 to 36, not {radix}")))?;
+    let radix = u32::try_from(radix)
+        .ok()
+        .filter(|radix| (2..=36).contains(radix))
+        .ok_or_else(|| invalid(format!("{name} takes a radix from 2 to 36, not {radix}")))?;
     let alphabet = &ALPHABET[..radix as usize];
     let numerals = text
         .chars()
-        .map(|character| alphabet.find(character).and_then(|at| u32::try_from(at).ok()))
+        .map(|character| {
+            alphabet
+                .find(character)
+                .and_then(|at| u32::try_from(at).ok())
+        })
         .collect::<Option<Vec<u32>>>()
-        .ok_or_else(|| invalid(format!("{name}'s value may only use the characters {alphabet}")))?;
-    let cipher = eggdb_crypto::Ff1::new(key, radix).map_err(|_| invalid(format!("{name} takes an AES key of 16, 24 or 32 bytes")))?;
-    let result = if name == "ff1_encrypt" { cipher.encrypt(&numerals, tweak) } else { cipher.decrypt(&numerals, tweak) };
+        .ok_or_else(|| {
+            invalid(format!(
+                "{name}'s value may only use the characters {alphabet}"
+            ))
+        })?;
+    let cipher = eggdb_crypto::Ff1::new(key, radix)
+        .map_err(|_| invalid(format!("{name} takes an AES key of 16, 24 or 32 bytes")))?;
+    let result = if name == "ff1_encrypt" {
+        cipher.encrypt(&numerals, tweak)
+    } else {
+        cipher.decrypt(&numerals, tweak)
+    };
     let numerals = result.map_err(|error| match error {
         eggdb_crypto::Ff1Error::Length => invalid(format!("{name} needs at least a million possible values ({radix}^length) and halves of at most 120 bits")),
         _ => invalid(format!("{name} cannot use this value or tweak")),
     })?;
-    Ok(Value::Text(numerals.iter().filter_map(|numeral| ALPHABET.as_bytes().get(*numeral as usize)).map(|byte| char::from(*byte)).collect()))
+    Ok(Value::Text(
+        numerals
+            .iter()
+            .filter_map(|numeral| ALPHABET.as_bytes().get(*numeral as usize))
+            .map(|byte| char::from(*byte))
+            .collect(),
+    ))
 }
 
 fn number(value: &Value) -> Option<f64> {
@@ -65,13 +97,21 @@ fn number(value: &Value) -> Option<f64> {
 
 fn laplace_noise(values: &[Value]) -> SqlResult<Value> {
     let [sensitivity, epsilon] = values else {
-        return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "laplace_noise takes (sensitivity, epsilon)"));
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            "laplace_noise takes (sensitivity, epsilon)",
+        ));
     };
     let (Some(sensitivity), Some(epsilon)) = (number(sensitivity), number(epsilon)) else {
-        return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "laplace_noise takes two numbers"));
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            "laplace_noise takes two numbers",
+        ));
     };
     if !(sensitivity.is_finite() && sensitivity > 0.0 && epsilon.is_finite() && epsilon > 0.0) {
-        return Err(invalid("laplace_noise needs a positive sensitivity and a positive epsilon"));
+        return Err(invalid(
+            "laplace_noise needs a positive sensitivity and a positive epsilon",
+        ));
     }
     let mut bytes = [0u8; 8];
     let uniform = loop {
@@ -82,7 +122,9 @@ fn laplace_noise(values: &[Value]) -> SqlResult<Value> {
         }
     };
     let scale = sensitivity / epsilon;
-    Ok(Value::Double(-scale * uniform.signum() * (1.0 - 2.0 * uniform.abs()).ln()))
+    Ok(Value::Double(
+        -scale * uniform.signum() * (1.0 - 2.0 * uniform.abs()).ln(),
+    ))
 }
 
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
@@ -99,7 +141,11 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 }
 
 pub(crate) fn result_type(name: &str) -> crate::types::SqlType {
-    if name == "laplace_noise" { crate::types::SqlType::Double } else { crate::types::SqlType::Text }
+    if name == "laplace_noise" {
+        crate::types::SqlType::Double
+    } else {
+        crate::types::SqlType::Text
+    }
 }
 
 #[cfg(test)]
@@ -159,6 +205,12 @@ mod tests {
         }
         assert_eq!(run(&mut session, "SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY['zip', 'age_band']) AS k").unwrap(), "k\n2\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY['zip', 'diagnosis']) AS k").unwrap(), "k\n1\nSELECT 1");
-        assert!(run(&mut session, "SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY[]::text[])").is_err());
+        assert!(
+            run(
+                &mut session,
+                "SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY[]::text[])"
+            )
+            .is_err()
+        );
     }
 }

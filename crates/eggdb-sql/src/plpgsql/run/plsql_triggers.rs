@@ -70,10 +70,9 @@ impl Run<'_> {
             return Ok(PlsqlTriggerEnd::ConditionFalse);
         }
         self.program(call.program)?;
-        let new = self
-            .frame
-            .index_of("new")
-            .map_or(Value::Null, |index| self.frame.variables[index].value.clone());
+        let new = self.frame.index_of("new").map_or(Value::Null, |index| {
+            self.frame.variables[index].value.clone()
+        });
         Ok(PlsqlTriggerEnd::Finished { new })
     }
 

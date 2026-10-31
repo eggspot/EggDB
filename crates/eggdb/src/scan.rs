@@ -319,7 +319,12 @@ pub struct Scan<'t> {
 impl<'t> Scan<'t> {
     pub(crate) fn between(reader: Reader<'t>, tree: Option<BTree>, range: &impl KeyRange) -> Self {
         let (start, end) = range.bounds();
-        Self::new(reader, tree, outside_collections(owned(start), owned(end)), 0)
+        Self::new(
+            reader,
+            tree,
+            outside_collections(owned(start), owned(end)),
+            0,
+        )
     }
 
     pub(crate) fn prefix(reader: Reader<'t>, tree: Option<BTree>, prefix: &[u8]) -> Self {

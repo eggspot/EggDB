@@ -226,10 +226,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
 /// one `bigint`, or two `integer`s.
 pub(crate) fn argument_types(name: &str, count: usize) -> Option<&'static [Option<SqlType>]> {
     const SINGLE: [Option<SqlType>; 1] = [Some(SqlType::BigInt)];
-    const PAIR: [Option<SqlType>; 2] = [
-        Some(SqlType::Integer),
-        Some(SqlType::Integer),
-    ];
+    const PAIR: [Option<SqlType>; 2] = [Some(SqlType::Integer), Some(SqlType::Integer)];
     request_of(name)?;
     match count {
         1 => Some(&SINGLE),
@@ -260,8 +257,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             key,
         };
         match request {
-            Request::Wait => wait(name, owner.owner, mode, lasts).map(|()| Value::Text(String::new())),
-            Request::Try => Ok(Value::Boolean(take(&mut held(), name, owner.owner, mode, lasts))),
+            Request::Wait => {
+                wait(name, owner.owner, mode, lasts).map(|()| Value::Text(String::new()))
+            }
+            Request::Try => Ok(Value::Boolean(take(
+                &mut held(),
+                name,
+                owner.owner,
+                mode,
+                lasts,
+            ))),
             Request::Unlock => Ok(Value::Boolean(unlock(name, owner.owner, mode))),
         }
     }))
@@ -369,7 +374,10 @@ mod tests {
         {
             let _entered = enter(&second, false);
             assert_eq!(call("pg_try_advisory_lock", &key), Value::Boolean(false));
-            assert_eq!(call("pg_try_advisory_lock_shared", &key), Value::Boolean(false));
+            assert_eq!(
+                call("pg_try_advisory_lock_shared", &key),
+                Value::Boolean(false)
+            );
             assert_eq!(call("pg_advisory_unlock", &key), Value::Boolean(false));
         }
         {
@@ -396,13 +404,22 @@ mod tests {
         let key = [Value::Integer(1), Value::Integer(2)];
         {
             let _entered = enter(&first, false);
-            assert_eq!(call("pg_try_advisory_lock_shared", &key), Value::Boolean(true));
+            assert_eq!(
+                call("pg_try_advisory_lock_shared", &key),
+                Value::Boolean(true)
+            );
         }
         {
             let _entered = enter(&second, false);
-            assert_eq!(call("pg_try_advisory_lock_shared", &key), Value::Boolean(true));
+            assert_eq!(
+                call("pg_try_advisory_lock_shared", &key),
+                Value::Boolean(true)
+            );
             assert_eq!(call("pg_try_advisory_lock", &key), Value::Boolean(false));
-            assert_eq!(call("pg_advisory_unlock_all", &[]), Value::Text(String::new()));
+            assert_eq!(
+                call("pg_advisory_unlock_all", &[]),
+                Value::Text(String::new())
+            );
         }
         let _entered = enter(&first, false);
         assert_eq!(call("pg_try_advisory_lock", &key), Value::Boolean(true));
@@ -415,19 +432,31 @@ mod tests {
         let key = [Value::BigInt(5)];
         {
             let _entered = enter(&first, false);
-            assert_eq!(call("pg_try_advisory_xact_lock", &key), Value::Boolean(true));
+            assert_eq!(
+                call("pg_try_advisory_xact_lock", &key),
+                Value::Boolean(true)
+            );
         }
         {
             let _entered = enter(&second, true);
-            assert_eq!(call("pg_try_advisory_xact_lock", &key), Value::Boolean(true));
+            assert_eq!(
+                call("pg_try_advisory_xact_lock", &key),
+                Value::Boolean(true)
+            );
         }
         {
             let _entered = enter(&first, false);
-            assert_eq!(call("pg_try_advisory_xact_lock", &key), Value::Boolean(false));
+            assert_eq!(
+                call("pg_try_advisory_xact_lock", &key),
+                Value::Boolean(false)
+            );
         }
         second.release_transaction_locks();
         let _entered = enter(&first, false);
-        assert_eq!(call("pg_try_advisory_xact_lock", &key), Value::Boolean(true));
+        assert_eq!(
+            call("pg_try_advisory_xact_lock", &key),
+            Value::Boolean(true)
+        );
     }
 
     #[test]

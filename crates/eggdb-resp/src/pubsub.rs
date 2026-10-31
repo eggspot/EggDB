@@ -43,7 +43,9 @@ fn frame(reply: &Reply, resp3: bool) -> Vec<u8> {
 
 impl Hub {
     fn locked(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Subscriber>> {
-        self.subscribers.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Publishes `message` on `channel`; returns how many subscriptions received it.
@@ -53,9 +55,17 @@ impl Hub {
         for subscriber in subscribers.values() {
             let mut frames = Vec::new();
             if subscriber.channels.contains(channel) {
-                frames.push(Reply::Push(vec![Reply::bulk("message"), Reply::bulk(channel.to_vec()), Reply::bulk(message.to_vec())]));
+                frames.push(Reply::Push(vec![
+                    Reply::bulk("message"),
+                    Reply::bulk(channel.to_vec()),
+                    Reply::bulk(message.to_vec()),
+                ]));
             }
-            for pattern in subscriber.patterns.iter().filter(|pattern| glob(pattern, channel)) {
+            for pattern in subscriber
+                .patterns
+                .iter()
+                .filter(|pattern| glob(pattern, channel))
+            {
                 frames.push(Reply::Push(vec![
                     Reply::bulk("pmessage"),
                     Reply::bulk(pattern.clone()),
@@ -64,11 +74,21 @@ impl Hub {
                 ]));
             }
             for reply in frames {
-                if subscriber.pending.load(std::sync::atomic::Ordering::Acquire) >= MAX_PENDING_PER_SUBSCRIBER {
+                if subscriber
+                    .pending
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    >= MAX_PENDING_PER_SUBSCRIBER
+                {
                     continue;
                 }
-                if subscriber.sender.send(frame(&reply, subscriber.resp3)).is_ok() {
-                    subscriber.pending.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                if subscriber
+                    .sender
+                    .send(frame(&reply, subscriber.resp3))
+                    .is_ok()
+                {
+                    subscriber
+                        .pending
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     delivered += 1;
                 }
             }
@@ -77,7 +97,13 @@ impl Hub {
     }
 
     /// Registers connection `id`'s outbox, the first time it subscribes.
-    pub fn attach(&self, id: u64, resp3: bool, sender: Sender<Vec<u8>>, pending: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    pub fn attach(
+        &self,
+        id: u64,
+        resp3: bool,
+        sender: Sender<Vec<u8>>,
+        pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         self.locked().entry(id).or_insert(Subscriber {
             channels: BTreeSet::new(),
             patterns: BTreeSet::new(),
@@ -122,19 +148,27 @@ impl Hub {
                 set.remove(name);
             }
             let held = other + set.len();
-            replies.push(Reply::Push(vec![Reply::bulk(word), Reply::bulk(name.clone()), Reply::Integer(held as i64)]));
+            replies.push(Reply::Push(vec![
+                Reply::bulk(word),
+                Reply::bulk(name.clone()),
+                Reply::Integer(held as i64),
+            ]));
         }
         if names.is_empty() {
-            replies.push(Reply::Push(vec![Reply::bulk(word), Reply::null(), Reply::Integer(other as i64)]));
+            replies.push(Reply::Push(vec![
+                Reply::bulk(word),
+                Reply::null(),
+                Reply::Integer(other as i64),
+            ]));
         }
         replies
     }
 
     /// How many channels and patterns connection `id` holds.
     pub fn held(&self, id: u64) -> usize {
-        self.locked()
-            .get(&id)
-            .map_or(0, |subscriber| subscriber.channels.len() + subscriber.patterns.len())
+        self.locked().get(&id).map_or(0, |subscriber| {
+            subscriber.channels.len() + subscriber.patterns.len()
+        })
     }
 
     /// Forgets connection `id`.
@@ -154,12 +188,24 @@ mod tests {
         let hub = Hub::default();
         let (sender, receiver) = std::sync::mpsc::channel();
         hub.attach(1, false, sender, Arc::new(AtomicUsize::new(0)));
-        assert_eq!(hub.change(1, Kind::Channel, true, &[b"news".to_vec()]).len(), 1);
+        assert_eq!(
+            hub.change(1, Kind::Channel, true, &[b"news".to_vec()])
+                .len(),
+            1
+        );
         hub.change(1, Kind::Pattern, true, &[b"n*".to_vec()]);
         assert_eq!(hub.held(1), 2);
         assert_eq!(hub.publish(b"news", b"hi"), 2);
-        assert_eq!(receiver.recv().unwrap(), b"*3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$2\r\nhi\r\n");
-        assert!(receiver.recv().unwrap().starts_with(b"*4\r\n$8\r\npmessage"));
+        assert_eq!(
+            receiver.recv().unwrap(),
+            b"*3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$2\r\nhi\r\n"
+        );
+        assert!(
+            receiver
+                .recv()
+                .unwrap()
+                .starts_with(b"*4\r\n$8\r\npmessage")
+        );
         assert_eq!(hub.publish(b"other", b"x"), 0);
         hub.change(1, Kind::Channel, false, &[]);
         assert_eq!(hub.held(1), 1);

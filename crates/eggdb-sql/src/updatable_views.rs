@@ -98,7 +98,9 @@ fn view_level(
     )?;
     let refused = |detail: &str| not_automatically_updatable(&view.name, verb, detail);
     if !query.with.is_empty() {
-        return Err(refused("Views containing WITH are not automatically updatable."));
+        return Err(refused(
+            "Views containing WITH are not automatically updatable.",
+        ));
     }
     if query.limit.is_some() || query.offset.is_some() {
         return Err(refused(
@@ -111,13 +113,19 @@ fn view_level(
         ));
     };
     if select.distinct {
-        return Err(refused("Views containing DISTINCT are not automatically updatable."));
+        return Err(refused(
+            "Views containing DISTINCT are not automatically updatable.",
+        ));
     }
     if !select.group_by.is_empty() {
-        return Err(refused("Views containing GROUP BY are not automatically updatable."));
+        return Err(refused(
+            "Views containing GROUP BY are not automatically updatable.",
+        ));
     }
     if select.having.is_some() {
-        return Err(refused("Views containing HAVING are not automatically updatable."));
+        return Err(refused(
+            "Views containing HAVING are not automatically updatable.",
+        ));
     }
     if select.limit.is_some() || select.offset.is_some() || select.source_row_limit.is_some() {
         return Err(refused(
@@ -134,7 +142,8 @@ fn view_level(
             "Views that return window functions or set-returning functions are not automatically updatable.",
         ));
     }
-    let single = "Views that do not select from a single table or view are not automatically updatable.";
+    let single =
+        "Views that do not select from a single table or view are not automatically updatable.";
     let Some(from) = &select.from else {
         return Err(refused(single));
     };
@@ -213,9 +222,7 @@ fn chain(
         if levels.len() >= MOST_VIEW_LEVELS {
             return Err(SqlError::new(
                 SqlState::STATEMENT_TOO_COMPLEX,
-                format!(
-                    "a statement can change a table through at most {MOST_VIEW_LEVELS} views"
-                ),
+                format!("a statement can change a table through at most {MOST_VIEW_LEVELS} views"),
             )
             .at(target.name.position));
         }
@@ -230,7 +237,9 @@ fn chain(
 fn updatable_column(expr: &Expr, base_label: &str) -> Option<String> {
     match &expr.kind {
         ExprKind::Column { qualifier, name }
-            if qualifier.as_deref().is_none_or(|qualifier| qualifier == base_label) =>
+            if qualifier
+                .as_deref()
+                .is_none_or(|qualifier| qualifier == base_label) =>
         {
             Some(name.clone())
         }
@@ -366,7 +375,10 @@ fn mapped_returning(
             SelectItem::Wildcard {
                 qualifier,
                 position,
-            } if qualifier.as_deref().is_none_or(|qualifier| qualifier == level.label) => {
+            } if qualifier
+                .as_deref()
+                .is_none_or(|qualifier| qualifier == level.label) =>
+            {
                 for (name, base) in &level.columns {
                     let mut expr = base.clone();
                     expr.position = position;
@@ -426,10 +438,12 @@ impl Checks {
 
 fn with_check(returning: &mut Option<Vec<SelectItem>>, check: Option<&Expr>) {
     if let Some(check) = check {
-        returning.get_or_insert_with(Vec::new).push(SelectItem::Expr {
-            expr: check.clone(),
-            alias: Some(CHECK_LABEL.to_owned()),
-        });
+        returning
+            .get_or_insert_with(Vec::new)
+            .push(SelectItem::Expr {
+                expr: check.clone(),
+                alias: Some(CHECK_LABEL.to_owned()),
+            });
     }
 }
 
@@ -446,7 +460,10 @@ fn checked(
         if row.pop() != Some(Value::Boolean(true)) {
             return Err(SqlError::new(
                 SqlState::WITH_CHECK_OPTION_VIOLATION,
-                format!("new row violates check option for view \"{}\"", display(view)),
+                format!(
+                    "new row violates check option for view \"{}\"",
+                    display(view)
+                ),
             ));
         }
     }
@@ -512,7 +529,12 @@ pub(crate) fn update(
     let check = checks.condition();
     with_check(&mut statement.returning, check.as_ref());
     let result = execute::update(writer, tables, &statement)?;
-    checked(result, check.is_some(), user_returning, &first_view(&levels))
+    checked(
+        result,
+        check.is_some(),
+        user_returning,
+        &first_view(&levels),
+    )
 }
 
 fn listed_width(source: &InsertSource) -> Option<usize> {
@@ -580,7 +602,12 @@ pub(crate) fn insert(
     let check = checks.condition();
     with_check(&mut statement.returning, check.as_ref());
     let result = execute::insert(writer, tables, &statement)?;
-    checked(result, check.is_some(), user_returning, &first_view(&levels))
+    checked(
+        result,
+        check.is_some(),
+        user_returning,
+        &first_view(&levels),
+    )
 }
 
 pub(crate) fn delete(

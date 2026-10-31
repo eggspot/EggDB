@@ -246,7 +246,11 @@ impl Source for MapSource {
                 Err(SourceError::new(ErrorKind::Other, "no such key"))
             }
             Change::Increment { key, by } => {
-                let current = self.space().get(key).cloned().unwrap_or_else(|| b"0".to_vec());
+                let current = self
+                    .space()
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| b"0".to_vec());
                 let counted = std::str::from_utf8(&current)
                     .ok()
                     .and_then(|text| text.parse::<i64>().ok())
@@ -1772,7 +1776,10 @@ fn with_collections() -> MapSource {
     }
     let users = source.collections.entry("users".to_owned()).or_default();
     for n in 1..=3 {
-        users.insert(format!("s:{n}").into_bytes(), format!("{{\"user\":{n}}}").into_bytes());
+        users.insert(
+            format!("s:{n}").into_bytes(),
+            format!("{{\"user\":{n}}}").into_bytes(),
+        );
     }
     source
 }
@@ -1807,7 +1814,10 @@ fn scenario_34_choosing_a_collection_shows_its_keys() {
     let picker = s.screen();
     assert!(picker.contains("> default key space"), "{picker}");
     assert!(picker.contains("  cache"), "{picker}");
-    assert!(picker.contains("Delete one after quitting, with"), "{picker}");
+    assert!(
+        picker.contains("Delete one after quitting, with"),
+        "{picker}"
+    );
     s.press(&["End", "Enter"]);
     assert!(s.row(1).starts_with(" Keys in users"), "{}", s.row(1));
     assert!(!s.row(1).contains("/user:"), "{}", s.row(1));
@@ -1860,7 +1870,11 @@ fn scenario_35_the_picker_adds_a_collection_and_checks_the_name() {
 #[test]
 fn scenario_36_the_sidebar_appears_from_110_columns_with_collections() {
     let plain = Scenario::new(120, 40);
-    assert!(!plain.screen().contains("Collections"), "{}", plain.screen());
+    assert!(
+        !plain.screen().contains("Collections"),
+        "{}",
+        plain.screen()
+    );
     let mut s = Scenario::with(120, 40, Capabilities::FULL, with_collections());
     assert!(s.row(1).starts_with(" Collections"), "{}", s.row(1));
     assert!(s.row(2).contains(" > default key space"), "{}", s.row(2));
@@ -1882,13 +1896,21 @@ fn scenario_38_changes_in_a_collection_stay_in_it() {
     s.press(&["Enter"]);
     s.type_str("nine");
     s.press(&["Enter"]);
-    assert!(s.screen().contains("In     collection users"), "{}", s.screen());
+    assert!(
+        s.screen().contains("In     collection users"),
+        "{}",
+        s.screen()
+    );
     s.press(&["Enter"]);
     let users = &s.ui.source().collections["users"];
     assert_eq!(users.get(b"s:9".as_slice()), Some(&b"nine".to_vec()));
     assert_eq!(s.entries(), &fixture().entries);
     s.press(&["Home", "d"]);
-    assert!(s.screen().contains("In     collection users"), "{}", s.screen());
+    assert!(
+        s.screen().contains("In     collection users"),
+        "{}",
+        s.screen()
+    );
     s.press(&["d"]);
     assert!(!s.ui.source().collections["users"].contains_key(b"s:1".as_slice()));
     assert_eq!(s.entries(), &fixture().entries);
@@ -1907,7 +1929,10 @@ fn scenario_39_the_picker_fits_a_60_column_terminal() {
         s.press(&["Esc", "?"]);
         s.screen()
     };
-    assert!(help.contains("Collections C  pick the collection shown"), "{help}");
+    assert!(
+        help.contains("Collections C  pick the collection shown"),
+        "{help}"
+    );
 }
 
 fn select_user_1(s: &mut Scenario) {
@@ -1958,7 +1983,11 @@ fn scenario_41_a_bad_time_keeps_the_prompt_and_esc_changes_nothing() {
         s.row(22),
         " Not a time: '30'; use 30s, 5m, 1h30m, 7d or 1500ms"
     );
-    assert!(s.row(1).starts_with(" Expire user:1 in: 30"), "{}", s.row(1));
+    assert!(
+        s.row(1).starts_with(" Expire user:1 in: 30"),
+        "{}",
+        s.row(1)
+    );
     s.press(&["Backspace", "Backspace"]);
     s.type_str("0s");
     s.press(&["Enter"]);
@@ -2045,11 +2074,14 @@ fn scenario_45_a_time_to_live_in_a_collection_names_the_collection() {
     s.press(&["t"]);
     s.type_str("5m");
     s.press(&["Enter"]);
-    assert!(s.screen().contains("In     collection users"), "{}", s.screen());
+    assert!(
+        s.screen().contains("In     collection users"),
+        "{}",
+        s.screen()
+    );
     s.press(&["Enter"]);
     assert_eq!(
-        s.ui
-            .source()
+        s.ui.source()
             .times_to_live
             .get(&(Some("users".to_owned()), b"s:1".to_vec())),
         Some(&Duration::from_secs(300))

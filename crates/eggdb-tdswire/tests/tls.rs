@@ -1,6 +1,10 @@
+//! SQL Server clients over TLS: PRELOGIN encryption in login-only, full and TDS 8 strict modes.
+
 mod common;
 
-use common::{LoginOptions, TestServer, batch_body, errors, login7_body, parse_tokens, prelogin_body, rows};
+use common::{
+    LoginOptions, TestServer, batch_body, errors, login7_body, parse_tokens, prelogin_body, rows,
+};
 use eggdb_tdswire::messages::{ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON};
 use eggdb_tls::self_signed::{SelfSignedCertificateRequest, generate_self_signed_certificate};
 use eggdb_tls::x509::SubjectAlternativeName;
@@ -27,7 +31,8 @@ fn tls_config() -> ServerConfig {
         not_after_unix_seconds: now + 3_600,
     };
     let (certificate, key) =
-        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill).expect("certificate");
+        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill)
+            .expect("certificate");
     ServerConfig::new(vec![certificate], key).expect("TLS config")
 }
 
@@ -47,7 +52,8 @@ impl Read for PreloginFramed {
             let mut header = [0u8; HEADER_BYTES];
             self.tcp.read_exact(&mut header)?;
             assert_eq!(header[0], PRELOGIN);
-            self.left_in_packet = usize::from(u16::from_be_bytes([header[2], header[3]])) - HEADER_BYTES;
+            self.left_in_packet =
+                usize::from(u16::from_be_bytes([header[2], header[3]])) - HEADER_BYTES;
         }
         let wanted = buffer.len().min(self.left_in_packet);
         let read = self.tcp.read(&mut buffer[..wanted])?;
@@ -117,16 +123,28 @@ fn prelogin_encryption(answer: &[u8]) -> Option<u8> {
 
 fn connect(server: &TestServer, encryption: u8) -> (TcpStream, u8) {
     let mut tcp = TcpStream::connect(server.address).expect("connect");
-    tcp.set_read_timeout(Some(Duration::from_secs(20))).expect("timeout");
+    tcp.set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
     send_message(&mut tcp, PRELOGIN, &prelogin_body(encryption));
     let answer = read_message(&mut tcp).expect("PRELOGIN answer");
-    (tcp, prelogin_encryption(&answer).expect("encryption option"))
+    (
+        tcp,
+        prelogin_encryption(&answer).expect("encryption option"),
+    )
 }
 
 fn tls_in_prelogin(tcp: TcpStream) -> TlsStream<PreloginFramed> {
-    let transport = PreloginFramed { tcp, framed: true, left_in_packet: 0, pending: Vec::new() };
-    let mut tls = TlsStream::connect(transport, &ClientConfig::new(ServerVerification::EncryptionOnly, "localhost"))
-        .expect("TLS handshake in PRELOGIN packets");
+    let transport = PreloginFramed {
+        tcp,
+        framed: true,
+        left_in_packet: 0,
+        pending: Vec::new(),
+    };
+    let mut tls = TlsStream::connect(
+        transport,
+        &ClientConfig::new(ServerVerification::EncryptionOnly, "localhost"),
+    )
+    .expect("TLS handshake in PRELOGIN packets");
     tls.get_mut().framed = false;
     tls
 }
@@ -180,7 +198,8 @@ fn tds_8_strict_starts_with_tls_and_alpn() {
     config.application_protocols = vec![b"tds/8.0".to_vec()];
     let server = TestServer::start_with_tls(Arc::new(config));
     let tcp = TcpStream::connect(server.address).expect("connect");
-    tcp.set_read_timeout(Some(Duration::from_secs(20))).expect("timeout");
+    tcp.set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
     let mut client = ClientConfig::new(ServerVerification::EncryptionOnly, "localhost");
     client.application_protocols = vec![b"tds/8.0".to_vec()];
     let mut tls = TlsStream::connect(tcp, &client).expect("TLS first");

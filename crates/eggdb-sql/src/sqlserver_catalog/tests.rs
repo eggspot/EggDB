@@ -725,7 +725,10 @@ fn sys_views_list_procedures_functions_and_their_parameters() {
             "SELECT o.name, o.type_desc FROM sys.objects o WHERE o.type_desc LIKE '%PROCEDURE' OR o.type_desc LIKE '%FUNCTION' ORDER BY o.name"
         ),
         vec![
-            vec![text("forcustomer"), text("SQL_INLINE_TABLE_VALUED_FUNCTION")],
+            vec![
+                text("forcustomer"),
+                text("SQL_INLINE_TABLE_VALUED_FUNCTION")
+            ],
             vec![text("getcustomer"), text("SQL_STORED_PROCEDURE")],
             vec![text("totals"), text("SQL_TABLE_VALUED_FUNCTION")],
             vec![text("twice"), text("SQL_SCALAR_FUNCTION")],
@@ -835,10 +838,25 @@ fn information_schema_lists_routines_and_parameters() {
             "SELECT routine_schema, routine_name, routine_type, data_type FROM INFORMATION_SCHEMA.ROUTINES ORDER BY routine_name"
         ),
         vec![
-            vec![text("sales"), text("forcustomer"), text("FUNCTION"), text("TABLE")],
-            vec![text("dbo"), text("getcustomer"), text("PROCEDURE"), Value::Null],
+            vec![
+                text("sales"),
+                text("forcustomer"),
+                text("FUNCTION"),
+                text("TABLE")
+            ],
+            vec![
+                text("dbo"),
+                text("getcustomer"),
+                text("PROCEDURE"),
+                Value::Null
+            ],
             vec![text("dbo"), text("totals"), text("FUNCTION"), text("TABLE")],
-            vec![text("dbo"), text("twice"), text("FUNCTION"), text("decimal")],
+            vec![
+                text("dbo"),
+                text("twice"),
+                text("FUNCTION"),
+                text("decimal")
+            ],
         ]
     );
     assert_eq!(
@@ -885,12 +903,32 @@ fn catalog_procedures_describe_procedures_and_functions() {
     assert_eq!(
         rows(&mut session, "EXEC sp_sproc_columns N'getcustomer'")
             .into_iter()
-            .map(|row| (row[3].clone(), row[4].clone(), row[6].clone(), row[17].clone()))
+            .map(|row| (
+                row[3].clone(),
+                row[4].clone(),
+                row[6].clone(),
+                row[17].clone()
+            ))
             .collect::<Vec<_>>(),
         vec![
-            (text("@RETURN_VALUE"), Value::SmallInt(5), text("int"), Value::Integer(0)),
-            (text("@id"), Value::SmallInt(1), text("int"), Value::Integer(1)),
-            (text("@name"), Value::SmallInt(2), text("nvarchar"), Value::Integer(2)),
+            (
+                text("@RETURN_VALUE"),
+                Value::SmallInt(5),
+                text("int"),
+                Value::Integer(0)
+            ),
+            (
+                text("@id"),
+                Value::SmallInt(1),
+                text("int"),
+                Value::Integer(1)
+            ),
+            (
+                text("@name"),
+                Value::SmallInt(2),
+                text("nvarchar"),
+                Value::Integer(2)
+            ),
         ]
     );
     assert_eq!(
@@ -908,13 +946,10 @@ fn catalog_procedures_describe_procedures_and_functions() {
         ]
     );
     assert_eq!(
-        rows(
-            &mut session,
-            "EXEC sp_procedure_params_rowset N'twice'"
-        )
-        .into_iter()
-        .map(|row| (row[2].clone(), row[3].clone(), row[9].clone()))
-        .collect::<Vec<_>>(),
+        rows(&mut session, "EXEC sp_procedure_params_rowset N'twice'")
+            .into_iter()
+            .map(|row| (row[2].clone(), row[3].clone(), row[9].clone()))
+            .collect::<Vec<_>>(),
         vec![
             (text("twice;0"), text("@RETURN_VALUE"), Value::SmallInt(131)),
             (text("twice;0"), text("@value"), Value::SmallInt(131)),
@@ -961,11 +996,35 @@ fn management_studio_reads_server_views_three_part_names_and_permissions() {
     let mut session = shop(&store);
     assert!(!rows(&mut session, "SELECT name FROM master.sys.databases").is_empty());
     assert!(!rows(&mut session, "SELECT name FROM [shop].[sys].[tables]").is_empty());
-    assert!(!rows(&mut session, "SELECT name, value_in_use FROM sys.configurations").is_empty());
-    assert_eq!(rows(&mut session, "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process = 1"), vec![vec![Value::Integer(1)]]);
-    assert!(!rows(&mut session, "SELECT name FROM sys.server_principals WHERE type = 'S'").is_empty());
+    assert!(
+        !rows(
+            &mut session,
+            "SELECT name, value_in_use FROM sys.configurations"
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process = 1"
+        ),
+        vec![vec![Value::Integer(1)]]
+    );
+    assert!(
+        !rows(
+            &mut session,
+            "SELECT name FROM sys.server_principals WHERE type = 'S'"
+        )
+        .is_empty()
+    );
     assert!(!rows(&mut session, "SELECT name FROM sys.database_files").is_empty());
     assert!(rows(&mut session, "SELECT * FROM sys.change_tracking_databases").is_empty());
-    assert_eq!(rows(&mut session, "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')"), vec![vec![Value::Integer(1)]]);
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')"
+        ),
+        vec![vec![Value::Integer(1)]]
+    );
     assert!(error_code(&mut session, "SELECT name FROM elsewhere.sys.tables").is_some());
 }

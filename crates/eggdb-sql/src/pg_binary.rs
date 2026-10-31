@@ -614,7 +614,9 @@ mod tests {
             }
             let _ = decode_array_texts(&bytes, ArrayElement::Integer);
         }
-        let huge = [0u8, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 23, 0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 1];
+        let huge = [
+            0u8, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 23, 0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 1,
+        ];
         assert!(decode_array_texts(&huge, ArrayElement::Integer).is_err());
     }
 

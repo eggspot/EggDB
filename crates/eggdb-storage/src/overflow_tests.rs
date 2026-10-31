@@ -1175,7 +1175,12 @@ fn a_damaged_compressed_value_is_an_error_never_a_panic() {
     let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(256)).unwrap();
     cache.set_value_compression(crate::ValueCompression::Lz4);
     let tree = BTree::create(&cache).unwrap();
-    let value: Vec<u8> = b"compressible ".iter().copied().cycle().take(40_000).collect();
+    let value: Vec<u8> = b"compressible "
+        .iter()
+        .copied()
+        .cycle()
+        .take(40_000)
+        .collect();
     tree.put(&cache, b"k", &value).unwrap();
     cache
         .commit(|superblock| superblock.catalog_root = tree.root())
@@ -1186,7 +1191,10 @@ fn a_damaged_compressed_value_is_an_error_never_a_panic() {
     );
     assert_eq!(tree.get(&cache, b"k").unwrap(), Some(value.clone()));
     let first = chain_of(&cache, b"k")[0];
-    assert_eq!(cache.read(first).unwrap().header().layout, overflow::COMPRESSED_LAYOUT);
+    assert_eq!(
+        cache.read(first).unwrap().header().layout,
+        overflow::COMPRESSED_LAYOUT
+    );
     let mut page = cache.write(first).unwrap();
     for byte in &mut page[24 + 8..24 + 64] {
         *byte ^= 0x5A;

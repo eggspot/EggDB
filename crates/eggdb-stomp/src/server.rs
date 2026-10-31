@@ -32,7 +32,9 @@ pub struct ServerConfig {
 
 impl std::fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerConfig").field("user", &self.user).finish_non_exhaustive()
+        f.debug_struct("ServerConfig")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
     }
 }
 
@@ -52,7 +54,11 @@ pub(crate) struct Broker<'k> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 enum Destination<'d> {
@@ -64,10 +70,15 @@ fn destination(text: &str) -> Result<Destination<'_>, String> {
     if let Some(name) = text.strip_prefix("/queue/").filter(|name| !name.is_empty()) {
         return Ok(Destination::Queue(name));
     }
-    if text.strip_prefix("/topic/").is_some_and(|name| !name.is_empty()) {
+    if text
+        .strip_prefix("/topic/")
+        .is_some_and(|name| !name.is_empty())
+    {
         return Ok(Destination::Topic);
     }
-    Err(format!("the destination {text} is not supported: use /queue/<name> or /topic/<name>"))
+    Err(format!(
+        "the destination {text} is not supported: use /queue/<name> or /topic/<name>"
+    ))
 }
 
 fn queue_failure(error: &QueueError) -> String {
@@ -76,7 +87,11 @@ fn queue_failure(error: &QueueError) -> String {
 
 impl<'k> Broker<'k> {
     pub(crate) fn new(keyspace: &'k (dyn Keyspace + Sync)) -> Self {
-        Self { queues: Queues::new(keyspace), topics: Mutex::new(BTreeMap::new()), next_topic_message: AtomicU64::new(1) }
+        Self {
+            queues: Queues::new(keyspace),
+            topics: Mutex::new(BTreeMap::new()),
+            next_topic_message: AtomicU64::new(1),
+        }
     }
 
     fn topics(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<TopicSubscriber>>> {
@@ -98,7 +113,11 @@ impl<'k> Broker<'k> {
                 frame = frame.with("content-type", content_type);
             }
             let bytes = frame.with_body(body).encode();
-            let _ = subscriber.writer.lock().unwrap_or_else(PoisonError::into_inner).write_all(&bytes);
+            let _ = subscriber
+                .writer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .write_all(&bytes);
         }
     }
 
@@ -133,7 +152,11 @@ struct Pending {
 }
 
 enum Staged {
-    Send { destination: String, content_type: Option<String>, body: Vec<u8> },
+    Send {
+        destination: String,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    },
     Ack(String),
     Nack(String),
 }
@@ -157,11 +180,16 @@ struct Session<'b, 'k> {
 
 impl Session<'_, '_> {
     fn send(&self, frame: &Frame) -> io::Result<()> {
-        self.writer.lock().unwrap_or_else(PoisonError::into_inner).write_all(&frame.encode())
+        self.writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write_all(&frame.encode())
     }
 
     fn refuse(&self, message: &str, request: Option<&Frame>) -> io::Result<Next> {
-        let mut frame = Frame::new("ERROR").with("message", message).with("content-type", "text/plain");
+        let mut frame = Frame::new("ERROR")
+            .with("message", message)
+            .with("content-type", "text/plain");
         if let Some(receipt) = request.and_then(|request| request.header("receipt")) {
             frame = frame.with("receipt-id", receipt);
         }
@@ -171,17 +199,30 @@ impl Session<'_, '_> {
 
     fn connect(&mut self, frame: &Frame) -> io::Result<Next> {
         let offered = frame.header("accept-version").unwrap_or("1.0");
-        let Some(version) = VERSIONS.iter().find(|version| offered.split(',').any(|offer| offer.trim() == **version)) else {
-            let refusal = Frame::new("ERROR").with("version", "1.0,1.1,1.2").with("message", "Supported protocol versions are 1.0, 1.1 and 1.2");
+        let Some(version) = VERSIONS
+            .iter()
+            .find(|version| offered.split(',').any(|offer| offer.trim() == **version))
+        else {
+            let refusal = Frame::new("ERROR").with("version", "1.0,1.1,1.2").with(
+                "message",
+                "Supported protocol versions are 1.0, 1.1 and 1.2",
+            );
             self.send(&refusal)?;
             return Ok(Next::Close);
         };
         let login = frame.header("login").unwrap_or_default();
         let passcode = frame.header("passcode").unwrap_or_default();
-        let authorized = eggdb_crypto::constant_time_eq(login.as_bytes(), self.config.user.as_bytes())
-            && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(passcode.as_bytes()), &self.config.password_sha256);
+        let authorized =
+            eggdb_crypto::constant_time_eq(login.as_bytes(), self.config.user.as_bytes())
+                && eggdb_crypto::constant_time_eq(
+                    &eggdb_crypto::sha256(passcode.as_bytes()),
+                    &self.config.password_sha256,
+                );
         if !authorized {
-            return self.refuse("Authentication failed: login and passcode must be the server's user and password", None);
+            return self.refuse(
+                "Authentication failed: login and passcode must be the server's user and password",
+                None,
+            );
         }
         self.connected = true;
         let connected = Frame::new("CONNECTED")
@@ -193,27 +234,47 @@ impl Session<'_, '_> {
         Ok(Next::Continue)
     }
 
-    fn store(&self, destination_text: &str, content_type: Option<&str>, body: &[u8]) -> Result<(), String> {
+    fn store(
+        &self,
+        destination_text: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) -> Result<(), String> {
         match destination(destination_text)? {
             Destination::Queue(name) => {
-                self.broker.queues.declare(name).map_err(|error| queue_failure(&error))?;
-                self.broker.queues.send(name, body, 0, now_ms()).map_err(|error| queue_failure(&error))?;
+                self.broker
+                    .queues
+                    .declare(name)
+                    .map_err(|error| queue_failure(&error))?;
+                self.broker
+                    .queues
+                    .send(name, body, 0, now_ms())
+                    .map_err(|error| queue_failure(&error))?;
             }
-            Destination::Topic => self.broker.publish_topic(destination_text, content_type, body),
+            Destination::Topic => self
+                .broker
+                .publish_topic(destination_text, content_type, body),
         }
         Ok(())
     }
 
     fn settle(&mut self, token: &str, accepted: bool) -> Result<(), String> {
         let Some(chosen) = self.pending.get(token) else {
-            return Err(format!("no message waits for an acknowledgement with id {token}"));
+            return Err(format!(
+                "no message waits for an acknowledgement with id {token}"
+            ));
         };
-        let cumulative = self.subscriptions.get(&chosen.subscription).is_some_and(|subscription| subscription.ack == AckMode::Client);
+        let cumulative = self
+            .subscriptions
+            .get(&chosen.subscription)
+            .is_some_and(|subscription| subscription.ack == AckMode::Client);
         let (subscription, sequence) = (chosen.subscription.clone(), chosen.sequence);
         let tokens: Vec<String> = if cumulative {
             self.pending
                 .iter()
-                .filter(|(_, pending)| pending.subscription == subscription && pending.sequence <= sequence)
+                .filter(|(_, pending)| {
+                    pending.subscription == subscription && pending.sequence <= sequence
+                })
                 .map(|(token, _)| token.clone())
                 .collect()
         } else {
@@ -224,7 +285,9 @@ impl Session<'_, '_> {
                 let outcome = if accepted {
                     self.broker.queues.ack(&pending.queue, pending.id)
                 } else {
-                    self.broker.queues.release(&pending.queue, pending.id, now_ms())
+                    self.broker
+                        .queues
+                        .release(&pending.queue, pending.id, now_ms())
                 };
                 outcome.map_err(|error| queue_failure(&error))?;
             }
@@ -233,7 +296,9 @@ impl Session<'_, '_> {
     }
 
     fn subscribe(&mut self, frame: &Frame) -> Result<(), String> {
-        let destination_text = frame.header("destination").ok_or("SUBSCRIBE needs a destination header")?;
+        let destination_text = frame
+            .header("destination")
+            .ok_or("SUBSCRIBE needs a destination header")?;
         let id = frame.header("id").ok_or("SUBSCRIBE needs an id header")?;
         if self.subscriptions.contains_key(id) {
             return Err(format!("the subscription id {id} is already in use"));
@@ -245,33 +310,62 @@ impl Session<'_, '_> {
             "auto" => AckMode::Auto,
             "client" => AckMode::Client,
             "client-individual" => AckMode::ClientIndividual,
-            other => return Err(format!("the ack mode {other} is not one of auto, client and client-individual")),
+            other => {
+                return Err(format!(
+                    "the ack mode {other} is not one of auto, client and client-individual"
+                ));
+            }
         };
-        let prefetch = frame.header("prefetch-count").and_then(|count| count.parse::<usize>().ok()).filter(|count| *count > 0).unwrap_or(PREFETCH).min(PREFETCH);
+        let prefetch = frame
+            .header("prefetch-count")
+            .and_then(|count| count.parse::<usize>().ok())
+            .filter(|count| *count > 0)
+            .unwrap_or(PREFETCH)
+            .min(PREFETCH);
         let queue = match destination(destination_text)? {
             Destination::Queue(name) => {
-                self.broker.queues.declare(name).map_err(|error| queue_failure(&error))?;
+                self.broker
+                    .queues
+                    .declare(name)
+                    .map_err(|error| queue_failure(&error))?;
                 Some(name.to_owned())
             }
             Destination::Topic => {
-                self.broker.topics().entry(destination_text.to_owned()).or_default().push(TopicSubscriber {
-                    session: self.id,
-                    subscription: id.to_owned(),
-                    writer: Arc::clone(&self.writer),
-                });
+                self.broker
+                    .topics()
+                    .entry(destination_text.to_owned())
+                    .or_default()
+                    .push(TopicSubscriber {
+                        session: self.id,
+                        subscription: id.to_owned(),
+                        writer: Arc::clone(&self.writer),
+                    });
                 None
             }
         };
-        self.subscriptions.insert(id.to_owned(), Subscription { destination: destination_text.to_owned(), queue, ack, prefetch });
+        self.subscriptions.insert(
+            id.to_owned(),
+            Subscription {
+                destination: destination_text.to_owned(),
+                queue,
+                ack,
+                prefetch,
+            },
+        );
         Ok(())
     }
 
     fn unsubscribe(&mut self, id: &str) -> Result<(), String> {
-        let subscription = self.subscriptions.remove(id).ok_or_else(|| format!("no subscription has the id {id}"))?;
+        let subscription = self
+            .subscriptions
+            .remove(id)
+            .ok_or_else(|| format!("no subscription has the id {id}"))?;
         if subscription.queue.is_none() {
             let mut topics = self.broker.topics();
             if let Some(subscribers) = topics.get_mut(&subscription.destination) {
-                subscribers.retain(|subscriber| subscriber.session != self.id || subscriber.subscription != id);
+                subscribers.retain(|subscriber| {
+                    subscriber.session != self.id || subscriber.subscription != id
+                });
             }
         }
         self.release_where(|pending| pending.subscription == id);
@@ -279,7 +373,12 @@ impl Session<'_, '_> {
     }
 
     fn release_where(&mut self, chosen: impl Fn(&Pending) -> bool) {
-        let tokens: Vec<String> = self.pending.iter().filter(|(_, pending)| chosen(pending)).map(|(token, _)| token.clone()).collect();
+        let tokens: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| chosen(pending))
+            .map(|(token, _)| token.clone())
+            .collect();
         let now = now_ms();
         for token in tokens {
             if let Some(pending) = self.pending.remove(&token) {
@@ -293,7 +392,10 @@ impl Session<'_, '_> {
     }
 
     fn stage(&mut self, transaction: &str, staged: Staged) -> Result<(), String> {
-        let steps = self.transactions.get_mut(transaction).ok_or_else(|| format!("the transaction {transaction} was not begun"))?;
+        let steps = self
+            .transactions
+            .get_mut(transaction)
+            .ok_or_else(|| format!("the transaction {transaction} was not begun"))?;
         if steps.len() >= MAX_STAGED {
             return Err("the transaction holds too many frames".to_owned());
         }
@@ -302,22 +404,40 @@ impl Session<'_, '_> {
     }
 
     fn commit(&mut self, transaction: &str) -> Result<(), String> {
-        let steps = self.transactions.remove(transaction).ok_or_else(|| format!("the transaction {transaction} was not begun"))?;
+        let steps = self
+            .transactions
+            .remove(transaction)
+            .ok_or_else(|| format!("the transaction {transaction} was not begun"))?;
         let mut queued: Vec<(&str, &[u8])> = Vec::new();
         for step in &steps {
-            if let Staged::Send { destination: text, body, .. } = step
+            if let Staged::Send {
+                destination: text,
+                body,
+                ..
+            } = step
                 && let Destination::Queue(name) = destination(text)?
             {
-                self.broker.queues.declare(name).map_err(|error| queue_failure(&error))?;
+                self.broker
+                    .queues
+                    .declare(name)
+                    .map_err(|error| queue_failure(&error))?;
                 queued.push((name, body));
             }
         }
-        self.broker.queues.send_all(&queued, now_ms()).map_err(|error| queue_failure(&error))?;
+        self.broker
+            .queues
+            .send_all(&queued, now_ms())
+            .map_err(|error| queue_failure(&error))?;
         for step in steps {
             match step {
-                Staged::Send { destination: text, content_type, body } => {
+                Staged::Send {
+                    destination: text,
+                    content_type,
+                    body,
+                } => {
                     if matches!(destination(&text)?, Destination::Topic) {
-                        self.broker.publish_topic(&text, content_type.as_deref(), &body);
+                        self.broker
+                            .publish_topic(&text, content_type.as_deref(), &body);
                     }
                 }
                 Staged::Ack(token) => self.settle(&token, true)?,
@@ -331,38 +451,61 @@ impl Session<'_, '_> {
         let transaction = frame.header("transaction").map(str::to_owned);
         match frame.command.as_str() {
             "SEND" => {
-                let destination_text = frame.header("destination").ok_or("SEND needs a destination header")?;
+                let destination_text = frame
+                    .header("destination")
+                    .ok_or("SEND needs a destination header")?;
                 destination(destination_text)?;
                 let content_type = frame.header("content-type");
                 match transaction {
                     Some(transaction) => self.stage(
                         &transaction,
-                        Staged::Send { destination: destination_text.to_owned(), content_type: content_type.map(str::to_owned), body: frame.body.clone() },
+                        Staged::Send {
+                            destination: destination_text.to_owned(),
+                            content_type: content_type.map(str::to_owned),
+                            body: frame.body.clone(),
+                        },
                     )?,
                     None => self.store(destination_text, content_type, &frame.body)?,
                 }
             }
             "SUBSCRIBE" => self.subscribe(frame)?,
-            "UNSUBSCRIBE" => self.unsubscribe(frame.header("id").ok_or("UNSUBSCRIBE needs an id header")?)?,
+            "UNSUBSCRIBE" => {
+                self.unsubscribe(frame.header("id").ok_or("UNSUBSCRIBE needs an id header")?)?
+            }
             "ACK" | "NACK" => {
-                let token = Self::ack_token(frame).ok_or("ACK and NACK need an id header")?.to_owned();
+                let token = Self::ack_token(frame)
+                    .ok_or("ACK and NACK need an id header")?
+                    .to_owned();
                 let accepted = frame.command == "ACK";
                 match transaction {
-                    Some(transaction) => self.stage(&transaction, if accepted { Staged::Ack(token) } else { Staged::Nack(token) })?,
+                    Some(transaction) => self.stage(
+                        &transaction,
+                        if accepted {
+                            Staged::Ack(token)
+                        } else {
+                            Staged::Nack(token)
+                        },
+                    )?,
                     None => self.settle(&token, accepted)?,
                 }
             }
             "BEGIN" => {
                 let transaction = transaction.ok_or("BEGIN needs a transaction header")?;
-                if self.transactions.contains_key(&transaction) || self.transactions.len() >= MAX_TRANSACTIONS {
-                    return Err(format!("the transaction {transaction} cannot begin: it is already open or too many are"));
+                if self.transactions.contains_key(&transaction)
+                    || self.transactions.len() >= MAX_TRANSACTIONS
+                {
+                    return Err(format!(
+                        "the transaction {transaction} cannot begin: it is already open or too many are"
+                    ));
                 }
                 self.transactions.insert(transaction, Vec::new());
             }
             "COMMIT" => self.commit(&transaction.ok_or("COMMIT needs a transaction header")?)?,
             "ABORT" => {
                 let transaction = transaction.ok_or("ABORT needs a transaction header")?;
-                self.transactions.remove(&transaction).ok_or_else(|| format!("the transaction {transaction} was not begun"))?;
+                self.transactions
+                    .remove(&transaction)
+                    .ok_or_else(|| format!("the transaction {transaction} was not begun"))?;
             }
             "DISCONNECT" => return Ok(Next::Close),
             other => return Err(format!("the command {other} is not a STOMP client frame")),
@@ -397,8 +540,16 @@ impl Session<'_, '_> {
             .iter()
             .filter_map(|(id, subscription)| {
                 let queue = subscription.queue.clone()?;
-                let outstanding = self.pending.values().filter(|pending| &pending.subscription == id).count();
-                let room = if subscription.ack == AckMode::Auto { subscription.prefetch } else { subscription.prefetch.saturating_sub(outstanding) };
+                let outstanding = self
+                    .pending
+                    .values()
+                    .filter(|pending| &pending.subscription == id)
+                    .count();
+                let room = if subscription.ack == AckMode::Auto {
+                    subscription.prefetch
+                } else {
+                    subscription.prefetch.saturating_sub(outstanding)
+                };
                 (room > 0).then(|| (id.clone(), queue, subscription.ack, room))
             })
             .collect();
@@ -427,7 +578,15 @@ impl Session<'_, '_> {
                     }
                 } else {
                     self.next_sequence += 1;
-                    self.pending.insert(message_id, Pending { subscription: id.clone(), queue: queue.clone(), id: message.id, sequence: self.next_sequence });
+                    self.pending.insert(
+                        message_id,
+                        Pending {
+                            subscription: id.clone(),
+                            queue: queue.clone(),
+                            id: message.id,
+                            sequence: self.next_sequence,
+                        },
+                    );
                 }
                 sent?;
             }
@@ -464,14 +623,27 @@ impl Session<'_, '_> {
             match reader.read(&mut chunk) {
                 Ok(0) => return Ok(()),
                 Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
                 Err(error) => return Err(error),
             }
         }
     }
 }
 
-pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, id: u64, reader: impl Read, writer: SharedWriter, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub(crate) fn serve_stream(
+    broker: &Broker<'_>,
+    config: &ServerConfig,
+    id: u64,
+    reader: impl Read,
+    writer: SharedWriter,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     let mut session = Session {
         broker,
         config,
@@ -491,7 +663,12 @@ pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, id: u64, 
 
 /// Serves STOMP clients on `listener`, keeping `/queue/` destinations in `keyspace`, until
 /// `stop` turns true.
-pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &ServerConfig, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub fn serve(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let broker = Broker::new(keyspace);
     let active = AtomicUsize::new(0);
@@ -518,13 +695,15 @@ pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &
             }
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let (broker, active) = (&broker, &active);
-            let spawned = std::thread::Builder::new().name("eggdb-stomp".to_owned()).spawn_scoped(scope, move || {
-                if let Ok(writer) = stream.try_clone() {
-                    let shared: SharedWriter = Arc::new(Mutex::new(writer));
-                    let _ = serve_stream(broker, config, id, ReadHalf(stream), shared, stop);
-                }
-                active.fetch_sub(1, Ordering::AcqRel);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("eggdb-stomp".to_owned())
+                .spawn_scoped(scope, move || {
+                    if let Ok(writer) = stream.try_clone() {
+                        let shared: SharedWriter = Arc::new(Mutex::new(writer));
+                        let _ = serve_stream(broker, config, id, ReadHalf(stream), shared, stop);
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                });
             if spawned.is_err() {
                 active.fetch_sub(1, Ordering::AcqRel);
             }

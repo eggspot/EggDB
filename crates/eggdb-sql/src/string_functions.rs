@@ -90,7 +90,10 @@ pub(crate) const FUNCTIONS: [&str; 25] = [
 const MAX_TEXT_BYTES: usize = (1 << 30) - 1;
 
 fn too_long() -> SqlError {
-    SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "requested length too large")
+    SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        "requested length too large",
+    )
 }
 
 fn checked_length(bytes: usize) -> SqlResult<()> {
@@ -298,7 +301,9 @@ fn format_text(values: &[Value]) -> SqlResult<Value> {
                     "null values cannot be formatted as an SQL identifier",
                 ));
             }
-            ('I', value) => crate::pg_keywords::quote_ident(&output_text(value).unwrap_or_default()),
+            ('I', value) => {
+                crate::pg_keywords::quote_ident(&output_text(value).unwrap_or_default())
+            }
             (_, Value::Null) => "NULL".to_owned(),
             (_, value) => quote_literal(&output_text(value).unwrap_or_default()),
         };
@@ -312,7 +317,9 @@ fn count_of(value: &Value) -> Option<i64> {
 }
 
 fn character_count(count: i64, length: usize) -> usize {
-    usize::try_from(count.max(0)).unwrap_or(usize::MAX).min(length)
+    usize::try_from(count.max(0))
+        .unwrap_or(usize::MAX)
+        .min(length)
 }
 
 fn kept_end(text: &str, count: i64, from_left: bool) -> String {
@@ -356,7 +363,12 @@ fn repeated(text: &str, count: i64) -> SqlResult<Value> {
 }
 
 fn normalization_form(name: &str) -> SqlResult<eggdb_text::Form> {
-    eggdb_text::Form::named(name.trim()).ok_or_else(|| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("invalid normalization form: {name}")))
+    eggdb_text::Form::named(name.trim()).ok_or_else(|| {
+        SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!("invalid normalization form: {name}"),
+        )
+    })
 }
 
 fn initcap(text: &str) -> String {
@@ -530,15 +542,23 @@ fn text_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         )),
         ("md5", 1) => Ok(Value::Text(crate::md5::hex_digest(text(0)?.as_bytes()))),
         ("starts_with", 2) => Ok(Value::Boolean(text(0)?.starts_with(text(1)?))),
-        ("normalize", 1) => Ok(Value::Text(eggdb_text::normalize(text(0)?, eggdb_text::Form::Nfc))),
+        ("normalize", 1) => Ok(Value::Text(eggdb_text::normalize(
+            text(0)?,
+            eggdb_text::Form::Nfc,
+        ))),
         ("normalize", 2) => {
             let source = text(0)?;
-            normalization_form(text(1)?).map(|form| Value::Text(eggdb_text::normalize(source, form)))
+            normalization_form(text(1)?)
+                .map(|form| Value::Text(eggdb_text::normalize(source, form)))
         }
-        ("is_normalized", 1) => Ok(Value::Boolean(eggdb_text::is_normalized(text(0)?, eggdb_text::Form::Nfc))),
+        ("is_normalized", 1) => Ok(Value::Boolean(eggdb_text::is_normalized(
+            text(0)?,
+            eggdb_text::Form::Nfc,
+        ))),
         ("is_normalized", 2) => {
             let source = text(0)?;
-            normalization_form(text(1)?).map(|form| Value::Boolean(eggdb_text::is_normalized(source, form)))
+            normalization_form(text(1)?)
+                .map(|form| Value::Boolean(eggdb_text::is_normalized(source, form)))
         }
         ("overlay", 3) => overlaid(text(0)?, text(1)?, number(2)?, None),
         ("overlay", 4) => overlaid(text(0)?, text(1)?, number(2)?, Some(number(3)?)),

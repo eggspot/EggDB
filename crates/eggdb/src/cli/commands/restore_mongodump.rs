@@ -15,13 +15,18 @@ pub(super) enum Layout {
 
 fn holds_bson(directory: &Path) -> bool {
     std::fs::read_dir(directory).is_ok_and(|entries| {
-        entries.flatten().any(|entry| entry.file_name().to_string_lossy().ends_with(DUMP_SUFFIX))
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(DUMP_SUFFIX))
     })
 }
 
 pub(super) fn layout_of(path: &Path) -> Option<Layout> {
     if path.is_file() {
-        return path.to_string_lossy().ends_with(DUMP_SUFFIX).then_some(Layout::OneCollection);
+        return path
+            .to_string_lossy()
+            .ends_with(DUMP_SUFFIX)
+            .then_some(Layout::OneCollection);
     }
     if !path.is_dir() {
         return None;
@@ -37,7 +42,9 @@ pub(super) fn layout_of(path: &Path) -> Option<Layout> {
 }
 
 fn name_of(path: &Path) -> String {
-    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn collections_in(directory: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
@@ -64,21 +71,38 @@ struct Totals {
 }
 
 impl Session<'_> {
-    pub(super) fn restore_mongodump(&mut self, dump: &Path, layout: Layout) -> Result<Exit, Failure> {
+    pub(super) fn restore_mongodump(
+        &mut self,
+        dump: &Path,
+        layout: Layout,
+    ) -> Result<Exit, Failure> {
         let shown = render::text(dump.display().to_string().as_bytes());
         let usage = |message: String| Failure::usage(message, Some(CommandName::Restore));
         let mut plan: Vec<(String, Vec<(String, PathBuf)>)> = Vec::new();
         let read_failure = |error: std::io::Error| usage(format!("cannot read {shown}: {error}"));
         match layout {
             Layout::OneCollection => {
-                let collection = name_of(dump).strip_suffix(DUMP_SUFFIX).unwrap_or_default().to_owned();
-                let database = dump.parent().map(name_of).filter(|name| !name.is_empty()).unwrap_or_else(|| "test".to_owned());
+                let collection = name_of(dump)
+                    .strip_suffix(DUMP_SUFFIX)
+                    .unwrap_or_default()
+                    .to_owned();
+                let database = dump
+                    .parent()
+                    .map(name_of)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "test".to_owned());
                 plan.push((database, vec![(collection, dump.to_path_buf())]));
             }
-            Layout::OneDatabase => plan.push((name_of(dump), collections_in(dump).map_err(read_failure)?)),
+            Layout::OneDatabase => {
+                plan.push((name_of(dump), collections_in(dump).map_err(read_failure)?))
+            }
             Layout::Databases => {
-                let mut databases: Vec<PathBuf> =
-                    std::fs::read_dir(dump).map_err(read_failure)?.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
+                let mut databases: Vec<PathBuf> = std::fs::read_dir(dump)
+                    .map_err(read_failure)?
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .collect();
                 databases.sort();
                 for database in databases {
                     let name = name_of(&database);
@@ -90,7 +114,10 @@ impl Session<'_> {
             }
         }
         let db = self.open(Access::Write { create: true }, None)?;
-        let keyspace = super::serve_resp::DatabaseKeyspace { db: &db, prefix: super::serve_resp::MONGO_COLLECTIONS };
+        let keyspace = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MONGO_COLLECTIONS,
+        };
         let store = eggdb_documents::Store::new(&keyspace, super::serve_mongo::store_seed());
         let mut totals = Totals::default();
         let mut first_error: Option<String> = None;
@@ -112,7 +139,10 @@ impl Session<'_> {
                 )
                 .map_err(|error| {
                     Failure::database(
-                        format!("cannot restore {database}.{collection} from {shown}: {}", error.message),
+                        format!(
+                            "cannot restore {database}.{collection} from {shown}: {}",
+                            error.message
+                        ),
                         Exit::DatabaseError,
                     )
                 })?;
@@ -120,9 +150,16 @@ impl Session<'_> {
                 totals.documents += restored.documents;
                 totals.failed += restored.failed;
                 totals.indexes += restored.indexes;
-                totals.skipped.extend(restored.skipped_indexes.into_iter().map(|reason| format!("{database}.{collection} {reason}")));
+                totals.skipped.extend(
+                    restored
+                        .skipped_indexes
+                        .into_iter()
+                        .map(|reason| format!("{database}.{collection} {reason}")),
+                );
                 if first_error.is_none() {
-                    first_error = restored.first_error.map(|error| format!("{database}.{collection}: {error}"));
+                    first_error = restored
+                        .first_error
+                        .map(|error| format!("{database}.{collection}: {error}"));
                 }
             }
         }
@@ -143,14 +180,24 @@ impl Session<'_> {
                     totals.databases, totals.collections, totals.documents, totals.failed, totals.indexes
                 ));
                 for skipped in &totals.skipped {
-                    self.out.text(&format!("index left out: {}\n", render::text(skipped.as_bytes())));
+                    self.out.text(&format!(
+                        "index left out: {}\n",
+                        render::text(skipped.as_bytes())
+                    ));
                 }
                 if let Some(error) = &first_error {
-                    self.out.text(&format!("first failure: {}\n", render::text(error.as_bytes())));
+                    self.out.text(&format!(
+                        "first failure: {}\n",
+                        render::text(error.as_bytes())
+                    ));
                 }
             }
         }
         self.close(db)?;
-        Ok(if totals.failed == 0 { Exit::Done } else { Exit::DatabaseError })
+        Ok(if totals.failed == 0 {
+            Exit::Done
+        } else {
+            Exit::DatabaseError
+        })
     }
 }

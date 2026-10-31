@@ -33,16 +33,21 @@ fn connected(backend: NetBackend) -> Result<Connected, String> {
     let connect = NetOp::Connect {
         address: listener.local_address().map_err(failed)?,
     };
-    queue.submit(accept, 0).map_err(|rejected| rejected.to_string())?;
-    queue.submit(connect, 1).map_err(|rejected| rejected.to_string())?;
+    queue
+        .submit(accept, 0)
+        .map_err(|rejected| rejected.to_string())?;
+    queue
+        .submit(connect, 1)
+        .map_err(|rejected| rejected.to_string())?;
     let mut completions = Vec::new();
     queue.reap(&mut completions, 2).map_err(failed)?;
     completions.sort_by_key(|completion| completion.user_data);
     let mut streams = completions.into_iter().map(|completion| {
-        completion
-            .result
-            .map_err(failed)
-            .and_then(|output| output.into_stream().ok_or_else(|| "no connection".to_owned()))
+        completion.result.map_err(failed).and_then(|output| {
+            output
+                .into_stream()
+                .ok_or_else(|| "no connection".to_owned())
+        })
     });
     let server = Arc::new(streams.next().ok_or("no accepted connection")??);
     let client = Arc::new(streams.next().ok_or("no connected connection")??);

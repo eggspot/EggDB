@@ -251,8 +251,14 @@ mod tests {
     #[test]
     fn short_and_out_of_bounds_input_is_refused() {
         assert_eq!(Reader::new(&[0]).read_u16(), Err(CodecError::Truncated));
-        assert_eq!(Reader::new(&[0, 5, 1]).read_vector_u16(0..=10), Err(CodecError::Truncated));
-        assert_eq!(Reader::new(&[0]).read_vector_u8(1..=10), Err(CodecError::LengthOutOfRange));
+        assert_eq!(
+            Reader::new(&[0, 5, 1]).read_vector_u16(0..=10),
+            Err(CodecError::Truncated)
+        );
+        assert_eq!(
+            Reader::new(&[0]).read_vector_u8(1..=10),
+            Err(CodecError::LengthOutOfRange)
+        );
         assert_eq!(Reader::new(&[1, 2]).finish(), Err(CodecError::TrailingData));
         assert_eq!(
             Reader::new(&[0xff, 0xff, 0xff]).read_vector_u24(0..=10),

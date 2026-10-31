@@ -5,7 +5,7 @@ use crate::session::QueryResult;
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use eggdb_auth::scram::parse_scram_verifier;
-use eggdb_crypto::{base64_decode, base64_encode, hmac_sha256, pbkdf2_hmac_sha256, sha256};
+use eggdb_crypto::{base64_encode, hmac_sha256, pbkdf2_hmac_sha256, sha256};
 use std::collections::BTreeSet;
 
 const ROLE_SPACE: u8 = 0x11;
@@ -160,9 +160,7 @@ fn put_text(out: &mut Vec<u8>, text: &str) {
 
 fn encode_role(role: &StoredRole) -> Vec<u8> {
     let mut out = vec![RECORD_VERSION];
-    out.push(
-        if role.login { LOGIN } else { 0 } | if role.superuser { SUPERUSER } else { 0 },
-    );
+    out.push(if role.login { LOGIN } else { 0 } | if role.superuser { SUPERUSER } else { 0 });
     put_text(&mut out, role.scram_verifier.as_deref().unwrap_or(""));
     out.extend_from_slice(&(role.member_of.len() as u32).to_le_bytes());
     for parent in &role.member_of {
@@ -229,21 +227,26 @@ pub fn stored_roles(reader: &dyn KeyValueRead) -> SqlResult<Vec<StoredRole>> {
     let prefix = role_key("");
     let mut roles = Vec::new();
     let mut failure = None;
-    reader.scan(&prefix, &prefix_end(&prefix), ScanDirection::Forward, &mut |key, value| {
-        let decoded = std::str::from_utf8(&key[prefix.len()..])
-            .map_err(|_| corrupt_role())
-            .and_then(|name| decode_role(name, value));
-        match decoded {
-            Ok(role) => {
-                roles.push(role);
-                Ok(true)
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            let decoded = std::str::from_utf8(&key[prefix.len()..])
+                .map_err(|_| corrupt_role())
+                .and_then(|name| decode_role(name, value));
+            match decoded {
+                Ok(role) => {
+                    roles.push(role);
+                    Ok(true)
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    Ok(false)
+                }
             }
-            Err(error) => {
-                failure = Some(error);
-                Ok(false)
-            }
-        }
-    })?;
+        },
+    )?;
     failure.map_or(Ok(roles), Err)
 }
 
@@ -287,11 +290,10 @@ fn checked_name(name: &Name) -> SqlResult<()> {
         .at(name.position));
     }
     if name.text == PUBLIC {
-        return Err(SqlError::new(
-            SqlState::RESERVED_NAME,
-            "role name \"public\" is reserved",
-        )
-        .at(name.position));
+        return Err(
+            SqlError::new(SqlState::RESERVED_NAME, "role name \"public\" is reserved")
+                .at(name.position),
+        );
     }
     Ok(())
 }
@@ -431,15 +433,20 @@ fn granted_tables(reader: &dyn KeyValueRead, grantee: &str) -> SqlResult<Vec<Str
     let mut prefix = NAMESPACE.to_vec();
     prefix.push(GRANT_SPACE);
     let mut tables = Vec::new();
-    reader.scan(&prefix, &prefix_end(&prefix), ScanDirection::Forward, &mut |key, _| {
-        let rest = &key[prefix.len()..];
-        if let Some(split) = rest.iter().position(|byte| *byte == 0)
-            && &rest[split + 1..] == grantee.as_bytes()
-        {
-            tables.push(String::from_utf8_lossy(&rest[..split]).into_owned());
-        }
-        Ok(true)
-    })?;
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, _| {
+            let rest = &key[prefix.len()..];
+            if let Some(split) = rest.iter().position(|byte| *byte == 0)
+                && &rest[split + 1..] == grantee.as_bytes()
+            {
+                tables.push(String::from_utf8_lossy(&rest[..split]).into_owned());
+            }
+            Ok(true)
+        },
+    )?;
     Ok(tables)
 }
 
@@ -450,9 +457,14 @@ fn change_privileges(
     tables: &[Name],
     grantees: &[String],
 ) -> SqlResult<()> {
-    let bits = privileges.iter().fold(0u8, |bits, privilege| bits | privilege.bit());
+    let bits = privileges
+        .iter()
+        .fold(0u8, |bits, privilege| bits | privilege.bit());
     for table in tables {
-        if writer.get(&crate::encoding::table_key(&table.text))?.is_none() {
+        if writer
+            .get(&crate::encoding::table_key(&table.text))?
+            .is_none()
+        {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_TABLE,
                 format!("relation \"{}\" does not exist", table.text),
@@ -469,7 +481,11 @@ fn change_privileges(
                 Some(_) => return Err(crate::encoding::corrupt("grant")),
                 None => 0,
             };
-            let changed = if granting { current | bits } else { current & !bits };
+            let changed = if granting {
+                current | bits
+            } else {
+                current & !bits
+            };
             if changed == 0 {
                 writer.delete(&key)?;
             } else {

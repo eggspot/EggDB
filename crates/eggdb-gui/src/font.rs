@@ -19,7 +19,9 @@ impl fmt::Display for FontError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(table) => write!(f, "the font's {table} is damaged"),
-            Self::Unsupported => f.write_str("the font has PostScript (CFF) outlines, not TrueType ones"),
+            Self::Unsupported => {
+                f.write_str("the font has PostScript (CFF) outlines, not TrueType ones")
+            }
         }
     }
 }
@@ -46,16 +48,33 @@ pub trait Typeface {
     fn extent(&self, size: f32) -> (f32, f32);
 
     /// Draws `character` with its pen at (`x`, `baseline`).
-    fn draw_glyph(&self, canvas: &mut Canvas, character: char, x: f32, baseline: f32, size: f32, color: Rgba);
+    fn draw_glyph(
+        &self,
+        canvas: &mut Canvas,
+        character: char,
+        x: f32,
+        baseline: f32,
+        size: f32,
+        color: Rgba,
+    );
 
     /// The width of `text` at `size`.
     fn width(&self, text: &str, size: f32) -> f32 {
-        text.chars().map(|character| self.advance(character, size)).sum()
+        text.chars()
+            .map(|character| self.advance(character, size))
+            .sum()
     }
 
     /// Draws `text` in a line box whose top is `top`, glyphs centred vertically in it,
     /// starting at `x`; returns where the pen ends.
-    fn draw_text(&self, canvas: &mut Canvas, text: &str, x: f32, top: f32, style: TextStyle) -> f32 {
+    fn draw_text(
+        &self,
+        canvas: &mut Canvas,
+        text: &str,
+        x: f32,
+        top: f32,
+        style: TextStyle,
+    ) -> f32 {
         let (ascent, descent) = self.extent(style.size);
         let baseline = (top + (style.line_height - ascent - descent) / 2.0 + ascent).round();
         let mut pen = x;
@@ -81,7 +100,15 @@ impl Typeface for BoxFace {
         ((size * 0.8).round(), (size * 0.2).round())
     }
 
-    fn draw_glyph(&self, canvas: &mut Canvas, character: char, x: f32, baseline: f32, size: f32, color: Rgba) {
+    fn draw_glyph(
+        &self,
+        canvas: &mut Canvas,
+        character: char,
+        x: f32,
+        baseline: f32,
+        size: f32,
+        color: Rgba,
+    ) {
         if character.is_whitespace() {
             return;
         }
@@ -176,14 +203,18 @@ impl TrueTypeFont {
         let head = table(b"head", "head")?;
         let hhea = table(b"hhea", "hhea")?;
         let maxp = table(b"maxp", "maxp")?;
-        let units_per_em = u16_at(&data, head.start + 18).filter(|units| *units >= 16)
+        let units_per_em = u16_at(&data, head.start + 18)
+            .filter(|units| *units >= 16)
             .ok_or(FontError::Malformed("head"))?;
         Ok(Self {
             units_per_em: f32::from(units_per_em),
             long_offsets: i16_at(&data, head.start + 50).ok_or(FontError::Malformed("head"))? != 0,
             ascender: f32::from(i16_at(&data, hhea.start + 4).ok_or(FontError::Malformed("hhea"))?),
-            descender: f32::from(i16_at(&data, hhea.start + 6).ok_or(FontError::Malformed("hhea"))?),
-            metric_count: u16_at(&data, hhea.start + 34).filter(|count| *count > 0)
+            descender: f32::from(
+                i16_at(&data, hhea.start + 6).ok_or(FontError::Malformed("hhea"))?,
+            ),
+            metric_count: u16_at(&data, hhea.start + 34)
+                .filter(|count| *count > 0)
                 .ok_or(FontError::Malformed("hhea"))?,
             glyph_count: u16_at(&data, maxp.start + 4).ok_or(FontError::Malformed("maxp"))?,
             hmtx: table(b"hmtx", "hmtx")?,
@@ -207,9 +238,11 @@ impl TrueTypeFont {
         let mut best: Option<(u8, usize)> = None;
         for index in 0..usize::from(count) {
             let record = start + 4 + 8 * index;
-            let (Some(platform), Some(encoding), Some(offset)) =
-                (u16_at(data, record), u16_at(data, record + 2), u32_at(data, record + 4))
-            else {
+            let (Some(platform), Some(encoding), Some(offset)) = (
+                u16_at(data, record),
+                u16_at(data, record + 2),
+                u32_at(data, record + 4),
+            ) else {
                 break;
             };
             let rank = match (platform, encoding) {
@@ -269,7 +302,11 @@ impl TrueTypeFont {
         let groups = u32_at(data, subtable + 12)? as usize;
         for group in 0..groups.min(1 << 16) {
             let at = subtable + 16 + 12 * group;
-            let (first, last, glyph) = (u32_at(data, at)?, u32_at(data, at + 4)?, u32_at(data, at + 8)?);
+            let (first, last, glyph) = (
+                u32_at(data, at)?,
+                u32_at(data, at + 4)?,
+                u32_at(data, at + 8)?,
+            );
             if (first..=last).contains(&code) {
                 return u16::try_from(glyph.checked_add(code - first)?).ok();
             }
@@ -316,7 +353,13 @@ impl TrueTypeFont {
         }
     }
 
-    fn simple(&self, data: &[u8], start: usize, count: usize, out: &mut Vec<Vec<Point>>) -> Option<()> {
+    fn simple(
+        &self,
+        data: &[u8],
+        start: usize,
+        count: usize,
+        out: &mut Vec<Vec<Point>>,
+    ) -> Option<()> {
         let mut ends = Vec::with_capacity(count);
         for index in 0..count {
             ends.push(usize::from(u16_at(data, start + 10 + 2 * index)?));
@@ -374,17 +417,29 @@ impl TrueTypeFont {
         Some(())
     }
 
-    fn composite(&self, data: &[u8], mut at: usize, depth: usize, out: &mut Vec<Vec<Point>>) -> Option<()> {
+    fn composite(
+        &self,
+        data: &[u8],
+        mut at: usize,
+        depth: usize,
+        out: &mut Vec<Vec<Point>>,
+    ) -> Option<()> {
         loop {
             let flags = u16_at(data, at)?;
             let glyph = u16_at(data, at + 2)?;
             at += 4;
             let (dx, dy) = if flags & 1 != 0 {
-                let pair = (f32::from(i16_at(data, at)?), f32::from(i16_at(data, at + 2)?));
+                let pair = (
+                    f32::from(i16_at(data, at)?),
+                    f32::from(i16_at(data, at + 2)?),
+                );
                 at += 4;
                 pair
             } else {
-                let pair = (f32::from(*data.get(at)? as i8), f32::from(*data.get(at + 1)? as i8));
+                let pair = (
+                    f32::from(*data.get(at)? as i8),
+                    f32::from(*data.get(at + 1)? as i8),
+                );
                 at += 2;
                 pair
             };
@@ -510,7 +565,11 @@ impl Coverage {
         if (from.1 - to.1).abs() < f32::EPSILON {
             return;
         }
-        let (direction, top, bottom) = if from.1 < to.1 { (1.0, from, to) } else { (-1.0, to, from) };
+        let (direction, top, bottom) = if from.1 < to.1 {
+            (1.0, from, to)
+        } else {
+            (-1.0, to, from)
+        };
         let slope = (bottom.0 - top.0) / (bottom.1 - top.1);
         let first_row = top.1.max(0.0).floor() as usize;
         let last_row = (bottom.1.ceil().max(0.0) as usize).min(self.height);
@@ -563,12 +622,26 @@ impl Typeface for TrueTypeFont {
     }
 
     fn extent(&self, size: f32) -> (f32, f32) {
-        (self.ascender * self.scale(size), -self.descender * self.scale(size))
+        (
+            self.ascender * self.scale(size),
+            -self.descender * self.scale(size),
+        )
     }
 
-    fn draw_glyph(&self, canvas: &mut Canvas, character: char, x: f32, baseline: f32, size: f32, color: Rgba) {
+    fn draw_glyph(
+        &self,
+        canvas: &mut Canvas,
+        character: char,
+        x: f32,
+        baseline: f32,
+        size: f32,
+        color: Rgba,
+    ) {
         let mut contours = Vec::new();
-        if self.contours(self.glyph_index(character), 0, &mut contours).is_none() {
+        if self
+            .contours(self.glyph_index(character), 0, &mut contours)
+            .is_none()
+        {
             return;
         }
         let scale = self.scale(size);
@@ -581,7 +654,9 @@ impl Typeface for TrueTypeFont {
         for contour in &contours {
             let points = flattened(contour);
             for pair in points.windows(2) {
-                let map = |point: (f32, f32)| (x - left + point.0 * scale, baseline - top - point.1 * scale);
+                let map = |point: (f32, f32)| {
+                    (x - left + point.0 * scale, baseline - top - point.1 * scale)
+                };
                 coverage.line(map(pair[0]), map(pair[1]));
             }
         }
@@ -590,7 +665,12 @@ impl Typeface for TrueTypeFont {
             for column in 0..width {
                 sum += coverage.area[row * (width + 2) + column];
                 let alpha = sum.abs().min(1.0);
-                canvas.blend(left as i64 + column as i64, top as i64 + row as i64, color, alpha);
+                canvas.blend(
+                    left as i64 + column as i64,
+                    top as i64 + row as i64,
+                    color,
+                    alpha,
+                );
             }
         }
     }
@@ -623,7 +703,10 @@ mod tests {
     #[test]
     fn hostile_font_files_are_errors_and_never_panic() {
         assert!(TrueTypeFont::parse(Vec::new()).is_err());
-        assert_eq!(TrueTypeFont::parse(b"OTTO\0\0\0\0\0\0\0\0".to_vec()).unwrap_err(), FontError::Unsupported);
+        assert_eq!(
+            TrueTypeFont::parse(b"OTTO\0\0\0\0\0\0\0\0".to_vec()).unwrap_err(),
+            FontError::Unsupported
+        );
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         for _ in 0..2000 {
             seed ^= seed << 13;
@@ -639,7 +722,11 @@ mod tests {
             }
             if let Ok(font) = TrueTypeFont::parse(bytes) {
                 let mut canvas = Canvas::new(32, 32, Rgba::hex(0xFFFFFF));
-                let style = TextStyle { size: 13.0, line_height: 18.0, color: Rgba::hex(0) };
+                let style = TextStyle {
+                    size: 13.0,
+                    line_height: 18.0,
+                    color: Rgba::hex(0),
+                };
                 font.draw_text(&mut canvas, "Ag", 2.0, 2.0, style);
             }
         }
@@ -648,7 +735,11 @@ mod tests {
     #[test]
     fn the_box_face_draws_the_same_pixels_everywhere() {
         let mut canvas = Canvas::new(40, 20, Rgba::hex(0xFFFFFF));
-        let style = TextStyle { size: 10.0, line_height: 20.0, color: Rgba::hex(0) };
+        let style = TextStyle {
+            size: 10.0,
+            line_height: 20.0,
+            color: Rgba::hex(0),
+        };
         let end = BoxFace.draw_text(&mut canvas, "ab", 2.0, 0.0, style);
         assert_eq!(end, 14.0);
         assert_eq!(canvas.pixel(4, 12), Some(Rgba::hex(0)));

@@ -47,9 +47,12 @@ pub(crate) const FUNCTIONS: [&str; 36] = [
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "st_asbinary" | "st_asewkb" => SqlType::Bytea,
-        "st_x" | "st_y" | "st_distance" | "st_area" | "st_length" | "st_distancesphere" => SqlType::Double,
+        "st_x" | "st_y" | "st_distance" | "st_area" | "st_length" | "st_distancesphere" => {
+            SqlType::Double
+        }
         "st_srid" | "st_npoints" => SqlType::Integer,
-        "st_dwithin" | "st_contains" | "st_within" | "st_intersects" | "st_disjoint" | "st_isempty" | "st_equals" => SqlType::Boolean,
+        "st_dwithin" | "st_contains" | "st_within" | "st_intersects" | "st_disjoint"
+        | "st_isempty" | "st_equals" => SqlType::Boolean,
         name if FUNCTIONS.contains(&name) => SqlType::Text,
         _ => return None,
     })
@@ -60,16 +63,22 @@ fn argument_error(error: eggdb_geo::GeoError) -> SqlError {
 }
 
 fn geo_error(error: eggdb_geo::GeoError) -> SqlError {
-    SqlError::new(SqlState::INTERNAL_ERROR, error.0).with_hint("\"POINT(1 2)\" and \"SRID=4326;POINT(1 2)\" are geometries")
+    SqlError::new(SqlState::INTERNAL_ERROR, error.0)
+        .with_hint("\"POINT(1 2)\" and \"SRID=4326;POINT(1 2)\" are geometries")
 }
 
 fn spatial_of(value: &Value) -> SqlResult<Option<Spatial>> {
     Ok(match value {
         Value::Null => None,
-        Value::Text(text) | Value::Bpchar(text) => Some(eggdb_geo::from_wkt(text).map_err(geo_error)?),
+        Value::Text(text) | Value::Bpchar(text) => {
+            Some(eggdb_geo::from_wkt(text).map_err(geo_error)?)
+        }
         Value::Bytea(bytes) => Some(eggdb_geo::from_wkb(bytes).map_err(geo_error)?),
         other => {
-            return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("a geometry is expected, not {}", other.type_name())));
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("a geometry is expected, not {}", other.type_name()),
+            ));
         }
     })
 }
@@ -79,11 +88,22 @@ fn geometry_value(spatial: &Spatial) -> Value {
 }
 
 fn number(value: &Value) -> SqlResult<f64> {
-    value.as_float().filter(|number| number.is_finite()).ok_or_else(|| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "a finite number is expected"))
+    value
+        .as_float()
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| {
+            SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                "a finite number is expected",
+            )
+        })
 }
 
 fn srid_of(value: &Value) -> SqlResult<Option<i32>> {
-    let srid = value.as_integer().and_then(|srid| i32::try_from(srid).ok()).ok_or_else(|| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "an SRID is an integer"))?;
+    let srid = value
+        .as_integer()
+        .and_then(|srid| i32::try_from(srid).ok())
+        .ok_or_else(|| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "an SRID is an integer"))?;
     Ok((srid != 0).then_some(srid))
 }
 
@@ -93,38 +113,61 @@ fn same_srid(left: &Spatial, right: &Spatial) -> SqlResult<()> {
     }
     Err(SqlError::new(
         SqlState::INTERNAL_ERROR,
-        format!("Operation on mixed SRID geometries ({} != {})", left.srid.unwrap_or(0), right.srid.unwrap_or(0)),
+        format!(
+            "Operation on mixed SRID geometries ({} != {})",
+            left.srid.unwrap_or(0),
+            right.srid.unwrap_or(0)
+        ),
     ))
 }
 
 fn coord_of(node: &Node) -> SqlResult<Coord> {
-    let invalid = || SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "invalid GeoJSON coordinates");
+    let invalid = || {
+        SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            "invalid GeoJSON coordinates",
+        )
+    };
     let Json::Array(items) = &node.value else {
         return Err(invalid());
     };
     let value = |at: usize| match items.get(at).map(|item| &item.value) {
-        Some(Json::Number(text)) => text.parse::<f64>().ok().filter(|number| number.is_finite()).ok_or_else(invalid),
+        Some(Json::Number(text)) => text
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
+            .ok_or_else(invalid),
         _ => Err(invalid()),
     };
-    Ok(Coord { x: value(0)?, y: value(1)? })
+    Ok(Coord {
+        x: value(0)?,
+        y: value(1)?,
+    })
 }
 
 fn list<T>(node: &Node, each: impl Fn(&Node) -> SqlResult<T>) -> SqlResult<Vec<T>> {
     match &node.value {
         Json::Array(items) => items.iter().map(each).collect(),
-        _ => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "invalid GeoJSON coordinates")),
+        _ => Err(SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            "invalid GeoJSON coordinates",
+        )),
     }
 }
 
 fn member<'n>(node: &'n Node, name: &str) -> Option<&'n Node> {
     match &node.value {
-        Json::Object(members) => members.iter().find(|(key, _)| key == name).map(|(_, value)| value),
+        Json::Object(members) => members
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value),
         _ => None,
     }
 }
 
 fn from_geojson(node: &Node, depth: usize) -> SqlResult<Geometry> {
-    let invalid = |message: &str| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message.to_owned());
+    let invalid =
+        |message: &str| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message.to_owned());
     if depth > eggdb_geo::MAX_DEPTH {
         return Err(invalid("GeoJSON collections are nested too deeply"));
     }
@@ -133,10 +176,14 @@ fn from_geojson(node: &Node, depth: usize) -> SqlResult<Geometry> {
         _ => return Err(invalid("GeoJSON has no type")),
     };
     if kind == "GeometryCollection" {
-        let items = member(node, "geometries").ok_or_else(|| invalid("a GeometryCollection has no geometries"))?;
-        return Ok(Geometry::Collection(list(items, |item| from_geojson(item, depth + 1))?));
+        let items = member(node, "geometries")
+            .ok_or_else(|| invalid("a GeometryCollection has no geometries"))?;
+        return Ok(Geometry::Collection(list(items, |item| {
+            from_geojson(item, depth + 1)
+        })?));
     }
-    let coordinates = member(node, "coordinates").ok_or_else(|| invalid("GeoJSON has no coordinates"))?;
+    let coordinates =
+        member(node, "coordinates").ok_or_else(|| invalid("GeoJSON has no coordinates"))?;
     Ok(match kind {
         "Point" => Geometry::Point(match &coordinates.value {
             Json::Array(items) if items.is_empty() => None,
@@ -145,19 +192,37 @@ fn from_geojson(node: &Node, depth: usize) -> SqlResult<Geometry> {
         "LineString" => Geometry::LineString(list(coordinates, coord_of)?),
         "MultiPoint" => Geometry::MultiPoint(list(coordinates, coord_of)?),
         "Polygon" => Geometry::Polygon(list(coordinates, |ring| list(ring, coord_of))?),
-        "MultiLineString" => Geometry::MultiLineString(list(coordinates, |line| list(line, coord_of))?),
-        "MultiPolygon" => Geometry::MultiPolygon(list(coordinates, |polygon| list(polygon, |ring| list(ring, coord_of)))?),
+        "MultiLineString" => {
+            Geometry::MultiLineString(list(coordinates, |line| list(line, coord_of))?)
+        }
+        "MultiPolygon" => Geometry::MultiPolygon(list(coordinates, |polygon| {
+            list(polygon, |ring| list(ring, coord_of))
+        })?),
         other => return Err(invalid(&format!("unknown GeoJSON type {other}"))),
     })
 }
 
 /// Runs a spatial function. Geometries are EWKT text (or WKB bytes) in and EWKT text out.
 pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
-    if arguments.iter().any(|argument| matches!(argument, Value::Null)) && name != "st_makepoint" {
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument, Value::Null))
+        && name != "st_makepoint"
+    {
         return Ok(Value::Null);
     }
     let spatial = |at: usize| -> SqlResult<Spatial> {
-        arguments.get(at).map(spatial_of).transpose()?.flatten().ok_or_else(|| SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("function {name} needs a geometry argument")))
+        arguments
+            .get(at)
+            .map(spatial_of)
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| {
+                SqlError::new(
+                    SqlState::UNDEFINED_FUNCTION,
+                    format!("function {name} needs a geometry argument"),
+                )
+            })
     };
     let pair = || -> SqlResult<(Spatial, Spatial)> {
         let (left, right) = (spatial(0)?, spatial(1)?);
@@ -165,7 +230,14 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
         Ok((left, right))
     };
     Ok(match (name, arguments) {
-        ("st_geomfromtext" | "st_geometryfromtext" | "st_geomfromewkt" | "st_geogfromtext" | "st_geographyfromtext", [_]) => {
+        (
+            "st_geomfromtext"
+            | "st_geometryfromtext"
+            | "st_geomfromewkt"
+            | "st_geogfromtext"
+            | "st_geographyfromtext",
+            [_],
+        ) => {
             let mut parsed = spatial(0)?;
             if name.starts_with("st_geog") && parsed.srid.is_none() {
                 parsed.srid = Some(4326);
@@ -184,16 +256,32 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
         ("st_asewkb", [_]) => Value::Bytea(eggdb_geo::to_wkb(&spatial(0)?, true)),
         ("st_asgeojson", [_, ..]) => Value::Text(eggdb_geo::to_geojson(&spatial(0)?.geometry)),
         ("st_geomfromgeojson", [Value::Text(text) | Value::Json(text) | Value::Jsonb(text)]) => {
-            let node = parse_document(text).map_err(|error| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, error.message))?;
-            geometry_value(&Spatial { srid: Some(4326), geometry: from_geojson(&node, 0)? })
+            let node = parse_document(text)
+                .map_err(|error| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, error.message))?;
+            geometry_value(&Spatial {
+                srid: Some(4326),
+                geometry: from_geojson(&node, 0)?,
+            })
         }
         ("st_makepoint" | "st_point", [x, y]) => {
             if matches!(x, Value::Null) || matches!(y, Value::Null) {
                 return Ok(Value::Null);
             }
-            geometry_value(&Spatial { srid: None, geometry: Geometry::Point(Some(Coord { x: number(x)?, y: number(y)? })) })
+            geometry_value(&Spatial {
+                srid: None,
+                geometry: Geometry::Point(Some(Coord {
+                    x: number(x)?,
+                    y: number(y)?,
+                })),
+            })
         }
-        ("st_point", [x, y, srid]) => geometry_value(&Spatial { srid: srid_of(srid)?, geometry: Geometry::Point(Some(Coord { x: number(x)?, y: number(y)? })) }),
+        ("st_point", [x, y, srid]) => geometry_value(&Spatial {
+            srid: srid_of(srid)?,
+            geometry: Geometry::Point(Some(Coord {
+                x: number(x)?,
+                y: number(y)?,
+            })),
+        }),
         ("st_setsrid", [_, srid]) => {
             let mut changed = spatial(0)?;
             changed.srid = srid_of(srid)?;
@@ -201,9 +289,16 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
         }
         ("st_srid", [_]) => Value::Integer(spatial(0)?.srid.unwrap_or(0)),
         ("st_x" | "st_y", [_]) => match spatial(0)?.geometry {
-            Geometry::Point(Some(coord)) => Value::Double(if name == "st_x" { coord.x } else { coord.y }),
+            Geometry::Point(Some(coord)) => {
+                Value::Double(if name == "st_x" { coord.x } else { coord.y })
+            }
             Geometry::Point(None) => Value::Null,
-            _ => return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "Argument to ST_X() must have type POINT")),
+            _ => {
+                return Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "Argument to ST_X() must have type POINT",
+                ));
+            }
         },
         ("st_distance", [_, _]) => {
             let (left, right) = pair()?;
@@ -211,7 +306,10 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
         }
         ("st_dwithin", [_, _, within]) => {
             let (left, right) = pair()?;
-            Value::Boolean(eggdb_geo::distance(&left.geometry, &right.geometry).is_some_and(|distance| distance <= number(within).unwrap_or(-1.0)))
+            Value::Boolean(
+                eggdb_geo::distance(&left.geometry, &right.geometry)
+                    .is_some_and(|distance| distance <= number(within).unwrap_or(-1.0)),
+            )
         }
         ("st_contains", [_, _]) => {
             let (left, right) = pair()?;
@@ -224,43 +322,72 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
         ("st_intersects" | "st_disjoint", [_, _]) => {
             let (left, right) = pair()?;
             let meets = eggdb_geo::intersects(&left.geometry, &right.geometry);
-            Value::Boolean(if name == "st_intersects" { meets } else { !meets })
+            Value::Boolean(if name == "st_intersects" {
+                meets
+            } else {
+                !meets
+            })
         }
         ("st_equals", [_, _]) => {
             let (left, right) = pair()?;
-            Value::Boolean(eggdb_geo::contains(&left.geometry, &right.geometry) && eggdb_geo::contains(&right.geometry, &left.geometry))
+            Value::Boolean(
+                eggdb_geo::contains(&left.geometry, &right.geometry)
+                    && eggdb_geo::contains(&right.geometry, &left.geometry),
+            )
         }
         ("st_area", [_]) => Value::Double(eggdb_geo::area(&spatial(0)?.geometry)),
         ("st_length", [_]) => Value::Double(eggdb_geo::length(&spatial(0)?.geometry)),
         ("st_envelope", [_]) => {
             let source = spatial(0)?;
             match eggdb_geo::envelope(&source.geometry) {
-                Some(geometry) => geometry_value(&Spatial { srid: source.srid, geometry }),
+                Some(geometry) => geometry_value(&Spatial {
+                    srid: source.srid,
+                    geometry,
+                }),
                 None => geometry_value(&source),
             }
         }
         ("st_distancesphere", [_, _]) => {
             let (left, right) = pair()?;
-            Value::Double(eggdb_geo::sphere_distance(&left.geometry, &right.geometry).map_err(geo_error)?)
+            Value::Double(
+                eggdb_geo::sphere_distance(&left.geometry, &right.geometry).map_err(geo_error)?,
+            )
         }
-        ("st_npoints", [_]) => Value::Integer(i32::try_from(spatial(0)?.geometry.coords().len()).unwrap_or(i32::MAX)),
+        ("st_npoints", [_]) => {
+            Value::Integer(i32::try_from(spatial(0)?.geometry.coords().len()).unwrap_or(i32::MAX))
+        }
         ("st_geometrytype", [_]) => Value::Text(spatial(0)?.geometry.type_name().to_owned()),
         ("st_isempty", [_]) => Value::Boolean(spatial(0)?.geometry.is_empty()),
         ("st_transform", [_, target]) => {
             let source = spatial(0)?;
             let geometry = match (source.srid, srid_of(target)?) {
                 (from, to) if from == to => source.geometry,
-                (Some(4326), Some(3857)) => eggdb_geo::to_web_mercator(&source.geometry).map_err(argument_error)?,
-                (Some(3857), Some(4326)) => eggdb_geo::from_web_mercator(&source.geometry).map_err(argument_error)?,
-                (None, _) => return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "ST_Transform: Input geometry has unknown (0) SRID")),
+                (Some(4326), Some(3857)) => {
+                    eggdb_geo::to_web_mercator(&source.geometry).map_err(argument_error)?
+                }
+                (Some(3857), Some(4326)) => {
+                    eggdb_geo::from_web_mercator(&source.geometry).map_err(argument_error)?
+                }
+                (None, _) => {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        "ST_Transform: Input geometry has unknown (0) SRID",
+                    ));
+                }
                 (Some(from), to) => {
                     return Err(SqlError::new(
                         SqlState::FEATURE_NOT_SUPPORTED,
-                        format!("ST_Transform from SRID {from} to {} is not supported yet; EggDB transforms between 4326 and 3857", to.unwrap_or(0)),
+                        format!(
+                            "ST_Transform from SRID {from} to {} is not supported yet; EggDB transforms between 4326 and 3857",
+                            to.unwrap_or(0)
+                        ),
                     ));
                 }
             };
-            geometry_value(&Spatial { srid: srid_of(target)?, geometry })
+            geometry_value(&Spatial {
+                srid: srid_of(target)?,
+                geometry,
+            })
         }
         ("st_tileenvelope", [zoom, x, y]) => {
             let whole = |value: &Value, what: &str| -> SqlResult<u64> {
@@ -268,12 +395,19 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 if number.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&number) {
                     Ok(number as u64)
                 } else {
-                    Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("ST_TileEnvelope: {what} must be a non-negative whole number")))
+                    Err(SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        format!("ST_TileEnvelope: {what} must be a non-negative whole number"),
+                    ))
                 }
             };
             let zoom = u32::try_from(whole(zoom, "the zoom")?).unwrap_or(u32::MAX);
-            let geometry = eggdb_geo::tile_envelope(zoom, whole(x, "x")?, whole(y, "y")?).map_err(argument_error)?;
-            geometry_value(&Spatial { srid: Some(3857), geometry })
+            let geometry = eggdb_geo::tile_envelope(zoom, whole(x, "x")?, whole(y, "y")?)
+                .map_err(argument_error)?;
+            geometry_value(&Spatial {
+                srid: Some(3857),
+                geometry,
+            })
         }
         ("st_geohash", [_, ..]) if arguments.len() <= 2 => {
             let precision = match arguments.get(1) {
@@ -281,14 +415,24 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 None => 20,
             };
             match spatial(0)?.geometry {
-                Geometry::Point(Some(coord)) => Value::Text(eggdb_geo::geohash(coord, precision).map_err(argument_error)?),
-                _ => return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "ST_GeoHash takes a point here")),
+                Geometry::Point(Some(coord)) => {
+                    Value::Text(eggdb_geo::geohash(coord, precision).map_err(argument_error)?)
+                }
+                _ => {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        "ST_GeoHash takes a point here",
+                    ));
+                }
             }
         }
         _ => {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,
-                format!("function {name} does not take {} arguments", arguments.len()),
+                format!(
+                    "function {name} does not take {} arguments",
+                    arguments.len()
+                ),
             ));
         }
     })

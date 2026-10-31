@@ -291,9 +291,16 @@ fn starts_column_part(lexemes: &[Lexeme], at: usize) -> bool {
             .iter()
             .any(|word| is_word(previous, word));
     }
-    ["constraint", "default", "generated", "collate", "visible", "invisible"]
-        .iter()
-        .any(|word| is_word(Some(lexeme), word))
+    [
+        "constraint",
+        "default",
+        "generated",
+        "collate",
+        "visible",
+        "invisible",
+    ]
+    .iter()
+    .any(|word| is_word(Some(lexeme), word))
 }
 
 fn disabled_column_constraints(element: &Element) -> Vec<ColumnConstraint> {

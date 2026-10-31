@@ -105,7 +105,13 @@ pub struct Primary {
 impl Primary {
     /// A primary for `term` whose history ends at `last` (0 for a new database).
     pub fn new(term: u64, last: u64, mode: Mode) -> Self {
-        Self { term, last, mode, retained: VecDeque::new(), acknowledged: BTreeMap::new() }
+        Self {
+            term,
+            last,
+            mode,
+            retained: VecDeque::new(),
+            acknowledged: BTreeMap::new(),
+        }
     }
 
     /// The term.
@@ -116,23 +122,40 @@ impl Primary {
     /// Records a commit's changes; returns its batch and the token to read it back with.
     pub fn commit(&mut self, changes: Vec<Change>) -> (Batch, ReadToken) {
         self.last += 1;
-        let batch = Batch { term: self.term, sequence: self.last, changes };
+        let batch = Batch {
+            term: self.term,
+            sequence: self.last,
+            changes,
+        };
         self.retained.push_back(batch.clone());
-        (batch, ReadToken { sequence: self.last })
+        (
+            batch,
+            ReadToken {
+                sequence: self.last,
+            },
+        )
     }
 
     /// The batches a replica that has applied up to `applied` still needs, at most `limit`.
     pub fn batches_after(&self, applied: u64, limit: usize) -> Result<Vec<Batch>, u64> {
         match self.retained.front() {
             Some(first) if first.sequence > applied + 1 => Err(first.sequence),
-            _ => Ok(self.retained.iter().filter(|batch| batch.sequence > applied).take(limit).cloned().collect()),
+            _ => Ok(self
+                .retained
+                .iter()
+                .filter(|batch| batch.sequence > applied)
+                .take(limit)
+                .cloned()
+                .collect()),
         }
     }
 
     /// Starts shipping to `replica`, which has applied up to `applied`; batches it still needs
     /// are kept until it acknowledges them.
     pub fn add_replica(&mut self, replica: ReplicaId, applied: u64) {
-        self.acknowledged.entry(replica).or_insert(applied.min(self.last));
+        self.acknowledged
+            .entry(replica)
+            .or_insert(applied.min(self.last));
     }
 
     /// Stops keeping batches for `replica`.
@@ -146,7 +169,11 @@ impl Primary {
         let entry = self.acknowledged.entry(replica).or_insert(0);
         *entry = (*entry).max(sequence.min(self.last));
         let everyone = self.acknowledged.values().copied().min().unwrap_or(0);
-        while self.retained.front().is_some_and(|batch| batch.sequence <= everyone) {
+        while self
+            .retained
+            .front()
+            .is_some_and(|batch| batch.sequence <= everyone)
+        {
             self.retained.pop_front();
         }
     }
@@ -156,7 +183,11 @@ impl Primary {
         match self.mode {
             Mode::Asynchronous => sequence <= self.last,
             Mode::Synchronous { acknowledgements } => {
-                self.acknowledged.values().filter(|applied| **applied >= sequence).count() >= acknowledgements
+                self.acknowledged
+                    .values()
+                    .filter(|applied| **applied >= sequence)
+                    .count()
+                    >= acknowledgements
             }
         }
     }
@@ -177,7 +208,14 @@ impl<A: Apply> Replica<A> {
     /// A replica that has applied up to `applied` in `term`, keeping its last `retain` batches
     /// to feed cascading replicas.
     pub fn new(id: ReplicaId, term: u64, applied: u64, storage: A, retain: usize) -> Self {
-        Self { id, term, applied, storage, retained: VecDeque::new(), retain }
+        Self {
+            id,
+            term,
+            applied,
+            storage,
+            retained: VecDeque::new(),
+            retain,
+        }
     }
 
     /// Its id.
@@ -209,7 +247,9 @@ impl<A: Apply> Replica<A> {
             return Ok(self.applied);
         }
         if batch.sequence != self.applied + 1 {
-            return Err(Refusal::Gap { next: self.applied + 1 });
+            return Err(Refusal::Gap {
+                next: self.applied + 1,
+            });
         }
         self.storage.apply(batch).map_err(Refusal::Failed)?;
         self.term = batch.term;
@@ -231,7 +271,12 @@ impl<A: Apply> Replica<A> {
         match self.retained.front() {
             Some(first) if first.sequence > applied + 1 => Err(first.sequence),
             None if applied < self.applied => Err(self.applied),
-            _ => Ok(self.retained.iter().filter(|batch| batch.sequence > applied).cloned().collect()),
+            _ => Ok(self
+                .retained
+                .iter()
+                .filter(|batch| batch.sequence > applied)
+                .cloned()
+                .collect()),
         }
     }
 
@@ -242,7 +287,10 @@ impl<A: Apply> Replica<A> {
 
     /// Turns this replica into the primary of `term`.
     pub fn promote(self, term: u64, mode: Mode) -> (Primary, A) {
-        (Primary::new(term.max(self.term + 1), self.applied, mode), self.storage)
+        (
+            Primary::new(term.max(self.term + 1), self.applied, mode),
+            self.storage,
+        )
     }
 }
 
@@ -260,7 +308,16 @@ pub struct Candidate {
 /// The replica to promote: the one with the newest term and then the most applied (the lower id
 /// on a tie, so every node picks the same one).
 pub fn elect(candidates: &[Candidate]) -> Option<ReplicaId> {
-    candidates.iter().max_by(|a, b| (a.term, a.applied, std::cmp::Reverse(a.id)).cmp(&(b.term, b.applied, std::cmp::Reverse(b.id)))).map(|candidate| candidate.id)
+    candidates
+        .iter()
+        .max_by(|a, b| {
+            (a.term, a.applied, std::cmp::Reverse(a.id)).cmp(&(
+                b.term,
+                b.applied,
+                std::cmp::Reverse(b.id),
+            ))
+        })
+        .map(|candidate| candidate.id)
 }
 
 #[cfg(test)]

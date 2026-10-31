@@ -23,7 +23,13 @@ thread_local! {
     static SESSIONS: RefCell<Vec<Option<OpenSession>>> = const { RefCell::new(Vec::new()) };
 }
 
-const DIALECTS: [Dialect; 5] = [Dialect::PostgreSql, Dialect::Sqlite, Dialect::MySql, Dialect::SqlServer, Dialect::Oracle];
+const DIALECTS: [Dialect; 5] = [
+    Dialect::PostgreSql,
+    Dialect::Sqlite,
+    Dialect::MySql,
+    Dialect::SqlServer,
+    Dialect::Oracle,
+];
 
 fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
@@ -35,7 +41,9 @@ fn json_string(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            control if (control as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", control as u32))
+            }
             other => out.push(other),
         }
     }
@@ -50,20 +58,43 @@ fn answer(json: String) -> u32 {
 }
 
 fn input_text() -> Result<String, String> {
-    INPUT.with(|input| String::from_utf8(input.borrow().clone()).map_err(|_| "the input is not UTF-8".to_owned()))
+    INPUT.with(|input| {
+        String::from_utf8(input.borrow().clone()).map_err(|_| "the input is not UTF-8".to_owned())
+    })
 }
 
 fn result_json(result: &QueryResult) -> String {
     let columns = match &result.columns {
-        Some(columns) => format!("[{}]", columns.iter().map(|column| json_string(&column.name)).collect::<Vec<_>>().join(",")),
+        Some(columns) => format!(
+            "[{}]",
+            columns
+                .iter()
+                .map(|column| json_string(&column.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         None => "null".to_owned(),
     };
     let rows: Vec<String> = result
         .rows
         .iter()
-        .map(|row| format!("[{}]", row.iter().map(|value| value.to_text().map_or_else(|| "null".to_owned(), |text| json_string(&text))).collect::<Vec<_>>().join(",")))
+        .map(|row| {
+            format!(
+                "[{}]",
+                row.iter()
+                    .map(|value| value
+                        .to_text()
+                        .map_or_else(|| "null".to_owned(), |text| json_string(&text)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
         .collect();
-    format!("{{\"tag\":{},\"columns\":{columns},\"rows\":[{}]}}", json_string(&result.tag), rows.join(","))
+    format!(
+        "{{\"tag\":{},\"columns\":{columns},\"rows\":[{}]}}",
+        json_string(&result.tag),
+        rows.join(",")
+    )
 }
 
 /// Makes the input buffer `length` bytes long and returns where it starts, for the host to fill.
@@ -92,13 +123,23 @@ pub extern "C" fn eggdb_wasm_output_len() -> u32 {
 /// Answers `{"version":"..."}` and returns the answer's length.
 #[unsafe(no_mangle)]
 pub extern "C" fn eggdb_wasm_version() -> u32 {
-    answer(format!("{{\"version\":{}}}", json_string(env!("CARGO_PKG_VERSION"))))
+    answer(format!(
+        "{{\"version\":{}}}",
+        json_string(env!("CARGO_PKG_VERSION"))
+    ))
 }
 
 fn open(path: &str, dialect: u32) -> Result<OpenSession, String> {
-    let dialect = *DIALECTS.get(usize::try_from(dialect).unwrap_or(usize::MAX)).ok_or_else(|| format!("dialect {dialect} is not one of 0 to 4"))?;
-    let database = if path == ":memory:" { Database::in_memory() } else { Database::open_with(path, eggdb::Options::default().create_if_missing(true)) };
-    let database: &'static Database = Box::leak(Box::new(database.map_err(|error| error.to_string())?));
+    let dialect = *DIALECTS
+        .get(usize::try_from(dialect).unwrap_or(usize::MAX))
+        .ok_or_else(|| format!("dialect {dialect} is not one of 0 to 4"))?;
+    let database = if path == ":memory:" {
+        Database::in_memory()
+    } else {
+        Database::open_with(path, eggdb::Options::default().create_if_missing(true))
+    };
+    let database: &'static Database =
+        Box::leak(Box::new(database.map_err(|error| error.to_string())?));
     let store: &'static Store<'static> = Box::leak(Box::new(database.sql_store()));
     Ok(store.session(dialect))
 }
@@ -131,19 +172,31 @@ pub extern "C" fn eggdb_wasm_open(dialect: u32) -> u32 {
 pub extern "C" fn eggdb_wasm_execute(handle: u32) -> u32 {
     let sql = match input_text() {
         Ok(sql) => sql,
-        Err(message) => return answer(format!("{{\"results\":[],\"error\":{}}}", json_string(&message))),
+        Err(message) => {
+            return answer(format!(
+                "{{\"results\":[],\"error\":{}}}",
+                json_string(&message)
+            ));
+        }
     };
     let index = usize::try_from(handle).unwrap_or(0).wrapping_sub(1);
     let json = SESSIONS.with(|sessions| {
         let mut sessions = sessions.borrow_mut();
         let Some(Some(session)) = sessions.get_mut(index) else {
-            return format!("{{\"results\":[],\"error\":{}}}", json_string("the database handle is not open"));
+            return format!(
+                "{{\"results\":[],\"error\":{}}}",
+                json_string("the database handle is not open")
+            );
         };
         let mut results = Vec::new();
         let outcome = session.execute(&sql, &mut |result| results.push(result_json(&result)));
         match outcome {
             Ok(()) => format!("{{\"results\":[{}]}}", results.join(",")),
-            Err(error) => format!("{{\"results\":[{}],\"error\":{}}}", results.join(","), json_string(&format!("ERROR:  {}", error.message()))),
+            Err(error) => format!(
+                "{{\"results\":[{}],\"error\":{}}}",
+                results.join(","),
+                json_string(&format!("ERROR:  {}", error.message()))
+            ),
         }
     });
     answer(json)
@@ -185,11 +238,18 @@ mod tests {
         write_input(":memory:");
         let handle = eggdb_wasm_open(0);
         assert_ne!(handle, 0, "{}", output());
-        write_input("CREATE TABLE t (id integer PRIMARY KEY, name text); INSERT INTO t VALUES (1, 'a\"b'), (2, NULL); SELECT * FROM t ORDER BY id");
+        write_input(
+            "CREATE TABLE t (id integer PRIMARY KEY, name text); INSERT INTO t VALUES (1, 'a\"b'), (2, NULL); SELECT * FROM t ORDER BY id",
+        );
         eggdb_wasm_execute(handle);
         let answer = output();
         assert!(answer.contains("\"tag\":\"CREATE TABLE\""), "{answer}");
-        assert!(answer.contains("\"columns\":[\"id\",\"name\"],\"rows\":[[\"1\",\"a\\\"b\"],[\"2\",null]]"), "{answer}");
+        assert!(
+            answer.contains(
+                "\"columns\":[\"id\",\"name\"],\"rows\":[[\"1\",\"a\\\"b\"],[\"2\",null]]"
+            ),
+            "{answer}"
+        );
         write_input("SELECT * FROM missing");
         eggdb_wasm_execute(handle);
         assert!(output().contains("\"error\":\"ERROR:  "));

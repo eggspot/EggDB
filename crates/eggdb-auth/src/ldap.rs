@@ -27,7 +27,9 @@ impl fmt::Display for LdapError {
         match self {
             Self::Unreachable(why) => write!(f, "the LDAP server cannot be reached: {why}"),
             Self::Protocol => f.write_str("the LDAP server's answer is not a bind response"),
-            Self::Refused(code) => write!(f, "the LDAP server refused the bind (result code {code})"),
+            Self::Refused(code) => {
+                write!(f, "the LDAP server refused the bind (result code {code})")
+            }
         }
     }
 }
@@ -72,7 +74,10 @@ pub fn escape_dn_value(value: &str) -> String {
 fn bind_request(message_id: u32, name: &str, password: &str) -> Vec<u8> {
     let mut bind = ber::integer(3);
     bind.extend(ber::element(ber::OCTET_STRING, name.as_bytes()));
-    bind.extend(ber::element(ber::SIMPLE_AUTHENTICATION, password.as_bytes()));
+    bind.extend(ber::element(
+        ber::SIMPLE_AUTHENTICATION,
+        password.as_bytes(),
+    ));
     let mut message = ber::integer(message_id);
     message.extend(ber::element(ber::BIND_REQUEST, &bind));
     ber::element(ber::SEQUENCE, &message)
@@ -221,9 +226,18 @@ mod tests {
             b'd', b'=', b'a', b'd', b'a', b',', b'd', b'c', b'=', b'x', 0x80, 0x02, b'p', b'w',
         ];
         assert_eq!(&directory.sent[..expected.len()], &expected);
-        assert_eq!(&directory.sent[expected.len()..], &[0x30, 0x05, 0x02, 0x01, 0x02, 0x42, 0x00]);
-        assert_eq!(simple_bind(&mut answering(INVALID_CREDENTIALS), "n", "p"), Ok(false));
-        assert_eq!(simple_bind(&mut answering(53), "n", "p"), Err(LdapError::Refused(53)));
+        assert_eq!(
+            &directory.sent[expected.len()..],
+            &[0x30, 0x05, 0x02, 0x01, 0x02, 0x42, 0x00]
+        );
+        assert_eq!(
+            simple_bind(&mut answering(INVALID_CREDENTIALS), "n", "p"),
+            Ok(false)
+        );
+        assert_eq!(
+            simple_bind(&mut answering(53), "n", "p"),
+            Err(LdapError::Refused(53))
+        );
     }
 
     #[test]
@@ -236,7 +250,12 @@ mod tests {
 
     #[test]
     fn hostile_answers_are_errors() {
-        for answer in [vec![], vec![0x30], vec![0x30, 0x84, 0xff, 0xff, 0xff, 0xff], vec![0x04, 0x00]] {
+        for answer in [
+            vec![],
+            vec![0x30],
+            vec![0x30, 0x84, 0xff, 0xff, 0xff, 0xff],
+            vec![0x04, 0x00],
+        ] {
             let mut directory = Directory {
                 answer: Cursor::new(answer),
                 sent: Vec::new(),

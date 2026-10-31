@@ -153,17 +153,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         )),
         ("pg_type_is_visible", [_]) => Ok(match first {
             Some(type_oid) if oids::builtin_type(type_oid).is_some() => Value::Boolean(true),
-            Some(type_oid) => crate::user_types::is_visible(type_oid)
-                .map_or(Value::Null, Value::Boolean),
+            Some(type_oid) => {
+                crate::user_types::is_visible(type_oid).map_or(Value::Null, Value::Boolean)
+            }
             None => Value::Null,
         }),
         ("pg_get_expr", [tree, ..]) => Ok(match tree {
             Value::Text(text) => Value::Text(text.clone()),
             _ => Value::Null,
         }),
-        ("pg_get_ruledef" | "pg_get_statisticsobjdef_columns", _) => {
-            Ok(Value::Null)
-        }
+        ("pg_get_ruledef" | "pg_get_statisticsobjdef_columns", _) => Ok(Value::Null),
         ("shobj_description", _) => Ok(Value::Null),
         ("pg_get_serial_sequence", [table, column]) => serial_sequence(table, column),
         ("to_regclass", [text]) => registered(RegKind::Class, text),
@@ -316,7 +315,10 @@ fn builtin_function(oid: u32) -> Option<&'static oids::BuiltinFunction> {
 
 fn routine_arguments(snapshot: &CatalogSnapshot, oid: u32, list: ArgumentList) -> Option<String> {
     match snapshot.routine(oid) {
-        Some(routine) => Some(super::routines::function_arguments(&routine.definition, list)),
+        Some(routine) => Some(super::routines::function_arguments(
+            &routine.definition,
+            list,
+        )),
         None => builtin_function(oid).map(|function| {
             function
                 .argument_types

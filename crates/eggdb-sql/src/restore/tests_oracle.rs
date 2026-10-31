@@ -413,7 +413,12 @@ fn a_sqlplus_script_hands_its_steps_to_a_caller_that_runs_them() {
                 statement: "ALTER SESSION SET CURRENT_SCHEMA = \"HR\"".to_owned(),
             },
             command("spool", "SPOOL", "out.log APPEND", "line 7"),
-            command("whenever", "WHENEVER SQLERROR", "SQLERROR CONTINUE", "line 8"),
+            command(
+                "whenever",
+                "WHENEVER SQLERROR",
+                "SQLERROR CONTINUE",
+                "line 8"
+            ),
             SqlPlusStep::Exit {
                 rollback: true,
                 status: Some("FAILURE".to_owned()),
@@ -540,7 +545,10 @@ fn the_classifier_names_oracle_kinds() {
         run("ALTER TRIGGER secure_employees DISABLE"),
         Effect::OtherDdl
     );
-    assert_eq!(ignored("ALTER TRIGGER secure_employees COMPILE"), PLSQL_SETTINGS);
+    assert_eq!(
+        ignored("ALTER TRIGGER secure_employees COMPILE"),
+        PLSQL_SETTINGS
+    );
     assert_eq!(ignored("ALTER PROCEDURE p COMPILE"), PLSQL_SETTINGS);
     assert_eq!(
         ignored("ALTER INDEX \"HR\".\"X\" NOPARALLEL"),
@@ -612,9 +620,8 @@ fn the_classifier_names_oracle_kinds() {
     );
     assert_eq!(run("<<outer>> BEGIN NULL; END;"), Effect::PlsqlBlock);
     assert_eq!(run("BEGIN x := 1; END;"), Effect::PlsqlBlock);
-    let supplied = skip_of(
-        "BEGIN sys.dbms_logrep_imp.instantiate_schema(schema_name => 'HR'); COMMIT; END;",
-    );
+    let supplied =
+        skip_of("BEGIN sys.dbms_logrep_imp.instantiate_schema(schema_name => 'HR'); COMMIT; END;");
     assert_eq!(
         (supplied.kind, supplied.reason),
         (
@@ -767,7 +774,10 @@ fn constraints_disabled_inside_a_column_move_to_the_table_level() {
     assert_eq!(added.disabled.len(), 2);
     assert!(added.disabled[0].in_column);
     assert!(!added.disabled[1].in_column);
-    assert_eq!(added.disabled[1].clause, "CONSTRAINT t_code_uk UNIQUE (code)");
+    assert_eq!(
+        added.disabled[1].clause,
+        "CONSTRAINT t_code_uk UNIQUE (code)"
+    );
     let only_disabled =
         rewritten_added("ALTER TABLE t ADD (CONSTRAINT t_code_uk UNIQUE (code) DISABLE)").unwrap();
     assert_eq!(only_disabled.text, "");
@@ -797,11 +807,7 @@ fn an_identity_the_engine_refuses_is_rewritten_out_and_noted() {
         .is_some()
     );
     assert!(
-        without_refused_identity(
-            "CREATE TABLE t (a NUMBER PRIMARY KEY)",
-            &not_first_key
-        )
-        .is_none()
+        without_refused_identity("CREATE TABLE t (a NUMBER PRIMARY KEY)", &not_first_key).is_none()
     );
     let other = SqlError::new(SqlState::UNDEFINED_TABLE, "missing");
     assert!(
@@ -1047,7 +1053,10 @@ ALTER TABLE emp ADD (email2 VARCHAR2(5) CONSTRAINT emp_e2_ck CHECK (email2 IS NO
         .map(|difference| difference.object.as_str())
         .collect();
     objects.sort_unstable();
-    assert_eq!(objects, vec!["emp.emp_e2_ck", "t.t_qty_ck", "t_p_fk", "w.id"]);
+    assert_eq!(
+        objects,
+        vec!["emp.emp_e2_ck", "t.t_qty_ck", "t_p_fk", "w.id"]
+    );
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
     session
         .execute("INSERT INTO t (qty) VALUES (4)", &mut |_| {})
@@ -1229,9 +1238,9 @@ fn a_bad_set_serveroutput_stops_the_script_with_its_line() {
     let error = script_steps("SET SERVEROUTPUT MAYBE\n").unwrap_err();
     assert_eq!(error.state(), SqlState::SYNTAX_ERROR);
     assert!(
-        error
-            .message()
-            .starts_with("line 1: SET SERVEROUTPUT does not take 'MAYBE': the form is SET SERVEROUTPUT ON|OFF"),
+        error.message().starts_with(
+            "line 1: SET SERVEROUTPUT does not take 'MAYBE': the form is SET SERVEROUTPUT ON|OFF"
+        ),
         "{error}"
     );
 }
@@ -1257,13 +1266,41 @@ fn server_output_settings_read_like_sqlplus() {
         ServerOutputSetting::Off
     );
     for (argument, state, part) in [
-        ("", SqlState::SYNTAX_ERROR, "does not take nothing after SERVEROUTPUT"),
-        ("ON SIZE", SqlState::SYNTAX_ERROR, "does not take nothing after SIZE"),
-        ("ON FORMAT WIDE", SqlState::SYNTAX_ERROR, "does not take 'WIDE'"),
-        ("ON SIZE lots", SqlState::INVALID_PARAMETER_VALUE, "SIZE lots is out of range"),
-        ("ON SIZE 1000001", SqlState::INVALID_PARAMETER_VALUE, "out of range"),
-        ("ON SIZE 1999", SqlState::INVALID_PARAMETER_VALUE, "out of range"),
-        ("ON WRAPPED", SqlState::SYNTAX_ERROR, "does not take 'WRAPPED'"),
+        (
+            "",
+            SqlState::SYNTAX_ERROR,
+            "does not take nothing after SERVEROUTPUT",
+        ),
+        (
+            "ON SIZE",
+            SqlState::SYNTAX_ERROR,
+            "does not take nothing after SIZE",
+        ),
+        (
+            "ON FORMAT WIDE",
+            SqlState::SYNTAX_ERROR,
+            "does not take 'WIDE'",
+        ),
+        (
+            "ON SIZE lots",
+            SqlState::INVALID_PARAMETER_VALUE,
+            "SIZE lots is out of range",
+        ),
+        (
+            "ON SIZE 1000001",
+            SqlState::INVALID_PARAMETER_VALUE,
+            "out of range",
+        ),
+        (
+            "ON SIZE 1999",
+            SqlState::INVALID_PARAMETER_VALUE,
+            "out of range",
+        ),
+        (
+            "ON WRAPPED",
+            SqlState::SYNTAX_ERROR,
+            "does not take 'WRAPPED'",
+        ),
         ("YES", SqlState::SYNTAX_ERROR, "does not take 'YES'"),
     ] {
         let error = ServerOutputSetting::parse(argument).unwrap_err();

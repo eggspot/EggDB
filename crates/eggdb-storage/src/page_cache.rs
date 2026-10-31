@@ -129,7 +129,6 @@ impl<F: File> PageCache<F> {
         self.compressed_written.set(true);
     }
 
-
     /// Keeps the cache's memory in RAM, never swapped out, for as long as the cache lives.
     /// Fails with the platform's error when the process may not lock that much memory.
     pub fn lock_in_memory(&mut self) -> Result<(), StorageError> {

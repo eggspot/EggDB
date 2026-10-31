@@ -204,14 +204,14 @@ pub(crate) fn object_member(key: &str, value: &str, binary: bool) -> String {
 
 fn build_object(values: &[Value], binary: bool, name: &str) -> SqlResult<Value> {
     if !values.len().is_multiple_of(2) {
-        return Err(invalid("argument list must have even number of elements").with_hint(
-            format!(
+        return Err(
+            invalid("argument list must have even number of elements").with_hint(format!(
                 "The arguments of {name}() must consist of alternating keys and values."
-            ),
-        ));
+            )),
+        );
     }
     let mut out = String::from("{");
-    for (at, pair) in values.chunks_exact(2).enumerate() {
+    for (at, pair) in values.as_chunks::<2>().0.iter().enumerate() {
         let key = object_key(&pair[0]).map_err(|error| {
             if pair[0].is_null() {
                 SqlError::new(
@@ -344,23 +344,30 @@ fn array_position(step: &str, at: usize, length: usize) -> SqlResult<i64> {
     })
 }
 
-fn set_at(node: &mut Json, path: &[String], depth: usize, new: &Json, create: bool) -> SqlResult<()> {
+fn set_at(
+    node: &mut Json,
+    path: &[String],
+    depth: usize,
+    new: &Json,
+    create: bool,
+) -> SqlResult<()> {
     let Some(step) = path.get(depth) else {
         return Ok(());
     };
     let last = depth + 1 == path.len();
     match node {
-        Json::Object(members) => {
-            match members.iter_mut().find(|(key, _)| key == step) {
-                Some((_, child)) if last => child.value = new.clone(),
-                Some((_, child)) => set_at(&mut child.value, path, depth + 1, new, create)?,
-                None if last && create => members.push((step.clone(), leaf(new.clone()))),
-                None => {}
-            }
-        }
+        Json::Object(members) => match members.iter_mut().find(|(key, _)| key == step) {
+            Some((_, child)) if last => child.value = new.clone(),
+            Some((_, child)) => set_at(&mut child.value, path, depth + 1, new, create)?,
+            None if last && create => members.push((step.clone(), leaf(new.clone()))),
+            None => {}
+        },
         Json::Array(items) => {
             let index = array_position(step, depth + 1, items.len())?;
-            match usize::try_from(index).ok().filter(|index| *index < items.len()) {
+            match usize::try_from(index)
+                .ok()
+                .filter(|index| *index < items.len())
+            {
                 Some(index) if last => items[index].value = new.clone(),
                 Some(index) => set_at(&mut items[index].value, path, depth + 1, new, create)?,
                 None if last && create => {
@@ -379,7 +386,13 @@ fn set_at(node: &mut Json, path: &[String], depth: usize, new: &Json, create: bo
     Ok(())
 }
 
-fn insert_at(node: &mut Json, path: &[String], depth: usize, new: &Json, after: bool) -> SqlResult<()> {
+fn insert_at(
+    node: &mut Json,
+    path: &[String],
+    depth: usize,
+    new: &Json,
+    after: bool,
+) -> SqlResult<()> {
     let Some(step) = path.get(depth) else {
         return Ok(());
     };
@@ -403,7 +416,8 @@ fn insert_at(node: &mut Json, path: &[String], depth: usize, new: &Json, after: 
                 let length = items.len() as i64;
                 let at = if after { index + 1 } else { index }.clamp(0, length);
                 items.insert(usize::try_from(at).unwrap_or(0), leaf(new.clone()));
-            } else if let Some(child) = usize::try_from(index).ok().and_then(|at| items.get_mut(at)) {
+            } else if let Some(child) = usize::try_from(index).ok().and_then(|at| items.get_mut(at))
+            {
                 insert_at(&mut child.value, path, depth + 1, new, after)?;
             }
         }
@@ -826,7 +840,11 @@ fn type_word(value: &Json) -> &'static str {
     }
 }
 
-pub(crate) fn record_rows(name: &str, values: &[Value], sink: &mut RecordSink<'_>) -> SqlResult<()> {
+pub(crate) fn record_rows(
+    name: &str,
+    values: &[Value],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
     if values.iter().any(Value::is_null) {
         return Ok(());
     }
@@ -844,7 +862,10 @@ pub(crate) fn record_rows(name: &str, values: &[Value], sink: &mut RecordSink<'_
                 )));
             };
             for (key, node) in members {
-                sink(vec![Value::Text(key.clone()), rendered(&document, node, as_text)?])?;
+                sink(vec![
+                    Value::Text(key.clone()),
+                    rendered(&document, node, as_text)?,
+                ])?;
             }
         }
         "json_array_elements"
@@ -941,7 +962,10 @@ fn openjson_extracted(values: &[Value], as_json: bool) -> Option<SqlResult<Value
 }
 
 fn bad_sqlserver_path(path: &str, at: usize) -> SqlError {
-    let found = path[at..].chars().next().map_or_else(String::new, String::from);
+    let found = path[at..]
+        .chars()
+        .next()
+        .map_or_else(String::new, String::from);
     SqlError::new(
         SqlState::INVALID_PARAMETER_VALUE,
         format!(
@@ -982,9 +1006,7 @@ pub(crate) fn sqlserver_path_steps(path: &str) -> SqlResult<Vec<String>> {
             steps.push(after[..end].to_owned());
             rest = &after[end + 1..];
         } else if let Some(after) = rest.strip_prefix('.') {
-            let end = after
-                .find(|character: char| character == '.' || character == '[')
-                .unwrap_or(after.len());
+            let end = after.find(['.', '[']).unwrap_or(after.len());
             if end == 0 {
                 return Err(bad_sqlserver_path(path, at + 1));
             }
@@ -1039,9 +1061,9 @@ fn record_field(value: &Value) -> String {
         return String::new();
     };
     let plain = !text.is_empty()
-        && !text
-            .chars()
-            .any(|character| matches!(character, '"' | '\\' | '(' | ')' | ',') || character.is_whitespace());
+        && !text.chars().any(|character| {
+            matches!(character, '"' | '\\' | '(' | ')' | ',') || character.is_whitespace()
+        });
     if plain {
         return text;
     }
@@ -1061,7 +1083,11 @@ pub(crate) fn record_text(fields: &[Value]) -> Value {
         [only] => only.clone(),
         _ => Value::Text(format!(
             "({})",
-            fields.iter().map(record_field).collect::<Vec<_>>().join(",")
+            fields
+                .iter()
+                .map(record_field)
+                .collect::<Vec<_>>()
+                .join(",")
         )),
     }
 }
@@ -1192,7 +1218,10 @@ fn marked(expr: &mut Expr, labels: &[String]) {
     }
 }
 
-pub(crate) fn with_whole_rows(mut items: Vec<SelectItem>, from: Option<&FromClause>) -> Vec<SelectItem> {
+pub(crate) fn with_whole_rows(
+    mut items: Vec<SelectItem>,
+    from: Option<&FromClause>,
+) -> Vec<SelectItem> {
     let Some(from) = from else {
         return items;
     };
@@ -1237,10 +1266,19 @@ mod tests {
             "{\"a\": 1, \"b\": \"x\\\"y\"}"
         );
         assert_eq!(
-            shown(function("json_build_array", &[Value::Integer(1), Value::Null, Value::Boolean(true)]).unwrap()),
+            shown(
+                function(
+                    "json_build_array",
+                    &[Value::Integer(1), Value::Null, Value::Boolean(true)]
+                )
+                .unwrap()
+            ),
             "[1, null, true]"
         );
-        assert_eq!(shown(function("json_build_object", &[Value::Integer(1)]).unwrap()), "error 22023");
+        assert_eq!(
+            shown(function("json_build_object", &[Value::Integer(1)]).unwrap()),
+            "error 22023"
+        );
         assert_eq!(
             shown(function("to_json", &[Value::Timestamp(0)]).unwrap()),
             "\"2000-01-01T00:00:00\""
@@ -1259,7 +1297,10 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(shown(set), "[{\"f1\": [2, 3, 4], \"f2\": null}, 2, null, 3]");
+        assert_eq!(
+            shown(set),
+            "[{\"f1\": [2, 3, 4], \"f2\": null}, 2, null, 3]"
+        );
         let set = function(
             "jsonb_set",
             &[
@@ -1269,7 +1310,10 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(shown(set), "[{\"f1\": 1, \"f2\": null, \"f3\": [2, 3, 4]}, 2]");
+        assert_eq!(
+            shown(set),
+            "[{\"f1\": 1, \"f2\": null, \"f3\": [2, 3, 4]}, 2]"
+        );
         let inserted = function(
             "jsonb_insert",
             &[
@@ -1297,7 +1341,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shown(stripped), "[{\"f1\":1},2,null,3]");
-        let pretty_text = function("jsonb_pretty", &[jsonb("[{\"f1\":1,\"f2\":null}, 2]")]).unwrap();
+        let pretty_text =
+            function("jsonb_pretty", &[jsonb("[{\"f1\":1,\"f2\":null}, 2]")]).unwrap();
         assert_eq!(
             shown(pretty_text),
             "[\n    {\n        \"f1\": 1,\n        \"f2\": null\n    },\n    2\n]"
@@ -1307,44 +1352,90 @@ mod tests {
     #[test]
     fn operators_follow_the_manuals_examples() {
         assert_eq!(
-            shown(concatenated(&jsonb("[\"a\", \"b\"]"), &jsonb("[\"a\", \"d\"]"))),
+            shown(concatenated(
+                &jsonb("[\"a\", \"b\"]"),
+                &jsonb("[\"a\", \"d\"]")
+            )),
             "[\"a\", \"b\", \"a\", \"d\"]"
         );
         assert_eq!(
-            shown(concatenated(&jsonb("{\"a\": \"b\"}"), &jsonb("{\"c\": \"d\"}"))),
+            shown(concatenated(
+                &jsonb("{\"a\": \"b\"}"),
+                &jsonb("{\"c\": \"d\"}")
+            )),
             "{\"a\": \"b\", \"c\": \"d\"}"
         );
-        assert_eq!(shown(concatenated(&jsonb("[1, 2]"), &jsonb("3"))), "[1, 2, 3]");
-        assert_eq!(shown(concatenated(&jsonb("1"), &jsonb("[2, 3]"))), "[1, 2, 3]");
-        assert_eq!(shown(concatenated(&jsonb("{\"a\": 1}"), &jsonb("2"))), "[{\"a\": 1}, 2]");
         assert_eq!(
-            shown(subtract(&jsonb("{\"a\": \"b\", \"c\": \"d\"}"), &Value::Text("a".into()))),
+            shown(concatenated(&jsonb("[1, 2]"), &jsonb("3"))),
+            "[1, 2, 3]"
+        );
+        assert_eq!(
+            shown(concatenated(&jsonb("1"), &jsonb("[2, 3]"))),
+            "[1, 2, 3]"
+        );
+        assert_eq!(
+            shown(concatenated(&jsonb("{\"a\": 1}"), &jsonb("2"))),
+            "[{\"a\": 1}, 2]"
+        );
+        assert_eq!(
+            shown(subtract(
+                &jsonb("{\"a\": \"b\", \"c\": \"d\"}"),
+                &Value::Text("a".into())
+            )),
             "{\"c\": \"d\"}"
         );
         assert_eq!(
-            shown(subtract(&jsonb("[\"a\", \"b\", \"c\", \"b\"]"), &Value::Text("b".into()))),
+            shown(subtract(
+                &jsonb("[\"a\", \"b\", \"c\", \"b\"]"),
+                &Value::Text("b".into())
+            )),
             "[\"a\", \"c\"]"
         );
-        assert_eq!(shown(subtract(&jsonb("[\"a\", \"b\"]"), &Value::Integer(1))), "[\"a\"]");
-        assert_eq!(shown(subtract(&jsonb("1"), &Value::Text("a".into()))), "error 22023");
         assert_eq!(
-            shown(delete_path(&jsonb("[\"a\", {\"b\":1}]"), &Value::Text("{1,b}".into()))),
+            shown(subtract(&jsonb("[\"a\", \"b\"]"), &Value::Integer(1))),
+            "[\"a\"]"
+        );
+        assert_eq!(
+            shown(subtract(&jsonb("1"), &Value::Text("a".into()))),
+            "error 22023"
+        );
+        assert_eq!(
+            shown(delete_path(
+                &jsonb("[\"a\", {\"b\":1}]"),
+                &Value::Text("{1,b}".into())
+            )),
             "[\"a\", {}]"
         );
         assert_eq!(
-            shown(has_key("?", &jsonb("{\"a\":1, \"b\":2}"), &Value::Text("b".into()))),
+            shown(has_key(
+                "?",
+                &jsonb("{\"a\":1, \"b\":2}"),
+                &Value::Text("b".into())
+            )),
             "t"
         );
         assert_eq!(
-            shown(has_key("?", &jsonb("[\"a\", \"b\", \"c\"]"), &Value::Text("b".into()))),
+            shown(has_key(
+                "?",
+                &jsonb("[\"a\", \"b\", \"c\"]"),
+                &Value::Text("b".into())
+            )),
             "t"
         );
         assert_eq!(
-            shown(has_key("?|", &jsonb("{\"a\":1, \"b\":2, \"c\":3}"), &Value::Text("{b,d}".into()))),
+            shown(has_key(
+                "?|",
+                &jsonb("{\"a\":1, \"b\":2, \"c\":3}"),
+                &Value::Text("{b,d}".into())
+            )),
             "t"
         );
         assert_eq!(
-            shown(has_key("?&", &jsonb("[\"a\", \"b\", \"c\"]"), &Value::Text("{a,d}".into()))),
+            shown(has_key(
+                "?&",
+                &jsonb("[\"a\", \"b\", \"c\"]"),
+                &Value::Text("{a,d}".into())
+            )),
             "f"
         );
     }
@@ -1367,7 +1458,11 @@ mod tests {
             "jsonb_array_elements_text",
             &[jsonb("[\"foo\", \"bar\", null]")],
             &mut |record| {
-                texts.push(record_text(&record).to_text().unwrap_or_else(|| "NULL".into()));
+                texts.push(
+                    record_text(&record)
+                        .to_text()
+                        .unwrap_or_else(|| "NULL".into()),
+                );
                 Ok(())
             },
         )
@@ -1396,14 +1491,24 @@ mod tests {
                 .collect();
             let document = Value::Text(document);
             let path = Value::Text(format!("{{{path}}}"));
-            let _ = function("jsonb_set", &[document.clone(), path.clone(), Value::Text("1".into())]);
-            let _ = function("jsonb_insert", &[document.clone(), path.clone(), Value::Text("1".into())]);
-            let _ = function("jsonb_pretty", &[document.clone()]);
+            let _ = function(
+                "jsonb_set",
+                &[document.clone(), path.clone(), Value::Text("1".into())],
+            );
+            let _ = function(
+                "jsonb_insert",
+                &[document.clone(), path.clone(), Value::Text("1".into())],
+            );
+            let _ = function("jsonb_pretty", std::slice::from_ref(&document));
             let _ = delete_path(&document, &path);
             let _ = subtract(&document, &Value::Integer(-1));
             let _ = concatenated(&document, &document);
             let _ = has_key("?|", &document, &path);
-            let _ = record_rows("json_each", &[document.clone()], &mut |_| Ok(()));
+            let _ = record_rows(
+                "json_each",
+                std::slice::from_ref(&document),
+                &mut |_| Ok(()),
+            );
             let _ = record_rows("jsonb_array_elements_text", &[document], &mut |_| Ok(()));
         }
     }

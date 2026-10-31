@@ -110,12 +110,16 @@ pub fn is_sqlite(bytes: &[u8]) -> bool {
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> Result<u16> {
-    let slice = bytes.get(at..at + 2).ok_or_else(|| damaged("a page is cut short"))?;
+    let slice = bytes
+        .get(at..at + 2)
+        .ok_or_else(|| damaged("a page is cut short"))?;
     Ok(u16::from_be_bytes([slice[0], slice[1]]))
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
-    let slice = bytes.get(at..at + 4).ok_or_else(|| damaged("a page is cut short"))?;
+    let slice = bytes
+        .get(at..at + 4)
+        .ok_or_else(|| damaged("a page is cut short"))?;
     Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
@@ -138,7 +142,7 @@ fn varint(bytes: &[u8], at: &mut usize) -> Result<u64> {
 }
 
 fn wal_checksum(words: &[u8], big_endian: bool, mut sums: (u32, u32)) -> (u32, u32) {
-    for pair in words.chunks_exact(8) {
+    for pair in words.as_chunks::<8>().0 {
         let word = |bytes: &[u8]| {
             let array = [bytes[0], bytes[1], bytes[2], bytes[3]];
             if big_endian {
@@ -216,7 +220,8 @@ impl SqliteFile {
                 "a file larger than 1 TiB".to_owned(),
             ));
         }
-        let bytes = std::fs::read(path).map_err(|error| SqliteFormatError::Io(error.to_string()))?;
+        let bytes =
+            std::fs::read(path).map_err(|error| SqliteFormatError::Io(error.to_string()))?;
         let mut wal_path = path.as_os_str().to_owned();
         wal_path.push("-wal");
         let wal = std::fs::read(Path::new(&wal_path)).unwrap_or_default();
@@ -231,7 +236,11 @@ impl SqliteFile {
         let page_size = match u16_at(&bytes, 16)? {
             1 => 65_536,
             size if size >= 512 && size.is_power_of_two() => usize::from(size),
-            _ => return Err(damaged("the page size is not a power of two from 512 to 65536")),
+            _ => {
+                return Err(damaged(
+                    "the page size is not a power of two from 512 to 65536",
+                ));
+            }
         };
         let reserved = usize::from(bytes[20]);
         let usable = page_size
@@ -343,7 +352,11 @@ impl SqliteFile {
                     "a WITHOUT ROWID table".to_owned(),
                 ));
             }
-            _ => return Err(damaged(format!("page {number} has an unknown b-tree type {kind}"))),
+            _ => {
+                return Err(damaged(format!(
+                    "page {number} has an unknown b-tree type {kind}"
+                )));
+            }
         };
         for cell in 0..cells {
             let offset = usize::from(u16_at(page, start + header + cell * 2)?);
@@ -387,7 +400,11 @@ impl SqliteFile {
         } else {
             let least = ((usable - 12) * 32 / 255) - 23;
             let candidate = least + ((total - least) % (usable - 4));
-            if candidate <= inline_most { candidate } else { least }
+            if candidate <= inline_most {
+                candidate
+            } else {
+                least
+            }
         };
         let mut payload = Vec::with_capacity(total.min(1 << 24));
         payload.extend_from_slice(
@@ -437,7 +454,11 @@ fn record(payload: &[u8]) -> Result<Vec<SqliteValue>> {
 }
 
 fn signed(bytes: &[u8]) -> i64 {
-    let mut value: i64 = if bytes.first().is_some_and(|byte| byte & 0x80 != 0) { -1 } else { 0 };
+    let mut value: i64 = if bytes.first().is_some_and(|byte| byte & 0x80 != 0) {
+        -1
+    } else {
+        0
+    };
     for byte in bytes {
         value = (value << 8) | i64::from(*byte);
     }
@@ -467,13 +488,13 @@ fn value_of(serial: u64, rest: &[u8]) -> Result<(SqliteValue, usize)> {
         9 => (SqliteValue::Integer(1), 0),
         10 | 11 => return Err(damaged("a record uses a reserved serial type")),
         even if even % 2 == 0 => {
-            let width = usize::try_from((even - 12) / 2)
-                .map_err(|_| damaged("a blob is too long"))?;
+            let width =
+                usize::try_from((even - 12) / 2).map_err(|_| damaged("a blob is too long"))?;
             (SqliteValue::Blob(take(width)?.to_vec()), width)
         }
         odd => {
-            let width = usize::try_from((odd - 13) / 2)
-                .map_err(|_| damaged("a text is too long"))?;
+            let width =
+                usize::try_from((odd - 13) / 2).map_err(|_| damaged("a text is too long"))?;
             let text = String::from_utf8_lossy(take(width)?).into_owned();
             (SqliteValue::Text(text), width)
         }

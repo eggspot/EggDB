@@ -95,10 +95,21 @@ fn json_is_the_same_as_format_json_and_the_last_format_wins() {
         string_at(&json_lines(&exported.stdout)[0], &["entries"]).as_deref(),
         Some("3")
     );
-    let last_wins = run_with(&["get", &file, "user:1", "--json", "--format", "text"], b"", on_a_terminal);
+    let last_wins = run_with(
+        &["get", &file, "user:1", "--json", "--format", "text"],
+        b"",
+        on_a_terminal,
+    );
     assert_eq!(text(&last_wins.stdout), "Ada\n");
-    let json_last = run_with(&["get", &file, "user:1", "--format", "text", "--json"], b"", on_a_terminal);
-    assert_eq!(text(&json_last.stdout), "{\"key\":\"user:1\",\"value\":\"Ada\"}\n");
+    let json_last = run_with(
+        &["get", &file, "user:1", "--format", "text", "--json"],
+        b"",
+        on_a_terminal,
+    );
+    assert_eq!(
+        text(&json_last.stdout),
+        "{\"key\":\"user:1\",\"value\":\"Ada\"}\n"
+    );
 }
 
 #[test]
@@ -117,8 +128,14 @@ fn errors_are_one_json_line_only_when_json_was_asked_for() {
     assert_eq!(as_json.exit, 3);
     assert!(as_json.stdout.is_empty());
     let error = one_json_error(&as_json.stderr);
-    assert_eq!(string_at(&error, &["error", "code"]).as_deref(), Some("not_found"));
-    assert_eq!(string_at(&error, &["error", "category"]).as_deref(), Some("not_found"));
+    assert_eq!(
+        string_at(&error, &["error", "code"]).as_deref(),
+        Some("not_found")
+    );
+    assert_eq!(
+        string_at(&error, &["error", "category"]).as_deref(),
+        Some("not_found")
+    );
     let message = string_at(&error, &["error", "message"]).unwrap_or_default();
     assert!(
         text(&as_text.stderr).starts_with(&format!("eggdb: {message}\n")),
@@ -136,8 +153,14 @@ fn errors_are_one_json_line_only_when_json_was_asked_for() {
     let usage = piped(&["get", &file, "user:1", "--frob", "--json"]);
     assert_eq!(usage.exit, 2);
     let error = one_json_error(&usage.stderr);
-    assert_eq!(string_at(&error, &["error", "code"]).as_deref(), Some("invalid_arguments"));
-    assert_eq!(string_at(&error, &["error", "category"]).as_deref(), Some("usage"));
+    assert_eq!(
+        string_at(&error, &["error", "code"]).as_deref(),
+        Some("invalid_arguments")
+    );
+    assert_eq!(
+        string_at(&error, &["error", "category"]).as_deref(),
+        Some("usage")
+    );
     assert_eq!(
         string_at(&error, &["error", "message"]).as_deref(),
         Some("unknown option '--frob' for eggdb get")
@@ -171,15 +194,24 @@ fn errors_are_one_json_line_only_when_json_was_asked_for() {
         string_at(&error, &["error", "code"]).as_deref(),
         Some("collection_not_found")
     );
-    assert_eq!(string_at(&error, &["error", "category"]).as_deref(), Some("not_found"));
+    assert_eq!(
+        string_at(&error, &["error", "category"]).as_deref(),
+        Some("not_found")
+    );
 
     let out = directory.file("taken.jsonl");
     std::fs::write(&out, b"x").unwrap();
     let exists = piped(&["export", &file, &out, "--json"]);
     assert_eq!(exists.exit, 3);
     let error = one_json_error(&exists.stderr);
-    assert_eq!(string_at(&error, &["error", "code"]).as_deref(), Some("already_exists"));
-    assert_eq!(string_at(&error, &["error", "category"]).as_deref(), Some("exists"));
+    assert_eq!(
+        string_at(&error, &["error", "code"]).as_deref(),
+        Some("already_exists")
+    );
+    assert_eq!(
+        string_at(&error, &["error", "category"]).as_deref(),
+        Some("exists")
+    );
 
     let absent = piped(&["get", &file, "nobody", "--json"]);
     assert_eq!(absent.exit, 1);
@@ -201,7 +233,10 @@ fn sql_prints_one_json_line_per_statement_and_keeps_its_text_in_a_pipe() {
     assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
     let results = json_lines(&ran.stdout);
     assert_eq!(results.len(), 3, "{}", text(&ran.stdout));
-    assert_eq!(string_at(&results[1], &["tag"]).as_deref(), Some("INSERT 0 2"));
+    assert_eq!(
+        string_at(&results[1], &["tag"]).as_deref(),
+        Some("INSERT 0 2")
+    );
     assert!(member(&results[1], "rows").is_none());
     let selected = &results[2];
     assert_eq!(string_at(selected, &["row_count"]).as_deref(), Some("2"));
@@ -220,21 +255,34 @@ fn sql_prints_one_json_line_per_statement_and_keeps_its_text_in_a_pipe() {
 
     let as_text = piped(&["sql", &file, "-c", "SELECT name FROM users WHERE id = 1"]);
     let shown = text(&as_text.stdout);
-    assert!(shown.starts_with(" name") && shown.ends_with("(1 row)\n\n"), "{shown}");
+    assert!(
+        shown.starts_with(" name") && shown.ends_with("(1 row)\n\n"),
+        "{shown}"
+    );
 
     let failed = piped(&["sql", &file, "--json", "-c", "SELECT * FROM nowhere"]);
     assert_eq!(failed.exit, 3);
     assert!(failed.stdout.is_empty());
     let error = one_json_error(&failed.stderr);
-    assert_eq!(string_at(&error, &["error", "code"]).as_deref(), Some("sql_error"));
-    assert_eq!(string_at(&error, &["error", "category"]).as_deref(), Some("failed"));
-    assert_eq!(string_at(&error, &["error", "sqlstate"]).as_deref(), Some("42P01"));
+    assert_eq!(
+        string_at(&error, &["error", "code"]).as_deref(),
+        Some("sql_error")
+    );
+    assert_eq!(
+        string_at(&error, &["error", "category"]).as_deref(),
+        Some("failed")
+    );
+    assert_eq!(
+        string_at(&error, &["error", "sqlstate"]).as_deref(),
+        Some("42P01")
+    );
 
     let hex = piped(&["sql", &file, "--format", "hex", "-c", "SELECT 1"]);
     assert_eq!(hex.exit, 2);
     assert!(
-        text(&hex.stderr)
-            .starts_with("eggdb: --format hex is for get and scan; eggdb sql prints text or json\n"),
+        text(&hex.stderr).starts_with(
+            "eggdb: --format hex is for get and scan; eggdb sql prints text or json\n"
+        ),
         "{}",
         text(&hex.stderr)
     );
@@ -280,7 +328,10 @@ fn help_json_lists_exactly_the_registry() {
             let name = string_at(tool, &["name"]).unwrap_or_default();
             let when = member(tool, "confirm_when").map(|node| &node.value);
             if name == "write_sql" {
-                assert_eq!(string_at(tool, &["confirm"]).as_deref(), Some("destructive_statement"));
+                assert_eq!(
+                    string_at(tool, &["confirm"]).as_deref(),
+                    Some("destructive_statement")
+                );
                 assert!(
                     matches!(when, Some(Json::String(text)) if text.starts_with("the statement is destructive: DROP, TRUNCATE")),
                     "{when:?}"
@@ -326,7 +377,10 @@ fn help_json_lists_exactly_the_registry() {
             .map(|definition| definition.usage.to_owned())
             .collect::<Vec<_>>()
     );
-    for args in [&["help", "table", "sample", "--json"][..], &["table", "sample", "--help", "--json"]] {
+    for args in [
+        &["help", "table", "sample", "--json"][..],
+        &["table", "sample", "--help", "--json"],
+    ] {
         let ran = piped(args);
         assert_eq!(ran.exit, 0, "{args:?}");
         let lines = json_lines(&ran.stdout);
@@ -338,24 +392,36 @@ fn help_json_lists_exactly_the_registry() {
     }
     let collection = piped(&["help", "collection", "del"]);
     assert_eq!(collection.exit, 0);
-    assert_eq!(text(&collection.stdout), help::command_help(CommandName::Collection));
+    assert_eq!(
+        text(&collection.stdout),
+        help::command_help(CommandName::Collection)
+    );
     let wrong_verb = piped(&["help", "table", "frob"]);
     assert_eq!(wrong_verb.exit, 2);
     assert!(text(&wrong_verb.stderr).starts_with("eggdb: table needs list, show or sample\n"));
     let ui = piped(&["help", "ui", "--json"]);
     let ui = &json_lines(&ui.stdout)[0];
     assert!(items(ui, "outputs").is_empty());
-    assert_eq!(member(ui, "default_format").map(|node| &node.value), Some(&Json::Null));
+    assert_eq!(
+        member(ui, "default_format").map(|node| &node.value),
+        Some(&Json::Null)
+    );
     let version = piped(&["version", "--json"]);
     assert_eq!(
         text(&version.stdout),
         format!("{{\"version\":\"{}\"}}\n", eggdb::VERSION)
     );
-    assert_eq!(text(&piped(&["version"]).stdout), format!("eggdb {}\n", eggdb::VERSION));
+    assert_eq!(
+        text(&piped(&["version"]).stdout),
+        format!("eggdb {}\n", eggdb::VERSION)
+    );
     let unknown = piped(&["help", "frob", "--json"]);
     assert_eq!(unknown.exit, 2);
     let error = one_json_error(&unknown.stderr);
-    assert_eq!(string_at(&error, &["error", "code"]).as_deref(), Some("invalid_arguments"));
+    assert_eq!(
+        string_at(&error, &["error", "code"]).as_deref(),
+        Some("invalid_arguments")
+    );
 }
 
 fn main_help_line(left: &str, summary: &str) -> String {
@@ -373,7 +439,10 @@ fn the_text_help_comes_from_the_registry() {
         let Some(first) = definitions.first() else {
             panic!("{} is not in the registry", command.name());
         };
-        let usages: Vec<&str> = definitions.iter().map(|definition| definition.usage).collect();
+        let usages: Vec<&str> = definitions
+            .iter()
+            .map(|definition| definition.usage)
+            .collect();
         assert_eq!(
             help::command_help(command),
             format!("Usage: {}\n\n{}", usages.join("\n       "), first.help)
@@ -390,7 +459,10 @@ fn the_text_help_comes_from_the_registry() {
                 format!("\n  {:<6} {} ", command.name(), verbs.join("|"))
             }
         };
-        assert!(help::MAIN.contains(&listed), "the main help lists {listed:?}");
+        assert!(
+            help::MAIN.contains(&listed),
+            "the main help lists {listed:?}"
+        );
     }
     for name in ["help", "version"] {
         let Some(definition) = eggdb_commands::command(&[name]) else {
@@ -400,7 +472,10 @@ fn the_text_help_comes_from_the_registry() {
             format!("{name:<6} {}", definition.synopsis).trim_end(),
             definition.summary,
         );
-        assert!(help::MAIN.contains(&listed), "the main help lists {listed:?}");
+        assert!(
+            help::MAIN.contains(&listed),
+            "the main help lists {listed:?}"
+        );
     }
 }
 
@@ -410,17 +485,24 @@ fn every_command_is_a_kept_name_or_a_noun_and_its_core_verbs() {
     for command in CommandName::ALL {
         let name = command.name();
         let fits = match command {
-            CommandName::Collection | CommandName::Table | CommandName::Row => help::definitions(command)
-                .iter()
-                .all(|definition| definition.words.len() == 2 && is_core_verb(definition.words[1])),
+            CommandName::Collection | CommandName::Table | CommandName::Row => {
+                help::definitions(command).iter().all(|definition| {
+                    definition.words.len() == 2 && is_core_verb(definition.words[1])
+                })
+            }
             _ => KEPT_NAMES.contains(&name) || is_core_verb(name),
         };
-        assert!(fits, "{name} is neither a kept name nor a noun with core verbs");
+        assert!(
+            fits,
+            "{name} is neither a kept name nor a noun with core verbs"
+        );
     }
     for kept in KEPT_NAMES {
         assert!(
             ["help", "version"].contains(kept)
-                || CommandName::ALL.iter().any(|command| command.name() == *kept),
+                || CommandName::ALL
+                    .iter()
+                    .any(|command| command.name() == *kept),
             "{kept} is kept but is no command"
         );
     }
@@ -428,17 +510,30 @@ fn every_command_is_a_kept_name_or_a_noun_and_its_core_verbs() {
 
 #[test]
 fn the_command_model_doc_lists_every_command_tool_and_error_code() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ux/command-model.md");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ux/command-model.md");
     let doc = std::fs::read_to_string(&path).unwrap();
     for command in COMMANDS {
-        assert!(doc.contains(&format!("| `{}` |", command.name())), "{}", command.name());
+        assert!(
+            doc.contains(&format!("| `{}` |", command.name())),
+            "{}",
+            command.name()
+        );
     }
     for tool in TOOLS {
-        assert!(doc.contains(&format!("| `{}` |", tool.name)), "{}", tool.name);
+        assert!(
+            doc.contains(&format!("| `{}` |", tool.name)),
+            "{}",
+            tool.name
+        );
     }
     for known in eggdb_commands::ERROR_CODES {
         assert!(
-            doc.contains(&format!("| `{}` | `{}` |", known.code, known.category.name())),
+            doc.contains(&format!(
+                "| `{}` | `{}` |",
+                known.code,
+                known.category.name()
+            )),
             "{} {}",
             known.code,
             known.category.name()
@@ -496,7 +591,10 @@ fn every_example_is_a_command_line_the_parser_takes() {
                 Some(start) => &example[start..],
                 None => panic!("{}: {example}", definition.name()),
             };
-            let Some(line) = example.split(" | ").next().filter(|line| is_one_eggdb_command(line))
+            let Some(line) = example
+                .split(" | ")
+                .next()
+                .filter(|line| is_one_eggdb_command(line))
             else {
                 continue;
             };
@@ -516,7 +614,11 @@ fn every_example_is_a_command_line_the_parser_takes() {
 fn every_command_of_the_parser_is_in_the_registry_with_its_json_form() {
     for command in CommandName::ALL {
         let definitions = help::definitions(command);
-        assert!(!definitions.is_empty(), "{} is not in the registry", command.name());
+        assert!(
+            !definitions.is_empty(),
+            "{} is not in the registry",
+            command.name()
+        );
         for definition in definitions {
             assert_eq!(
                 definition.has_json(),

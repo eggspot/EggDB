@@ -4,8 +4,7 @@
 //! must be refused).
 
 use eggdb_crypto::{
-    AEAD_NONCE_BYTES, AEAD_TAG_BYTES, AeadError, Aes, AesGcm, AesKeyLengthError,
-    ChaCha20Poly1305,
+    AEAD_NONCE_BYTES, AEAD_TAG_BYTES, AeadError, Aes, AesGcm, AesKeyLengthError, ChaCha20Poly1305,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -96,7 +95,7 @@ fn aes_gcm_matches_the_gcm_specification_test_cases_1_and_2() {
 }
 
 enum Aead {
-    Gcm(AesGcm),
+    Gcm(Box<AesGcm>),
     ChaCha(ChaCha20Poly1305),
 }
 
@@ -159,15 +158,16 @@ fn run_wycheproof(cases: &str, make: impl Fn(&[u8]) -> Aead) -> usize {
 #[test]
 fn aes_gcm_passes_every_wycheproof_case_with_a_96_bit_nonce() {
     let checked = run_wycheproof(include_str!("data/wycheproof_aes_gcm.txt"), |key| {
-        Aead::Gcm(AesGcm::new(key).unwrap())
+        Aead::Gcm(Box::new(AesGcm::new(key).unwrap()))
     });
     assert_eq!(checked, 197);
 }
 
 #[test]
 fn chacha20_poly1305_passes_every_wycheproof_case() {
-    let checked = run_wycheproof(include_str!("data/wycheproof_chacha20_poly1305.txt"), |key| {
-        Aead::ChaCha(ChaCha20Poly1305::new(&key.try_into().unwrap()))
-    });
+    let checked = run_wycheproof(
+        include_str!("data/wycheproof_chacha20_poly1305.txt"),
+        |key| Aead::ChaCha(ChaCha20Poly1305::new(&key.try_into().unwrap())),
+    );
     assert_eq!(checked, 316);
 }

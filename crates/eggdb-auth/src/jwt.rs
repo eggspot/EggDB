@@ -90,7 +90,7 @@ fn base64url(text: &str) -> Option<Vec<u8>> {
             other => other,
         })
         .collect();
-    while standard.len() % 4 != 0 {
+    while !standard.len().is_multiple_of(4) {
         standard.push('=');
     }
     base64_decode(standard.as_bytes()).ok()
@@ -226,7 +226,12 @@ pub fn verify(
     {
         return Err(JwtError::BadSignature);
     }
-    let time = |name: &str| claims.field(name).and_then(Json::number).map(|value| value as i64);
+    let time = |name: &str| {
+        claims
+            .field(name)
+            .and_then(Json::number)
+            .map(|value| value as i64)
+    };
     match time("exp") {
         Some(expires) if now_unix <= expires.saturating_add(policy.leeway_seconds) => {}
         _ => return Err(JwtError::Expired),

@@ -18,9 +18,7 @@ use std::sync::Arc;
 fn function_object(name: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::WRONG_OBJECT_TYPE,
-        format!(
-            "The request for procedure '{name}' failed because '{name}' is a function object."
-        ),
+        format!("The request for procedure '{name}' failed because '{name}' is a function object."),
     )
     .with_sqlserver_code(2809)
     .at(position)
@@ -130,7 +128,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         &mut self,
         routine: &str,
     ) -> SqlResult<Option<Arc<RoutineDefinition>>> {
-        let found = self.read(|reader, tables| crate::routines::resolve(reader, tables, routine))?;
+        let found =
+            self.read(|reader, tables| crate::routines::resolve(reader, tables, routine))?;
         Ok(found.and_then(|named| {
             named
                 .routines
@@ -140,7 +139,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         }))
     }
 
-    pub(in crate::session) fn run_execute(&mut self, call: &ProcedureCall) -> SqlResult<QueryResult> {
+    pub(in crate::session) fn run_execute(
+        &mut self,
+        call: &ProcedureCall,
+    ) -> SqlResult<QueryResult> {
         let system = crate::session::sqlserver::is_system_procedure(&call.procedure.text);
         if !system
             && self.batch_resume.is_some()

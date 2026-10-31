@@ -41,25 +41,43 @@ fn an_agent_reads_only_what_its_role_may_and_through_its_policies() {
     let audit = TempAudit::new("agent-role");
     let opener = MapOpener::new(store());
     let mut server = agent_server(&opener, &audit, "reporter");
-    let answer = call(&mut server, 1, "run_sql", r#"{"sql":"SELECT id FROM users ORDER BY id"}"#);
+    let answer = call(
+        &mut server,
+        1,
+        "run_sql",
+        r#"{"sql":"SELECT id FROM users ORDER BY id"}"#,
+    );
     let rows = text_at(structured(&answer), &["row_count"]);
     assert_eq!(rows, "2", "{answer:?}");
-    let refused = call(&mut server, 2, "run_sql", r#"{"sql":"SELECT * FROM secrets"}"#);
-    assert_eq!(text_at(structured(&refused), &["error", "sqlstate"]), "42501");
+    let refused = call(
+        &mut server,
+        2,
+        "run_sql",
+        r#"{"sql":"SELECT * FROM secrets"}"#,
+    );
+    assert_eq!(
+        text_at(structured(&refused), &["error", "sqlstate"]),
+        "42501"
+    );
     let tools = parsed(
         &server
             .handle(br#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#)
             .unwrap(),
     );
     let listed = format!("{tools:?}");
-    assert!(!listed.contains("\"kv_get\"") && !listed.contains("kv_scan"), "{listed}");
+    assert!(
+        !listed.contains("\"kv_get\"") && !listed.contains("kv_scan"),
+        "{listed}"
+    );
 }
 
 #[test]
 fn an_agent_whose_role_cannot_log_in_is_refused() {
     let audit = TempAudit::new("agent-nologin");
     let opener = MapOpener::new(store());
-    opener.store.sql(Dialect::PostgreSql, "ALTER ROLE reporter NOLOGIN");
+    opener
+        .store
+        .sql(Dialect::PostgreSql, "ALTER ROLE reporter NOLOGIN");
     let mut server = agent_server(&opener, &audit, "reporter");
     let answer = call(&mut server, 1, "run_sql", r#"{"sql":"SELECT 1"}"#);
     assert!(!error_code(&answer).is_empty());
@@ -73,7 +91,10 @@ fn prompts_are_listed_and_filled_in() {
     let list = server
         .handle(br#"{"jsonrpc":"2.0","id":1,"method":"prompts/list"}"#)
         .unwrap();
-    assert!(list.contains("explore_database") && list.contains("answer_with_sql"), "{list}");
+    assert!(
+        list.contains("explore_database") && list.contains("answer_with_sql"),
+        "{list}"
+    );
     let filled = server
         .handle(br#"{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"answer_with_sql","arguments":{"question":"How many users?"}}}"#)
         .unwrap();

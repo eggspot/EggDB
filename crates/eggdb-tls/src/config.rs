@@ -64,7 +64,10 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// A setup serving `chain` (leaf first) signed for with `private_key`.
-    pub fn new(chain: Vec<Certificate>, private_key: PrivateKey) -> Result<Self, ServerConfigError> {
+    pub fn new(
+        chain: Vec<Certificate>,
+        private_key: PrivateKey,
+    ) -> Result<Self, ServerConfigError> {
         let leaf = chain.first().ok_or(ServerConfigError::EmptyChain)?;
         let matches = match (leaf.public_key(), private_key.public_key()) {
             (SubjectPublicKey::P256(certified), SubjectPublicKey::P256(held)) => *certified == held,

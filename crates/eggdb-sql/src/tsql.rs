@@ -16,8 +16,8 @@ pub(crate) use functions::{
 pub(crate) use routines::{ProcedureRun, TsqlReturns, TsqlRoutine};
 pub(crate) use statements::{
     MatchingRow, apply_changes, changed_rows, columns_mismatch, combined, declare, every_row,
-    filled_rows, matching_of, matching_select, remove_rows, scalar_select, undeclared,
-    value_items, variable_column, variable_columns,
+    filled_rows, matching_of, matching_select, remove_rows, scalar_select, undeclared, value_items,
+    variable_column, variable_columns,
 };
 pub(crate) use variables::{BatchContext, DynamicBatch, ScalarVariable};
 

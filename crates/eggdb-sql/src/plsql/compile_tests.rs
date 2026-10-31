@@ -69,7 +69,10 @@ fn an_anonymous_block_declares_variables_and_assigns_them() {
         panic!("{compiled:?}");
     };
     assert!(constant.constant);
-    assert_eq!(constant.variable_type, VariableType::Sql(SqlType::Varchar(Some(10))));
+    assert_eq!(
+        constant.variable_type,
+        VariableType::Sql(SqlType::Varchar(Some(10)))
+    );
     let StepKind::Assign { target, value } = &compiled.block.steps[0].kind else {
         panic!("{compiled:?}");
     };
@@ -104,7 +107,10 @@ fn bulk_collect_into_fills_a_collection() {
     let DeclarationKind::Variable(ids) = &compiled.block.declarations[1].kind else {
         panic!("{compiled:?}");
     };
-    assert_eq!(ids.variable_type, VariableType::Named(vec!["ids_t".to_owned()]));
+    assert_eq!(
+        ids.variable_type,
+        VariableType::Named(vec!["ids_t".to_owned()])
+    );
     let StepKind::Sql {
         statement,
         into: Some(into),
@@ -118,9 +124,8 @@ fn bulk_collect_into_fills_a_collection() {
 
 #[test]
 fn dml_returning_into_keeps_the_returning_clause() {
-    let found = steps(
-        "DECLARE i NUMBER; BEGIN INSERT INTO t (a) VALUES (1) RETURNING id INTO i; END;",
-    );
+    let found =
+        steps("DECLARE i NUMBER; BEGIN INSERT INTO t (a) VALUES (1) RETURNING id INTO i; END;");
     let StepKind::Sql {
         statement,
         into: Some(into),
@@ -144,7 +149,11 @@ fn procedure_call_statements_become_calls() {
         .collect();
     assert_eq!(
         calls,
-        ["CALL p()", "CALL pkg.q(1, 'a')", "CALL dbms_output.put_line('hi')"]
+        [
+            "CALL p()",
+            "CALL pkg.q(1, 'a')",
+            "CALL dbms_output.put_line('hi')"
+        ]
     );
 }
 
@@ -185,7 +194,10 @@ fn user_exceptions_are_raised_and_handled_by_identity_or_number() {
     let handlers = &compiled.block.handlers;
     assert_eq!(
         handlers[0].conditions,
-        [ExceptionCondition::Oracle(1403), ExceptionCondition::Oracle(20002)]
+        [
+            ExceptionCondition::Oracle(1403),
+            ExceptionCondition::Oracle(20002)
+        ]
     );
     assert_eq!(
         handlers[1].conditions,
@@ -251,15 +263,25 @@ fn query_and_cursor_for_loops_declare_their_record() {
     let StepKind::Loop(cursor_loop) = &found[1] else {
         panic!("{found:?}");
     };
-    assert!(matches!(&cursor_loop.kind, LoopKind::Cursor { cursor, record, .. } if cursor == "c" && record == "r"));
+    assert!(
+        matches!(&cursor_loop.kind, LoopKind::Cursor { cursor, record, .. } if cursor == "c" && record == "r")
+    );
 }
 
 #[test]
 fn a_loop_index_and_an_in_parameter_are_read_only() {
     let error = failure("BEGIN FOR i IN 1..3 LOOP i := 2; END LOOP; END;");
-    assert!(error.message().contains("PLS-00363: expression 'I' cannot be used as an assignment target"), "{error}");
+    assert!(
+        error
+            .message()
+            .contains("PLS-00363: expression 'I' cannot be used as an assignment target"),
+        "{error}"
+    );
     let error = failure("PROCEDURE p(a NUMBER) IS BEGIN a := 1; END;");
-    assert!(error.message().contains("PLS-00363: expression 'A'"), "{error}");
+    assert!(
+        error.message().contains("PLS-00363: expression 'A'"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -292,16 +314,39 @@ fn syntax_errors_name_the_symbol_encountered() {
 
 #[test]
 fn return_exit_and_raise_are_checked_where_they_appear() {
-    assert!(failure("BEGIN RETURN 1; END;").message().contains("PLS-00372"));
+    assert!(
+        failure("BEGIN RETURN 1; END;")
+            .message()
+            .contains("PLS-00372")
+    );
     assert!(failure("BEGIN EXIT; END;").message().contains("PLS-00376"));
-    assert!(failure("BEGIN <<b>> BEGIN EXIT b; END; END;").message().contains("PLS-00373"));
+    assert!(
+        failure("BEGIN <<b>> BEGIN EXIT b; END; END;")
+            .message()
+            .contains("PLS-00373")
+    );
     assert!(failure("BEGIN RAISE; END;").message().contains("PLS-00367"));
-    assert!(failure("FUNCTION f RETURN NUMBER IS BEGIN RETURN; END;").message().contains("PLS-00503"));
-    assert!(failure("PROCEDURE p IS BEGIN NULL; END q;").message().contains("PLS-00113"));
-    assert!(failure("BEGIN PIPE ROW (1); END;").message().contains("PLS-00629"));
+    assert!(
+        failure("FUNCTION f RETURN NUMBER IS BEGIN RETURN; END;")
+            .message()
+            .contains("PLS-00503")
+    );
+    assert!(
+        failure("PROCEDURE p IS BEGIN NULL; END q;")
+            .message()
+            .contains("PLS-00113")
+    );
+    assert!(
+        failure("BEGIN PIPE ROW (1); END;")
+            .message()
+            .contains("PLS-00629")
+    );
     let goto = failure("BEGIN GOTO done; END;");
     assert_eq!(goto.state(), SqlState::FEATURE_NOT_SUPPORTED);
-    assert_compilation_error(&goto, "line 1, column 7:\nPL/SQL: GOTO is not supported yet");
+    assert_compilation_error(
+        &goto,
+        "line 1, column 7:\nPL/SQL: GOTO is not supported yet",
+    );
 }
 
 #[test]
@@ -323,7 +368,10 @@ fn a_stored_procedure_keeps_its_declared_types_and_source() {
         .iter()
         .map(|parameter| parameter.mode)
         .collect();
-    assert_eq!(modes, [ParameterMode::In, ParameterMode::In, ParameterMode::Out]);
+    assert_eq!(
+        modes,
+        [ParameterMode::In, ParameterMode::In, ParameterMode::Out]
+    );
     assert_eq!(definition.parameters[0].sql_type, SqlType::Dynamic);
     let Some(plsql) = &definition.plsql else {
         panic!("{definition:?}");
@@ -333,7 +381,10 @@ fn a_stored_procedure_keeps_its_declared_types_and_source() {
         DeclaredType::ColumnType(vec!["job_history".to_owned(), "employee_id".to_owned()])
     );
     assert_eq!(plsql.declared[2].text(), "VARCHAR2");
-    assert_eq!(plsql.identity(&definition.parameters), "JOB_HISTORY.EMPLOYEE_ID%TYPE, DATE");
+    assert_eq!(
+        plsql.identity(&definition.parameters),
+        "JOB_HISTORY.EMPLOYEE_ID%TYPE, DATE"
+    );
     assert_eq!(unit.program.block.steps.len(), 2);
 }
 
@@ -346,8 +397,16 @@ fn a_function_heading_records_its_return_type_and_options() {
     assert_eq!(definition.kind, RoutineKind::Function);
     assert_eq!(definition.volatility, Volatility::Immutable);
     assert!(!definition.security_definer);
-    assert!(matches!(definition.returns, RoutineReturns::One(ReturnType::Type(_))));
-    assert!(definition.plsql.as_ref().is_some_and(|plsql| plsql.deterministic));
+    assert!(matches!(
+        definition.returns,
+        RoutineReturns::One(ReturnType::Type(_))
+    ));
+    assert!(
+        definition
+            .plsql
+            .as_ref()
+            .is_some_and(|plsql| plsql.deterministic)
+    );
     let pipelined = created(
         "FUNCTION numbers RETURN number_table PIPELINED IS BEGIN PIPE ROW (1); RETURN; END;",
     );
@@ -378,7 +437,9 @@ fn a_nested_subprogram_sees_the_enclosing_variables() {
         panic!("{compiled:?}");
     };
     assert!(forward.program.is_none());
-    assert!(matches!(&compiled.block.steps[0].kind, StepKind::Call(call) if call.text == "CALL add_to(1)"));
+    assert!(
+        matches!(&compiled.block.steps[0].kind, StepKind::Call(call) if call.text == "CALL add_to(1)")
+    );
 }
 
 #[test]
@@ -397,7 +458,9 @@ fn collection_methods_and_elements_are_targets() {
     assert_eq!(target.name, "v");
     assert_eq!(*method, CollectionMethod::Delete);
     assert!(arguments.is_empty());
-    assert!(matches!(&found[1], StepKind::CollectionMethod { method: CollectionMethod::Extend, arguments, .. } if arguments.len() == 1));
+    assert!(
+        matches!(&found[1], StepKind::CollectionMethod { method: CollectionMethod::Extend, arguments, .. } if arguments.len() == 1)
+    );
     let StepKind::Assign { target, .. } = &found[2] else {
         panic!("{found:?}");
     };
@@ -415,8 +478,12 @@ fn forall_runs_one_statement_over_a_range() {
     };
     assert_eq!(forall.variable, "i");
     assert!(forall.save_exceptions);
-    assert!(matches!(&forall.bounds, ForallBounds::Range { lower, upper } if lower.text == "1" && upper.text == "ids.COUNT"));
-    assert!(matches!(&forall.statement.kind, StepKind::Sql { statement, .. } if statement.text == "DELETE FROM jobs WHERE id = ids(i)"));
+    assert!(
+        matches!(&forall.bounds, ForallBounds::Range { lower, upper } if lower.text == "1" && upper.text == "ids.COUNT")
+    );
+    assert!(
+        matches!(&forall.statement.kind, StepKind::Sql { statement, .. } if statement.text == "DELETE FROM jobs WHERE id = ids(i)")
+    );
 }
 
 #[test]
@@ -430,9 +497,11 @@ fn execute_immediate_binds_and_fetches_into_variables() {
     assert_eq!(dynamic.command.text, "'SELECT 1 FROM dual WHERE 1 = :1'");
     assert!(dynamic.into.as_ref().is_some_and(|into| into.strict));
     assert_eq!(dynamic.using.len(), 1);
-    assert!(failure("DECLARE n NUMBER; BEGIN EXECUTE IMMEDIATE 'x' USING OUT n; END;")
-        .message()
-        .contains("not supported"));
+    assert!(
+        failure("DECLARE n NUMBER; BEGIN EXECUTE IMMEDIATE 'x' USING OUT n; END;")
+            .message()
+            .contains("not supported")
+    );
 }
 
 #[test]
@@ -446,14 +515,20 @@ fn cursor_variables_open_fetch_and_close() {
     };
     assert_eq!(cursor.variable_type, VariableType::RefCursor);
     let found: Vec<&StepKind> = compiled.block.steps.iter().map(|step| &step.kind).collect();
-    assert!(matches!(found[0], StepKind::Open { cursor, source: OpenSource::Query(QuerySource::Static(_)), .. } if cursor == "c"));
-    assert!(matches!(found[1], StepKind::Fetch { cursor, limit: None, into, .. } if cursor == "c" && !into.bulk));
+    assert!(
+        matches!(found[0], StepKind::Open { cursor, source: OpenSource::Query(QuerySource::Static(_)), .. } if cursor == "c")
+    );
+    assert!(
+        matches!(found[1], StepKind::Fetch { cursor, limit: None, into, .. } if cursor == "c" && !into.bulk)
+    );
     assert!(matches!(found[2], StepKind::Close(cursor) if cursor == "c"));
     let limited = steps(
         "DECLARE CURSOR c IS SELECT id FROM jobs; TYPE t IS TABLE OF NUMBER; v t; \
          BEGIN OPEN c; FETCH c BULK COLLECT INTO v LIMIT 100; CLOSE c; END;",
     );
-    assert!(matches!(&limited[1], StepKind::Fetch { limit: Some(limit), into, .. } if limit.text == "100" && into.bulk));
+    assert!(
+        matches!(&limited[1], StepKind::Fetch { limit: Some(limit), into, .. } if limit.text == "100" && into.bulk)
+    );
 }
 
 #[test]
@@ -542,7 +617,17 @@ fn hostile_units_fail_without_panicking() {
             let _ = compile_package(prefix, None);
         }
     }
-    for garbage in ["<<", "BEGIN <<x", "DECLARE TYPE", "BEGIN FORALL i IN", ":=", "BEGIN :1 := 2; END;"] {
-        assert!(compile(&anonymous_block_definition(garbage)).is_err(), "{garbage}");
+    for garbage in [
+        "<<",
+        "BEGIN <<x",
+        "DECLARE TYPE",
+        "BEGIN FORALL i IN",
+        ":=",
+        "BEGIN :1 := 2; END;",
+    ] {
+        assert!(
+            compile(&anonymous_block_definition(garbage)).is_err(),
+            "{garbage}"
+        );
     }
 }

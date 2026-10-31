@@ -84,16 +84,25 @@ struct CopyBridge<'c> {
 }
 
 fn sql_failure(error: &ClientError) -> SqlError {
-    SqlError::new(SqlState::CONNECTION_FAILURE, format!("reading from the source failed: {error}"))
+    SqlError::new(
+        SqlState::CONNECTION_FAILURE,
+        format!("reading from the source failed: {error}"),
+    )
 }
 
 impl CopyChannel for CopyBridge<'_> {
     fn start_copy_in(&mut self, _start: &CopyStart) -> SqlResult<()> {
-        self.client.start_copy_out(&self.source_sql).map_err(|error| sql_failure(&error))
+        self.client
+            .start_copy_out(&self.source_sql)
+            .map_err(|error| sql_failure(&error))
     }
 
     fn read_copy_data(&mut self, data: &mut Vec<u8>) -> SqlResult<bool> {
-        match self.client.read_copy_out().map_err(|error| sql_failure(&error))? {
+        match self
+            .client
+            .read_copy_out()
+            .map_err(|error| sql_failure(&error))?
+        {
             Some(piece) => {
                 self.rows += piece.iter().filter(|byte| **byte == b'\n').count() as u64;
                 data.extend_from_slice(&piece);
@@ -104,11 +113,17 @@ impl CopyChannel for CopyBridge<'_> {
     }
 
     fn start_copy_out(&mut self, _start: &CopyStart) -> SqlResult<()> {
-        Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, "follow copies into EggDB only"))
+        Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "follow copies into EggDB only",
+        ))
     }
 
     fn write_copy_data(&mut self, _data: &[u8]) -> SqlResult<()> {
-        Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, "follow copies into EggDB only"))
+        Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "follow copies into EggDB only",
+        ))
     }
 
     fn finish_copy_out(&mut self) -> SqlResult<()> {
@@ -185,8 +200,15 @@ impl Session<'_> {
             }
             Some(crate::cli::args::ExportFile::Standard) => {
                 let mut line = String::new();
-                std::io::BufRead::read_line(&mut std::io::BufReader::new(&mut *self.stdin), &mut line).map_err(|error| {
-                    Failure::usage(format!("cannot read the password from stdin: {error}"), Some(CommandName::Follow))
+                std::io::BufRead::read_line(
+                    &mut std::io::BufReader::new(&mut *self.stdin),
+                    &mut line,
+                )
+                .map_err(|error| {
+                    Failure::usage(
+                        format!("cannot read the password from stdin: {error}"),
+                        Some(CommandName::Follow),
+                    )
                 })?;
                 self.stdin_taken = true;
                 Ok(Some(line.trim_end_matches(['\r', '\n']).to_owned()))
@@ -208,7 +230,9 @@ impl Session<'_> {
             )));
         }
         if self.request.follow.poll_seconds.is_some() {
-            return Err(usage("--poll is for SQL Server sources; PostgreSQL streams its changes".to_owned()));
+            return Err(usage(
+                "--poll is for SQL Server sources; PostgreSQL streams its changes".to_owned(),
+            ));
         }
         let mut options = parse_postgres_url(&source).map_err(usage)?;
         options.password = self.source_password(PASSWORD_VARIABLE)?;
@@ -219,9 +243,14 @@ impl Session<'_> {
         let target = format!("{}:{}/{}", options.host, options.port, options.database);
         let existed = self.request.file.exists();
         let started = Instant::now();
-        let mut catalog = PgClient::connect(&options).map_err(|error| client_failure(&target, &error))?;
+        let mut catalog =
+            PgClient::connect(&options).map_err(|error| client_failure(&target, &error))?;
         let tls = catalog.tls_version().map_or("no TLS", |version| {
-            if version == eggdb_tls::cipher_suite::version::TLS13 { "TLS 1.3" } else { "TLS 1.2" }
+            if version == eggdb_tls::cipher_suite::version::TLS13 {
+                "TLS 1.3"
+            } else {
+                "TLS 1.2"
+            }
         });
         let server = catalog.server_version().to_owned();
         self.follow_event(
@@ -240,8 +269,16 @@ impl Session<'_> {
                 options.ssl_mode.name()
             ),
         );
-        let wal_level = rows_of(catalog.simple_query("SHOW wal_level").map_err(|error| client_failure(&target, &error))?);
-        let wal_level = wal_level.first().and_then(|row| row.first()).map(text).unwrap_or_default();
+        let wal_level = rows_of(
+            catalog
+                .simple_query("SHOW wal_level")
+                .map_err(|error| client_failure(&target, &error))?,
+        );
+        let wal_level = wal_level
+            .first()
+            .and_then(|row| row.first())
+            .map(text)
+            .unwrap_or_default();
         if wal_level != "logical" {
             return Err(Failure::Database {
                 message: format!(
@@ -256,7 +293,8 @@ impl Session<'_> {
         let (publication, created_publication) = self.prepare_publication(&mut catalog, &target)?;
         let mut replication_options = options.clone();
         replication_options.replication = true;
-        let mut stream = PgClient::connect(&replication_options).map_err(|error| client_failure(&target, &error))?;
+        let mut stream = PgClient::connect(&replication_options)
+            .map_err(|error| client_failure(&target, &error))?;
         let slot_name = format!("eggdb_follow_{}", std::process::id());
         let slot = stream
             .simple_query(&format!(
@@ -279,9 +317,15 @@ impl Session<'_> {
                 _ => client_failure(&target, &error),
             })?;
         let slot_row = rows_of(slot).into_iter().next().unwrap_or_default();
-        let consistent_point = slot_row.get(1).map(text).and_then(|lsn| parse_lsn(&lsn)).ok_or_else(|| {
-            source_failed(format!("cannot follow {target}: the replication slot reported no position"))
-        })?;
+        let consistent_point = slot_row
+            .get(1)
+            .map(text)
+            .and_then(|lsn| parse_lsn(&lsn))
+            .ok_or_else(|| {
+                source_failed(format!(
+                    "cannot follow {target}: the replication slot reported no position"
+                ))
+            })?;
         let snapshot = slot_row.get(2).map(text).unwrap_or_default();
         self.follow_event(
             JsonObject::new()
@@ -297,10 +341,14 @@ impl Session<'_> {
         );
 
         let mut counts = FollowCounts::default();
-        let copy_outcome = self.copy_snapshot(&mut catalog, &target, &snapshot, &publication, &mut counts);
+        let copy_outcome =
+            self.copy_snapshot(&mut catalog, &target, &snapshot, &publication, &mut counts);
         if let Err(failure) = copy_outcome {
             if created_publication {
-                let _ = catalog.simple_query(&format!("DROP PUBLICATION IF EXISTS {}", quote_identifier(&publication)));
+                let _ = catalog.simple_query(&format!(
+                    "DROP PUBLICATION IF EXISTS {}",
+                    quote_identifier(&publication)
+                ));
             }
             stream.terminate();
             catalog.terminate();
@@ -324,12 +372,21 @@ impl Session<'_> {
         );
 
         let _ = stop_signals::watch();
-        let followed = self.stream_changes(&mut stream, &slot_name, &publication, consistent_point, &mut counts);
+        let followed = self.stream_changes(
+            &mut stream,
+            &slot_name,
+            &publication,
+            consistent_point,
+            &mut counts,
+        );
         let (reason, applied) = match followed {
             Ok(outcome) => outcome,
             Err(failure) => {
                 if created_publication {
-                    let _ = catalog.simple_query(&format!("DROP PUBLICATION IF EXISTS {}", quote_identifier(&publication)));
+                    let _ = catalog.simple_query(&format!(
+                        "DROP PUBLICATION IF EXISTS {}",
+                        quote_identifier(&publication)
+                    ));
                 }
                 return Err(failure);
             }
@@ -338,7 +395,10 @@ impl Session<'_> {
         counts.sequences = self.copy_sequence_values(&mut catalog)?;
         let publication_dropped = created_publication
             && catalog
-                .simple_query(&format!("DROP PUBLICATION IF EXISTS {}", quote_identifier(&publication)))
+                .simple_query(&format!(
+                    "DROP PUBLICATION IF EXISTS {}",
+                    quote_identifier(&publication)
+                ))
                 .is_ok();
         catalog.terminate();
         let ok = !matches!(reason, StopReason::SourceClosed);
@@ -398,19 +458,30 @@ impl Session<'_> {
         Ok(if ok { Exit::Done } else { Exit::DatabaseError })
     }
 
-    fn prepare_publication(&mut self, catalog: &mut PgClient, target: &str) -> Result<(String, bool), Failure> {
+    fn prepare_publication(
+        &mut self,
+        catalog: &mut PgClient,
+        target: &str,
+    ) -> Result<(String, bool), Failure> {
         let wanted = self.request.follow.publication.clone();
-        let name = wanted.clone().unwrap_or_else(|| DEFAULT_PUBLICATION.to_owned());
+        let name = wanted
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PUBLICATION.to_owned());
         let existing = rows_of(
             catalog
-                .simple_query(&format!("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = {}", quote_literal(&name)))
+                .simple_query(&format!(
+                    "SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = {}",
+                    quote_literal(&name)
+                ))
                 .map_err(|error| client_failure(target, &error))?,
         );
         if !existing.is_empty() {
             return Ok((name, false));
         }
         if wanted.is_some() {
-            return Err(source_failed(format!("cannot follow {target}: publication '{name}' does not exist")));
+            return Err(source_failed(format!(
+                "cannot follow {target}: publication '{name}' does not exist"
+            )));
         }
         catalog
             .simple_query(&format!("CREATE PUBLICATION {} FOR ALL TABLES", quote_identifier(&name)))
@@ -430,9 +501,16 @@ impl Session<'_> {
 
     fn schema_filter(&self) -> String {
         if self.request.follow.schemas.is_empty() {
-            "n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'".to_owned()
+            "n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'"
+                .to_owned()
         } else {
-            let names: Vec<String> = self.request.follow.schemas.iter().map(|name| quote_literal(name)).collect();
+            let names: Vec<String> = self
+                .request
+                .follow
+                .schemas
+                .iter()
+                .map(|name| quote_literal(name))
+                .collect();
             format!("n.nspname IN ({})", names.join(", "))
         }
     }
@@ -446,9 +524,14 @@ impl Session<'_> {
         counts: &mut FollowCounts,
     ) -> Result<(), Failure> {
         let failed = |error: ClientError| client_failure(target, &error);
-        catalog.simple_query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").map_err(failed)?;
         catalog
-            .simple_query(&format!("SET TRANSACTION SNAPSHOT {}", quote_literal(snapshot)))
+            .simple_query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .map_err(failed)?;
+        catalog
+            .simple_query(&format!(
+                "SET TRANSACTION SNAPSHOT {}",
+                quote_literal(snapshot)
+            ))
             .map_err(failed)?;
         let filter = self.schema_filter();
         let tables: Vec<SourceTable> = rows_of(
@@ -504,7 +587,11 @@ impl Session<'_> {
         .iter()
         .map(|row| text(&row[0]))
         .collect();
-        let unpublished: Vec<String> = tables.iter().map(SourceTable::shown).filter(|name| !published.contains(name)).collect();
+        let unpublished: Vec<String> = tables
+            .iter()
+            .map(SourceTable::shown)
+            .filter(|name| !published.contains(name))
+            .collect();
         if !unpublished.is_empty() {
             return Err(source_failed(format!(
                 "cannot follow {target}: publication '{publication}' does not publish {} of the tables: {}; their changes would never arrive. Add them to it, or leave them out with --schema",
@@ -513,13 +600,22 @@ impl Session<'_> {
             )));
         }
 
-        let db = self.open(Access::Write { create: self.request.create }, None)?;
+        let db = self.open(
+            Access::Write {
+                create: self.request.create,
+            },
+            None,
+        )?;
         let store = DatabaseStore(&db);
         let mut session = store.session(Dialect::PostgreSql);
         let mut run = |sql: &str| -> Result<(), Failure> {
-            session
-                .execute(sql, &mut |_| {})
-                .map_err(|error| source_failed(format!("cannot create in {}: {} ({sql})", self.file_display, error.message())))
+            session.execute(sql, &mut |_| {}).map_err(|error| {
+                source_failed(format!(
+                    "cannot create in {}: {} ({sql})",
+                    self.file_display,
+                    error.message()
+                ))
+            })
         };
         let schemas: Vec<String> = {
             let mut names: Vec<String> = tables.iter().map(|table| table.schema.clone()).collect();
@@ -528,7 +624,10 @@ impl Session<'_> {
         };
         for schema in &schemas {
             if schema != "public" {
-                run(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(schema)))?;
+                run(&format!(
+                    "CREATE SCHEMA IF NOT EXISTS {}",
+                    quote_identifier(schema)
+                ))?;
             }
         }
         let sequences = rows_of(
@@ -549,7 +648,11 @@ impl Session<'_> {
                 text(&sequence[4]),
                 text(&sequence[5]),
                 text(&sequence[3]),
-                if text(&sequence[7]) == "true" { " CYCLE" } else { "" }
+                if text(&sequence[7]) == "true" {
+                    " CYCLE"
+                } else {
+                    ""
+                }
             ))?;
         }
         let mut deferred = Vec::new();
@@ -577,7 +680,11 @@ impl Session<'_> {
             let mut definitions: Vec<String> = columns
                 .iter()
                 .map(|column| {
-                    let mut definition = format!("{} {}", quote_identifier(&text(&column[0])), text(&column[1]));
+                    let mut definition = format!(
+                        "{} {}",
+                        quote_identifier(&text(&column[0])),
+                        text(&column[1])
+                    );
                     match text(&column[4]).as_str() {
                         "a" => definition.push_str(" GENERATED ALWAYS AS IDENTITY"),
                         "d" => definition.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
@@ -594,7 +701,11 @@ impl Session<'_> {
                 })
                 .collect();
             for constraint in &constraints {
-                let clause = format!("CONSTRAINT {} {}", quote_identifier(&text(&constraint[0])), text(&constraint[2]));
+                let clause = format!(
+                    "CONSTRAINT {} {}",
+                    quote_identifier(&text(&constraint[0])),
+                    text(&constraint[2])
+                );
                 if text(&constraint[1]) == "f" {
                     deferred.push(format!("ALTER TABLE {} ADD {clause}", table.qualified()));
                 } else {
@@ -620,7 +731,17 @@ impl Session<'_> {
         self.follow_event(
             JsonObject::new()
                 .string("event", "schema")
-                .raw("schemas", &format!("[{}]", schemas.iter().map(|name| render::json_string(name)).collect::<Vec<_>>().join(",")))
+                .raw(
+                    "schemas",
+                    &format!(
+                        "[{}]",
+                        schemas
+                            .iter()
+                            .map(|name| render::json_string(name))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                )
                 .number("tables", tables.len() as u64)
                 .number("sequences", sequences.len() as u64),
             &format!(
@@ -638,8 +759,18 @@ impl Session<'_> {
                 rows: 0,
             };
             session
-                .execute_with_copy(&format!("COPY {} FROM STDIN", table.qualified()), &mut |_| true, &mut bridge)
-                .map_err(|error| source_failed(format!("cannot copy {}: {}", table.shown(), error.message())))?;
+                .execute_with_copy(
+                    &format!("COPY {} FROM STDIN", table.qualified()),
+                    &mut |_| true,
+                    &mut bridge,
+                )
+                .map_err(|error| {
+                    source_failed(format!(
+                        "cannot copy {}: {}",
+                        table.shown(),
+                        error.message()
+                    ))
+                })?;
             let rows = bridge.rows;
             counts.tables += 1;
             counts.rows_copied += rows;
@@ -666,9 +797,13 @@ impl Session<'_> {
                 .map_err(failed)?,
         );
         for statement in indexes.iter().map(|row| text(&row[0])).chain(deferred) {
-            session
-                .execute(&statement, &mut |_| {})
-                .map_err(|error| source_failed(format!("cannot create in {}: {} ({statement})", self.file_display, error.message())))?;
+            session.execute(&statement, &mut |_| {}).map_err(|error| {
+                source_failed(format!(
+                    "cannot create in {}: {} ({statement})",
+                    self.file_display,
+                    error.message()
+                ))
+            })?;
         }
         let _ = session.close();
         catalog.simple_query("COMMIT").map_err(failed)?;
@@ -683,7 +818,8 @@ impl Session<'_> {
         start: Lsn,
         counts: &mut FollowCounts,
     ) -> Result<(StopReason, Lsn), Failure> {
-        let failed = |error: ClientError| source_failed(format!("the replication stream failed: {error}"));
+        let failed =
+            |error: ClientError| source_failed(format!("the replication stream failed: {error}"));
         stream
             .start_copy_both(&format!(
                 "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names {})",
@@ -692,7 +828,9 @@ impl Session<'_> {
                 quote_literal(&quote_identifier(publication))
             ))
             .map_err(failed)?;
-        stream.set_read_timeout(Some(POLL_TIMEOUT)).map_err(failed)?;
+        stream
+            .set_read_timeout(Some(POLL_TIMEOUT))
+            .map_err(failed)?;
         let db = self.open(Access::Write { create: false }, None)?;
         let store = DatabaseStore(&db);
         let mut session = store.session(Dialect::PostgreSql);
@@ -714,40 +852,63 @@ impl Session<'_> {
                 Err(ClientError::TimedOut) => {
                     if last_status.elapsed() >= STATUS_INTERVAL || until_caught_up {
                         stream
-                            .send_copy_data(&standby_status_update(applied, now_unix_micros(), until_caught_up))
+                            .send_copy_data(&standby_status_update(
+                                applied,
+                                now_unix_micros(),
+                                until_caught_up,
+                            ))
                             .map_err(failed)?;
                         last_status = Instant::now();
                     }
                     continue;
                 }
-                Err(ClientError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Err(ClientError::Io(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
                     return Ok((StopReason::SourceClosed, applied));
                 }
                 Err(error) => return Err(failed(error)),
             };
-            match parse_stream_message(&message).map_err(|error| source_failed(error.to_string()))? {
-                StreamMessage::Keepalive { wal_end, reply_requested } => {
+            match parse_stream_message(&message)
+                .map_err(|error| source_failed(error.to_string()))?
+            {
+                StreamMessage::Keepalive {
+                    wal_end,
+                    reply_requested,
+                } => {
                     server_end = server_end.max(wal_end);
                     if !in_transaction {
                         applied = applied.max(wal_end);
                         if until_caught_up {
                             stream
-                                .send_copy_data(&standby_status_update(applied, now_unix_micros(), false))
+                                .send_copy_data(&standby_status_update(
+                                    applied,
+                                    now_unix_micros(),
+                                    false,
+                                ))
                                 .map_err(failed)?;
                             return Ok((StopReason::CaughtUp, applied));
                         }
                     }
                     if reply_requested {
                         stream
-                            .send_copy_data(&standby_status_update(applied, now_unix_micros(), false))
+                            .send_copy_data(&standby_status_update(
+                                applied,
+                                now_unix_micros(),
+                                false,
+                            ))
                             .map_err(failed)?;
                         last_status = Instant::now();
                     }
                 }
                 StreamMessage::XLogData { wal_end, data, .. } => {
                     server_end = server_end.max(wal_end);
-                    let logical = parse_logical_message(&data).map_err(|error| source_failed(error.to_string()))?;
-                    match applier.apply(logical).map_err(|error| source_failed(error.to_string()))? {
+                    let logical = parse_logical_message(&data)
+                        .map_err(|error| source_failed(error.to_string()))?;
+                    match applier
+                        .apply(logical)
+                        .map_err(|error| source_failed(error.to_string()))?
+                    {
                         Change::Begin => {
                             in_transaction = true;
                             pending.clear();
@@ -808,8 +969,20 @@ impl Session<'_> {
         for row in &values {
             let name = qualified(&text(&row[0]), &text(&row[1]));
             session
-                .execute(&format!("SELECT pg_catalog.setval({}, {}, true)", quote_literal(&name), text(&row[2])), &mut |_| {})
-                .map_err(|error| source_failed(format!("cannot set the sequence {name}: {}", error.message())))?;
+                .execute(
+                    &format!(
+                        "SELECT pg_catalog.setval({}, {}, true)",
+                        quote_literal(&name),
+                        text(&row[2])
+                    ),
+                    &mut |_| {},
+                )
+                .map_err(|error| {
+                    source_failed(format!(
+                        "cannot set the sequence {name}: {}",
+                        error.message()
+                    ))
+                })?;
         }
         let _ = session.close();
         Ok(values.len() as u64)

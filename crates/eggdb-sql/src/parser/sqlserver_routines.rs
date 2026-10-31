@@ -159,7 +159,9 @@ impl Parser<'_> {
             return Err(not_first_in_batch(kind, position));
         }
         if matches!(self.peek_kind(), TokenKind::Word(word) if word.starts_with('#')) {
-            return Err(not_supported("Temporary procedures and functions (#name)").at(self.position()));
+            return Err(
+                not_supported("Temporary procedures and functions (#name)").at(self.position())
+            );
         }
         let name = self.table_name()?;
         if self.peek_kind() == &TokenKind::Semicolon

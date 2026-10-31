@@ -9,8 +9,7 @@ const OBJECT_TYPES_LATER: &str = "Oracle object types come later";
 const SUPPLIED_PACKAGE: &str = "it calls an Oracle-supplied package EggDB does not have";
 const SUPPLIED_PACKAGE_PREFIXES: [&str; 3] = ["dbms_", "utl_", "owa_"];
 const SUPPLIED_PACKAGES_IN_EGGDB: [&str; 1] = ["dbms_output"];
-pub(crate) const PROMPTED_BLOCK: &str =
-    "it uses a substitution variable with no value: SQL*Plus would prompt for it, --define gives it one";
+pub(crate) const PROMPTED_BLOCK: &str = "it uses a substitution variable with no value: SQL*Plus would prompt for it, --define gives it one";
 pub(crate) const NOT_COMPILED: &str =
     "did not compile; Oracle would keep it invalid, EggDB does not create it";
 const NOT_SUPPORTED_YET: &str = "not supported yet";

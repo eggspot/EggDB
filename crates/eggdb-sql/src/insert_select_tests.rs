@@ -47,7 +47,10 @@ fn insert_select_adds_the_rows_of_its_query_in_the_query_order() {
         "id|id__1\n1|1\n2|2\n3|3\nINSERT 0 3"
     );
     assert_eq!(
-        last(&mut session, "SELECT id, name, born FROM authors ORDER BY id"),
+        last(
+            &mut session,
+            "SELECT id, name, born FROM authors ORDER BY id"
+        ),
         "id|name|born\n1|Ada|1815-12-10\n2|Edsger|1930-05-11\n3|Grace|NULL\nSELECT 3"
     );
 }
@@ -91,10 +94,7 @@ fn insert_select_checks_constraints_and_converts_like_insert_values() {
     let mut session = with_authors(&store);
     last(&mut session, "INSERT INTO authors (name) VALUES ('Ada')");
     assert_eq!(
-        state(
-            &mut session,
-            "INSERT INTO authors (name) SELECT 'Ada'"
-        ),
+        state(&mut session, "INSERT INTO authors (name) SELECT 'Ada'"),
         "23505"
     );
     assert_eq!(
@@ -169,7 +169,10 @@ fn insert_select_runs_in_the_other_dialects() {
     let mut mysql = Session::with_dialect(&store, Dialect::MySql);
     last(&mut mysql, "CREATE TABLE m (a INT, b INT)");
     assert_eq!(
-        last(&mut mysql, "INSERT INTO m SELECT 1, 2 UNION ALL SELECT 3, 4"),
+        last(
+            &mut mysql,
+            "INSERT INTO m SELECT 1, 2 UNION ALL SELECT 3, 4"
+        ),
         "INSERT 0 2"
     );
 }

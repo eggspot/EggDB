@@ -112,8 +112,14 @@ fn scans_inside_a_collection_take_ranges_prefixes_and_both_ends() {
             .collect::<eggdb::Result<_>>()
             .unwrap()
     };
-    assert_eq!(keys(c.scan_prefix("ap")), [b"apple".to_vec(), b"apricot".to_vec()]);
-    assert_eq!(keys(c.scan("b".."d")), [b"banana".to_vec(), b"cherry".to_vec()]);
+    assert_eq!(
+        keys(c.scan_prefix("ap")),
+        [b"apple".to_vec(), b"apricot".to_vec()]
+    );
+    assert_eq!(
+        keys(c.scan("b".."d")),
+        [b"banana".to_vec(), b"cherry".to_vec()]
+    );
     assert_eq!(keys(c.scan(..="banana")).len(), 3);
     assert_eq!(keys(c.scan("c"..)), [b"cherry".to_vec(), b"date".to_vec()]);
     assert_eq!(keys(c.scan("z".."a")), Vec::<Vec<u8>>::new());
@@ -121,17 +127,22 @@ fn scans_inside_a_collection_take_ranges_prefixes_and_both_ends() {
     let mut both = c.scan(..);
     assert_eq!(both.next().unwrap().unwrap().0, b"apple");
     assert_eq!(both.next_back().unwrap().unwrap().0, b"date");
-    assert_eq!(both.next_entry().unwrap().map(|(key, _)| key.to_vec()), Some(b"apricot".to_vec()));
     assert_eq!(
-        both.next_back_key_and_value_len().unwrap().map(|(key, len)| (key.to_vec(), len)),
+        both.next_entry().unwrap().map(|(key, _)| key.to_vec()),
+        Some(b"apricot".to_vec())
+    );
+    assert_eq!(
+        both.next_back_key_and_value_len()
+            .unwrap()
+            .map(|(key, len)| (key.to_vec(), len)),
         Some((b"cherry".to_vec(), 6))
     );
-    assert_eq!(both.next().unwrap().unwrap(), (b"banana".to_vec(), b"BANANA".to_vec()));
-    assert!(both.next().is_none());
     assert_eq!(
-        c.get_with("cherry", |value| value.len()).unwrap(),
-        Some(6)
+        both.next().unwrap().unwrap(),
+        (b"banana".to_vec(), b"BANANA".to_vec())
     );
+    assert!(both.next().is_none());
+    assert_eq!(c.get_with("cherry", |value| value.len()).unwrap(), Some(6));
     drop(both);
     drop(c);
     assert_eq!(keys(tx.scan(..)).len(), 5);
@@ -218,7 +229,11 @@ fn the_default_key_space_refuses_and_hides_the_reserved_prefix() {
     tx.put("still open", "yes").unwrap();
     tx.commit().unwrap();
     assert_eq!(db.get(&reserved_key).unwrap(), None);
-    assert_eq!(db.read(|tx| tx.get_with(&reserved_key, |v| v.len())).unwrap(), None);
+    assert_eq!(
+        db.read(|tx| tx.get_with(&reserved_key, |v| v.len()))
+            .unwrap(),
+        None
+    );
     assert_eq!(db.collection("c").get("k").unwrap(), Some(b"v".to_vec()));
     assert_eq!(db.collection_names().unwrap(), ["c"]);
 }
@@ -384,7 +399,7 @@ fn random_changes_to_three_key_spaces_agree_with_three_maps() {
     db.create_collection("a").unwrap();
     db.create_collection("b").unwrap();
     let mut models: [Entries; 3] = Default::default();
-    let mut random = Lcg(0x5eed_c011_ec71_0a5);
+    let mut random = Lcg(0x05ee_dc01_1ec7_10a5);
     for round in 0..40 {
         let mut tx = db.begin_write().unwrap();
         for _ in 0..50 {
@@ -420,10 +435,17 @@ fn random_changes_to_three_key_spaces_agree_with_three_maps() {
         for (space, model) in spaces.iter().zip(models.iter()) {
             assert_eq!(&scan_all(&db, *space), model, "round {round}, {space:?}");
             let low = format!("k{:03}", random.below(200)).into_bytes();
-            let in_range: Vec<Vec<u8>> = model.range(low.clone()..).map(|(key, _)| key.clone()).collect();
+            let in_range: Vec<Vec<u8>> = model
+                .range(low.clone()..)
+                .map(|(key, _)| key.clone())
+                .collect();
             let scanned: Vec<Vec<u8>> = db
                 .read(|tx| match space {
-                    Some(name) => tx.collection(name)?.scan(low.clone()..).map(|e| e.map(|(k, _)| k)).collect(),
+                    Some(name) => tx
+                        .collection(name)?
+                        .scan(low.clone()..)
+                        .map(|e| e.map(|(k, _)| k))
+                        .collect(),
                     None => tx.scan(low.clone()..).map(|e| e.map(|(k, _)| k)).collect(),
                 })
                 .unwrap();

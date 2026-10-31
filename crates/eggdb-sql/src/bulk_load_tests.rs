@@ -101,7 +101,10 @@ fn insert_bulk_waits_for_its_rows_and_loads_them_with_defaults_and_numbered_iden
     assert_eq!(tag(&steps[0]), "INSERT 0 2");
     assert!(!session.bulk_load_pending());
     assert_eq!(
-        texts(&mut session, "SELECT id, name, price FROM items ORDER BY id"),
+        texts(
+            &mut session,
+            "SELECT id, name, price FROM items ORDER BY id"
+        ),
         vec![
             vec!["1".to_owned(), "bread".to_owned(), "12.50".to_owned()],
             vec!["2".to_owned(), "egg".to_owned(), "1.50".to_owned()],
@@ -136,7 +139,10 @@ fn a_failing_bulk_load_loads_nothing_and_rows_need_a_waiting_insert_bulk() {
         texts(&mut session, "SELECT count(*) AS n FROM items"),
         vec![vec!["0".to_owned()]]
     );
-    batch(&mut session, "INSERT BULK items (name NVarChar(20), price Decimal(10,2))");
+    batch(
+        &mut session,
+        "INSERT BULK items (name NVarChar(20), price Decimal(10,2))",
+    );
     let steps = load(&mut session, &mut Rows(vec![vec![text("short")]]));
     assert_eq!(code(&steps[0]), Some(4815));
     batch(&mut session, "INSERT BULK items (name NVarChar(20))");
@@ -169,9 +175,7 @@ fn bcp_character_files_load_through_sql_servers_conversions() {
         &mut session,
         "CREATE TABLE people (id INT PRIMARY KEY, name NVARCHAR(20), score DECIMAL(5,1), seen BIT, joined DATETIME2(3) DEFAULT '2024-01-01')",
     );
-    session
-        .execute("INSERT BULK people", &mut |_| {})
-        .unwrap();
+    session.execute("INSERT BULK people", &mut |_| {}).unwrap();
     let mut data: &[u8] =
         b"1\tada\t9.5\t1\t2024-05-06 07:08:09.123\r\n2\t\t\t0\t\n3\t\0\t-1.0\t0\t2024-02-03\n";
     let mut reader = BcpCharacterReader::new(&mut data, BcpTerminators::default());

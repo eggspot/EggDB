@@ -12,7 +12,10 @@ fn the_first_frame_draws_with_real_fonts_and_is_saved_as_png() {
     };
     let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui");
     let _ = std::fs::create_dir_all(&output);
-    for (kind, name) in [(ThemeKind::Light, "main_light.png"), (ThemeKind::Dark, "main_dark.png")] {
+    for (kind, name) in [
+        (ThemeKind::Light, "main_light.png"),
+        (ThemeKind::Dark, "main_dark.png"),
+    ] {
         let theme = Theme::of(kind);
         let frame = draw(&MainWindow::sample(), theme, faces.faces());
         assert_eq!((frame.width(), frame.height()), (WIDTH, HEIGHT));

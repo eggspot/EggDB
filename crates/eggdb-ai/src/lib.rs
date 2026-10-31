@@ -11,7 +11,9 @@ pub const DEFAULT_DIMENSIONS: usize = 256;
 pub const DEFAULT_RRF_K: f64 = 60.0;
 
 fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 fn add_feature(vector: &mut [f32], feature: &str, weight: f32) {
@@ -45,7 +47,11 @@ pub fn embed(text: &str, dimensions: usize) -> Vec<f32> {
 /// The reciprocal rank fusion score of one document from its rank in each list (1 for the
 /// first; `None` when a list does not hold it): the sum of `1 / (k + rank)`.
 pub fn reciprocal_rank_fusion(ranks: &[Option<u64>], k: f64) -> f64 {
-    ranks.iter().flatten().map(|rank| 1.0 / (k + *rank as f64)).sum()
+    ranks
+        .iter()
+        .flatten()
+        .map(|rank| 1.0 / (k + *rank as f64))
+        .sum()
 }
 
 /// `text` cut into pieces of at most `words` words, each starting `words - overlap` words after
@@ -96,7 +102,10 @@ mod tests {
     #[test]
     fn chunks_overlap_and_cover_the_text() {
         let text = "one two three four five six seven";
-        assert_eq!(chunks(text, 3, 1), ["one two three", "three four five", "five six seven"]);
+        assert_eq!(
+            chunks(text, 3, 1),
+            ["one two three", "three four five", "five six seven"]
+        );
         assert_eq!(chunks(text, 10, 2), [text]);
         assert!(chunks("", 3, 1).is_empty());
         assert_eq!(chunks("a b", 1, 5), ["a", "b"]);

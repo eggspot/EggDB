@@ -7,7 +7,9 @@ use crate::tests::render;
 
 fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
     let mut out = Vec::new();
-    session.execute(sql, &mut |result| out.push(render(&result))).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    session
+        .execute(sql, &mut |result| out.push(render(&result)))
+        .unwrap_or_else(|error| panic!("{sql}: {error}"));
     out.join("\n")
 }
 
@@ -36,8 +38,18 @@ fn a_postgresql_dump_restores_to_equal_rows() {
     let restored = MemoryStore::default();
     let mut target = Session::new(&restored);
     let mut input = dump.as_slice();
-    let outcome = restore_dump(&mut target, &mut input, RestoreOptions::default(), &mut |_| {});
-    assert!(outcome.error.is_none(), "{:?}\n{}", outcome.error, String::from_utf8_lossy(&dump));
+    let outcome = restore_dump(
+        &mut target,
+        &mut input,
+        RestoreOptions::default(),
+        &mut |_| {},
+    );
+    assert!(
+        outcome.error.is_none(),
+        "{:?}\n{}",
+        outcome.error,
+        String::from_utf8_lossy(&dump)
+    );
     let query = "SELECT id, name, born, score, active, photo, seen FROM people ORDER BY id";
     assert_eq!(run(&mut target, query), run(&mut session, query));
 }
@@ -47,7 +59,10 @@ fn other_dialects_write_their_own_syntax() {
     let store = source();
     let mut session = Session::new(&store);
     for (dialect, expected) in [
-        (Dialect::MySql, "INSERT INTO `people` (`id`, `name`, `born`, `score`, `active`, `photo`, `seen`) VALUES"),
+        (
+            Dialect::MySql,
+            "INSERT INTO `people` (`id`, `name`, `born`, `score`, `active`, `photo`, `seen`) VALUES",
+        ),
         (Dialect::SqlServer, "N'Ada O''Brien'"),
         (Dialect::Oracle, "HEXTORAW('0102')"),
         (Dialect::Sqlite, "X'0102'"),
@@ -64,6 +79,11 @@ fn other_dialects_write_their_own_syntax() {
     dump_sql(&mut session, Dialect::Sqlite, &mut sqlite).unwrap();
     let restored = MemoryStore::default();
     let mut target = Session::with_dialect(&restored, Dialect::Sqlite);
-    target.execute(&String::from_utf8(sqlite).unwrap(), &mut |_| {}).unwrap();
-    assert_eq!(run(&mut target, "SELECT count(*) FROM people"), run(&mut target, "SELECT 2"));
+    target
+        .execute(&String::from_utf8(sqlite).unwrap(), &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        run(&mut target, "SELECT count(*) FROM people"),
+        run(&mut target, "SELECT 2")
+    );
 }

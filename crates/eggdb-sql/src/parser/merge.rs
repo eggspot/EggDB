@@ -224,8 +224,10 @@ impl Parser<'_> {
                     condition,
                 });
             } else {
-                return Err(sqlserver::not_supported("more than one WHEN MATCHED clause in MERGE")
-                    .at(self.position()));
+                return Err(
+                    sqlserver::not_supported("more than one WHEN MATCHED clause in MERGE")
+                        .at(self.position()),
+                );
             }
         }
         if update.is_none() && insert.is_none() {

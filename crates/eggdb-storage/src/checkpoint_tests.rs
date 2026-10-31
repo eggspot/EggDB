@@ -456,7 +456,10 @@ fn a_data_page_in_the_space_a_checkpoint_cut_off_waits_for_the_header_copy() {
     cache.set_auto_checkpoint_bytes(None);
     let cut_from = cache.superblock().page_count;
     let (_, older) = header_slots(&fs);
-    assert_ne!(older.unwrap().log_head_page, cache.superblock().log_head_page);
+    assert_ne!(
+        older.unwrap().log_head_page,
+        cache.superblock().log_head_page
+    );
     let mut grown = false;
     for _ in 0..4096 {
         let mut page = cache.allocate(leaf()).unwrap();
@@ -469,7 +472,10 @@ fn a_data_page_in_the_space_a_checkpoint_cut_off_waits_for_the_header_copy() {
             assert_older_slot_is_a_copy(&fs, "before the cut space holds data");
         } else {
             let (_, older) = header_slots(&fs);
-            assert_ne!(older.unwrap().log_head_page, cache.superblock().log_head_page);
+            assert_ne!(
+                older.unwrap().log_head_page,
+                cache.superblock().log_head_page
+            );
         }
         cache.commit(|_| {}).unwrap();
         if grown {

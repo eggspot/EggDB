@@ -137,7 +137,11 @@ impl Reply {
 /// and `-inf` for infinities.
 pub fn format_double(number: f64) -> String {
     if number.is_infinite() {
-        return if number > 0.0 { "inf".to_owned() } else { "-inf".to_owned() };
+        return if number > 0.0 {
+            "inf".to_owned()
+        } else {
+            "-inf".to_owned()
+        };
     }
     if number == number.trunc() && number.abs() < 1e17 {
         return format!("{}", number as i64);
@@ -185,13 +189,18 @@ impl<R: Read> RequestReader<R> {
 
     fn line(&mut self) -> Result<Vec<u8>, ProtocolError> {
         loop {
-            if let Some(end) = self.buffer[self.start..].windows(2).position(|pair| pair == b"\r\n") {
+            if let Some(end) = self.buffer[self.start..]
+                .windows(2)
+                .position(|pair| pair == b"\r\n")
+            {
                 let line = self.buffer[self.start..self.start + end].to_vec();
                 self.start += end + 2;
                 return Ok(line);
             }
             if self.buffer.len() - self.start > MAX_LINE_BYTES {
-                return Err(ProtocolError::Invalid("Protocol error: too big inline request".to_owned()));
+                return Err(ProtocolError::Invalid(
+                    "Protocol error: too big inline request".to_owned(),
+                ));
             }
             self.fill()?;
         }
@@ -203,7 +212,9 @@ impl<R: Read> RequestReader<R> {
         }
         let bytes = self.buffer[self.start..self.start + length].to_vec();
         if &self.buffer[self.start + length..self.start + length + 2] != b"\r\n" {
-            return Err(ProtocolError::Invalid("Protocol error: expected '\\r\\n'".to_owned()));
+            return Err(ProtocolError::Invalid(
+                "Protocol error: expected '\\r\\n'".to_owned(),
+            ));
         }
         self.start += length + 2;
         Ok(bytes)
@@ -217,7 +228,7 @@ impl<R: Read> RequestReader<R> {
     }
 
     /// The next request's arguments.
-    pub fn next(&mut self) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    pub fn next_request(&mut self) -> Result<Vec<Vec<u8>>, ProtocolError> {
         loop {
             let line = self.line()?;
             match line.first() {
@@ -227,7 +238,9 @@ impl<R: Read> RequestReader<R> {
                         continue;
                     }
                     if count as usize > MAX_ARGUMENTS {
-                        return Err(ProtocolError::Invalid("Protocol error: invalid multibulk length".to_owned()));
+                        return Err(ProtocolError::Invalid(
+                            "Protocol error: invalid multibulk length".to_owned(),
+                        ));
                     }
                     let mut arguments = Vec::with_capacity((count as usize).min(1024));
                     for _ in 0..count {
@@ -240,7 +253,9 @@ impl<R: Read> RequestReader<R> {
                         }
                         let length = Self::number(&header[1..], "bulk length")?;
                         if length < 0 || length as usize > MAX_BULK_BYTES {
-                            return Err(ProtocolError::Invalid("Protocol error: invalid bulk length".to_owned()));
+                            return Err(ProtocolError::Invalid(
+                                "Protocol error: invalid bulk length".to_owned(),
+                            ));
                         }
                         arguments.push(self.exact(length as usize)?);
                     }
@@ -267,12 +282,19 @@ mod tests {
 
     #[test]
     fn requests_parse_as_arrays_and_inline_lines() {
-        let input = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\nPING hello\r\n\r\n*1\r\n$4\r\nPING\r\n".to_vec();
+        let input =
+            b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\nPING hello\r\n\r\n*1\r\n$4\r\nPING\r\n".to_vec();
         let mut reader = RequestReader::new(&input[..]);
-        assert_eq!(reader.next().unwrap(), vec![b"GET".to_vec(), b"k".to_vec()]);
-        assert_eq!(reader.next().unwrap(), vec![b"PING".to_vec(), b"hello".to_vec()]);
-        assert_eq!(reader.next().unwrap(), vec![b"PING".to_vec()]);
-        assert_eq!(reader.next(), Err(ProtocolError::Closed));
+        assert_eq!(
+            reader.next_request().unwrap(),
+            vec![b"GET".to_vec(), b"k".to_vec()]
+        );
+        assert_eq!(
+            reader.next_request().unwrap(),
+            vec![b"PING".to_vec(), b"hello".to_vec()]
+        );
+        assert_eq!(reader.next_request().unwrap(), vec![b"PING".to_vec()]);
+        assert_eq!(reader.next_request(), Err(ProtocolError::Closed));
     }
 
     #[test]
@@ -285,11 +307,14 @@ mod tests {
             b"*99999999999\r\n",
         ] {
             let mut reader = RequestReader::new(input);
-            assert!(matches!(reader.next(), Err(ProtocolError::Invalid(_))), "{input:?}");
+            assert!(
+                matches!(reader.next_request(), Err(ProtocolError::Invalid(_))),
+                "{input:?}"
+            );
         }
         let endless = vec![b'a'; MAX_LINE_BYTES + 10];
         let mut reader = RequestReader::new(&endless[..]);
-        assert!(reader.next().is_err());
+        assert!(reader.next_request().is_err());
     }
 
     #[test]

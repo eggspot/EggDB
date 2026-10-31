@@ -70,7 +70,12 @@ fn printed(steps: &[BatchStep]) -> Vec<String> {
     steps
         .iter()
         .filter_map(|step| step.outcome.as_ref().ok())
-        .flat_map(|result| result.info_messages.iter().map(|message| message.text.clone()))
+        .flat_map(|result| {
+            result
+                .info_messages
+                .iter()
+                .map(|message| message.text.clone())
+        })
         .collect()
 }
 

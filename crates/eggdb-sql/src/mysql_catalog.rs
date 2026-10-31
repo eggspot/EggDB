@@ -325,11 +325,17 @@ impl MySqlRelation {
         if !schema.eq_ignore_ascii_case(crate::schemas::INFORMATION_SCHEMA) {
             return None;
         }
-        Self::ALL.into_iter().find(|relation| relation.name().eq_ignore_ascii_case(base))
+        Self::ALL
+            .into_iter()
+            .find(|relation| relation.name().eq_ignore_ascii_case(base))
     }
 
     pub(crate) fn oid(self) -> u32 {
-        FIRST_OID + Self::ALL.iter().position(|relation| *relation == self).unwrap_or(0) as u32
+        FIRST_OID
+            + Self::ALL
+                .iter()
+                .position(|relation| *relation == self)
+                .unwrap_or(0) as u32
     }
 
     pub(crate) fn columns(self) -> &'static [CatalogColumn] {
@@ -359,13 +365,19 @@ impl MySqlRelation {
 type NamedRow = HashMap<&'static str, Value>;
 
 fn standard_rows(snapshot: &CatalogSnapshot, relation: InformationRelation) -> Vec<NamedRow> {
-    let names: Vec<&'static str> = relation.columns().iter().map(|column| column.name).collect();
+    let names: Vec<&'static str> = relation
+        .columns()
+        .iter()
+        .map(|column| column.name)
+        .collect();
     information_schema::rows(snapshot, relation)
         .into_iter()
         .map(|values| names.iter().copied().zip(values).collect())
         .filter(|row: &NamedRow| {
             !matches!(
-                text_of(row, "table_schema").or_else(|| text_of(row, "constraint_schema")).as_deref(),
+                text_of(row, "table_schema")
+                    .or_else(|| text_of(row, "constraint_schema"))
+                    .as_deref(),
                 Some("pg_catalog" | "information_schema")
             )
         })
@@ -377,7 +389,9 @@ fn text_of(row: &NamedRow, name: &str) -> Option<String> {
 }
 
 fn number_of(row: &NamedRow, name: &str) -> Value {
-    row.get(name).and_then(Value::as_integer).map_or(Value::Null, Value::BigInt)
+    row.get(name)
+        .and_then(Value::as_integer)
+        .map_or(Value::Null, Value::BigInt)
 }
 
 fn text(value: &str) -> Value {
@@ -429,12 +443,18 @@ fn mysql_data_type(standard: &str) -> &'static str {
 }
 
 fn mysql_column_type(data_type: &str, row: &NamedRow) -> String {
-    let length = row.get("character_maximum_length").and_then(Value::as_integer);
+    let length = row
+        .get("character_maximum_length")
+        .and_then(Value::as_integer);
     let precision = row.get("numeric_precision").and_then(Value::as_integer);
     let scale = row.get("numeric_scale").and_then(Value::as_integer);
     match data_type {
         "varchar" | "char" => format!("{data_type}({})", length.unwrap_or(255)),
-        "decimal" => format!("decimal({},{})", precision.unwrap_or(65), scale.unwrap_or(0)),
+        "decimal" => format!(
+            "decimal({},{})",
+            precision.unwrap_or(65),
+            scale.unwrap_or(0)
+        ),
         "tinyint" => "tinyint(1)".to_owned(),
         other => other.to_owned(),
     }
@@ -447,16 +467,24 @@ struct Keys {
 }
 
 fn keys(snapshot: &CatalogSnapshot) -> Keys {
-    let constraint_types: HashMap<String, String> = standard_rows(snapshot, InformationRelation::TableConstraints)
-        .iter()
-        .filter_map(|row| Some((text_of(row, "constraint_name")?, text_of(row, "constraint_type")?)))
-        .collect();
+    let constraint_types: HashMap<String, String> =
+        standard_rows(snapshot, InformationRelation::TableConstraints)
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    text_of(row, "constraint_name")?,
+                    text_of(row, "constraint_type")?,
+                ))
+            })
+            .collect();
     let mut primary: HashMap<(String, String), Vec<String>> = HashMap::new();
     let mut unique = Vec::new();
     for row in standard_rows(snapshot, InformationRelation::KeyColumnUsage) {
-        let (Some(constraint), Some(table), Some(column)) =
-            (text_of(&row, "constraint_name"), text_of(&row, "table_name"), text_of(&row, "column_name"))
-        else {
+        let (Some(constraint), Some(table), Some(column)) = (
+            text_of(&row, "constraint_name"),
+            text_of(&row, "table_name"),
+            text_of(&row, "column_name"),
+        ) else {
             continue;
         };
         let schema = text_of(&row, "table_schema").unwrap_or_default();
@@ -466,7 +494,11 @@ fn keys(snapshot: &CatalogSnapshot) -> Keys {
             _ => {}
         }
     }
-    Keys { primary, unique, constraint_types }
+    Keys {
+        primary,
+        unique,
+        constraint_types,
+    }
 }
 
 pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<Vec<Value>> {
@@ -475,37 +507,70 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
         MySqlRelation::Schemata => [snapshot.database.clone(), "information_schema".to_owned()]
             .into_iter()
             .map(|schema| {
-                build(columns, vec![
-                    ("catalog_name", text(CATALOG)),
-                    ("schema_name", Value::Text(schema)),
-                    ("default_character_set_name", text(CHARACTER_SET)),
-                    ("default_collation_name", text(COLLATION)),
-                    ("default_encryption", text("NO")),
-                ])
+                build(
+                    columns,
+                    vec![
+                        ("catalog_name", text(CATALOG)),
+                        ("schema_name", Value::Text(schema)),
+                        ("default_character_set_name", text(CHARACTER_SET)),
+                        ("default_collation_name", text(COLLATION)),
+                        ("default_encryption", text("NO")),
+                    ],
+                )
             })
             .collect(),
         MySqlRelation::Tables => standard_rows(snapshot, InformationRelation::Tables)
             .iter()
             .map(|row| {
                 let is_view = text_of(row, "table_type").as_deref() == Some("VIEW");
-                build(columns, vec![
-                    ("table_catalog", text(CATALOG)),
-                    ("table_schema", mysql_schema(snapshot, text_of(row, "table_schema"))),
-                    ("table_name", optional(text_of(row, "table_name"))),
-                    ("table_type", text(if is_view { "VIEW" } else { "BASE TABLE" })),
-                    ("engine", if is_view { Value::Null } else { text(ENGINE) }),
-                    ("version", if is_view { Value::Null } else { Value::BigInt(10) }),
-                    ("row_format", if is_view { Value::Null } else { text("Dynamic") }),
-                    ("table_rows", Value::BigInt(0)),
-                    ("avg_row_length", Value::BigInt(0)),
-                    ("data_length", Value::BigInt(0)),
-                    ("max_data_length", Value::BigInt(0)),
-                    ("index_length", Value::BigInt(0)),
-                    ("data_free", Value::BigInt(0)),
-                    ("table_collation", if is_view { Value::Null } else { text(COLLATION) }),
-                    ("create_options", text("")),
-                    ("table_comment", text(if is_view { "VIEW" } else { "" })),
-                ])
+                build(
+                    columns,
+                    vec![
+                        ("table_catalog", text(CATALOG)),
+                        (
+                            "table_schema",
+                            mysql_schema(snapshot, text_of(row, "table_schema")),
+                        ),
+                        ("table_name", optional(text_of(row, "table_name"))),
+                        (
+                            "table_type",
+                            text(if is_view { "VIEW" } else { "BASE TABLE" }),
+                        ),
+                        ("engine", if is_view { Value::Null } else { text(ENGINE) }),
+                        (
+                            "version",
+                            if is_view {
+                                Value::Null
+                            } else {
+                                Value::BigInt(10)
+                            },
+                        ),
+                        (
+                            "row_format",
+                            if is_view {
+                                Value::Null
+                            } else {
+                                text("Dynamic")
+                            },
+                        ),
+                        ("table_rows", Value::BigInt(0)),
+                        ("avg_row_length", Value::BigInt(0)),
+                        ("data_length", Value::BigInt(0)),
+                        ("max_data_length", Value::BigInt(0)),
+                        ("index_length", Value::BigInt(0)),
+                        ("data_free", Value::BigInt(0)),
+                        (
+                            "table_collation",
+                            if is_view {
+                                Value::Null
+                            } else {
+                                text(COLLATION)
+                            },
+                        ),
+                        ("create_options", text("")),
+                        ("table_comment", text(if is_view { "VIEW" } else { "" })),
+                    ],
+                )
             })
             .collect(),
         MySqlRelation::Columns => {
@@ -518,40 +583,82 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                     let schema = text_of(row, "table_schema").unwrap_or_default();
                     let table = text_of(row, "table_name").unwrap_or_default();
                     let name = text_of(row, "column_name").unwrap_or_default();
-                    let key = if keys.primary.get(&(schema.clone(), table.clone())).is_some_and(|key| key.contains(&name)) {
+                    let key = if keys
+                        .primary
+                        .get(&(schema.clone(), table.clone()))
+                        .is_some_and(|key| key.contains(&name))
+                    {
                         "PRI"
-                    } else if keys.unique.contains(&(schema.clone(), table.clone(), name.clone())) {
+                    } else if keys
+                        .unique
+                        .contains(&(schema.clone(), table.clone(), name.clone()))
+                    {
                         "UNI"
                     } else {
                         ""
                     };
                     let default = text_of(row, "column_default");
                     let generated = text_of(row, "is_identity").as_deref() == Some("YES")
-                        || default.as_deref().is_some_and(|value| value.starts_with("nextval("));
+                        || default
+                            .as_deref()
+                            .is_some_and(|value| value.starts_with("nextval("));
                     let textual = matches!(data_type, "varchar" | "char" | "longtext");
-                    build(columns, vec![
-                        ("table_catalog", text(CATALOG)),
-                        ("table_schema", mysql_schema(snapshot, Some(schema))),
-                        ("table_name", Value::Text(table)),
-                        ("column_name", Value::Text(name)),
-                        ("ordinal_position", number_of(row, "ordinal_position")),
-                        ("column_default", if generated { Value::Null } else { optional(default) }),
-                        ("is_nullable", optional(text_of(row, "is_nullable"))),
-                        ("data_type", text(data_type)),
-                        ("character_maximum_length", number_of(row, "character_maximum_length")),
-                        ("character_octet_length", number_of(row, "character_octet_length")),
-                        ("numeric_precision", number_of(row, "numeric_precision")),
-                        ("numeric_scale", number_of(row, "numeric_scale")),
-                        ("datetime_precision", number_of(row, "datetime_precision")),
-                        ("character_set_name", if textual { text(CHARACTER_SET) } else { Value::Null }),
-                        ("collation_name", if textual { text(COLLATION) } else { Value::Null }),
-                        ("column_type", Value::Text(mysql_column_type(data_type, row))),
-                        ("column_key", text(key)),
-                        ("extra", text(if generated { "auto_increment" } else { "" })),
-                        ("privileges", text("select,insert,update,references")),
-                        ("column_comment", text("")),
-                        ("generation_expression", text("")),
-                    ])
+                    build(
+                        columns,
+                        vec![
+                            ("table_catalog", text(CATALOG)),
+                            ("table_schema", mysql_schema(snapshot, Some(schema))),
+                            ("table_name", Value::Text(table)),
+                            ("column_name", Value::Text(name)),
+                            ("ordinal_position", number_of(row, "ordinal_position")),
+                            (
+                                "column_default",
+                                if generated {
+                                    Value::Null
+                                } else {
+                                    optional(default)
+                                },
+                            ),
+                            ("is_nullable", optional(text_of(row, "is_nullable"))),
+                            ("data_type", text(data_type)),
+                            (
+                                "character_maximum_length",
+                                number_of(row, "character_maximum_length"),
+                            ),
+                            (
+                                "character_octet_length",
+                                number_of(row, "character_octet_length"),
+                            ),
+                            ("numeric_precision", number_of(row, "numeric_precision")),
+                            ("numeric_scale", number_of(row, "numeric_scale")),
+                            ("datetime_precision", number_of(row, "datetime_precision")),
+                            (
+                                "character_set_name",
+                                if textual {
+                                    text(CHARACTER_SET)
+                                } else {
+                                    Value::Null
+                                },
+                            ),
+                            (
+                                "collation_name",
+                                if textual {
+                                    text(COLLATION)
+                                } else {
+                                    Value::Null
+                                },
+                            ),
+                            (
+                                "column_type",
+                                Value::Text(mysql_column_type(data_type, row)),
+                            ),
+                            ("column_key", text(key)),
+                            ("extra", text(if generated { "auto_increment" } else { "" })),
+                            ("privileges", text("select,insert,update,references")),
+                            ("column_comment", text("")),
+                            ("generation_expression", text("")),
+                        ],
+                    )
                 })
                 .collect()
         }
@@ -562,40 +669,56 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
             primaries.sort();
             for ((schema, table), key) in primaries {
                 for (position, column) in key.iter().enumerate() {
-                    built.push(build(columns, vec![
-                        ("table_catalog", text(CATALOG)),
-                        ("table_schema", mysql_schema(snapshot, Some(schema.clone()))),
-                        ("table_name", Value::Text(table.clone())),
-                        ("non_unique", Value::BigInt(0)),
-                        ("index_schema", mysql_schema(snapshot, Some(schema.clone()))),
-                        ("index_name", text("PRIMARY")),
-                        ("seq_in_index", Value::BigInt(position as i64 + 1)),
-                        ("column_name", Value::Text(column.clone())),
-                        ("collation", text("A")),
-                        ("cardinality", Value::BigInt(0)),
-                        ("nullable", text("")),
-                        ("index_type", text("BTREE")),
-                        ("comment", text("")),
-                        ("index_comment", text("")),
-                        ("is_visible", text("YES")),
-                    ]));
+                    built.push(build(
+                        columns,
+                        vec![
+                            ("table_catalog", text(CATALOG)),
+                            ("table_schema", mysql_schema(snapshot, Some(schema.clone()))),
+                            ("table_name", Value::Text(table.clone())),
+                            ("non_unique", Value::BigInt(0)),
+                            ("index_schema", mysql_schema(snapshot, Some(schema.clone()))),
+                            ("index_name", text("PRIMARY")),
+                            ("seq_in_index", Value::BigInt(position as i64 + 1)),
+                            ("column_name", Value::Text(column.clone())),
+                            ("collation", text("A")),
+                            ("cardinality", Value::BigInt(0)),
+                            ("nullable", text("")),
+                            ("index_type", text("BTREE")),
+                            ("comment", text("")),
+                            ("index_comment", text("")),
+                            ("is_visible", text("YES")),
+                        ],
+                    ));
                 }
             }
             built
         }
         MySqlRelation::KeyColumnUsage => {
             let keys = keys(snapshot);
-            let references: HashMap<String, String> = standard_rows(snapshot, InformationRelation::ReferentialConstraints)
-                .iter()
-                .filter_map(|row| Some((text_of(row, "constraint_name")?, text_of(row, "unique_constraint_name")?)))
-                .collect();
+            let references: HashMap<String, String> =
+                standard_rows(snapshot, InformationRelation::ReferentialConstraints)
+                    .iter()
+                    .filter_map(|row| {
+                        Some((
+                            text_of(row, "constraint_name")?,
+                            text_of(row, "unique_constraint_name")?,
+                        ))
+                    })
+                    .collect();
             let usage = standard_rows(snapshot, InformationRelation::KeyColumnUsage);
             let unique_columns: HashMap<(String, i64), (String, String, String)> = usage
                 .iter()
                 .filter_map(|row| {
                     Some((
-                        (text_of(row, "constraint_name")?, row.get("ordinal_position")?.as_integer()?),
-                        (text_of(row, "table_schema")?, text_of(row, "table_name")?, text_of(row, "column_name")?),
+                        (
+                            text_of(row, "constraint_name")?,
+                            row.get("ordinal_position")?.as_integer()?,
+                        ),
+                        (
+                            text_of(row, "table_schema")?,
+                            text_of(row, "table_name")?,
+                            text_of(row, "column_name")?,
+                        ),
                     ))
                 })
                 .collect();
@@ -603,139 +726,248 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
                 .iter()
                 .map(|row| {
                     let constraint = text_of(row, "constraint_name").unwrap_or_default();
-                    let is_primary = keys.constraint_types.get(&constraint).map(String::as_str) == Some("PRIMARY KEY");
+                    let is_primary = keys.constraint_types.get(&constraint).map(String::as_str)
+                        == Some("PRIMARY KEY");
                     let referenced = references.get(&constraint).and_then(|unique| {
-                        let position = row.get("position_in_unique_constraint").and_then(Value::as_integer)?;
+                        let position = row
+                            .get("position_in_unique_constraint")
+                            .and_then(Value::as_integer)?;
                         unique_columns.get(&(unique.clone(), position))
                     });
-                    build(columns, vec![
-                        ("constraint_catalog", text(CATALOG)),
-                        ("constraint_schema", mysql_schema(snapshot, text_of(row, "constraint_schema"))),
-                        ("constraint_name", Value::Text(if is_primary { "PRIMARY".to_owned() } else { constraint })),
-                        ("table_catalog", text(CATALOG)),
-                        ("table_schema", mysql_schema(snapshot, text_of(row, "table_schema"))),
-                        ("table_name", optional(text_of(row, "table_name"))),
-                        ("column_name", optional(text_of(row, "column_name"))),
-                        ("ordinal_position", number_of(row, "ordinal_position")),
-                        ("position_in_unique_constraint", number_of(row, "position_in_unique_constraint")),
-                        ("referenced_table_schema", referenced.map_or(Value::Null, |(schema, _, _)| mysql_schema(snapshot, Some(schema.clone())))),
-                        ("referenced_table_name", referenced.map_or(Value::Null, |(_, table, _)| Value::Text(table.clone()))),
-                        ("referenced_column_name", referenced.map_or(Value::Null, |(_, _, column)| Value::Text(column.clone()))),
-                    ])
+                    build(
+                        columns,
+                        vec![
+                            ("constraint_catalog", text(CATALOG)),
+                            (
+                                "constraint_schema",
+                                mysql_schema(snapshot, text_of(row, "constraint_schema")),
+                            ),
+                            (
+                                "constraint_name",
+                                Value::Text(if is_primary {
+                                    "PRIMARY".to_owned()
+                                } else {
+                                    constraint
+                                }),
+                            ),
+                            ("table_catalog", text(CATALOG)),
+                            (
+                                "table_schema",
+                                mysql_schema(snapshot, text_of(row, "table_schema")),
+                            ),
+                            ("table_name", optional(text_of(row, "table_name"))),
+                            ("column_name", optional(text_of(row, "column_name"))),
+                            ("ordinal_position", number_of(row, "ordinal_position")),
+                            (
+                                "position_in_unique_constraint",
+                                number_of(row, "position_in_unique_constraint"),
+                            ),
+                            (
+                                "referenced_table_schema",
+                                referenced.map_or(Value::Null, |(schema, _, _)| {
+                                    mysql_schema(snapshot, Some(schema.clone()))
+                                }),
+                            ),
+                            (
+                                "referenced_table_name",
+                                referenced.map_or(Value::Null, |(_, table, _)| {
+                                    Value::Text(table.clone())
+                                }),
+                            ),
+                            (
+                                "referenced_column_name",
+                                referenced.map_or(Value::Null, |(_, _, column)| {
+                                    Value::Text(column.clone())
+                                }),
+                            ),
+                        ],
+                    )
                 })
                 .collect()
         }
-        MySqlRelation::TableConstraints => standard_rows(snapshot, InformationRelation::TableConstraints)
-            .iter()
-            .filter(|row| text_of(row, "constraint_type").as_deref() != Some("CHECK") || !text_of(row, "constraint_name").unwrap_or_default().ends_with("_not_null"))
-            .map(|row| {
-                let kind = text_of(row, "constraint_type").unwrap_or_default();
-                let name = if kind == "PRIMARY KEY" { "PRIMARY".to_owned() } else { text_of(row, "constraint_name").unwrap_or_default() };
-                build(columns, vec![
-                    ("constraint_catalog", text(CATALOG)),
-                    ("constraint_schema", mysql_schema(snapshot, text_of(row, "constraint_schema"))),
-                    ("constraint_name", Value::Text(name)),
-                    ("table_schema", mysql_schema(snapshot, text_of(row, "table_schema"))),
-                    ("table_name", optional(text_of(row, "table_name"))),
-                    ("constraint_type", Value::Text(kind)),
-                    ("enforced", text("YES")),
-                ])
-            })
-            .collect(),
-        MySqlRelation::ReferentialConstraints => {
-            let tables: HashMap<String, String> = standard_rows(snapshot, InformationRelation::TableConstraints)
+        MySqlRelation::TableConstraints => {
+            standard_rows(snapshot, InformationRelation::TableConstraints)
                 .iter()
-                .filter_map(|row| Some((text_of(row, "constraint_name")?, text_of(row, "table_name")?)))
-                .collect();
+                .filter(|row| {
+                    text_of(row, "constraint_type").as_deref() != Some("CHECK")
+                        || !text_of(row, "constraint_name")
+                            .unwrap_or_default()
+                            .ends_with("_not_null")
+                })
+                .map(|row| {
+                    let kind = text_of(row, "constraint_type").unwrap_or_default();
+                    let name = if kind == "PRIMARY KEY" {
+                        "PRIMARY".to_owned()
+                    } else {
+                        text_of(row, "constraint_name").unwrap_or_default()
+                    };
+                    build(
+                        columns,
+                        vec![
+                            ("constraint_catalog", text(CATALOG)),
+                            (
+                                "constraint_schema",
+                                mysql_schema(snapshot, text_of(row, "constraint_schema")),
+                            ),
+                            ("constraint_name", Value::Text(name)),
+                            (
+                                "table_schema",
+                                mysql_schema(snapshot, text_of(row, "table_schema")),
+                            ),
+                            ("table_name", optional(text_of(row, "table_name"))),
+                            ("constraint_type", Value::Text(kind)),
+                            ("enforced", text("YES")),
+                        ],
+                    )
+                })
+                .collect()
+        }
+        MySqlRelation::ReferentialConstraints => {
+            let tables: HashMap<String, String> =
+                standard_rows(snapshot, InformationRelation::TableConstraints)
+                    .iter()
+                    .filter_map(|row| {
+                        Some((
+                            text_of(row, "constraint_name")?,
+                            text_of(row, "table_name")?,
+                        ))
+                    })
+                    .collect();
             standard_rows(snapshot, InformationRelation::ReferentialConstraints)
                 .iter()
                 .map(|row| {
                     let name = text_of(row, "constraint_name").unwrap_or_default();
                     let unique = text_of(row, "unique_constraint_name").unwrap_or_default();
-                    build(columns, vec![
-                        ("constraint_catalog", text(CATALOG)),
-                        ("constraint_schema", mysql_schema(snapshot, text_of(row, "constraint_schema"))),
-                        ("constraint_name", Value::Text(name.clone())),
-                        ("unique_constraint_catalog", text(CATALOG)),
-                        ("unique_constraint_schema", mysql_schema(snapshot, text_of(row, "unique_constraint_schema"))),
-                        ("unique_constraint_name", Value::Text(unique.clone())),
-                        ("match_option", text("NONE")),
-                        ("update_rule", optional(text_of(row, "update_rule"))),
-                        ("delete_rule", optional(text_of(row, "delete_rule"))),
-                        ("table_name", optional(tables.get(&name).cloned())),
-                        ("referenced_table_name", optional(tables.get(&unique).cloned())),
-                    ])
+                    build(
+                        columns,
+                        vec![
+                            ("constraint_catalog", text(CATALOG)),
+                            (
+                                "constraint_schema",
+                                mysql_schema(snapshot, text_of(row, "constraint_schema")),
+                            ),
+                            ("constraint_name", Value::Text(name.clone())),
+                            ("unique_constraint_catalog", text(CATALOG)),
+                            (
+                                "unique_constraint_schema",
+                                mysql_schema(snapshot, text_of(row, "unique_constraint_schema")),
+                            ),
+                            ("unique_constraint_name", Value::Text(unique.clone())),
+                            ("match_option", text("NONE")),
+                            ("update_rule", optional(text_of(row, "update_rule"))),
+                            ("delete_rule", optional(text_of(row, "delete_rule"))),
+                            ("table_name", optional(tables.get(&name).cloned())),
+                            (
+                                "referenced_table_name",
+                                optional(tables.get(&unique).cloned()),
+                            ),
+                        ],
+                    )
                 })
                 .collect()
         }
         MySqlRelation::Views => standard_rows(snapshot, InformationRelation::Views)
             .iter()
             .map(|row| {
-                build(columns, vec![
-                    ("table_catalog", text(CATALOG)),
-                    ("table_schema", mysql_schema(snapshot, text_of(row, "table_schema"))),
-                    ("table_name", optional(text_of(row, "table_name"))),
-                    ("view_definition", optional(text_of(row, "view_definition"))),
-                    ("check_option", text("NONE")),
-                    ("is_updatable", optional(text_of(row, "is_updatable"))),
-                    ("definer", text("eggdb@%")),
-                    ("security_type", text("DEFINER")),
-                    ("character_set_client", text(CHARACTER_SET)),
-                    ("collation_connection", text(COLLATION)),
-                ])
+                build(
+                    columns,
+                    vec![
+                        ("table_catalog", text(CATALOG)),
+                        (
+                            "table_schema",
+                            mysql_schema(snapshot, text_of(row, "table_schema")),
+                        ),
+                        ("table_name", optional(text_of(row, "table_name"))),
+                        ("view_definition", optional(text_of(row, "view_definition"))),
+                        ("check_option", text("NONE")),
+                        ("is_updatable", optional(text_of(row, "is_updatable"))),
+                        ("definer", text("eggdb@%")),
+                        ("security_type", text("DEFINER")),
+                        ("character_set_client", text(CHARACTER_SET)),
+                        ("collation_connection", text(COLLATION)),
+                    ],
+                )
             })
             .collect(),
-        MySqlRelation::Engines => vec![build(columns, vec![
-            ("engine", text(ENGINE)),
-            ("support", text("DEFAULT")),
-            ("comment", text("EggDB's storage engine, shown as InnoDB: transactions, row-level consistency and foreign keys")),
-            ("transactions", text("YES")),
-            ("xa", text("NO")),
-            ("savepoints", text("NO")),
-        ])],
+        MySqlRelation::Engines => vec![build(
+            columns,
+            vec![
+                ("engine", text(ENGINE)),
+                ("support", text("DEFAULT")),
+                (
+                    "comment",
+                    text(
+                        "EggDB's storage engine, shown as InnoDB: transactions, row-level consistency and foreign keys",
+                    ),
+                ),
+                ("transactions", text("YES")),
+                ("xa", text("NO")),
+                ("savepoints", text("NO")),
+            ],
+        )],
         MySqlRelation::CharacterSets => vec![
-            build(columns, vec![
-                ("character_set_name", text(CHARACTER_SET)),
-                ("default_collate_name", text(COLLATION)),
-                ("description", text("UTF-8 Unicode")),
-                ("maxlen", Value::BigInt(4)),
-            ]),
-            build(columns, vec![
-                ("character_set_name", text("binary")),
-                ("default_collate_name", text("binary")),
-                ("description", text("Binary pseudo charset")),
-                ("maxlen", Value::BigInt(1)),
-            ]),
+            build(
+                columns,
+                vec![
+                    ("character_set_name", text(CHARACTER_SET)),
+                    ("default_collate_name", text(COLLATION)),
+                    ("description", text("UTF-8 Unicode")),
+                    ("maxlen", Value::BigInt(4)),
+                ],
+            ),
+            build(
+                columns,
+                vec![
+                    ("character_set_name", text("binary")),
+                    ("default_collate_name", text("binary")),
+                    ("description", text("Binary pseudo charset")),
+                    ("maxlen", Value::BigInt(1)),
+                ],
+            ),
         ],
         MySqlRelation::Collations => vec![
-            build(columns, vec![
-                ("collation_name", text(COLLATION)),
-                ("character_set_name", text(CHARACTER_SET)),
-                ("id", Value::BigInt(255)),
-                ("is_default", text("Yes")),
-                ("is_compiled", text("Yes")),
-                ("sortlen", Value::BigInt(0)),
-                ("pad_attribute", text("NO PAD")),
-            ]),
-            build(columns, vec![
-                ("collation_name", text("binary")),
-                ("character_set_name", text("binary")),
-                ("id", Value::BigInt(63)),
-                ("is_default", text("Yes")),
-                ("is_compiled", text("Yes")),
-                ("sortlen", Value::BigInt(1)),
-                ("pad_attribute", text("NO PAD")),
-            ]),
+            build(
+                columns,
+                vec![
+                    ("collation_name", text(COLLATION)),
+                    ("character_set_name", text(CHARACTER_SET)),
+                    ("id", Value::BigInt(255)),
+                    ("is_default", text("Yes")),
+                    ("is_compiled", text("Yes")),
+                    ("sortlen", Value::BigInt(0)),
+                    ("pad_attribute", text("NO PAD")),
+                ],
+            ),
+            build(
+                columns,
+                vec![
+                    ("collation_name", text("binary")),
+                    ("character_set_name", text("binary")),
+                    ("id", Value::BigInt(63)),
+                    ("is_default", text("Yes")),
+                    ("is_compiled", text("Yes")),
+                    ("sortlen", Value::BigInt(1)),
+                    ("pad_attribute", text("NO PAD")),
+                ],
+            ),
         ],
-        MySqlRelation::ProcessList => vec![build(columns, vec![
-            ("id", Value::BigInt(i64::from(std::process::id()))),
-            ("user", Value::Text(crate::pg_catalog::session_user().unwrap_or_else(|| "eggdb".to_owned()))),
-            ("host", text("localhost")),
-            ("db", Value::Text(snapshot.database.clone())),
-            ("command", text("Query")),
-            ("time", Value::BigInt(0)),
-            ("state", text("executing")),
-        ])],
+        MySqlRelation::ProcessList => vec![build(
+            columns,
+            vec![
+                ("id", Value::BigInt(i64::from(std::process::id()))),
+                (
+                    "user",
+                    Value::Text(
+                        crate::pg_catalog::session_user().unwrap_or_else(|| "eggdb".to_owned()),
+                    ),
+                ),
+                ("host", text("localhost")),
+                ("db", Value::Text(snapshot.database.clone())),
+                ("command", text("Query")),
+                ("time", Value::BigInt(0)),
+                ("state", text("executing")),
+            ],
+        )],
         MySqlRelation::Routines
         | MySqlRelation::Parameters
         | MySqlRelation::Triggers
@@ -797,7 +1029,11 @@ pub(crate) fn show_rows(snapshot: &CatalogSnapshot, view: MySqlRelation) -> Vec<
     let shown = show_columns(view);
     let positions: Vec<Option<usize>> = shown
         .iter()
-        .map(|(_, source)| view.columns().iter().position(|column| column.name == *source))
+        .map(|(_, source)| {
+            view.columns()
+                .iter()
+                .position(|column| column.name == *source)
+        })
         .collect();
     rows(snapshot, view)
         .into_iter()
@@ -834,16 +1070,51 @@ mod tests {
         let store = MemoryStore::default();
         let mut session = Session::with_dialect(&store, Dialect::MySql);
         session.identify("eggdb", "shop");
-        run(&mut session, "CREATE TABLE customers (id int AUTO_INCREMENT PRIMARY KEY, email varchar(80) UNIQUE)");
-        run(&mut session, "CREATE TABLE orders (id int PRIMARY KEY, customer_id int, amount decimal(10,2), FOREIGN KEY (customer_id) REFERENCES customers (id))");
-        let tables = run(&mut session, "SELECT table_schema, table_name, table_type, engine FROM information_schema.tables ORDER BY table_name");
-        assert!(tables.contains("shop") && tables.contains("customers") && tables.contains("BASE TABLE") && tables.contains("InnoDB"), "{tables}");
-        let columns = run(&mut session, "SELECT column_name, column_type, column_key, extra FROM information_schema.columns WHERE table_name = 'customers' ORDER BY ordinal_position");
-        assert!(columns.contains("int") && columns.contains("PRI") && columns.contains("auto_increment"), "{columns}");
-        assert!(columns.contains("varchar(80)") && columns.contains("UNI"), "{columns}");
-        let keys = run(&mut session, "SELECT constraint_name, referenced_table_name FROM information_schema.key_column_usage WHERE table_name = 'orders' ORDER BY ordinal_position, constraint_name");
-        assert!(keys.contains("PRIMARY") && keys.contains("customers"), "{keys}");
-        let statistics = run(&mut session, "SELECT index_name, column_name FROM information_schema.statistics WHERE table_name = 'customers'");
+        run(
+            &mut session,
+            "CREATE TABLE customers (id int AUTO_INCREMENT PRIMARY KEY, email varchar(80) UNIQUE)",
+        );
+        run(
+            &mut session,
+            "CREATE TABLE orders (id int PRIMARY KEY, customer_id int, amount decimal(10,2), FOREIGN KEY (customer_id) REFERENCES customers (id))",
+        );
+        let tables = run(
+            &mut session,
+            "SELECT table_schema, table_name, table_type, engine FROM information_schema.tables ORDER BY table_name",
+        );
+        assert!(
+            tables.contains("shop")
+                && tables.contains("customers")
+                && tables.contains("BASE TABLE")
+                && tables.contains("InnoDB"),
+            "{tables}"
+        );
+        let columns = run(
+            &mut session,
+            "SELECT column_name, column_type, column_key, extra FROM information_schema.columns WHERE table_name = 'customers' ORDER BY ordinal_position",
+        );
+        assert!(
+            columns.contains("int")
+                && columns.contains("PRI")
+                && columns.contains("auto_increment"),
+            "{columns}"
+        );
+        assert!(
+            columns.contains("varchar(80)") && columns.contains("UNI"),
+            "{columns}"
+        );
+        let keys = run(
+            &mut session,
+            "SELECT constraint_name, referenced_table_name FROM information_schema.key_column_usage WHERE table_name = 'orders' ORDER BY ordinal_position, constraint_name",
+        );
+        assert!(
+            keys.contains("PRIMARY") && keys.contains("customers"),
+            "{keys}"
+        );
+        let statistics = run(
+            &mut session,
+            "SELECT index_name, column_name FROM information_schema.statistics WHERE table_name = 'customers'",
+        );
         assert!(statistics.contains("PRIMARY"), "{statistics}");
         assert!(run(&mut session, "SHOW ENGINES").contains("InnoDB"));
         assert!(run(&mut session, "SHOW CHARACTER SET LIKE 'utf8%'").contains("utf8mb4"));
@@ -851,6 +1122,12 @@ mod tests {
         run(&mut session, "SHOW PLUGINS");
         assert!(run(&mut session, "SHOW FULL PROCESSLIST").contains("shop"));
         run(&mut session, "SHOW GLOBAL VARIABLES LIKE 'version%'");
-        assert!(run(&mut session, "SELECT schema_name FROM information_schema.schemata").contains("shop"));
+        assert!(
+            run(
+                &mut session,
+                "SELECT schema_name FROM information_schema.schemata"
+            )
+            .contains("shop")
+        );
     }
 }

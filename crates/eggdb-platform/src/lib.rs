@@ -42,6 +42,7 @@ mod error;
 pub mod fonts;
 mod fs;
 mod io;
+pub mod local_socket;
 mod memory;
 mod net;
 mod os_cpus;
@@ -106,7 +107,6 @@ mod os_terminal_windows;
     )
 ))]
 mod os_wait_status;
-pub mod local_socket;
 pub mod process;
 mod rng;
 pub mod secure_random;

@@ -1,13 +1,13 @@
 use crate::backend_keys::BackendKeys;
 use crate::connection::{refuse_too_many, serve_connection};
-use eggdb_auth::scram::ScramVerifier;
 use crate::wire::Wire;
+use eggdb_auth::scram::ScramVerifier;
+use eggdb_platform::local_socket::LocalListener;
 use eggdb_sql::KeyValueStore;
+use eggdb_tls::ServerConnection;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use eggdb_platform::local_socket::LocalListener;
-use eggdb_tls::ServerConnection;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -278,7 +278,10 @@ fn accept_next(
     log: &(dyn Fn(&str) + Sync),
 ) -> Option<ServerConnection> {
     let report = |error: io::Error| {
-        if !matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) {
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ) {
             log(&format!("accepting a connection failed: {error}"));
         }
     };

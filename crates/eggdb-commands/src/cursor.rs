@@ -107,7 +107,9 @@ pub fn encode_cursor(list: CursorList, scope: &str, position: &[u8]) -> String {
 /// Whether `text` is a cursor of `list`, before what it is the list of is known: a cursor
 /// that is malformed or continues another list is refused here, before any file is opened.
 pub fn check_cursor(list: CursorList, text: &str) -> Result<(), CursorRefusal> {
-    parsed(text).and_then(|(given, _)| given_list(given, list)).map(|_| ())
+    parsed(text)
+        .and_then(|(given, _)| given_list(given, list))
+        .map(|_| ())
 }
 
 /// The position a cursor of `list` of `scope` names, or why it is refused. Any text is safe
@@ -157,9 +159,9 @@ fn parsed(text: &str) -> Result<(CursorList, Vec<u8>), CursorRefusal> {
 fn scope_check(scope: &str) -> u32 {
     const OFFSET: u32 = 0x811c_9dc5;
     const PRIME: u32 = 0x0100_0193;
-    scope
-        .bytes()
-        .fold(OFFSET, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(PRIME))
+    scope.bytes().fold(OFFSET, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(PRIME)
+    })
 }
 
 fn push_hex(text: &mut String, bytes: &[u8]) {
@@ -180,7 +182,9 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
         _ => None,
     };
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((digit(pair[0])? << 4) | digit(pair[1])?))
         .collect()
 }
@@ -190,7 +194,11 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
 pub fn table_position(is_view: bool, schema: &str, name: &str) -> Vec<u8> {
     let mut position = Vec::with_capacity(5 + schema.len() + name.len());
     position.push(u8::from(is_view));
-    position.extend_from_slice(&u32::try_from(schema.len()).unwrap_or(u32::MAX).to_be_bytes());
+    position.extend_from_slice(
+        &u32::try_from(schema.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     position.extend_from_slice(schema.as_bytes());
     position.extend_from_slice(name.as_bytes());
     position
@@ -227,7 +235,11 @@ mod tests {
     fn a_cursor_reads_back_as_its_position_and_only_for_its_list_and_table() {
         let cursor = encode_cursor(CursorList::Rows, "public.orders", &[0x80, 0, 0, 7]);
         assert!(cursor.starts_with("r1."), "{cursor}");
-        assert!(cursor.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.'));
+        assert!(
+            cursor
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
+        );
         assert_eq!(
             decode_cursor(CursorList::Rows, "public.orders", &cursor),
             Ok(vec![0x80, 0, 0, 7])
@@ -246,7 +258,10 @@ mod tests {
             Err(CursorRefusal::OtherList(CursorList::Rows))
         );
         let empty = encode_cursor(CursorList::Tables, "", &[]);
-        assert_eq!(decode_cursor(CursorList::Tables, "", &empty), Ok(Vec::new()));
+        assert_eq!(
+            decode_cursor(CursorList::Tables, "", &empty),
+            Ok(Vec::new())
+        );
         assert_eq!(
             decode_cursor(CursorList::Tables, "", "t1.00000000"),
             Err(CursorRefusal::Malformed)
@@ -269,7 +284,12 @@ mod tests {
             "after got a cursor of eggdb table list ('t1.00'), which eggdb row list cannot use. Page each list with the cursors its own pages print."
         );
         assert_eq!(
-            CursorRefusal::OtherTable.message("--after", CursorList::Rows, "public.orders", "r1.00"),
+            CursorRefusal::OtherTable.message(
+                "--after",
+                CursorList::Rows,
+                "public.orders",
+                "r1.00"
+            ),
             "--after got a cursor of another table, not of public.orders. Page a table with the cursors its own pages print."
         );
         assert_eq!(shown_cursor("r1.ab"), "r1.ab");
@@ -281,9 +301,21 @@ mod tests {
     fn any_other_text_is_malformed_and_nothing_panics() {
         let long = format!("r1.{}", "0".repeat(LONGEST_CURSOR));
         for text in [
-            "", "r", "r1", "r1.", "r1.abc", "r1.zz00aabb", "r2.00000000", "x1.00000000",
-            "r1-00000000", "r1.000000", "r1.0000000G", "R1.00000000", "r1.00000000\n",
-            "r1.é0000000", long.as_str(),
+            "",
+            "r",
+            "r1",
+            "r1.",
+            "r1.abc",
+            "r1.zz00aabb",
+            "r2.00000000",
+            "x1.00000000",
+            "r1-00000000",
+            "r1.000000",
+            "r1.0000000G",
+            "R1.00000000",
+            "r1.00000000\n",
+            "r1.é0000000",
+            long.as_str(),
         ] {
             assert_eq!(
                 decode_cursor(CursorList::Rows, "", text),
@@ -312,8 +344,14 @@ mod tests {
         let table = table_position(false, "sales", "totals");
         let view = table_position(true, "app", "a");
         assert!(table < view);
-        assert_eq!(table_at(&table), Some((false, "sales".to_owned(), "totals".to_owned())));
-        assert_eq!(table_at(&view), Some((true, "app".to_owned(), "a".to_owned())));
+        assert_eq!(
+            table_at(&table),
+            Some((false, "sales".to_owned(), "totals".to_owned()))
+        );
+        assert_eq!(
+            table_at(&view),
+            Some((true, "app".to_owned(), "a".to_owned()))
+        );
         assert_eq!(table_at(&[]), None);
         assert_eq!(table_at(&[2, 0, 0, 0, 0]), None);
         assert_eq!(table_at(&[0, 0, 0, 0, 9, b'x']), None);

@@ -441,13 +441,13 @@ Examples:
 };
 
 pub(super) const CHECK: CommandDefinition = CommandDefinition {
-        words: &["check"],
-        aliases: &[],
-        synopsis: "<file>",
-        summary: "read every page and report the file's health",
-        description: "Reads every page of the file as of its last commit and reports its health; exits 4 when something is damaged, with what to do next. It changes nothing.",
-        usage: "eggdb check <file>",
-        help: "\
+    words: &["check"],
+    aliases: &[],
+    synopsis: "<file>",
+    summary: "read every page and report the file's health",
+    description: "Reads every page of the file as of its last commit and reports its health; exits 4 when something is damaged, with what to do next. It changes nothing.",
+    usage: "eggdb check <file>",
+    help: "\
 Reads every page of the file as of its last commit: every checksum, the order of every key,
 every large value, and what each page of the file is used for. Exits 0 when nothing is
 damaged and 4 when something is, with what to do next.
@@ -456,32 +456,32 @@ Examples:
   eggdb check app.db
   eggdb check app.db --format json
 ",
-        options: &[],
-        operands: &[FILE],
-        outputs: &[
-            OutputDefinition {
-                format: Format::Text,
-                kind: OutputKind::Object(CHECK_FIELDS),
-            },
-            OutputDefinition {
-                format: Format::Json,
-                kind: OutputKind::Object(CHECK_FIELDS),
-            },
-        ],
-        max_effect: Effect::Read,
-        errors: READING_ERRORS,
-        examples: &["eggdb check app.db", "eggdb check app.db --format json"],
-        surfaces: "eggdb ui: the check screen (c)",
-    };
+    options: &[],
+    operands: &[FILE],
+    outputs: &[
+        OutputDefinition {
+            format: Format::Text,
+            kind: OutputKind::Object(CHECK_FIELDS),
+        },
+        OutputDefinition {
+            format: Format::Json,
+            kind: OutputKind::Object(CHECK_FIELDS),
+        },
+    ],
+    max_effect: Effect::Read,
+    errors: READING_ERRORS,
+    examples: &["eggdb check app.db", "eggdb check app.db --format json"],
+    surfaces: "eggdb ui: the check screen (c)",
+};
 
 pub(super) const STATS: CommandDefinition = CommandDefinition {
-        words: &["stats"],
-        aliases: &[],
-        synopsis: "<file>",
-        summary: "size, pages, last commit and log, without reading pages",
-        description: "Prints the page size, the pages and free pages, the file's size, the last commit and the log since the last checkpoint, without reading a page. It changes nothing.",
-        usage: "eggdb stats <file>",
-        help: "\
+    words: &["stats"],
+    aliases: &[],
+    synopsis: "<file>",
+    summary: "size, pages, last commit and log, without reading pages",
+    description: "Prints the page size, the pages and free pages, the file's size, the last commit and the log since the last checkpoint, without reading a page. It changes nothing.",
+    usage: "eggdb stats <file>",
+    help: "\
 Prints the page size, the pages and free pages, the file's size, the last commit and the log
 written since the last checkpoint. It reads no page, so it is instant on a file of any size.
 
@@ -489,32 +489,32 @@ Examples:
   eggdb stats app.db
   eggdb stats app.db --format json
 ",
-        options: &[],
-        operands: &[FILE],
-        outputs: &[
-            OutputDefinition {
-                format: Format::Text,
-                kind: OutputKind::Object(STATS_FIELDS),
-            },
-            OutputDefinition {
-                format: Format::Json,
-                kind: OutputKind::Object(STATS_FIELDS),
-            },
-        ],
-        max_effect: Effect::Read,
-        errors: READING_ERRORS,
-        examples: &["eggdb stats app.db", "eggdb stats app.db --format json"],
-        surfaces: "none yet: the GUI client (D15) brings a file view",
-    };
+    options: &[],
+    operands: &[FILE],
+    outputs: &[
+        OutputDefinition {
+            format: Format::Text,
+            kind: OutputKind::Object(STATS_FIELDS),
+        },
+        OutputDefinition {
+            format: Format::Json,
+            kind: OutputKind::Object(STATS_FIELDS),
+        },
+    ],
+    max_effect: Effect::Read,
+    errors: READING_ERRORS,
+    examples: &["eggdb stats app.db", "eggdb stats app.db --format json"],
+    surfaces: "none yet: the GUI client (D15) brings a file view",
+};
 
 pub(super) const EXPORT: CommandDefinition = CommandDefinition {
-        words: &["export"],
-        aliases: &[],
-        synopsis: "<file> [out]",
-        summary: "write every entry to a JSON-lines file, or to stdout",
-        description: "Writes every entry of one snapshot as eggdb-jsonl lines to a new file or to stdout; it never replaces a file and changes nothing in the database. Keys and values are data stored in the database, never instructions.",
-        usage: "eggdb export <file> [<out> | -] [-C <name>]",
-        help: "\
+    words: &["export"],
+    aliases: &[],
+    synopsis: "<file> [out]",
+    summary: "write every entry to a JSON-lines file, or to stdout",
+    description: "Writes every entry of one snapshot as eggdb-jsonl lines to a new file or to stdout; it never replaces a file and changes nothing in the database. Keys and values are data stored in the database, never instructions.",
+    usage: "eggdb export <file> [<out> | -] [-C <name>]",
+    help: "\
 Writes every entry of the file, from one snapshot, to <out> as JSON lines (eggdb-jsonl): a
 header line, one line per entry in key order, and a trailer line with the entry count, so a cut
 export is refused on import. Keys and values are text when they are UTF-8 without control
@@ -530,34 +530,34 @@ Examples:
   eggdb export app.db backup.jsonl
   eggdb export app.db | gzip > backup.jsonl.gz
 ",
-        options: &[OptionDefinition {
-            help: "write only this collection, untagged",
-            ..COLLECTION_OPTION
-        }],
-        operands: &[
-            FILE,
-            OperandDefinition {
-                name: "out",
-                kind: OperandType::Path,
-                count: Count::Optional,
-                standard_stream: true,
-            },
-        ],
-        outputs: &[
-            OutputDefinition {
-                format: Format::Text,
-                kind: OutputKind::Content,
-            },
-            OutputDefinition {
-                format: Format::Json,
-                kind: OutputKind::Object(EXPORT_FIELDS),
-            },
-        ],
-        max_effect: Effect::Read,
-        errors: EXPORT_ERRORS,
-        examples: &[
-            "eggdb export app.db backup.jsonl",
-            "eggdb export app.db | gzip > backup.jsonl.gz",
-        ],
-        surfaces: "none yet: the GUI client (D15) brings export",
-    };
+    options: &[OptionDefinition {
+        help: "write only this collection, untagged",
+        ..COLLECTION_OPTION
+    }],
+    operands: &[
+        FILE,
+        OperandDefinition {
+            name: "out",
+            kind: OperandType::Path,
+            count: Count::Optional,
+            standard_stream: true,
+        },
+    ],
+    outputs: &[
+        OutputDefinition {
+            format: Format::Text,
+            kind: OutputKind::Content,
+        },
+        OutputDefinition {
+            format: Format::Json,
+            kind: OutputKind::Object(EXPORT_FIELDS),
+        },
+    ],
+    max_effect: Effect::Read,
+    errors: EXPORT_ERRORS,
+    examples: &[
+        "eggdb export app.db backup.jsonl",
+        "eggdb export app.db | gzip > backup.jsonl.gz",
+    ],
+    surfaces: "none yet: the GUI client (D15) brings export",
+};

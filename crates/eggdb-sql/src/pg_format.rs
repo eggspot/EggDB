@@ -74,7 +74,9 @@ const PATTERNS: [&str; 52] = [
 ];
 
 fn spelling_of(text: &[char]) -> Spelling {
-    let mut letters = text.iter().filter(|character| character.is_ascii_alphabetic());
+    let mut letters = text
+        .iter()
+        .filter(|character| character.is_ascii_alphabetic());
     match (letters.next(), letters.next()) {
         (Some(first), _) if first.is_ascii_lowercase() => Spelling::Lower,
         (Some(_), Some(second)) if second.is_ascii_lowercase() => Spelling::Capitalized,
@@ -86,10 +88,22 @@ fn field_named(pattern: &str, written: &[char]) -> Field {
     let spelling = spelling_of(written);
     let lower = spelling == Spelling::Lower;
     match pattern {
-        "A.D." | "B.C." => Field::Era { dotted: true, lower },
-        "AD" | "BC" => Field::Era { dotted: false, lower },
-        "A.M." | "P.M." => Field::Meridian { dotted: true, lower },
-        "AM" | "PM" => Field::Meridian { dotted: false, lower },
+        "A.D." | "B.C." => Field::Era {
+            dotted: true,
+            lower,
+        },
+        "AD" | "BC" => Field::Era {
+            dotted: false,
+            lower,
+        },
+        "A.M." | "P.M." => Field::Meridian {
+            dotted: true,
+            lower,
+        },
+        "AM" | "PM" => Field::Meridian {
+            dotted: false,
+            lower,
+        },
         "Y,YYY" => Field::YearWithComma,
         "SSSSS" | "SSSS" => Field::SecondsOfDay,
         "MONTH" => Field::MonthName(spelling),
@@ -128,7 +142,9 @@ fn field_named(pattern: &str, written: &[char]) -> Field {
         "J" => Field::JulianDay,
         "Q" => Field::Quarter,
         other => {
-            let digits = other.strip_prefix("FF").and_then(|digit| digit.parse::<u8>().ok());
+            let digits = other
+                .strip_prefix("FF")
+                .and_then(|digit| digit.parse::<u8>().ok());
             Field::Fraction(digits.unwrap_or(6))
         }
     }
@@ -299,7 +315,8 @@ impl Moment {
     }
 
     fn weekday(&self) -> usize {
-        self.days.map_or(0, |days| (days + 6).rem_euclid(7) as usize)
+        self.days
+            .map_or(0, |days| (days + 6).rem_euclid(7) as usize)
     }
 
     fn iso(&self) -> (i64, i64) {
@@ -377,7 +394,11 @@ fn number_text(value: i64, width: usize, fill: bool) -> String {
     if fill {
         value.to_string()
     } else if value < 0 {
-        format!("-{:0width$}", value.unsigned_abs(), width = width.saturating_sub(1))
+        format!(
+            "-{:0width$}",
+            value.unsigned_abs(),
+            width = width.saturating_sub(1)
+        )
     } else {
         format!("{value:0width$}")
     }
@@ -403,7 +424,11 @@ fn zone_text(moment: &Moment, lower: bool) -> String {
     } else {
         datetime::format_offset(offset)
     };
-    if lower { text.to_ascii_lowercase() } else { text }
+    if lower {
+        text.to_ascii_lowercase()
+    } else {
+        text
+    }
 }
 
 fn field_text(moment: &Moment, field: Field, fill: bool) -> (String, Option<i64>) {
@@ -421,7 +446,10 @@ fn field_text(moment: &Moment, field: Field, fill: bool) -> (String, Option<i64>
         Field::Microsecond => number(moment.micros, 6),
         Field::Fraction(digits) => {
             let six = format!("{:06}", moment.micros);
-            let shown = six.get(..usize::from(digits).min(6)).unwrap_or("").to_owned();
+            let shown = six
+                .get(..usize::from(digits).min(6))
+                .unwrap_or("")
+                .to_owned();
             (shown, None)
         }
         Field::SecondsOfDay => {
@@ -442,10 +470,7 @@ fn field_text(moment: &Moment, field: Field, fill: bool) -> (String, Option<i64>
             };
             (text, None)
         }
-        Field::YearWithComma => (
-            format!("{},{:03}", year / 1000, year % 1000),
-            Some(year),
-        ),
+        Field::YearWithComma => (format!("{},{:03}", year / 1000, year % 1000), Some(year)),
         Field::Year(width) => {
             let width = usize::from(width);
             let shown = if width >= 4 {
@@ -552,7 +577,10 @@ fn field_text(moment: &Moment, field: Field, fill: bool) -> (String, Option<i64>
         }
         Field::ZoneName { lower } => (zone_text(moment, lower), None),
         Field::Offset => (
-            moment.offset.map(datetime::format_offset).unwrap_or_default(),
+            moment
+                .offset
+                .map(datetime::format_offset)
+                .unwrap_or_default(),
             None,
         ),
     }
@@ -737,7 +765,9 @@ fn power_of_ten(exponent: u32) -> SqlResult<Numeric> {
 }
 
 fn roman_text(number: &Numeric, lower: bool, fill: bool) -> String {
-    let rounded = number.to_i128_rounded().and_then(|whole| i64::try_from(whole).ok());
+    let rounded = number
+        .to_i128_rounded()
+        .and_then(|whole| i64::try_from(whole).ok());
     let numeral = match rounded.and_then(roman) {
         Some(numeral) if lower => numeral.to_ascii_lowercase(),
         Some(numeral) => numeral,
@@ -878,7 +908,10 @@ fn format_number(value: &Value, template_text: &str) -> SqlResult<String> {
     let Some(number) = numeric_of(value) else {
         return Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
-            format!("function to_char({}, unknown) does not exist", value.type_name()),
+            format!(
+                "function to_char({}, unknown) does not exist",
+                value.type_name()
+            ),
         ));
     };
     if let Some(NumberPiece::Roman { lower }) = template
@@ -946,7 +979,12 @@ fn format_number(value: &Value, template_text: &str) -> SqlResult<String> {
                 if overflow {
                     area.push_shown('#');
                 } else if digit_index >= missing {
-                    area.push_shown(whole_digits.get(digit_index - missing).copied().unwrap_or('0'));
+                    area.push_shown(
+                        whole_digits
+                            .get(digit_index - missing)
+                            .copied()
+                            .unwrap_or('0'),
+                    );
                 } else if *zero
                     || first_zero.is_some_and(|first| digit_index >= first)
                     || (blank_integer && digit_index + 1 == template.integer_digits)
@@ -1124,7 +1162,11 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn skip_spaces(&mut self) {
-        while self.chars.get(self.at).is_some_and(|character| character.is_whitespace()) {
+        while self
+            .chars
+            .get(self.at)
+            .is_some_and(|character| character.is_whitespace())
+        {
             self.at += 1;
         }
     }
@@ -1215,7 +1257,11 @@ fn read_number(
     if negative {
         reader.at += 1;
     }
-    let most = if reads_digits(next) || matches!(field, Field::Fraction(_) | Field::Millisecond | Field::Microsecond) {
+    let most = if reads_digits(next)
+        || matches!(
+            field,
+            Field::Fraction(_) | Field::Millisecond | Field::Microsecond
+        ) {
         widest(field)
     } else {
         widest(field).max(9)
@@ -1228,9 +1274,9 @@ fn read_number(
             "Value must be an integer.",
         ));
     }
-    let value: i64 = digits.parse().map_err(|_| {
-        invalid_value(&digits, pattern_name(field), "Value must be an integer.")
-    })?;
+    let value: i64 = digits
+        .parse()
+        .map_err(|_| invalid_value(&digits, pattern_name(field), "Value must be an integer."))?;
     Ok((if negative { -value } else { value }, digits.len()))
 }
 
@@ -1280,15 +1326,13 @@ fn read_field(
     match field {
         Field::Meridian { .. } => {
             reader.skip_spaces();
-            let found = reader
-                .word(&["AM", "PM", "A.M.", "P.M."])
-                .ok_or_else(|| {
-                    invalid_value(
-                        &reader.shown(),
-                        "AM",
-                        "The given value did not match any of the allowed values for this field.",
-                    )
-                })?;
+            let found = reader.word(&["AM", "PM", "A.M.", "P.M."]).ok_or_else(|| {
+                invalid_value(
+                    &reader.shown(),
+                    "AM",
+                    "The given value did not match any of the allowed values for this field.",
+                )
+            })?;
             parts.afternoon = Some(found % 2 == 1);
         }
         Field::Era { .. } => {
@@ -1310,7 +1354,10 @@ fn read_field(
                 .map(|name| name.get(..3).unwrap_or(name).to_owned())
                 .collect();
             let names: Vec<&str> = if matches!(field, Field::MonthName(_)) {
-                full.iter().map(String::as_str).chain(short.iter().map(String::as_str)).collect()
+                full.iter()
+                    .map(String::as_str)
+                    .chain(short.iter().map(String::as_str))
+                    .collect()
             } else {
                 short.iter().map(String::as_str).collect()
             };
@@ -1326,7 +1373,10 @@ fn read_field(
         Field::DayName(_) | Field::DayAbbreviation(_) => {
             reader.skip_spaces();
             let full: Vec<&str> = DAYS.to_vec();
-            let short: Vec<&str> = DAYS.iter().map(|name| name.get(..3).unwrap_or(name)).collect();
+            let short: Vec<&str> = DAYS
+                .iter()
+                .map(|name| name.get(..3).unwrap_or(name))
+                .collect();
             let names: Vec<&str> = full.into_iter().chain(short).collect();
             reader.word(&names).ok_or_else(|| {
                 invalid_value(
@@ -1468,7 +1518,11 @@ fn assembled(parts: &Parts, text: &str) -> SqlResult<(i64, Option<i64>)> {
     let days = if let Some(julian) = parts.julian {
         julian - JULIAN_DAY_OF_EPOCH
     } else if let (Some(day_of_year), None) = (parts.day_of_year, parts.month) {
-        let length = if datetime::is_leap_year(year) { 366 } else { 365 };
+        let length = if datetime::is_leap_year(year) {
+            366
+        } else {
+            365
+        };
         if !(1..=length).contains(&day_of_year) {
             return Err(out_of_range(text));
         }
@@ -1512,7 +1566,11 @@ fn assembled(parts: &Parts, text: &str) -> SqlResult<(i64, Option<i64>)> {
     });
     let offset = offset
         .or(parts.zone_minutes.map(|minutes| minutes * 60))
-        .or_else(|| parts.region.map(|zone| i64::from(zone.offset_of_local(local))));
+        .or_else(|| {
+            parts
+                .region
+                .map(|zone| i64::from(zone.offset_of_local(local)))
+        });
     Ok((local, offset))
 }
 
@@ -1675,7 +1733,11 @@ mod tests {
             ("1234", "99", " ##"),
         ];
         for (value, template, expected) in cases {
-            assert_eq!(number(value, template), expected, "to_char({value}, {template})");
+            assert_eq!(
+                number(value, template),
+                expected,
+                "to_char({value}, {template})"
+            );
         }
     }
 
@@ -1689,16 +1751,48 @@ mod tests {
         let cases = [
             ("2002-04-20 17:31:12.66", "HH12:MI:SS", "05:31:12"),
             ("2002-04-20 17:31:12.66", "HH24:MI:SS.MS", "17:31:12.660"),
-            ("2002-04-20 17:31:12.66", "Day, DD  HH12:MI:SS", "Saturday , 20  05:31:12"),
-            ("2002-04-20 17:31:12.66", "FMDay, FMDD  HH12:MI:SS", "Saturday, 20  05:31:12"),
-            ("2002-04-20 17:31:12.66", "YYYY-MM-DD\"T\"HH24:MI:SS", "2002-04-20T17:31:12"),
-            ("2002-04-20 17:31:12.66", "Month MON mon Mon", "April     APR apr Apr"),
-            ("2002-04-20 17:31:12.66", "DDDth Q CC J IW WW D ID", "110th 2 21 2452385 16 16 7 6"),
-            ("2002-04-01 08:00:00", "FMDDth FMMonth YYYY am", "1st April 2002 am"),
-            ("2002-04-01 08:00:00", "RM rm Y,YYY yyyy", "IV   iv   2,002 2002"),
+            (
+                "2002-04-20 17:31:12.66",
+                "Day, DD  HH12:MI:SS",
+                "Saturday , 20  05:31:12",
+            ),
+            (
+                "2002-04-20 17:31:12.66",
+                "FMDay, FMDD  HH12:MI:SS",
+                "Saturday, 20  05:31:12",
+            ),
+            (
+                "2002-04-20 17:31:12.66",
+                "YYYY-MM-DD\"T\"HH24:MI:SS",
+                "2002-04-20T17:31:12",
+            ),
+            (
+                "2002-04-20 17:31:12.66",
+                "Month MON mon Mon",
+                "April     APR apr Apr",
+            ),
+            (
+                "2002-04-20 17:31:12.66",
+                "DDDth Q CC J IW WW D ID",
+                "110th 2 21 2452385 16 16 7 6",
+            ),
+            (
+                "2002-04-01 08:00:00",
+                "FMDDth FMMonth YYYY am",
+                "1st April 2002 am",
+            ),
+            (
+                "2002-04-01 08:00:00",
+                "RM rm Y,YYY yyyy",
+                "IV   iv   2,002 2002",
+            ),
         ];
         for (text, template, expected) in cases {
-            assert_eq!(moment(text, template), expected, "to_char({text}, {template})");
+            assert_eq!(
+                moment(text, template),
+                expected,
+                "to_char({text}, {template})"
+            );
         }
     }
 
@@ -1717,7 +1811,10 @@ mod tests {
             date("2009-02-30", "YYYY-MM-DD").unwrap_err().state().code(),
             "22008"
         );
-        assert_eq!(date("2000-xx-01", "YYYY-MM-DD").unwrap_err().state().code(), "22007");
+        assert_eq!(
+            date("2000-xx-01", "YYYY-MM-DD").unwrap_err().state().code(),
+            "22007"
+        );
         let number = |text: &str, template: &str| {
             to_number(&[Value::Text(text.into()), Value::Text(template.into())])
                 .unwrap()
@@ -1743,7 +1840,8 @@ mod tests {
             let _ = format_number(&Value::Double(0.5), &template);
             let _ = format_moment(&Moment::of_local(0, Some(3600)), &template);
             let _ = fill_parts("2024-02-29 13:45:01", &template);
-            let _ = number_template(&template).and_then(|parsed| read_number_text("-1,2.5", &parsed));
+            let _ =
+                number_template(&template).and_then(|parsed| read_number_text("-1,2.5", &parsed));
         }
     }
 }

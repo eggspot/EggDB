@@ -1,11 +1,11 @@
+use crate::bulk::{BulkInput, BulkLoadError, BulkReader};
 use crate::messages::{
-    ATTENTION, BULK_LOAD, LOGIN7, Login7, PRELOGIN, PreLogin, RESET_CONNECTION,
+    ATTENTION, BULK_LOAD, ENCRYPT_CLIENT_CERT, ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON,
+    ENCRYPT_REQ, LOGIN7, Login7, PRELOGIN, PreLogin, RESET_CONNECTION,
     RESET_CONNECTION_SKIP_TRANSACTION, RPC, SQL_BATCH, TABULAR_RESULT, TDS_7_4,
-    ENCRYPT_CLIENT_CERT, ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON, ENCRYPT_REQ, TRANSACTION_MANAGER,
-    TransactionRequest, parse_login7, parse_prelogin, parse_sql_batch,
+    TRANSACTION_MANAGER, TransactionRequest, parse_login7, parse_prelogin, parse_sql_batch,
     parse_transaction_manager_request, prelogin_response,
 };
-use crate::bulk::{BulkInput, BulkLoadError, BulkReader};
 use crate::procedures::PreparedBatches;
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::tokens::{
@@ -247,7 +247,11 @@ fn negotiate_encryption(
     }
 }
 
-fn parse_prelogin_message(shared: &Shared<'_>, wire: &Wire<'_>, message: &Message) -> Option<PreLogin> {
+fn parse_prelogin_message(
+    shared: &Shared<'_>,
+    wire: &Wire<'_>,
+    message: &Message,
+) -> Option<PreLogin> {
     if message.kind != PRELOGIN {
         (shared.log)(&format!(
             "{}  protocol error: the first message is not PRELOGIN",
@@ -264,7 +268,12 @@ fn parse_prelogin_message(shared: &Shared<'_>, wire: &Wire<'_>, message: &Messag
     }
 }
 
-fn start_tls(shared: &Shared<'_>, wire: &mut Wire<'_>, config: &eggdb_tls::ServerConfig, framed: bool) -> bool {
+fn start_tls(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    config: &eggdb_tls::ServerConfig,
+    framed: bool,
+) -> bool {
     match wire.start_tls(config, framed) {
         Ok(()) => true,
         Err(error) => {
@@ -282,7 +291,9 @@ fn read_strict_prelogin(
     if !start_tls(shared, wire, config, false) {
         return None;
     }
-    let negotiated = wire.tls().and_then(|info| info.application_protocol.as_deref());
+    let negotiated = wire
+        .tls()
+        .and_then(|info| info.application_protocol.as_deref());
     if negotiated != Some(TDS_8_APPLICATION_PROTOCOL) {
         (shared.log)(&format!(
             "{}  TDS 8 connection refused: the client did not ask for tds/8.0 with ALPN",

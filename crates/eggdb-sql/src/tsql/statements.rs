@@ -42,7 +42,11 @@ pub(crate) fn constant(value: Value) -> Expr {
 
 pub(crate) fn combined(operator: BinaryOperator, left: Value, right: Value) -> SqlResult<Value> {
     let expr = Expr {
-        kind: ExprKind::Binary(operator, Box::new(constant(left)), Box::new(constant(right))),
+        kind: ExprKind::Binary(
+            operator,
+            Box::new(constant(left)),
+            Box::new(constant(right)),
+        ),
         position: 0,
     };
     let evaluator = Evaluator {
@@ -96,12 +100,10 @@ pub(crate) fn declare(
                 }
             }
             Declaration::Table { name, columns } => {
-                tables
-                    .entry(name.clone())
-                    .or_insert_with(|| TableVariable {
-                        columns: columns.clone(),
-                        rows: Vec::new(),
-                    });
+                tables.entry(name.clone()).or_insert_with(|| TableVariable {
+                    columns: columns.clone(),
+                    rows: Vec::new(),
+                });
             }
         }
     }
@@ -187,7 +189,11 @@ pub(crate) fn filled_rows(
     Ok(filled)
 }
 
-pub(crate) fn matching_select(variable: &Name, filter: Option<&Expr>, values: &[Expr]) -> Option<Select> {
+pub(crate) fn matching_select(
+    variable: &Name,
+    filter: Option<&Expr>,
+    values: &[Expr],
+) -> Option<Select> {
     let mut items: Vec<Expr> = filter.into_iter().cloned().collect();
     items.extend(values.iter().cloned());
     if items.is_empty() {
@@ -221,7 +227,10 @@ pub(crate) fn changed_rows(
     for (index, row) in matching {
         let mut changed = Vec::with_capacity(columns.len());
         for ((at, sql_type), value) in columns.iter().zip(row) {
-            changed.push((*at, crate::sqlserver_conversion::implicit(value, *sql_type)?));
+            changed.push((
+                *at,
+                crate::sqlserver_conversion::implicit(value, *sql_type)?,
+            ));
         }
         changes.push((index, changed));
     }

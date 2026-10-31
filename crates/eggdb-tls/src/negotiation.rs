@@ -25,15 +25,28 @@ pub const SUPPORTED_SIGNATURE_SCHEMES: [u16; 7] = [
 /// The signature algorithm of a TLS signature scheme. TLS 1.3 forbids PKCS#1 v1.5 signatures in
 /// the handshake, so they map to an algorithm only for TLS 1.2.
 pub fn scheme_algorithm(scheme: u16, tls13: bool) -> Option<SignatureAlgorithm> {
-    let pss = |hash: SignatureHash| Some(SignatureAlgorithm::RsaPss { hash, salt_length: hash.digest_bytes() });
+    let pss = |hash: SignatureHash| {
+        Some(SignatureAlgorithm::RsaPss {
+            hash,
+            salt_length: hash.digest_bytes(),
+        })
+    };
     match scheme {
-        signature_scheme::ECDSA_SECP256R1_SHA256 => Some(SignatureAlgorithm::Ecdsa(SignatureHash::Sha256)),
+        signature_scheme::ECDSA_SECP256R1_SHA256 => {
+            Some(SignatureAlgorithm::Ecdsa(SignatureHash::Sha256))
+        }
         signature_scheme::RSA_PSS_RSAE_SHA256 => pss(SignatureHash::Sha256),
         signature_scheme::RSA_PSS_RSAE_SHA384 => pss(SignatureHash::Sha384),
         signature_scheme::RSA_PSS_RSAE_SHA512 => pss(SignatureHash::Sha512),
-        signature_scheme::RSA_PKCS1_SHA256 if !tls13 => Some(SignatureAlgorithm::RsaPkcs1(SignatureHash::Sha256)),
-        signature_scheme::RSA_PKCS1_SHA384 if !tls13 => Some(SignatureAlgorithm::RsaPkcs1(SignatureHash::Sha384)),
-        signature_scheme::RSA_PKCS1_SHA512 if !tls13 => Some(SignatureAlgorithm::RsaPkcs1(SignatureHash::Sha512)),
+        signature_scheme::RSA_PKCS1_SHA256 if !tls13 => {
+            Some(SignatureAlgorithm::RsaPkcs1(SignatureHash::Sha256))
+        }
+        signature_scheme::RSA_PKCS1_SHA384 if !tls13 => {
+            Some(SignatureAlgorithm::RsaPkcs1(SignatureHash::Sha384))
+        }
+        signature_scheme::RSA_PKCS1_SHA512 if !tls13 => {
+            Some(SignatureAlgorithm::RsaPkcs1(SignatureHash::Sha512))
+        }
         _ => None,
     }
 }
@@ -60,11 +73,16 @@ pub fn scheme_fits_key(scheme: u16, key: &SubjectPublicKey) -> bool {
 /// 7.4.1.4.1 would allow SHA-1, which EggDB never signs with).
 pub fn choose_signature_scheme(key: &PrivateKey, offered: &[u16], tls13: bool) -> Option<u16> {
     let public_key = key.public_key();
-    let usable = |scheme: &u16| scheme_fits_key(*scheme, &public_key) && scheme_algorithm(*scheme, tls13).is_some();
+    let usable = |scheme: &u16| {
+        scheme_fits_key(*scheme, &public_key) && scheme_algorithm(*scheme, tls13).is_some()
+    };
     if offered.is_empty() && !tls13 {
-        return [signature_scheme::ECDSA_SECP256R1_SHA256, signature_scheme::RSA_PKCS1_SHA256]
-            .into_iter()
-            .find(usable);
+        return [
+            signature_scheme::ECDSA_SECP256R1_SHA256,
+            signature_scheme::RSA_PKCS1_SHA256,
+        ]
+        .into_iter()
+        .find(usable);
     }
     offered.iter().copied().find(usable)
 }
@@ -145,14 +163,18 @@ impl EphemeralKey {
         match self {
             Self::X25519(scalar) => {
                 let peer: &[u8; X25519_KEY_BYTES] = peer_public_key.try_into().ok()?;
-                x25519_shared_secret(scalar, peer).ok().map(|secret| secret.to_vec())
+                x25519_shared_secret(scalar, peer)
+                    .ok()
+                    .map(|secret| secret.to_vec())
             }
             Self::P256(key) => {
                 if peer_public_key.first() != Some(&0x04) {
                     return None;
                 }
                 let peer = P256PublicKey::from_sec1(peer_public_key).ok()?;
-                p256_shared_secret(key, &peer).ok().map(|secret| secret.to_vec())
+                p256_shared_secret(key, &peer)
+                    .ok()
+                    .map(|secret| secret.to_vec())
             }
         }
     }
@@ -174,8 +196,12 @@ mod tests {
         for group in SUPPORTED_GROUPS {
             let mut first_random = fixed_random(3);
             let mut second_random = fixed_random(5);
-            let first = EphemeralKey::generate(group, &mut first_random).unwrap().unwrap();
-            let second = EphemeralKey::generate(group, &mut second_random).unwrap().unwrap();
+            let first = EphemeralKey::generate(group, &mut first_random)
+                .unwrap()
+                .unwrap();
+            let second = EphemeralKey::generate(group, &mut second_random)
+                .unwrap()
+                .unwrap();
             assert_eq!(first.group(), group);
             let one = first.shared_secret(&second.public_key()).unwrap();
             let other = second.shared_secret(&first.public_key()).unwrap();
@@ -186,10 +212,14 @@ mod tests {
     #[test]
     fn malformed_and_low_order_peer_keys_are_refused() {
         let mut random = fixed_random(9);
-        let x25519 = EphemeralKey::generate(named_group::X25519, &mut random).unwrap().unwrap();
+        let x25519 = EphemeralKey::generate(named_group::X25519, &mut random)
+            .unwrap()
+            .unwrap();
         assert!(x25519.shared_secret(&[0u8; 32]).is_none());
         assert!(x25519.shared_secret(&[1u8; 31]).is_none());
-        let p256 = EphemeralKey::generate(named_group::SECP256R1, &mut random).unwrap().unwrap();
+        let p256 = EphemeralKey::generate(named_group::SECP256R1, &mut random)
+            .unwrap()
+            .unwrap();
         assert!(p256.shared_secret(&[4u8; 65]).is_none());
         let compressed = {
             let mut point = p256.public_key();
@@ -198,16 +228,26 @@ mod tests {
             point
         };
         assert!(p256.shared_secret(&compressed).is_none());
-        assert!(EphemeralKey::generate(0x0018, &mut random).unwrap().is_none());
+        assert!(
+            EphemeralKey::generate(0x0018, &mut random)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn application_protocols_follow_the_server_order() {
         let server = vec![b"postgresql".to_vec(), b"other".to_vec()];
         let client = vec![b"other".to_vec(), b"postgresql".to_vec()];
-        assert_eq!(choose_application_protocol(&server, &client), Ok(Some(b"postgresql".to_vec())));
+        assert_eq!(
+            choose_application_protocol(&server, &client),
+            Ok(Some(b"postgresql".to_vec()))
+        );
         assert_eq!(choose_application_protocol(&server, &[]), Ok(None));
-        assert_eq!(choose_application_protocol(&server, &[b"h2".to_vec()]), Err(NoCommonApplicationProtocol));
+        assert_eq!(
+            choose_application_protocol(&server, &[b"h2".to_vec()]),
+            Err(NoCommonApplicationProtocol)
+        );
     }
 
     #[test]
@@ -216,7 +256,10 @@ mod tests {
         assert!(scheme_algorithm(signature_scheme::RSA_PKCS1_SHA256, false).is_some());
         assert_eq!(
             scheme_algorithm(signature_scheme::RSA_PSS_RSAE_SHA384, true),
-            Some(SignatureAlgorithm::RsaPss { hash: SignatureHash::Sha384, salt_length: 48 })
+            Some(SignatureAlgorithm::RsaPss {
+                hash: SignatureHash::Sha384,
+                salt_length: 48
+            })
         );
     }
 }

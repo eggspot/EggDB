@@ -4,7 +4,7 @@ use crate::crc32c::{crc32c, crc32c_append};
 use crate::error::{FormatError, StorageError};
 use crate::format::{
     Features, FileId, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageSize,
-    PageType, RECYCLED_SEGMENTS, Superblock, segment_holds_a_page,
+    PageType, RECYCLED_SEGMENTS, Superblock,
 };
 use eggdb_platform::{ErrorKind, File};
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,7 +97,6 @@ impl RecordType {
 pub(crate) fn default_segment_pages(page_size: PageSize) -> u32 {
     (DEFAULT_SEGMENT_BYTES / page_size.bytes()).max(2) as u32
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Segment {
@@ -1193,14 +1192,14 @@ mod tests {
         for log2 in 12..=16 {
             let page_size = PageSize::from_log2(log2).unwrap();
             let default = super::default_segment_pages(page_size);
-            assert!(super::segment_holds_a_page(page_size, default));
+            assert!(crate::format::segment_holds_a_page(page_size, default));
             let bytes = u64::from(default) * page_size.bytes() as u64;
             assert!(bytes >= 64 << 10);
         }
-        assert!(!super::segment_holds_a_page(PageSize::DEFAULT, 2));
-        assert!(super::segment_holds_a_page(PageSize::DEFAULT, 3));
+        assert!(!crate::format::segment_holds_a_page(PageSize::DEFAULT, 2));
+        assert!(crate::format::segment_holds_a_page(PageSize::DEFAULT, 3));
         let large = PageSize::from_log2(16).unwrap();
-        assert!(!super::segment_holds_a_page(large, 1));
+        assert!(!crate::format::segment_holds_a_page(large, 1));
     }
 
     fn committed_states(fs: &SimFileSystem, durability: Durability) -> Vec<u64> {

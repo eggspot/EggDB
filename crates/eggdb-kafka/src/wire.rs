@@ -13,7 +13,11 @@ impl<'b> Reader<'b> {
     }
 
     fn take(&mut self, count: usize) -> Parsed<&'b [u8]> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or("a Kafka request ends early")?;
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or("a Kafka request ends early")?;
         let slice = &self.bytes[self.at..end];
         self.at = end;
         Ok(slice)
@@ -24,15 +28,21 @@ impl<'b> Reader<'b> {
     }
 
     pub(crate) fn i16(&mut self) -> Parsed<i16> {
-        Ok(i16::from_be_bytes(self.take(2)?.try_into().map_err(|_| "short")?))
+        Ok(i16::from_be_bytes(
+            self.take(2)?.try_into().map_err(|_| "short")?,
+        ))
     }
 
     pub(crate) fn i32(&mut self) -> Parsed<i32> {
-        Ok(i32::from_be_bytes(self.take(4)?.try_into().map_err(|_| "short")?))
+        Ok(i32::from_be_bytes(
+            self.take(4)?.try_into().map_err(|_| "short")?,
+        ))
     }
 
     pub(crate) fn i64(&mut self) -> Parsed<i64> {
-        Ok(i64::from_be_bytes(self.take(8)?.try_into().map_err(|_| "short")?))
+        Ok(i64::from_be_bytes(
+            self.take(8)?.try_into().map_err(|_| "short")?,
+        ))
     }
 
     pub(crate) fn string(&mut self) -> Parsed<Option<String>> {
@@ -41,7 +51,9 @@ impl<'b> Reader<'b> {
             return Ok(None);
         }
         let bytes = self.take(length as usize)?;
-        Ok(Some(String::from_utf8(bytes.to_vec()).map_err(|_| "a Kafka string is not UTF-8")?))
+        Ok(Some(
+            String::from_utf8(bytes.to_vec()).map_err(|_| "a Kafka string is not UTF-8")?,
+        ))
     }
 
     pub(crate) fn bytes(&mut self) -> Parsed<Option<&'b [u8]>> {
@@ -52,7 +64,10 @@ impl<'b> Reader<'b> {
         self.take(length as usize).map(Some)
     }
 
-    pub(crate) fn array<T>(&mut self, mut each: impl FnMut(&mut Self) -> Parsed<T>) -> Parsed<Vec<T>> {
+    pub(crate) fn array<T>(
+        &mut self,
+        mut each: impl FnMut(&mut Self) -> Parsed<T>,
+    ) -> Parsed<Vec<T>> {
         let count = self.i32()?;
         if count < 0 {
             return Ok(Vec::new());
@@ -94,7 +109,8 @@ impl Writer {
         match value {
             Some(text) => {
                 self.i16(text.len().min(i16::MAX as usize) as i16);
-                self.out.extend_from_slice(&text.as_bytes()[..text.len().min(i16::MAX as usize)]);
+                self.out
+                    .extend_from_slice(&text.as_bytes()[..text.len().min(i16::MAX as usize)]);
             }
             None => {
                 self.i16(-1);
@@ -119,7 +135,11 @@ pub(crate) fn crc32c(bytes: &[u8]) -> u32 {
     for byte in bytes {
         crc ^= u32::from(*byte);
         for _ in 0..8 {
-            crc = if crc & 1 == 1 { (crc >> 1) ^ 0x82f6_3b78 } else { crc >> 1 };
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0x82f6_3b78
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc

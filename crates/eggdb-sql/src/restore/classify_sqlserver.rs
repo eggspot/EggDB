@@ -7,7 +7,15 @@ use crate::error::{SqlError, SqlState};
 const HEAD_TOKENS: usize = 64;
 const BATCH_LOGIC: &str = "batch logic (IF, WHILE, DECLARE, BEGIN ... END) is restored only as existence guards (IF [NOT] EXISTS (...), IF OBJECT_ID(...) IS [NOT] NULL) around one statement";
 const LOGIC_WORDS: [&str; 9] = [
-    "if", "while", "declare", "begin", "goto", "return", "throw", "raiserror", "try",
+    "if",
+    "while",
+    "declare",
+    "begin",
+    "goto",
+    "return",
+    "throw",
+    "raiserror",
+    "try",
 ];
 const NOT_SUPPORTED_YET: &str = "not supported yet";
 

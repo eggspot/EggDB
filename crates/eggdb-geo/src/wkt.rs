@@ -9,11 +9,18 @@ struct Reader<'t> {
 
 impl Reader<'_> {
     fn fail<T>(&self, message: &str) -> Result<T, GeoError> {
-        Err(GeoError(format!("parse error - invalid geometry: {message} at character {}", self.at)))
+        Err(GeoError(format!(
+            "parse error - invalid geometry: {message} at character {}",
+            self.at
+        )))
     }
 
     fn skip_space(&mut self) {
-        while let Some(space) = self.text[self.at..].chars().next().filter(|character| character.is_whitespace()) {
+        while let Some(space) = self.text[self.at..]
+            .chars()
+            .next()
+            .filter(|character| character.is_whitespace())
+        {
             self.at += space.len_utf8();
         }
     }
@@ -21,7 +28,9 @@ impl Reader<'_> {
     fn word(&mut self) -> String {
         self.skip_space();
         let rest = &self.text[self.at..];
-        let length = rest.find(|character: char| !character.is_ascii_alphabetic()).unwrap_or(rest.len());
+        let length = rest
+            .find(|character: char| !character.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
         self.at += length;
         rest[..length].to_ascii_uppercase()
     }
@@ -37,14 +46,22 @@ impl Reader<'_> {
     }
 
     fn expect(&mut self, expected: char) -> Result<(), GeoError> {
-        if self.symbol(expected) { Ok(()) } else { self.fail(&format!("expected '{expected}'")) }
+        if self.symbol(expected) {
+            Ok(())
+        } else {
+            self.fail(&format!("expected '{expected}'"))
+        }
     }
 
     fn number(&mut self) -> Result<f64, GeoError> {
         self.skip_space();
         let rest = &self.text[self.at..];
-        let length = rest.find(|character: char| !(character.is_ascii_digit() || "+-.eE".contains(character))).unwrap_or(rest.len());
-        let value: f64 = rest[..length].parse().or_else(|_| self.fail("expected a number"))?;
+        let length = rest
+            .find(|character: char| !(character.is_ascii_digit() || "+-.eE".contains(character)))
+            .unwrap_or(rest.len());
+        let value: f64 = rest[..length]
+            .parse()
+            .or_else(|_| self.fail("expected a number"))?;
         if !value.is_finite() {
             return self.fail("expected a finite number");
         }
@@ -164,15 +181,28 @@ impl Reader<'_> {
 
 /// Reads WKT, or EWKT with a `SRID=n;` prefix.
 pub fn from_wkt(text: &str) -> Result<Spatial, GeoError> {
-    let (srid, body) = match text.trim_start().strip_prefix("SRID=").or_else(|| text.trim_start().strip_prefix("srid=")) {
+    let (srid, body) = match text
+        .trim_start()
+        .strip_prefix("SRID=")
+        .or_else(|| text.trim_start().strip_prefix("srid="))
+    {
         Some(rest) => {
-            let (number, body) = rest.split_once(';').ok_or_else(|| GeoError("parse error - invalid geometry: SRID without ';'".to_owned()))?;
-            let srid: i32 = number.trim().parse().map_err(|_| GeoError("parse error - invalid geometry: bad SRID".to_owned()))?;
+            let (number, body) = rest.split_once(';').ok_or_else(|| {
+                GeoError("parse error - invalid geometry: SRID without ';'".to_owned())
+            })?;
+            let srid: i32 = number
+                .trim()
+                .parse()
+                .map_err(|_| GeoError("parse error - invalid geometry: bad SRID".to_owned()))?;
             (Some(srid).filter(|srid| *srid != 0), body)
         }
         None => (None, text),
     };
-    let mut reader = Reader { text: body, at: 0, points: 0 };
+    let mut reader = Reader {
+        text: body,
+        at: 0,
+        points: 0,
+    };
     let geometry = reader.geometry(0)?;
     reader.skip_space();
     if reader.at != body.len() {

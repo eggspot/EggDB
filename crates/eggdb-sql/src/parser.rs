@@ -27,9 +27,9 @@ mod triggers;
 mod types;
 mod windows;
 
+pub(crate) use mysql_routines::mysql_program;
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
 pub(crate) use oracle::{is_reserved as is_oracle_reserved, oracle_table_name};
-pub(crate) use mysql_routines::mysql_program;
 pub(crate) use plpgsql::plpgsql_program;
 pub(crate) use plsql::{plsql_package_program, plsql_program};
 pub use sqlserver::SQLSERVER_COMPATIBLE_VERSION;
@@ -47,9 +47,9 @@ pub(crate) use sqlite::is_schema_table;
 
 use crate::ast::{
     AggregateFunction, BinaryOperator, ColumnDefinition, CreateTable, Delete, DiscardTarget, Expr,
-    ExprKind, FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition, JoinKind,
-    Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement, TableReference,
-    TruthTest, UnaryOperator, Update,
+    ExprKind, FromClause, IndexSpec, Insert, InsertSource, InsertValue, Join, JoinCondition,
+    JoinKind, Literal, Name, OnDuplicate, Overriding, Select, SelectItem, Statement,
+    TableReference, TruthTest, UnaryOperator, Update,
 };
 use crate::dialect::Dialect;
 use crate::encoding::{IndexMethod, SortOptions};
@@ -427,11 +427,6 @@ impl<'t> Parser<'t> {
         }
     }
 
-    pub(crate) fn returning_values(mut self) -> Self {
-        self.returns_values = true;
-        self
-    }
-
     pub(crate) fn with_batch_context(mut self, batch: &'t crate::tsql::BatchContext) -> Self {
         self.batch = Some(batch);
         self
@@ -732,7 +727,10 @@ impl<'t> Parser<'t> {
         if self.mysql() && self.peek_kind() == &TokenKind::Dot {
             self.at += 1;
             let table = self.name()?;
-            if name.text.eq_ignore_ascii_case(crate::schemas::INFORMATION_SCHEMA) {
+            if name
+                .text
+                .eq_ignore_ascii_case(crate::schemas::INFORMATION_SCHEMA)
+            {
                 return Ok(Name {
                     text: crate::schemas::written_qualified(
                         crate::schemas::INFORMATION_SCHEMA,
@@ -834,7 +832,9 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         };
         match word.as_ref() {
-            "refresh" if self.postgresql() && self.is_word_at(1, "materialized") => self.refresh_materialized_view(),
+            "refresh" if self.postgresql() && self.is_word_at(1, "materialized") => {
+                self.refresh_materialized_view()
+            }
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),
@@ -853,9 +853,9 @@ impl<'t> Parser<'t> {
                 if self.take_word("to") {
                     self.take_word("savepoint");
                     let name = self.name()?;
-                    return Ok(Statement::Savepoint(crate::ast::SavepointCommand::RollbackTo(
-                        name,
-                    )));
+                    return Ok(Statement::Savepoint(
+                        crate::ast::SavepointCommand::RollbackTo(name),
+                    ));
                 }
                 Ok(Statement::Rollback)
             }
@@ -905,7 +905,9 @@ impl<'t> Parser<'t> {
             }
             "grant" if !self.sqlite() => self.grant_or_revoke_privileges(true),
             "revoke" if !self.sqlite() => self.grant_or_revoke_privileges(false),
-            "alter" if !self.sqlite() && (self.is_word_at(1, "role") || self.is_word_at(1, "user")) => {
+            "alter"
+                if !self.sqlite() && (self.is_word_at(1, "role") || self.is_word_at(1, "user")) =>
+            {
                 self.alter_role()
             }
             "comment" if self.postgresql() || self.oracle() => self.comment(),
@@ -944,17 +946,21 @@ impl<'t> Parser<'t> {
             "savepoint" => {
                 self.at += 1;
                 let name = self.name()?;
-                Ok(Statement::Savepoint(crate::ast::SavepointCommand::Set(name)))
+                Ok(Statement::Savepoint(crate::ast::SavepointCommand::Set(
+                    name,
+                )))
             }
             "release" if !self.sqlserver() => {
                 self.at += 1;
                 self.take_word("savepoint");
                 let name = self.name()?;
-                Ok(Statement::Savepoint(crate::ast::SavepointCommand::Release(name)))
+                Ok(Statement::Savepoint(crate::ast::SavepointCommand::Release(
+                    name,
+                )))
             }
-            "alter" | "truncate" | "savepoint" | "release" | "copy" | "grant" | "revoke"
-            | "prepare" | "execute" | "analyze" | "vacuum" | "discard" | "listen" | "notify"
-            | "unlisten" | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
+            "alter" | "truncate" | "release" | "copy" | "grant" | "revoke" | "prepare"
+            | "execute" | "vacuum" | "discard" | "listen" | "notify" | "unlisten"
+            | "deallocate" => Err(self.not_supported(&word.to_ascii_uppercase())),
             _ => Err(self.unexpected()),
         }
     }
@@ -1137,11 +1143,13 @@ impl<'t> Parser<'t> {
         }
         self.take_word("table");
         let mut tables = Vec::new();
-        while matches!(self.peek_kind(), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
-            && !(self.oracle()
-                && ["compute", "estimate", "delete", "validate", "list"]
-                    .iter()
-                    .any(|word| self.is_word(word)))
+        while matches!(
+            self.peek_kind(),
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+        ) && !(self.oracle()
+            && ["compute", "estimate", "delete", "validate", "list"]
+                .iter()
+                .any(|word| self.is_word(word)))
         {
             tables.push(self.table_name()?);
             if self.peek_kind() == &TokenKind::LeftParen {
@@ -1377,9 +1385,9 @@ impl<'t> Parser<'t> {
             TokenKind::Word(word) if word == "true" => true,
             TokenKind::Word(word) if word == "false" => false,
             _ => {
-                return Err(
-                    self.not_supported("set_config with arguments other than constants and parameters")
-                );
+                return Err(self.not_supported(
+                    "set_config with arguments other than constants and parameters",
+                ));
             }
         };
         self.at += 1;
@@ -2270,7 +2278,11 @@ impl<'t> Parser<'t> {
         let name = part(self.peek_kind_at(2))?;
         let position = self.position();
         self.at += 3;
-        Some(crate::user_types::resolve_type(Some(&schema), &name, position))
+        Some(crate::user_types::resolve_type(
+            Some(&schema),
+            &name,
+            position,
+        ))
     }
 
     fn element_type(&mut self) -> SqlResult<SqlType> {
@@ -2415,7 +2427,14 @@ impl<'t> Parser<'t> {
         } else {
             true
         };
-        Ok(Statement::MaterializedView(crate::ast::MaterializedViewCommand::Create { name, query, with_data, if_not_exists }))
+        Ok(Statement::MaterializedView(
+            crate::ast::MaterializedViewCommand::Create {
+                name,
+                query,
+                with_data,
+                if_not_exists,
+            },
+        ))
     }
 
     pub(super) fn refresh_materialized_view(&mut self) -> SqlResult<Statement> {
@@ -2431,7 +2450,9 @@ impl<'t> Parser<'t> {
         } else {
             true
         };
-        Ok(Statement::MaterializedView(crate::ast::MaterializedViewCommand::Refresh { name, with_data }))
+        Ok(Statement::MaterializedView(
+            crate::ast::MaterializedViewCommand::Refresh { name, with_data },
+        ))
     }
 
     fn drop(&mut self) -> SqlResult<Statement> {
@@ -2459,7 +2480,9 @@ impl<'t> Parser<'t> {
                 names.push(self.table_name()?);
             }
             let _ = self.take_word("cascade") || self.take_word("restrict");
-            return Ok(Statement::MaterializedView(crate::ast::MaterializedViewCommand::Drop { names, if_exists }));
+            return Ok(Statement::MaterializedView(
+                crate::ast::MaterializedViewCommand::Drop { names, if_exists },
+            ));
         }
         if self.postgresql() && self.is_word("sequence") {
             return self.drop_sequence();
@@ -3084,10 +3107,7 @@ impl<'t> Parser<'t> {
                 position,
             });
         }
-        if self.sqlserver()
-            && self.select_targets.is_some()
-            && self.query_depth == 0
-        {
+        if self.sqlserver() && self.select_targets.is_some() && self.query_depth == 0 {
             return self.sqlserver_assignment_item();
         }
         if self.sqlserver()
@@ -4327,7 +4347,9 @@ impl<'t> Parser<'t> {
     }
 
     fn named_argument_name(&mut self) -> SqlResult<Option<Name>> {
-        if !(self.postgresql() || self.oracle()) || self.peek_kind_at(1) != &TokenKind::Operator("=>") {
+        if !(self.postgresql() || self.oracle())
+            || self.peek_kind_at(1) != &TokenKind::Operator("=>")
+        {
             return Ok(None);
         }
         let parameter = self.name()?;

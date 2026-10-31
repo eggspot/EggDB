@@ -1496,31 +1496,67 @@ mod tests {
             micros: i64::MAX - 1,
         };
         assert_eq!(Interval::INFINITY.compare(huge), Ordering::Greater);
-        assert_eq!(Interval::NEG_INFINITY.compare(interval("-178000000 years")), Ordering::Less);
+        assert_eq!(
+            Interval::NEG_INFINITY.compare(interval("-178000000 years")),
+            Ordering::Less
+        );
         let day = interval("1 day");
-        assert_eq!(Interval::INFINITY.checked_add(day).ok(), Some(Interval::INFINITY));
-        assert_eq!(day.checked_sub(Interval::INFINITY).ok(), Some(Interval::NEG_INFINITY));
-        assert!(Interval::INFINITY.checked_add(Interval::NEG_INFINITY).is_err());
+        assert_eq!(
+            Interval::INFINITY.checked_add(day).ok(),
+            Some(Interval::INFINITY)
+        );
+        assert_eq!(
+            day.checked_sub(Interval::INFINITY).ok(),
+            Some(Interval::NEG_INFINITY)
+        );
+        assert!(
+            Interval::INFINITY
+                .checked_add(Interval::NEG_INFINITY)
+                .is_err()
+        );
         assert!(Interval::INFINITY.checked_sub(Interval::INFINITY).is_err());
         assert_eq!(
             Interval::INFINITY.checked_sub(Interval::NEG_INFINITY).ok(),
             Some(Interval::INFINITY)
         );
-        assert_eq!(Interval::INFINITY.negated().ok(), Some(Interval::NEG_INFINITY));
-        assert_eq!(Interval::INFINITY.multiply(-2.0).ok(), Some(Interval::NEG_INFINITY));
+        assert_eq!(
+            Interval::INFINITY.negated().ok(),
+            Some(Interval::NEG_INFINITY)
+        );
+        assert_eq!(
+            Interval::INFINITY.multiply(-2.0).ok(),
+            Some(Interval::NEG_INFINITY)
+        );
         assert!(Interval::INFINITY.multiply(0.0).is_err());
         assert!(Interval::default().multiply(f64::INFINITY).is_err());
-        assert_eq!(day.multiply(f64::NEG_INFINITY).ok(), Some(Interval::NEG_INFINITY));
-        assert_eq!(Interval::INFINITY.divide(4.0).ok(), Some(Interval::INFINITY));
+        assert_eq!(
+            day.multiply(f64::NEG_INFINITY).ok(),
+            Some(Interval::NEG_INFINITY)
+        );
+        assert_eq!(
+            Interval::INFINITY.divide(4.0).ok(),
+            Some(Interval::INFINITY)
+        );
         assert!(Interval::INFINITY.divide(f64::INFINITY).is_err());
         assert_eq!(day.divide(f64::INFINITY).ok(), Some(Interval::default()));
-        assert_eq!(Interval::INFINITY.justify_interval().ok(), Some(Interval::INFINITY));
         assert_eq!(
-            Interval::INFINITY.with_modifier(Some(IntervalFields::Year), Some(0)).ok(),
+            Interval::INFINITY.justify_interval().ok(),
+            Some(Interval::INFINITY)
+        );
+        assert_eq!(
+            Interval::INFINITY
+                .with_modifier(Some(IntervalFields::Year), Some(0))
+                .ok(),
             Some(Interval::INFINITY)
         );
         assert!(add_to_timestamp(0, Interval::INFINITY).is_err());
-        assert!(Interval::parse("2147483647 mons 2147483647 days 2562047788:00:54.775807", None).is_err());
+        assert!(
+            Interval::parse(
+                "2147483647 mons 2147483647 days 2562047788:00:54.775807",
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

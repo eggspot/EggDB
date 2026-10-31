@@ -1,6 +1,6 @@
 use crate::ast::{
-    AlterRoutine, AlterRoutineAction, CreateRoutine, DropRoutine, DropTrigger, Name,
-    RoutineTarget, Statement, TriggerName,
+    AlterRoutine, AlterRoutineAction, CreateRoutine, DropRoutine, DropTrigger, Name, RoutineTarget,
+    Statement, TriggerName,
 };
 use crate::dialect::Dialect;
 use crate::encoding::{decode_routines, encode_routines, prefix_end, routine_key, routines_prefix};
@@ -23,10 +23,10 @@ mod sqlserver;
 pub(crate) use calls::{
     DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_outputs,
     called_name, default_argument, default_value, evaluate, exprs_call_marked_routine,
-    insert_calls_marked_routine, is_default_argument, marked_call,
-    mentions_routine_call, prepare_delete, prepare_insert, prepare_query, prepare_select,
-    prepare_update, query_calls_marked_routine, run_do, select_calls_marked_routine,
-    select_calls_volatile, select_may_write,
+    insert_calls_marked_routine, is_default_argument, marked_call, mentions_routine_call,
+    prepare_delete, prepare_insert, prepare_query, prepare_select, prepare_update,
+    query_calls_marked_routine, run_do, select_calls_marked_routine, select_calls_volatile,
+    select_may_write,
 };
 
 pub(crate) const MAX_ROUTINE_TEXT: usize = 1 << 20;
@@ -231,6 +231,7 @@ impl RoutineDefinition {
         format!("{}({})", display(&self.name), self.identity())
     }
 
+    #[cfg(test)]
     pub(crate) fn required_inputs(&self) -> usize {
         self.parameters
             .iter()
@@ -623,7 +624,11 @@ pub(crate) fn create_routine(
     match routines.iter().position(|known| known.identity == identity) {
         Some(at) => {
             if !create.replace {
-                return Err(duplicate(definition.kind, &definition.name, create.name.position));
+                return Err(duplicate(
+                    definition.kind,
+                    &definition.name,
+                    create.name.position,
+                ));
             }
             let existing = parse_definition(&routines[at].text, routines[at].dialect)?;
             if existing.kind != definition.kind {
@@ -821,8 +826,10 @@ pub(crate) fn alter_routine(
         }
         AlterRoutineAction::SetSchema(schema) => {
             if !crate::schemas::schema_exists(&*writer, &schema.text)? {
-                return Err(crate::schemas::missing_schema(&schema.text, Dialect::PostgreSql)
-                    .at(schema.position));
+                return Err(
+                    crate::schemas::missing_schema(&schema.text, Dialect::PostgreSql)
+                        .at(schema.position),
+                );
             }
             qualified(&schema.text, base_name(&located.name))
         }
@@ -842,7 +849,10 @@ pub(crate) fn alter_routine(
         ));
     };
     let mut to = stored(&*writer, &new_name)?;
-    if to.iter().any(|routine| routine.identity == located.identity) {
+    if to
+        .iter()
+        .any(|routine| routine.identity == located.identity)
+    {
         return Err(SqlError::new(
             SqlState::DUPLICATE_FUNCTION,
             format!(

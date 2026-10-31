@@ -1,3 +1,5 @@
+//! PostgreSQL clients over TLS: SSLRequest, direct TLS with ALPN and channel binding.
+
 mod common;
 
 use common::{DATABASE, PASSWORD, TestServer, USER, cstring};
@@ -25,7 +27,8 @@ fn tls_server() -> TestServer {
         not_after_unix_seconds: now + 3_600,
     };
     let (certificate, key) =
-        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill).expect("certificate");
+        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill)
+            .expect("certificate");
     let mut config = ServerConfig::new(vec![certificate], key).expect("TLS config");
     config.application_protocols = vec![b"postgresql".to_vec()];
     TestServer::start_with_tls(Arc::new(config))
@@ -33,7 +36,9 @@ fn tls_server() -> TestServer {
 
 fn tcp(address: SocketAddr) -> TcpStream {
     let stream = TcpStream::connect(address).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(20))).expect("timeout");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
     stream
 }
 
@@ -82,12 +87,20 @@ fn read_message(stream: &mut impl Read) -> Option<(u8, Vec<u8>)> {
     Some((header[0], body))
 }
 
-fn scram_login(stream: &mut (impl Read + Write), mechanism: &str, binding: Option<&[u8]>) -> (u8, Vec<u8>) {
+fn scram_login(
+    stream: &mut (impl Read + Write),
+    mechanism: &str,
+    binding: Option<&[u8]>,
+) -> (u8, Vec<u8>) {
     let (tag, body) = read_message(stream).expect("authentication request");
     assert_eq!(tag, b'R');
     assert_eq!(&body[..4], &10i32.to_be_bytes());
     assert_eq!(&body[4..], b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0");
-    let gs2_header = if mechanism.ends_with("-PLUS") { "p=tls-server-end-point,," } else { "y,," };
+    let gs2_header = if mechanism.ends_with("-PLUS") {
+        "p=tls-server-end-point,,"
+    } else {
+        "y,,"
+    };
     let client_nonce = "fyko+d2lbbFgONRv9qkxdawL";
     let client_first_bare = format!("n=,r={client_nonce}");
     let client_first = format!("{gs2_header}{client_first_bare}");
@@ -121,8 +134,16 @@ fn scram_login(stream: &mut (impl Read + Write), mechanism: &str, binding: Optio
     let without_proof = format!("c={},r={nonce}", base64_encode(&channel));
     let auth_message = format!("{client_first_bare},{server_first},{without_proof}");
     let signature = hmac_sha256(&stored_key, auth_message.as_bytes());
-    let proof: Vec<u8> = client_key.iter().zip(signature).map(|(key, signed)| key ^ signed).collect();
-    send(stream, b'p', format!("{without_proof},p={}", base64_encode(&proof)).as_bytes());
+    let proof: Vec<u8> = client_key
+        .iter()
+        .zip(signature)
+        .map(|(key, signed)| key ^ signed)
+        .collect();
+    send(
+        stream,
+        b'p',
+        format!("{without_proof},p={}", base64_encode(&proof)).as_bytes(),
+    );
     let (tag, body) = read_message(stream).expect("SASL final");
     if tag == b'E' {
         return (tag, body);
@@ -152,7 +173,10 @@ fn query_one(stream: &mut (impl Read + Write)) -> String {
 fn ssl_request_then_scram_plus_logs_in_and_runs_a_query() {
     let server = tls_server();
     let mut stream = after_ssl_request(server.address);
-    let binding = stream.info().tls_server_end_point().expect("channel binding");
+    let binding = stream
+        .info()
+        .tls_server_end_point()
+        .expect("channel binding");
     send_startup(&mut stream);
     let (tag, body) = scram_login(&mut stream, "SCRAM-SHA-256-PLUS", Some(&binding));
     assert_eq!(tag, b'R', "{}", String::from_utf8_lossy(&body));
@@ -181,10 +205,19 @@ fn a_client_claiming_no_server_binding_support_is_refused_over_tls() {
 #[test]
 fn direct_tls_with_the_postgresql_protocol_logs_in() {
     let server = tls_server();
-    let mut stream =
-        TlsStream::connect(tcp(server.address), &client_config(vec![b"postgresql".to_vec()])).expect("direct TLS");
-    assert_eq!(stream.info().application_protocol, Some(b"postgresql".to_vec()));
-    let binding = stream.info().tls_server_end_point().expect("channel binding");
+    let mut stream = TlsStream::connect(
+        tcp(server.address),
+        &client_config(vec![b"postgresql".to_vec()]),
+    )
+    .expect("direct TLS");
+    assert_eq!(
+        stream.info().application_protocol,
+        Some(b"postgresql".to_vec())
+    );
+    let binding = stream
+        .info()
+        .tls_server_end_point()
+        .expect("channel binding");
     send_startup(&mut stream);
     let (tag, _) = scram_login(&mut stream, "SCRAM-SHA-256-PLUS", Some(&binding));
     assert_eq!(tag, b'R');
@@ -194,7 +227,8 @@ fn direct_tls_with_the_postgresql_protocol_logs_in() {
 #[test]
 fn direct_tls_without_alpn_is_closed() {
     let server = tls_server();
-    let mut stream = TlsStream::connect(tcp(server.address), &client_config(Vec::new())).expect("handshake");
+    let mut stream =
+        TlsStream::connect(tcp(server.address), &client_config(Vec::new())).expect("handshake");
     send_startup(&mut stream);
     assert!(read_message(&mut stream).is_none());
 }

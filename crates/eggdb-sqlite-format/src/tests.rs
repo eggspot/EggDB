@@ -14,7 +14,11 @@ fn put_varint(out: &mut Vec<u8>, value: u64) {
         rest >>= 7;
     }
     for (index, group) in groups.iter().rev().enumerate() {
-        out.push(if index + 1 < groups.len() { group | 0x80 } else { *group });
+        out.push(if index + 1 < groups.len() {
+            group | 0x80
+        } else {
+            *group
+        });
     }
 }
 
@@ -138,14 +142,25 @@ fn a_hand_built_database_reads_its_schema_and_rows() {
 
 #[test]
 fn varints_and_serial_types_follow_the_format() {
-    for value in [0u64, 0x7f, 0x80, 0x3fff, 0x4000, u64::from(u32::MAX), u64::MAX >> 8] {
+    for value in [
+        0u64,
+        0x7f,
+        0x80,
+        0x3fff,
+        0x4000,
+        u64::from(u32::MAX),
+        u64::MAX >> 8,
+    ] {
         let mut bytes = Vec::new();
         put_varint(&mut bytes, value);
         let mut at = 0;
         assert_eq!(varint(&bytes, &mut at).unwrap(), value);
         assert_eq!(at, bytes.len());
     }
-    assert_eq!(value_of(3, &[0xff, 0xff, 0xfe]).unwrap(), (SqliteValue::Integer(-2), 3));
+    assert_eq!(
+        value_of(3, &[0xff, 0xff, 0xfe]).unwrap(),
+        (SqliteValue::Integer(-2), 3)
+    );
     assert_eq!(value_of(8, &[]).unwrap().0, SqliteValue::Integer(0));
     assert!(value_of(10, &[]).is_err());
     assert!(value_of(6, &[0; 4]).is_err());

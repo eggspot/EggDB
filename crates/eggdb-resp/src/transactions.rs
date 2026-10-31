@@ -11,20 +11,34 @@ struct OpenTransaction<'t> {
 }
 
 impl Keyspace for OpenTransaction<'_> {
-    fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String> {
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String> {
         if db != self.db {
             return Err("ERR a transaction uses one database: SELECT before MULTI".to_owned());
         }
-        let keys = self.keys.try_borrow().map_err(|_| "ERR the transaction is busy".to_owned())?;
+        let keys = self
+            .keys
+            .try_borrow()
+            .map_err(|_| "ERR the transaction is busy".to_owned())?;
         let read: &dyn KeysRead = &**keys;
         body(read)
     }
 
-    fn write(&self, db: u32, body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>) -> Result<(), String> {
+    fn write(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String> {
         if db != self.db {
             return Err("ERR a transaction uses one database: SELECT before MULTI".to_owned());
         }
-        let mut keys = self.keys.try_borrow_mut().map_err(|_| "ERR the transaction is busy".to_owned())?;
+        let mut keys = self
+            .keys
+            .try_borrow_mut()
+            .map_err(|_| "ERR the transaction is busy".to_owned())?;
         body(&mut **keys)
     }
 }
@@ -35,7 +49,9 @@ fn exec(context: &Context<'_>, client: &mut Client) -> Reply {
     };
     let watched = std::mem::take(&mut client.watched);
     if std::mem::take(&mut client.queue_failed) {
-        return Reply::Error("EXECABORT Transaction discarded because of previous errors.".to_owned());
+        return Reply::Error(
+            "EXECABORT Transaction discarded because of previous errors.".to_owned(),
+        );
     }
     let db = client.db;
     let mut replies = None;
@@ -71,7 +87,11 @@ fn exec(context: &Context<'_>, client: &mut Client) -> Reply {
 /// Runs a command with `MULTI`, `EXEC`, `DISCARD`, `WATCH` and `UNWATCH` handled: inside
 /// `MULTI` commands are queued (`+QUEUED`), and `EXEC` runs them all in one transaction of the
 /// engine, or none when a watched key changed.
-pub fn execute_with_transactions(context: &Context<'_>, client: &mut Client, arguments: &[Vec<u8>]) -> Reply {
+pub fn execute_with_transactions(
+    context: &Context<'_>,
+    client: &mut Client,
+    arguments: &[Vec<u8>],
+) -> Reply {
     let name = arguments
         .first()
         .map(|first| String::from_utf8_lossy(first).to_ascii_lowercase())
@@ -131,9 +151,9 @@ pub fn execute_with_transactions(context: &Context<'_>, client: &mut Client, arg
             }
             Reply::Status("QUEUED".to_owned())
         }
-        _ if NOT_IN_MULTI.contains(&name.as_str()) => {
-            Reply::Error(format!("ERR wrong number of arguments for '{name}' command"))
-        }
+        _ if NOT_IN_MULTI.contains(&name.as_str()) => Reply::Error(format!(
+            "ERR wrong number of arguments for '{name}' command"
+        )),
         _ => execute(context, client, arguments),
     }
 }

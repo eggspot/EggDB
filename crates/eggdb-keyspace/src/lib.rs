@@ -6,6 +6,11 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+/// Keys and their stored bytes, in key order.
+pub type Entries = Vec<(Vec<u8>, Vec<u8>)>;
+
+type Database = BTreeMap<Vec<u8>, Vec<u8>>;
+
 /// Reads one database's keys within a transaction.
 pub trait KeysRead {
     /// The stored bytes of `key`.
@@ -13,7 +18,7 @@ pub trait KeysRead {
     /// Every key, in byte order.
     fn keys(&self) -> Result<Vec<Vec<u8>>, String>;
     /// Every key starting with `prefix` and its stored bytes, in key order.
-    fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+    fn scan(&self, prefix: &[u8]) -> Result<Entries, String> {
         let mut found = Vec::new();
         for key in self.keys()? {
             if key.starts_with(prefix)
@@ -40,15 +45,23 @@ pub trait KeysWrite: KeysRead {
 /// transaction, so it is atomic. A write whose body fails changes nothing.
 pub trait Keyspace {
     /// Runs `body` on a snapshot of database `db`.
-    fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String>;
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String>;
     /// Runs `body` in a write transaction on database `db`, committing when it succeeds.
-    fn write(&self, db: u32, body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>) -> Result<(), String>;
+    fn write(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String>;
 }
 
 /// A keyspace in memory, for tests and for servers that keep no file.
 #[derive(Debug, Default)]
 pub struct MemoryKeyspace {
-    databases: Mutex<BTreeMap<u32, BTreeMap<Vec<u8>, Vec<u8>>>>,
+    databases: Mutex<BTreeMap<u32, Database>>,
 }
 
 struct MemoryKeys<'a> {
@@ -91,14 +104,28 @@ impl KeysWrite for MemoryKeys<'_> {
 }
 
 impl Keyspace for MemoryKeyspace {
-    fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String> {
-        let mut databases = self.databases.lock().map_err(|_| "the keyspace failed".to_owned())?;
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut databases = self
+            .databases
+            .lock()
+            .map_err(|_| "the keyspace failed".to_owned())?;
         let mut snapshot = databases.entry(db).or_default().clone();
         body(&MemoryKeys { map: &mut snapshot })
     }
 
-    fn write(&self, db: u32, body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>) -> Result<(), String> {
-        let mut databases = self.databases.lock().map_err(|_| "the keyspace failed".to_owned())?;
+    fn write(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut databases = self
+            .databases
+            .lock()
+            .map_err(|_| "the keyspace failed".to_owned())?;
         let current = databases.entry(db).or_default();
         let mut changed = current.clone();
         body(&mut MemoryKeys { map: &mut changed })?;

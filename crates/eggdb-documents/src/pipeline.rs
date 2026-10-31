@@ -51,7 +51,17 @@ pub enum Stage {
     ReplaceRoot(Bson),
 }
 
-const ACCUMULATORS: [&str; 9] = ["$sum", "$avg", "$min", "$max", "$first", "$last", "$push", "$addToSet", "$count"];
+const ACCUMULATORS: [&str; 9] = [
+    "$sum",
+    "$avg",
+    "$min",
+    "$max",
+    "$first",
+    "$last",
+    "$push",
+    "$addToSet",
+    "$count",
+];
 
 fn not_supported(name: &str) -> DocumentError {
     DocumentError::not_implemented(format!("the {name} stage is not supported yet"))
@@ -60,24 +70,32 @@ fn not_supported(name: &str) -> DocumentError {
 fn whole_number(value: &Bson, stage: &str) -> DocumentResult<u64> {
     match value.as_i64() {
         Some(number) if number >= 0 => Ok(number as u64),
-        _ => Err(DocumentError::bad_value(format!("invalid argument to {stage} stage: needs a non-negative whole number"))),
+        _ => Err(DocumentError::bad_value(format!(
+            "invalid argument to {stage} stage: needs a non-negative whole number"
+        ))),
     }
 }
 
 fn path_of(value: &Bson, stage: &str) -> DocumentResult<String> {
     match value.as_str().and_then(|text| text.strip_prefix('$')) {
         Some(path) if !path.is_empty() && !path.starts_with('$') => Ok(path.to_owned()),
-        _ => Err(DocumentError::bad_value(format!("{stage} needs a field path starting with '$'"))),
+        _ => Err(DocumentError::bad_value(format!(
+            "{stage} needs a field path starting with '$'"
+        ))),
     }
 }
 
 fn parse_stage(stage: &Document) -> DocumentResult<Stage> {
     let Some((name, argument)) = stage.first().filter(|_| stage.len() == 1) else {
-        return Err(DocumentError::bad_value("A pipeline stage specification object must contain exactly one field."));
+        return Err(DocumentError::bad_value(
+            "A pipeline stage specification object must contain exactly one field.",
+        ));
     };
     let document_argument = || match argument {
         Bson::Document(inner) => Ok(inner.clone()),
-        _ => Err(DocumentError::bad_value(format!("the {name} stage's specification must be an object"))),
+        _ => Err(DocumentError::bad_value(format!(
+            "the {name} stage's specification must be an object"
+        ))),
     };
     Ok(match name.as_str() {
         "$match" => Stage::Match(parse_filter(&document_argument()?)?),
@@ -87,9 +105,19 @@ fn parse_stage(stage: &Document) -> DocumentResult<Stage> {
             Bson::String(path) => vec![path.clone()],
             Bson::Array(items) => items
                 .iter()
-                .map(|item| item.as_str().map(str::to_owned).ok_or_else(|| DocumentError::bad_value("$unset specification must be a string or an array of strings")))
+                .map(|item| {
+                    item.as_str().map(str::to_owned).ok_or_else(|| {
+                        DocumentError::bad_value(
+                            "$unset specification must be a string or an array of strings",
+                        )
+                    })
+                })
                 .collect::<DocumentResult<_>>()?,
-            _ => return Err(DocumentError::bad_value("$unset specification must be a string or an array of strings")),
+            _ => {
+                return Err(DocumentError::bad_value(
+                    "$unset specification must be a string or an array of strings",
+                ));
+            }
         }),
         "$sort" => Stage::Sort(parse_sort(&document_argument()?)?),
         "$skip" => Stage::Skip(whole_number(argument, "$skip")?),
@@ -98,48 +126,85 @@ fn parse_stage(stage: &Document) -> DocumentResult<Stage> {
             limit => Stage::Limit(limit),
         },
         "$count" => match argument.as_str() {
-            Some(field) if !field.is_empty() && !field.starts_with('$') && !field.contains('.') => Stage::Count(field.to_owned()),
-            _ => return Err(DocumentError::bad_value("the count field must be a non-empty string without '$' or '.'")),
+            Some(field) if !field.is_empty() && !field.starts_with('$') && !field.contains('.') => {
+                Stage::Count(field.to_owned())
+            }
+            _ => {
+                return Err(DocumentError::bad_value(
+                    "the count field must be a non-empty string without '$' or '.'",
+                ));
+            }
         },
         "$group" => {
             let spec = document_argument()?;
             let Some(key) = spec.get("_id").cloned() else {
-                return Err(DocumentError::failed_to_parse("a group specification must include an _id"));
+                return Err(DocumentError::failed_to_parse(
+                    "a group specification must include an _id",
+                ));
             };
             let mut accumulators = Vec::new();
             for (field, accumulator) in spec.iter().filter(|(field, _)| *field != "_id") {
-                let Some((operator, expression)) = accumulator.as_document().and_then(Document::first) else {
-                    return Err(DocumentError::bad_value(format!("The field '{field}' must be an accumulator object")));
+                let Some((operator, expression)) =
+                    accumulator.as_document().and_then(Document::first)
+                else {
+                    return Err(DocumentError::bad_value(format!(
+                        "The field '{field}' must be an accumulator object"
+                    )));
                 };
                 if !ACCUMULATORS.contains(&operator.as_str()) {
-                    return Err(DocumentError::bad_value(format!("unknown group operator '{operator}'")));
+                    return Err(DocumentError::bad_value(format!(
+                        "unknown group operator '{operator}'"
+                    )));
                 }
                 accumulators.push((field.clone(), operator.clone(), expression.clone()));
             }
             Stage::Group(key, accumulators)
         }
         "$unwind" => match argument {
-            Bson::String(_) => Stage::Unwind { path: path_of(argument, "$unwind")?, index_field: None, preserve_empty: false },
+            Bson::String(_) => Stage::Unwind {
+                path: path_of(argument, "$unwind")?,
+                index_field: None,
+                preserve_empty: false,
+            },
             Bson::Document(spec) => Stage::Unwind {
                 path: path_of(spec.get("path").unwrap_or(&Bson::Null), "$unwind")?,
                 index_field: spec.get_str("includeArrayIndex").map(str::to_owned),
                 preserve_empty: spec.get_bool("preserveNullAndEmptyArrays") == Some(true),
             },
-            _ => return Err(DocumentError::bad_value("expected either a string or an object as specification for $unwind stage")),
+            _ => {
+                return Err(DocumentError::bad_value(
+                    "expected either a string or an object as specification for $unwind stage",
+                ));
+            }
         },
         "$lookup" => {
             let spec = document_argument()?;
             if spec.contains_key("pipeline") {
-                return Err(DocumentError::not_implemented("$lookup with a pipeline is not supported yet"));
+                return Err(DocumentError::not_implemented(
+                    "$lookup with a pipeline is not supported yet",
+                ));
             }
             let field = |name: &str| {
-                spec.get_str(name).map(str::to_owned).ok_or_else(|| DocumentError::failed_to_parse(format!("$lookup needs the string field '{name}'")))
+                spec.get_str(name).map(str::to_owned).ok_or_else(|| {
+                    DocumentError::failed_to_parse(format!(
+                        "$lookup needs the string field '{name}'"
+                    ))
+                })
             };
-            Stage::Lookup { from: field("from")?, local_field: field("localField")?, foreign_field: field("foreignField")?, as_field: field("as")? }
+            Stage::Lookup {
+                from: field("from")?,
+                local_field: field("localField")?,
+                foreign_field: field("foreignField")?,
+                as_field: field("as")?,
+            }
         }
         "$replaceRoot" => match document_argument()?.get("newRoot") {
             Some(root) => Stage::ReplaceRoot(root.clone()),
-            None => return Err(DocumentError::failed_to_parse("no newRoot specified for the $replaceRoot stage")),
+            None => {
+                return Err(DocumentError::failed_to_parse(
+                    "no newRoot specified for the $replaceRoot stage",
+                ));
+            }
         },
         "$replaceWith" => Stage::ReplaceRoot(argument.clone()),
         other => return Err(not_supported(other)),
@@ -152,11 +217,19 @@ pub fn parse_pipeline(stages: &[Bson]) -> DocumentResult<Vec<Stage>> {
     let mut out = Vec::new();
     for stage in stages {
         let Bson::Document(stage) = stage else {
-            return Err(DocumentError::type_mismatch("Each element of the 'pipeline' array must be an object"));
+            return Err(DocumentError::type_mismatch(
+                "Each element of the 'pipeline' array must be an object",
+            ));
         };
         if let Some(expression) = stage.get("$sortByCount").filter(|_| stage.len() == 1) {
-            out.push(Stage::Group(expression.clone(), vec![("count".to_owned(), "$sum".to_owned(), Bson::Int32(1))]));
-            out.push(Stage::Sort(parse_sort(&Document::from_entries(vec![("count".to_owned(), Bson::Int32(-1))]))?));
+            out.push(Stage::Group(
+                expression.clone(),
+                vec![("count".to_owned(), "$sum".to_owned(), Bson::Int32(1))],
+            ));
+            out.push(Stage::Sort(parse_sort(&Document::from_entries(vec![(
+                "count".to_owned(),
+                Bson::Int32(-1),
+            )]))?));
             continue;
         }
         out.push(parse_stage(stage)?);
@@ -180,25 +253,46 @@ enum ProjectedField {
 
 fn projected_field(value: &Bson) -> ProjectedField {
     match value {
-        Bson::Boolean(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_) => {
-            if value.is_truthy() { ProjectedField::Include } else { ProjectedField::Exclude }
+        Bson::Boolean(_)
+        | Bson::Int32(_)
+        | Bson::Int64(_)
+        | Bson::Double(_)
+        | Bson::Decimal128(_) => {
+            if value.is_truthy() {
+                ProjectedField::Include
+            } else {
+                ProjectedField::Exclude
+            }
         }
         _ => ProjectedField::Computed,
     }
 }
 
 fn project(document: &Document, spec: &Document) -> DocumentResult<Document> {
-    let fields: Vec<(&String, &Bson, ProjectedField)> =
-        spec.iter().filter(|(name, _)| *name != "_id").map(|(name, value)| (name, value, projected_field(value))).collect();
+    let fields: Vec<(&String, &Bson, ProjectedField)> = spec
+        .iter()
+        .filter(|(name, _)| *name != "_id")
+        .map(|(name, value)| (name, value, projected_field(value)))
+        .collect();
     let id_kind = spec.get("_id").map(projected_field);
-    let excluding = fields.iter().any(|(_, _, kind)| *kind == ProjectedField::Exclude)
+    let excluding = fields
+        .iter()
+        .any(|(_, _, kind)| *kind == ProjectedField::Exclude)
         || (fields.is_empty() && id_kind == Some(ProjectedField::Exclude));
     if excluding {
-        if let Some((name, _, _)) = fields.iter().find(|(_, _, kind)| *kind != ProjectedField::Exclude) {
-            return Err(DocumentError::bad_value(format!("Invalid $project :: caused by :: Cannot do inclusion on field {name} in exclusion projection")));
+        if let Some((name, _, _)) = fields
+            .iter()
+            .find(|(_, _, kind)| *kind != ProjectedField::Exclude)
+        {
+            return Err(DocumentError::bad_value(format!(
+                "Invalid $project :: caused by :: Cannot do inclusion on field {name} in exclusion projection"
+            )));
         }
         let mut out = document.clone();
-        let dropped = fields.iter().map(|(name, _, _)| name.as_str()).chain((id_kind == Some(ProjectedField::Exclude)).then_some("_id"));
+        let dropped = fields
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .chain((id_kind == Some(ProjectedField::Exclude)).then_some("_id"));
         for path in dropped {
             if let Ok(Some(target)) = slot(&mut out, path, false) {
                 target.remove();
@@ -221,7 +315,11 @@ fn project(document: &Document, spec: &Document) -> DocumentResult<Document> {
         }
     }
     for (path, value, kind) in fields {
-        let result = if kind == ProjectedField::Include { field_value(document, path) } else { evaluate(value, document)? };
+        let result = if kind == ProjectedField::Include {
+            field_value(document, path)
+        } else {
+            evaluate(value, document)?
+        };
         if let Some(result) = result {
             set_path(&mut out, path, result)?;
         }
@@ -238,19 +336,33 @@ struct Group {
     inputs: Vec<Vec<Option<Bson>>>,
 }
 
-fn run_group(documents: Vec<Document>, key: &Bson, accumulators: &[(String, String, Bson)]) -> DocumentResult<Vec<Document>> {
+fn run_group(
+    documents: Vec<Document>,
+    key: &Bson,
+    accumulators: &[(String, String, Bson)],
+) -> DocumentResult<Vec<Document>> {
     let mut groups: Vec<Group> = Vec::new();
     for document in &documents {
         let value = group_key(evaluate(key, document)?);
-        let at = match groups.iter().position(|group| compare(&group.key, &value) == Ordering::Equal) {
+        let at = match groups
+            .iter()
+            .position(|group| compare(&group.key, &value) == Ordering::Equal)
+        {
             Some(at) => at,
             None => {
-                groups.push(Group { key: value, inputs: vec![Vec::new(); accumulators.len()] });
+                groups.push(Group {
+                    key: value,
+                    inputs: vec![Vec::new(); accumulators.len()],
+                });
                 groups.len() - 1
             }
         };
         for (slot, (_, operator, expression)) in groups[at].inputs.iter_mut().zip(accumulators) {
-            let input = if operator == "$count" { Some(Bson::Int32(1)) } else { evaluate(expression, document)? };
+            let input = if operator == "$count" {
+                Some(Bson::Int32(1))
+            } else {
+                evaluate(expression, document)?
+            };
             slot.push(input);
         }
     }
@@ -268,7 +380,10 @@ fn run_group(documents: Vec<Document>, key: &Bson, accumulators: &[(String, Stri
                 _ => {
                     let mut unique: Vec<Bson> = Vec::new();
                     for value in present {
-                        if !unique.iter().any(|held| compare(held, &value) == Ordering::Equal) {
+                        if !unique
+                            .iter()
+                            .any(|held| compare(held, &value) == Ordering::Equal)
+                        {
                             unique.push(value);
                         }
                     }
@@ -282,7 +397,12 @@ fn run_group(documents: Vec<Document>, key: &Bson, accumulators: &[(String, Stri
     Ok(out)
 }
 
-fn unwind(documents: Vec<Document>, path: &str, index_field: Option<&str>, preserve_empty: bool) -> DocumentResult<Vec<Document>> {
+fn unwind(
+    documents: Vec<Document>,
+    path: &str,
+    index_field: Option<&str>,
+    preserve_empty: bool,
+) -> DocumentResult<Vec<Document>> {
     let mut out = Vec::new();
     for document in documents {
         match crate::path::get_exact(&document, path).cloned() {
@@ -332,7 +452,11 @@ fn lookup_values(document: &Document, path: &str) -> Vec<Bson> {
 
 /// Runs `stages` over `input`; `load` reads another collection of the same database for
 /// `$lookup`.
-pub fn run_pipeline(stages: &[Stage], input: Vec<Document>, load: &dyn Fn(&str) -> DocumentResult<Vec<Document>>) -> DocumentResult<Vec<Document>> {
+pub fn run_pipeline(
+    stages: &[Stage],
+    input: Vec<Document>,
+    load: &dyn Fn(&str) -> DocumentResult<Vec<Document>>,
+) -> DocumentResult<Vec<Document>> {
     let mut documents = input;
     for stage in stages {
         documents = match stage {

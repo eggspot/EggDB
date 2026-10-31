@@ -37,19 +37,20 @@
 mod backend_keys;
 pub mod client;
 mod connection;
-mod notifications;
 pub mod messages;
+mod notifications;
+pub mod replication;
 mod server;
 pub mod types;
 mod wire;
-pub mod replication;
 
 pub use connection::{MAX_AUTHENTICATION_MESSAGE_BYTES, MAX_MESSAGE_BYTES};
 pub use eggdb_auth::scram::{
-    MIN_SCRAM_ITERATIONS, SCRAM_SALT_BYTES, SCRAM_SHA_256, SCRAM_SHA_256_PLUS, ScramExchange, ScramFailure,
-    ScramVerifier,
+    MIN_SCRAM_ITERATIONS, SCRAM_SALT_BYTES, SCRAM_SHA_256, SCRAM_SHA_256_PLUS, ScramExchange,
+    ScramFailure, ScramVerifier,
 };
 pub use server::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
-    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve, serve_databases, serve_with_local,
+    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve,
+    serve_databases, serve_with_local,
 };

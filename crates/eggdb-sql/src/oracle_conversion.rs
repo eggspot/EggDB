@@ -14,10 +14,9 @@ fn nls_models(target: SqlType) -> Option<Vec<(String, ModelUse)>> {
         SqlType::Date | SqlType::Timestamp(Some(0)) => vec![date],
         SqlType::Timestamp(None) => vec![date, timestamp],
         SqlType::Timestamp(_) => vec![timestamp],
-        SqlType::TimestampTz(_) => vec![(
-            nls.timestamp_tz_format().to_owned(),
-            ModelUse::ZonedInput,
-        )],
+        SqlType::TimestampTz(_) => {
+            vec![(nls.timestamp_tz_format().to_owned(), ModelUse::ZonedInput)]
+        }
         _ => return None,
     })
 }

@@ -14,8 +14,7 @@ mod port {
     use std::io;
     use std::net::{SocketAddr, TcpStream};
     use std::os::windows::io::{
-        AsRawHandle, AsRawSocket, FromRawHandle, FromRawSocket, OwnedHandle, OwnedSocket,
-        RawHandle,
+        AsRawHandle, AsRawSocket, FromRawHandle, FromRawSocket, OwnedHandle, OwnedSocket, RawHandle,
     };
     use std::ptr;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -184,13 +183,7 @@ mod port {
             wait: i32,
             flags: *mut u32,
         ) -> i32;
-        fn setsockopt(
-            socket: usize,
-            level: i32,
-            name: i32,
-            value: *const c_void,
-            len: i32,
-        ) -> i32;
+        fn setsockopt(socket: usize, level: i32, name: i32, value: *const c_void, len: i32) -> i32;
         fn bind(socket: usize, name: *const c_void, len: i32) -> i32;
     }
 
@@ -213,7 +206,8 @@ mod port {
             if started == 0 {
                 Ok(Self)
             } else {
-                Err(Error::from(io::Error::from_raw_os_error(started)).with_kind(ErrorKind::Unsupported))
+                Err(Error::from(io::Error::from_raw_os_error(started))
+                    .with_kind(ErrorKind::Unsupported))
             }
         }
     }
@@ -299,10 +293,14 @@ mod port {
             let extensions = Extensions {
                 // SAFETY: the pointer Winsock hands out for WSAID_ACCEPTEX has AcceptEx's
                 // signature.
-                accept: unsafe { std::mem::transmute::<usize, AcceptEx>(extension(&probe, WSAID_ACCEPTEX)?) },
+                accept: unsafe {
+                    std::mem::transmute::<usize, AcceptEx>(extension(&probe, WSAID_ACCEPTEX)?)
+                },
                 // SAFETY: the pointer Winsock hands out for WSAID_CONNECTEX has ConnectEx's
                 // signature.
-                connect: unsafe { std::mem::transmute::<usize, ConnectEx>(extension(&probe, WSAID_CONNECTEX)?) },
+                connect: unsafe {
+                    std::mem::transmute::<usize, ConnectEx>(extension(&probe, WSAID_CONNECTEX)?)
+                },
             };
             Ok(Self {
                 id: NEXT_PORT_ID.fetch_add(1, Ordering::Relaxed),
@@ -370,7 +368,9 @@ mod port {
                             return Ok(());
                         }
                         let rounded_up = left.as_nanos().div_ceil(1_000_000);
-                        u32::try_from(rounded_up).unwrap_or(INFINITE - 1).min(INFINITE - 1)
+                        u32::try_from(rounded_up)
+                            .unwrap_or(INFINITE - 1)
+                            .min(INFINITE - 1)
                     }
                 };
                 self.dequeue(completions, milliseconds)?;
@@ -398,7 +398,10 @@ mod port {
             found
         }
 
-        fn start(&mut self, pending: Box<Pending>) -> core::result::Result<(), (Box<Pending>, Error)> {
+        fn start(
+            &mut self,
+            pending: Box<Pending>,
+        ) -> core::result::Result<(), (Box<Pending>, Error)> {
             let mut pending = pending;
             if let Err(error) = self.prepare(&mut pending) {
                 return Err((pending, error));
@@ -473,7 +476,9 @@ mod port {
                 .0
                 .compare_exchange(0, self.id, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => self.associate(socket).inspect_err(|_| binding.0.store(0, Ordering::Release)),
+                Ok(_) => self
+                    .associate(socket)
+                    .inspect_err(|_| binding.0.store(0, Ordering::Release)),
                 Err(bound) if bound == self.id => Ok(()),
                 Err(_) => Err(Error::new(ErrorKind::Unsupported)),
             }
@@ -527,7 +532,10 @@ mod port {
             let removed = (removed as usize).min(ENTRIES_PER_WAIT);
             for entry in &entries[..removed] {
                 let raw = entry.overlapped.cast::<Pending>();
-                let Some(index) = self.in_port.iter().position(|in_port| in_port.pending == raw)
+                let Some(index) = self
+                    .in_port
+                    .iter()
+                    .position(|in_port| in_port.pending == raw)
                 else {
                     continue;
                 };
@@ -562,7 +570,12 @@ mod port {
     fn cancel_one(in_port: &InPort) {
         // SAFETY: asks the system to cancel one operation that is still in flight on the
         // socket; the overlapped pointer only identifies it.
-        unsafe { CancelIoEx(ptr::without_provenance_mut(in_port.socket), in_port.pending.cast()) };
+        unsafe {
+            CancelIoEx(
+                ptr::without_provenance_mut(in_port.socket),
+                in_port.pending.cast(),
+            )
+        };
     }
 
     unsafe fn begin(raw: *mut Pending, extensions: Extensions) -> io::Result<()> {
@@ -696,7 +709,11 @@ mod port {
         }
     }
 
-    fn completed(pending: &mut Pending, transferred: u32, port_id: u64) -> Result<NetOutput<OsStream>> {
+    fn completed(
+        pending: &mut Pending,
+        transferred: u32,
+        port_id: u64,
+    ) -> Result<NetOutput<OsStream>> {
         let listening = pending.socket;
         match (&pending.op, pending.new_socket.take()) {
             (NetOp::Accept { .. }, Some(accepted)) => {
@@ -716,12 +733,18 @@ mod port {
             (NetOp::Receive { .. } | NetOp::Send { .. }, _) => {
                 Ok(NetOutput::Transferred(transferred as usize))
             }
-            (NetOp::Accept { .. } | NetOp::Connect { .. }, None) => Err(Error::new(ErrorKind::Other)),
+            (NetOp::Accept { .. } | NetOp::Connect { .. }, None) => {
+                Err(Error::new(ErrorKind::Other))
+            }
         }
     }
 
     fn update_context(socket: usize, option: i32, value: &[u8]) -> io::Result<()> {
-        let value_ptr = if value.is_empty() { ptr::null() } else { value.as_ptr().cast() };
+        let value_ptr = if value.is_empty() {
+            ptr::null()
+        } else {
+            value.as_ptr().cast()
+        };
         // SAFETY: `value` holds `value.len()` bytes read only during the call.
         let set = unsafe { setsockopt(socket, SOL_SOCKET, option, value_ptr, value.len() as i32) };
         if set == SOCKET_ERROR {

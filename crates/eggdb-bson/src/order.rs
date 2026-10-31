@@ -52,10 +52,10 @@ fn exact_integer(value: &Bson) -> Option<i64> {
 }
 
 fn compare_integer_with_double(integer: i64, double: f64) -> Ordering {
-    if double >= 9.223_372_036_854_775_807e18 {
+    if double >= 9.223_372_036_854_776e18 {
         return Ordering::Less;
     }
-    if double < -9.223_372_036_854_775_808e18 {
+    if double < -9.223_372_036_854_776e18 {
         return Ordering::Greater;
     }
     let whole = double.floor();
@@ -79,7 +79,11 @@ fn compare_documents(left: &Document, right: &Document) -> Ordering {
             return ordering;
         }
     }
-    if right_entries.next().is_some() { Ordering::Less } else { Ordering::Equal }
+    if right_entries.next().is_some() {
+        Ordering::Less
+    } else {
+        Ordering::Equal
+    }
 }
 
 /// Compares two values in MongoDB's documented order: by [`type_rank`] first, numbers of any
@@ -91,7 +95,9 @@ pub fn compare(left: &Bson, right: &Bson) -> Ordering {
     }
     match (left, right) {
         (a, b) if a.is_number() => compare_numbers(a, b),
-        (Bson::String(a) | Bson::Symbol(a), Bson::String(b) | Bson::Symbol(b)) => a.as_bytes().cmp(b.as_bytes()),
+        (Bson::String(a) | Bson::Symbol(a), Bson::String(b) | Bson::Symbol(b)) => {
+            a.as_bytes().cmp(b.as_bytes())
+        }
         (Bson::Document(a), Bson::Document(b)) => compare_documents(a, b),
         (Bson::Array(a), Bson::Array(b)) => {
             for (x, y) in a.iter().zip(b) {
@@ -102,25 +108,64 @@ pub fn compare(left: &Bson, right: &Bson) -> Ordering {
             }
             a.len().cmp(&b.len())
         }
-        (Bson::Binary { subtype: s1, bytes: b1 }, Bson::Binary { subtype: s2, bytes: b2 }) => {
-            b1.len().cmp(&b2.len()).then(s1.cmp(s2)).then_with(|| b1.cmp(b2))
-        }
+        (
+            Bson::Binary {
+                subtype: s1,
+                bytes: b1,
+            },
+            Bson::Binary {
+                subtype: s2,
+                bytes: b2,
+            },
+        ) => b1
+            .len()
+            .cmp(&b2.len())
+            .then(s1.cmp(s2))
+            .then_with(|| b1.cmp(b2)),
         (Bson::ObjectId(a), Bson::ObjectId(b)) => a.cmp(b),
         (Bson::Boolean(a), Bson::Boolean(b)) => a.cmp(b),
         (Bson::DateTime(a), Bson::DateTime(b)) => a.cmp(b),
-        (Bson::Timestamp { time: t1, increment: i1 }, Bson::Timestamp { time: t2, increment: i2 }) => {
-            t1.cmp(t2).then(i1.cmp(i2))
-        }
-        (Bson::Regex { pattern: p1, options: o1 }, Bson::Regex { pattern: p2, options: o2 }) => {
-            p1.cmp(p2).then_with(|| o1.cmp(o2))
-        }
-        (Bson::DbPointer { namespace: n1, id: i1 }, Bson::DbPointer { namespace: n2, id: i2 }) => {
-            n1.cmp(n2).then(i1.cmp(i2))
-        }
+        (
+            Bson::Timestamp {
+                time: t1,
+                increment: i1,
+            },
+            Bson::Timestamp {
+                time: t2,
+                increment: i2,
+            },
+        ) => t1.cmp(t2).then(i1.cmp(i2)),
+        (
+            Bson::Regex {
+                pattern: p1,
+                options: o1,
+            },
+            Bson::Regex {
+                pattern: p2,
+                options: o2,
+            },
+        ) => p1.cmp(p2).then_with(|| o1.cmp(o2)),
+        (
+            Bson::DbPointer {
+                namespace: n1,
+                id: i1,
+            },
+            Bson::DbPointer {
+                namespace: n2,
+                id: i2,
+            },
+        ) => n1.cmp(n2).then(i1.cmp(i2)),
         (Bson::JavaScript(a), Bson::JavaScript(b)) => a.cmp(b),
-        (Bson::JavaScriptWithScope { code: c1, scope: s1 }, Bson::JavaScriptWithScope { code: c2, scope: s2 }) => {
-            c1.cmp(c2).then_with(|| compare_documents(s1, s2))
-        }
+        (
+            Bson::JavaScriptWithScope {
+                code: c1,
+                scope: s1,
+            },
+            Bson::JavaScriptWithScope {
+                code: c2,
+                scope: s2,
+            },
+        ) => c1.cmp(c2).then_with(|| compare_documents(s1, s2)),
         _ => Ordering::Equal,
     }
 }

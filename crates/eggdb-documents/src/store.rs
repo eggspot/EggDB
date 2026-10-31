@@ -75,13 +75,22 @@ pub enum Modification {
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Checks a database name as MongoDB restricts it.
 pub fn check_database_name(name: &str) -> DocumentResult<()> {
-    if name.is_empty() || name.len() >= 64 || name.chars().any(|character| "/\\. \"$*<>:|?\0".contains(character)) {
-        return Err(DocumentError::invalid_namespace(format!("Invalid database name: '{name}'")));
+    if name.is_empty()
+        || name.len() >= 64
+        || name
+            .chars()
+            .any(|character| "/\\. \"$*<>:|?\0".contains(character))
+    {
+        return Err(DocumentError::invalid_namespace(format!(
+            "Invalid database name: '{name}'"
+        )));
     }
     Ok(())
 }
@@ -89,7 +98,9 @@ pub fn check_database_name(name: &str) -> DocumentResult<()> {
 /// Checks a collection name as MongoDB restricts it.
 pub fn check_collection_name(name: &str) -> DocumentResult<()> {
     if name.is_empty() || name.len() > 255 || name.contains(['\0', '$']) || name.starts_with('.') {
-        return Err(DocumentError::invalid_namespace(format!("Invalid collection name: '{name}'")));
+        return Err(DocumentError::invalid_namespace(format!(
+            "Invalid collection name: '{name}'"
+        )));
     }
     Ok(())
 }
@@ -123,14 +134,20 @@ fn id_key(id: &Bson) -> Vec<u8> {
             }
             _ => {
                 let bits = number.as_f64().unwrap_or(f64::NAN).to_bits();
-                let sortable = if bits >> 63 == 1 { !bits } else { bits | (1 << 63) };
+                let sortable = if bits >> 63 == 1 {
+                    !bits
+                } else {
+                    bits | (1 << 63)
+                };
                 key.push(b'f');
                 key.extend_from_slice(&sortable.to_be_bytes());
             }
         },
         Bson::String(text) | Bson::Symbol(text) => key.extend_from_slice(text.as_bytes()),
         Bson::ObjectId(bytes) => key.extend_from_slice(bytes),
-        other => key.extend_from_slice(&Document::from_entries(vec![(String::new(), other.clone())]).to_bytes()),
+        other => key.extend_from_slice(
+            &Document::from_entries(vec![(String::new(), other.clone())]).to_bytes(),
+        ),
     }
     key
 }
@@ -142,19 +159,31 @@ fn document_key(database: &str, collection: &str, id: &Bson) -> Vec<u8> {
 }
 
 fn decoded(bytes: &[u8]) -> DocumentResult<Document> {
-    Document::from_bytes(bytes).map_err(|error| DocumentError::storage(format!("a stored document is damaged: {error}")))
+    Document::from_bytes(bytes)
+        .map_err(|error| DocumentError::storage(format!("a stored document is damaged: {error}")))
 }
 
 fn check_document(document: &Document) -> DocumentResult<Vec<u8>> {
     match document.get("_id") {
-        Some(Bson::Array(_)) => return Err(DocumentError::bad_value("The '_id' value cannot be of type array")),
-        Some(Bson::Regex { .. }) => return Err(DocumentError::bad_value("can't use a regex for _id")),
-        Some(Bson::Undefined) => return Err(DocumentError::bad_value("can't use a undefined for _id")),
+        Some(Bson::Array(_)) => {
+            return Err(DocumentError::bad_value(
+                "The '_id' value cannot be of type array",
+            ));
+        }
+        Some(Bson::Regex { .. }) => {
+            return Err(DocumentError::bad_value("can't use a regex for _id"));
+        }
+        Some(Bson::Undefined) => {
+            return Err(DocumentError::bad_value("can't use a undefined for _id"));
+        }
         _ => {}
     }
     let bytes = document.to_bytes();
     if bytes.len() > MAX_DOCUMENT_BYTES {
-        return Err(DocumentError::bad_value(format!("object to insert too large. size in bytes: {}, max size: {MAX_DOCUMENT_BYTES}", bytes.len())));
+        return Err(DocumentError::bad_value(format!(
+            "object to insert too large. size in bytes: {}, max size: {MAX_DOCUMENT_BYTES}",
+            bytes.len()
+        )));
     }
     Ok(bytes)
 }
@@ -168,29 +197,46 @@ fn duplicate(database: &str, collection: &str, id: &Bson) -> DocumentError {
     ))
 }
 
-fn ensure_collection(keys: &mut dyn KeysWrite, database: &str, collection: &str) -> DocumentResult<()> {
+fn ensure_collection(
+    keys: &mut dyn KeysWrite,
+    database: &str,
+    collection: &str,
+) -> DocumentResult<()> {
     check_database_name(database)?;
     check_collection_name(collection)?;
     let key = collection_key(database, collection);
     if keys.get(&key).map_err(DocumentError::storage)?.is_none() {
-        keys.put(&key, &Document::new().to_bytes()).map_err(DocumentError::storage)?;
+        keys.put(&key, &Document::new().to_bytes())
+            .map_err(DocumentError::storage)?;
     }
     Ok(())
 }
 
-fn matching(keys: &dyn KeysRead, database: &str, collection: &str, filter: &Filter) -> DocumentResult<Vec<(Vec<u8>, Document)>> {
+fn matching(
+    keys: &dyn KeysRead,
+    database: &str,
+    collection: &str,
+    filter: &Filter,
+) -> DocumentResult<Vec<(Vec<u8>, Document)>> {
     if let Some(id) = only_id(filter) {
         let key = document_key(database, collection, id);
         return Ok(match keys.get(&key).map_err(DocumentError::storage)? {
             Some(bytes) => {
                 let document = decoded(&bytes)?;
-                if matches(filter, &document) { vec![(key, document)] } else { Vec::new() }
+                if matches(filter, &document) {
+                    vec![(key, document)]
+                } else {
+                    Vec::new()
+                }
             }
             None => Vec::new(),
         });
     }
     let mut found = Vec::new();
-    for (key, bytes) in keys.scan(&documents_prefix(database, collection)).map_err(DocumentError::storage)? {
+    for (key, bytes) in keys
+        .scan(&documents_prefix(database, collection))
+        .map_err(DocumentError::storage)?
+    {
         let document = decoded(&bytes)?;
         if matches(filter, &document) {
             found.push((key, document));
@@ -206,7 +252,11 @@ impl<'k> Store<'k> {
         let mut process_unique = [0u8; 5];
         process_unique.copy_from_slice(&seed[..5]);
         let counter_start = u32::from_be_bytes([0, seed[5], seed[6], seed[7]]);
-        Self { keyspace, process_unique, counter_start }
+        Self {
+            keyspace,
+            process_unique,
+            counter_start,
+        }
     }
 
     /// A new object id.
@@ -231,7 +281,10 @@ impl<'k> Store<'k> {
         }
     }
 
-    fn write<T>(&self, body: impl FnOnce(&mut dyn KeysWrite) -> DocumentResult<T>) -> DocumentResult<T> {
+    fn write<T>(
+        &self,
+        body: impl FnOnce(&mut dyn KeysWrite) -> DocumentResult<T>,
+    ) -> DocumentResult<T> {
         let mut body = Some(body);
         let mut out = None;
         let result = self.keyspace.write(0, &mut |keys| {
@@ -241,7 +294,11 @@ impl<'k> Store<'k> {
             let outcome = body(keys);
             let failed = outcome.is_err();
             out = Some(outcome);
-            if failed { Err(ROLLED_BACK.to_owned()) } else { Ok(()) }
+            if failed {
+                Err(ROLLED_BACK.to_owned())
+            } else {
+                Ok(())
+            }
         });
         match (result, out) {
             (_, Some(Err(error))) => Err(error),
@@ -290,8 +347,15 @@ impl<'k> Store<'k> {
             let mut out = Vec::new();
             for (owner, collection) in Self::collections(keys)? {
                 if owner == database {
-                    let info = keys.get(&collection_key(&owner, &collection)).map_err(DocumentError::storage)?;
-                    out.push((collection, info.map(|bytes| decoded(&bytes)).transpose()?.unwrap_or_default()));
+                    let info = keys
+                        .get(&collection_key(&owner, &collection))
+                        .map_err(DocumentError::storage)?;
+                    out.push((
+                        collection,
+                        info.map(|bytes| decoded(&bytes))
+                            .transpose()?
+                            .unwrap_or_default(),
+                    ));
                 }
             }
             Ok(out)
@@ -303,8 +367,14 @@ impl<'k> Store<'k> {
         self.write(|keys| {
             check_database_name(database)?;
             check_collection_name(collection)?;
-            if keys.get(&collection_key(database, collection)).map_err(DocumentError::storage)?.is_some() {
-                return Err(DocumentError::namespace_exists(format!("Collection {database}.{collection} already exists.")));
+            if keys
+                .get(&collection_key(database, collection))
+                .map_err(DocumentError::storage)?
+                .is_some()
+            {
+                return Err(DocumentError::namespace_exists(format!(
+                    "Collection {database}.{collection} already exists."
+                )));
             }
             ensure_collection(keys, database, collection)
         })
@@ -317,7 +387,10 @@ impl<'k> Store<'k> {
             if keys.get(&key).map_err(DocumentError::storage)?.is_none() {
                 return Ok(false);
             }
-            for (document, _) in keys.scan(&documents_prefix(database, collection)).map_err(DocumentError::storage)? {
+            for (document, _) in keys
+                .scan(&documents_prefix(database, collection))
+                .map_err(DocumentError::storage)?
+            {
                 keys.delete(&document).map_err(DocumentError::storage)?;
             }
             keys.delete(&key).map_err(DocumentError::storage)?;
@@ -334,19 +407,36 @@ impl<'k> Store<'k> {
     }
 
     /// The index definitions stored for a collection (`_id_` always first).
-    pub fn indexes(&self, database: &str, collection: &str) -> DocumentResult<Option<Vec<Document>>> {
+    pub fn indexes(
+        &self,
+        database: &str,
+        collection: &str,
+    ) -> DocumentResult<Option<Vec<Document>>> {
         self.read(|keys| {
-            let Some(bytes) = keys.get(&collection_key(database, collection)).map_err(DocumentError::storage)? else {
+            let Some(bytes) = keys
+                .get(&collection_key(database, collection))
+                .map_err(DocumentError::storage)?
+            else {
                 return Ok(None);
             };
             let info = decoded(&bytes)?;
             let mut indexes = vec![Document::from_entries(vec![
                 ("v".to_owned(), Bson::Int32(2)),
-                ("key".to_owned(), Bson::Document(Document::from_entries(vec![("_id".to_owned(), Bson::Int32(1))]))),
+                (
+                    "key".to_owned(),
+                    Bson::Document(Document::from_entries(vec![(
+                        "_id".to_owned(),
+                        Bson::Int32(1),
+                    )])),
+                ),
                 ("name".to_owned(), Bson::String("_id_".to_owned())),
             ])];
             if let Some(stored) = info.get_array("indexes") {
-                indexes.extend(stored.iter().filter_map(|index| index.as_document().cloned()));
+                indexes.extend(
+                    stored
+                        .iter()
+                        .filter_map(|index| index.as_document().cloned()),
+                );
             }
             Ok(Some(indexes))
         })
@@ -354,7 +444,12 @@ impl<'k> Store<'k> {
 
     /// Records index definitions (`createIndexes`); returns how many there were before and
     /// after. The definitions are kept for listing; queries do not use them yet.
-    pub fn create_indexes(&self, database: &str, collection: &str, definitions: &[Document]) -> DocumentResult<(usize, usize)> {
+    pub fn create_indexes(
+        &self,
+        database: &str,
+        collection: &str,
+        definitions: &[Document],
+    ) -> DocumentResult<(usize, usize)> {
         self.write(|keys| {
             ensure_collection(keys, database, collection)?;
             let key = collection_key(database, collection);
@@ -392,11 +487,18 @@ impl<'k> Store<'k> {
 
     /// Removes index definitions by name, or all but `_id_` for `*`; returns how many there
     /// were before.
-    pub fn drop_indexes(&self, database: &str, collection: &str, name: &str) -> DocumentResult<usize> {
+    pub fn drop_indexes(
+        &self,
+        database: &str,
+        collection: &str,
+        name: &str,
+    ) -> DocumentResult<usize> {
         self.write(|keys| {
             let key = collection_key(database, collection);
             let Some(bytes) = keys.get(&key).map_err(DocumentError::storage)? else {
-                return Err(DocumentError::namespace_not_found(format!("ns not found {database}.{collection}")));
+                return Err(DocumentError::namespace_not_found(format!(
+                    "ns not found {database}.{collection}"
+                )));
             };
             let mut info = decoded(&bytes)?;
             let stored: Vec<Bson> = info.get_array("indexes").cloned().unwrap_or_default();
@@ -407,14 +509,21 @@ impl<'k> Store<'k> {
             let kept: Vec<Bson> = if name == "*" {
                 Vec::new()
             } else {
-                let kept: Vec<Bson> = stored.iter().filter(|index| index.as_document().and_then(|index| index.get_str("name")) != Some(name)).cloned().collect();
+                let kept: Vec<Bson> = stored
+                    .iter()
+                    .filter(|index| {
+                        index.as_document().and_then(|index| index.get_str("name")) != Some(name)
+                    })
+                    .cloned()
+                    .collect();
                 if kept.len() == stored.len() {
                     return Err(DocumentError::new_index_not_found(name));
                 }
                 kept
             };
             info.insert("indexes", Bson::Array(kept));
-            keys.put(&key, &info.to_bytes()).map_err(DocumentError::storage)?;
+            keys.put(&key, &info.to_bytes())
+                .map_err(DocumentError::storage)?;
             Ok(before)
         })
     }
@@ -422,7 +531,13 @@ impl<'k> Store<'k> {
     /// Inserts documents, giving each without an `_id` a new object id first. `ordered` stops
     /// at the first failure; otherwise every document is tried. Each document is its own
     /// change: a failing one does not undo the others.
-    pub fn insert(&self, database: &str, collection: &str, documents: Vec<Document>, ordered: bool) -> DocumentResult<InsertOutcome> {
+    pub fn insert(
+        &self,
+        database: &str,
+        collection: &str,
+        documents: Vec<Document>,
+        ordered: bool,
+    ) -> DocumentResult<InsertOutcome> {
         self.write(|keys| {
             ensure_collection(keys, database, collection)?;
             let mut outcome = InsertOutcome::default();
@@ -455,26 +570,49 @@ impl<'k> Store<'k> {
     }
 
     /// The documents of a collection matching `filter`, sorted by `sort`.
-    pub fn find(&self, database: &str, collection: &str, filter: &Filter, sort: &SortSpec) -> DocumentResult<Vec<Document>> {
-        let mut documents: Vec<Document> =
-            self.read(|keys| matching(keys, database, collection, filter))?.into_iter().map(|(_, document)| document).collect();
+    pub fn find(
+        &self,
+        database: &str,
+        collection: &str,
+        filter: &Filter,
+        sort: &SortSpec,
+    ) -> DocumentResult<Vec<Document>> {
+        let mut documents: Vec<Document> = self
+            .read(|keys| matching(keys, database, collection, filter))?
+            .into_iter()
+            .map(|(_, document)| document)
+            .collect();
         sort_documents(&mut documents, sort);
         Ok(documents)
     }
 
     /// Updates the first matching document, or every one with `multi`, upserting when asked.
-    pub fn update(&self, database: &str, collection: &str, filter: &Filter, update: &Update, options: UpdateOptions) -> DocumentResult<UpdateOutcome> {
+    pub fn update(
+        &self,
+        database: &str,
+        collection: &str,
+        filter: &Filter,
+        update: &Update,
+        options: UpdateOptions,
+    ) -> DocumentResult<UpdateOutcome> {
         if options.multi && matches!(update, Update::Replacement(_)) {
-            return Err(DocumentError::failed_to_parse("multi update is not supported for replacement-style update"));
+            return Err(DocumentError::failed_to_parse(
+                "multi update is not supported for replacement-style update",
+            ));
         }
         let now = now_ms();
         self.write(|keys| {
             let found = matching(keys, database, collection, filter)?;
             let mut outcome = UpdateOutcome::default();
-            for (key, mut document) in found.into_iter().take(if options.multi { usize::MAX } else { 1 }) {
+            for (key, mut document) in
+                found
+                    .into_iter()
+                    .take(if options.multi { usize::MAX } else { 1 })
+            {
                 outcome.matched += 1;
                 if apply_update(update, &mut document, false, now)? {
-                    keys.put(&key, &check_document(&document)?).map_err(DocumentError::storage)?;
+                    keys.put(&key, &check_document(&document)?)
+                        .map_err(DocumentError::storage)?;
                     outcome.modified += 1;
                 }
             }
@@ -490,7 +628,8 @@ impl<'k> Store<'k> {
                 if keys.get(&key).map_err(DocumentError::storage)?.is_some() {
                     return Err(duplicate(database, collection, &id));
                 }
-                keys.put(&key, &check_document(&document)?).map_err(DocumentError::storage)?;
+                keys.put(&key, &check_document(&document)?)
+                    .map_err(DocumentError::storage)?;
                 outcome.upserted = Some(id);
             }
             Ok(outcome)
@@ -498,11 +637,20 @@ impl<'k> Store<'k> {
     }
 
     /// Deletes the first matching document, or every one; returns how many.
-    pub fn delete(&self, database: &str, collection: &str, filter: &Filter, only_one: bool) -> DocumentResult<u64> {
+    pub fn delete(
+        &self,
+        database: &str,
+        collection: &str,
+        filter: &Filter,
+        only_one: bool,
+    ) -> DocumentResult<u64> {
         self.write(|keys| {
             let found = matching(keys, database, collection, filter)?;
             let mut deleted = 0;
-            for (key, _) in found.into_iter().take(if only_one { 1 } else { usize::MAX }) {
+            for (key, _) in found
+                .into_iter()
+                .take(if only_one { 1 } else { usize::MAX })
+            {
                 if keys.delete(&key).map_err(DocumentError::storage)? {
                     deleted += 1;
                 }
@@ -540,17 +688,32 @@ impl<'k> Store<'k> {
                     let mut changed = document.clone();
                     outcome.matched = 1;
                     if apply_update(update, &mut changed, false, now)? {
-                        keys.put(&key, &check_document(&changed)?).map_err(DocumentError::storage)?;
+                        keys.put(&key, &check_document(&changed)?)
+                            .map_err(DocumentError::storage)?;
                         outcome.modified = 1;
                     }
                     Ok((Some(if *new { changed } else { document }), outcome))
                 }
-                (Modification::Update { update, upsert: true, new }, None) => {
+                (
+                    Modification::Update {
+                        update,
+                        upsert: true,
+                        new,
+                    },
+                    None,
+                ) => {
                     ensure_collection(keys, database, collection)?;
                     let mut document = upsert_document(filter, update, now)?;
-                    let id = document.get("_id").cloned().unwrap_or_else(|| Bson::ObjectId(self.new_object_id()));
+                    let id = document
+                        .get("_id")
+                        .cloned()
+                        .unwrap_or_else(|| Bson::ObjectId(self.new_object_id()));
                     document.insert_first("_id", id.clone());
-                    keys.put(&document_key(database, collection, &id), &check_document(&document)?).map_err(DocumentError::storage)?;
+                    keys.put(
+                        &document_key(database, collection, &id),
+                        &check_document(&document)?,
+                    )
+                    .map_err(DocumentError::storage)?;
                     outcome.upserted = Some(id);
                     Ok((new.then_some(document), outcome))
                 }
@@ -562,6 +725,10 @@ impl<'k> Store<'k> {
 
 impl DocumentError {
     fn new_index_not_found(name: &str) -> Self {
-        Self { code: 27, code_name: "IndexNotFound", message: format!("index not found with name [{name}]") }
+        Self {
+            code: 27,
+            code_name: "IndexNotFound",
+            message: format!("index not found with name [{name}]"),
+        }
     }
 }

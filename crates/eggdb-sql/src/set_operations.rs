@@ -433,12 +433,12 @@ pub(crate) fn order_and_limit(
         let tied = |left: &Vec<Value>, right: &Vec<Value>| {
             compare_sort_keys(order_by, left, right) == std::cmp::Ordering::Equal
         };
-        let ties: Option<&dyn Fn(&Vec<Value>, &Vec<Value>) -> bool> =
-            if limit.with_ties && !keys.is_empty() {
-                Some(&tied)
-            } else {
-                None
-            };
+        let ties: crate::execute::TieCheck<'_, Vec<Value>> = if limit.with_ties && !keys.is_empty()
+        {
+            Some(&tied)
+        } else {
+            None
+        };
         result.rows = rows_within_limit(keyed, skip, take, ties);
     }
     result.tag = format!("SELECT {}", result.rows.len());

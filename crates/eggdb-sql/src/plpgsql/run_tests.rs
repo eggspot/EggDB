@@ -95,7 +95,8 @@ fn loops_conditions_and_variables_compute_a_result() {
     let store = MemoryStore::default();
     setup(
         &store,
-        &["CREATE FUNCTION add_odd(n integer) RETURNS integer LANGUAGE plpgsql AS $$
+        &[
+            "CREATE FUNCTION add_odd(n integer) RETURNS integer LANGUAGE plpgsql AS $$
 DECLARE
   total integer := 0;
 BEGIN
@@ -107,11 +108,21 @@ BEGIN
     total := total - 100;
   END LOOP;
   RETURN total;
-END $$"],
+END $$",
+        ],
     );
-    assert_eq!(value(&store, "add_odd", vec![Value::Integer(5)]), Value::Integer(9));
-    assert_eq!(value(&store, "add_odd", vec![Value::Integer(0)]), Value::Integer(0));
-    assert_eq!(value(&store, "add_odd", vec![Value::Integer(21)]), Value::Integer(21));
+    assert_eq!(
+        value(&store, "add_odd", vec![Value::Integer(5)]),
+        Value::Integer(9)
+    );
+    assert_eq!(
+        value(&store, "add_odd", vec![Value::Integer(0)]),
+        Value::Integer(0)
+    );
+    assert_eq!(
+        value(&store, "add_odd", vec![Value::Integer(21)]),
+        Value::Integer(21)
+    );
 }
 
 #[test]
@@ -119,7 +130,10 @@ fn an_exception_handler_undoes_the_blocks_writes_and_keeps_its_variables() {
     let store = MemoryStore::default();
     setup(
         &store,
-        &[TABLE, COUNTED, "CREATE FUNCTION guarded() RETURNS text LANGUAGE plpgsql AS $$
+        &[
+            TABLE,
+            COUNTED,
+            "CREATE FUNCTION guarded() RETURNS text LANGUAGE plpgsql AS $$
 DECLARE
   x integer := 1;
 BEGIN
@@ -132,9 +146,13 @@ BEGIN
     RETURN 'caught ' || SQLSTATE || ' x=' || x;
   END;
   RETURN 'not reached';
-END $$"],
+END $$",
+        ],
     );
-    assert_eq!(value(&store, "guarded", Vec::new()), text("caught 22012 x=2"));
+    assert_eq!(
+        value(&store, "guarded", Vec::new()),
+        text("caught 22012 x=2")
+    );
     assert_eq!(value(&store, "counted", Vec::new()), Value::BigInt(1));
 }
 
@@ -160,7 +178,10 @@ END $$"],
     assert_eq!(error.message(), "negative: -1");
     assert_eq!(error.hint(), Some("use a positive number"));
     let context = error.context().unwrap_or_default();
-    assert!(context.contains("PL/pgSQL function noisy(integer) line 5 at RAISE"), "{context}");
+    assert!(
+        context.contains("PL/pgSQL function noisy(integer) line 5 at RAISE"),
+        "{context}"
+    );
 }
 
 #[test]
@@ -168,33 +189,51 @@ fn select_into_strict_finds_exactly_one_row() {
     let store = MemoryStore::default();
     setup(
         &store,
-        &[TABLE, "INSERT INTO t VALUES (1, 'one'), (2, 'two')", "CREATE FUNCTION lookup(wanted integer) RETURNS text LANGUAGE plpgsql AS $$
+        &[
+            TABLE,
+            "INSERT INTO t VALUES (1, 'one'), (2, 'two')",
+            "CREATE FUNCTION lookup(wanted integer) RETURNS text LANGUAGE plpgsql AS $$
 DECLARE
   found_note text;
 BEGIN
   SELECT note INTO STRICT found_note FROM t WHERE id = wanted;
   RETURN found_note;
-END $$", "CREATE FUNCTION any_note() RETURNS text LANGUAGE plpgsql AS $$
+END $$",
+            "CREATE FUNCTION any_note() RETURNS text LANGUAGE plpgsql AS $$
 DECLARE
   found_note text;
 BEGIN
   SELECT note INTO STRICT found_note FROM t;
   RETURN found_note;
-END $$", "CREATE FUNCTION loose(wanted integer) RETURNS boolean LANGUAGE plpgsql AS $$
+END $$",
+            "CREATE FUNCTION loose(wanted integer) RETURNS boolean LANGUAGE plpgsql AS $$
 DECLARE
   found_note text;
 BEGIN
   SELECT note INTO found_note FROM t WHERE id = wanted;
   RETURN FOUND;
-END $$"],
+END $$",
+        ],
     );
-    assert_eq!(value(&store, "lookup", vec![Value::Integer(1)]), text("one"));
+    assert_eq!(
+        value(&store, "lookup", vec![Value::Integer(1)]),
+        text("one")
+    );
     let missing = failure(&store, "lookup", vec![Value::Integer(99)]);
     assert_eq!(missing.state(), SqlState::NO_DATA_FOUND);
     assert_eq!(missing.message(), "query returned no rows");
-    assert_eq!(failure(&store, "any_note", Vec::new()).state(), SqlState::TOO_MANY_ROWS);
-    assert_eq!(value(&store, "loose", vec![Value::Integer(2)]), Value::Boolean(true));
-    assert_eq!(value(&store, "loose", vec![Value::Integer(9)]), Value::Boolean(false));
+    assert_eq!(
+        failure(&store, "any_note", Vec::new()).state(),
+        SqlState::TOO_MANY_ROWS
+    );
+    assert_eq!(
+        value(&store, "loose", vec![Value::Integer(2)]),
+        Value::Boolean(true)
+    );
+    assert_eq!(
+        value(&store, "loose", vec![Value::Integer(9)]),
+        Value::Boolean(false)
+    );
 }
 
 #[test]
@@ -238,7 +277,10 @@ fn cursors_open_fetch_and_close() {
     let store = MemoryStore::default();
     setup(
         &store,
-        &[TABLE, "INSERT INTO t VALUES (3, 'c'), (1, 'a'), (2, 'b')", "CREATE FUNCTION walk() RETURNS text LANGUAGE plpgsql AS $$
+        &[
+            TABLE,
+            "INSERT INTO t VALUES (3, 'c'), (1, 'a'), (2, 'b')",
+            "CREATE FUNCTION walk() RETURNS text LANGUAGE plpgsql AS $$
 DECLARE
   c CURSOR FOR SELECT id FROM t ORDER BY id;
   v integer;
@@ -252,7 +294,8 @@ BEGIN
   END LOOP;
   CLOSE c;
   RETURN seen;
-END $$", "CREATE FUNCTION walk_from(low integer) RETURNS text LANGUAGE plpgsql AS $$
+END $$",
+            "CREATE FUNCTION walk_from(low integer) RETURNS text LANGUAGE plpgsql AS $$
 DECLARE
   c CURSOR (lowest integer) FOR SELECT id, note FROM t WHERE id >= lowest ORDER BY id;
   seen text := '';
@@ -261,10 +304,14 @@ BEGIN
     seen := seen || r.note;
   END LOOP;
   RETURN seen;
-END $$"],
+END $$",
+        ],
     );
     assert_eq!(value(&store, "walk", Vec::new()), text("1,2,3,"));
-    assert_eq!(value(&store, "walk_from", vec![Value::Integer(2)]), text("bc"));
+    assert_eq!(
+        value(&store, "walk_from", vec![Value::Integer(2)]),
+        text("bc")
+    );
 }
 
 #[test]
@@ -272,7 +319,10 @@ fn dynamic_sql_runs_with_using_values_and_counts_rows() {
     let store = MemoryStore::default();
     setup(
         &store,
-        &[TABLE, "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')", "CREATE FUNCTION dynamic_count(minimum integer) RETURNS bigint LANGUAGE plpgsql AS $$
+        &[
+            TABLE,
+            "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+            "CREATE FUNCTION dynamic_count(minimum integer) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE
   counted bigint;
   changed bigint;
@@ -281,9 +331,13 @@ BEGIN
   UPDATE t SET note = 'seen' WHERE id >= minimum;
   GET DIAGNOSTICS changed = ROW_COUNT;
   RETURN counted * 100 + changed;
-END $$"],
+END $$",
+        ],
     );
-    assert_eq!(value(&store, "dynamic_count", vec![Value::Integer(2)]), Value::BigInt(202));
+    assert_eq!(
+        value(&store, "dynamic_count", vec![Value::Integer(2)]),
+        Value::BigInt(202)
+    );
 }
 
 #[test]
@@ -301,7 +355,10 @@ fn sql_functions_read_their_parameters_by_name_and_number() {
         value(&store, "plus", vec![Value::Integer(2), Value::Integer(3)]),
         Value::Integer(5)
     );
-    assert_eq!(value(&store, "twice", vec![Value::Integer(21)]), Value::Integer(42));
+    assert_eq!(
+        value(&store, "twice", vec![Value::Integer(21)]),
+        Value::Integer(42)
+    );
     assert_eq!(value(&store, "greeting", Vec::new()), text("hello world"));
 }
 
@@ -326,28 +383,44 @@ fn records_case_and_constants_fail_like_postgresql() {
     let store = MemoryStore::default();
     setup(
         &store,
-        &["CREATE FUNCTION unassigned() RETURNS integer LANGUAGE plpgsql AS $$
+        &[
+            "CREATE FUNCTION unassigned() RETURNS integer LANGUAGE plpgsql AS $$
 DECLARE
   r record;
 BEGIN
   RETURN r.id;
-END $$", "CREATE FUNCTION pick(n integer) RETURNS text LANGUAGE plpgsql AS $$
+END $$",
+            "CREATE FUNCTION pick(n integer) RETURNS text LANGUAGE plpgsql AS $$
 BEGIN
   CASE n
     WHEN 1, 2 THEN RETURN 'small';
     WHEN 3 THEN RETURN 'three';
   END CASE;
-END $$", "CREATE FUNCTION no_return() RETURNS integer LANGUAGE plpgsql AS $$
+END $$",
+            "CREATE FUNCTION no_return() RETURNS integer LANGUAGE plpgsql AS $$
 BEGIN
   NULL;
-END $$"],
+END $$",
+        ],
     );
     let unassigned = failure(&store, "unassigned", Vec::new());
-    assert_eq!(unassigned.state(), SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE);
+    assert_eq!(
+        unassigned.state(),
+        SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE
+    );
     assert_eq!(unassigned.message(), "record \"r\" is not assigned yet");
-    assert_eq!(value(&store, "pick", vec![Value::Integer(2)]), text("small"));
-    assert_eq!(value(&store, "pick", vec![Value::Integer(3)]), text("three"));
-    assert_eq!(failure(&store, "pick", vec![Value::Integer(4)]).state(), SqlState::CASE_NOT_FOUND);
+    assert_eq!(
+        value(&store, "pick", vec![Value::Integer(2)]),
+        text("small")
+    );
+    assert_eq!(
+        value(&store, "pick", vec![Value::Integer(3)]),
+        text("three")
+    );
+    assert_eq!(
+        failure(&store, "pick", vec![Value::Integer(4)]).state(),
+        SqlState::CASE_NOT_FOUND
+    );
     assert_eq!(
         failure(&store, "no_return", Vec::new()).state(),
         SqlState::FUNCTION_EXECUTED_NO_RETURN_STATEMENT
@@ -359,13 +432,18 @@ fn trigger_functions_change_new_and_read_trigger_variables() {
     let store = MemoryStore::default();
     setup(
         &store,
-        &["CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$
+        &[
+            "CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   NEW.note := upper(NEW.note) || ' by ' || TG_OP || ' ' || TG_NARGS || ' ' || TG_ARGV[0];
   RETURN NEW;
-END $$"],
+END $$",
+        ],
     );
-    assert_eq!(failure(&store, "stamp", Vec::new()).state(), SqlState::FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        failure(&store, "stamp", Vec::new()).state(),
+        SqlState::FEATURE_NOT_SUPPORTED
+    );
     let trigger = TriggerCall {
         new: Some(row(vec![Value::Integer(1), text("x")], &["id", "note"])),
         old: None,
@@ -381,7 +459,10 @@ END $$"],
     let (returned, _) = invoked(&store, "stamp", Vec::new(), Some(trigger)).expect("stamp");
     assert_eq!(
         returned,
-        Returned::Value(row(vec![Value::Integer(1), text("X by INSERT 1 tag")], &["id", "note"]))
+        Returned::Value(row(
+            vec![Value::Integer(1), text("X by INSERT 1 tag")],
+            &["id", "note"]
+        ))
     );
 }
 
@@ -399,12 +480,27 @@ fn hostile_bodies_fail_with_errors_instead_of_crashing() {
             "BEGIN FOR i IN 1..3 BY 0 LOOP NULL; END LOOP; END",
             SqlState::INVALID_PARAMETER_VALUE,
         ),
-        ("DECLARE x integer NOT NULL := 1; BEGIN x := NULL; END", SqlState::NULL_VALUE_NOT_ALLOWED),
-        ("DECLARE x CONSTANT integer := 1; BEGIN SELECT 2 INTO x; END", SqlState::ERROR_IN_ASSIGNMENT),
+        (
+            "DECLARE x integer NOT NULL := 1; BEGIN x := NULL; END",
+            SqlState::NULL_VALUE_NOT_ALLOWED,
+        ),
+        (
+            "DECLARE x CONSTANT integer := 1; BEGIN SELECT 2 INTO x; END",
+            SqlState::ERROR_IN_ASSIGNMENT,
+        ),
         ("BEGIN SELECT 1; END", SqlState::SYNTAX_ERROR),
-        ("BEGIN RAISE; END", SqlState::STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER),
-        ("BEGIN ASSERT 1 = 2, 'broken'; END", SqlState::ASSERT_FAILURE),
-        ("DECLARE c refcursor; BEGIN CLOSE c; END", SqlState::INVALID_CURSOR_NAME),
+        (
+            "BEGIN RAISE; END",
+            SqlState::STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER,
+        ),
+        (
+            "BEGIN ASSERT 1 = 2, 'broken'; END",
+            SqlState::ASSERT_FAILURE,
+        ),
+        (
+            "DECLARE c refcursor; BEGIN CLOSE c; END",
+            SqlState::INVALID_CURSOR_NAME,
+        ),
     ];
     for (code, state) in cases {
         match inline(&store, code) {
@@ -412,7 +508,14 @@ fn hostile_bodies_fail_with_errors_instead_of_crashing() {
             Err(error) => assert_eq!(error.state(), state, "{code}: {error}"),
         }
     }
-    for garbage in ["", "BEGIN", "BEGIN END", "x := ;", "BEGIN LOOP END; END", "\u{0}"] {
+    for garbage in [
+        "",
+        "BEGIN",
+        "BEGIN END",
+        "x := ;",
+        "BEGIN LOOP END; END",
+        "\u{0}",
+    ] {
         let _ = inline(&store, garbage);
     }
 }

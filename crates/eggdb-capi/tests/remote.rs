@@ -5,8 +5,8 @@
 use eggdb::Database;
 use eggdb_capi::{
     EGGDB_BLOB, EGGDB_ERR_SQL, EGGDB_INTEGER, EGGDB_NULL, EGGDB_OK, EGGDB_REAL, EGGDB_TEXT,
-    EggdbParameter, EggdbResult, EggdbSql, eggdb_last_sqlstate, eggdb_sql_close,
-    eggdb_sql_connect, eggdb_sql_execute, eggdb_sql_execute_with_parameters,
+    EggdbParameter, EggdbResult, EggdbSql, eggdb_last_sqlstate, eggdb_sql_close, eggdb_sql_connect,
+    eggdb_sql_execute, eggdb_sql_execute_with_parameters,
 };
 use eggdb_pgwire::{ScramVerifier, ServerConfig};
 use std::ffi::{CStr, CString, c_int};
@@ -36,11 +36,12 @@ fn run(sql: *mut EggdbSql, text: &str, values: &[Option<&str>]) -> (c_int, Vec<E
         .collect();
     let mut results: *const EggdbResult = ptr::null();
     let mut count = 0;
-    // SAFETY: a live session, the text, the parameters and places for the results.
-    let status = unsafe {
-        if values.is_empty() {
-            eggdb_sql_execute(sql, text.as_ptr(), &mut results, &mut count)
-        } else {
+    let status = if values.is_empty() {
+        // SAFETY: a live session, the text and places for the results.
+        unsafe { eggdb_sql_execute(sql, text.as_ptr(), &mut results, &mut count) }
+    } else {
+        // SAFETY: a live session, the text, the parameters and places for the results.
+        unsafe {
             eggdb_sql_execute_with_parameters(
                 sql,
                 text.as_ptr(),
@@ -82,7 +83,10 @@ fn a_session_on_a_server_runs_statements_with_typed_values() {
     .unwrap();
     let mut sql: *mut EggdbSql = ptr::null_mut();
     // SAFETY: a URL and a place for the handle.
-    assert_eq!(unsafe { eggdb_sql_connect(url.as_ptr(), &mut sql) }, EGGDB_OK);
+    assert_eq!(
+        unsafe { eggdb_sql_connect(url.as_ptr(), &mut sql) },
+        EGGDB_OK
+    );
     let (status, _) = run(
         sql,
         "CREATE TABLE items (id integer PRIMARY KEY, name text, price double precision, data bytea)",
@@ -95,9 +99,17 @@ fn a_session_on_a_server_runs_statements_with_typed_values() {
         &[Some("7"), Some("it's"), Some("2.5"), Some("\\x00ff")],
     );
     assert_eq!(status, EGGDB_OK);
-    let (status, _) = run(sql, "INSERT INTO items VALUES ($1, $2, NULL, NULL)", &[Some("8"), None]);
+    let (status, _) = run(
+        sql,
+        "INSERT INTO items VALUES ($1, $2, NULL, NULL)",
+        &[Some("8"), None],
+    );
     assert_eq!(status, EGGDB_OK);
-    let (status, results) = run(sql, "SELECT id, name, price, data FROM items ORDER BY id", &[]);
+    let (status, results) = run(
+        sql,
+        "SELECT id, name, price, data FROM items ORDER BY id",
+        &[],
+    );
     assert_eq!(status, EGGDB_OK);
     let result = results[0];
     assert_eq!((result.column_count, result.row_count), (4, 2));

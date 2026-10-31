@@ -4,7 +4,9 @@
 //! result must be `nvarchar`: callers cast their columns to `nvarchar(max)` in the query, so
 //! this client never needs SQL Server's other type encodings.
 
-use crate::messages::{ENCRYPT_NOT_SUP, ENCRYPT_ON, ENCRYPT_REQ, LOGIN7, PRELOGIN, SQL_BATCH, TDS_7_4};
+use crate::messages::{
+    ENCRYPT_NOT_SUP, ENCRYPT_ON, ENCRYPT_REQ, LOGIN7, PRELOGIN, SQL_BATCH, TDS_7_4,
+};
 use crate::tls_transport::TdsTransport;
 use crate::wire::{DEFAULT_PACKET_SIZE, HEADER_BYTES};
 use eggdb_tls::verify::{ServerName, TrustStore};
@@ -66,7 +68,10 @@ pub struct TdsConnectOptions {
 impl TdsConnectOptions {
     /// The URL without a password, for messages.
     pub fn shown(&self) -> String {
-        format!("sqlserver://{}@{}:{}/{}", self.user, self.host, self.port, self.database)
+        format!(
+            "sqlserver://{}@{}:{}/{}",
+            self.user, self.host, self.port, self.database
+        )
     }
 }
 
@@ -87,7 +92,11 @@ pub fn parse_sql_server_url(url: &str) -> Result<TdsConnectOptions, String> {
         return Err("the URL names no user: write sqlserver://user@host/database".to_owned());
     }
     let (host, port) = match host_part.rsplit_once(':') {
-        Some((host, port)) => (host, port.parse().map_err(|_| format!("'{port}' is not a port number"))?),
+        Some((host, port)) => (
+            host,
+            port.parse()
+                .map_err(|_| format!("'{port}' is not a port number"))?,
+        ),
         None => (host_part, DEFAULT_PORT),
     };
     if host.is_empty() {
@@ -97,7 +106,11 @@ pub fn parse_sql_server_url(url: &str) -> Result<TdsConnectOptions, String> {
         host: host.to_owned(),
         port,
         user: user.to_owned(),
-        database: if database.is_empty() { "master".to_owned() } else { database.to_owned() },
+        database: if database.is_empty() {
+            "master".to_owned()
+        } else {
+            database.to_owned()
+        },
         password: None,
         encrypt: Encrypt::Yes,
         trust_server_certificate: false,
@@ -114,7 +127,9 @@ pub fn parse_sql_server_url(url: &str) -> Result<TdsConnectOptions, String> {
                     _ => return Err(format!("encrypt must be yes, strict or no, not '{value}'")),
                 };
             }
-            "trustServerCertificate" => options.trust_server_certificate = matches!(value, "true" | "yes"),
+            "trustServerCertificate" => {
+                options.trust_server_certificate = matches!(value, "true" | "yes")
+            }
             "sslrootcert" => options.root_certificate = Some(PathBuf::from(value)),
             "password" => {
                 return Err("the password is in the URL, where every user's ps shows it; set SQLCMDPASSWORD or pass --password-file".to_owned());
@@ -122,7 +137,10 @@ pub fn parse_sql_server_url(url: &str) -> Result<TdsConnectOptions, String> {
             _ => return Err(format!("the URL parameter '{name}' is not supported")),
         }
     }
-    if options.encrypt != Encrypt::No && !options.trust_server_certificate && options.root_certificate.is_none() {
+    if options.encrypt != Encrypt::No
+        && !options.trust_server_certificate
+        && options.root_certificate.is_none()
+    {
         return Err(
             "an encrypted connection needs the certificate of the authority to trust (sslrootcert=...) or trustServerCertificate=true".to_owned(),
         );
@@ -154,7 +172,9 @@ impl std::fmt::Display for TdsClientError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
-            Self::Tls(message) | Self::Login(message) | Self::Protocol(message) => formatter.write_str(message),
+            Self::Tls(message) | Self::Login(message) | Self::Protocol(message) => {
+                formatter.write_str(message)
+            }
             Self::Server { number, message } => write!(formatter, "{message} (error {number})"),
         }
     }
@@ -210,7 +230,10 @@ pub struct TdsClient {
 
 impl std::fmt::Debug for TdsClient {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("TdsClient").field("encrypted", &self.encrypted).finish_non_exhaustive()
+        formatter
+            .debug_struct("TdsClient")
+            .field("encrypted", &self.encrypted)
+            .finish_non_exhaustive()
     }
 }
 
@@ -228,7 +251,10 @@ fn prelogin_body(encryption: u8) -> Vec<u8> {
 fn prelogin_encryption(answer: &[u8]) -> Option<u8> {
     let mut at = 0;
     while *answer.get(at)? != 0xFF {
-        let offset = usize::from(u16::from_be_bytes([*answer.get(at + 1)?, *answer.get(at + 2)?]));
+        let offset = usize::from(u16::from_be_bytes([
+            *answer.get(at + 1)?,
+            *answer.get(at + 2)?,
+        ]));
         if answer[at] == 1 {
             return answer.get(offset).copied();
         }
@@ -238,7 +264,10 @@ fn prelogin_encryption(answer: &[u8]) -> Option<u8> {
 }
 
 fn login7_body(options: &TdsConnectOptions, password: &str) -> Vec<u8> {
-    let obfuscated: Vec<u8> = utf16(password).into_iter().map(|byte| byte.rotate_left(4) ^ 0xA5).collect();
+    let obfuscated: Vec<u8> = utf16(password)
+        .into_iter()
+        .map(|byte| byte.rotate_left(4) ^ 0xA5)
+        .collect();
     let names: [Vec<u8>; 9] = [
         utf16("eggdb"),
         utf16(&options.user),
@@ -291,14 +320,19 @@ fn tls_config(options: &TdsConnectOptions, strict: bool) -> Result<ClientConfig,
     let verification = if options.trust_server_certificate {
         ServerVerification::EncryptionOnly
     } else {
-        let path = options
-            .root_certificate
-            .as_ref()
-            .ok_or_else(|| TdsClientError::Tls("sslrootcert is needed to check the certificate".to_owned()))?;
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| TdsClientError::Tls(format!("cannot read sslrootcert {}: {error}", path.display())))?;
-        let trust = TrustStore::from_pem(&text).map_err(|error| TdsClientError::Tls(error.to_string()))?;
-        let server_name = ServerName::parse(&options.host).map_err(|error| TdsClientError::Tls(error.to_string()))?;
+        let path = options.root_certificate.as_ref().ok_or_else(|| {
+            TdsClientError::Tls("sslrootcert is needed to check the certificate".to_owned())
+        })?;
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            TdsClientError::Tls(format!(
+                "cannot read sslrootcert {}: {error}",
+                path.display()
+            ))
+        })?;
+        let trust =
+            TrustStore::from_pem(&text).map_err(|error| TdsClientError::Tls(error.to_string()))?;
+        let server_name = ServerName::parse(&options.host)
+            .map_err(|error| TdsClientError::Tls(error.to_string()))?;
         ServerVerification::Full { trust, server_name }
     };
     let mut config = ClientConfig::new(verification, &options.host);
@@ -311,46 +345,80 @@ fn tls_config(options: &TdsConnectOptions, strict: bool) -> Result<ClientConfig,
 impl TdsClient {
     /// Connects, encrypts as `options.encrypt` asks, and logs in.
     pub fn connect(options: &TdsConnectOptions) -> Result<Self, TdsClientError> {
-        let password = options
-            .password
-            .as_deref()
-            .ok_or_else(|| TdsClientError::Login("a password is needed and none was given (SQLCMDPASSWORD is unset)".to_owned()))?;
+        let password = options.password.as_deref().ok_or_else(|| {
+            TdsClientError::Login(
+                "a password is needed and none was given (SQLCMDPASSWORD is unset)".to_owned(),
+            )
+        })?;
         let address = (options.host.as_str(), options.port)
             .to_socket_addrs()?
             .next()
-            .ok_or_else(|| TdsClientError::Io(io::Error::new(io::ErrorKind::NotFound, "the host has no address")))?;
+            .ok_or_else(|| {
+                TdsClientError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "the host has no address",
+                ))
+            })?;
         let tcp = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(QUERY_TIMEOUT))?;
         let mut client = if options.encrypt == Encrypt::Strict {
-            let tls = TlsStream::connect(TdsTransport::new(tcp, Vec::new(), false), &tls_config(options, true)?)
-                .map_err(|error| TdsClientError::Tls(error.to_string()))?;
-            let mut client = Self { transport: Transport::Tls(Box::new(tls)), next_packet_id: 1, encrypted: true };
+            let tls = TlsStream::connect(
+                TdsTransport::new(tcp, Vec::new(), false),
+                &tls_config(options, true)?,
+            )
+            .map_err(|error| TdsClientError::Tls(error.to_string()))?;
+            let mut client = Self {
+                transport: Transport::Tls(Box::new(tls)),
+                next_packet_id: 1,
+                encrypted: true,
+            };
             client.send_message(PRELOGIN, &prelogin_body(ENCRYPT_ON))?;
             client.read_message()?;
             client
         } else {
-            let mut client = Self { transport: Transport::Plain(tcp), next_packet_id: 1, encrypted: false };
-            let asked = if options.encrypt == Encrypt::Yes { ENCRYPT_ON } else { ENCRYPT_NOT_SUP };
+            let mut client = Self {
+                transport: Transport::Plain(tcp),
+                next_packet_id: 1,
+                encrypted: false,
+            };
+            let asked = if options.encrypt == Encrypt::Yes {
+                ENCRYPT_ON
+            } else {
+                ENCRYPT_NOT_SUP
+            };
             client.send_message(PRELOGIN, &prelogin_body(asked))?;
             let answer = client.read_message()?;
-            let answered = prelogin_encryption(&answer)
-                .ok_or_else(|| TdsClientError::Protocol("the PRELOGIN answer has no encryption option".to_owned()))?;
+            let answered = prelogin_encryption(&answer).ok_or_else(|| {
+                TdsClientError::Protocol("the PRELOGIN answer has no encryption option".to_owned())
+            })?;
             let encrypt = match (options.encrypt, answered) {
                 (Encrypt::Yes, ENCRYPT_NOT_SUP) => {
-                    return Err(TdsClientError::Tls("the server does not support encryption and the URL says encrypt=yes".to_owned()));
+                    return Err(TdsClientError::Tls(
+                        "the server does not support encryption and the URL says encrypt=yes"
+                            .to_owned(),
+                    ));
                 }
                 (Encrypt::Yes, _) | (_, ENCRYPT_ON | ENCRYPT_REQ) => true,
                 _ => false,
             };
             if encrypt {
                 let Transport::Plain(tcp) = client.transport else {
-                    return Err(TdsClientError::Protocol("encryption started twice".to_owned()));
+                    return Err(TdsClientError::Protocol(
+                        "encryption started twice".to_owned(),
+                    ));
                 };
-                let mut tls = TlsStream::connect(TdsTransport::new(tcp, Vec::new(), true), &tls_config(options, false)?)
-                    .map_err(|error| TdsClientError::Tls(error.to_string()))?;
+                let mut tls = TlsStream::connect(
+                    TdsTransport::new(tcp, Vec::new(), true),
+                    &tls_config(options, false)?,
+                )
+                .map_err(|error| TdsClientError::Tls(error.to_string()))?;
                 tls.get_mut().framed = false;
-                client = Self { transport: Transport::Tls(Box::new(tls)), next_packet_id: client.next_packet_id, encrypted: true };
+                client = Self {
+                    transport: Transport::Tls(Box::new(tls)),
+                    next_packet_id: client.next_packet_id,
+                    encrypted: true,
+                };
             }
             client
         };
@@ -373,11 +441,19 @@ impl TdsClient {
 
     fn send_message(&mut self, kind: u8, body: &[u8]) -> Result<(), TdsClientError> {
         let payload_bytes = DEFAULT_PACKET_SIZE - HEADER_BYTES;
-        let chunks: Vec<&[u8]> = if body.is_empty() { vec![&[]] } else { body.chunks(payload_bytes).collect() };
+        let chunks: Vec<&[u8]> = if body.is_empty() {
+            vec![&[]]
+        } else {
+            body.chunks(payload_bytes).collect()
+        };
         let mut bytes = Vec::with_capacity(body.len() + chunks.len() * HEADER_BYTES);
         for (index, chunk) in chunks.iter().enumerate() {
             bytes.push(kind);
-            bytes.push(if index + 1 == chunks.len() { END_OF_MESSAGE } else { 0 });
+            bytes.push(if index + 1 == chunks.len() {
+                END_OF_MESSAGE
+            } else {
+                0
+            });
             bytes.extend_from_slice(&((chunk.len() + HEADER_BYTES) as u16).to_be_bytes());
             bytes.extend_from_slice(&[0, 0, self.next_packet_id, 0]);
             self.next_packet_id = self.next_packet_id.wrapping_add(1);
@@ -395,7 +471,9 @@ impl TdsClient {
             self.transport.read_exact(&mut header)?;
             let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
             if length < HEADER_BYTES || body.len() + length > MAX_MESSAGE_BYTES {
-                return Err(TdsClientError::Protocol("a packet with an impossible length".to_owned()));
+                return Err(TdsClientError::Protocol(
+                    "a packet with an impossible length".to_owned(),
+                ));
             }
             let start = body.len();
             body.resize(start + length - HEADER_BYTES, 0);
@@ -423,7 +501,10 @@ struct TokenReader<'a> {
 
 impl<'a> TokenReader<'a> {
     fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
-        let (taken, rest) = self.bytes.split_at_checked(count).ok_or_else(|| "the token stream ends early".to_owned())?;
+        let (taken, rest) = self
+            .bytes
+            .split_at_checked(count)
+            .ok_or_else(|| "the token stream ends early".to_owned())?;
         self.bytes = rest;
         Ok(taken)
     }
@@ -451,7 +532,12 @@ impl<'a> TokenReader<'a> {
 
     fn utf16(&mut self, characters: usize) -> Result<String, String> {
         let bytes = self.take(characters * 2)?;
-        let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
         String::from_utf16(&units).map_err(|_| "a string is not UTF-16".to_owned())
     }
 }
@@ -500,8 +586,15 @@ fn read_value(reader: &mut TokenReader<'_>, plp: bool) -> Result<Option<String>,
             }
             bytes.extend_from_slice(reader.take(chunk)?);
         }
-        let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
-        return String::from_utf16(&units).map(Some).map_err(|_| "a value is not UTF-16".to_owned());
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return String::from_utf16(&units)
+            .map(Some)
+            .map_err(|_| "a value is not UTF-16".to_owned());
     }
     let length = reader.u16()?;
     if length == 0xFFFF {
@@ -528,7 +621,9 @@ pub fn parse_results(stream: &[u8]) -> Result<Vec<TextRows>, String> {
                     reader.u16()?;
                     let kind = reader.u8()?;
                     if kind != TYPE_NVARCHAR {
-                        return Err(format!("a result column has type 0x{kind:02X}; cast it to nvarchar(max)"));
+                        return Err(format!(
+                            "a result column has type 0x{kind:02X}; cast it to nvarchar(max)"
+                        ));
                     }
                     let maximum = reader.u16()?;
                     reader.take(5)?;
@@ -543,7 +638,10 @@ pub fn parse_results(stream: &[u8]) -> Result<Vec<TextRows>, String> {
                 for plp in &columns {
                     row.push(read_value(&mut reader, *plp)?);
                 }
-                results.last_mut().ok_or("a row before its columns")?.push(row);
+                results
+                    .last_mut()
+                    .ok_or("a row before its columns")?
+                    .push(row);
             }
             TOKEN_NBCROW => {
                 let bitmap = reader.take(columns.len().div_ceil(8))?.to_vec();
@@ -555,7 +653,10 @@ pub fn parse_results(stream: &[u8]) -> Result<Vec<TextRows>, String> {
                         row.push(read_value(&mut reader, *plp)?);
                     }
                 }
-                results.last_mut().ok_or("a row before its columns")?.push(row);
+                results
+                    .last_mut()
+                    .ok_or("a row before its columns")?
+                    .push(row);
             }
             TOKEN_DONE | TOKEN_DONEPROC | TOKEN_DONEINPROC => {
                 reader.take(12)?;
@@ -588,13 +689,31 @@ mod tests {
 
     #[test]
     fn urls_read_their_encryption_and_refuse_passwords() {
-        let options = parse_sql_server_url("sqlserver://sa@sql.example.com/Shop?encrypt=strict&sslrootcert=ca.pem").unwrap();
-        assert_eq!((options.host.as_str(), options.port, options.database.as_str()), ("sql.example.com", 1433, "Shop"));
+        let options = parse_sql_server_url(
+            "sqlserver://sa@sql.example.com/Shop?encrypt=strict&sslrootcert=ca.pem",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                options.host.as_str(),
+                options.port,
+                options.database.as_str()
+            ),
+            ("sql.example.com", 1433, "Shop")
+        );
         assert_eq!(options.encrypt, Encrypt::Strict);
         let plain = parse_sql_server_url("sqlserver://sa@127.0.0.1:1434/Shop?encrypt=no").unwrap();
         assert_eq!((plain.port, plain.encrypt), (1434, Encrypt::No));
-        assert!(parse_sql_server_url("sqlserver://sa:pw@host/db").unwrap_err().contains("SQLCMDPASSWORD"));
-        assert!(parse_sql_server_url("sqlserver://sa@host/db").unwrap_err().contains("sslrootcert"));
+        assert!(
+            parse_sql_server_url("sqlserver://sa:pw@host/db")
+                .unwrap_err()
+                .contains("SQLCMDPASSWORD")
+        );
+        assert!(
+            parse_sql_server_url("sqlserver://sa@host/db")
+                .unwrap_err()
+                .contains("sslrootcert")
+        );
         assert!(parse_sql_server_url("sqlserver://sa@host/db?trustServerCertificate=true").is_ok());
     }
 

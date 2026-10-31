@@ -74,7 +74,9 @@ fn statements_that_differ_only_in_constants_give_their_own_results() {
                 format!("SELECT name, score FROM people WHERE id = {id}"),
                 format!("SELECT id FROM people WHERE score > {} ORDER BY id", id % 9),
                 format!("SELECT count(*) FROM people WHERE name <> 'person {id}'"),
-                format!("SELECT id * {id}, 'x{id}' FROM people WHERE id BETWEEN {id} AND 59 ORDER BY 1 LIMIT 3"),
+                format!(
+                    "SELECT id * {id}, 'x{id}' FROM people WHERE id BETWEEN {id} AND 59 ORDER BY 1 LIMIT 3"
+                ),
             ] {
                 let fresh = rows(&mut Session::with_dialect(&store, dialect), &text);
                 assert_eq!(rows(&mut cached, &text), fresh, "{dialect:?}: {text}");
@@ -220,6 +222,10 @@ fn in_lists_of_integers_answer_as_the_comparison_does() {
             "SELECT count(*) FROM orders WHERE false",
         ),
     ] {
-        assert_eq!(rows(&mut session, query), rows(&mut session, expected), "{query}");
+        assert_eq!(
+            rows(&mut session, query),
+            rows(&mut session, expected),
+            "{query}"
+        );
     }
 }

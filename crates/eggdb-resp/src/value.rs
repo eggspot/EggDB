@@ -9,7 +9,9 @@ pub struct SortedSet {
 }
 
 fn order(left: &(f64, Vec<u8>), right: &(f64, Vec<u8>)) -> std::cmp::Ordering {
-    left.0.total_cmp(&right.0).then_with(|| left.1.cmp(&right.1))
+    left.0
+        .total_cmp(&right.0)
+        .then_with(|| left.1.cmp(&right.1))
 }
 
 impl SortedSet {
@@ -53,13 +55,16 @@ impl SortedSet {
 /// A stream's entry identifier: milliseconds and a sequence number.
 pub type StreamId = (u64, u64);
 
+/// A stream entry's field names and values, in order.
+pub type Fields = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// A stream: entries of field-value pairs in identifier order, and the last identifier given.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Stream {
     /// The highest identifier ever added.
     pub last: StreamId,
     /// The entries.
-    pub entries: BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>>,
+    pub entries: BTreeMap<StreamId, Fields>,
 }
 
 /// A value of one of the six types.
@@ -254,7 +259,9 @@ impl Entry {
                 Data::SortedSet(set)
             }
             5 => {
-                let mut word = || -> Option<u64> { Some(u64::from_le_bytes(cursor.take(8)?.try_into().ok()?)) };
+                let mut word = || -> Option<u64> {
+                    Some(u64::from_le_bytes(cursor.take(8)?.try_into().ok()?))
+                };
                 let last = (word()?, word()?);
                 let count = cursor.count()?;
                 let mut entries = BTreeMap::new();
@@ -312,9 +319,17 @@ mod tests {
             };
             assert_eq!(Entry::decode(&entry.encode()), Some(entry));
         }
-        let ordered: Vec<Vec<u8>> = zset.ordered().into_iter().map(|(_, member)| member).collect();
+        let ordered: Vec<Vec<u8>> = zset
+            .ordered()
+            .into_iter()
+            .map(|(_, member)| member)
+            .collect();
         assert_eq!(ordered, vec![b"c".to_vec(), b"a".to_vec(), b"b".to_vec()]);
-        for damaged in [&[][..], &[9, 0], &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255]] {
+        for damaged in [
+            &[][..],
+            &[9, 0],
+            &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255],
+        ] {
             assert_eq!(Entry::decode(damaged), None);
         }
     }

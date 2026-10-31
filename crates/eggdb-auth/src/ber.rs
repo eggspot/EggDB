@@ -29,7 +29,9 @@ pub(crate) fn integer(value: u32) -> Vec<u8> {
         skip -= 1;
     }
     let content: Vec<u8> = if bytes[skip] & 0x80 != 0 {
-        std::iter::once(0).chain(bytes[skip..].iter().copied()).collect()
+        std::iter::once(0)
+            .chain(bytes[skip..].iter().copied())
+            .collect()
     } else {
         bytes[skip..].to_vec()
     };

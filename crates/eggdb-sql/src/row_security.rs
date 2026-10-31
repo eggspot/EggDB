@@ -25,9 +25,15 @@ impl PolicyCommand {
     }
 
     fn from_code(code: u8) -> Option<Self> {
-        [Self::All, Self::Select, Self::Insert, Self::Update, Self::Delete]
-            .into_iter()
-            .find(|command| command.code() == code)
+        [
+            Self::All,
+            Self::Select,
+            Self::Insert,
+            Self::Update,
+            Self::Delete,
+        ]
+        .into_iter()
+        .find(|command| command.code() == code)
     }
 
     fn covers(self, wanted: Self) -> bool {
@@ -47,9 +53,19 @@ pub(crate) struct Policy {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RowSecurityStatement {
-    CreatePolicy { table: Name, policy: Policy },
-    DropPolicy { table: Name, name: Name, if_exists: bool },
-    Switch { table: Name, enabled: bool },
+    CreatePolicy {
+        table: Name,
+        policy: Policy,
+    },
+    DropPolicy {
+        table: Name,
+        name: Name,
+        if_exists: bool,
+    },
+    Switch {
+        table: Name,
+        enabled: bool,
+    },
 }
 
 impl RowSecurityStatement {
@@ -103,7 +119,11 @@ fn put_text(out: &mut Vec<u8>, text: Option<&str>) {
 }
 
 fn encode(policy: &Policy) -> Vec<u8> {
-    let mut out = vec![RECORD_VERSION, policy.command.code(), u8::from(policy.permissive)];
+    let mut out = vec![
+        RECORD_VERSION,
+        policy.command.code(),
+        u8::from(policy.permissive),
+    ];
     out.extend_from_slice(&(policy.roles.len() as u32).to_le_bytes());
     for role in &policy.roles {
         put_text(&mut out, Some(role));
@@ -135,7 +155,9 @@ fn take_text(bytes: &[u8], at: &mut usize) -> SqlResult<Option<String>> {
         [1] => {
             let length = take_u32(bytes, at)?;
             let text = take(bytes, at, length)?;
-            String::from_utf8(text.to_vec()).map(Some).map_err(|_| corrupt())
+            String::from_utf8(text.to_vec())
+                .map(Some)
+                .map_err(|_| corrupt())
         }
         _ => Err(corrupt()),
     }
@@ -174,21 +196,26 @@ pub(crate) fn policies(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<
     let prefix = policy_prefix(table);
     let mut found = Vec::new();
     let mut failure = None;
-    reader.scan(&prefix, &prefix_end(&prefix), ScanDirection::Forward, &mut |key, value| {
-        let decoded = std::str::from_utf8(&key[prefix.len()..])
-            .map_err(|_| corrupt())
-            .and_then(|name| decode(name, value));
-        match decoded {
-            Ok(policy) => {
-                found.push(policy);
-                Ok(true)
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            let decoded = std::str::from_utf8(&key[prefix.len()..])
+                .map_err(|_| corrupt())
+                .and_then(|name| decode(name, value));
+            match decoded {
+                Ok(policy) => {
+                    found.push(policy);
+                    Ok(true)
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    Ok(false)
+                }
             }
-            Err(error) => {
-                failure = Some(error);
-                Ok(false)
-            }
-        }
-    })?;
+        },
+    )?;
     failure.map_or(Ok(found), Err)
 }
 
@@ -223,7 +250,10 @@ pub(crate) fn run(
         | RowSecurityStatement::DropPolicy { table, .. }
         | RowSecurityStatement::Switch { table, .. } => table,
     };
-    if writer.get(&crate::encoding::table_key(&table.text))?.is_none() {
+    if writer
+        .get(&crate::encoding::table_key(&table.text))?
+        .is_none()
+    {
         return Err(missing_table(table));
     }
     match statement {
@@ -374,8 +404,8 @@ pub(crate) fn check_new_rows(
 }
 
 pub(crate) fn condition_expression(text: &str, settings: &Settings) -> SqlResult<Expr> {
-    let tokens = crate::lexer::tokenize_in(text, crate::Dialect::PostgreSql)
-        .map_err(|_| corrupt())?;
+    let tokens =
+        crate::lexer::tokenize_in(text, crate::Dialect::PostgreSql).map_err(|_| corrupt())?;
     let mut parser = crate::parser::Parser::new(text, &tokens)
         .with_context(crate::parser::Parameters::Absent, settings)
         .in_dialect(crate::Dialect::PostgreSql);

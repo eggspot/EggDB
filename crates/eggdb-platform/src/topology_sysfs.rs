@@ -120,7 +120,9 @@ fn topology_file(cpu: CpuId, name: &str) -> String {
     format!("cpu/cpu{}/topology/{name}", cpu.index())
 }
 
-fn core_kinds(file: &dyn Fn(&str) -> Option<String>) -> Option<BTreeMap<CpuId, crate::topology::CoreKind>> {
+fn core_kinds(
+    file: &dyn Fn(&str) -> Option<String>,
+) -> Option<BTreeMap<CpuId, crate::topology::CoreKind>> {
     let performance = list(file, "../cpu_core/cpus")?;
     let efficiency = list(file, "../cpu_atom/cpus").unwrap_or_default();
     let mut kinds = BTreeMap::new();
@@ -405,7 +407,9 @@ mod tests {
         let performance: CpuSet = (0..4).map(cpu).collect();
         assert_eq!(topology.performance_cpus(), Some(performance));
         assert_eq!(
-            topology.location(cpu(5)).and_then(|location| location.kind()),
+            topology
+                .location(cpu(5))
+                .and_then(|location| location.kind()),
             Some(crate::CoreKind::Efficiency)
         );
     }

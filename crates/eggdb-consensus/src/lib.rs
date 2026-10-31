@@ -99,7 +99,10 @@ pub struct Timing {
 
 impl Default for Timing {
     fn default() -> Self {
-        Self { election_ticks: 10, heartbeat_ticks: 2 }
+        Self {
+            election_ticks: 10,
+            heartbeat_ticks: 2,
+        }
     }
 }
 
@@ -139,7 +142,11 @@ impl Node {
     pub fn new(id: NodeId, members: &[NodeId], timing: Timing, seed: u64) -> Self {
         let mut node = Self {
             id,
-            peers: members.iter().copied().filter(|member| *member != id).collect(),
+            peers: members
+                .iter()
+                .copied()
+                .filter(|member| *member != id)
+                .collect(),
             timing,
             term: 0,
             voted_for: None,
@@ -227,15 +234,21 @@ impl Node {
         if index == 0 {
             return Some(0);
         }
-        self.log.get(usize::try_from(index - 1).ok()?).map(|entry| entry.term)
+        self.log
+            .get(usize::try_from(index - 1).ok()?)
+            .map(|entry| entry.term)
     }
 
     fn majority(&self) -> usize {
-        (self.peers.len() + 1) / 2 + 1
+        self.peers.len().div_ceil(2) + 1
     }
 
     fn send(&self, to: NodeId, message: Message) -> Envelope {
-        Envelope { from: self.id, to, message }
+        Envelope {
+            from: self.id,
+            to,
+            message,
+        }
     }
 
     fn become_follower(&mut self, term: u64, leader: Option<NodeId>) {
@@ -261,7 +274,19 @@ impl Node {
             return self.become_leader();
         }
         let (last_index, last_term) = (self.last_index(), self.last_term());
-        self.peers.iter().map(|peer| self.send(*peer, Message::RequestVote { term: self.term, last_index, last_term })).collect()
+        self.peers
+            .iter()
+            .map(|peer| {
+                self.send(
+                    *peer,
+                    Message::RequestVote {
+                        term: self.term,
+                        last_index,
+                        last_term,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn become_leader(&mut self) -> Vec<Envelope> {
@@ -271,7 +296,11 @@ impl Node {
         self.next_index = self.peers.iter().map(|peer| (*peer, next)).collect();
         self.match_index = self.peers.iter().map(|peer| (*peer, 0)).collect();
         self.elapsed = 0;
-        self.log.push(Entry { term: self.term, index: next, command: Vec::new() });
+        self.log.push(Entry {
+            term: self.term,
+            index: next,
+            command: Vec::new(),
+        });
         self.advance_commit();
         self.broadcast()
     }
@@ -280,12 +309,30 @@ impl Node {
         let next = self.next_index.get(&peer).copied().unwrap_or(1).max(1);
         let previous_index = next - 1;
         let previous_term = self.term_at(previous_index).unwrap_or(0);
-        let entries: Vec<Entry> = self.log.iter().skip(previous_index as usize).take(MAX_ENTRIES_PER_APPEND).cloned().collect();
-        self.send(peer, Message::Append { term: self.term, previous_index, previous_term, entries, commit: self.commit })
+        let entries: Vec<Entry> = self
+            .log
+            .iter()
+            .skip(previous_index as usize)
+            .take(MAX_ENTRIES_PER_APPEND)
+            .cloned()
+            .collect();
+        self.send(
+            peer,
+            Message::Append {
+                term: self.term,
+                previous_index,
+                previous_term,
+                entries,
+                commit: self.commit,
+            },
+        )
     }
 
     fn broadcast(&self) -> Vec<Envelope> {
-        self.peers.iter().map(|peer| self.append_to(*peer)).collect()
+        self.peers
+            .iter()
+            .map(|peer| self.append_to(*peer))
+            .collect()
     }
 
     fn advance_commit(&mut self) {
@@ -322,10 +369,16 @@ impl Node {
     /// Appends a command when this node leads; returns its index.
     pub fn propose(&mut self, command: Vec<u8>) -> Result<(u64, Vec<Envelope>), NotLeader> {
         if self.role != Role::Leader {
-            return Err(NotLeader { leader: self.leader });
+            return Err(NotLeader {
+                leader: self.leader,
+            });
         }
         let index = self.last_index() + 1;
-        self.log.push(Entry { term: self.term, index, command });
+        self.log.push(Entry {
+            term: self.term,
+            index,
+            command,
+        });
         self.advance_commit();
         Ok((index, self.broadcast()))
     }
@@ -333,21 +386,36 @@ impl Node {
     /// Handles a message from `from`; returns the messages to send.
     pub fn step(&mut self, from: NodeId, message: Message) -> Vec<Envelope> {
         let message_term = match &message {
-            Message::RequestVote { term, .. } | Message::Vote { term, .. } | Message::Append { term, .. } | Message::AppendReply { term, .. } => *term,
+            Message::RequestVote { term, .. }
+            | Message::Vote { term, .. }
+            | Message::Append { term, .. }
+            | Message::AppendReply { term, .. } => *term,
         };
         if message_term > self.term {
             let leader = matches!(message, Message::Append { .. }).then_some(from);
             self.become_follower(message_term, leader);
         }
         match message {
-            Message::RequestVote { term, last_index, last_term } => {
+            Message::RequestVote {
+                term,
+                last_index,
+                last_term,
+            } => {
                 let up_to_date = (last_term, last_index) >= (self.last_term(), self.last_index());
-                let granted = term == self.term && up_to_date && self.voted_for.is_none_or(|voted| voted == from);
+                let granted = term == self.term
+                    && up_to_date
+                    && self.voted_for.is_none_or(|voted| voted == from);
                 if granted {
                     self.voted_for = Some(from);
                     self.elapsed = 0;
                 }
-                vec![self.send(from, Message::Vote { term: self.term, granted })]
+                vec![self.send(
+                    from,
+                    Message::Vote {
+                        term: self.term,
+                        granted,
+                    },
+                )]
             }
             Message::Vote { term, granted } => {
                 if self.role == Role::Candidate && term == self.term && granted {
@@ -358,14 +426,34 @@ impl Node {
                 }
                 Vec::new()
             }
-            Message::Append { term, previous_index, previous_term, entries, commit } => {
+            Message::Append {
+                term,
+                previous_index,
+                previous_term,
+                entries,
+                commit,
+            } => {
                 if term < self.term {
-                    return vec![self.send(from, Message::AppendReply { term: self.term, success: false, index: self.last_index() })];
+                    return vec![self.send(
+                        from,
+                        Message::AppendReply {
+                            term: self.term,
+                            success: false,
+                            index: self.last_index(),
+                        },
+                    )];
                 }
                 self.become_follower(term, Some(from));
                 if self.term_at(previous_index) != Some(previous_term) {
                     let hint = previous_index.saturating_sub(1).min(self.last_index());
-                    return vec![self.send(from, Message::AppendReply { term: self.term, success: false, index: hint })];
+                    return vec![self.send(
+                        from,
+                        Message::AppendReply {
+                            term: self.term,
+                            success: false,
+                            index: hint,
+                        },
+                    )];
                 }
                 let received = entries.len() as u64;
                 for entry in entries {
@@ -382,9 +470,20 @@ impl Node {
                 if commit > self.commit {
                     self.commit = commit.min(self.last_index());
                 }
-                vec![self.send(from, Message::AppendReply { term: self.term, success: true, index: matched })]
+                vec![self.send(
+                    from,
+                    Message::AppendReply {
+                        term: self.term,
+                        success: true,
+                        index: matched,
+                    },
+                )]
             }
-            Message::AppendReply { term, success, index } => {
+            Message::AppendReply {
+                term,
+                success,
+                index,
+            } => {
                 if self.role != Role::Leader || term != self.term {
                     return Vec::new();
                 }
@@ -412,7 +511,10 @@ impl Node {
         let from = self.applied as usize;
         let to = (self.commit as usize).min(self.log.len());
         self.applied = to as u64;
-        self.log.get(from..to).map(<[Entry]>::to_vec).unwrap_or_default()
+        self.log
+            .get(from..to)
+            .map(<[Entry]>::to_vec)
+            .unwrap_or_default()
     }
 }
 

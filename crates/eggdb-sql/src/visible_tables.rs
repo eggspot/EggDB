@@ -105,12 +105,17 @@ fn shown_name(internal: &str) -> String {
 
 fn names_under(reader: &dyn KeyValueRead, prefix: &[u8]) -> SqlResult<Vec<String>> {
     let mut names = Vec::new();
-    reader.scan(prefix, &prefix_end(prefix), ScanDirection::Forward, &mut |key, _| {
-        if let Some(name) = key.get(prefix.len()..) {
-            names.push(String::from_utf8_lossy(name).into_owned());
-        }
-        Ok(true)
-    })?;
+    reader.scan(
+        prefix,
+        &prefix_end(prefix),
+        ScanDirection::Forward,
+        &mut |key, _| {
+            if let Some(name) = key.get(prefix.len()..) {
+                names.push(String::from_utf8_lossy(name).into_owned());
+            }
+            Ok(true)
+        },
+    )?;
     Ok(names)
 }
 

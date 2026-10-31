@@ -17,7 +17,9 @@ pub fn write_varint(mut value: u64, out: &mut Vec<u8>) {
 pub fn read_varint(bytes: &[u8], at: &mut usize) -> Result<u64, DecodeError> {
     let mut value = 0u64;
     for shift in (0..64).step_by(7) {
-        let byte = *bytes.get(*at).ok_or_else(|| damaged("a varint runs past its bytes"))?;
+        let byte = *bytes
+            .get(*at)
+            .ok_or_else(|| damaged("a varint runs past its bytes"))?;
         *at += 1;
         if shift == 63 && byte > 1 {
             return Err(damaged("a varint overflows 64 bits"));
@@ -54,7 +56,9 @@ pub fn decode_deltas(bytes: &[u8]) -> Result<(Vec<i64>, usize), DecodeError> {
     let mut at = 0;
     let count = read_varint(bytes, &mut at)?;
     if count > bytes.len() as u64 {
-        return Err(damaged("a delta run claims more values than its bytes can hold"));
+        return Err(damaged(
+            "a delta run claims more values than its bytes can hold",
+        ));
     }
     let mut values = Vec::with_capacity(count as usize);
     let mut previous = 0i64;

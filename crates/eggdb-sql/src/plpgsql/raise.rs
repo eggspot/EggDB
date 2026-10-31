@@ -173,13 +173,19 @@ mod tests {
     #[test]
     fn messages_fill_placeholders_like_postgresql() {
         let arguments = [Value::Integer(7), Value::Null];
-        assert_eq!(format_message("a % b % c %%", &arguments), "a 7 b <NULL> c %");
+        assert_eq!(
+            format_message("a % b % c %%", &arguments),
+            "a 7 b <NULL> c %"
+        );
         assert_eq!(format_message("100%%", &[]), "100%");
     }
 
     #[test]
     fn error_codes_read_states_and_condition_names() {
-        assert_eq!(errcode("22012").map(|state| state.code().to_owned()), Ok("22012".to_owned()));
+        assert_eq!(
+            errcode("22012").map(|state| state.code().to_owned()),
+            Ok("22012".to_owned())
+        );
         assert_eq!(
             errcode("unique_violation").map(|state| state.code().to_owned()),
             Ok("23505".to_owned())

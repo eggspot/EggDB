@@ -11,11 +11,18 @@ pub(crate) struct Frame {
 
 impl Frame {
     pub(crate) fn new(command: &str) -> Self {
-        Self { command: command.to_owned(), headers: Vec::new(), body: Vec::new() }
+        Self {
+            command: command.to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
     }
 
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
+        self.headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
     }
 
     pub(crate) fn with(mut self, name: &str, value: &str) -> Self {
@@ -102,10 +109,16 @@ pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'stat
     let mut line_start = at;
     let body_start = loop {
         let Some(offset) = buffer[line_start..].iter().position(|&byte| byte == b'\n') else {
-            return if buffer.len() - at > MAX_HEADER_BYTES { Err("the frame's headers are too long") } else { Ok(None) };
+            return if buffer.len() - at > MAX_HEADER_BYTES {
+                Err("the frame's headers are too long")
+            } else {
+                Ok(None)
+            };
         };
         let newline = line_start + offset;
-        let line = buffer[line_start..newline].strip_suffix(b"\r").unwrap_or(&buffer[line_start..newline]);
+        let line = buffer[line_start..newline]
+            .strip_suffix(b"\r")
+            .unwrap_or(&buffer[line_start..newline]);
         if newline - at > MAX_HEADER_BYTES {
             return Err("the frame's headers are too long");
         }
@@ -125,10 +138,17 @@ pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'stat
     let mut headers = Vec::with_capacity(header_lines.len());
     for line in header_lines {
         let (name, value) = line.split_once(':').ok_or("a frame header has no colon")?;
-        let (name, value) = if escaped { (unescape(name)?, unescape(value)?) } else { (name.to_owned(), value.to_owned()) };
+        let (name, value) = if escaped {
+            (unescape(name)?, unescape(value)?)
+        } else {
+            (name.to_owned(), value.to_owned())
+        };
         headers.push((name, value));
     }
-    let length = headers.iter().find(|(name, _)| name == "content-length").map(|(_, value)| value.trim().parse::<usize>());
+    let length = headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .map(|(_, value)| value.trim().parse::<usize>());
     let (body_end, used) = match length {
         Some(Ok(length)) => {
             if length > MAX_BODY_BYTES {
@@ -145,10 +165,16 @@ pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'stat
         Some(Err(_)) => return Err("the content-length header is not a number"),
         None => match buffer[body_start..].iter().position(|&byte| byte == 0) {
             Some(offset) => (body_start + offset, body_start + offset + 1),
-            None if buffer.len() - body_start > MAX_BODY_BYTES => return Err("the frame's body is larger than 16 MiB"),
+            None if buffer.len() - body_start > MAX_BODY_BYTES => {
+                return Err("the frame's body is larger than 16 MiB");
+            }
             None => return Ok(None),
         },
     };
-    let frame = Frame { command: (*command).to_owned(), headers, body: buffer[body_start..body_end].to_vec() };
+    let frame = Frame {
+        command: (*command).to_owned(),
+        headers,
+        body: buffer[body_start..body_end].to_vec(),
+    };
     Ok(Some((frame, used)))
 }

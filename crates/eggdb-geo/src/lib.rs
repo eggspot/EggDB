@@ -89,7 +89,9 @@ impl Geometry {
             Geometry::Point(point) => point.iter().copied().collect(),
             Geometry::LineString(line) | Geometry::MultiPoint(line) => line.clone(),
             Geometry::Polygon(rings) | Geometry::MultiLineString(rings) => rings.concat(),
-            Geometry::MultiPolygon(polygons) => polygons.iter().flat_map(|rings| rings.concat()).collect(),
+            Geometry::MultiPolygon(polygons) => {
+                polygons.iter().flat_map(|rings| rings.concat()).collect()
+            }
             Geometry::Collection(items) => items.iter().flat_map(Geometry::coords).collect(),
         }
     }

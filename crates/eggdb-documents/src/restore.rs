@@ -26,25 +26,44 @@ fn next_document(reader: &mut impl Read) -> DocumentResult<Option<Vec<u8>>> {
     while filled < 4 {
         match reader.read(&mut length_bytes[filled..]) {
             Ok(0) if filled == 0 => return Ok(None),
-            Ok(0) => return Err(DocumentError::failed_to_parse("the dump ends inside a document's length")),
+            Ok(0) => {
+                return Err(DocumentError::failed_to_parse(
+                    "the dump ends inside a document's length",
+                ));
+            }
             Ok(read) => filled += read,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(DocumentError::storage(format!("cannot read the dump: {error}"))),
+            Err(error) => {
+                return Err(DocumentError::storage(format!(
+                    "cannot read the dump: {error}"
+                )));
+            }
         }
     }
     let length = i32::from_le_bytes(length_bytes);
-    let Some(length) = usize::try_from(length).ok().filter(|length| (5..=MAX_DOCUMENT_BYTES).contains(length)) else {
-        return Err(DocumentError::failed_to_parse(format!("a document in the dump has the impossible length {length}")));
+    let Some(length) = usize::try_from(length)
+        .ok()
+        .filter(|length| (5..=MAX_DOCUMENT_BYTES).contains(length))
+    else {
+        return Err(DocumentError::failed_to_parse(format!(
+            "a document in the dump has the impossible length {length}"
+        )));
     };
     let mut bytes = vec![0u8; length];
     bytes[..4].copy_from_slice(&length_bytes);
-    reader
-        .read_exact(&mut bytes[4..])
-        .map_err(|error| DocumentError::failed_to_parse(format!("the dump ends inside a document: {error}")))?;
+    reader.read_exact(&mut bytes[4..]).map_err(|error| {
+        DocumentError::failed_to_parse(format!("the dump ends inside a document: {error}"))
+    })?;
     Ok(Some(bytes))
 }
 
-fn flush(store: &Store<'_>, database: &str, collection: &str, pending: &mut Vec<Document>, outcome: &mut RestoredCollection) -> DocumentResult<()> {
+fn flush(
+    store: &Store<'_>,
+    database: &str,
+    collection: &str,
+    pending: &mut Vec<Document>,
+    outcome: &mut RestoredCollection,
+) -> DocumentResult<()> {
     if pending.is_empty() {
         return Ok(());
     }
@@ -52,7 +71,10 @@ fn flush(store: &Store<'_>, database: &str, collection: &str, pending: &mut Vec<
     outcome.documents += inserted.inserted;
     outcome.failed += inserted.errors.len() as u64;
     if outcome.first_error.is_none() {
-        outcome.first_error = inserted.errors.first().map(|(_, error)| error.message.clone());
+        outcome.first_error = inserted
+            .errors
+            .first()
+            .map(|(_, error)| error.message.clone());
     }
     Ok(())
 }
@@ -99,7 +121,9 @@ pub fn restore_collection(
                 continue;
             }
             if index.get_bool("unique") == Some(true) {
-                outcome.skipped_indexes.push(format!("{name}: unique indexes besides _id are not enforced yet"));
+                outcome.skipped_indexes.push(format!(
+                    "{name}: unique indexes besides _id are not enforced yet"
+                ));
                 continue;
             }
             let mut definition = Document::new();

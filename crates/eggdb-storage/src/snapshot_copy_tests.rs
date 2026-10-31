@@ -67,7 +67,7 @@ fn key(index: usize) -> Vec<u8> {
 }
 
 fn value(index: usize) -> Vec<u8> {
-    let len = if index % 37 == 0 {
+    let len = if index.is_multiple_of(37) {
         3 * 4096 + index
     } else {
         20 + index % 90
@@ -114,12 +114,6 @@ fn read_all(read: &ReadTransaction<'_, SimFile>) -> Model {
         found.insert(key.to_vec(), value.to_vec());
     }
     found
-}
-
-fn contents(fs: &SimFileSystem, path: &str, clock: &Arc<SimClock>) -> Model {
-    let store = opened(fs, path, Access::ReadOnly, clock);
-    let read = store.begin_read().unwrap();
-    read_all(&read)
 }
 
 fn copy(

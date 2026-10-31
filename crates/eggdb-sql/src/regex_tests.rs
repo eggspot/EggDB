@@ -228,8 +228,14 @@ fn matches_report_the_leftmost_then_preferred_length_and_their_groups() {
     assert_eq!(spans("abcd", "a|ab").unwrap()[0], Some((0, 2)));
     assert_eq!(spans("xabcabc", "(abc)+").unwrap()[0], Some((1, 7)));
     assert_eq!(spans("XY1234Z", "Y*([0-9]{1,3})").unwrap()[1], Some((2, 5)));
-    assert_eq!(spans("XY1234Z", "Y*?([0-9]{1,3})").unwrap()[1], Some((2, 3)));
-    assert_eq!(spans("abc", "(x)|(b)").unwrap(), vec![Some((1, 2)), None, Some((1, 2))]);
+    assert_eq!(
+        spans("XY1234Z", "Y*?([0-9]{1,3})").unwrap()[1],
+        Some((2, 3))
+    );
+    assert_eq!(
+        spans("abc", "(x)|(b)").unwrap(),
+        vec![Some((1, 2)), None, Some((1, 2))]
+    );
     assert!(spans("abc", "d").is_none());
 }
 

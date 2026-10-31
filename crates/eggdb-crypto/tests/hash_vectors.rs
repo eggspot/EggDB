@@ -3,8 +3,8 @@
 //! HMAC-SHA-512, RFC 5869 for HKDF-SHA-256.
 
 use eggdb_crypto::{
-    HashFunction, Hmac, HkdfError, Sha256, Sha384, Sha512, hkdf_expand, hkdf_extract, hmac,
-    sha384, sha512,
+    HashFunction, HkdfError, Hmac, Sha256, Sha384, Sha512, hkdf_expand, hkdf_extract, hmac, sha384,
+    sha512,
 };
 
 fn hex(bytes: &[u8]) -> String {

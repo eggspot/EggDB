@@ -232,9 +232,15 @@ fn table_query(table: &CommonTable, recursive: bool) -> Query {
     }
 }
 
-fn renamed(columns: Vec<OutputColumn>, names: &[Name], table: &Name) -> SqlResult<Vec<OutputColumn>> {
+fn renamed(
+    columns: Vec<OutputColumn>,
+    names: &[Name],
+    table: &Name,
+) -> SqlResult<Vec<OutputColumn>> {
     if names.len() > columns.len() {
-        let position = names.get(columns.len()).map_or(table.position, |name| name.position);
+        let position = names
+            .get(columns.len())
+            .map_or(table.position, |name| name.position);
         return Err(SqlError::new(
             SqlState::INVALID_COLUMN_REFERENCE,
             format!(
@@ -329,21 +335,21 @@ fn record(
     column_names: &[Name],
     result: Option<QueryResult>,
 ) -> SqlResult<()> {
-    let variable = match result.and_then(|result| result.columns.map(|columns| (columns, result.rows)))
-    {
-        Some((columns, rows)) => {
-            let variable = variable_name(number, &name.text);
-            frame.insert(
-                variable.clone(),
-                TableVariable {
-                    columns: renamed(columns, column_names, name)?,
-                    rows,
-                },
-            );
-            Some(variable)
-        }
-        None => None,
-    };
+    let variable =
+        match result.and_then(|result| result.columns.map(|columns| (columns, result.rows))) {
+            Some((columns, rows)) => {
+                let variable = variable_name(number, &name.text);
+                frame.insert(
+                    variable.clone(),
+                    TableVariable {
+                        columns: renamed(columns, column_names, name)?,
+                        rows,
+                    },
+                );
+                Some(variable)
+            }
+            None => None,
+        };
     materialized.push(Materialized {
         name: name.text.clone(),
         variable,
@@ -383,7 +389,7 @@ pub(crate) fn run(
                 column_names,
                 statement,
             } => {
-                let mut statement = statement.clone();
+                let mut statement = (**statement).clone();
                 replace_in_statement(&mut statement, &materialized)?;
                 let result = {
                     let _entered = entered(&frame);
@@ -427,7 +433,7 @@ pub(crate) fn describe(
                 name,
                 column_names,
                 statement,
-            } => (name, column_names, statement.clone()),
+            } => (name, column_names, (**statement).clone()),
         };
         replace_in_statement(&mut statement, &materialized)?;
         let columns = {
@@ -435,8 +441,16 @@ pub(crate) fn describe(
             bind(binding, reader, tables, &mut statement)?;
             described(reader, tables, &statement)?
         };
-        let result = columns.map(|columns| QueryResult::rows("SELECT 0".to_owned(), columns, Vec::new()));
-        record(&mut frame, &mut materialized, number, name, column_names, result)?;
+        let result =
+            columns.map(|columns| QueryResult::rows("SELECT 0".to_owned(), columns, Vec::new()));
+        record(
+            &mut frame,
+            &mut materialized,
+            number,
+            name,
+            column_names,
+            result,
+        )?;
     }
     let mut body = with.body.clone();
     replace_in_statement(&mut body, &materialized)?;

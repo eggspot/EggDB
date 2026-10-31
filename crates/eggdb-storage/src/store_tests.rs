@@ -864,7 +864,12 @@ fn a_cursor_stepped_back_returns_the_same_entry_again_and_then_moves_on() {
     }
     assert_eq!(seen, (0..300).map(key).collect::<Vec<_>>());
     let mut lengths = tree.scan(Bound::Unbounded, Bound::Unbounded, ScanOrder::Descending);
-    let last = read.next_key_and_value_len(&mut lengths).unwrap().unwrap().0.to_vec();
+    let last = read
+        .next_key_and_value_len(&mut lengths)
+        .unwrap()
+        .unwrap()
+        .0
+        .to_vec();
     lengths.step_back();
     let again = read.next_key_and_value_len(&mut lengths).unwrap().unwrap();
     assert_eq!((again.0.to_vec(), again.1), (last, 4));

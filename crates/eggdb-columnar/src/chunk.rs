@@ -40,7 +40,10 @@ pub struct IntegerChunk {
 pub const MAX_CHUNK_VALUES: u64 = 1 << 24;
 
 fn offsets(values: &[i64], min: i64) -> Vec<u64> {
-    values.iter().map(|value| value.wrapping_sub(min) as u64).collect()
+    values
+        .iter()
+        .map(|value| value.wrapping_sub(min) as u64)
+        .collect()
 }
 
 impl IntegerChunk {
@@ -49,9 +52,18 @@ impl IntegerChunk {
     pub fn encode(values: &[i64]) -> Self {
         let values = &values[..values.len().min(MAX_CHUNK_VALUES as usize)];
         let Some((&min, &max)) = values.iter().min().zip(values.iter().max()) else {
-            return Self { encoding: Encoding::FrameOfReference, stats: None, bytes: Vec::new() };
+            return Self {
+                encoding: Encoding::FrameOfReference,
+                stats: None,
+                bytes: Vec::new(),
+            };
         };
-        let stats = ChunkStats { min, max, sum: values.iter().map(|value| i128::from(*value)).sum(), count: values.len() as u64 };
+        let stats = ChunkStats {
+            min,
+            max,
+            sum: values.iter().map(|value| i128::from(*value)).sum(),
+            count: values.len() as u64,
+        };
         let shifted = offsets(values, min);
         let width = bit_width(&shifted);
         let mut frame = vec![width];
@@ -60,11 +72,19 @@ impl IntegerChunk {
         encode_hybrid(&shifted, width, &mut runs);
         let mut deltas = Vec::new();
         encode_deltas(values, &mut deltas);
-        let (encoding, bytes) = [(Encoding::FrameOfReference, frame), (Encoding::Runs, runs), (Encoding::Deltas, deltas)]
-            .into_iter()
-            .min_by_key(|(_, bytes)| bytes.len())
-            .unwrap_or((Encoding::FrameOfReference, Vec::new()));
-        Self { encoding, stats: Some(stats), bytes }
+        let (encoding, bytes) = [
+            (Encoding::FrameOfReference, frame),
+            (Encoding::Runs, runs),
+            (Encoding::Deltas, deltas),
+        ]
+        .into_iter()
+        .min_by_key(|(_, bytes)| bytes.len())
+        .unwrap_or((Encoding::FrameOfReference, Vec::new()));
+        Self {
+            encoding,
+            stats: Some(stats),
+            bytes,
+        }
     }
 
     /// The encoding chosen.
@@ -94,13 +114,25 @@ impl IntegerChunk {
         let values = match self.encoding {
             Encoding::Deltas => decode_deltas(&self.bytes)?.0,
             Encoding::FrameOfReference | Encoding::Runs => {
-                let (&width, rest) = self.bytes.split_first().ok_or_else(|| damaged("a chunk has no bit width"))?;
-                let shifted = if self.encoding == Encoding::Runs { decode_hybrid(rest, width, count)?.0 } else { unpack(rest, width, count)? };
-                shifted.into_iter().map(|offset| stats.min.wrapping_add(offset as i64)).collect()
+                let (&width, rest) = self
+                    .bytes
+                    .split_first()
+                    .ok_or_else(|| damaged("a chunk has no bit width"))?;
+                let shifted = if self.encoding == Encoding::Runs {
+                    decode_hybrid(rest, width, count)?.0
+                } else {
+                    unpack(rest, width, count)?
+                };
+                shifted
+                    .into_iter()
+                    .map(|offset| stats.min.wrapping_add(offset as i64))
+                    .collect()
             }
         };
         if values.len() != count {
-            return Err(damaged("a chunk holds a different number of values than its statistics"));
+            return Err(damaged(
+                "a chunk holds a different number of values than its statistics",
+            ));
         }
         Ok(values)
     }
@@ -117,7 +149,12 @@ impl IntegerChunk {
         if stats.max < low {
             return Ok(0);
         }
-        Ok(self.decode()?.into_iter().filter(|value| *value >= low).map(i128::from).sum())
+        Ok(self
+            .decode()?
+            .into_iter()
+            .filter(|value| *value >= low)
+            .map(i128::from)
+            .sum())
     }
 
     /// The chunk as bytes: its encoding, statistics and data.
@@ -142,7 +179,9 @@ impl IntegerChunk {
 
     /// Reads what [`IntegerChunk::to_bytes`] wrote, checking the data against its statistics.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let (&tag, rest) = bytes.split_first().ok_or_else(|| damaged("a chunk is empty"))?;
+        let (&tag, rest) = bytes
+            .split_first()
+            .ok_or_else(|| damaged("a chunk is empty"))?;
         let encoding = match tag {
             0 => Encoding::FrameOfReference,
             1 => Encoding::Runs,
@@ -154,9 +193,13 @@ impl IntegerChunk {
         let stats = if count == 0 {
             None
         } else {
-            let fixed = rest.get(at..at + 32).ok_or_else(|| damaged("a chunk's statistics are cut short"))?;
+            let fixed = rest
+                .get(at..at + 32)
+                .ok_or_else(|| damaged("a chunk's statistics are cut short"))?;
             at += 32;
-            let read = |from: usize| i64::from_le_bytes(fixed[from..from + 8].try_into().unwrap_or_default());
+            let read = |from: usize| {
+                i64::from_le_bytes(fixed[from..from + 8].try_into().unwrap_or_default())
+            };
             Some(ChunkStats {
                 min: read(0),
                 max: read(8),
@@ -164,7 +207,11 @@ impl IntegerChunk {
                 count,
             })
         };
-        let chunk = Self { encoding, stats, bytes: rest[at..].to_vec() };
+        let chunk = Self {
+            encoding,
+            stats,
+            bytes: rest[at..].to_vec(),
+        };
         let values = chunk.decode()?;
         if let Some(stats) = stats {
             let consistent = values.iter().min() == Some(&stats.min)

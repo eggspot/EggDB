@@ -23,10 +23,7 @@ impl Overflow {
     fn of(options: &[Value]) -> Self {
         Self {
             truncate: matches!(options.first(), Some(Value::Boolean(true))),
-            indicator: options
-                .get(1)
-                .and_then(text_of)
-                .unwrap_or_default(),
+            indicator: options.get(1).and_then(text_of).unwrap_or_default(),
             with_count: !matches!(options.get(2), Some(Value::Boolean(false))),
         }
     }

@@ -41,7 +41,10 @@ END stats;";
 
 fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
-    run(&mut session, "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))");
+    run(
+        &mut session,
+        "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))",
+    );
     session
 }
 
@@ -79,16 +82,19 @@ fn single(session: &mut Session<'_, MemoryStore>, text: &str) -> String {
 fn logged(session: &mut Session<'_, MemoryStore>) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     session
-        .execute("SELECT n, msg FROM log ORDER BY n", &mut |result: QueryResult| {
-            for row in result.rows {
-                let text = |at: usize| {
-                    row.get(at)
-                        .and_then(|value| value.to_text())
-                        .unwrap_or_else(|| "NULL".to_owned())
-                };
-                rows.push((text(0), text(1)));
-            }
-        })
+        .execute(
+            "SELECT n, msg FROM log ORDER BY n",
+            &mut |result: QueryResult| {
+                for row in result.rows {
+                    let text = |at: usize| {
+                        row.get(at)
+                            .and_then(|value| value.to_text())
+                            .unwrap_or_else(|| "NULL".to_owned())
+                    };
+                    rows.push((text(0), text(1)));
+                }
+            },
+        )
         .unwrap_or_else(|error| panic!("log: {error}"));
     rows
 }
@@ -103,9 +109,15 @@ fn entries(rows: &[(&str, &str)]) -> Vec<(String, String)> {
 fn package_variables_keep_their_values_between_calls() {
     let store = MemoryStore::default();
     let mut session = stats_session(&store);
-    run(&mut session, "BEGIN stats.add_amount(5); stats.add_amount('7'); END;");
+    run(
+        &mut session,
+        "BEGIN stats.add_amount(5); stats.add_amount('7'); END;",
+    );
     run(&mut session, "CALL stats.add_amount(3)");
-    assert_eq!(single(&mut session, "SELECT stats.current_total() FROM dual"), "15");
+    assert_eq!(
+        single(&mut session, "SELECT stats.current_total() FROM dual"),
+        "15"
+    );
     assert_eq!(
         logged(&mut session),
         entries(&[
@@ -125,8 +137,14 @@ fn the_initialization_part_runs_once_per_session() {
     run(&mut first, "BEGIN stats.add_amount(2); END;");
     let mut second = Session::with_dialect(&store, Dialect::Oracle);
     run(&mut second, "CALL stats.add_amount(0)");
-    assert_eq!(single(&mut second, "SELECT stats.current_total() FROM dual"), "0");
-    assert_eq!(single(&mut first, "SELECT stats.current_total() FROM dual"), "3");
+    assert_eq!(
+        single(&mut second, "SELECT stats.current_total() FROM dual"),
+        "0"
+    );
+    assert_eq!(
+        single(&mut first, "SELECT stats.current_total() FROM dual"),
+        "3"
+    );
     let initialized = logged(&mut first)
         .into_iter()
         .filter(|(_, msg)| msg == "initialized")
@@ -146,7 +164,10 @@ fn blocks_read_and_assign_public_package_variables() {
   INSERT INTO log VALUES (stats.limit_value, 'limit');
 END;",
     );
-    assert_eq!(single(&mut session, "SELECT stats.current_total() FROM dual"), "30");
+    assert_eq!(
+        single(&mut session, "SELECT stats.current_total() FROM dual"),
+        "30"
+    );
     assert_eq!(
         logged(&mut session),
         entries(&[("1", "initialized"), ("30", "outside"), ("100", "limit")])
@@ -163,7 +184,10 @@ fn package_constants_and_private_items_are_protected() {
         "BEGIN INSERT INTO log VALUES (stats.calls, 'private'); END;",
     );
     failure(&mut session, "BEGIN stats.note('private'); END;");
-    assert_eq!(single(&mut session, "SELECT stats.current_total() FROM dual"), "0");
+    assert_eq!(
+        single(&mut session, "SELECT stats.current_total() FROM dual"),
+        "0"
+    );
 }
 
 #[test]
@@ -237,10 +261,22 @@ END feed;",
   END next_entry;
 END feed;",
     );
-    assert_eq!(single(&mut session, "SELECT feed.next_entry() FROM dual"), "10");
-    assert_eq!(single(&mut session, "SELECT feed.next_entry() FROM dual"), "20");
-    assert_eq!(single(&mut session, "SELECT feed.next_entry() FROM dual"), "NULL");
-    assert_eq!(single(&mut session, "SELECT feed.next_entry() FROM dual"), "10");
+    assert_eq!(
+        single(&mut session, "SELECT feed.next_entry() FROM dual"),
+        "10"
+    );
+    assert_eq!(
+        single(&mut session, "SELECT feed.next_entry() FROM dual"),
+        "20"
+    );
+    assert_eq!(
+        single(&mut session, "SELECT feed.next_entry() FROM dual"),
+        "NULL"
+    );
+    assert_eq!(
+        single(&mut session, "SELECT feed.next_entry() FROM dual"),
+        "10"
+    );
 }
 
 #[test]
@@ -256,11 +292,7 @@ END;",
     );
     assert_eq!(
         logged(&mut session),
-        entries(&[
-            ("1", "initialized"),
-            ("2", "number 4"),
-            ("4", "total"),
-        ])
+        entries(&[("1", "initialized"), ("2", "number 4"), ("4", "total"),])
     );
 }
 
@@ -269,10 +301,16 @@ fn replacing_a_package_discards_its_session_state() {
     let store = MemoryStore::default();
     let mut session = stats_session(&store);
     run(&mut session, "BEGIN stats.add_amount(9); END;");
-    assert_eq!(single(&mut session, "SELECT stats.current_total() FROM dual"), "9");
+    assert_eq!(
+        single(&mut session, "SELECT stats.current_total() FROM dual"),
+        "9"
+    );
     run(&mut session, STATS_BODY);
     run(&mut session, "CALL stats.add_amount(1)");
-    assert_eq!(single(&mut session, "SELECT stats.current_total() FROM dual"), "1");
+    assert_eq!(
+        single(&mut session, "SELECT stats.current_total() FROM dual"),
+        "1"
+    );
 }
 
 #[test]

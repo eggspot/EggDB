@@ -7,8 +7,8 @@ use crate::dialect::Dialect;
 use crate::encoding::{TableDefinition, encode_row};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, Source, and, children, children_mut, compare_truth, or};
-use crate::hash_index::SeededIntegerHash;
 use crate::execute::{self, TableCache};
+use crate::hash_index::SeededIntegerHash;
 use crate::join;
 use crate::memory::WorkMemory;
 use crate::session::{OutputColumn, QueryResult};
@@ -116,7 +116,8 @@ fn hashed(values: &[Value]) -> Option<HashedValues> {
     }
     let present = values.iter().filter(|value| !value.is_null());
     let keys = if all_integers {
-        let mut keys = HashSet::with_capacity_and_hasher(values.len(), SeededIntegerHash::default());
+        let mut keys =
+            HashSet::with_capacity_and_hasher(values.len(), SeededIntegerHash::default());
         keys.extend(present.filter_map(integer_of));
         HashedKeys::Integers(keys)
     } else {
@@ -551,12 +552,18 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
             return None;
         };
         let (inner, index) = match (&left.kind, &right.kind) {
-            (_, ExprKind::OuterColumn { index, depth: 1, .. }) if !mentions_outer(left) => {
-                (left, *index)
-            }
-            (ExprKind::OuterColumn { index, depth: 1, .. }, _) if !mentions_outer(right) => {
-                (right, *index)
-            }
+            (
+                _,
+                ExprKind::OuterColumn {
+                    index, depth: 1, ..
+                },
+            ) if !mentions_outer(left) => (left, *index),
+            (
+                ExprKind::OuterColumn {
+                    index, depth: 1, ..
+                },
+                _,
+            ) if !mentions_outer(right) => (right, *index),
             _ => return None,
         };
         if shape == LookupShape::Aggregate && !matches!(inner.kind, ExprKind::Column { .. }) {
@@ -2018,7 +2025,11 @@ fn is_lateral(
     else {
         return false;
     };
-    if reference.derived.as_ref().is_some_and(|derived| derived.lateral) {
+    if reference
+        .derived
+        .as_ref()
+        .is_some_and(|derived| derived.lateral)
+    {
         return true;
     }
     let Some(generated) = reference.generated.as_deref() else {
@@ -2112,7 +2123,10 @@ struct LateralKey {
 }
 
 fn lateral_key_name(number: usize) -> String {
-    format!("{}lateral key {number}", crate::temp_tables::HIDDEN_COLUMN_MARKER)
+    format!(
+        "{}lateral key {number}",
+        crate::temp_tables::HIDDEN_COLUMN_MARKER
+    )
 }
 
 struct LateralRows {
@@ -2157,8 +2171,14 @@ fn lateral_rows(
         next: parent,
     };
     let mut inner = Prepared::new();
-    let (query, correlated) =
-        prepare_query(&outer_env, tables, &source.query, Some(&outer), ctes, &mut inner)?;
+    let (query, correlated) = prepare_query(
+        &outer_env,
+        tables,
+        &source.query,
+        Some(&outer),
+        ctes,
+        &mut inner,
+    )?;
     let mut needed = Vec::new();
     for_each_select(&query, &mut |select| {
         for expr in select_expressions(select) {
@@ -2314,10 +2334,7 @@ fn prepare_lateral(
         return Ok(());
     };
     let (kind, uses_names) = match from.joins.get(join_at) {
-        Some(join) => (
-            join.kind,
-            matches!(join.condition, JoinCondition::Using(_)),
-        ),
+        Some(join) => (join.kind, matches!(join.condition, JoinCondition::Using(_))),
         None => return Err(internal("a LATERAL item lost its join")),
     };
     let source = std::iter::once(&from.first)
@@ -2325,7 +2342,10 @@ fn prepare_lateral(
         .nth(index)
         .and_then(lateral_source)
         .ok_or_else(|| internal("a LATERAL item lost its query"))?;
-    if matches!(kind, crate::ast::JoinKind::Right | crate::ast::JoinKind::Full) {
+    if matches!(
+        kind,
+        crate::ast::JoinKind::Right | crate::ast::JoinKind::Full
+    ) {
         return Err(SqlError::new(
             SqlState::INVALID_COLUMN_REFERENCE,
             format!(

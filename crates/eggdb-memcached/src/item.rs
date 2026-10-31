@@ -54,7 +54,9 @@ pub fn expiry_of(exptime: i64, now_ms: u64) -> Option<u64> {
     match exptime {
         0 => None,
         negative if negative < 0 => Some(0),
-        relative if relative <= RELATIVE_LIMIT_SECONDS => Some(now_ms.saturating_add(relative as u64 * 1000)),
+        relative if relative <= RELATIVE_LIMIT_SECONDS => {
+            Some(now_ms.saturating_add(relative as u64 * 1000))
+        }
         absolute => Some((absolute as u64).saturating_mul(1000)),
     }
 }
@@ -65,7 +67,12 @@ mod tests {
 
     #[test]
     fn items_round_trip_and_exptime_follows_the_protocol() {
-        let item = Item { data: b"hello".to_vec(), flags: 7, cas: 42, expires_at_ms: Some(9) };
+        let item = Item {
+            data: b"hello".to_vec(),
+            flags: 7,
+            cas: 42,
+            expires_at_ms: Some(9),
+        };
         assert_eq!(Item::decode(&item.encode()), Some(item));
         assert_eq!(Item::decode(&[1, 2, 3]), None);
         assert_eq!(expiry_of(0, 5000), None);

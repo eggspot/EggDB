@@ -27,7 +27,8 @@ impl Ghash {
         for chunk in bytes.chunks(AES_BLOCK_BYTES) {
             let mut block = [0u8; AES_BLOCK_BYTES];
             block[..chunk.len()].copy_from_slice(chunk);
-            self.accumulator = gf128_multiply(self.accumulator ^ u128::from_be_bytes(block), self.key);
+            self.accumulator =
+                gf128_multiply(self.accumulator ^ u128::from_be_bytes(block), self.key);
         }
     }
 }
@@ -93,7 +94,8 @@ impl AesGcm {
         };
         ghash.absorb_padded(associated_data);
         ghash.absorb_padded(ciphertext);
-        let lengths = (((associated_data.len() as u128) * 8) << 64) | ((ciphertext.len() as u128) * 8);
+        let lengths =
+            (((associated_data.len() as u128) * 8) << 64) | ((ciphertext.len() as u128) * 8);
         ghash.absorb_padded(&lengths.to_be_bytes());
         let mut mask = Self::counter_block(nonce, 1);
         self.cipher.encrypt_block(&mut mask);

@@ -332,7 +332,10 @@ impl Parser<'_> {
                 }
                 (function, arguments)
             }
-            _ => (function, self.sqlserver_arguments(name, function.arguments())?),
+            _ => (
+                function,
+                self.sqlserver_arguments(name, function.arguments())?,
+            ),
         };
         let national = arguments
             .first()
@@ -782,7 +785,14 @@ impl Parser<'_> {
                 position,
             }))),
         };
-        Ok(derived_rows(rows, items, alias, "string_split", position, self.dialect))
+        Ok(derived_rows(
+            rows,
+            items,
+            alias,
+            "string_split",
+            position,
+            self.dialect,
+        ))
     }
 
     pub(super) fn at_openjson(&self) -> bool {
@@ -801,10 +811,16 @@ impl Parser<'_> {
     fn openjson_column_key(&self) -> String {
         let token = self.peek();
         let written = self.text.get(token.start..token.end).unwrap_or("");
-        if let Some(inner) = written.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        if let Some(inner) = written
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
             return inner.replace("]]", "]");
         }
-        if let Some(inner) = written.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+        if let Some(inner) = written
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
             return inner.replace("\"\"", "\"");
         }
         written.to_owned()
@@ -818,8 +834,10 @@ impl Parser<'_> {
         if self.take(&TokenKind::Comma) {
             let path_position = self.position();
             let Some(path) = self.string_constant() else {
-                return Err(not_supported("OPENJSON with a path that is not a string constant")
-                    .at(path_position));
+                return Err(
+                    not_supported("OPENJSON with a path that is not a string constant")
+                        .at(path_position),
+                );
             };
             let steps = crate::json_functions::sqlserver_path_steps(&path)
                 .map_err(|error| error.at_if_unplaced(path_position))?;
@@ -900,7 +918,14 @@ impl Parser<'_> {
                 position,
             }))),
         };
-        Ok(derived_rows(rows, items, alias, "openjson", position, self.dialect))
+        Ok(derived_rows(
+            rows,
+            items,
+            alias,
+            "openjson",
+            position,
+            self.dialect,
+        ))
     }
 }
 

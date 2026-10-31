@@ -34,7 +34,10 @@ impl VersionVector {
 
     /// Whether this vector has seen every write `other` has.
     pub fn descends(&self, other: &Self) -> bool {
-        other.0.iter().all(|(node, count)| self.0.get(node).is_some_and(|mine| mine >= count))
+        other
+            .0
+            .iter()
+            .all(|(node, count)| self.0.get(node).is_some_and(|mine| mine >= count))
     }
 
     /// Takes in every write `other` has seen.
@@ -76,10 +79,16 @@ impl Replica {
     /// Takes in `incoming` for `key`; returns whether it changed what the replica holds.
     pub fn apply(&mut self, key: &[u8], incoming: &Version, resolution: Resolution) -> bool {
         let held = self.versions.entry(key.to_vec()).or_default();
-        if held.iter().any(|version| version == incoming || (version.vector.descends(&incoming.vector) && version.vector != incoming.vector)) {
+        if held.iter().any(|version| {
+            version == incoming
+                || (version.vector.descends(&incoming.vector) && version.vector != incoming.vector)
+        }) {
             return false;
         }
-        if held.iter().any(|version| version.vector == incoming.vector && version.stamp >= incoming.stamp) {
+        if held
+            .iter()
+            .any(|version| version.vector == incoming.vector && version.stamp >= incoming.stamp)
+        {
             return false;
         }
         held.retain(|version| !incoming.vector.descends(&version.vector));
@@ -89,8 +98,15 @@ impl Replica {
             for version in held.iter() {
                 merged.merge(&version.vector);
             }
-            let winner = held.iter().max_by_key(|version| version.stamp).cloned().unwrap_or_else(|| incoming.clone());
-            *held = vec![Version { vector: merged, ..winner }];
+            let winner = held
+                .iter()
+                .max_by_key(|version| version.stamp)
+                .cloned()
+                .unwrap_or_else(|| incoming.clone());
+            *held = vec![Version {
+                vector: merged,
+                ..winner
+            }];
         }
         held.sort_by_key(|version| version.stamp);
         true
@@ -157,18 +173,32 @@ pub struct Quorum {
 
 impl std::fmt::Debug for Quorum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Quorum").field("nodes", &self.replicas.len()).field("n", &self.n).field("r", &self.r).field("w", &self.w).finish_non_exhaustive()
+        f.debug_struct("Quorum")
+            .field("nodes", &self.replicas.len())
+            .field("n", &self.n)
+            .field("r", &self.r)
+            .field("w", &self.w)
+            .finish_non_exhaustive()
     }
 }
 
 impl Quorum {
     /// A cluster of `nodes` keeping each key on `n` of them, writes needing `w` and reads `r`.
-    pub fn new(nodes: &[NodeId], n: usize, r: usize, w: usize, resolution: Resolution) -> Result<Self, QuorumError> {
+    pub fn new(
+        nodes: &[NodeId],
+        n: usize,
+        r: usize,
+        w: usize,
+        resolution: Resolution,
+    ) -> Result<Self, QuorumError> {
         if n == 0 || r == 0 || w == 0 || n > nodes.len() || r > n || w > n {
             return Err(QuorumError::BadConfiguration);
         }
         Ok(Self {
-            replicas: nodes.iter().map(|node| (*node, Replica::default())).collect(),
+            replicas: nodes
+                .iter()
+                .map(|node| (*node, Replica::default()))
+                .collect(),
             unreachable: BTreeSet::new(),
             clocks: BTreeMap::new(),
             hints: BTreeMap::new(),
@@ -206,14 +236,28 @@ impl Quorum {
 
     fn tick(&mut self, node: NodeId, now_ms: u64) -> Stamp {
         let last = self.clocks.get(&node).copied().unwrap_or_default();
-        let stamp = if now_ms > last.millis { Stamp { millis: now_ms, counter: 0, node } } else { Stamp { millis: last.millis, counter: last.counter.saturating_add(1), node } };
+        let stamp = if now_ms > last.millis {
+            Stamp {
+                millis: now_ms,
+                counter: 0,
+                node,
+            }
+        } else {
+            Stamp {
+                millis: last.millis,
+                counter: last.counter.saturating_add(1),
+                node,
+            }
+        };
         self.clocks.insert(node, stamp);
         stamp
     }
 
     fn observe(&mut self, node: NodeId, stamp: Stamp) {
         let clock = self.clocks.entry(node).or_default();
-        if stamp.millis > clock.millis || (stamp.millis == clock.millis && stamp.counter > clock.counter) {
+        if stamp.millis > clock.millis
+            || (stamp.millis == clock.millis && stamp.counter > clock.counter)
+        {
             *clock = Stamp { node, ..stamp };
         }
     }
@@ -221,17 +265,33 @@ impl Quorum {
     /// Writes `value` (`None` deletes) to `key` through `coordinator`, superseding what
     /// `context` read; succeeds once `w` replicas hold it, using fallback nodes with hints for
     /// unreachable home replicas.
-    pub fn put(&mut self, coordinator: NodeId, key: &[u8], value: Option<Vec<u8>>, context: &VersionVector, now_ms: u64) -> Result<Version, QuorumError> {
+    pub fn put(
+        &mut self,
+        coordinator: NodeId,
+        key: &[u8],
+        value: Option<Vec<u8>>,
+        context: &VersionVector,
+        now_ms: u64,
+    ) -> Result<Version, QuorumError> {
         if !self.reachable(coordinator) {
             return Err(QuorumError::UnknownCoordinator(coordinator));
         }
         let stamp = self.tick(coordinator, now_ms);
         let mut vector = context.clone();
         vector.bump(coordinator);
-        let version = Version { vector, stamp, value };
+        let version = Version {
+            vector,
+            stamp,
+            value,
+        };
         let order = self.order(key);
         let homes: Vec<NodeId> = order.iter().take(self.n).copied().collect();
-        let spares: Vec<NodeId> = order.iter().skip(self.n).copied().filter(|node| self.reachable(*node)).collect();
+        let spares: Vec<NodeId> = order
+            .iter()
+            .skip(self.n)
+            .copied()
+            .filter(|node| self.reachable(*node))
+            .collect();
         let mut fallbacks = spares.into_iter();
         let mut stored = 0;
         for home in &homes {
@@ -240,12 +300,19 @@ impl Quorum {
                 stored += 1;
             } else if let Some(fallback) = fallbacks.next() {
                 self.store(fallback, key, &version);
-                self.hints.entry(fallback).or_default().push(Hint { owner: *home, key: key.to_vec(), version: version.clone() });
+                self.hints.entry(fallback).or_default().push(Hint {
+                    owner: *home,
+                    key: key.to_vec(),
+                    version: version.clone(),
+                });
                 stored += 1;
             }
         }
         if stored < self.w {
-            return Err(QuorumError::NotEnoughReplicas { answered: stored, needed: self.w });
+            return Err(QuorumError::NotEnoughReplicas {
+                answered: stored,
+                needed: self.w,
+            });
         }
         Ok(version)
     }
@@ -261,9 +328,18 @@ impl Quorum {
     /// Reads `key` from `r` reachable home replicas, reconciles what they hold, and repairs the
     /// ones that were behind.
     pub fn get(&mut self, key: &[u8]) -> Result<ReadResult, QuorumError> {
-        let asked: Vec<NodeId> = self.order(key).into_iter().take(self.n).filter(|node| self.reachable(*node)).take(self.r).collect();
+        let asked: Vec<NodeId> = self
+            .order(key)
+            .into_iter()
+            .take(self.n)
+            .filter(|node| self.reachable(*node))
+            .take(self.r)
+            .collect();
         if asked.len() < self.r {
-            return Err(QuorumError::NotEnoughReplicas { answered: asked.len(), needed: self.r });
+            return Err(QuorumError::NotEnoughReplicas {
+                answered: asked.len(),
+                needed: self.r,
+            });
         }
         let mut merged = Replica::default();
         for node in &asked {
@@ -282,7 +358,13 @@ impl Quorum {
         for version in &reconciled {
             context.merge(&version.vector);
         }
-        Ok(ReadResult { values: reconciled.into_iter().map(|version| version.value).collect(), context })
+        Ok(ReadResult {
+            values: reconciled
+                .into_iter()
+                .map(|version| version.value)
+                .collect(),
+            context,
+        })
     }
 
     /// Hands the versions kept for unreachable home replicas to those now reachable.
@@ -309,9 +391,18 @@ impl Quorum {
 
     /// Brings every reachable home replica of every key to the same versions.
     pub fn anti_entropy(&mut self) {
-        let keys: BTreeSet<Vec<u8>> = self.replicas.values().flat_map(|replica| replica.versions.keys().cloned()).collect();
+        let keys: BTreeSet<Vec<u8>> = self
+            .replicas
+            .values()
+            .flat_map(|replica| replica.versions.keys().cloned())
+            .collect();
         for key in keys {
-            let homes: Vec<NodeId> = self.order(&key).into_iter().take(self.n).filter(|node| self.reachable(*node)).collect();
+            let homes: Vec<NodeId> = self
+                .order(&key)
+                .into_iter()
+                .take(self.n)
+                .filter(|node| self.reachable(*node))
+                .collect();
             let mut merged = Replica::default();
             for node in &homes {
                 let found: Vec<Version> = self.replicas[node].versions(&key).to_vec();

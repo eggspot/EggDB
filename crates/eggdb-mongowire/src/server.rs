@@ -1,6 +1,9 @@
 use crate::commands::{Shared, run};
 use crate::cursors::Cursors;
-use crate::message::{HEADER_BYTES, OP_MSG, OP_QUERY, Request, message_reply, query_reply, read_header, read_message, read_query};
+use crate::message::{
+    HEADER_BYTES, OP_MSG, OP_QUERY, Request, message_reply, query_reply, read_header, read_message,
+    read_query,
+};
 use eggdb_auth::scram::{ScramExchange, ScramVerifier};
 use eggdb_bson::{Bson, Document};
 use eggdb_documents::Store;
@@ -38,8 +41,14 @@ impl std::fmt::Debug for ServerConfig {
 }
 
 pub(crate) enum Conversation {
-    AwaitingFinal { exchange: ScramExchange, skip_empty: bool, user: String },
-    AwaitingEmpty { user: String },
+    AwaitingFinal {
+        exchange: Box<ScramExchange>,
+        skip_empty: bool,
+        user: String,
+    },
+    AwaitingEmpty {
+        user: String,
+    },
 }
 
 /// One connection's state.
@@ -63,7 +72,11 @@ impl Read for StopAware<'_> {
                 return Ok(0);
             }
             match self.stream.read(buffer) {
-                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
                 other => return other,
             }
         }
@@ -77,7 +90,18 @@ fn database_of(body: &Document) -> String {
 fn without_generic_fields(body: &Document) -> Document {
     Document::from_entries(
         body.iter()
-            .filter(|(name, _)| !matches!(name.as_str(), "$db" | "lsid" | "$clusterTime" | "$readPreference" | "apiVersion" | "apiStrict" | "apiDeprecationErrors"))
+            .filter(|(name, _)| {
+                !matches!(
+                    name.as_str(),
+                    "$db"
+                        | "lsid"
+                        | "$clusterTime"
+                        | "$readPreference"
+                        | "apiVersion"
+                        | "apiStrict"
+                        | "apiDeprecationErrors"
+                )
+            })
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect(),
     )
@@ -85,7 +109,12 @@ fn without_generic_fields(body: &Document) -> Document {
 
 /// Serves one connection: reads requests from `reader` and writes replies to `writer` until
 /// the client closes it or sends something that is not a valid message.
-pub(crate) fn serve_stream(shared: &Shared<'_>, session: &mut Session, mut reader: impl Read, writer: &mut impl Write) -> io::Result<()> {
+pub(crate) fn serve_stream(
+    shared: &Shared<'_>,
+    session: &mut Session,
+    mut reader: impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
     let mut next_reply_id = 1i32;
     loop {
         let mut header_bytes = [0u8; HEADER_BYTES];
@@ -119,13 +148,23 @@ pub(crate) fn serve_stream(shared: &Shared<'_>, session: &mut Session, mut reade
                 }
             }
             Request::Query { namespace, query } => {
-                let (database, collection) = namespace.split_once('.').unwrap_or((namespace.as_str(), ""));
+                let (database, collection) = namespace
+                    .split_once('.')
+                    .unwrap_or((namespace.as_str(), ""));
                 if collection != "$cmd" {
                     let refusal = Document::from_entries(vec![
-                        ("$err".to_owned(), Bson::String("OP_QUERY is only supported for commands".to_owned())),
+                        (
+                            "$err".to_owned(),
+                            Bson::String("OP_QUERY is only supported for commands".to_owned()),
+                        ),
                         ("code".to_owned(), Bson::Int32(352)),
                     ]);
-                    Some(query_reply(next_reply_id, header.request_id, &refusal, true))
+                    Some(query_reply(
+                        next_reply_id,
+                        header.request_id,
+                        &refusal,
+                        true,
+                    ))
                 } else {
                     let reply = run(shared, session, database, &without_generic_fields(&query));
                     Some(query_reply(next_reply_id, header.request_id, &reply, false))
@@ -144,7 +183,12 @@ pub(crate) fn serve_stream(shared: &Shared<'_>, session: &mut Session, mut reade
 
 /// Serves MongoDB clients on `listener` from `store`, a thread per connection, until `stop`
 /// turns true.
-pub fn serve(store: &Store<'_>, listener: &TcpListener, config: &ServerConfig, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub fn serve(
+    store: &Store<'_>,
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let mut seed = [0u8; 8];
     (config.random)(&mut seed)?;
@@ -165,7 +209,10 @@ pub fn serve(store: &Store<'_>, listener: &TcpListener, config: &ServerConfig, s
                     continue;
                 }
             };
-            if stream.set_nonblocking(false).is_err() || stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
+            if stream.set_nonblocking(false).is_err()
+                || stream.set_read_timeout(Some(READ_POLL)).is_err()
+                || stream.set_nodelay(true).is_err()
+            {
                 continue;
             }
             if active.fetch_add(1, Ordering::AcqRel) >= config.max_connections {
@@ -174,19 +221,26 @@ pub fn serve(store: &Store<'_>, listener: &TcpListener, config: &ServerConfig, s
             }
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let (shared, active) = (&shared, &active);
-            let spawned = std::thread::Builder::new().name("eggdb-mongo".to_owned()).spawn_scoped(scope, move || {
-                if let Ok(mut writer) = stream.try_clone() {
-                    let mut session = Session {
-                        id,
-                        peer: peer.to_string(),
-                        authenticated_user: None,
-                        conversation: None,
-                        failed_logins: 0,
-                    };
-                    let _ = serve_stream(shared, &mut session, StopAware { stream, stop }, &mut writer);
-                }
-                active.fetch_sub(1, Ordering::AcqRel);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("eggdb-mongo".to_owned())
+                .spawn_scoped(scope, move || {
+                    if let Ok(mut writer) = stream.try_clone() {
+                        let mut session = Session {
+                            id,
+                            peer: peer.to_string(),
+                            authenticated_user: None,
+                            conversation: None,
+                            failed_logins: 0,
+                        };
+                        let _ = serve_stream(
+                            shared,
+                            &mut session,
+                            StopAware { stream, stop },
+                            &mut writer,
+                        );
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                });
             if spawned.is_err() {
                 active.fetch_sub(1, Ordering::AcqRel);
             }

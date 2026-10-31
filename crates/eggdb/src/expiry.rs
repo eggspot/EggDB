@@ -107,7 +107,11 @@ fn split_by_deadline(rest: &[u8]) -> Result<(Moment, &[u8])> {
     }
 }
 
-pub(crate) fn deadline_in(reader: Reader<'_>, tree: &BTree, stored: &[u8]) -> Result<Option<Moment>> {
+pub(crate) fn deadline_in(
+    reader: Reader<'_>,
+    tree: &BTree,
+    stored: &[u8],
+) -> Result<Option<Moment>> {
     reader
         .get(tree, &deadline_key(stored))?
         .map(|bytes| read_record(&bytes))
@@ -356,7 +360,9 @@ impl WriteTransaction<'_> {
                 0
             }
         };
-        let next = current.checked_add(by).ok_or_else(|| overflow(current, by))?;
+        let next = current
+            .checked_add(by)
+            .ok_or_else(|| overflow(current, by))?;
         self.put_raw(stored, next.to_string().as_bytes())?;
         Ok(next)
     }
@@ -684,7 +690,10 @@ mod tests {
         assert!(early < late && late < later);
         let prefix = by_deadline_prefix();
         let (deadline, stored) = split_by_deadline(&early[prefix.len()..]).unwrap();
-        assert_eq!((deadline, stored), (Moment::from_unix_micros(5), b"zzz".as_slice()));
+        assert_eq!(
+            (deadline, stored),
+            (Moment::from_unix_micros(5), b"zzz".as_slice())
+        );
         let short = split_by_deadline(&[0; 7]).unwrap_err();
         assert_eq!(short.kind(), ErrorKind::Corrupt);
     }
@@ -712,7 +721,10 @@ mod tests {
         assert!(Moment::from_unix_micros(3_000).has_reached(deadline));
         assert_eq!(now.until(deadline), Some(Duration::from_micros(2_000)));
         assert_eq!(deadline.until(deadline), None);
-        assert_eq!(now.after(Duration::from_nanos(1)), Moment::from_unix_micros(1_001));
+        assert_eq!(
+            now.after(Duration::from_nanos(1)),
+            Moment::from_unix_micros(1_001)
+        );
         assert_eq!(now.after(Duration::MAX), Moment::from_unix_micros(u64::MAX));
     }
 
@@ -728,8 +740,18 @@ mod tests {
             assert_eq!(parse_counter(text.as_bytes()).ok(), Some(value), "{text}");
         }
         for bad in [
-            "", "-", "+1", "01", "-0", " 1", "1 ", "1.5", "0x10", "9223372036854775808",
-            "-9223372036854775809", "１",
+            "",
+            "-",
+            "+1",
+            "01",
+            "-0",
+            " 1",
+            "1 ",
+            "1.5",
+            "0x10",
+            "9223372036854775808",
+            "-9223372036854775809",
+            "１",
         ] {
             let error = parse_counter(bad.as_bytes()).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::NotAnInteger, "{bad:?}");

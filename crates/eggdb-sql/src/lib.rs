@@ -36,26 +36,27 @@ mod coordination;
 mod copy;
 mod datetime;
 mod deferred_checks;
-mod dump;
 mod destructive;
 mod dialect;
+mod dump;
 mod encoding;
 mod enums;
 mod error;
 mod eval;
 mod execute;
 mod explain;
+mod foreign;
 mod geo_functions;
 mod hash_index;
 mod hyperloglog;
 mod indexes;
 mod information_schema;
 mod interval;
-mod join;
 pub mod jobs;
-pub mod reports;
+mod join;
 pub mod json;
 mod json_functions;
+mod ledger;
 mod lexer;
 mod md5;
 mod memory;
@@ -65,6 +66,7 @@ mod mysql_catalog;
 mod mysql_errors;
 mod mysql_variables;
 mod name_resolution;
+mod notifications;
 mod numeric;
 mod oracle_conversion;
 mod oracle_date_functions;
@@ -89,17 +91,20 @@ mod plan;
 mod plan_cache;
 mod plpgsql;
 mod plsql;
+mod privacy;
 mod pushdown;
-mod foreign;
 mod random;
 mod ranges;
 mod records;
 mod regex;
 mod regexp_functions;
 mod relations;
+pub mod reports;
 mod restore;
 mod retention;
+mod roles;
 mod routines;
+mod row_security;
 mod schema;
 mod schemas;
 mod sequences;
@@ -107,14 +112,8 @@ mod session;
 mod set_operations;
 mod set_returning;
 mod settings;
-mod sqlite_errors;
-mod notifications;
-mod roles;
-mod row_security;
 mod sqlite_datetime;
-mod ledger;
-mod tenancy;
-mod text_search;
+mod sqlite_errors;
 mod sqlite_functions;
 mod sqlserver_catalog;
 mod sqlserver_conversion;
@@ -124,25 +123,26 @@ mod sqlserver_functions;
 mod sqlserver_numbers;
 mod sqlserver_strings;
 mod sqlserver_types;
+mod standards;
 mod statistics;
 mod store;
-mod privacy;
-mod standards;
 mod string_functions;
 mod subquery;
 mod table_variables;
 mod temp_tables;
 mod temporal;
 mod temporary;
+mod tenancy;
+mod text_search;
 mod time_zones;
 mod triggers;
 mod tsql;
 mod types;
-mod vector;
-mod vector_functions;
 mod typing;
 mod updatable_views;
 mod user_types;
+mod vector;
+mod vector_functions;
 mod views;
 mod visible_tables;
 mod window;
@@ -163,11 +163,17 @@ mod correctness;
 #[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]
+mod geo_tests;
+#[cfg(test)]
 mod implicit_transaction_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]
 mod insert_select_tests;
+#[cfg(test)]
+mod lateral_tests;
+#[cfg(test)]
+mod materialized_view_tests;
 #[cfg(test)]
 mod memory_store;
 #[cfg(test)]
@@ -175,41 +181,35 @@ mod migration_tool_tests;
 #[cfg(test)]
 mod one_statement_tests;
 #[cfg(test)]
-mod sql_speed_tests;
-#[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]
 mod partition_tests;
 #[cfg(test)]
-mod savepoint_tests;
-#[cfg(test)]
 mod regex_tests;
+#[cfg(test)]
+mod savepoint_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]
 mod set_returning_tests;
 #[cfg(test)]
+mod sql_speed_tests;
+#[cfg(test)]
 mod sqlserver_tests;
 #[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]
-mod user_type_tests;
-#[cfg(test)]
 mod tests;
 #[cfg(test)]
-mod lateral_tests;
+mod time_series_tests;
+#[cfg(test)]
+mod user_type_tests;
+#[cfg(test)]
+mod vector_tests;
 #[cfg(test)]
 mod view_change_tests;
 #[cfg(test)]
 mod visible_tables_tests;
-#[cfg(test)]
-mod time_series_tests;
-#[cfg(test)]
-mod geo_tests;
-#[cfg(test)]
-mod materialized_view_tests;
-#[cfg(test)]
-mod vector_tests;
 #[cfg(test)]
 mod window_tests;
 #[cfg(test)]
@@ -224,11 +224,16 @@ pub use destructive::{
 };
 pub use dialect::Dialect;
 pub use dump::{DumpReport, dump_sql};
+pub use eggdb_auth::scram::{ScramParts, parse_scram_verifier};
+pub use enums::EnumValue;
 pub use error::{SqlError, SqlResult, SqlState};
+pub use foreign::{ForeignSource, set_foreign_source};
 pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};
+pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES};
 pub use mysql_errors::Warning;
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
+pub use notifications::Notification;
 pub use numeric::Numeric;
 pub use parser::{
     ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION, SQLSERVER_COMPATIBLE_VERSION,
@@ -236,12 +241,10 @@ pub use parser::{
 pub use pg_binary::{decode_pg_binary_text, encode_pg_binary};
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use plsql::ServerOutputReader;
-pub use foreign::{ForeignSource, set_foreign_source};
 pub use random::{RandomSource, set_random_source};
+pub use ranges::{RangeBound, RangeBounds, RangeValue};
+pub use records::RecordValue;
 pub use regex::regex_matches_with_flags;
-pub use notifications::Notification;
-pub use eggdb_auth::scram::{ScramParts, parse_scram_verifier};
-pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use relations::{EXACT_ROW_COUNT_UP_TO, Relation, RelationKind, find_relation};
 pub use restore::{
     Consequence, IgnoredMetaCommand, IgnoredStatements, IncludeBase, IncludeOpener, IncludeRequest,
@@ -249,13 +252,14 @@ pub use restore::{
     ServerOutputSetting, SkippedObject, SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlServerBatch,
     TableRows, restore_dump, sqlserver_batches, starts_plsql_unit,
 };
+pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use schema::{
     ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,
 };
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
-    Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session,
-    StatementDescription, StoredProcedure, TransactionStatus,
+    Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
+    StoredProcedure, TransactionStatus,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
@@ -263,12 +267,8 @@ pub use sqlserver_catalog::is_catalog_procedure;
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
 };
-pub use enums::EnumValue;
-pub use ranges::{RangeBound, RangeBounds, RangeValue};
-pub use records::RecordValue;
 pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
-pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES};
 pub use visible_tables::{UnknownTableName, VisibleRead, VisibleTables};
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's

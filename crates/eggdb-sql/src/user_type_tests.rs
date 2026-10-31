@@ -24,10 +24,16 @@ fn enums_store_compare_in_declared_order_and_take_new_labels() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     assert_eq!(
-        ok(&mut session, "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')"),
+        ok(
+            &mut session,
+            "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')"
+        ),
         "CREATE TYPE"
     );
-    ok(&mut session, "CREATE TABLE person (name text, current_mood mood)");
+    ok(
+        &mut session,
+        "CREATE TABLE person (name text, current_mood mood)",
+    );
     assert_eq!(
         ok(
             &mut session,
@@ -52,7 +58,10 @@ fn enums_store_compare_in_declared_order_and_take_new_labels() {
         "ALTER TYPE"
     );
     assert_eq!(
-        ok(&mut session, "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh'"),
+        ok(
+            &mut session,
+            "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh'"
+        ),
         "ALTER TYPE"
     );
     assert_eq!(
@@ -64,7 +73,10 @@ fn enums_store_compare_in_declared_order_and_take_new_labels() {
         "enum_range\n{sad,meh,ok,happy}\nSELECT 1"
     );
     assert_eq!(
-        ok(&mut session, "SELECT enum_first(NULL::mood), enum_last(NULL::mood)"),
+        ok(
+            &mut session,
+            "SELECT enum_first(NULL::mood), enum_last(NULL::mood)"
+        ),
         "enum_first|enum_last\nsad|happy\nSELECT 1"
     );
     ok(&mut session, "ALTER TYPE mood RENAME VALUE 'meh' TO 'fine'");
@@ -131,10 +143,7 @@ fn composite_types_build_select_fields_and_store_rows() {
         ),
         "id|c|r\n1|(1.5,-2)|1.5\n2|(3,4)|3\n3|NULL|NULL\nSELECT 3"
     );
-    assert_eq!(
-        state(&mut session, "SELECT (c).nope FROM points"),
-        "42703"
-    );
+    assert_eq!(state(&mut session, "SELECT (c).nope FROM points"), "42703");
     assert_eq!(
         ok(&mut session, "SELECT ROW(1, 'a b', NULL) AS r"),
         "r\n(1,\"a b\",)\nSELECT 1"
@@ -146,10 +155,7 @@ fn composite_types_build_select_fields_and_store_rows() {
         ),
         "typtype\nc\nSELECT 1"
     );
-    assert_eq!(
-        state(&mut session, "CREATE TABLE bad (r record)"),
-        "42P16"
-    );
+    assert_eq!(state(&mut session, "CREATE TABLE bad (r record)"), "42P16");
 }
 
 #[test]
@@ -262,7 +268,10 @@ fn domains_check_their_constraints_defaults_and_not_null_everywhere() {
         &mut session,
         "CREATE TABLE stock (item text, qty posint, kind code)",
     );
-    ok(&mut session, "INSERT INTO stock (item, qty) VALUES ('a', 3)");
+    ok(
+        &mut session,
+        "INSERT INTO stock (item, qty) VALUES ('a', 3)",
+    );
     assert_eq!(
         ok(&mut session, "SELECT item, qty, kind FROM stock"),
         "item|qty|kind\na|3|xyz\nSELECT 1"
@@ -275,10 +284,7 @@ fn domains_check_their_constraints_defaults_and_not_null_everywhere() {
         state(&mut session, "INSERT INTO stock VALUES ('c', NULL, 'abc')"),
         "23502"
     );
-    assert_eq!(
-        state(&mut session, "UPDATE stock SET qty = -1"),
-        "23514"
-    );
+    assert_eq!(state(&mut session, "UPDATE stock SET qty = -1"), "23514");
     assert_eq!(
         state(&mut session, "INSERT INTO stock VALUES ('d', 1, 'abcd')"),
         "22001"
@@ -308,7 +314,10 @@ fn domains_check_their_constraints_defaults_and_not_null_everywhere() {
         "ALTER DOMAIN posint ADD CONSTRAINT below_2 CHECK (VALUE < 2) NOT VALID",
     );
     assert_eq!(
-        state(&mut session, "ALTER DOMAIN posint VALIDATE CONSTRAINT below_2"),
+        state(
+            &mut session,
+            "ALTER DOMAIN posint VALIDATE CONSTRAINT below_2"
+        ),
         "23514"
     );
     ok(&mut session, "ALTER DOMAIN posint DROP CONSTRAINT below_2");
@@ -371,7 +380,10 @@ fn array_columns_store_one_dimension_of_any_storable_element() {
         &mut session,
         "UPDATE tagged SET tags = tags || 'z'::text WHERE id = 2",
     );
-    ok(&mut session, "ALTER TABLE tagged ADD COLUMN flags boolean[]");
+    ok(
+        &mut session,
+        "ALTER TABLE tagged ADD COLUMN flags boolean[]",
+    );
     session.close().unwrap();
     let mut reopened = Session::new(&store);
     assert_eq!(
@@ -382,7 +394,10 @@ fn array_columns_store_one_dimension_of_any_storable_element() {
         "id|tags|flags\n1|{a,\"b c\"}|NULL\n2|{z}|NULL\nSELECT 2"
     );
     assert_eq!(
-        state(&mut reopened, "INSERT INTO tagged VALUES (3, '{{a}}', NULL)"),
+        state(
+            &mut reopened,
+            "INSERT INTO tagged VALUES (3, '{{a}}', NULL)"
+        ),
         "0A000"
     );
 }
@@ -512,11 +527,17 @@ fn not_valid_constraints_validate_later_and_constraints_rename() {
         "convalidated|def\nf|CHECK ((n > 0)) NOT VALID\nSELECT 1"
     );
     assert_eq!(
-        state(&mut session, "ALTER TABLE amounts VALIDATE CONSTRAINT positive"),
+        state(
+            &mut session,
+            "ALTER TABLE amounts VALIDATE CONSTRAINT positive"
+        ),
         "23514"
     );
     ok(&mut session, "DELETE FROM amounts WHERE n < 0");
-    ok(&mut session, "ALTER TABLE amounts VALIDATE CONSTRAINT positive");
+    ok(
+        &mut session,
+        "ALTER TABLE amounts VALIDATE CONSTRAINT positive",
+    );
     assert_eq!(
         ok(
             &mut session,
@@ -547,11 +568,17 @@ fn not_valid_constraints_validate_later_and_constraints_rename() {
     );
     assert_eq!(state(&mut session, "INSERT INTO pets VALUES (8)"), "23503");
     assert_eq!(
-        state(&mut session, "ALTER TABLE pets VALIDATE CONSTRAINT pets_owner"),
+        state(
+            &mut session,
+            "ALTER TABLE pets VALIDATE CONSTRAINT pets_owner"
+        ),
         "23503"
     );
     ok(&mut session, "INSERT INTO owners VALUES (7)");
-    ok(&mut session, "ALTER TABLE pets VALIDATE CONSTRAINT pets_owner");
+    ok(
+        &mut session,
+        "ALTER TABLE pets VALIDATE CONSTRAINT pets_owner",
+    );
 }
 
 #[test]
@@ -578,9 +605,15 @@ fn identity_columns_take_their_options_and_change_them_later() {
         state(&mut session, "INSERT INTO ids (id, v) VALUES (1, 'x')"),
         "428C9"
     );
-    ok(&mut session, "ALTER TABLE ids ALTER COLUMN id DROP IDENTITY");
+    ok(
+        &mut session,
+        "ALTER TABLE ids ALTER COLUMN id DROP IDENTITY",
+    );
     assert_eq!(
-        state(&mut session, "ALTER TABLE ids ALTER COLUMN id DROP IDENTITY"),
+        state(
+            &mut session,
+            "ALTER TABLE ids ALTER COLUMN id DROP IDENTITY"
+        ),
         "55000"
     );
     assert_eq!(
@@ -603,7 +636,10 @@ fn hostile_type_statements_are_errors_never_panics() {
     let mut session = Session::new(&store);
     ok(&mut session, "CREATE TYPE e AS ENUM ('a', 'b')");
     ok(&mut session, "CREATE DOMAIN d AS integer CHECK (VALUE > 0)");
-    ok(&mut session, "CREATE TABLE h (x e, y d, z int4range, w text[])");
+    ok(
+        &mut session,
+        "CREATE TABLE h (x e, y d, z int4range, w text[])",
+    );
     fuzz(
         &mut session,
         &[

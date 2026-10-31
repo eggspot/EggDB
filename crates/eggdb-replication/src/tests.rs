@@ -1,4 +1,7 @@
-use crate::{Apply, Batch, Candidate, Change, Mode, Primary, ReadToken, Refusal, Replica, decode_batch, elect, encode_batch};
+use crate::{
+    Apply, Batch, Candidate, Change, Mode, Primary, ReadToken, Refusal, Replica, decode_batch,
+    elect, encode_batch,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -23,7 +26,11 @@ impl Apply for Memory {
 }
 
 fn put(key: u64) -> Vec<Change> {
-    vec![Change::Put { collection: String::new(), key: key.to_be_bytes().to_vec(), value: vec![1] }]
+    vec![Change::Put {
+        collection: String::new(),
+        key: key.to_be_bytes().to_vec(),
+        value: vec![1],
+    }]
 }
 
 #[test]
@@ -39,13 +46,26 @@ fn replicas_apply_in_order_and_refuse_gaps_and_stale_terms() {
     assert!(replica.can_serve(token));
     assert_eq!(replica.receive(&first), Ok(2));
     replica.follow_term(2);
-    let stale = Batch { term: 1, sequence: 3, changes: put(3) };
-    assert_eq!(replica.receive(&stale), Err(Refusal::StaleTerm { current: 2 }));
+    let stale = Batch {
+        term: 1,
+        sequence: 3,
+        changes: put(3),
+    };
+    assert_eq!(
+        replica.receive(&stale),
+        Err(Refusal::StaleTerm { current: 2 })
+    );
 }
 
 #[test]
 fn synchronous_commits_wait_for_acknowledgements_and_logs_are_trimmed() {
-    let mut primary = Primary::new(1, 0, Mode::Synchronous { acknowledgements: 2 });
+    let mut primary = Primary::new(
+        1,
+        0,
+        Mode::Synchronous {
+            acknowledgements: 2,
+        },
+    );
     primary.add_replica(1, 0);
     primary.add_replica(2, 0);
     let (batch, _) = primary.commit(put(1));
@@ -78,9 +98,21 @@ fn cascading_replicas_follow_another_replica() {
 #[test]
 fn election_prefers_the_newest_term_then_the_most_applied() {
     let candidates = [
-        Candidate { id: 3, term: 1, applied: 90 },
-        Candidate { id: 1, term: 2, applied: 10 },
-        Candidate { id: 2, term: 2, applied: 10 },
+        Candidate {
+            id: 3,
+            term: 1,
+            applied: 90,
+        },
+        Candidate {
+            id: 1,
+            term: 2,
+            applied: 10,
+        },
+        Candidate {
+            id: 2,
+            term: 2,
+            applied: 10,
+        },
     ];
     assert_eq!(elect(&candidates), Some(1));
     assert_eq!(elect(&[]), None);
@@ -92,8 +124,15 @@ fn batches_cross_the_wire_and_damaged_bytes_are_refused() {
         term: 4,
         sequence: 9,
         changes: vec![
-            Change::Put { collection: "resp0".to_owned(), key: b"k".to_vec(), value: b"v".to_vec() },
-            Change::Delete { collection: String::new(), key: b"gone".to_vec() },
+            Change::Put {
+                collection: "resp0".to_owned(),
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            },
+            Change::Delete {
+                collection: String::new(),
+                key: b"gone".to_vec(),
+            },
         ],
     };
     let bytes = encode_batch(&batch);
@@ -121,8 +160,16 @@ impl Rng {
 fn simulated_partitions_never_lose_a_synchronous_commit_on_failover() {
     for seed in 1..=40u64 {
         let mut rng = Rng(seed * 0x9e37_79b9_7f4a_7c15);
-        let mut primary = Primary::new(1, 0, Mode::Synchronous { acknowledgements: 1 });
-        let mut replicas: Vec<Replica<Memory>> = (1..=2).map(|id| Replica::new(id, 1, 0, Memory::default(), 1_000)).collect();
+        let mut primary = Primary::new(
+            1,
+            0,
+            Mode::Synchronous {
+                acknowledgements: 1,
+            },
+        );
+        let mut replicas: Vec<Replica<Memory>> = (1..=2)
+            .map(|id| Replica::new(id, 1, 0, Memory::default(), 1_000))
+            .collect();
         for replica in &replicas {
             primary.add_replica(replica.id(), 0);
         }
@@ -132,7 +179,7 @@ fn simulated_partitions_never_lose_a_synchronous_commit_on_failover() {
             let (batch, token) = primary.commit(put(key));
             written.push((key, token.sequence));
             for replica in &mut replicas {
-                let reachable = rng.next() % 4 != 0;
+                let reachable = !rng.next().is_multiple_of(4);
                 if !reachable {
                     continue;
                 }
@@ -155,16 +202,37 @@ fn simulated_partitions_never_lose_a_synchronous_commit_on_failover() {
                 durable.push(*key);
             }
         }
-        let candidates: Vec<Candidate> = replicas.iter().map(|replica| Candidate { id: replica.id(), term: replica.term(), applied: replica.applied() }).collect();
+        let candidates: Vec<Candidate> = replicas
+            .iter()
+            .map(|replica| Candidate {
+                id: replica.id(),
+                term: replica.term(),
+                applied: replica.applied(),
+            })
+            .collect();
         let chosen = elect(&candidates).unwrap();
-        let winner = replicas.into_iter().find(|replica| replica.id() == chosen).unwrap();
+        let winner = replicas
+            .into_iter()
+            .find(|replica| replica.id() == chosen)
+            .unwrap();
         for key in &durable {
-            assert!(winner.storage().keys.contains_key(&key.to_be_bytes().to_vec()), "seed {seed}: durable key {key} lost");
+            assert!(
+                winner
+                    .storage()
+                    .keys
+                    .contains_key(key.to_be_bytes().as_slice()),
+                "seed {seed}: durable key {key} lost"
+            );
         }
         let applied = winner.applied();
         let (new_primary, storage) = winner.promote(1, Mode::Asynchronous);
         assert_eq!(new_primary.term(), 2);
         assert_eq!(storage.keys.len() as u64, applied);
-        assert!(ReadToken { sequence: applied } <= ReadToken { sequence: applied + 1 });
+        assert!(
+            ReadToken { sequence: applied }
+                <= ReadToken {
+                    sequence: applied + 1
+                }
+        );
     }
 }

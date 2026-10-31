@@ -530,21 +530,13 @@ fn check_input_elements(elements: &[DatetimeElement]) -> SqlResult<()> {
     if has(Field::Julian) && has(Field::DayOfYear) {
         return Err(date_error(1811, "Julian date precludes use of day of year"));
     }
-    if has(Field::Meridian)
-        && elements
-            .iter()
-            .any(|element| *element == DatetimeElement::Hour24)
-    {
+    if has(Field::Meridian) && elements.contains(&DatetimeElement::Hour24) {
         return Err(date_error(
             1818,
             "'HH24' precludes use of meridian indicator",
         ));
     }
-    if has(Field::Era)
-        && elements
-            .iter()
-            .any(|element| *element == DatetimeElement::SignedYear)
-    {
+    if has(Field::Era) && elements.contains(&DatetimeElement::SignedYear) {
         return Err(date_error(1819, "signed year precludes use of BC/AD"));
     }
     Ok(())
@@ -824,10 +816,9 @@ fn push_suffixed(
                 suffix_spelling,
             ));
         }
-        NumberSuffix::Spelled => out.push_str(&spelled(
-            &oracle_numerals::spelled(magnitude),
-            spelling,
-        )),
+        NumberSuffix::Spelled => {
+            out.push_str(&spelled(&oracle_numerals::spelled(magnitude), spelling))
+        }
         NumberSuffix::SpelledOrdinal => out.push_str(&spelled(
             &oracle_numerals::spelled_ordinal(magnitude),
             spelling,
@@ -940,7 +931,9 @@ pub(crate) fn format_zoned(
                 push_number(&mut out, (parts.era_year() + 99) / 100, 2, fill);
             }
             E::RadixCharacter => out.push('.'),
-            E::DayName(spelling) => push_name(&mut out, DAYS[parts.weekday() as usize], *spelling, !fill),
+            E::DayName(spelling) => {
+                push_name(&mut out, DAYS[parts.weekday() as usize], *spelling, !fill)
+            }
             E::DayAbbreviation(spelling) => {
                 push_name(
                     &mut out,
@@ -1110,12 +1103,9 @@ impl Reader<'_> {
 
     fn zone_name(&mut self) -> String {
         let start = self.at;
-        while self
-            .peek()
-            .is_some_and(|character| {
-                character.is_alphanumeric() || matches!(character, '/' | '_' | '-' | '+')
-            })
-        {
+        while self.peek().is_some_and(|character| {
+            character.is_alphanumeric() || matches!(character, '/' | '_' | '-' | '+')
+        }) {
             self.at += 1;
         }
         self.input[start..self.at].iter().collect()
@@ -1409,7 +1399,9 @@ fn read_element(
         E::MonthAbbreviation(_) | E::MonthName(_) => {
             let full = matches!(element, E::MonthName(_));
             let month = if exact {
-                reader.name_among(&MONTHS, Some(full)).map(|index| index + 1)
+                reader
+                    .name_among(&MONTHS, Some(full))
+                    .map(|index| index + 1)
             } else {
                 reader.month_name()
             };
@@ -1630,7 +1622,11 @@ fn assemble_date(fields: &Fields, now_year: i64, now_month: i64) -> SqlResult<(i
         return Err(year_out_of_range());
     }
     if let Some(day_of_year) = fields.day_of_year {
-        let length = if datetime::is_leap_year(year) { 366 } else { 365 };
+        let length = if datetime::is_leap_year(year) {
+            366
+        } else {
+            365
+        };
         if day_of_year > length {
             return Err(date_error(
                 1848,
@@ -1669,10 +1665,16 @@ fn assemble_time(fields: &Fields) -> SqlResult<(i64, i64, i64)> {
         return Err(date_error(1836, "hour conflicts with seconds in day"));
     }
     if fields.minute.is_some() && minute != from_minute {
-        return Err(date_error(1837, "minutes of hour conflicts with seconds in day"));
+        return Err(date_error(
+            1837,
+            "minutes of hour conflicts with seconds in day",
+        ));
     }
     if fields.second.is_some() && second != from_second {
-        return Err(date_error(1838, "seconds of minute conflicts with seconds in day"));
+        return Err(date_error(
+            1838,
+            "seconds of minute conflicts with seconds in day",
+        ));
     }
     Ok((from_hour, from_minute, from_second))
 }
@@ -2139,8 +2141,14 @@ mod tests {
             write(stamp, "CC SCC Q WW W IW IYYY IY I", None).as_deref(),
             Ok("20  20 4 48 1 48 1999 99 9")
         );
-        assert_eq!(write(at(2000, 1, 1, 0, 0, 0), "CC", None).as_deref(), Ok("20"));
-        assert_eq!(write(at(2001, 1, 1, 0, 0, 0), "CC", None).as_deref(), Ok("21"));
+        assert_eq!(
+            write(at(2000, 1, 1, 0, 0, 0), "CC", None).as_deref(),
+            Ok("20")
+        );
+        assert_eq!(
+            write(at(2001, 1, 1, 0, 0, 0), "CC", None).as_deref(),
+            Ok("21")
+        );
         assert_eq!(
             write(at(2021, 1, 1, 0, 0, 0), "IYYY-IW", None).as_deref(),
             Ok("2020-53")
@@ -2171,10 +2179,7 @@ mod tests {
         assert_eq!(write(stamp, "fmDDth", None).as_deref(), Ok("1st"));
         assert_eq!(write(stamp, "DDSP", None).as_deref(), Ok("ONE"));
         assert_eq!(write(stamp, "Ddspth", None).as_deref(), Ok("First"));
-        assert_eq!(
-            write(stamp, "MMSPTH", None).as_deref(),
-            Ok("TWELFTH")
-        );
+        assert_eq!(write(stamp, "MMSPTH", None).as_deref(), Ok("TWELFTH"));
         assert_eq!(
             write(stamp, "Jsp", None).as_deref(),
             Ok("Two Million Four Hundred Fifty-One Thousand Five Hundred Fourteen")
@@ -2262,7 +2267,10 @@ mod tests {
             Ok(at(1999, 12, 1, 0, 0, 0))
         );
         assert_eq!(read("Monday 01-12-1999", "DAY DD-MM-YYYY"), Err(1835));
-        assert_eq!(read("4 01-12-1999", "D DD-MM-YYYY"), Ok(at(1999, 12, 1, 0, 0, 0)));
+        assert_eq!(
+            read("4 01-12-1999", "D DD-MM-YYYY"),
+            Ok(at(1999, 12, 1, 0, 0, 0))
+        );
         assert_eq!(read("8 01-12-1999", "D DD-MM-YYYY"), Err(1846));
         assert_eq!(read("Someday", "DAY"), Err(1846));
         assert_eq!(
@@ -2273,7 +2281,10 @@ mod tests {
             read("01-12-1999 22 79509", "DD-MM-YYYY HH24 SSSSS"),
             Ok(at(1999, 12, 1, 22, 5, 9))
         );
-        assert_eq!(read("01-12-1999 21 79509", "DD-MM-YYYY HH24 SSSSS"), Err(1836));
+        assert_eq!(
+            read("01-12-1999 21 79509", "DD-MM-YYYY HH24 SSSSS"),
+            Err(1836)
+        );
         assert_eq!(read("86400", "SSSSS"), Err(1853));
         assert_eq!(read("XII-1999", "RM-YYYY"), Ok(at(1999, 12, 1, 0, 0, 0)));
         assert_eq!(read("iv-1999", "RM-YYYY"), Ok(at(1999, 4, 1, 0, 0, 0)));
@@ -2281,15 +2292,27 @@ mod tests {
 
     #[test]
     fn eras_signed_years_and_grouped_years_read_before_christ_too() {
-        assert_eq!(read("15-03-0044 BC", "DD-MM-YYYY BC"), Ok(at(-43, 3, 15, 0, 0, 0)));
-        assert_eq!(read("15-03-0044 A.D.", "DD-MM-YYYY BC"), Ok(at(44, 3, 15, 0, 0, 0)));
+        assert_eq!(
+            read("15-03-0044 BC", "DD-MM-YYYY BC"),
+            Ok(at(-43, 3, 15, 0, 0, 0))
+        );
+        assert_eq!(
+            read("15-03-0044 A.D.", "DD-MM-YYYY BC"),
+            Ok(at(44, 3, 15, 0, 0, 0))
+        );
         assert_eq!(read("15-03-0044 XX", "DD-MM-YYYY BC"), Err(1856));
         assert_eq!(read("-0044", "SYYYY"), Ok(at(-43, 10, 1, 0, 0, 0)));
         assert_eq!(read("2,024", "Y,YYY"), Ok(at(2024, 10, 1, 0, 0, 0)));
         assert_eq!(read("2024", "Y,YYY"), Ok(at(2024, 10, 1, 0, 0, 0)));
-        assert_eq!(read("01-01-4713 BC", "DD-MM-YYYY BC"), Ok(at(-4712, 1, 1, 0, 0, 0)));
+        assert_eq!(
+            read("01-01-4713 BC", "DD-MM-YYYY BC"),
+            Ok(at(-4712, 1, 1, 0, 0, 0))
+        );
         assert_eq!(read("01-01-4715 BC", "DD-MM-YYYY BC"), Err(1841));
-        assert_eq!(read("01-01-4712 BC", "DD-MM-YYYY BC"), Ok(at(-4711, 1, 1, 0, 0, 0)));
+        assert_eq!(
+            read("01-01-4712 BC", "DD-MM-YYYY BC"),
+            Ok(at(-4711, 1, 1, 0, 0, 0))
+        );
     }
 
     #[test]
@@ -2327,7 +2350,9 @@ mod tests {
         assert_eq!(zone_offset(" +05:30 ").ok(), Some(5 * 3600 + 1800));
         assert_eq!(zone_offset("utc").ok(), Some(0));
         assert_eq!(
-            zone_offset("+5:x").err().and_then(|error| error.vendor_code()),
+            zone_offset("+5:x")
+                .err()
+                .and_then(|error| error.vendor_code()),
             Some(1857)
         );
     }

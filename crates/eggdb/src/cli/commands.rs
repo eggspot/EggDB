@@ -20,21 +20,21 @@ mod copy_io;
 mod csv_import;
 mod expiry;
 mod explain;
+mod follow;
+mod follow_sql_server;
+mod foreign;
 mod mcp;
 mod parquet_io;
 mod restore;
 mod restore_aof;
 mod restore_mongodump;
 mod row;
-mod follow;
-mod follow_sql_server;
-mod foreign;
 mod serve;
-mod serve_mcp;
 mod serve_jobs;
+mod serve_mcp;
+mod serve_metrics;
 mod serve_mongo;
 mod serve_resp;
-mod serve_metrics;
 mod serve_tls;
 mod shell;
 mod shell_copy;
@@ -247,7 +247,11 @@ impl<'a> Session<'a> {
             && self.request.collection.is_none()
             && std::fs::symlink_metadata(&self.request.file).is_err()
         {
-            self.refuse_what_a_new_file_cannot_store(&key, value.len(), self.request.ttl.is_some())?;
+            self.refuse_what_a_new_file_cannot_store(
+                &key,
+                value.len(),
+                self.request.ttl.is_some(),
+            )?;
         }
         let cache = cache_for_value(value.len());
         let db = self.open(
@@ -279,9 +283,7 @@ impl<'a> Session<'a> {
         })?;
         self.close(db)?;
         if self.format == Format::Json {
-            let object = JsonObject::new()
-                .bytes("key", &key)
-                .boolean("stored", true);
+            let object = JsonObject::new().bytes("key", &key).boolean("stored", true);
             let object = match ttl {
                 Some(ttl) => expiry::with_time_to_live(object, Some(ttl)),
                 None => object,
@@ -292,8 +294,12 @@ impl<'a> Session<'a> {
     }
 
     fn put_streamed(&mut self, key: &[u8], path: &std::path::Path) -> Result<Exit, Failure> {
-        let unreadable =
-            |error: std::io::Error| Failure::usage(format!("cannot read @{}: {error}", path.display()), Some(CommandName::Put));
+        let unreadable = |error: std::io::Error| {
+            Failure::usage(
+                format!("cannot read @{}: {error}", path.display()),
+                Some(CommandName::Put),
+            )
+        };
         let mut source = std::fs::File::open(path).map_err(unreadable)?;
         let len = source.metadata().map_err(unreadable)?.len();
         let value_bytes = usize::try_from(len).unwrap_or(usize::MAX);
@@ -331,7 +337,11 @@ impl<'a> Session<'a> {
         value_bytes: usize,
         expires: bool,
     ) -> Result<(), Failure> {
-        let deadline_bytes = if expires { EXPIRY_KEY_OVERHEAD_BYTES } else { 0 };
+        let deadline_bytes = if expires {
+            EXPIRY_KEY_OVERHEAD_BYTES
+        } else {
+            0
+        };
         let max_key = BTree::max_key_bytes(PageSize::DEFAULT).saturating_sub(deadline_bytes);
         let refusal = if key.len() > max_key {
             StorageError::KeyTooLarge {

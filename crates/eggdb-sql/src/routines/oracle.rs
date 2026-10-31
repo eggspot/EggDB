@@ -94,9 +94,9 @@ pub(super) fn wrong_arguments(
         (true, _) => call_error(format!(
             "PLS-306: wrong number or types of arguments in call to '{shown}'"
         )),
-        (false, RoutineKind::Function) => {
-            call_error(format!("PLS-221: '{shown}' is not a procedure or is undefined"))
-        }
+        (false, RoutineKind::Function) => call_error(format!(
+            "PLS-221: '{shown}' is not a procedure or is undefined"
+        )),
         (false, RoutineKind::Procedure) => SqlError::new(
             SqlState::WRONG_OBJECT_TYPE,
             "not a valid function or procedure name",

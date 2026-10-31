@@ -64,10 +64,16 @@ pub(crate) fn compress(input: &[u8]) -> Vec<u8> {
             let candidate = candidate as usize;
             if at - candidate <= MAX_OFFSET && read_u32(input, candidate) == sequence {
                 let mut matched = MIN_MATCH;
-                while at + matched < extend_limit && input[candidate + matched] == input[at + matched] {
+                while at + matched < extend_limit
+                    && input[candidate + matched] == input[at + matched]
+                {
                     matched += 1;
                 }
-                put_sequence(&mut out, &input[anchor..at], Some((at - candidate, matched)));
+                put_sequence(
+                    &mut out,
+                    &input[anchor..at],
+                    Some((at - candidate, matched)),
+                );
                 at += matched;
                 anchor = at;
                 continue;
@@ -79,11 +85,18 @@ pub(crate) fn compress(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn length_bytes(input: &[u8], at: &mut usize, mut length: usize, most: usize) -> Result<usize, &'static str> {
+fn length_bytes(
+    input: &[u8],
+    at: &mut usize,
+    mut length: usize,
+    most: usize,
+) -> Result<usize, &'static str> {
     loop {
         let byte = *input.get(*at).ok_or("a length runs past the block")?;
         *at += 1;
-        length = length.checked_add(usize::from(byte)).ok_or("a length overflows")?;
+        length = length
+            .checked_add(usize::from(byte))
+            .ok_or("a length overflows")?;
         if length > most {
             return Err("a length runs past the decompressed size");
         }
@@ -97,7 +110,12 @@ fn length_bytes(input: &[u8], at: &mut usize, mut length: usize, most: usize) ->
 /// error: a length or offset that runs past the block or the output, and output of another
 /// size.
 pub(crate) fn decompress(input: &[u8], expected: usize) -> Result<Vec<u8>, &'static str> {
-    if expected > input.len().saturating_mul(MOST_EXPANSION).saturating_add(MATCH_FIND_LIMIT) {
+    if expected
+        > input
+            .len()
+            .saturating_mul(MOST_EXPANSION)
+            .saturating_add(MATCH_FIND_LIMIT)
+    {
         return Err("the decompressed size is larger than any block of this length can give");
     }
     let mut out: Vec<u8> = Vec::new();
@@ -105,7 +123,11 @@ pub(crate) fn decompress(input: &[u8], expected: usize) -> Result<Vec<u8>, &'sta
         .map_err(|_| "the decompressed size cannot be allocated")?;
     let mut at = 0;
     loop {
-        let token = usize::from(*input.get(at).ok_or("the block ends before its last sequence")?);
+        let token = usize::from(
+            *input
+                .get(at)
+                .ok_or("the block ends before its last sequence")?,
+        );
         at += 1;
         let mut literals = token >> 4;
         if literals == RUN_MASK {
@@ -121,7 +143,9 @@ pub(crate) fn decompress(input: &[u8], expected: usize) -> Result<Vec<u8>, &'sta
         if at == input.len() {
             break;
         }
-        let offset_bytes = input.get(at..at + 2).ok_or("an offset runs past the block")?;
+        let offset_bytes = input
+            .get(at..at + 2)
+            .ok_or("an offset runs past the block")?;
         let offset = usize::from(u16::from_le_bytes([offset_bytes[0], offset_bytes[1]]));
         at += 2;
         if offset == 0 || offset > out.len() {

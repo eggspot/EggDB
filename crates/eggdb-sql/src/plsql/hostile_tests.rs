@@ -28,17 +28,103 @@ impl Scrambler {
 }
 
 const TOKENS: &[&str] = &[
-    "DECLARE", "BEGIN", "END", "END;", "IF", "THEN", "ELSIF", "ELSE", "END IF", "LOOP",
-    "END LOOP", "WHILE", "FOR", "IN", "REVERSE", "..", "CASE", "WHEN", "END CASE", "EXIT",
-    "CONTINUE", "RETURN", "RAISE", "EXCEPTION", "OTHERS", "OR", "PRAGMA", "EXCEPTION_INIT",
-    "AUTONOMOUS_TRANSACTION", "TYPE", "IS", "AS", "RECORD", "TABLE", "OF", "INDEX", "BY",
-    "PLS_INTEGER", "VARCHAR2(10)", "NUMBER", "VARRAY(3)", "REF", "CURSOR", "SUBTYPE", "%TYPE",
-    "%ROWTYPE", "%FOUND", "%NOTFOUND", "%ROWCOUNT", "%ISOPEN", "SQL", "PROCEDURE", "FUNCTION",
-    "PACKAGE", "BODY", "OUT", "IN OUT", "NOCOPY", "DEFAULT", "CONSTANT", "NOT NULL", ":=", "=>",
-    "OPEN", "FETCH", "CLOSE", "INTO", "BULK COLLECT", "LIMIT", "FORALL", "SAVE EXCEPTIONS",
-    "EXECUTE IMMEDIATE", "USING", "GOTO", "<<", ">>", "lbl", "SELECT", "FROM dual", "COMMIT",
-    "ROLLBACK", "NULL", "RAISE_APPLICATION_ERROR", "DBMS_OUTPUT.PUT_LINE", ":new", ":old",
-    "x", "y", "t", "c", ";", ",", "(", ")", ".", "'s'", "-20001",
+    "DECLARE",
+    "BEGIN",
+    "END",
+    "END;",
+    "IF",
+    "THEN",
+    "ELSIF",
+    "ELSE",
+    "END IF",
+    "LOOP",
+    "END LOOP",
+    "WHILE",
+    "FOR",
+    "IN",
+    "REVERSE",
+    "..",
+    "CASE",
+    "WHEN",
+    "END CASE",
+    "EXIT",
+    "CONTINUE",
+    "RETURN",
+    "RAISE",
+    "EXCEPTION",
+    "OTHERS",
+    "OR",
+    "PRAGMA",
+    "EXCEPTION_INIT",
+    "AUTONOMOUS_TRANSACTION",
+    "TYPE",
+    "IS",
+    "AS",
+    "RECORD",
+    "TABLE",
+    "OF",
+    "INDEX",
+    "BY",
+    "PLS_INTEGER",
+    "VARCHAR2(10)",
+    "NUMBER",
+    "VARRAY(3)",
+    "REF",
+    "CURSOR",
+    "SUBTYPE",
+    "%TYPE",
+    "%ROWTYPE",
+    "%FOUND",
+    "%NOTFOUND",
+    "%ROWCOUNT",
+    "%ISOPEN",
+    "SQL",
+    "PROCEDURE",
+    "FUNCTION",
+    "PACKAGE",
+    "BODY",
+    "OUT",
+    "IN OUT",
+    "NOCOPY",
+    "DEFAULT",
+    "CONSTANT",
+    "NOT NULL",
+    ":=",
+    "=>",
+    "OPEN",
+    "FETCH",
+    "CLOSE",
+    "INTO",
+    "BULK COLLECT",
+    "LIMIT",
+    "FORALL",
+    "SAVE EXCEPTIONS",
+    "EXECUTE IMMEDIATE",
+    "USING",
+    "GOTO",
+    "<<",
+    ">>",
+    "lbl",
+    "SELECT",
+    "FROM dual",
+    "COMMIT",
+    "ROLLBACK",
+    "NULL",
+    "RAISE_APPLICATION_ERROR",
+    "DBMS_OUTPUT.PUT_LINE",
+    ":new",
+    ":old",
+    "x",
+    "y",
+    "t",
+    "c",
+    ";",
+    ",",
+    "(",
+    ")",
+    ".",
+    "'s'",
+    "-20001",
 ];
 
 fn assert_compilation_error(text: &str, outcome: Result<(), SqlError>) {
@@ -58,10 +144,7 @@ fn scrambled_units_compile_to_oracle_compilation_errors_and_never_panic() {
         let package = format!("PACKAGE BODY k IS {tokens} END k;");
         let subprogram = format!("PROCEDURE p IS {tokens}");
         for text in [&tokens, &block, &subprogram] {
-            assert_compilation_error(
-                text,
-                compile(&anonymous_block_definition(text)).map(drop),
-            );
+            assert_compilation_error(text, compile(&anonymous_block_definition(text)).map(drop));
         }
         assert_compilation_error(&package, compile_package(&package, None).map(drop));
         assert_compilation_error(&tokens, compile_trigger(&tokens, &records).map(drop));
@@ -84,7 +167,11 @@ fn oversized_units_are_refused_with_errors() {
             " END LOOP;".repeat(5_000)
         ),
     ] {
-        assert!(compile(&anonymous_block_definition(&text)).is_err(), "{}", &text[..40]);
+        assert!(
+            compile(&anonymous_block_definition(&text)).is_err(),
+            "{}",
+            &text[..40]
+        );
     }
 }
 
@@ -192,9 +279,15 @@ fn scrambled_blocks_run_to_an_end_or_an_error_and_leave_the_session_usable() {
         let _ = session.take_server_output();
     }
     session
-        .execute("BEGIN DELETE FROM t; INSERT INTO t VALUES (42); COMMIT; END;", &mut |_| {})
+        .execute(
+            "BEGIN DELETE FROM t; INSERT INTO t VALUES (42); COMMIT; END;",
+            &mut |_| {},
+        )
         .unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(count_of(&mut session, "SELECT COUNT(*) FROM t WHERE n = 42"), "1");
+    assert_eq!(
+        count_of(&mut session, "SELECT COUNT(*) FROM t WHERE n = 42"),
+        "1"
+    );
 }
 
 #[test]

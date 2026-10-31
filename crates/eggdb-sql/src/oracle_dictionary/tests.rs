@@ -58,7 +58,10 @@ fn a_user_with_a_schema_of_its_own_sees_it_as_its_own_objects() {
     let mut session = hr_session(&store);
     assert_eq!(session.dialect(), Dialect::Oracle);
     assert_eq!(
-        last(&mut session, "SELECT table_name FROM user_tables ORDER BY table_name"),
+        last(
+            &mut session,
+            "SELECT table_name FROM user_tables ORDER BY table_name"
+        ),
         "TABLE_NAME\nCOUNTRIES\nREGIONS\nSELECT 2"
     );
     assert_eq!(
@@ -73,7 +76,10 @@ fn a_user_with_a_schema_of_its_own_sees_it_as_its_own_objects() {
         "COUNT(*)\n2\nSELECT 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT region_name FROM HR.regions WHERE region_id = 1"),
+        last(
+            &mut session,
+            "SELECT region_name FROM HR.regions WHERE region_id = 1"
+        ),
         "REGION_NAME\nEurope\nSELECT 1"
     );
     assert_eq!(
@@ -275,7 +281,10 @@ fn a_postgresql_session_switches_to_oracle_and_back_between_statements() {
     last(&mut session, "BEGIN");
     last(&mut session, "INSERT INTO t VALUES (2, 'b')");
     last(&mut session, "ROLLBACK");
-    assert_eq!(last(&mut session, "SELECT COUNT(*) FROM t"), "COUNT(*)\n1\nSELECT 1");
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) FROM t"),
+        "COUNT(*)\n1\nSELECT 1"
+    );
     last(&mut session, "SET eggdb.dialect = DEFAULT");
     assert_eq!(session.dialect(), Dialect::PostgreSql);
     last(&mut session, "RESET eggdb.dialect");

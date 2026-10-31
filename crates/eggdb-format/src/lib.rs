@@ -17,10 +17,13 @@
 
 extern crate alloc;
 
+/// Reading and writing the format's fixed-width little-endian integers.
 pub mod bytes;
+/// CRC-32C (Castagnoli), the checksum of every page and log record.
 pub mod crc32c;
 mod error;
 mod flash;
+/// The file header, the superblock and page headers of EggDB's file format.
 pub mod format;
 #[cfg(test)]
 mod test_rng;
@@ -29,6 +32,7 @@ pub use crc32c::{crc32c, crc32c_append};
 pub use error::FormatError;
 pub use flash::{Flash, FlashPageError, FlashPages};
 pub use format::{
-    Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC, MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED,
-    PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
+    Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC,
+    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK,
+    PageChecksum, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };

@@ -18,7 +18,11 @@ pub struct AofReport {
 /// Replays an append-only file, the RESP commands a server logged (Redis's AOF format, which
 /// is RESP requests one after another), into `keyspace`; `MULTI`/`EXEC` blocks run as one
 /// transaction each, and `SELECT` switches databases as it did when logged.
-pub fn replay_aof(keyspace: &dyn Keyspace, input: impl Read, now_ms: u64) -> Result<AofReport, String> {
+pub fn replay_aof(
+    keyspace: &dyn Keyspace,
+    input: impl Read,
+    now_ms: u64,
+) -> Result<AofReport, String> {
     let mut reader = RequestReader::new(input);
     let mut client = Client {
         authenticated: true,
@@ -31,7 +35,7 @@ pub fn replay_aof(keyspace: &dyn Keyspace, input: impl Read, now_ms: u64) -> Res
     };
     let mut report = AofReport::default();
     loop {
-        let arguments = match reader.next() {
+        let arguments = match reader.next_request() {
             Ok(arguments) => arguments,
             Err(ProtocolError::Closed) => return Ok(report),
             Err(ProtocolError::Invalid(message)) => {
@@ -64,9 +68,17 @@ mod tests {
         assert_eq!(report.commands, 6);
         assert_eq!(report.failed, 1);
         assert!(report.first_error.unwrap().starts_with("command 6:"));
-        let mut client = Client { authenticated: true, ..Client::default() };
-        let context = Context { keyspace: &keyspace, password_sha256: None, now_ms: 0 };
-        let reply = crate::commands::execute(&context, &mut client, &[b"LLEN".to_vec(), b"l".to_vec()]);
+        let mut client = Client {
+            authenticated: true,
+            ..Client::default()
+        };
+        let context = Context {
+            keyspace: &keyspace,
+            password_sha256: None,
+            now_ms: 0,
+        };
+        let reply =
+            crate::commands::execute(&context, &mut client, &[b"LLEN".to_vec(), b"l".to_vec()]);
         assert_eq!(reply, Reply::Integer(2));
         assert!(replay_aof(&keyspace, &b"*1\r\n:x\r\n"[..], 0).is_err());
     }

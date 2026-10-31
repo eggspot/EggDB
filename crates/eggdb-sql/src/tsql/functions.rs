@@ -3,8 +3,8 @@ use super::errors::nesting_too_deep;
 use super::routines::TsqlReturns;
 use super::statements::{
     MatchingRow, apply_changes, changed_rows, columns_mismatch, combined, declare, every_row,
-    filled_rows, matching_of, matching_select, remove_rows, scalar_select, undeclared,
-    value_items, variable_column, variable_columns,
+    filled_rows, matching_of, matching_select, remove_rows, scalar_select, undeclared, value_items,
+    variable_column, variable_columns,
 };
 use super::variables::{BatchContext, ScalarVariable};
 use crate::ast::{
@@ -171,8 +171,8 @@ pub(crate) fn refused_in_function(
         Statement::Merge(_) => "MERGE",
         Statement::Truncate(_) => "TRUNCATE TABLE",
         Statement::Begin { .. } => "BEGIN TRANSACTION",
-        Statement::Commit { .. } => "COMMIT TRANSACTION",
-        Statement::Rollback { .. } => "ROLLBACK TRANSACTION",
+        Statement::Commit => "COMMIT TRANSACTION",
+        Statement::Rollback => "ROLLBACK TRANSACTION",
         Statement::Savepoint(_) => "SAVE TRANSACTION",
         Statement::Analyze(_) => "UPDATE STATISTICS",
         Statement::Role(role) => role.tag(),
@@ -296,7 +296,10 @@ pub(crate) fn inline_table_columns(
     Ok(result.columns.unwrap_or_default())
 }
 
-fn converted_arguments(definition: &RoutineDefinition, arguments: Vec<Value>) -> SqlResult<Vec<Value>> {
+fn converted_arguments(
+    definition: &RoutineDefinition,
+    arguments: Vec<Value>,
+) -> SqlResult<Vec<Value>> {
     if arguments.len() > definition.parameters.len() {
         return Err(too_many_arguments(definition));
     }

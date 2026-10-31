@@ -165,7 +165,10 @@ fn default_formats(definition: &CommandDefinition) -> Option<(Format, Format)> {
         .first()
         .and_then(|word| CommandName::named(word));
     Some(match named {
-        Some(command) => (default_format(command, true), default_format(command, false)),
+        Some(command) => (
+            default_format(command, true),
+            default_format(command, false),
+        ),
         None => (Format::Text, Format::Text),
     })
 }
@@ -261,7 +264,10 @@ fn tool_json(tool: &ToolDefinition) -> String {
             JsonObject::new()
                 .string("name", argument.name)
                 .string("type", argument.kind.json_type())
-                .raw("maps_to", &optional(argument.maps_to.json_name().as_deref()))
+                .raw(
+                    "maps_to",
+                    &optional(argument.maps_to.json_name().as_deref()),
+                )
                 .object()
         })
         .collect();
@@ -293,7 +299,10 @@ fn tool_json(tool: &ToolDefinition) -> String {
         .boolean("idempotent", tool.idempotent)
         .boolean("open_world", tool.open_world)
         .raw("confirm", &optional(tool.confirm.map(|check| check.name())))
-        .raw("confirm_when", &optional(tool.confirm.map(|check| check.when())))
+        .raw(
+            "confirm_when",
+            &optional(tool.confirm.map(|check| check.when())),
+        )
         .raw("annotations", &annotations)
         .object()
 }

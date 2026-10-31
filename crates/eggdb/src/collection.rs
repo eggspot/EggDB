@@ -435,7 +435,8 @@ impl WriteCollection<'_, '_> {
     /// How long `key` in the collection has left before it expires, this transaction's changes
     /// included, or `None` when it has no time to live or is absent.
     pub fn time_to_live(&self, key: impl AsRef<[u8]>) -> Result<Option<Duration>> {
-        self.transaction.time_to_live_stored(&self.key(key.as_ref()))
+        self.transaction
+            .time_to_live_stored(&self.key(key.as_ref()))
     }
 
     /// Adds `by` to the counter under `key` in the collection and returns the new count, as
@@ -744,7 +745,13 @@ mod tests {
     fn records_round_trip_and_damage_is_an_error() {
         assert_eq!(read_record(&record(42), "x").ok(), Some(42));
         assert_eq!(read_record(&record(u32::MAX), "x").ok(), Some(u32::MAX));
-        let damaged_records: [&[u8]; 5] = [&[], &[1], &[1, 0, 0, 0], &[1, 0, 0, 0, 0, 0], &[0, 0, 0, 0, 1]];
+        let damaged_records: [&[u8]; 5] = [
+            &[],
+            &[1],
+            &[1, 0, 0, 0],
+            &[1, 0, 0, 0, 0, 0],
+            &[0, 0, 0, 0, 1],
+        ];
         for damaged in damaged_records {
             let error = read_record(damaged, "x").unwrap_err();
             assert_eq!(error.kind(), ErrorKind::Corrupt, "{damaged:?}");
@@ -756,7 +763,13 @@ mod tests {
     #[test]
     fn names_are_text_without_whitespace_or_control_characters() {
         let longest = "x".repeat(128);
-        for good in ["users", "a", "日本", "with-dash_and.dot:colon", longest.as_str()] {
+        for good in [
+            "users",
+            "a",
+            "日本",
+            "with-dash_and.dot:colon",
+            longest.as_str(),
+        ] {
             assert!(check_collection_name(good).is_ok(), "{good}");
         }
         let too_long = "x".repeat(129);

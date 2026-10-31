@@ -70,7 +70,11 @@ impl<S: Read + Write> TlsStream<S> {
         }
     }
 
-    fn established(layer: RecordLayer<S>, established: crate::session::Established, is_client: bool) -> Self {
+    fn established(
+        layer: RecordLayer<S>,
+        established: crate::session::Established,
+        is_client: bool,
+    ) -> Self {
         Self {
             layer,
             info: established.info,
@@ -107,7 +111,12 @@ impl<S: Read + Write> TlsStream<S> {
     }
 
     /// Keying material exported for `label` and `context` (RFC 8446 section 7.5, RFC 5705).
-    pub fn export_keying_material(&self, label: &[u8], context: Option<&[u8]>, length: usize) -> Vec<u8> {
+    pub fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: Option<&[u8]>,
+        length: usize,
+    ) -> Vec<u8> {
         self.traffic.export(label, context, length)
     }
 
@@ -117,7 +126,8 @@ impl<S: Read + Write> TlsStream<S> {
             return Ok(());
         }
         self.sent_close = true;
-        self.layer.queue(content_type::ALERT, &AlertDescription::CloseNotify.encode())?;
+        self.layer
+            .queue(content_type::ALERT, &AlertDescription::CloseNotify.encode())?;
         self.layer.flush()?;
         Ok(())
     }
@@ -128,28 +138,45 @@ impl<S: Read + Write> TlsStream<S> {
         let Traffic::Tls13(traffic) = &mut self.traffic else {
             return Ok(());
         };
-        self.layer.queue(content_type::HANDSHAKE, &key_update_message(request_peer_update))?;
+        self.layer.queue(
+            content_type::HANDSHAKE,
+            &key_update_message(request_peer_update),
+        )?;
         traffic.write_secret = next_traffic_secret(traffic.hash, &traffic.write_secret);
         let keys = traffic_keys(traffic.hash, traffic.aead, &traffic.write_secret);
-        let protection = Tls13RecordProtection::new(traffic.aead, &keys)
-            .ok_or(TlsError::protocol(AlertDescription::InternalError, "traffic key of the wrong length"))?;
-        self.layer.set_write_protection(Protection::Tls13(protection));
+        let protection =
+            Tls13RecordProtection::new(traffic.aead, &keys).ok_or(TlsError::protocol(
+                AlertDescription::InternalError,
+                "traffic key of the wrong length",
+            ))?;
+        self.layer
+            .set_write_protection(Protection::Tls13(protection));
         self.layer.flush()
     }
 
     fn receive_key_update(&mut self, body: &[u8]) -> Result<(), TlsError> {
         let update_requested = decode_key_update(body)?;
         if !self.post_handshake.is_empty() {
-            return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "a KeyUpdate was followed by part of a message"));
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "a KeyUpdate was followed by part of a message",
+            ));
         }
         let Traffic::Tls13(traffic) = &mut self.traffic else {
-            return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "KeyUpdate on a TLS 1.2 connection"));
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "KeyUpdate on a TLS 1.2 connection",
+            ));
         };
         traffic.read_secret = next_traffic_secret(traffic.hash, &traffic.read_secret);
         let keys = traffic_keys(traffic.hash, traffic.aead, &traffic.read_secret);
-        let protection = Tls13RecordProtection::new(traffic.aead, &keys)
-            .ok_or(TlsError::protocol(AlertDescription::InternalError, "traffic key of the wrong length"))?;
-        self.layer.set_read_protection(Protection::Tls13(protection))?;
+        let protection =
+            Tls13RecordProtection::new(traffic.aead, &keys).ok_or(TlsError::protocol(
+                AlertDescription::InternalError,
+                "traffic key of the wrong length",
+            ))?;
+        self.layer
+            .set_read_protection(Protection::Tls13(protection))?;
         if update_requested && !self.sent_close {
             self.update_keys(false)?;
         }
@@ -162,7 +189,9 @@ impl<S: Read + Write> TlsStream<S> {
             let tls13 = matches!(self.traffic, Traffic::Tls13(_));
             match message_type {
                 handshake_type::NEW_SESSION_TICKET if tls13 && self.is_client => {}
-                handshake_type::KEY_UPDATE if tls13 => self.receive_key_update(message_body(&message))?,
+                handshake_type::KEY_UPDATE if tls13 => {
+                    self.receive_key_update(message_body(&message))?
+                }
                 0 if !tls13 && self.is_client && message_body(&message).is_empty() => {}
                 _ => {
                     return Err(TlsError::protocol(
@@ -186,7 +215,10 @@ impl<S: Read + Write> TlsStream<S> {
             match content {
                 content_type::APPLICATION_DATA => {
                     if !self.post_handshake.is_empty() {
-                        return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "application data inside a handshake message"));
+                        return Err(TlsError::protocol(
+                            AlertDescription::UnexpectedMessage,
+                            "application data inside a handshake message",
+                        ));
                     }
                     if payload.is_empty() {
                         continue;
@@ -201,14 +233,19 @@ impl<S: Read + Write> TlsStream<S> {
                         self.peer_closed = true;
                         return Ok(false);
                     }
-                    if alert.level == crate::alert::level::WARNING && !matches!(self.traffic, Traffic::Tls13(_)) {
+                    if alert.level == crate::alert::level::WARNING
+                        && !matches!(self.traffic, Traffic::Tls13(_))
+                    {
                         continue;
                     }
                     return Err(TlsError::PeerAlert(alert));
                 }
                 content_type::HANDSHAKE => self.receive_handshake(&payload)?,
                 _ => {
-                    return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "an unexpected record after the handshake"));
+                    return Err(TlsError::protocol(
+                        AlertDescription::UnexpectedMessage,
+                        "an unexpected record after the handshake",
+                    ));
                 }
             }
         }
@@ -223,7 +260,9 @@ impl<S: Read + Write> TlsStream<S> {
 fn is_retryable(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
     )
 }
 
@@ -240,7 +279,10 @@ impl<S: Read + Write> Read for TlsStream<S> {
             return Ok(0);
         }
         if self.failed {
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the TLS connection has failed"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the TLS connection has failed",
+            ));
         }
         while self.received_offset >= self.received.len() {
             if self.peer_closed {
@@ -264,13 +306,20 @@ impl<S: Read + Write> Read for TlsStream<S> {
 impl<S: Read + Write> Write for TlsStream<S> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         if self.sent_close || self.failed {
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the TLS connection is closed"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the TLS connection is closed",
+            ));
         }
         if buffer.is_empty() {
             return Ok(0);
         }
         let count = buffer.len().min(MAX_WRITE_BYTES);
-        if let Err(error) = self.layer.queue(content_type::APPLICATION_DATA, &buffer[..count]).and_then(|()| self.layer.flush()) {
+        if let Err(error) = self
+            .layer
+            .queue(content_type::APPLICATION_DATA, &buffer[..count])
+            .and_then(|()| self.layer.flush())
+        {
             return Err(self.fail_with(error));
         }
         Ok(count)
@@ -293,7 +342,11 @@ pub struct PrefixedStream<S> {
 impl<S> PrefixedStream<S> {
     /// `inner` with `prefix` read first.
     pub fn new(prefix: Vec<u8>, inner: S) -> Self {
-        Self { prefix, offset: 0, inner }
+        Self {
+            prefix,
+            offset: 0,
+            inner,
+        }
     }
 
     /// The wrapped stream.

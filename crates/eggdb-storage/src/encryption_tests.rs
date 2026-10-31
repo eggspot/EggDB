@@ -48,10 +48,16 @@ fn raw_contents(fs: &SimFileSystem, path: &str) -> Vec<u8> {
 }
 
 fn holds(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
-fn reopened(fs: &SimFileSystem, path: &str, key: Option<&[u8]>) -> Result<Store<SimFile>, StorageError> {
+fn reopened(
+    fs: &SimFileSystem,
+    path: &str,
+    key: Option<&[u8]>,
+) -> Result<Store<SimFile>, StorageError> {
     let mut file = PageFile::open(fs, Path::new(path), Access::ReadWrite)?;
     if let Some(key) = key {
         file.use_page_key(key)?;
@@ -76,7 +82,10 @@ fn an_encrypted_file_holds_no_plaintext_and_reads_back_with_its_key() {
     assert!(read_secret(&store).unwrap().starts_with(SECRET));
     let read = store.begin_read().unwrap();
     let tree = read.open_tree(read.catalog_root()).unwrap();
-    assert_eq!(read.get(&tree, b"large").unwrap().unwrap(), SECRET.repeat(2000));
+    assert_eq!(
+        read.get(&tree, b"large").unwrap().unwrap(),
+        SECRET.repeat(2000)
+    );
 }
 
 #[test]
@@ -86,8 +95,14 @@ fn a_missing_or_wrong_key_is_refused() {
     let without = reopened(&fs, "db", None).unwrap();
     assert!(matches!(read_secret(&without), Err(StorageError::NeedsKey)));
     drop(without);
-    assert!(matches!(reopened(&fs, "db", Some(&[1; 32])), Err(StorageError::WrongKey)));
-    assert!(matches!(reopened(&fs, "db", Some(&[1; 16])), Err(StorageError::WrongKey)));
+    assert!(matches!(
+        reopened(&fs, "db", Some(&[1; 32])),
+        Err(StorageError::WrongKey)
+    ));
+    assert!(matches!(
+        reopened(&fs, "db", Some(&[1; 16])),
+        Err(StorageError::WrongKey)
+    ));
 }
 
 #[test]
@@ -107,7 +122,10 @@ fn a_file_with_plain_data_cannot_take_a_key() {
     drop(store);
     let mut file = PageFile::open(&fs, Path::new("plain"), Access::ReadWrite).unwrap();
     assert!(file.superblock().catalog_root != NO_PAGE);
-    assert!(matches!(file.use_page_key(&KEY), Err(StorageError::NotEncrypted)));
+    assert!(matches!(
+        file.use_page_key(&KEY),
+        Err(StorageError::NotEncrypted)
+    ));
 }
 
 #[test]
@@ -131,5 +149,8 @@ fn a_copy_of_an_encrypted_file_stays_encrypted_with_the_same_key() {
     assert!(!holds(&raw_contents(&fs, "copy"), SECRET));
     let copy = reopened(&fs, "copy", Some(&KEY)).unwrap();
     assert!(read_secret(&copy).unwrap().starts_with(SECRET));
-    assert!(matches!(reopened(&fs, "copy", Some(&[3; 32])), Err(StorageError::WrongKey)));
+    assert!(matches!(
+        reopened(&fs, "copy", Some(&[3; 32])),
+        Err(StorageError::WrongKey)
+    ));
 }

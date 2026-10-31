@@ -6,9 +6,7 @@ use crate::roles::{Privilege, RoleOptions, RoleStatement};
 
 impl Parser<'_> {
     pub(super) fn at_role_definition(&self) -> bool {
-        self.is_word("role")
-            || self.is_word("user")
-            || (self.sqlserver() && self.is_word("login"))
+        self.is_word("role") || self.is_word("user") || (self.sqlserver() && self.is_word("login"))
     }
 
     pub(super) fn create_role(&mut self) -> SqlResult<Statement> {
@@ -124,10 +122,20 @@ impl Parser<'_> {
                 while self.take(&TokenKind::Comma) {
                     options.member_of.push(self.role_name()?.text);
                 }
-            } else if ["createdb", "nocreatedb", "createrole", "nocreaterole", "inherit", "noinherit",
-                "replication", "noreplication", "bypassrls", "nobypassrls"]
-                .iter()
-                .any(|word| self.is_word(word))
+            } else if [
+                "createdb",
+                "nocreatedb",
+                "createrole",
+                "nocreaterole",
+                "inherit",
+                "noinherit",
+                "replication",
+                "noreplication",
+                "bypassrls",
+                "nobypassrls",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
             {
                 self.at += 1;
             } else if self.take_word("connection") {
@@ -178,12 +186,17 @@ impl Parser<'_> {
             if self.take_word("all") {
                 return Err(self.not_supported("GRANT ON ALL TABLES IN SCHEMA"));
             }
-            if self.is_word("schema") || self.is_word("database") || self.is_word("sequence")
-                || self.is_word("function") || self.is_word("procedure")
+            if self.is_word("schema")
+                || self.is_word("database")
+                || self.is_word("sequence")
+                || self.is_word("function")
+                || self.is_word("procedure")
             {
                 return Err(self.not_supported(&format!(
                     "privileges on a {}",
-                    self.text.get(self.peek().start..self.peek().end).unwrap_or("")
+                    self.text
+                        .get(self.peek().start..self.peek().end)
+                        .unwrap_or("")
                 )));
             }
             self.take_word("table");
@@ -195,19 +208,18 @@ impl Parser<'_> {
                 tables.push(self.table_name()?);
             }
         }
-        if granting {
-            self.expect_word("to")?;
-        } else if !self.take_word("from") {
+        if granting || !self.take_word("from") {
             self.expect_word("to")?;
         }
         let mut grantees = vec![self.grantee()?];
         while self.take(&TokenKind::Comma) {
             grantees.push(self.grantee()?);
         }
-        if granting && self.take_word("with") {
-            if self.take_word("grant") || self.take_word("admin") {
-                self.expect_word("option")?;
-            }
+        if granting
+            && self.take_word("with")
+            && (self.take_word("grant") || self.take_word("admin"))
+        {
+            self.expect_word("option")?;
         }
         if !granting {
             let _ = self.take_word("cascade") || self.take_word("restrict");

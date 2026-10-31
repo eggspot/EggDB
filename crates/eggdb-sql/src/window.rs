@@ -481,7 +481,10 @@ pub(crate) fn function_name(arguments: &[Expr]) -> String {
         .first()
         .and_then(literal_text)
         .and_then(|text| WindowFunction::decoded(&text))
-        .map_or_else(|| "?column?".to_owned(), |function| function.name().to_owned())
+        .map_or_else(
+            || "?column?".to_owned(),
+            |function| function.name().to_owned(),
+        )
 }
 
 pub(crate) fn split(expr: Expr) -> Option<(WindowSpec, Vec<Expr>)> {
@@ -522,10 +525,7 @@ pub(crate) fn check_call(expr: &Expr) -> SqlResult<()> {
     let position = expr.position;
     let parts = parts(expr.clone()).ok_or_else(|| lost_definition(position))?;
     if !parts.reference.is_empty() {
-        let name = parts
-            .reference
-            .trim_start_matches(['=', '('])
-            .to_owned();
+        let name = parts.reference.trim_start_matches(['=', '(']).to_owned();
         return Err(undefined_window(&name, position));
     }
     let keys = parts
@@ -536,7 +536,9 @@ pub(crate) fn check_call(expr: &Expr) -> SqlResult<()> {
         .chain(parts.order.iter().map(|item| &item.expr));
     for key in keys {
         if let Some(inner) = first_call(key) {
-            return Err(windowing_error("window function calls cannot be nested").at(inner.position));
+            return Err(
+                windowing_error("window function calls cannot be nested").at(inner.position)
+            );
         }
     }
     let Some(clause) = &parts.frame else {
@@ -607,11 +609,10 @@ pub(crate) fn define_windows(
     let mut defined: Vec<(String, WindowDefinition)> = Vec::with_capacity(listed.len());
     for (name, mut definition) in listed {
         if defined.iter().any(|(known, _)| *known == name.text) {
-            return Err(windowing_error(format!(
-                "window \"{}\" is already defined",
-                name.text
-            ))
-            .at(name.position));
+            return Err(
+                windowing_error(format!("window \"{}\" is already defined", name.text))
+                    .at(name.position),
+            );
         }
         if let Some(base) = definition.base.take() {
             let found = defined
@@ -696,6 +697,7 @@ struct Layout {
 }
 
 impl WindowSpec {
+    #[cfg(test)]
     pub(crate) fn keys(&self) -> usize {
         self.arguments + usize::from(self.filtered) + self.partition + self.order.len()
     }
@@ -1333,11 +1335,11 @@ impl<'k> Partition<'k> {
         }
         for position in 0..count {
             let (start, end) = self.frame_range(frame, offsets, direction, position)?;
-            let mut rows =
-                (start..end).filter(|&candidate| !self.excluded(frame.exclusion, position, candidate));
+            let mut rows = (start..end)
+                .filter(|&candidate| !self.excluded(frame.exclusion, position, candidate));
             let chosen = match spec.function {
                 WindowFunction::FirstValue => rows.next(),
-                WindowFunction::LastValue => rows.last(),
+                WindowFunction::LastValue => rows.next_back(),
                 _ => {
                     let wanted = self.value(position, 1);
                     if wanted.is_null() {
@@ -1432,7 +1434,10 @@ mod tests {
     }
 
     fn big(numbers: &[i64]) -> Vec<Value> {
-        numbers.iter().map(|&number| Value::BigInt(number)).collect()
+        numbers
+            .iter()
+            .map(|&number| Value::BigInt(number))
+            .collect()
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //! statement runs at its first step and keeps its rows until it is reset or finalized.
 
 use eggdb::Database;
-use eggdb::sql::{Dialect, OutputColumn, Parameter, QueryResult, Session, SqlError, SqlType, Store, Value};
+use eggdb::sql::{
+    Dialect, OutputColumn, Parameter, QueryResult, Session, SqlError, SqlType, Store, Value,
+};
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::sync::Arc;
 
@@ -59,8 +61,8 @@ pub struct Sqlite3 {
     code: c_int,
     changes: i64,
     total_changes: i64,
-    store: Arc<Store<'static>>,
-    database: Arc<Database>,
+    _store: Arc<Store<'static>>,
+    _database: Arc<Database>,
 }
 
 impl std::fmt::Debug for Sqlite3 {
@@ -108,10 +110,12 @@ impl Sqlite3 {
 
     fn run(&mut self, text: &str, parameters: &[Parameter]) -> Result<Vec<QueryResult>, c_int> {
         let mut results = Vec::new();
-        let outcome = self.session.execute_prepared(text, parameters, &mut |result| {
-            results.push(result);
-            true
-        });
+        let outcome = self
+            .session
+            .execute_prepared(text, parameters, &mut |result| {
+                results.push(result);
+                true
+            });
         match outcome {
             Ok(()) => {
                 let changed: i64 = results.iter().map(|result| affected(&result.tag)).sum();
@@ -130,7 +134,10 @@ fn affected(tag: &str) -> i64 {
     if !matches!(verb, "INSERT" | "UPDATE" | "DELETE") {
         return 0;
     }
-    tag.rsplit(' ').next().and_then(|count| count.parse().ok()).unwrap_or(0)
+    tag.rsplit(' ')
+        .next()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
 }
 
 /// # Safety
@@ -197,8 +204,8 @@ pub unsafe extern "C" fn sqlite3_open_v2(
         code: SQLITE_OK,
         changes: 0,
         total_changes: 0,
-        store,
-        database,
+        _store: store,
+        _database: database,
     });
     let code = match failure {
         Some(message) => connection.record(SQLITE_CANTOPEN, &message),
@@ -293,16 +300,25 @@ pub unsafe extern "C" fn sqlite3_exec(
             .iter()
             .map(|column| CString::new(column.name.clone()).unwrap_or_default())
             .collect();
-        let mut name_pointers: Vec<*mut c_char> =
-            names.iter_mut().map(|name| name.as_ptr().cast_mut()).collect();
+        let mut name_pointers: Vec<*mut c_char> = names
+            .iter_mut()
+            .map(|name| name.as_ptr().cast_mut())
+            .collect();
         for row in &result.rows {
             let texts: Vec<Option<CString>> = row
                 .iter()
-                .map(|value| value.to_text().map(|text| CString::new(text.replace('\0', " ")).unwrap_or_default()))
+                .map(|value| {
+                    value
+                        .to_text()
+                        .map(|text| CString::new(text.replace('\0', " ")).unwrap_or_default())
+                })
                 .collect();
             let mut pointers: Vec<*mut c_char> = texts
                 .iter()
-                .map(|text| text.as_ref().map_or(std::ptr::null_mut(), |text| text.as_ptr().cast_mut()))
+                .map(|text| {
+                    text.as_ref()
+                        .map_or(std::ptr::null_mut(), |text| text.as_ptr().cast_mut())
+                })
                 .collect();
             // SAFETY: the callback gets pointers to `pointers.len()` values and names that live
             // until it returns, as SQLite's contract says.
@@ -368,8 +384,10 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
     };
     let end = first_statement_end(text);
     if !tail.is_null() {
-        // SAFETY: `end` lies within the given text, and `tail` is writable memory.
-        unsafe { tail.write(sql.add(end)) };
+        // SAFETY: `end` lies within the given text, so the pointer stays inside it.
+        let rest = unsafe { sql.add(end) };
+        // SAFETY: `tail` is writable memory, as the caller promises.
+        unsafe { tail.write(rest) };
     }
     let first = text[..end].trim();
     if first.is_empty() || first == ";" {
@@ -493,7 +511,11 @@ impl Sqlite3Stmt {
 /// # Safety
 /// `statement` is a live statement.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sqlite3_bind_int(statement: *mut Sqlite3Stmt, index: c_int, value: c_int) -> c_int {
+pub unsafe extern "C" fn sqlite3_bind_int(
+    statement: *mut Sqlite3Stmt,
+    index: c_int,
+    value: c_int,
+) -> c_int {
     // SAFETY: the same contract.
     unsafe { sqlite3_bind_int64(statement, index, i64::from(value)) }
 }
@@ -503,7 +525,11 @@ pub unsafe extern "C" fn sqlite3_bind_int(statement: *mut Sqlite3Stmt, index: c_
 /// # Safety
 /// `statement` is a live statement.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sqlite3_bind_int64(statement: *mut Sqlite3Stmt, index: c_int, value: i64) -> c_int {
+pub unsafe extern "C" fn sqlite3_bind_int64(
+    statement: *mut Sqlite3Stmt,
+    index: c_int,
+    value: i64,
+) -> c_int {
     // SAFETY: the caller passes a live statement.
     match unsafe { statement_mut(statement) } {
         Some(statement) => statement.bind(index, Some(SqlType::BigInt), Some(value.to_string())),
@@ -516,7 +542,11 @@ pub unsafe extern "C" fn sqlite3_bind_int64(statement: *mut Sqlite3Stmt, index: 
 /// # Safety
 /// `statement` is a live statement.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sqlite3_bind_double(statement: *mut Sqlite3Stmt, index: c_int, value: c_double) -> c_int {
+pub unsafe extern "C" fn sqlite3_bind_double(
+    statement: *mut Sqlite3Stmt,
+    index: c_int,
+    value: c_double,
+) -> c_int {
     // SAFETY: the caller passes a live statement.
     match unsafe { statement_mut(statement) } {
         Some(statement) => statement.bind(index, Some(SqlType::Double), Some(format!("{value:?}"))),
@@ -676,12 +706,10 @@ pub unsafe extern "C" fn sqlite3_reset(statement: *mut Sqlite3Stmt) -> c_int {
 pub unsafe extern "C" fn sqlite3_clear_bindings(statement: *mut Sqlite3Stmt) -> c_int {
     // SAFETY: the caller passes a live statement.
     if let Some(statement) = unsafe { statement_mut(statement) } {
-        for binding in &mut statement.bindings {
-            *binding = Parameter {
-                declared_type: None,
-                value: None,
-            };
-        }
+        statement.bindings.fill(Parameter {
+            declared_type: None,
+            value: None,
+        });
     }
     SQLITE_OK
 }
@@ -714,7 +742,10 @@ pub unsafe extern "C" fn sqlite3_column_count(statement: *mut Sqlite3Stmt) -> c_
 /// # Safety
 /// `statement` is a live statement.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sqlite3_column_name(statement: *mut Sqlite3Stmt, column: c_int) -> *const c_char {
+pub unsafe extern "C" fn sqlite3_column_name(
+    statement: *mut Sqlite3Stmt,
+    column: c_int,
+) -> *const c_char {
     // SAFETY: the caller passes a live statement.
     unsafe { statement_mut(statement) }
         .and_then(|statement| statement.names.get(usize::try_from(column).ok()?))
@@ -731,7 +762,9 @@ pub unsafe extern "C" fn sqlite3_column_type(statement: *mut Sqlite3Stmt, column
     // SAFETY: the caller passes a live statement.
     match unsafe { statement_mut(statement) }.and_then(|statement| statement.row_value(column)) {
         None | Some(Value::Null) => SQLITE_NULL,
-        Some(Value::Boolean(_) | Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_)) => SQLITE_INTEGER,
+        Some(Value::Boolean(_) | Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_)) => {
+            SQLITE_INTEGER
+        }
         Some(Value::Real(_) | Value::Double(_)) => SQLITE_FLOAT,
         Some(Value::Bytea(_)) => SQLITE_BLOB,
         Some(_) => SQLITE_TEXT,
@@ -752,7 +785,10 @@ pub unsafe extern "C" fn sqlite3_column_int64(statement: *mut Sqlite3Stmt, colum
         Some(Value::BigInt(number)) => *number,
         Some(Value::Double(number)) => *number as i64,
         Some(Value::Real(number)) => *number as i64,
-        Some(value) => value.to_text().and_then(|text| text.trim().parse().ok()).unwrap_or(0),
+        Some(value) => value
+            .to_text()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0),
         None => 0,
     }
 }
@@ -773,7 +809,10 @@ pub unsafe extern "C" fn sqlite3_column_int(statement: *mut Sqlite3Stmt, column:
 /// # Safety
 /// `statement` is a live statement.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sqlite3_column_double(statement: *mut Sqlite3Stmt, column: c_int) -> c_double {
+pub unsafe extern "C" fn sqlite3_column_double(
+    statement: *mut Sqlite3Stmt,
+    column: c_int,
+) -> c_double {
     // SAFETY: the caller passes a live statement.
     match unsafe { statement_mut(statement) }.and_then(|statement| statement.row_value(column)) {
         Some(Value::Double(number)) => *number,
@@ -781,7 +820,10 @@ pub unsafe extern "C" fn sqlite3_column_double(statement: *mut Sqlite3Stmt, colu
         Some(Value::BigInt(number)) => *number as f64,
         Some(Value::Integer(number)) => f64::from(*number),
         Some(Value::SmallInt(number)) => f64::from(*number),
-        Some(value) => value.to_text().and_then(|text| text.trim().parse().ok()).unwrap_or(0.0),
+        Some(value) => value
+            .to_text()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0.0),
         None => 0.0,
     }
 }
@@ -813,7 +855,10 @@ fn cached_bytes(statement: &mut Sqlite3Stmt, column: c_int) -> Option<&Vec<u8>> 
 /// # Safety
 /// `statement` is a live statement.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sqlite3_column_text(statement: *mut Sqlite3Stmt, column: c_int) -> *const u8 {
+pub unsafe extern "C" fn sqlite3_column_text(
+    statement: *mut Sqlite3Stmt,
+    column: c_int,
+) -> *const u8 {
     // SAFETY: the caller passes a live statement.
     unsafe { statement_mut(statement) }
         .and_then(|statement| cached_bytes(statement, column))
@@ -825,7 +870,10 @@ pub unsafe extern "C" fn sqlite3_column_text(statement: *mut Sqlite3Stmt, column
 /// # Safety
 /// `statement` is a live statement.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sqlite3_column_blob(statement: *mut Sqlite3Stmt, column: c_int) -> *const c_void {
+pub unsafe extern "C" fn sqlite3_column_blob(
+    statement: *mut Sqlite3Stmt,
+    column: c_int,
+) -> *const c_void {
     // SAFETY: the same contract.
     unsafe { sqlite3_column_text(statement, column) }.cast()
 }

@@ -3,7 +3,10 @@ const MAX_CONDITIONS: usize = 200;
 pub(crate) fn identifier(name: &str) -> Option<String> {
     let mut characters = name.chars();
     let first = characters.next()?;
-    let valid = (first.is_alphabetic() || first == '_') && characters.all(|character| character.is_alphanumeric() || character == '_' || character == '$') && name.len() <= 63;
+    let valid = (first.is_alphabetic() || first == '_')
+        && characters
+            .all(|character| character.is_alphanumeric() || character == '_' || character == '$')
+        && name.len() <= 63;
     valid.then(|| format!("\"{name}\""))
 }
 
@@ -18,7 +21,10 @@ fn percent_decode(text: &str) -> String {
     while at < bytes.len() {
         match bytes[at] {
             b'+' => out.push(b' '),
-            b'%' => match text.get(at + 1..at + 3).and_then(|pair| u8::from_str_radix(pair, 16).ok()) {
+            b'%' => match text
+                .get(at + 1..at + 3)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            {
                 Some(byte) => {
                     out.push(byte);
                     at += 2;
@@ -33,7 +39,10 @@ fn percent_decode(text: &str) -> String {
 }
 
 fn list_items(text: &str) -> Result<Vec<String>, String> {
-    let inner = text.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')).ok_or("in. needs a list in parentheses, such as in.(1,2,3)")?;
+    let inner = text
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .ok_or("in. needs a list in parentheses, such as in.(1,2,3)")?;
     let mut items = Vec::new();
     let mut current = String::new();
     let mut quoted = false;
@@ -63,7 +72,9 @@ fn condition(column: &str, expression: &str) -> Result<String, String> {
         Some(rest) => (true, rest),
         None => (false, expression),
     };
-    let (operator, value) = expression.split_once('.').ok_or_else(|| format!("{expression}: write operator.value, such as eq.5"))?;
+    let (operator, value) = expression
+        .split_once('.')
+        .ok_or_else(|| format!("{expression}: write operator.value, such as eq.5"))?;
     let rendered = match operator {
         "eq" => format!("{column} = {}", literal(value)),
         "neq" => format!("{column} <> {}", literal(value)),
@@ -78,19 +89,34 @@ fn condition(column: &str, expression: &str) -> Result<String, String> {
             "true" => format!("{column} IS TRUE"),
             "false" => format!("{column} IS FALSE"),
             "unknown" => format!("{column} IS UNKNOWN"),
-            _ => return Err(format!("is.{value}: use is.null, is.true, is.false or is.unknown")),
+            _ => {
+                return Err(format!(
+                    "is.{value}: use is.null, is.true, is.false or is.unknown"
+                ));
+            }
         },
         "in" => {
             let items = list_items(value)?;
             if items.is_empty() {
                 "FALSE".to_owned()
             } else {
-                format!("{column} IN ({})", items.iter().map(|item| literal(item)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "{column} IN ({})",
+                    items
+                        .iter()
+                        .map(|item| literal(item))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
         }
         other => return Err(format!("{other} is not a filter operator this API knows")),
     };
-    Ok(if negated { format!("NOT ({rendered})") } else { rendered })
+    Ok(if negated {
+        format!("NOT ({rendered})")
+    } else {
+        rendered
+    })
 }
 
 #[derive(Debug, Default)]
@@ -112,18 +138,36 @@ impl Query {
                 "select" => {
                     if value.trim() != "*" {
                         let mut columns = Vec::new();
-                        for item in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+                        for item in value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|item| !item.is_empty())
+                        {
                             let (alias, column) = item.split_once(':').unwrap_or(("", item));
-                            let column = identifier(column).ok_or_else(|| format!("{column} is not a column name"))?;
-                            columns.push(if alias.is_empty() { column } else { format!("{column} AS {}", identifier(alias).ok_or_else(|| format!("{alias} is not a valid alias"))?) });
+                            let column = identifier(column)
+                                .ok_or_else(|| format!("{column} is not a column name"))?;
+                            columns.push(if alias.is_empty() {
+                                column
+                            } else {
+                                format!(
+                                    "{column} AS {}",
+                                    identifier(alias)
+                                        .ok_or_else(|| format!("{alias} is not a valid alias"))?
+                                )
+                            });
                         }
                         query.select = Some(columns);
                     }
                 }
                 "order" => {
-                    for item in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+                    for item in value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                    {
                         let mut parts = item.split('.');
-                        let column = identifier(parts.next().unwrap_or_default()).ok_or_else(|| format!("{item} does not start with a column name"))?;
+                        let column = identifier(parts.next().unwrap_or_default())
+                            .ok_or_else(|| format!("{item} does not start with a column name"))?;
                         let mut rendered = column;
                         for modifier in parts {
                             rendered.push_str(match modifier {
@@ -137,10 +181,23 @@ impl Query {
                         query.order.push(rendered);
                     }
                 }
-                "limit" => query.limit = Some(value.parse().map_err(|_| format!("limit={value} is not a count"))?),
-                "offset" => query.offset = Some(value.parse().map_err(|_| format!("offset={value} is not a count"))?),
+                "limit" => {
+                    query.limit = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("limit={value} is not a count"))?,
+                    )
+                }
+                "offset" => {
+                    query.offset = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("offset={value} is not a count"))?,
+                    )
+                }
                 column => {
-                    let quoted = identifier(column).ok_or_else(|| format!("{column} is not a column name"))?;
+                    let quoted = identifier(column)
+                        .ok_or_else(|| format!("{column} is not a column name"))?;
                     if query.conditions.len() >= MAX_CONDITIONS {
                         return Err("too many filters".to_owned());
                     }
@@ -152,15 +209,25 @@ impl Query {
     }
 
     pub(crate) fn projection(&self) -> String {
-        self.select.as_ref().map_or_else(|| "*".to_owned(), |columns| columns.join(", "))
+        self.select
+            .as_ref()
+            .map_or_else(|| "*".to_owned(), |columns| columns.join(", "))
     }
 
     pub(crate) fn where_clause(&self) -> String {
-        if self.conditions.is_empty() { String::new() } else { format!(" WHERE {}", self.conditions.join(" AND ")) }
+        if self.conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", self.conditions.join(" AND "))
+        }
     }
 
     pub(crate) fn order_clause(&self) -> String {
-        if self.order.is_empty() { String::new() } else { format!(" ORDER BY {}", self.order.join(", ")) }
+        if self.order.is_empty() {
+            String::new()
+        } else {
+            format!(" ORDER BY {}", self.order.join(", "))
+        }
     }
 
     pub(crate) fn page_clause(&self) -> String {

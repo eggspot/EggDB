@@ -70,7 +70,10 @@ fn the_manuals_sales_tax_and_out_parameter_functions_compute_their_results() {
         ],
     );
     assert_eq!(rows(&mut session, "SELECT sales_tax(100)"), ["6"]);
-    assert_eq!(rows(&mut session, "SELECT * FROM sum_n_product(2, 4)"), ["6|8"]);
+    assert_eq!(
+        rows(&mut session, "SELECT * FROM sum_n_product(2, 4)"),
+        ["6|8"]
+    );
 }
 
 #[test]
@@ -196,7 +199,10 @@ fn the_manuals_emp_stamp_trigger_checks_and_stamps_rows() {
                  FOR EACH ROW EXECUTE FUNCTION emp_stamp()",
         ],
     );
-    answer(&mut session, "INSERT INTO emp (empname, salary) VALUES ('ann', 100)");
+    answer(
+        &mut session,
+        "INSERT INTO emp (empname, salary) VALUES ('ann', 100)",
+    );
     assert_eq!(
         rows(
             &mut session,

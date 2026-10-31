@@ -85,9 +85,7 @@ pub(crate) struct BatchContext {
 
 impl BatchContext {
     pub(crate) fn variable(&self, name: &str) -> Option<&ScalarVariable> {
-        self.variables
-            .iter()
-            .find(|variable| variable.name == name)
+        self.variables.iter().find(|variable| variable.name == name)
     }
 
     pub(crate) fn variable_mut(&mut self, name: &str) -> Option<&mut ScalarVariable> {

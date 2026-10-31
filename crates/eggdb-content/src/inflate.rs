@@ -1,10 +1,23 @@
 use crate::ContentError;
 
-const LENGTH_BASES: [u16; 29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
-const LENGTH_EXTRA: [u8; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-const DISTANCE_BASES: [u16; 30] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
-const DISTANCE_EXTRA: [u8; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
-const CODE_LENGTH_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const LENGTH_BASES: [u16; 29] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
+];
+const LENGTH_EXTRA: [u8; 29] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+const DISTANCE_BASES: [u16; 30] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+];
+const DISTANCE_EXTRA: [u8; 30] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];
+const CODE_LENGTH_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
 const MAX_BITS: usize = 15;
 
 fn corrupt(message: &str) -> ContentError {
@@ -21,7 +34,10 @@ struct Bits<'a> {
 impl Bits<'_> {
     fn take(&mut self, wanted: u32) -> Result<u32, ContentError> {
         while self.count < wanted {
-            let byte = *self.data.get(self.at).ok_or_else(|| corrupt("it ends early"))?;
+            let byte = *self
+                .data
+                .get(self.at)
+                .ok_or_else(|| corrupt("it ends early"))?;
             self.at += 1;
             self.buffer |= u64::from(byte) << self.count;
             self.count += 8;
@@ -47,7 +63,9 @@ impl Huffman {
     fn new(lengths: &[u8]) -> Result<Self, ContentError> {
         let mut counts = [0u16; MAX_BITS + 1];
         for &length in lengths {
-            let slot = counts.get_mut(usize::from(length)).ok_or_else(|| corrupt("a code is too long"))?;
+            let slot = counts
+                .get_mut(usize::from(length))
+                .ok_or_else(|| corrupt("a code is too long"))?;
             *slot += 1;
         }
         let mut left: i32 = 1;
@@ -80,7 +98,11 @@ impl Huffman {
             code |= bits.take(1)? as i32;
             let count = i32::from(count);
             if code - first < count {
-                return self.symbols.get((index + code - first) as usize).copied().ok_or_else(|| corrupt("a code has no symbol"));
+                return self
+                    .symbols
+                    .get((index + code - first) as usize)
+                    .copied()
+                    .ok_or_else(|| corrupt("a code has no symbol"));
             }
             index += count;
             first = (first + count) << 1;
@@ -116,7 +138,10 @@ fn dynamic_tables(bits: &mut Bits<'_>) -> Result<(Huffman, Huffman), ContentErro
         let (value, repeat) = match symbol {
             0..=15 => (symbol as u8, 1),
             16 => {
-                let previous = *lengths.get(filled.wrapping_sub(1)).filter(|_| filled > 0).ok_or_else(|| corrupt("a repeat has nothing before it"))?;
+                let previous = *lengths
+                    .get(filled.wrapping_sub(1))
+                    .filter(|_| filled > 0)
+                    .ok_or_else(|| corrupt("a repeat has nothing before it"))?;
                 (previous, 3 + bits.take(2)? as usize)
             }
             17 => (0, 3 + bits.take(3)? as usize),
@@ -131,10 +156,19 @@ fn dynamic_tables(bits: &mut Bits<'_>) -> Result<(Huffman, Huffman), ContentErro
     if lengths[256] == 0 {
         return Err(corrupt("a block has no end code"));
     }
-    Ok((Huffman::new(&lengths[..literal_count])?, Huffman::new(&lengths[literal_count..])?))
+    Ok((
+        Huffman::new(&lengths[..literal_count])?,
+        Huffman::new(&lengths[literal_count..])?,
+    ))
 }
 
-fn codes(bits: &mut Bits<'_>, out: &mut Vec<u8>, literals: &Huffman, distances: &Huffman, limit: usize) -> Result<(), ContentError> {
+fn codes(
+    bits: &mut Bits<'_>,
+    out: &mut Vec<u8>,
+    literals: &Huffman,
+    distances: &Huffman,
+    limit: usize,
+) -> Result<(), ContentError> {
     loop {
         let symbol = usize::from(literals.decode(bits)?);
         if symbol < 256 {
@@ -143,10 +177,16 @@ fn codes(bits: &mut Bits<'_>, out: &mut Vec<u8>, literals: &Huffman, distances: 
             return Ok(());
         } else {
             let at = symbol - 257;
-            let (&base, &extra) = LENGTH_BASES.get(at).zip(LENGTH_EXTRA.get(at)).ok_or_else(|| corrupt("a length code is out of range"))?;
+            let (&base, &extra) = LENGTH_BASES
+                .get(at)
+                .zip(LENGTH_EXTRA.get(at))
+                .ok_or_else(|| corrupt("a length code is out of range"))?;
             let length = usize::from(base) + bits.take(u32::from(extra))? as usize;
             let at = usize::from(distances.decode(bits)?);
-            let (&base, &extra) = DISTANCE_BASES.get(at).zip(DISTANCE_EXTRA.get(at)).ok_or_else(|| corrupt("a distance code is out of range"))?;
+            let (&base, &extra) = DISTANCE_BASES
+                .get(at)
+                .zip(DISTANCE_EXTRA.get(at))
+                .ok_or_else(|| corrupt("a distance code is out of range"))?;
             let distance = usize::from(base) + bits.take(u32::from(extra))? as usize;
             if distance > out.len() {
                 return Err(corrupt("a distance reaches before the start"));
@@ -158,31 +198,46 @@ fn codes(bits: &mut Bits<'_>, out: &mut Vec<u8>, literals: &Huffman, distances: 
             }
         }
         if out.len() > limit {
-            return Err(ContentError(format!("the content expands past {limit} bytes")));
+            return Err(ContentError(format!(
+                "the content expands past {limit} bytes"
+            )));
         }
     }
 }
 
 /// Decompresses a raw DEFLATE stream (RFC 1951), refusing to produce more than `limit` bytes.
 pub fn inflate(data: &[u8], limit: usize) -> Result<Vec<u8>, ContentError> {
-    let mut bits = Bits { data, at: 0, buffer: 0, count: 0 };
+    let mut bits = Bits {
+        data,
+        at: 0,
+        buffer: 0,
+        count: 0,
+    };
     let mut out = Vec::new();
     loop {
         let last = bits.take(1)? == 1;
         match bits.take(2)? {
             0 => {
                 bits.align();
-                let header = data.get(bits.at..bits.at + 4).ok_or_else(|| corrupt("a stored block ends early"))?;
+                let header = data
+                    .get(bits.at..bits.at + 4)
+                    .ok_or_else(|| corrupt("a stored block ends early"))?;
                 let length = usize::from(u16::from_le_bytes([header[0], header[1]]));
-                if u16::from_le_bytes([header[0], header[1]]) != !u16::from_le_bytes([header[2], header[3]]) {
+                if u16::from_le_bytes([header[0], header[1]])
+                    != !u16::from_le_bytes([header[2], header[3]])
+                {
                     return Err(corrupt("a stored block's length check fails"));
                 }
                 bits.at += 4;
-                let stored = data.get(bits.at..bits.at + length).ok_or_else(|| corrupt("a stored block ends early"))?;
+                let stored = data
+                    .get(bits.at..bits.at + length)
+                    .ok_or_else(|| corrupt("a stored block ends early"))?;
                 out.extend_from_slice(stored);
                 bits.at += length;
                 if out.len() > limit {
-                    return Err(ContentError(format!("the content expands past {limit} bytes")));
+                    return Err(ContentError(format!(
+                        "the content expands past {limit} bytes"
+                    )));
                 }
             }
             1 => {

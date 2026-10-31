@@ -1509,7 +1509,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 .then(|| crate::table_variables::enter(&self.table_variables));
             let _constraints = self.enter_constraints();
             let _nls = self.enter_oracle_nls();
-            let _plsql = self.oracle().then(|| crate::plsql::enter_session(&self.plsql));
+            let _plsql = self
+                .oracle()
+                .then(|| crate::plsql::enter_session(&self.plsql));
             if let Some(mut rows) = parser.literal_rows() {
                 let _catalog = crate::pg_catalog::enter_statement(false, &settings);
                 resume = parser.resume_point();
@@ -1552,7 +1554,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 (true, _, _) => parser.sqlserver_condition(),
                 (false, CachedStatement::Parsed(statement), Some(shape)) => {
                     parser = parser.resuming_at((shape.stop(), statement_point.1));
-                    Ok(statement)
+                    Ok(*statement)
                 }
                 (false, _, _) => parser.statement(),
             };
@@ -1688,12 +1690,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         names: Option<&[Name]>,
         deferred: bool,
     ) -> SqlResult<QueryResult> {
-        let shown: Option<Vec<String>> =
-            names.map(|names| names.iter().map(|name| crate::schemas::base_name(&name.text).to_owned()).collect());
+        let shown: Option<Vec<String>> = names.map(|names| {
+            names
+                .iter()
+                .map(|name| crate::schemas::base_name(&name.text).to_owned())
+                .collect()
+        });
         if let Some(names) = names {
             for name in names {
                 let base = crate::schemas::base_name(&name.text).to_owned();
-                let found = self.read(|reader, _| crate::constraints::deferrable_constraint(reader, &base))?;
+                let found = self
+                    .read(|reader, _| crate::constraints::deferrable_constraint(reader, &base))?;
                 match found {
                     None => {
                         return Err(SqlError::new(
@@ -1959,38 +1966,79 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             "SELECT query FROM eggdb_internal.materialized_views WHERE name = {}",
             crate::dump::sql_string(name)
         )) {
-            Ok(results) => results.into_iter().flat_map(|result| result.rows).collect::<Vec<_>>(),
-            Err(error) if matches!(error.state(), SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME) => Vec::new(),
+            Ok(results) => results
+                .into_iter()
+                .flat_map(|result| result.rows)
+                .collect::<Vec<_>>(),
+            Err(error)
+                if matches!(
+                    error.state(),
+                    SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME
+                ) =>
+            {
+                Vec::new()
+            }
             Err(error) => return Err(error),
         };
-        Ok(rows.into_iter().next().and_then(|row| match row.into_iter().next() {
-            Some(Value::Text(query)) => Some(query),
-            _ => None,
-        }))
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| match row.into_iter().next() {
+                Some(Value::Text(query)) => Some(query),
+                _ => None,
+            }))
     }
 
-    fn materialized_view(&mut self, command: &crate::ast::MaterializedViewCommand) -> SqlResult<QueryResult> {
+    fn materialized_view(
+        &mut self,
+        command: &crate::ast::MaterializedViewCommand,
+    ) -> SqlResult<QueryResult> {
         use crate::ast::MaterializedViewCommand;
-        let written = |name: &str| name.split('.').map(crate::schema::quoted).collect::<Vec<_>>().join(".");
+        let written = |name: &str| {
+            name.split('.')
+                .map(crate::schema::quoted)
+                .collect::<Vec<_>>()
+                .join(".")
+        };
         match command {
-            MaterializedViewCommand::Create { name, query, with_data, if_not_exists } => {
+            MaterializedViewCommand::Create {
+                name,
+                query,
+                with_data,
+                if_not_exists,
+            } => {
                 if self.materialized_view_query(&name.text)?.is_some() {
                     if *if_not_exists {
-                        return Ok(QueryResult::command("CREATE MATERIALIZED VIEW").with_notice(format!(
-                            "NOTICE:  relation \"{}\" already exists, skipping",
-                            name.text
-                        )));
+                        return Ok(
+                            QueryResult::command("CREATE MATERIALIZED VIEW").with_notice(format!(
+                                "NOTICE:  relation \"{}\" already exists, skipping",
+                                name.text
+                            )),
+                        );
                     }
-                    return Err(SqlError::new(SqlState::DUPLICATE_TABLE, format!("relation \"{}\" already exists", name.text)));
+                    return Err(SqlError::new(
+                        SqlState::DUPLICATE_TABLE,
+                        format!("relation \"{}\" already exists", name.text),
+                    ));
                 }
                 let described = self
-                    .run_quietly(&format!("SELECT * FROM ({query}) AS materialized_definition LIMIT 0"))?
+                    .run_quietly(&format!(
+                        "SELECT * FROM ({query}) AS materialized_definition LIMIT 0"
+                    ))?
                     .into_iter()
                     .find_map(|result| result.columns)
                     .unwrap_or_default();
                 let columns: Vec<String> = described
                     .iter()
-                    .map(|column| format!("{} {}", crate::schema::quoted(&column.name), column.sql_type.map_or_else(|| "text".to_owned(), |sql_type| sql_type.name())))
+                    .map(|column| {
+                        format!(
+                            "{} {}",
+                            crate::schema::quoted(&column.name),
+                            column
+                                .sql_type
+                                .map_or_else(|| "text".to_owned(), |sql_type| sql_type.name())
+                        )
+                    })
                     .collect();
                 let table = written(&name.text);
                 let name_text = name.text.clone();
@@ -2015,7 +2063,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             MaterializedViewCommand::Refresh { name, with_data } => {
                 let Some(query) = self.materialized_view_query(&name.text)? else {
-                    return Err(SqlError::new(SqlState::WRONG_OBJECT_TYPE, format!("\"{}\" is not a materialized view", name.text)));
+                    return Err(SqlError::new(
+                        SqlState::WRONG_OBJECT_TYPE,
+                        format!("\"{}\" is not a materialized view", name.text),
+                    ));
                 };
                 let table = written(&name.text);
                 let with_data = *with_data;
@@ -2035,7 +2086,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         Some(_) => dropped.push(name.text.clone()),
                         None if *if_exists => {}
                         None => {
-                            return Err(SqlError::new(SqlState::UNDEFINED_TABLE, format!("materialized view \"{}\" does not exist", name.text)));
+                            return Err(SqlError::new(
+                                SqlState::UNDEFINED_TABLE,
+                                format!("materialized view \"{}\" does not exist", name.text),
+                            ));
                         }
                     }
                 }
@@ -2064,7 +2118,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             "eggdb_catalog" => ("eggdb_catalog", crate::catalog::CATALOG_SCRIPT),
             "eggdb_privacy" => ("eggdb_privacy", crate::privacy::PRIVACY_SCRIPT),
             "eggdb_retention" => ("eggdb_retention", crate::retention::RETENTION_SCRIPT),
-            "eggdb_coordination" => ("eggdb_coordination", crate::coordination::COORDINATION_SCRIPT),
+            "eggdb_coordination" => (
+                "eggdb_coordination",
+                crate::coordination::COORDINATION_SCRIPT,
+            ),
             "eggdb_migration" => ("eggdb_migration", crate::migration::MIGRATION_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
@@ -2075,15 +2132,22 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         )?;
         if installed {
             if if_not_exists {
-                return Ok(QueryResult::command("CREATE EXTENSION")
-                    .with_notice(format!("NOTICE:  extension \"{name}\" already exists, skipping")));
+                return Ok(
+                    QueryResult::command("CREATE EXTENSION").with_notice(format!(
+                        "NOTICE:  extension \"{name}\" already exists, skipping"
+                    )),
+                );
             }
-            return Err(SqlError::new(SqlState::DUPLICATE_OBJECT, format!("extension \"{name}\" already exists")));
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_OBJECT,
+                format!("extension \"{name}\" already exists"),
+            ));
         }
         self.execute(script, &mut |_| {})?;
         Ok(QueryResult::command("CREATE EXTENSION"))
     }
 
+    /// Ends the session, rolling back a transaction it left open; returns whether one was open.
     pub fn close(mut self) -> SqlResult<bool> {
         let was_open = self.in_block();
         match std::mem::replace(&mut self.block, Block::None) {
@@ -2237,14 +2301,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 .and_then(|count| count.parse().ok())
                 .unwrap_or(0)
         };
-        Ok(crate::explain::render_analyzed(&plan, rows, planning, execution))
+        Ok(crate::explain::render_analyzed(
+            &plan, rows, planning, execution,
+        ))
     }
 
     /// The `log_min_duration_statement` threshold: statements that take at least this long are
     /// worth logging, or `None` when it is off (`-1`, the default).
     pub fn slow_statement_threshold(&self) -> Option<std::time::Duration> {
         let millis = milliseconds_setting(&self.settings.get("log_min_duration_statement").ok()?)?;
-        Some(std::time::Duration::from_millis(u64::try_from(millis).ok()?))
+        Some(std::time::Duration::from_millis(
+            u64::try_from(millis).ok()?,
+        ))
     }
 
     fn statement_timeout(&self) -> Option<std::time::Duration> {
@@ -2306,7 +2374,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
         }
         match statement {
-            Statement::InstallExtension { name, if_not_exists } => return self.install_extension(name, *if_not_exists),
+            Statement::InstallExtension {
+                name,
+                if_not_exists,
+            } => return self.install_extension(name, *if_not_exists),
             Statement::MaterializedView(command) => return self.materialized_view(command),
             Statement::Begin { read_only } => return self.begin(*read_only),
             Statement::Commit => return self.commit(),
@@ -2616,7 +2687,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 binding.update(writer, tables, update)?;
                 if dialect == Dialect::PostgreSql
                     || (dialect == Dialect::SqlServer
-                        && crate::routines::exprs_call_marked_routine(crate::execute::update_exprs(update)))
+                        && crate::routines::exprs_call_marked_routine(
+                            crate::execute::update_exprs(update),
+                        ))
                 {
                     crate::routines::prepare_update(writer, tables, &settings, update)?;
                 }
@@ -2626,7 +2699,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 binding.delete(writer, tables, delete)?;
                 if dialect == Dialect::PostgreSql
                     || (dialect == Dialect::SqlServer
-                        && crate::routines::exprs_call_marked_routine(crate::execute::delete_exprs(delete)))
+                        && crate::routines::exprs_call_marked_routine(
+                            crate::execute::delete_exprs(delete),
+                        ))
                 {
                     crate::routines::prepare_delete(writer, tables, &settings, delete)?;
                 }
@@ -2687,10 +2762,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     for argument in &mut call.arguments {
                         binding.condition(&*writer, tables, argument)?;
                     }
-                    let (result, sources) = crate::routines::call_procedure_outputs(writer, tables, &settings, call)?;
+                    let (result, sources) =
+                        crate::routines::call_procedure_outputs(writer, tables, &settings, call)?;
                     let row = result.rows.first().cloned().unwrap_or_default();
                     for (value, source) in row.into_iter().zip(sources) {
-                        if let Some(name) = source.and_then(|at| call.user_variables.get(at).cloned().flatten()) {
+                        if let Some(name) =
+                            source.and_then(|at| call.user_variables.get(at).cloned().flatten())
+                        {
                             assigned.push((name, value));
                         }
                     }
@@ -2698,7 +2776,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 });
                 if result.is_ok() {
                     for (name, value) in assigned {
-                        Arc::make_mut(&mut self.settings).mysql.set_user(&name, value);
+                        Arc::make_mut(&mut self.settings)
+                            .mysql
+                            .set_user(&name, value);
                     }
                 }
                 result
@@ -2747,7 +2827,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             } => {
                 let tag = if *domain { "DROP DOMAIN" } else { "DROP TYPE" };
                 self.write(tag, |writer, tables| {
-                    crate::user_types::drop_types(writer, tables, names, *if_exists, *cascade, *domain)
+                    crate::user_types::drop_types(
+                        writer, tables, names, *if_exists, *cascade, *domain,
+                    )
                 })
             }
             Statement::AlterType(alter) => self.write("ALTER TYPE", |writer, _| {
@@ -3251,7 +3333,9 @@ fn milliseconds_setting(value: &str) -> Option<i64> {
     let value = value.trim();
     let (number, unit) = value
         .find(|character: char| !character.is_ascii_digit() && character != '-')
-        .map_or((value, "ms"), |split| (&value[..split], value[split..].trim()));
+        .map_or((value, "ms"), |split| {
+            (&value[..split], value[split..].trim())
+        });
     let number: i64 = number.parse().ok()?;
     if number < 0 {
         return None;

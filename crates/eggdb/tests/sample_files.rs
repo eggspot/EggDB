@@ -250,7 +250,9 @@ fn a_v0_2_0_file_takes_collections_and_keeps_its_default_key_space() {
     let db = Database::open(&path).unwrap();
     assert_eq!(db.collection_names().unwrap(), Vec::<String>::new());
     assert!(db.create_collection("added").unwrap());
-    db.collection("added").put("user:1", "in a collection").unwrap();
+    db.collection("added")
+        .put("user:1", "in a collection")
+        .unwrap();
     db.close().unwrap();
 
     let db = Database::open(&path).unwrap();
@@ -283,8 +285,12 @@ fn a_v0_2_0_file_takes_expiring_keys_and_then_carries_their_feature_flag() {
     assert_eq!(features(path.as_path()).read_only_compatible, 0);
 
     let db = Database::open(&path).unwrap();
-    db.put_with_expiry("session", "for an hour", std::time::Duration::from_secs(3600))
-        .unwrap();
+    db.put_with_expiry(
+        "session",
+        "for an hour",
+        std::time::Duration::from_secs(3600),
+    )
+    .unwrap();
     assert_eq!(db.increment("visits", 2).unwrap(), 2);
     db.close().unwrap();
     assert_eq!(

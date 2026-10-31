@@ -228,7 +228,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 .map(|parameter| {
                     let value = finished
                         .variable(&parameter.name.to_lowercase())
-                        .map_or_else(|| parameter.value.clone(), |variable| variable.value.clone());
+                        .map_or_else(
+                            || parameter.value.clone(),
+                            |variable| variable.value.clone(),
+                        );
                     let value = match parameter.declared_type {
                         Some(sql_type) => {
                             crate::sqlserver_conversion::implicit(value.clone(), sql_type)
@@ -415,12 +418,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                                 NestedRun::Dynamic(dynamic) => {
                                     self.run_dynamic(dynamic, statement_start, in_try, on_step)?
                                 }
-                                NestedRun::Procedure(procedure) => self.run_procedure(
-                                    procedure,
-                                    statement_start,
-                                    in_try,
-                                    on_step,
-                                )?,
+                                NestedRun::Procedure(procedure) => {
+                                    self.run_procedure(procedure, statement_start, in_try, on_step)?
+                                }
                             };
                             match end {
                                 DynamicEnd::Done => {
@@ -445,10 +445,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 if xact_abort && self.in_block() && !self.settings.sqlserver.uncommittable {
                     Arc::make_mut(&mut self.settings).sqlserver.uncommittable = true;
                 }
-                let line = crate::tsql::line_of(
-                    code.text,
-                    failure.position().unwrap_or(statement_start),
-                );
+                let line =
+                    crate::tsql::line_of(code.text, failure.position().unwrap_or(statement_start));
                 if let Some(slot) = caught.get_mut(index) {
                     *slot = Some(CaughtError::of(&failure, line));
                 }
@@ -778,7 +776,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         Ok(QueryResult::command("DECLARE"))
     }
 
-    pub(super) fn run_set_variable(&mut self, variable: &Name, value: &Expr) -> SqlResult<QueryResult> {
+    pub(super) fn run_set_variable(
+        &mut self,
+        variable: &Name,
+        value: &Expr,
+    ) -> SqlResult<QueryResult> {
         let value = self.evaluate(value)?;
         self.assign_variable(&variable.text, value)
             .map_err(|error| error.at_if_unplaced(variable.position))?;
@@ -889,7 +891,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         Ok(result)
     }
 
-    pub(super) fn run_throw(&mut self, arguments: Option<&ThrowArguments>) -> SqlResult<QueryResult> {
+    pub(super) fn run_throw(
+        &mut self,
+        arguments: Option<&ThrowArguments>,
+    ) -> SqlResult<QueryResult> {
         let Some(arguments) = arguments else {
             return Err(match &self.batch_context.caught {
                 Some(caught) => caught.rethrown(),
@@ -1032,7 +1037,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     .collect(),
                 rows: Vec::new(),
             };
-            self.writable_table_variables().insert(name.text.clone(), variable);
+            self.writable_table_variables()
+                .insert(name.text.clone(), variable);
         }
         Ok(QueryResult::command("DECLARE"))
     }

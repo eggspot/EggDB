@@ -8,6 +8,7 @@
 //! with its API.
 
 mod api;
+/// A client for S3-compatible object stores, signed with SigV4.
 pub mod client;
 mod store;
 mod xml;

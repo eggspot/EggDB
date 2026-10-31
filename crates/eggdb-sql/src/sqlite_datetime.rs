@@ -106,7 +106,11 @@ fn digits(text: &[u8], at: &mut usize, count: usize) -> Option<i64> {
         return None;
     }
     *at += count;
-    Some(slice.iter().fold(0, |total, digit| total * 10 + i64::from(digit - b'0')))
+    Some(
+        slice
+            .iter()
+            .fold(0, |total, digit| total * 10 + i64::from(digit - b'0')),
+    )
 }
 
 fn take(text: &[u8], at: &mut usize, byte: u8) -> bool {
@@ -345,7 +349,8 @@ fn apply(moment: &mut Moment, modifier: &str) -> Option<()> {
     match lowered.as_str() {
         "unixepoch" => {
             let seconds = pending?;
-            moment.jd_ms = UNIX_EPOCH_JD_MS.checked_add(jd_ms_of_julian_day(seconds / 86_400.0)?)?;
+            moment.jd_ms =
+                UNIX_EPOCH_JD_MS.checked_add(jd_ms_of_julian_day(seconds / 86_400.0)?)?;
             return Some(());
         }
         "julianday" => {
@@ -486,7 +491,11 @@ fn day_of_week(moment: &Moment) -> i64 {
 }
 
 fn iso_week(civil: &Civil, weekday_sunday_zero: i64) -> (i64, i64) {
-    let iso_weekday = if weekday_sunday_zero == 0 { 7 } else { weekday_sunday_zero };
+    let iso_weekday = if weekday_sunday_zero == 0 {
+        7
+    } else {
+        weekday_sunday_zero
+    };
     let thursday = days_from_civil(civil.year, civil.month, civil.day) + (4 - iso_weekday);
     let (year, _, _) = civil_from_days(thursday);
     let week = (thursday - days_from_civil(year, 1, 1)) / 7 + 1;
@@ -529,8 +538,10 @@ pub(crate) fn strftime(values: &[Value]) -> Value {
             Some('I') => format!("{twelve:02}"),
             Some('l') => format!("{twelve:2}"),
             Some('j') => format!("{:03}", day_of_year(&civil)),
-            Some('J') => crate::sqlite_functions::real_text(moment.jd_ms as f64 / MS_PER_DAY as f64)
-                .unwrap_or_default(),
+            Some('J') => {
+                crate::sqlite_functions::real_text(moment.jd_ms as f64 / MS_PER_DAY as f64)
+                    .unwrap_or_default()
+            }
             Some('m') => format!("{:02}", civil.month),
             Some('M') => format!("{:02}", seconds / 60 % 60),
             Some('p') => (if hour < 12 { "AM" } else { "PM" }).to_owned(),
@@ -549,10 +560,7 @@ pub(crate) fn strftime(values: &[Value]) -> Value {
             Some('u') => (if weekday == 0 { 7 } else { weekday }).to_string(),
             Some('w') => weekday.to_string(),
             Some('U') => format!("{:02}", (day_of_year(&civil) + 6 - weekday) / 7),
-            Some('W') => format!(
-                "{:02}",
-                (day_of_year(&civil) + 6 - (weekday + 6) % 7) / 7
-            ),
+            Some('W') => format!("{:02}", (day_of_year(&civil) + 6 - (weekday + 6) % 7) / 7),
             Some('V') => format!("{:02}", iso_week(&civil, weekday).1),
             Some('G') => format!("{:04}", iso_week(&civil, weekday).0),
             Some('g') => format!("{:02}", iso_week(&civil, weekday).0 % 100),
@@ -568,8 +576,12 @@ pub(crate) fn strftime(values: &[Value]) -> Value {
 /// SQLite's `timediff(a, b)`: the time from `b` to `a` as `(+|-)YYYY-MM-DD HH:MM:SS.SSS`.
 pub(crate) fn timediff(values: &[Value]) -> Value {
     let (Some(later), Some(earlier)) = (
-        values.first().and_then(|value| evaluate(std::slice::from_ref(value))),
-        values.get(1).and_then(|value| evaluate(std::slice::from_ref(value))),
+        values
+            .first()
+            .and_then(|value| evaluate(std::slice::from_ref(value))),
+        values
+            .get(1)
+            .and_then(|value| evaluate(std::slice::from_ref(value))),
     ) else {
         return Value::Null;
     };
@@ -630,7 +642,10 @@ mod tests {
             text("2023-02-28")
         );
         assert_eq!(
-            run(DateFunction::Date, &["2013-10-07", "start of month", "+1 month", "-1 day"]),
+            run(
+                DateFunction::Date,
+                &["2013-10-07", "start of month", "+1 month", "-1 day"]
+            ),
             text("2013-10-31")
         );
         assert_eq!(
@@ -642,11 +657,17 @@ mod tests {
             text("2024-10-08")
         );
         assert_eq!(
-            call(DateFunction::DateTime, &[Value::BigInt(1_092_941_466), text("unixepoch")]),
+            call(
+                DateFunction::DateTime,
+                &[Value::BigInt(1_092_941_466), text("unixepoch")]
+            ),
             text("2004-08-19 18:51:06")
         );
         assert_eq!(
-            call(DateFunction::DateTime, &[Value::BigInt(1_092_941_466), text("auto")]),
+            call(
+                DateFunction::DateTime,
+                &[Value::BigInt(1_092_941_466), text("auto")]
+            ),
             text("2004-08-19 18:51:06")
         );
         assert_eq!(
@@ -666,7 +687,10 @@ mod tests {
             text("2024-06-30 21:30:00")
         );
         assert_eq!(
-            run(DateFunction::DateTime, &["2024-01-01", "+0001-02-03 04:05:06"]),
+            run(
+                DateFunction::DateTime,
+                &["2024-01-01", "+0001-02-03 04:05:06"]
+            ),
             text("2025-03-04 04:05:06")
         );
     }
@@ -682,7 +706,11 @@ mod tests {
             &["9999-12-31", "+1 day"],
             &["24:61"],
         ] {
-            assert_eq!(run(DateFunction::Date, arguments), Value::Null, "{arguments:?}");
+            assert_eq!(
+                run(DateFunction::Date, arguments),
+                Value::Null,
+                "{arguments:?}"
+            );
         }
     }
 

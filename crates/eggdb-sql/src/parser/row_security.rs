@@ -23,14 +23,19 @@ impl Parser<'_> {
         } else if self.take_word("disable") {
             false
         } else if self.take_word("force") || (self.take_word("no") && self.take_word("force")) {
-            return Err(self.not_supported("FORCE ROW LEVEL SECURITY (EggDB has no table owners yet)"));
+            return Err(
+                self.not_supported("FORCE ROW LEVEL SECURITY (EggDB has no table owners yet)")
+            );
         } else {
             return Err(self.unexpected());
         };
         self.expect_word("row")?;
         self.expect_word("level")?;
         self.expect_word("security")?;
-        Ok(Statement::RowSecurity(RowSecurityStatement::Switch { table, enabled }))
+        Ok(Statement::RowSecurity(RowSecurityStatement::Switch {
+            table,
+            enabled,
+        }))
     }
 
     fn condition_text(&mut self) -> SqlResult<String> {

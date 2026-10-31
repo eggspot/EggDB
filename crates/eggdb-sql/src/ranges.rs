@@ -7,8 +7,6 @@ use std::cmp::Ordering;
 pub(crate) struct BuiltinRange {
     pub(crate) name: &'static str,
     pub(crate) oid: u32,
-    pub(crate) array_oid: u32,
-    pub(crate) multirange_oid: u32,
     pub(crate) subtype: SqlType,
     pub(crate) discrete: bool,
 }
@@ -17,48 +15,36 @@ pub(crate) const BUILTIN_RANGES: [BuiltinRange; 6] = [
     BuiltinRange {
         name: "int4range",
         oid: 3904,
-        array_oid: 3905,
-        multirange_oid: 4451,
         subtype: SqlType::Integer,
         discrete: true,
     },
     BuiltinRange {
         name: "numrange",
         oid: 3906,
-        array_oid: 3907,
-        multirange_oid: 4532,
         subtype: SqlType::Numeric(None),
         discrete: false,
     },
     BuiltinRange {
         name: "tsrange",
         oid: 3908,
-        array_oid: 3909,
-        multirange_oid: 4533,
         subtype: SqlType::Timestamp(None),
         discrete: false,
     },
     BuiltinRange {
         name: "tstzrange",
         oid: 3910,
-        array_oid: 3911,
-        multirange_oid: 4534,
         subtype: SqlType::TimestampTz(None),
         discrete: false,
     },
     BuiltinRange {
         name: "daterange",
         oid: 3912,
-        array_oid: 3913,
-        multirange_oid: 4535,
         subtype: SqlType::Date,
         discrete: true,
     },
     BuiltinRange {
         name: "int8range",
         oid: 3926,
-        array_oid: 3927,
-        multirange_oid: 4536,
         subtype: SqlType::BigInt,
         discrete: true,
     },
@@ -207,9 +193,7 @@ fn next_value(value: &Value) -> SqlResult<Value> {
             .checked_add(1)
             .filter(|days| crate::datetime::valid_date(*days))
             .map(Value::Date)
-            .ok_or_else(|| {
-                SqlError::new(SqlState::DATETIME_FIELD_OVERFLOW, "date out of range")
-            }),
+            .ok_or_else(|| SqlError::new(SqlState::DATETIME_FIELD_OVERFLOW, "date out of range")),
         other => Ok(other.clone()),
     }
 }
@@ -305,11 +289,19 @@ pub(crate) fn format_text(range: &RangeValue) -> String {
         return "empty".to_owned();
     };
     let mut out = String::new();
-    out.push(if bounds.lower.is_inclusive() { '[' } else { '(' });
+    out.push(if bounds.lower.is_inclusive() {
+        '['
+    } else {
+        '('
+    });
     push_bound(&mut out, bounds.lower.value());
     out.push(',');
     push_bound(&mut out, bounds.upper.value());
-    out.push(if bounds.upper.is_inclusive() { ']' } else { ')' });
+    out.push(if bounds.upper.is_inclusive() {
+        ']'
+    } else {
+        ')'
+    });
     out
 }
 
@@ -575,7 +567,12 @@ fn no_operator(symbol: &str, left: &Value, right: &Value) -> SqlError {
     )
 }
 
-fn same_type(left: &RangeValue, right: &RangeValue, symbol: &str, values: (&Value, &Value)) -> SqlResult<()> {
+fn same_type(
+    left: &RangeValue,
+    right: &RangeValue,
+    symbol: &str,
+    values: (&Value, &Value),
+) -> SqlResult<()> {
     if left.type_oid == right.type_oid {
         Ok(())
     } else {
@@ -584,7 +581,11 @@ fn same_type(left: &RangeValue, right: &RangeValue, symbol: &str, values: (&Valu
 }
 
 pub(crate) fn containment(contains: bool, left: &Value, right: &Value) -> Option<SqlResult<Value>> {
-    let (outer, inner) = if contains { (left, right) } else { (right, left) };
+    let (outer, inner) = if contains {
+        (left, right)
+    } else {
+        (right, left)
+    };
     let symbol = if contains { "@>" } else { "<@" };
     let range = range_of(outer)?;
     if inner.is_null() {
@@ -649,9 +650,10 @@ pub(crate) fn operator(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             a.checked_shr(shift).unwrap_or(if a < 0 { -1 } else { 0 })
         };
         let sql_type = left.sql_type().unwrap_or(SqlType::BigInt);
-        return Some(crate::types::integer_value(shifted, sql_type).or_else(|_| {
-            crate::types::integer_value(shifted as i32 as i64, SqlType::Integer)
-        }));
+        return Some(
+            crate::types::integer_value(shifted, sql_type)
+                .or_else(|_| crate::types::integer_value(shifted as i32 as i64, SqlType::Integer)),
+        );
     }
     let (Some(a), Some(b)) = (range_of(left), range_of(right)) else {
         return Some(Err(no_operator(symbol, left, right)));
@@ -662,11 +664,7 @@ pub(crate) fn operator(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     side_test(name, a, b).map(|found| Ok(Value::Boolean(found)))
 }
 
-fn bound_extreme<'b>(
-    first: Side<'b>,
-    second: Side<'b>,
-    wanted: Ordering,
-) -> &'b RangeBound {
+fn bound_extreme<'b>(first: Side<'b>, second: Side<'b>, wanted: Ordering) -> &'b RangeBound {
     if compare_sides(first, second) == wanted {
         first.bound
     } else {
@@ -823,9 +821,8 @@ pub(crate) fn construct(
             ));
         }
     };
-    let convert = |value: Value| {
-        crate::types::convert(value, subtype, crate::types::Conversion::Assignment)
-    };
+    let convert =
+        |value: Value| crate::types::convert(value, subtype, crate::types::Conversion::Assignment);
     let low = convert(evaluator.eval(low, Some(subtype))?)?;
     let high = convert(evaluator.eval(high, Some(subtype))?)?;
     let flags = match flags {
@@ -851,7 +848,10 @@ pub(crate) fn construct_from_values(type_oid: u32, values: &[Value]) -> SqlResul
         _ => {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,
-                format!("a range constructor takes 2 or 3 arguments, not {}", values.len()),
+                format!(
+                    "a range constructor takes 2 or 3 arguments, not {}",
+                    values.len()
+                ),
             ));
         }
     };
@@ -878,11 +878,10 @@ fn bounded(type_oid: u32, low: Value, high: Value, flags: &str) -> SqlResult<Val
         "(]" => (false, true),
         "()" => (false, false),
         _ => {
-            return Err(SqlError::new(
-                SqlState::SYNTAX_ERROR,
-                "invalid range bound flags",
-            )
-            .with_hint("Valid values are \"[]\", \"[)\", \"(]\", and \"()\"."));
+            return Err(
+                SqlError::new(SqlState::SYNTAX_ERROR, "invalid range bound flags")
+                    .with_hint("Valid values are \"[]\", \"[)\", \"(]\", and \"()\"."),
+            );
         }
     };
     let bound = |value: Value, inclusive: bool| {
@@ -916,9 +915,7 @@ pub(crate) fn function_type(name: &str, argument: Option<SqlType>) -> Option<Opt
         .filter(|defined| defined.kind == DefinedKind::Range)?;
     Some(match name {
         "lower" | "upper" => crate::user_types::range_subtype(range_type.oid),
-        "isempty" | "lower_inc" | "upper_inc" | "lower_inf" | "upper_inf" => {
-            Some(SqlType::Boolean)
-        }
+        "isempty" | "lower_inc" | "upper_inc" | "lower_inf" | "upper_inf" => Some(SqlType::Boolean),
         _ => return None,
     })
 }
@@ -965,7 +962,9 @@ mod tests {
 
     #[test]
     fn malformed_ranges_are_errors_never_panics() {
-        for text in ["", "[", "[1", "[1,", "[1,2", "1,2]", "[1,2]x", "[1,2,3]", "[\"1", "[\\"] {
+        for text in [
+            "", "[", "[1", "[1,", "[1,2", "1,2]", "[1,2]x", "[1,2,3]", "[\"1", "[\\",
+        ] {
             assert!(parse_text(text, 3904, SqlType::Integer).is_err(), "{text}");
         }
     }

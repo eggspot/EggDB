@@ -1,5 +1,5 @@
-use crate::ast::{BinaryOperator, Expr, ExprKind, PartitionBoundSpec, PartitionBoundValue};
 pub(crate) use crate::ast::PartitionStrategy;
+use crate::ast::{BinaryOperator, Expr, ExprKind, PartitionBoundSpec, PartitionBoundValue};
 use crate::dialect::Dialect;
 use crate::encoding::{
     TableDefinition, decode_partitioning, encode_key_value, encode_partitioning, partition_key,
@@ -110,7 +110,9 @@ impl PartitionCatalog {
     }
 
     pub(crate) fn every(&self) -> impl Iterator<Item = (&str, &PartitionRecord)> {
-        self.records.iter().map(|(name, record)| (name.as_str(), record))
+        self.records
+            .iter()
+            .map(|(name, record)| (name.as_str(), record))
     }
 }
 
@@ -379,10 +381,6 @@ impl Partitioned {
         }))
     }
 
-    pub(crate) fn key_names(&self) -> &[String] {
-        &self.key_names
-    }
-
     pub(crate) fn children(&self) -> impl Iterator<Item = &str> {
         self.children.iter().map(|child| child.name.as_str())
     }
@@ -530,14 +528,14 @@ fn restrictions_of(
     for conjunct in conjuncts(filter) {
         match &conjunct.kind {
             ExprKind::Binary(operator, left, right) => {
-                let (column, value, operator) =
-                    match names_key_column(left, qualifiers, key_names) {
-                        Some(column) => (column, right, Some(*operator)),
-                        None => match names_key_column(right, qualifiers, key_names) {
-                            Some(column) => (column, left, flipped(*operator)),
-                            None => continue,
-                        },
-                    };
+                let (column, value, operator) = match names_key_column(left, qualifiers, key_names)
+                {
+                    Some(column) => (column, right, Some(*operator)),
+                    None => match names_key_column(right, qualifiers, key_names) {
+                        Some(column) => (column, left, flipped(*operator)),
+                        None => continue,
+                    },
+                };
                 let Some(operator) = operator else {
                     continue;
                 };
@@ -740,10 +738,6 @@ impl PartitionConstraint {
         }
     }
 
-    pub(crate) fn parent(&self) -> Option<&str> {
-        self.levels.first().map(|level| level.parent.as_str())
-    }
-
     pub(crate) fn root(&self) -> Option<&str> {
         self.levels.last().map(|level| level.parent.as_str())
     }
@@ -810,7 +804,9 @@ pub(crate) fn constraint_of(
             catalog
                 .children_of(parent)
                 .into_iter()
-                .filter(|(name, sibling)| *name != current && !matches!(sibling, PartitionBound::Default))
+                .filter(|(name, sibling)| {
+                    *name != current && !matches!(sibling, PartitionBound::Default)
+                })
                 .map(|(_, sibling)| typed(sibling, &types))
                 .collect::<SqlResult<Vec<_>>>()?
         } else {
@@ -862,7 +858,12 @@ fn bound_value_text(
             match convert(value, SqlType::Text, Conversion::Explicit)? {
                 Value::Null => BoundText::Null,
                 Value::Text(text) => BoundText::Value(text),
-                _ => return Err(invalid_bound("a partition bound value has no text form", position)),
+                _ => {
+                    return Err(invalid_bound(
+                        "a partition bound value has no text form",
+                        position,
+                    ));
+                }
             }
         }
     })
@@ -886,7 +887,9 @@ pub(crate) fn bound_of(
             ),
             position,
         )
-        .with_detail(format!("The bound is written as for a {written} partition."))
+        .with_detail(format!(
+            "The bound is written as for a {written} partition."
+        ))
     };
     Ok(match spec {
         PartitionBoundSpec::Default => PartitionBound::Default,
@@ -931,7 +934,9 @@ pub(crate) fn bound_of(
             if key.strategy != PartitionStrategy::List {
                 return Err(wrong_strategy("list"));
             }
-            let sql_type = *types.first().ok_or_else(|| invalid_bound("no key", position))?;
+            let sql_type = *types
+                .first()
+                .ok_or_else(|| invalid_bound("no key", position))?;
             let mut texts = Vec::with_capacity(values.len());
             for value in values {
                 if !matches!(value, PartitionBoundValue::Value(_)) {
@@ -1168,7 +1173,11 @@ pub(crate) fn with_descendants(
     let mut expanded: Vec<crate::ast::Name> = Vec::with_capacity(names.len());
     for name in names {
         for descendant in catalog.descendants_of(&name.text).into_iter().rev() {
-            if !expanded.iter().chain(names).any(|known| known.text == descendant) {
+            if !expanded
+                .iter()
+                .chain(names)
+                .any(|known| known.text == descendant)
+            {
                 expanded.push(crate::ast::Name {
                     text: descendant,
                     position: name.position,

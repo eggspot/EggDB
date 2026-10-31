@@ -144,16 +144,16 @@ impl Modulus {
         self.reduce_once(&t, top)
     }
 
-    fn to_montgomery(&self, a: &Limbs) -> Limbs {
+    fn montgomery_form(&self, a: &Limbs) -> Limbs {
         self.multiply(a, &self.r_squared)
     }
 
-    fn from_montgomery(&self, a: &Limbs) -> Limbs {
+    fn standard_form(&self, a: &Limbs) -> Limbs {
         self.multiply(a, &ONE)
     }
 
     fn power(&self, base: &Limbs, public_exponent: &Limbs) -> Limbs {
-        let mut result = self.to_montgomery(&ONE);
+        let mut result = self.montgomery_form(&ONE);
         for limb in public_exponent.iter().rev() {
             for bit in (0..64).rev() {
                 result = self.multiply(&result, &result);
@@ -178,18 +178,18 @@ impl FieldElement {
     pub(super) const ZERO: Self = Self([0; 4]);
 
     pub(super) fn one() -> Self {
-        Self(FIELD.to_montgomery(&ONE))
+        Self(FIELD.montgomery_form(&ONE))
     }
 
     pub(super) fn from_be_bytes(bytes: &[u8; 32]) -> Option<Self> {
         let limbs = limbs_from_be_bytes(bytes);
         FIELD
             .is_below(&limbs)
-            .then(|| Self(FIELD.to_montgomery(&limbs)))
+            .then(|| Self(FIELD.montgomery_form(&limbs)))
     }
 
     pub(super) fn to_be_bytes(self) -> [u8; 32] {
-        limbs_to_be_bytes(&FIELD.from_montgomery(&self.0))
+        limbs_to_be_bytes(&FIELD.standard_form(&self.0))
     }
 
     pub(super) fn add(&self, other: &Self) -> Self {
@@ -230,7 +230,7 @@ impl FieldElement {
     }
 
     pub(super) fn is_odd(&self) -> bool {
-        FIELD.from_montgomery(&self.0)[0] & 1 == 1
+        FIELD.standard_form(&self.0)[0] & 1 == 1
     }
 
     pub(super) fn equals(&self, other: &Self) -> bool {
@@ -250,12 +250,12 @@ impl Scalar {
         let limbs = limbs_from_be_bytes(bytes);
         ORDER
             .is_below(&limbs)
-            .then(|| Self(ORDER.to_montgomery(&limbs)))
+            .then(|| Self(ORDER.montgomery_form(&limbs)))
     }
 
     pub(super) fn from_be_bytes_reduced(bytes: &[u8; 32]) -> Self {
         let reduced = ORDER.reduce_once(&limbs_from_be_bytes(bytes), 0);
-        Self(ORDER.to_montgomery(&reduced))
+        Self(ORDER.montgomery_form(&reduced))
     }
 
     pub(super) fn from_digest(digest: &[u8]) -> Self {
@@ -269,7 +269,7 @@ impl Scalar {
     }
 
     pub(super) fn to_be_bytes(self) -> [u8; 32] {
-        limbs_to_be_bytes(&ORDER.from_montgomery(&self.0))
+        limbs_to_be_bytes(&ORDER.standard_form(&self.0))
     }
 
     pub(super) fn add(&self, other: &Self) -> Self {
@@ -322,7 +322,11 @@ mod tests {
         bytes[31] = 7;
         bytes[0] = 0x5a;
         let element = FieldElement::from_be_bytes(&bytes).unwrap();
-        assert!(element.multiply(&element.invert()).equals(&FieldElement::one()));
+        assert!(
+            element
+                .multiply(&element.invert())
+                .equals(&FieldElement::one())
+        );
         let scalar = Scalar::from_be_bytes(&bytes).unwrap();
         let one = Scalar::from_be_bytes(&limbs_to_be_bytes(&ONE)).unwrap();
         assert!(scalar.multiply(&scalar.invert()).equals(&one));

@@ -75,7 +75,14 @@ mod tests {
         assert_eq!(run(&mut session, batch).unwrap(), "copied\n10\nSELECT 1");
         assert_eq!(run(&mut session, batch).unwrap(), "copied\n5\nSELECT 1");
         assert_eq!(run(&mut session, batch).unwrap(), "copied\n0\nSELECT 1");
-        assert_eq!(run(&mut session, "SELECT copied_rows, batches FROM eggdb_migration.jobs").unwrap(), "copied_rows|batches\n25|4\nSELECT 1");
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT copied_rows, batches FROM eggdb_migration.jobs"
+            )
+            .unwrap(),
+            "copied_rows|batches\n25|4\nSELECT 1"
+        );
         run(&mut session, "UPDATE accounts SET balance = 0 WHERE id = 7").unwrap();
         run(&mut session, "DELETE FROM accounts WHERE id = 9").unwrap();
         run(&mut session, "INSERT INTO accounts VALUES (99, 'stray', 1)").unwrap();

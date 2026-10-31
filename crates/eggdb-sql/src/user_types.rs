@@ -1,5 +1,5 @@
 use crate::ast::{
-    AlterDomain, AlterDomainAction, AlterTypeAction, AlterType, CreateDomain, CreateType,
+    AlterDomain, AlterDomainAction, AlterType, AlterTypeAction, CreateDomain, CreateType,
     DomainConstraintSpec, Name, TypeSpec,
 };
 use crate::encoding::{
@@ -227,7 +227,9 @@ impl Registry {
         let schema = crate::schemas::schema_of(&user_type.name);
         let base = crate::schemas::base_name(&user_type.name);
         let visible = self.path.iter().any(|entry| entry == schema)
-            && self.resolve(None, base).is_some_and(|found| found.oid == user_type.oid);
+            && self
+                .resolve(None, base)
+                .is_some_and(|found| found.oid == user_type.oid);
         if visible {
             crate::pg_keywords::quote_ident(base)
         } else {
@@ -501,7 +503,10 @@ pub(crate) fn range_subtype(oid: u32) -> Option<SqlType> {
 pub(crate) fn domain_base(oid: u32) -> Option<SqlType> {
     let registry = current()?;
     let chain = registry.domain_chain(oid);
-    chain.last().and_then(|last| last.domain()).map(|domain| domain.base)
+    chain
+        .last()
+        .and_then(|last| last.domain())
+        .map(|domain| domain.base)
 }
 
 pub(crate) fn domain_default(oid: u32) -> Option<String> {
@@ -539,24 +544,22 @@ pub(crate) fn parse_input(text: &str, defined: DefinedType) -> SqlResult<Value> 
                 )),
             }
         }
-        DefinedKind::Composite if defined.oid == crate::records::RECORD_OID => {
-            Err(SqlError::not_supported(
-                "input of anonymous composite types is not implemented",
-            ))
-        }
+        DefinedKind::Composite if defined.oid == crate::records::RECORD_OID => Err(
+            SqlError::not_supported("input of anonymous composite types is not implemented"),
+        ),
         DefinedKind::Composite => {
             let attributes = composite_attributes(defined.oid)
                 .ok_or_else(|| crate::encoding::corrupt("type definition"))?;
             crate::records::parse_text(text, defined.oid, &attributes)
         }
         DefinedKind::Range => {
-            let subtype =
-                range_subtype(defined.oid).ok_or_else(|| crate::encoding::corrupt("type definition"))?;
+            let subtype = range_subtype(defined.oid)
+                .ok_or_else(|| crate::encoding::corrupt("type definition"))?;
             crate::ranges::parse_text(text, defined.oid, subtype)
         }
         DefinedKind::Domain => {
-            let base =
-                domain_base(defined.oid).ok_or_else(|| crate::encoding::corrupt("type definition"))?;
+            let base = domain_base(defined.oid)
+                .ok_or_else(|| crate::encoding::corrupt("type definition"))?;
             let value = crate::types::parse_input(text, base)?;
             check_domain_value(defined.oid, &value)?;
             Ok(value)
@@ -575,7 +578,11 @@ fn cannot_cast(value: &Value, target: DefinedType) -> SqlError {
     )
 }
 
-pub(crate) fn convert(value: Value, target: DefinedType, conversion: Conversion) -> SqlResult<Value> {
+pub(crate) fn convert(
+    value: Value,
+    target: DefinedType,
+    conversion: Conversion,
+) -> SqlResult<Value> {
     if value.is_null() {
         if target.kind == DefinedKind::Domain {
             check_domain_value(target.oid, &value)?;
@@ -763,7 +770,10 @@ pub(crate) fn table_needs_registry(table: &TableDefinition) -> bool {
             .iter()
             .filter_map(|column| column.default.as_deref())
             .any(stored_text)
-        || table.checks.iter().any(|check| stored_text(&check.expression))
+        || table
+            .checks
+            .iter()
+            .any(|check| stored_text(&check.expression))
 }
 
 fn duplicate_type(name: &str) -> SqlError {
@@ -810,9 +820,10 @@ fn check_member_type(sql_type: SqlType, position: usize, what: &str) -> SqlResul
             "a system catalog type as {what} is not supported yet"
         ))
         .at(position)),
-        SqlType::Defined(defined) if defined.kind == DefinedKind::Domain => {
-            Err(SqlError::not_supported(format!("a domain as {what} is not supported yet")).at(position))
-        }
+        SqlType::Defined(defined) if defined.kind == DefinedKind::Domain => Err(
+            SqlError::not_supported(format!("a domain as {what} is not supported yet"))
+                .at(position),
+        ),
         SqlType::Defined(defined) if defined.oid == crate::records::RECORD_OID => {
             Err(SqlError::new(
                 SqlState::INVALID_TABLE_DEFINITION,
@@ -820,16 +831,20 @@ fn check_member_type(sql_type: SqlType, position: usize, what: &str) -> SqlResul
             )
             .at(position))
         }
-        SqlType::Array(element) if !element.is_storable() => Err(SqlError::not_supported(
-            format!("{} as {what} is not supported yet", element.type_name()),
-        )
+        SqlType::Array(element) if !element.is_storable() => Err(SqlError::not_supported(format!(
+            "{} as {what} is not supported yet",
+            element.type_name()
+        ))
         .at(position)),
         _ => Ok(()),
     }
 }
 
 fn save(writer: &mut dyn KeyValueWrite, user_type: &UserType) -> SqlResult<()> {
-    writer.put(&user_type_key(&user_type.name), &encode_user_type(user_type))
+    writer.put(
+        &user_type_key(&user_type.name),
+        &encode_user_type(user_type),
+    )
 }
 
 pub(crate) fn create_type(
@@ -943,7 +958,9 @@ fn add_domain_check(
     }
     crate::eval::reject_aggregates(&spec.expr, "check constraints")?;
     if crate::subquery::mentions_subquery(&spec.expr) {
-        return Err(SqlError::not_supported("cannot use subquery in check constraint").at(spec.position));
+        return Err(
+            SqlError::not_supported("cannot use subquery in check constraint").at(spec.position),
+        );
     }
     let scope_table = domain_scope_table(internal, storable_base(domain.base));
     crate::eval::check_columns(
@@ -1014,7 +1031,10 @@ pub(crate) fn create_domain(
     let mut domain = DomainDefinition {
         base: create.base,
         not_null: create.not_null,
-        default: create.default.as_ref().map(|(_, text)| text.trim().to_owned()),
+        default: create
+            .default
+            .as_ref()
+            .map(|(_, text)| text.trim().to_owned()),
         checks: Vec::new(),
     };
     let frame_registry = Arc::new(registry);
@@ -1053,7 +1073,10 @@ fn columns_using(
     for table in crate::indexes::every_table(writer)? {
         let table = Arc::new(table);
         for (column, found) in table.columns.iter().enumerate() {
-            let typed = found.sql_type.defined().is_some_and(|defined| defined.oid == oid);
+            let typed = found
+                .sql_type
+                .defined()
+                .is_some_and(|defined| defined.oid == oid);
             let through_domain = table.domain_of(column).is_some_and(|domain| {
                 registry
                     .domain_chain(domain)
@@ -1155,11 +1178,9 @@ pub(crate) fn drop_types(
         }
     }
     for found in &dropping {
-        if let Some(dependent) = registry
-            .types()
-            .iter()
-            .find(|other| other.mentions(found.oid) && !dropping.iter().any(|known| known.oid == other.oid))
-        {
+        if let Some(dependent) = registry.types().iter().find(|other| {
+            other.mentions(found.oid) && !dropping.iter().any(|known| known.oid == other.oid)
+        }) {
             return Err(SqlError::new(
                 SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
                 format!(
@@ -1271,7 +1292,9 @@ fn added_sort_order(labels: &[EnumLabel], neighbor: Option<(&str, bool)>) -> Sql
         return Err(SqlError::not_supported(
             "no room is left between these enum labels for another one",
         )
-        .with_hint("Add the label at another place, or create the type again with every label in order."));
+        .with_hint(
+            "Add the label at another place, or create the type again with every label in order.",
+        ));
     }
     Ok(order)
 }
@@ -1300,8 +1323,11 @@ fn renamed(
     let internal = match schema {
         Some(schema) => {
             if !crate::schemas::schema_exists(writer, &schema.text)? {
-                return Err(crate::schemas::missing_schema(&schema.text, crate::Dialect::PostgreSql)
-                    .at(schema.position));
+                return Err(crate::schemas::missing_schema(
+                    &schema.text,
+                    crate::Dialect::PostgreSql,
+                )
+                .at(schema.position));
             }
             crate::schemas::qualified(&schema.text, crate::schemas::base_name(&found.name))
         }
@@ -1313,7 +1339,8 @@ fn renamed(
     if internal == found.name {
         return Ok(());
     }
-    let moved = moved_name(writer, registry, found, internal).map_err(|error| error.at(to.position))?;
+    let moved =
+        moved_name(writer, registry, found, internal).map_err(|error| error.at(to.position))?;
     writer.delete(&user_type_key(&found.name))?;
     save(writer, &moved)
 }
@@ -1362,7 +1389,9 @@ pub(crate) fn alter_type(
                 sort_order: order,
                 label: label.clone(),
             });
-            labels.sort_by(|left, right| crate::types::compare_floats(left.sort_order, right.sort_order));
+            labels.sort_by(|left, right| {
+                crate::types::compare_floats(left.sort_order, right.sort_order)
+            });
             save(
                 writer,
                 &UserType {
@@ -1536,7 +1565,11 @@ pub(crate) fn alter_domain(
                 }
             }
             AlterDomainAction::ValidateConstraint(name) => {
-                let Some(check) = domain.checks.iter_mut().find(|check| check.name == name.text) else {
+                let Some(check) = domain
+                    .checks
+                    .iter_mut()
+                    .find(|check| check.name == name.text)
+                else {
                     return Err(missing_domain_constraint(name, &found));
                 };
                 if !check.validated {
@@ -1563,7 +1596,11 @@ pub(crate) fn alter_domain(
                     )
                     .at(to.position));
                 }
-                let Some(check) = domain.checks.iter_mut().find(|check| check.name == from.text) else {
+                let Some(check) = domain
+                    .checks
+                    .iter_mut()
+                    .find(|check| check.name == from.text)
+                else {
                     return Err(missing_domain_constraint(from, &found));
                 };
                 check.name = to.text.clone();

@@ -28,7 +28,9 @@ const TRIGGER_VARIABLES: [&str; 12] = [
     "tg_argv",
 ];
 
-const STATEMENTS_WITH_INTO: [&str; 7] = ["select", "with", "insert", "update", "delete", "merge", "values"];
+const STATEMENTS_WITH_INTO: [&str; 7] = [
+    "select", "with", "insert", "update", "delete", "merge", "values",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
@@ -495,7 +497,9 @@ impl<'t> Compiler<'t, '_> {
         };
         if not_null && default.is_none() {
             return Err(SqlError::syntax(
-                format!("variable \"{name}\" must have a default value, since it's declared NOT NULL"),
+                format!(
+                    "variable \"{name}\" must have a default value, since it's declared NOT NULL"
+                ),
                 position,
             ));
         }
@@ -653,7 +657,13 @@ impl<'t> Compiler<'t, '_> {
             .iter()
             .rev()
             .find(|scope| scope.label.as_deref() == Some(label))
-            .and_then(|scope| scope.variables.iter().rev().find(|variable| variable.name == name))
+            .and_then(|scope| {
+                scope
+                    .variables
+                    .iter()
+                    .rev()
+                    .find(|variable| variable.name == name)
+            })
     }
 
     fn is_label(&self, name: &str) -> bool {
@@ -683,7 +693,9 @@ impl<'t> Compiler<'t, '_> {
     }
 
     fn check_targets(&self, targets: &[Target]) -> SqlResult<()> {
-        targets.iter().try_for_each(|target| self.check_target(target))
+        targets
+            .iter()
+            .try_for_each(|target| self.check_target(target))
     }
 
     fn require_variable(&self, name: &str, position: usize) -> SqlResult<()> {
@@ -742,7 +754,7 @@ impl<'t> Compiler<'t, '_> {
         Ok(targets)
     }
 
-    fn into_targets(&mut self) -> SqlResult<IntoTargets> {
+    fn parse_into_targets(&mut self) -> SqlResult<IntoTargets> {
         let strict = self.take_word("strict");
         let targets = self.target_list()?;
         self.check_targets(&targets)?;
@@ -945,8 +957,10 @@ impl<'t> Compiler<'t, '_> {
                 Ok(StepKind::Null)
             }
             "commit" | "rollback" => self.transaction_step(),
-            "start" | "savepoint" | "release" => Err(unsupported_transaction_command(self.position())),
-            "end" | "else" | "elsif" | "elseif" | "when" | "then" | "exception" | "loop" => {
+            "start" | "savepoint" | "release" => {
+                Err(unsupported_transaction_command(self.position()))
+            }
+            "end" | "else" | "elsif" | "elseif" | "when" | "then" | "exception" => {
                 Err(self.unexpected())
             }
             "call" => {
@@ -978,9 +992,7 @@ impl<'t> Compiler<'t, '_> {
     fn sql_step(&mut self) -> SqlResult<StepKind> {
         let first = self.parser.at;
         let finds_into = match self.kind() {
-            TokenKind::Word(word) => STATEMENTS_WITH_INTO
-                .iter()
-                .any(|known| word == known),
+            TokenKind::Word(word) => STATEMENTS_WITH_INTO.iter().any(|known| word == known),
             TokenKind::LeftParen => true,
             _ => false,
         };
@@ -991,7 +1003,9 @@ impl<'t> Compiler<'t, '_> {
                 TokenKind::End => break,
                 TokenKind::Semicolon if parens == 0 => break,
                 TokenKind::LeftParen | TokenKind::LeftBracket => parens += 1,
-                TokenKind::RightParen | TokenKind::RightBracket => parens = parens.saturating_sub(1),
+                TokenKind::RightParen | TokenKind::RightBracket => {
+                    parens = parens.saturating_sub(1)
+                }
                 TokenKind::Word(word)
                     if word == "into"
                         && parens == 0
@@ -1001,7 +1015,7 @@ impl<'t> Compiler<'t, '_> {
                 {
                     let into_start = self.position();
                     self.advance();
-                    let targets = self.into_targets()?;
+                    let targets = self.parse_into_targets()?;
                     into = Some((into_start, self.parser.previous_end(), targets));
                     continue;
                 }
@@ -1064,7 +1078,7 @@ impl<'t> Compiler<'t, '_> {
                 if into.is_some() {
                     return Err(SqlError::syntax("INTO specified more than once", position));
                 }
-                into = Some(self.into_targets()?);
+                into = Some(self.parse_into_targets()?);
             } else if self.take_word("using") {
                 if using.is_some() {
                     return Err(SqlError::syntax("USING specified more than once", position));
@@ -1099,7 +1113,10 @@ impl<'t> Compiler<'t, '_> {
             let position = self.position();
             let word = self.any_word()?;
             let Some(item) = DiagnosticsItem::of_name(&word) else {
-                return Err(SqlError::syntax("unrecognized GET DIAGNOSTICS item", position));
+                return Err(SqlError::syntax(
+                    "unrecognized GET DIAGNOSTICS item",
+                    position,
+                ));
             };
             if item.is_stacked() != stacked {
                 return Err(SqlError::syntax(
@@ -1219,7 +1236,9 @@ impl<'t> Compiler<'t, '_> {
             return Ok(LoopKind::Query { targets, source });
         }
         let single = match targets.as_slice() {
-            [single] if single.path.is_empty() && !single.name.starts_with('$') => Some(single.name.clone()),
+            [single] if single.path.is_empty() && !single.name.starts_with('$') => {
+                Some(single.name.clone())
+            }
             _ => None,
         };
         if let Some(record) = &single
@@ -1279,7 +1298,10 @@ impl<'t> Compiler<'t, '_> {
 
     fn range_upper(&mut self) -> SqlResult<Fragment> {
         let joined_with_number = matches!(
-            self.parser.tokens.get(self.parser.at + 1).map(|token| &token.kind),
+            self.parser
+                .tokens
+                .get(self.parser.at + 1)
+                .map(|token| &token.kind),
             Some(TokenKind::Decimal(_))
         );
         self.parser.at += if joined_with_number { 1 } else { 2 };
@@ -1322,8 +1344,10 @@ impl<'t> Compiler<'t, '_> {
         self.parser.expect(&TokenKind::LeftParen)?;
         let mut values = Vec::new();
         loop {
-            let named = matches!(self.kind(), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
-                && (self.assignment_operator_at(1) > 0 || self.is_operator_at(1, "=>"));
+            let named = matches!(
+                self.kind(),
+                TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+            ) && (self.assignment_operator_at(1) > 0 || self.is_operator_at(1, "=>"));
             let name = if named {
                 let name = self.any_word()?;
                 if !self.parser.take_operator("=>") {
@@ -1385,7 +1409,9 @@ impl<'t> Compiler<'t, '_> {
             .find(|scope| scope.label.as_deref() == Some(label))
         {
             None => Err(SqlError::syntax(
-                format!("there is no label \"{label}\" attached to any block or loop enclosing this statement"),
+                format!(
+                    "there is no label \"{label}\" attached to any block or loop enclosing this statement"
+                ),
                 position,
             )),
             Some(scope) if !exits && !scope.is_loop => Err(SqlError::syntax(
@@ -1416,7 +1442,10 @@ impl<'t> Compiler<'t, '_> {
         }
         if self.take_word("query") {
             if !self.definition.returns.is_set() {
-                return Err(mismatch("cannot use RETURN QUERY in a non-SETOF function", position));
+                return Err(mismatch(
+                    "cannot use RETURN QUERY in a non-SETOF function",
+                    position,
+                ));
             }
             let source = if self.take_word("execute") {
                 self.dynamic_source(&[])?
@@ -1435,29 +1464,41 @@ impl<'t> Compiler<'t, '_> {
         let definition = self.definition;
         if definition.kind == RoutineKind::Procedure {
             return if has_value {
-                Err(mismatch("RETURN cannot have a parameter in a procedure", position))
+                Err(mismatch(
+                    "RETURN cannot have a parameter in a procedure",
+                    position,
+                ))
             } else {
                 Ok(())
             };
         }
         if definition.returns.is_set() {
             return if has_value {
-                Err(mismatch("RETURN cannot have a parameter in function returning set", position)
-                    .with_hint("Use RETURN NEXT or RETURN QUERY."))
+                Err(mismatch(
+                    "RETURN cannot have a parameter in function returning set",
+                    position,
+                )
+                .with_hint("Use RETURN NEXT or RETURN QUERY."))
             } else {
                 Ok(())
             };
         }
         if definition.returns == RoutineReturns::One(ReturnType::Void) {
             return if has_value {
-                Err(mismatch("RETURN cannot have a parameter in function returning void", position))
+                Err(mismatch(
+                    "RETURN cannot have a parameter in function returning void",
+                    position,
+                ))
             } else {
                 Ok(())
             };
         }
         if has_output_parameters(definition) {
             return if has_value {
-                Err(mismatch("RETURN cannot have a parameter in function with OUT parameters", position))
+                Err(mismatch(
+                    "RETURN cannot have a parameter in function with OUT parameters",
+                    position,
+                ))
             } else {
                 Ok(())
             };
@@ -1465,20 +1506,29 @@ impl<'t> Compiler<'t, '_> {
         if has_value {
             Ok(())
         } else {
-            Err(SqlError::syntax("missing expression at or near \";\"", position))
+            Err(SqlError::syntax(
+                "missing expression at or near \";\"",
+                position,
+            ))
         }
     }
 
     fn check_return_next(&self, has_value: bool, position: usize) -> SqlResult<()> {
         if !self.definition.returns.is_set() {
-            return Err(mismatch("cannot use RETURN NEXT in a non-SETOF function", position));
+            return Err(mismatch(
+                "cannot use RETURN NEXT in a non-SETOF function",
+                position,
+            ));
         }
         match (has_output_parameters(self.definition), has_value) {
             (true, true) => Err(mismatch(
                 "RETURN NEXT cannot have a parameter in function with OUT parameters",
                 position,
             )),
-            (false, false) => Err(SqlError::syntax("RETURN NEXT must have a parameter", position)),
+            (false, false) => Err(SqlError::syntax(
+                "RETURN NEXT must have a parameter",
+                position,
+            )),
             _ => Ok(()),
         }
     }
@@ -1513,10 +1563,16 @@ impl<'t> Compiler<'t, '_> {
                 }
                 let wanted = format_placeholders(&format);
                 if wanted > raise.arguments.len() {
-                    return Err(SqlError::syntax("too few parameters specified for RAISE", position));
+                    return Err(SqlError::syntax(
+                        "too few parameters specified for RAISE",
+                        position,
+                    ));
                 }
                 if wanted < raise.arguments.len() {
-                    return Err(SqlError::syntax("too many parameters specified for RAISE", position));
+                    return Err(SqlError::syntax(
+                        "too many parameters specified for RAISE",
+                        position,
+                    ));
                 }
                 raise.format = Some(format);
             }
@@ -1627,7 +1683,7 @@ impl<'t> Compiler<'t, '_> {
             return Ok(StepKind::Move { cursor, direction });
         }
         self.expect_word("into")?;
-        let into = self.into_targets()?;
+        let into = self.parse_into_targets()?;
         self.expect_semicolon()?;
         Ok(StepKind::Fetch {
             cursor,
@@ -1708,7 +1764,10 @@ impl<'t> Compiler<'t, '_> {
                         | FetchDirection::Backward(Some(_))
                 );
                 if multiple && !moves {
-                    return Err(SqlError::syntax("FETCH statement cannot return multiple rows", position));
+                    return Err(SqlError::syntax(
+                        "FETCH statement cannot return multiple rows",
+                        position,
+                    ));
                 }
                 direction
             }

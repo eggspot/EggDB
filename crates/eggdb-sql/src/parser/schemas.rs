@@ -480,9 +480,27 @@ impl<'t> Parser<'t> {
         self.expect_word("extension")?;
         let if_not_exists = self.if_not_exists()?;
         let name = self.name()?;
-        if let Some(bundled) = ["pg_cron", "eggdb_cdc", "eggdb_tenancy", "eggdb_ledger", "eggdb_console", "eggdb_bi", "eggdb_catalog", "eggdb_privacy", "eggdb_retention", "eggdb_coordination", "eggdb_migration"].into_iter().find(|bundled| *bundled == name.text) {
+        if let Some(bundled) = [
+            "pg_cron",
+            "eggdb_cdc",
+            "eggdb_tenancy",
+            "eggdb_ledger",
+            "eggdb_console",
+            "eggdb_bi",
+            "eggdb_catalog",
+            "eggdb_privacy",
+            "eggdb_retention",
+            "eggdb_coordination",
+            "eggdb_migration",
+        ]
+        .into_iter()
+        .find(|bundled| *bundled == name.text)
+        {
             self.skip_statement();
-            return Ok(Statement::InstallExtension { name: bundled, if_not_exists });
+            return Ok(Statement::InstallExtension {
+                name: bundled,
+                if_not_exists,
+            });
         }
         if !["plpgsql", "vector", "postgis"].contains(&name.text.as_str()) {
             return Err(SqlError::not_supported(format!(

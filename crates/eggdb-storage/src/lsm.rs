@@ -7,6 +7,9 @@ use eggdb_platform::File;
 use std::cmp::Ordering;
 use std::ops::Bound;
 
+pub(crate) type OwnedEntry = (Vec<u8>, Vec<u8>);
+pub(crate) type EntryRef<'a> = (&'a [u8], &'a [u8]);
+
 const DELTA_KEY: &[u8] = b"d";
 const MERGE_KEY: &[u8] = b"m";
 const NEXT_RUN_KEY: &[u8] = b"n";
@@ -108,7 +111,9 @@ impl Merge {
         let count = read_u32(bytes, at)? as usize;
         at += 4;
         if count > MOST_COMPONENTS || bytes.len() != at + count * 4 {
-            return Err(damaged("a merge entry lists another number of sources than it holds"));
+            return Err(damaged(
+                "a merge entry lists another number of sources than it holds",
+            ));
         }
         let sources = (0..count)
             .map(|index| read_u32(bytes, at + index * 4))
@@ -164,7 +169,9 @@ impl Manifest {
         let mut cursor = tree.scan_prefix(&[RUN_PREFIX], ScanOrder::Descending);
         while let Some((key, value)) = cursor.next_in(pages)? {
             if key.len() != 5 || runs.len() >= MOST_COMPONENTS {
-                return Err(damaged("a run entry has a malformed key or there are too many runs"));
+                return Err(damaged(
+                    "a run entry has a malformed key or there are too many runs",
+                ));
             }
             let number = u32::from_be_bytes([key[1], key[2], key[3], key[4]]);
             if number >= next_run {
@@ -280,7 +287,10 @@ impl LsmTree {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let manifest = Manifest::read(pages, &self.manifest)?;
         for component in manifest.components_newest_first() {
-            if let Some(stored) = component.tree.get_in(pages, key, |value| value.into_vec())? {
+            if let Some(stored) = component
+                .tree
+                .get_in(pages, key, |value| value.into_vec())?
+            {
                 return Ok(live_value(&stored)?.map(<[u8]>::to_vec));
             }
         }
@@ -411,7 +421,10 @@ impl LsmTree {
             None => Bound::Unbounded,
         };
         let mut merged = Merged::new(
-            sources.iter().map(|component| component.tree.root()).collect(),
+            sources
+                .iter()
+                .map(|component| component.tree.root())
+                .collect(),
             start,
             Bound::Unbounded,
             ScanOrder::Ascending,
@@ -489,7 +502,7 @@ impl LsmTree {
 
     /// A cursor over the live entries with keys from `start` to `end`, in `order`. Like
     /// [`BTree::scan`], it holds no page between calls.
-    pub fn scan_in(
+    pub(crate) fn scan_in(
         &self,
         pages: &impl PageSource,
         start: Bound<&[u8]>,
@@ -502,7 +515,12 @@ impl LsmTree {
             .map(|component| component.tree.root())
             .collect();
         Ok(LsmCursor {
-            merged: Merged::new(roots, start.map(<[u8]>::to_vec), end.map(<[u8]>::to_vec), order),
+            merged: Merged::new(
+                roots,
+                start.map(<[u8]>::to_vec),
+                end.map(<[u8]>::to_vec),
+                order,
+            ),
             entry: (Vec::new(), Vec::new()),
         })
     }
@@ -532,7 +550,10 @@ impl LsmTree {
         let manifest_report = self.manifest.check_marking(pages, &mut used)?;
         report.pages += pages_of(&manifest_report);
         let merge_target = manifest.merge.as_ref().map(|merge| merge.target);
-        for component in manifest.components_newest_first().chain(merge_target.iter()) {
+        for component in manifest
+            .components_newest_first()
+            .chain(merge_target.iter())
+        {
             let found = component.tree.check_marking(pages, &mut used)?;
             report.components += 1;
             report.stored_entries += found.entries;
@@ -584,10 +605,7 @@ impl Merged {
         Ok(())
     }
 
-    fn next_stored(
-        &mut self,
-        pages: &impl PageSource,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+    fn next_stored(&mut self, pages: &impl PageSource) -> Result<Option<OwnedEntry>, StorageError> {
         if !self.started {
             for at in 0..self.cursors.len() {
                 self.refill(pages, at)?;
@@ -650,14 +668,14 @@ impl LsmCursor {
     pub fn next<F: File>(
         &mut self,
         cache: &PageCache<F>,
-    ) -> Result<Option<(&[u8], &[u8])>, StorageError> {
+    ) -> Result<Option<EntryRef<'_>>, StorageError> {
         self.next_in(cache)
     }
 
     pub(crate) fn next_in(
         &mut self,
         pages: &impl PageSource,
-    ) -> Result<Option<(&[u8], &[u8])>, StorageError> {
+    ) -> Result<Option<EntryRef<'_>>, StorageError> {
         loop {
             let Some((key, stored)) = self.merged.next_stored(pages)? else {
                 return Ok(None);

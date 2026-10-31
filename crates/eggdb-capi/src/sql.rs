@@ -167,7 +167,12 @@ impl ResultBatch {
             return;
         };
         let (kind, integer, real, bytes) = match type_oid {
-            OID_BOOL => (EGGDB_INTEGER, i64::from(text == "t"), 0.0, text.as_bytes().to_vec()),
+            OID_BOOL => (
+                EGGDB_INTEGER,
+                i64::from(text == "t"),
+                0.0,
+                text.as_bytes().to_vec(),
+            ),
             OID_INT2 | OID_INT4 | OID_INT8 | OID_OID => match text.parse::<i64>() {
                 Ok(number) => (EGGDB_INTEGER, number, 0.0, text.as_bytes().to_vec()),
                 Err(_) => (EGGDB_TEXT, 0, 0.0, text.as_bytes().to_vec()),
@@ -200,7 +205,11 @@ impl ResultBatch {
         }
         let first_value = self.pending_values.len();
         let column_count = result.columns.len();
-        let row_count = if column_count == 0 { 0 } else { result.rows.len() };
+        let row_count = if column_count == 0 {
+            0
+        } else {
+            result.rows.len()
+        };
         for row in result.rows.iter().take(row_count) {
             for column in 0..column_count {
                 let text = row.get(column).and_then(Option::as_deref);
@@ -256,14 +265,16 @@ impl ResultBatch {
                 .map(|&offset| base.wrapping_add(offset).cast::<c_char>()),
         );
         self.values
-            .extend(self.pending_values.iter().map(|pending| EggdbValue {
-                kind: pending.kind,
-                integer: pending.integer,
-                real: pending.real,
-                data: pending
-                    .text
-                    .map_or(std::ptr::null(), |(start, _)| base.wrapping_add(start)),
-                len: pending.text.map_or(0, |(_, len)| len),
+            .extend(self.pending_values.iter().map(|pending| {
+                EggdbValue {
+                    kind: pending.kind,
+                    integer: pending.integer,
+                    real: pending.real,
+                    data: pending
+                        .text
+                        .map_or(std::ptr::null(), |(start, _)| base.wrapping_add(start)),
+                    len: pending.text.map_or(0, |(_, len)| len),
+                }
             }));
         let names = self.names.as_ptr();
         let values = self.values.as_ptr();
@@ -303,7 +314,7 @@ fn hex_bytes(text: &str) -> Option<Vec<u8>> {
 
 enum Backend {
     Local {
-        session: SqlSession,
+        session: Box<SqlSession>,
         store: Arc<Store<'static>>,
         database: Arc<Database>,
     },
@@ -380,7 +391,7 @@ pub unsafe extern "C" fn eggdb_sql_open(
         let session = store_ref.session(dialect);
         let handle = args::give(EggdbSql {
             backend: Backend::Local {
-                session,
+                session: Box::new(session),
                 store,
                 database,
             },
@@ -576,7 +587,8 @@ pub unsafe extern "C" fn eggdb_sql_connect(url: *const c_char, sql: *mut *mut Eg
         unsafe { args::write(sql, std::ptr::null_mut(), "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated URL.
         let url = unsafe { args::text(url, "url") }?;
-        let options = eggdb_pgwire::client::parse_postgres_url(url).map_err(Failure::invalid_argument)?;
+        let options =
+            eggdb_pgwire::client::parse_postgres_url(url).map_err(Failure::invalid_argument)?;
         let client = eggdb_pgwire::client::PgClient::connect(&options).map_err(remote_failure)?;
         let handle = args::give(EggdbSql {
             backend: Backend::Remote(Box::new(client)),
@@ -638,7 +650,11 @@ mod tests {
 
     #[test]
     fn parameters_become_text_values_or_null() {
-        let given = [parameter(Some(b"42")), parameter(None), parameter(Some(b""))];
+        let given = [
+            parameter(Some(b"42")),
+            parameter(None),
+            parameter(Some(b"")),
+        ];
         // SAFETY: three parameters, each NULL or pointing to its bytes.
         let converted = unsafe { parameters(given.as_ptr(), given.len()) }
             .unwrap_or_else(|failure| panic!("{failure:?}"));
@@ -647,7 +663,11 @@ mod tests {
             .map(|parameter| parameter.value.as_deref())
             .collect();
         assert_eq!(values, [Some("42"), None, Some("")]);
-        assert!(converted.iter().all(|parameter| parameter.declared_type.is_none()));
+        assert!(
+            converted
+                .iter()
+                .all(|parameter| parameter.declared_type.is_none())
+        );
     }
 
     #[test]
@@ -671,7 +691,10 @@ mod tests {
     fn values_get_the_kind_their_type_reads_as() {
         assert_eq!(kind_and_number(&Value::Null).0, EGGDB_NULL);
         assert_eq!(kind_and_number(&Value::Boolean(true)).1, 1);
-        assert_eq!(kind_and_number(&Value::BigInt(-7)), (EGGDB_INTEGER, -7, 0.0));
+        assert_eq!(
+            kind_and_number(&Value::BigInt(-7)),
+            (EGGDB_INTEGER, -7, 0.0)
+        );
         assert_eq!(kind_and_number(&Value::Double(2.5)), (EGGDB_REAL, 0, 2.5));
         assert_eq!(kind_and_number(&Value::Text("x".into())).0, EGGDB_TEXT);
         assert_eq!(kind_and_number(&Value::Bytea(vec![1])).0, EGGDB_BLOB);

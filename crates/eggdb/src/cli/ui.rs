@@ -219,9 +219,7 @@ fn apply(
         (Some(name), Change::Expire { key, time_to_live }) => transaction
             .collection(name)?
             .set_expiry(key, *time_to_live)?,
-        (Some(name), Change::Persist { key }) => {
-            transaction.collection(name)?.clear_expiry(key)?
-        }
+        (Some(name), Change::Persist { key }) => transaction.collection(name)?.clear_expiry(key)?,
         (Some(name), Change::Increment { key, by }) => {
             transaction.collection(name)?.increment(key, *by)?;
             true

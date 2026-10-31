@@ -28,11 +28,17 @@ struct Reader<'b> {
 
 impl<'b> Reader<'b> {
     fn fail<T>(&self, message: &str) -> Result<T, BsonError> {
-        Err(BsonError { message: message.to_owned(), offset: self.at })
+        Err(BsonError {
+            message: message.to_owned(),
+            offset: self.at,
+        })
     }
 
     fn take(&mut self, count: usize) -> Result<&'b [u8], BsonError> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len());
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len());
         match end {
             Some(end) => {
                 let taken = &self.bytes[self.at..end];
@@ -102,7 +108,11 @@ impl<'b> Reader<'b> {
         }
         let start = self.at;
         let length = self.i32()?;
-        let Some(end) = usize::try_from(length).ok().filter(|length| *length >= 5).and_then(|length| start.checked_add(length)) else {
+        let Some(end) = usize::try_from(length)
+            .ok()
+            .filter(|length| *length >= 5)
+            .and_then(|length| start.checked_add(length))
+        else {
             return self.fail("a document's length is too small");
         };
         if end > self.bytes.len() {
@@ -132,7 +142,12 @@ impl<'b> Reader<'b> {
             0x01 => Bson::Double(f64::from_le_bytes(self.array()?)),
             0x02 => Bson::String(self.string()?),
             0x03 => Bson::Document(self.document(depth + 1)?),
-            0x04 => Bson::Array(self.entries(depth + 1)?.into_iter().map(|(_, value)| value).collect()),
+            0x04 => Bson::Array(
+                self.entries(depth + 1)?
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect(),
+            ),
             0x05 => {
                 let length = self.i32()?;
                 let Ok(length) = usize::try_from(length) else {
@@ -141,13 +156,19 @@ impl<'b> Reader<'b> {
                 let subtype = self.byte()?;
                 let mut bytes = self.take(length)?;
                 if subtype == 0x02 {
-                    let inner = Reader { bytes, at: 0 }.i32().ok().and_then(|inner| usize::try_from(inner).ok());
+                    let inner = Reader { bytes, at: 0 }
+                        .i32()
+                        .ok()
+                        .and_then(|inner| usize::try_from(inner).ok());
                     if inner != Some(length.saturating_sub(4)) {
                         return self.fail("old binary data's inner length does not match");
                     }
                     bytes = &bytes[4..];
                 }
-                Bson::Binary { subtype, bytes: bytes.to_vec() }
+                Bson::Binary {
+                    subtype,
+                    bytes: bytes.to_vec(),
+                }
             }
             0x06 => Bson::Undefined,
             0x07 => Bson::ObjectId(self.array()?),
@@ -158,8 +179,14 @@ impl<'b> Reader<'b> {
             },
             0x09 => Bson::DateTime(self.i64()?),
             0x0A => Bson::Null,
-            0x0B => Bson::Regex { pattern: self.cstring()?, options: self.cstring()? },
-            0x0C => Bson::DbPointer { namespace: self.string()?, id: self.array()? },
+            0x0B => Bson::Regex {
+                pattern: self.cstring()?,
+                options: self.cstring()?,
+            },
+            0x0C => Bson::DbPointer {
+                namespace: self.string()?,
+                id: self.array()?,
+            },
             0x0D => Bson::JavaScript(self.string()?),
             0x0E => Bson::Symbol(self.string()?),
             0x0F => {
@@ -199,7 +226,10 @@ impl Document {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BsonError> {
         let (document, used) = read_document(bytes)?;
         if used != bytes.len() {
-            return Err(BsonError { message: "bytes follow the document".to_owned(), offset: used });
+            return Err(BsonError {
+                message: "bytes follow the document".to_owned(),
+                offset: used,
+            });
         }
         Ok(document)
     }

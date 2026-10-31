@@ -68,7 +68,11 @@ fn tokens(text: &str, config: Option<Config>) -> Option<Vec<Token>> {
             '<' => {
                 let end = rest.find('>')?;
                 let inside = &rest[1..end];
-                let distance = if inside == "-" { 1 } else { inside.parse().ok()? };
+                let distance = if inside == "-" {
+                    1
+                } else {
+                    inside.parse().ok()?
+                };
                 out.push(Token::Follows(distance));
                 rest = &rest[end + 1..];
             }
@@ -87,7 +91,9 @@ fn tokens(text: &str, config: Option<Config>) -> Option<Vec<Token>> {
             }
             _ => {
                 let end = rest
-                    .find(|character: char| character.is_whitespace() || "&|!()<:'".contains(character))
+                    .find(|character: char| {
+                        character.is_whitespace() || "&|!()<:'".contains(character)
+                    })
                     .unwrap_or(rest.len());
                 if end == 0 {
                     return None;
@@ -126,7 +132,9 @@ impl Parser {
         let mut left = self.and()?;
         while self.peek() == Some(&Token::Or) {
             self.at += 1;
-            left = combine(left, self.and()?, |a, b| TsQuery::Or(Box::new(a), Box::new(b)));
+            left = combine(left, self.and()?, |a, b| {
+                TsQuery::Or(Box::new(a), Box::new(b))
+            });
         }
         Some(left)
     }
@@ -135,7 +143,9 @@ impl Parser {
         let mut left = self.phrase()?;
         while self.peek() == Some(&Token::And) {
             self.at += 1;
-            left = combine(left, self.phrase()?, |a, b| TsQuery::And(Box::new(a), Box::new(b)));
+            left = combine(left, self.phrase()?, |a, b| {
+                TsQuery::And(Box::new(a), Box::new(b))
+            });
         }
         Some(left)
     }
@@ -144,7 +154,9 @@ impl Parser {
         let mut left = self.unary()?;
         while let Some(Token::Follows(distance)) = self.peek().cloned() {
             self.at += 1;
-            left = combine(left, self.unary()?, |a, b| TsQuery::Phrase(Box::new(a), Box::new(b), distance));
+            left = combine(left, self.unary()?, |a, b| {
+                TsQuery::Phrase(Box::new(a), Box::new(b), distance)
+            });
         }
         Some(left)
     }
@@ -186,7 +198,11 @@ impl Parser {
     }
 }
 
-fn combine(left: TsQuery, right: TsQuery, join: impl FnOnce(TsQuery, TsQuery) -> TsQuery) -> TsQuery {
+fn combine(
+    left: TsQuery,
+    right: TsQuery,
+    join: impl FnOnce(TsQuery, TsQuery) -> TsQuery,
+) -> TsQuery {
     match (left, right) {
         (TsQuery::Empty, other) | (other, TsQuery::Empty) => other,
         (left, right) => join(left, right),
@@ -209,7 +225,11 @@ impl TsQuery {
         if tokens.is_empty() {
             return Some(Self::Empty);
         }
-        let mut parser = Parser { tokens, at: 0, depth: 0 };
+        let mut parser = Parser {
+            tokens,
+            at: 0,
+            depth: 0,
+        };
         let query = parser.or()?;
         (parser.at == parser.tokens.len()).then_some(query)
     }
@@ -219,8 +239,13 @@ impl TsQuery {
         words(text)
             .into_iter()
             .filter_map(|word| config.lexeme(word))
-            .map(|lexeme| Self::Term { lexeme, prefix: false })
-            .fold(Self::Empty, |left, right| combine(left, right, |a, b| Self::And(Box::new(a), Box::new(b))))
+            .map(|lexeme| Self::Term {
+                lexeme,
+                prefix: false,
+            })
+            .fold(Self::Empty, |left, right| {
+                combine(left, right, |a, b| Self::And(Box::new(a), Box::new(b)))
+            })
     }
 
     /// `phraseto_tsquery`: the words in order, each next to the one before.
@@ -228,8 +253,15 @@ impl TsQuery {
         words(text)
             .into_iter()
             .filter_map(|word| config.lexeme(word))
-            .map(|lexeme| Self::Term { lexeme, prefix: false })
-            .fold(Self::Empty, |left, right| combine(left, right, |a, b| Self::Phrase(Box::new(a), Box::new(b), 1)))
+            .map(|lexeme| Self::Term {
+                lexeme,
+                prefix: false,
+            })
+            .fold(Self::Empty, |left, right| {
+                combine(left, right, |a, b| {
+                    Self::Phrase(Box::new(a), Box::new(b), 1)
+                })
+            })
     }
 
     /// `websearch_to_tsquery`: words all required, `"quoted phrases"`, `or`, and `-word` to
@@ -245,7 +277,10 @@ impl TsQuery {
             };
             let (part, after) = if let Some(quoted) = after.strip_prefix('"') {
                 let end = quoted.find('"').unwrap_or(quoted.len());
-                (Self::phrase(config, &quoted[..end]), quoted.get(end + 1..).unwrap_or(""))
+                (
+                    Self::phrase(config, &quoted[..end]),
+                    quoted.get(end + 1..).unwrap_or(""),
+                )
             } else {
                 let end = after.find(char::is_whitespace).unwrap_or(after.len());
                 let word = &after[..end];
@@ -256,15 +291,21 @@ impl TsQuery {
                 }
                 (Self::plain(config, word), &after[end..])
             };
-            let part = if negated && part != Self::Empty { Self::Not(Box::new(part)) } else { part };
+            let part = if negated && part != Self::Empty {
+                Self::Not(Box::new(part))
+            } else {
+                part
+            };
             if let Some(last) = alternatives.pop() {
-                alternatives.push(combine(last, part, |a, b| Self::And(Box::new(a), Box::new(b))));
+                alternatives.push(combine(last, part, |a, b| {
+                    Self::And(Box::new(a), Box::new(b))
+                }));
             }
             rest = after;
         }
-        alternatives
-            .into_iter()
-            .fold(Self::Empty, |left, right| combine(left, right, |a, b| Self::Or(Box::new(a), Box::new(b))))
+        alternatives.into_iter().fold(Self::Empty, |left, right| {
+            combine(left, right, |a, b| Self::Or(Box::new(a), Box::new(b)))
+        })
     }
 
     /// Whether `vector` matches.
@@ -303,7 +344,11 @@ impl TsQuery {
                 }
             }
             Self::Or(left, right) => {
-                let mut all = [left.phrase_positions(vector), right.phrase_positions(vector)].concat();
+                let mut all = [
+                    left.phrase_positions(vector),
+                    right.phrase_positions(vector),
+                ]
+                .concat();
                 all.sort_unstable();
                 all.dedup();
                 all
@@ -383,24 +428,53 @@ mod tests {
 
     #[test]
     fn queries_parse_print_and_match_as_postgresql_documents() {
-        let vector = TsVector::from_text(Config::English, "a fat cat sat on a mat and ate a fat rat");
+        let vector =
+            TsVector::from_text(Config::English, "a fat cat sat on a mat and ate a fat rat");
         let query = TsQuery::parse(Config::English, "fat & (rats | dog) & !cow").unwrap();
         assert_eq!(query.to_string(), "'fat' & ( 'rat' | 'dog' ) & !'cow'");
         assert!(query.matches(&vector));
-        assert!(TsQuery::parse(Config::English, "fat <-> cat").unwrap().matches(&vector));
-        assert!(!TsQuery::parse(Config::English, "cat <-> fat").unwrap().matches(&vector));
-        assert!(TsQuery::parse(Config::English, "fat <2> sat").unwrap().matches(&vector));
-        assert!(TsQuery::parse(Config::English, "ra:*").unwrap().matches(&vector));
-        assert_eq!(TsQuery::plain(Config::English, "The Fat Rats").to_string(), "'fat' & 'rat'");
-        assert_eq!(TsQuery::phrase(Config::English, "fat cats").to_string(), "'fat' <-> 'cat'");
+        assert!(
+            TsQuery::parse(Config::English, "fat <-> cat")
+                .unwrap()
+                .matches(&vector)
+        );
+        assert!(
+            !TsQuery::parse(Config::English, "cat <-> fat")
+                .unwrap()
+                .matches(&vector)
+        );
+        assert!(
+            TsQuery::parse(Config::English, "fat <2> sat")
+                .unwrap()
+                .matches(&vector)
+        );
+        assert!(
+            TsQuery::parse(Config::English, "ra:*")
+                .unwrap()
+                .matches(&vector)
+        );
+        assert_eq!(
+            TsQuery::plain(Config::English, "The Fat Rats").to_string(),
+            "'fat' & 'rat'"
+        );
+        assert_eq!(
+            TsQuery::phrase(Config::English, "fat cats").to_string(),
+            "'fat' <-> 'cat'"
+        );
         assert_eq!(
             TsQuery::web(Config::English, "\"fat rat\" or cat -dog").to_string(),
             "'fat' <-> 'rat' | 'cat' & !'dog'"
         );
-        assert_eq!(TsQuery::parse(Config::English, "the & a").unwrap(), TsQuery::Empty);
+        assert_eq!(
+            TsQuery::parse(Config::English, "the & a").unwrap(),
+            TsQuery::Empty
+        );
         assert_eq!(TsQuery::parse_literal(&query.to_string()), Some(query));
         for broken in ["fat &", "(fat", "fat)", "<x> fat", "&"] {
-            assert!(TsQuery::parse(Config::English, broken).is_none(), "{broken}");
+            assert!(
+                TsQuery::parse(Config::English, broken).is_none(),
+                "{broken}"
+            );
         }
         let deep = "(".repeat(100) + "a" + &")".repeat(100);
         assert!(TsQuery::parse(Config::Simple, &deep).is_none());

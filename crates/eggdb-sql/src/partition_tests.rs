@@ -43,13 +43,19 @@ fn range_partitions_take_their_rows_and_the_parent_reads_them_all() {
         answer(&mut session, "SELECT id FROM m_2024 ORDER BY id"),
         "id\n1\n3\nSELECT 2"
     );
-    assert_eq!(answer(&mut session, "SELECT id FROM m_2025"), "id\n2\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM m_2025"),
+        "id\n2\nSELECT 1"
+    );
     assert_eq!(
         answer(&mut session, "SELECT id, v FROM m ORDER BY id"),
         "id|v\n1|10\n2|20\n3|30\nSELECT 3"
     );
     assert_eq!(
-        answer(&mut session, "SELECT count(*) FROM m WHERE at >= '2025-01-01'"),
+        answer(
+            &mut session,
+            "SELECT count(*) FROM m WHERE at >= '2025-01-01'"
+        ),
         "count\n1\nSELECT 1"
     );
 }
@@ -61,10 +67,15 @@ fn a_row_without_a_partition_is_refused() {
     let error = failure(&mut session, "INSERT INTO m VALUES (9, '2030-01-01', 1)");
     assert_eq!(error.state().code(), "23514");
     assert!(
-        error.message().contains("no partition of relation \"m\" found for row"),
+        error
+            .message()
+            .contains("no partition of relation \"m\" found for row"),
         "{error}"
     );
-    let error = failure(&mut session, "INSERT INTO m_2024 VALUES (9, '2025-06-01', 1)");
+    let error = failure(
+        &mut session,
+        "INSERT INTO m_2024 VALUES (9, '2025-06-01', 1)",
+    );
     assert!(
         error.message().contains("violates partition constraint"),
         "{error}"
@@ -90,8 +101,14 @@ fn a_where_on_the_key_reads_only_the_partitions_it_can_match() {
         "EXPLAIN SELECT * FROM m WHERE at BETWEEN '2024-02-01' AND '2025-02-01'",
     );
     assert!(plan.contains("m_2024") && plan.contains("m_2025"), "{plan}");
-    let plan = answer(&mut session, "EXPLAIN SELECT * FROM m AS x WHERE x.at < '2024-06-01'");
-    assert!(plan.contains("m_2024") && !plan.contains("m_2025"), "{plan}");
+    let plan = answer(
+        &mut session,
+        "EXPLAIN SELECT * FROM m AS x WHERE x.at < '2024-06-01'",
+    );
+    assert!(
+        plan.contains("m_2024") && !plan.contains("m_2025"),
+        "{plan}"
+    );
     assert_eq!(
         answer(&mut session, "SELECT id FROM m WHERE at = '2025-03-01'"),
         "id\n2\nSELECT 1"
@@ -132,14 +149,23 @@ fn list_hash_and_default_partitions_route_rows() {
          CREATE TABLE c_rest PARTITION OF c DEFAULT;
          INSERT INTO c VALUES (1, 'de'), (2, 'us'), (3, 'jp'), (4, NULL)",
     );
-    assert_eq!(answer(&mut session, "SELECT id FROM c_eu"), "id\n1\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM c_eu"),
+        "id\n1\nSELECT 1"
+    );
     assert_eq!(
         answer(&mut session, "SELECT id FROM c_rest ORDER BY id"),
         "id\n3\n4\nSELECT 2"
     );
-    let error = failure(&mut session, "CREATE TABLE c_x PARTITION OF c FOR VALUES IN ('us')");
+    let error = failure(
+        &mut session,
+        "CREATE TABLE c_x PARTITION OF c FOR VALUES IN ('us')",
+    );
     assert!(error.message().contains("would overlap"), "{error}");
-    let error = failure(&mut session, "CREATE TABLE c_jp PARTITION OF c FOR VALUES IN ('jp')");
+    let error = failure(
+        &mut session,
+        "CREATE TABLE c_jp PARTITION OF c FOR VALUES IN ('jp')",
+    );
     assert!(error.message().contains("violated by some row"), "{error}");
     answer(
         &mut session,
@@ -192,7 +218,11 @@ fn attach_detach_and_drop_keep_the_tree_consistent() {
     );
     assert!(error.message().contains("would overlap"), "{error}");
     answer(&mut session, "DROP TABLE m");
-    assert!(failure(&mut session, "SELECT * FROM m_2024").message().contains("m_2024"));
+    assert!(
+        failure(&mut session, "SELECT * FROM m_2024")
+            .message()
+            .contains("m_2024")
+    );
     assert_eq!(
         answer(&mut session, "SELECT count(*) FROM m_2026"),
         "count\n1\nSELECT 1"
@@ -274,10 +304,7 @@ fn mysql_and_oracle_name_their_partitions_inside_create_table() {
                PARTITION other VALUES (DEFAULT)
              )",
     );
-    answer(
-        &mut session,
-        "INSERT INTO sales VALUES (1, 'E')",
-    );
+    answer(&mut session, "INSERT INTO sales VALUES (1, 'E')");
     answer(&mut session, "INSERT INTO sales VALUES (2, 'N')");
     assert!(
         answer(&mut session, "SELECT COUNT(*) FROM sales").contains('2'),
@@ -299,7 +326,10 @@ fn hostile_partition_statements_are_refused_with_errors() {
     ] {
         failure(&mut session, sql);
     }
-    answer(&mut session, "CREATE TABLE r (x int) PARTITION BY RANGE (x)");
+    answer(
+        &mut session,
+        "CREATE TABLE r (x int) PARTITION BY RANGE (x)",
+    );
     for sql in [
         "CREATE TABLE r1 PARTITION OF r FOR VALUES FROM (10) TO (5)",
         "CREATE TABLE r1 PARTITION OF r FOR VALUES FROM (NULL) TO (5)",
@@ -321,12 +351,18 @@ fn analyze_records_row_counts_and_approx_count_distinct_estimates() {
     let mut session = Session::new(&store);
     answer(&mut session, "CREATE TABLE a (v integer)");
     for value in 0..500 {
-        answer(&mut session, &format!("INSERT INTO a VALUES ({})", value % 200));
+        answer(
+            &mut session,
+            &format!("INSERT INTO a VALUES ({})", value % 200),
+        );
     }
     answer(&mut session, "ANALYZE a");
     answer(&mut session, "ANALYZE");
     assert_eq!(
-        answer(&mut session, "SELECT reltuples FROM pg_class WHERE relname = 'a'"),
+        answer(
+            &mut session,
+            "SELECT reltuples FROM pg_class WHERE relname = 'a'"
+        ),
         "reltuples\n500\nSELECT 1"
     );
     let estimate = answer(&mut session, "SELECT approx_count_distinct(v) FROM a");
@@ -342,7 +378,10 @@ fn analyze_records_row_counts_and_approx_count_distinct_estimates() {
 fn batched_aggregates_give_the_row_at_a_time_results() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    answer(&mut session, "CREATE TABLE n (id integer PRIMARY KEY, v bigint, s smallint)");
+    answer(
+        &mut session,
+        "CREATE TABLE n (id integer PRIMARY KEY, v bigint, s smallint)",
+    );
     let mut values = Vec::new();
     for id in 0..3000i64 {
         let v = match id % 7 {
@@ -353,7 +392,10 @@ fn batched_aggregates_give_the_row_at_a_time_results() {
         };
         values.push(v);
         let shown = v.map_or("NULL".to_owned(), |v| v.to_string());
-        answer(&mut session, &format!("INSERT INTO n VALUES ({id}, {shown}, {})", id % 100));
+        answer(
+            &mut session,
+            &format!("INSERT INTO n VALUES ({id}, {shown}, {})", id % 100),
+        );
     }
     let present: Vec<i128> = values.iter().flatten().map(|&v| i128::from(v)).collect();
     let expected = format!(
@@ -364,7 +406,10 @@ fn batched_aggregates_give_the_row_at_a_time_results() {
         present.iter().max().unwrap()
     );
     assert_eq!(
-        answer(&mut session, "SELECT count(*), count(v), sum(v), min(v), max(v), min(s) FROM n"),
+        answer(
+            &mut session,
+            "SELECT count(*), count(v), sum(v), min(v), max(v), min(s) FROM n"
+        ),
         expected
     );
     assert_eq!(

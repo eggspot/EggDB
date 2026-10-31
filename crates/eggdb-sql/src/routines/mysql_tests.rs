@@ -40,7 +40,10 @@ fn a_function_with_locals_loops_and_conditions_returns_its_value() {
            RETURN result;
          END",
     );
-    assert_eq!(run(&mut session, "SELECT factorial(5)"), run(&mut session, "SELECT CAST(120 AS SIGNED)"));
+    assert_eq!(
+        run(&mut session, "SELECT factorial(5)"),
+        run(&mut session, "SELECT CAST(120 AS SIGNED)")
+    );
     let error = fails(&mut session, "SELECT factorial(-1)");
     assert_eq!(error.state().code(), "45000");
     assert!(error.message().contains("negative"), "{}", error.message());
@@ -56,7 +59,10 @@ fn a_function_with_locals_loops_and_conditions_returns_its_value() {
 fn a_procedure_writes_rows_reads_into_variables_and_fills_out_parameters() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    run(&mut session, "CREATE TABLE ledger (id INT PRIMARY KEY AUTO_INCREMENT, amount INT)");
+    run(
+        &mut session,
+        "CREATE TABLE ledger (id INT PRIMARY KEY AUTO_INCREMENT, amount INT)",
+    );
     run(
         &mut session,
         "CREATE DEFINER=`root`@`localhost` PROCEDURE add_entries(IN how_many INT, IN each_amount INT, OUT total INT)
@@ -71,10 +77,20 @@ fn a_procedure_writes_rows_reads_into_variables_and_fills_out_parameters() {
          END",
     );
     run(&mut session, "CALL add_entries(3, 10, @sum)");
-    assert_eq!(run(&mut session, "SELECT @sum"), run(&mut session, "SELECT 30"));
-    assert_eq!(run(&mut session, "SELECT COUNT(*) FROM ledger"), run(&mut session, "SELECT 3"));
+    assert_eq!(
+        run(&mut session, "SELECT @sum"),
+        run(&mut session, "SELECT 30")
+    );
+    assert_eq!(
+        run(&mut session, "SELECT COUNT(*) FROM ledger"),
+        run(&mut session, "SELECT 3")
+    );
     run(&mut session, "DROP PROCEDURE add_entries");
-    assert!(session.execute("CALL add_entries(1, 1, @x)", &mut |_| {}).is_err());
+    assert!(
+        session
+            .execute("CALL add_entries(1, 1, @x)", &mut |_| {})
+            .is_err()
+    );
     run(&mut session, "DROP PROCEDURE IF EXISTS add_entries");
 }
 
@@ -99,7 +115,10 @@ fn leave_iterate_case_and_a_call_without_parentheses_work() {
          END",
     );
     run(&mut session, "CALL odd_numbers");
-    assert_eq!(run(&mut session, "SELECT SUM(n) FROM seen"), run(&mut session, "SELECT 16"));
+    assert_eq!(
+        run(&mut session, "SELECT SUM(n) FROM seen"),
+        run(&mut session, "SELECT 16")
+    );
 }
 
 #[test]
@@ -115,6 +134,10 @@ fn unsupported_and_malformed_bodies_are_errors() {
     ] {
         assert!(session.execute(body, &mut |_| {}).is_err(), "{body}");
     }
-    let deep = format!("CREATE PROCEDURE p() {}SELECT 1;{}", "BEGIN ".repeat(200), " END;".repeat(200));
+    let deep = format!(
+        "CREATE PROCEDURE p() {}SELECT 1;{}",
+        "BEGIN ".repeat(200),
+        " END;".repeat(200)
+    );
     assert!(session.execute(&deep, &mut |_| {}).is_err());
 }

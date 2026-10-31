@@ -388,7 +388,9 @@ impl Parser<'_> {
         }
         let condition = if self.is_word("where") {
             if direction == CopyDirection::ToClient {
-                return Err(unsupported("WHERE clause not allowed with COPY TO").at(self.position()));
+                return Err(
+                    unsupported("WHERE clause not allowed with COPY TO").at(self.position())
+                );
             }
             self.at += 1;
             Some(self.expression()?)

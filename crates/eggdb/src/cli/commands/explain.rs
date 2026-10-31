@@ -120,11 +120,18 @@ mod tests {
         let oracle = refuse_unexplainable(Dialect::Oracle, "SELECT 1");
         assert!(matches!(
             oracle,
-            Err(Failure::Database { code: "not_supported", exit: Exit::DatabaseError, .. })
+            Err(Failure::Database {
+                code: "not_supported",
+                exit: Exit::DatabaseError,
+                ..
+            })
         ));
         assert!(refuse_unexplainable(Dialect::SqlServer, "SELECT 1").is_err());
         let doubled = refuse_unexplainable(Dialect::PostgreSql, "  explain SELECT 1");
-        assert_eq!(doubled.map_err(|failure| failure.code()), Err("invalid_arguments"));
+        assert_eq!(
+            doubled.map_err(|failure| failure.code()),
+            Err("invalid_arguments")
+        );
         assert!(refuse_unexplainable(Dialect::MySql, "SELECT 1").is_ok());
         assert_eq!(explain_prefix(Dialect::Sqlite), "EXPLAIN QUERY PLAN ");
         assert_eq!(explain_prefix(Dialect::PostgreSql), "EXPLAIN ");

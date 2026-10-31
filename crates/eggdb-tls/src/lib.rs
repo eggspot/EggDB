@@ -11,7 +11,7 @@
 //! - [`self_signed`]: self-signed P-256 server certificates;
 //! - [`verify`]: chains to trust anchors and server-name matching (RFC 5280, RFC 6125);
 //! - [`codec`]: TLS's presentation language;
-//! - [`alert`]: alerts;
+//! - [`alert`]: the alert messages;
 //! - [`cipher_suite`]: the cipher suites, their hashes and their record AEADs;
 //! - [`key_schedule`]: the TLS 1.3 key schedule (RFC 8446 section 7);
 //! - [`record`]: the record layer and record protection for TLS 1.3 and TLS 1.2;

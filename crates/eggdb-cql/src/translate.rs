@@ -1,4 +1,6 @@
-use crate::cql::{Assignment, ColumnDefinition, Operator, Relation, Selection, Statement, TableName, Term};
+use crate::cql::{
+    Assignment, ColumnDefinition, Operator, Relation, Selection, Statement, TableName, Term,
+};
 use crate::types::CqlType;
 
 pub(crate) const METADATA_DDL: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_cql; CREATE TABLE IF NOT EXISTS eggdb_cql.tables (keyspace_name text, table_name text, partition_key text NOT NULL, clustering_key text NOT NULL, descending text NOT NULL, column_types text NOT NULL, PRIMARY KEY (keyspace_name, table_name))";
@@ -15,7 +17,10 @@ pub(crate) struct TableInfo {
 
 impl TableInfo {
     pub(crate) fn column_type(&self, name: &str) -> Option<CqlType> {
-        self.columns.iter().find(|(column, _)| column == name).map(|(_, cql)| *cql)
+        self.columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, cql)| *cql)
     }
 
     fn primary_key(&self) -> impl Iterator<Item = &String> {
@@ -34,7 +39,12 @@ pub(crate) enum Outcome {
     Rows(Box<TableInfo>),
     Applied(String, String),
     SetKeyspace(String),
-    SchemaChange { change: &'static str, target: &'static str, keyspace: String, name: Option<String> },
+    SchemaChange {
+        change: &'static str,
+        target: &'static str,
+        keyspace: String,
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +80,10 @@ impl Translation {
         for piece in &self.pieces {
             match piece {
                 Piece::Sql(text) => out.push_str(text),
-                Piece::Marker(index) => match (values.get(*index).cloned().flatten(), self.markers.get(*index)) {
+                Piece::Marker(index) => match (
+                    values.get(*index).cloned().flatten(),
+                    self.markers.get(*index),
+                ) {
                     (Some(value), Some(marker)) => {
                         out.push_str(&literal(&value));
                         out.push_str("::");
@@ -112,14 +125,26 @@ impl Builder {
     fn term(&mut self, term: &Term, name: &str, cql: CqlType) -> Result<(), String> {
         match term {
             Term::Marker(index) => {
-                let slot = self.markers.get_mut(*index).ok_or("a bind marker is out of range")?;
-                *slot = Some(Marker { name: name.to_owned(), cql });
+                let slot = self
+                    .markers
+                    .get_mut(*index)
+                    .ok_or("a bind marker is out of range")?;
+                *slot = Some(Marker {
+                    name: name.to_owned(),
+                    cql,
+                });
                 self.pieces.push(Piece::Marker(*index));
             }
-            Term::Text(text) | Term::Uuid(text) => self.sql(&format!("{}::{}", literal(text), cql.sql())),
-            Term::Number(number) if number == "NaN" || number == "Infinity" => self.sql(&format!("{}::{}", literal(number), cql.sql())),
+            Term::Text(text) | Term::Uuid(text) => {
+                self.sql(&format!("{}::{}", literal(text), cql.sql()))
+            }
+            Term::Number(number) if number == "NaN" || number == "Infinity" => {
+                self.sql(&format!("{}::{}", literal(number), cql.sql()))
+            }
             Term::Number(number) => {
-                if !number.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'e' | b'E' | b'+' | b'-')) {
+                if !number.bytes().all(|byte| {
+                    byte.is_ascii_digit() || matches!(byte, b'.' | b'e' | b'E' | b'+' | b'-')
+                }) {
                     return Err(format!("{number} is not a number"));
                 }
                 self.sql(&format!("{number}::{}", cql.sql()));
@@ -137,10 +162,15 @@ fn keyspace_of(table: &TableName, current: Option<&str>) -> Result<String, Strin
 }
 
 fn column(info: &TableInfo, name: &str) -> Result<CqlType, String> {
-    info.column_type(name).ok_or_else(|| format!("Undefined column name {name}"))
+    info.column_type(name)
+        .ok_or_else(|| format!("Undefined column name {name}"))
 }
 
-fn relations(builder: &mut Builder, info: &TableInfo, relations: &[Relation]) -> Result<(), String> {
+fn relations(
+    builder: &mut Builder,
+    info: &TableInfo,
+    relations: &[Relation],
+) -> Result<(), String> {
     for (index, relation) in relations.iter().enumerate() {
         builder.sql(if index == 0 { " WHERE " } else { " AND " });
         let cql = column(info, &relation.column)?;
@@ -174,13 +204,22 @@ fn relations(builder: &mut Builder, info: &TableInfo, relations: &[Relation]) ->
     Ok(())
 }
 
-fn key_terms<'r>(info: &TableInfo, relations: &'r [Relation]) -> Result<Vec<(&'r str, &'r Term)>, String> {
+fn key_terms<'r>(
+    info: &TableInfo,
+    relations: &'r [Relation],
+) -> Result<Vec<(&'r str, &'r Term)>, String> {
     for relation in relations {
         if !info.primary_key().any(|key| *key == relation.column) {
-            return Err(format!("Non PRIMARY KEY columns found in where clause: {}", relation.column));
+            return Err(format!(
+                "Non PRIMARY KEY columns found in where clause: {}",
+                relation.column
+            ));
         }
         if relation.operator != Operator::Equal {
-            return Err(format!("Only equality on every PRIMARY KEY column is supported in UPDATE yet, not on {}", relation.column));
+            return Err(format!(
+                "Only equality on every PRIMARY KEY column is supported in UPDATE yet, not on {}",
+                relation.column
+            ));
         }
     }
     info.primary_key()
@@ -188,19 +227,43 @@ fn key_terms<'r>(info: &TableInfo, relations: &'r [Relation]) -> Result<Vec<(&'r
             relations
                 .iter()
                 .find(|relation| relation.column == *key)
-                .and_then(|relation| relation.terms.first().map(|term| (relation.column.as_str(), term)))
+                .and_then(|relation| {
+                    relation
+                        .terms
+                        .first()
+                        .map(|term| (relation.column.as_str(), term))
+                })
                 .ok_or_else(|| format!("Some primary key parts are missing: {key}"))
         })
         .collect()
 }
 
-fn upsert(builder: &mut Builder, info: &TableInfo, target: &str, keys: &[(&str, &Term)], assignments: &[(String, Assignment)]) -> Result<(), String> {
-    let columns: Vec<String> = keys.iter().map(|(name, _)| identifier(name)).chain(assignments.iter().map(|(name, _)| identifier(name))).collect();
-    builder.sql(&format!("INSERT INTO {target} ({}) VALUES (", columns.join(", ")));
+fn upsert(
+    builder: &mut Builder,
+    info: &TableInfo,
+    target: &str,
+    keys: &[(&str, &Term)],
+    assignments: &[(String, Assignment)],
+) -> Result<(), String> {
+    let columns: Vec<String> = keys
+        .iter()
+        .map(|(name, _)| identifier(name))
+        .chain(assignments.iter().map(|(name, _)| identifier(name)))
+        .collect();
+    builder.sql(&format!(
+        "INSERT INTO {target} ({}) VALUES (",
+        columns.join(", ")
+    ));
     let mut first = true;
-    for (name, term) in keys.iter().copied().chain(assignments.iter().map(|(name, assignment)| match assignment {
-        Assignment::Set(term) | Assignment::Add(term) => (name.as_str(), term),
-    })) {
+    for (name, term) in
+        keys.iter().copied().chain(
+            assignments
+                .iter()
+                .map(|(name, assignment)| match assignment {
+                    Assignment::Set(term) | Assignment::Add(term) => (name.as_str(), term),
+                }),
+        )
+    {
         if !first {
             builder.sql(", ");
         }
@@ -217,7 +280,11 @@ fn upsert(builder: &mut Builder, info: &TableInfo, target: &str, keys: &[(&str, 
         .iter()
         .map(|(name, assignment)| match assignment {
             Assignment::Set(_) => format!("{} = EXCLUDED.{}", identifier(name), identifier(name)),
-            Assignment::Add(_) => format!("{0} = COALESCE({1}.{0}, 0) + EXCLUDED.{0}", identifier(name), identifier(&info.table)),
+            Assignment::Add(_) => format!(
+                "{0} = COALESCE({1}.{0}, 0) + EXCLUDED.{0}",
+                identifier(name),
+                identifier(&info.table)
+            ),
         })
         .collect();
     builder.sql(&format!("UPDATE SET {}", updates.join(", ")));
@@ -231,11 +298,24 @@ struct TableDefinition<'d> {
     descending: &'d [String],
 }
 
-fn create_table(builder: &mut Builder, keyspace: &str, name: &str, if_not_exists: bool, definition: &TableDefinition<'_>) -> Result<(), String> {
-    let TableDefinition { columns, partition, clustering, descending } = *definition;
+fn create_table(
+    builder: &mut Builder,
+    keyspace: &str,
+    name: &str,
+    if_not_exists: bool,
+    definition: &TableDefinition<'_>,
+) -> Result<(), String> {
+    let TableDefinition {
+        columns,
+        partition,
+        clustering,
+        descending,
+    } = *definition;
     for key in partition.iter().chain(clustering) {
         if !columns.iter().any(|definition| definition.name == *key) {
-            return Err(format!("Unknown definition {key} referenced in PRIMARY KEY"));
+            return Err(format!(
+                "Unknown definition {key} referenced in PRIMARY KEY"
+            ));
         }
     }
     for column in descending {
@@ -243,9 +323,19 @@ fn create_table(builder: &mut Builder, keyspace: &str, name: &str, if_not_exists
             return Err(format!("Missing CLUSTERING ORDER for column {column}"));
         }
     }
-    let definitions: Vec<String> = columns.iter().map(|definition| format!("{} {}", identifier(&definition.name), definition.cql.sql())).collect();
-    let keys: Vec<String> = partition.iter().chain(clustering).map(|key| identifier(key)).collect();
-    let types: Vec<String> = columns.iter().map(|definition| format!("{}\t{}", definition.name, definition.cql.name())).collect();
+    let definitions: Vec<String> = columns
+        .iter()
+        .map(|definition| format!("{} {}", identifier(&definition.name), definition.cql.sql()))
+        .collect();
+    let keys: Vec<String> = partition
+        .iter()
+        .chain(clustering)
+        .map(|key| identifier(key))
+        .collect();
+    let types: Vec<String> = columns
+        .iter()
+        .map(|definition| format!("{}\t{}", definition.name, definition.cql.name()))
+        .collect();
     builder.sql(&format!(
         "{METADATA_DDL}; CREATE TABLE {}{} ({}, PRIMARY KEY ({})); INSERT INTO eggdb_cql.tables VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (keyspace_name, table_name) DO NOTHING",
         if if_not_exists { "IF NOT EXISTS " } else { "" },
@@ -262,7 +352,14 @@ fn create_table(builder: &mut Builder, keyspace: &str, name: &str, if_not_exists
     Ok(())
 }
 
-fn select(builder: &mut Builder, info: &TableInfo, selection: &Selection, conditions: &[Relation], order: &[(String, bool)], limit: Option<&Term>) -> Result<(), String> {
+fn select(
+    builder: &mut Builder,
+    info: &TableInfo,
+    selection: &Selection,
+    conditions: &[Relation],
+    order: &[(String, bool)],
+    limit: Option<&Term>,
+) -> Result<(), String> {
     let target = qualified(&info.keyspace, &info.table);
     let projection = match selection {
         Selection::All => "*".to_owned(),
@@ -288,16 +385,28 @@ fn select(builder: &mut Builder, info: &TableInfo, selection: &Selection, condit
             info.partition
                 .iter()
                 .map(|key| identifier(key))
-                .chain(info.clustering.iter().map(|key| if info.descending.contains(key) { format!("{} DESC", identifier(key)) } else { identifier(key) }))
+                .chain(info.clustering.iter().map(|key| {
+                    if info.descending.contains(key) {
+                        format!("{} DESC", identifier(key))
+                    } else {
+                        identifier(key)
+                    }
+                }))
                 .collect()
         }
     } else {
         let mut ordering = Vec::new();
         for (name, descending) in order {
             if !info.clustering.contains(name) {
-                return Err(format!("Order by is currently only supported on the clustered columns of the PRIMARY KEY, got {name}"));
+                return Err(format!(
+                    "Order by is currently only supported on the clustered columns of the PRIMARY KEY, got {name}"
+                ));
             }
-            ordering.push(if *descending { format!("{} DESC", identifier(name)) } else { identifier(name) });
+            ordering.push(if *descending {
+                format!("{} DESC", identifier(name))
+            } else {
+                identifier(name)
+            });
         }
         ordering
     };
@@ -311,12 +420,37 @@ fn select(builder: &mut Builder, info: &TableInfo, selection: &Selection, condit
     Ok(())
 }
 
-fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>, catalog: &mut dyn Catalog) -> Result<(Outcome, String, String), String> {
+fn statement(
+    builder: &mut Builder,
+    statement: &Statement,
+    current: Option<&str>,
+    catalog: &mut dyn Catalog,
+) -> Result<(Outcome, String, String), String> {
     Ok(match statement {
-        Statement::Use(keyspace) => (Outcome::SetKeyspace(keyspace.clone()), keyspace.clone(), String::new()),
-        Statement::CreateKeyspace { name, if_not_exists } => {
-            builder.sql(&format!("CREATE SCHEMA {}{}", if *if_not_exists { "IF NOT EXISTS " } else { "" }, identifier(name)));
-            (Outcome::SchemaChange { change: "CREATED", target: "KEYSPACE", keyspace: name.clone(), name: None }, name.clone(), String::new())
+        Statement::Use(keyspace) => (
+            Outcome::SetKeyspace(keyspace.clone()),
+            keyspace.clone(),
+            String::new(),
+        ),
+        Statement::CreateKeyspace {
+            name,
+            if_not_exists,
+        } => {
+            builder.sql(&format!(
+                "CREATE SCHEMA {}{}",
+                if *if_not_exists { "IF NOT EXISTS " } else { "" },
+                identifier(name)
+            ));
+            (
+                Outcome::SchemaChange {
+                    change: "CREATED",
+                    target: "KEYSPACE",
+                    keyspace: name.clone(),
+                    name: None,
+                },
+                name.clone(),
+                String::new(),
+            )
         }
         Statement::DropKeyspace { name, if_exists } => {
             builder.sql(&format!(
@@ -325,12 +459,48 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
                 identifier(name),
                 literal(name)
             ));
-            (Outcome::SchemaChange { change: "DROPPED", target: "KEYSPACE", keyspace: name.clone(), name: None }, name.clone(), String::new())
+            (
+                Outcome::SchemaChange {
+                    change: "DROPPED",
+                    target: "KEYSPACE",
+                    keyspace: name.clone(),
+                    name: None,
+                },
+                name.clone(),
+                String::new(),
+            )
         }
-        Statement::CreateTable { table, if_not_exists, columns, partition, clustering, descending } => {
+        Statement::CreateTable {
+            table,
+            if_not_exists,
+            columns,
+            partition,
+            clustering,
+            descending,
+        } => {
             let keyspace = keyspace_of(table, current)?;
-            create_table(builder, &keyspace, &table.table, *if_not_exists, &TableDefinition { columns, partition, clustering, descending })?;
-            (Outcome::SchemaChange { change: "CREATED", target: "TABLE", keyspace: keyspace.clone(), name: Some(table.table.clone()) }, keyspace, table.table.clone())
+            create_table(
+                builder,
+                &keyspace,
+                &table.table,
+                *if_not_exists,
+                &TableDefinition {
+                    columns,
+                    partition,
+                    clustering,
+                    descending,
+                },
+            )?;
+            (
+                Outcome::SchemaChange {
+                    change: "CREATED",
+                    target: "TABLE",
+                    keyspace: keyspace.clone(),
+                    name: Some(table.table.clone()),
+                },
+                keyspace,
+                table.table.clone(),
+            )
         }
         Statement::DropTable { table, if_exists } => {
             let keyspace = keyspace_of(table, current)?;
@@ -341,7 +511,16 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
                 literal(&keyspace),
                 literal(&table.table)
             ));
-            (Outcome::SchemaChange { change: "DROPPED", target: "TABLE", keyspace: keyspace.clone(), name: Some(table.table.clone()) }, keyspace, table.table.clone())
+            (
+                Outcome::SchemaChange {
+                    change: "DROPPED",
+                    target: "TABLE",
+                    keyspace: keyspace.clone(),
+                    name: Some(table.table.clone()),
+                },
+                keyspace,
+                table.table.clone(),
+            )
         }
         Statement::Truncate(table) => {
             let keyspace = keyspace_of(table, current)?;
@@ -349,12 +528,20 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
             builder.sql(&format!("TRUNCATE {}", qualified(&keyspace, &table.table)));
             (Outcome::Void, keyspace, table.table.clone())
         }
-        Statement::Insert { table, columns, values, if_not_exists } => {
+        Statement::Insert {
+            table,
+            columns,
+            values,
+            if_not_exists,
+        } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
             let mut keys = Vec::new();
             for key in info.primary_key() {
-                let at = columns.iter().position(|name| name == key).ok_or_else(|| format!("Some primary key parts are missing: {key}"))?;
+                let at = columns
+                    .iter()
+                    .position(|name| name == key)
+                    .ok_or_else(|| format!("Some primary key parts are missing: {key}"))?;
                 keys.push((columns[at].as_str(), &values[at]));
             }
             let assignments: Vec<(String, Assignment)> = columns
@@ -366,11 +553,18 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
             let target = qualified(&keyspace, &table.table);
             if *if_not_exists {
                 let mut entries: Vec<(&str, &Term)> = keys.clone();
-                entries.extend(assignments.iter().map(|(name, assignment)| match assignment {
-                    Assignment::Set(term) | Assignment::Add(term) => (name.as_str(), term),
-                }));
+                entries.extend(
+                    assignments
+                        .iter()
+                        .map(|(name, assignment)| match assignment {
+                            Assignment::Set(term) | Assignment::Add(term) => (name.as_str(), term),
+                        }),
+                );
                 let names: Vec<String> = entries.iter().map(|(name, _)| identifier(name)).collect();
-                builder.sql(&format!("INSERT INTO {target} ({}) VALUES (", names.join(", ")));
+                builder.sql(&format!(
+                    "INSERT INTO {target} ({}) VALUES (",
+                    names.join(", ")
+                ));
                 for (at, (name, term)) in entries.iter().enumerate() {
                     if at > 0 {
                         builder.sql(", ");
@@ -378,13 +572,21 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
                     builder.term(term, name, column(&info, name)?)?;
                 }
                 builder.sql(") ON CONFLICT DO NOTHING RETURNING TRUE");
-                (Outcome::Applied(keyspace.clone(), table.table.clone()), keyspace, table.table.clone())
+                (
+                    Outcome::Applied(keyspace.clone(), table.table.clone()),
+                    keyspace,
+                    table.table.clone(),
+                )
             } else {
                 upsert(builder, &info, &target, &keys, &assignments)?;
                 (Outcome::Void, keyspace, table.table.clone())
             }
         }
-        Statement::Update { table, assignments, relations: conditions } => {
+        Statement::Update {
+            table,
+            assignments,
+            relations: conditions,
+        } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
             for (name, _) in assignments {
@@ -394,10 +596,20 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
                 column(&info, name)?;
             }
             let keys = key_terms(&info, conditions)?;
-            upsert(builder, &info, &qualified(&keyspace, &table.table), &keys, assignments)?;
+            upsert(
+                builder,
+                &info,
+                &qualified(&keyspace, &table.table),
+                &keys,
+                assignments,
+            )?;
             (Outcome::Void, keyspace, table.table.clone())
         }
-        Statement::Delete { table, columns, relations: conditions } => {
+        Statement::Delete {
+            table,
+            columns,
+            relations: conditions,
+        } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
             let target = qualified(&keyspace, &table.table);
@@ -408,7 +620,9 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
                 for name in columns {
                     column(&info, name)?;
                     if info.primary_key().any(|key| key == name) {
-                        return Err(format!("Invalid identifier {name} for deletion (should not be a PRIMARY KEY part)"));
+                        return Err(format!(
+                            "Invalid identifier {name} for deletion (should not be a PRIMARY KEY part)"
+                        ));
                     }
                     cleared.push(format!("{} = NULL", identifier(name)));
                 }
@@ -417,7 +631,13 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
             relations(builder, &info, conditions)?;
             (Outcome::Void, keyspace, table.table.clone())
         }
-        Statement::Select { table, selection, relations: conditions, order, limit } => {
+        Statement::Select {
+            table,
+            selection,
+            relations: conditions,
+            order,
+            limit,
+        } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
             select(builder, &info, selection, conditions, order, limit.as_ref())?;
@@ -438,9 +658,32 @@ fn statement(builder: &mut Builder, statement: &Statement, current: Option<&str>
 }
 
 /// Translates one CQL statement with `markers` bind markers into SQL in the PostgreSQL dialect.
-pub(crate) fn translate(cql: &Statement, markers: usize, current: Option<&str>, catalog: &mut dyn Catalog) -> Result<Translation, String> {
-    let mut builder = Builder { pieces: Vec::new(), markers: vec![None; markers] };
+pub(crate) fn translate(
+    cql: &Statement,
+    markers: usize,
+    current: Option<&str>,
+    catalog: &mut dyn Catalog,
+) -> Result<Translation, String> {
+    let mut builder = Builder {
+        pieces: Vec::new(),
+        markers: vec![None; markers],
+    };
     let (outcome, keyspace, table) = statement(&mut builder, cql, current, catalog)?;
-    let markers = builder.markers.into_iter().map(|marker| marker.unwrap_or(Marker { name: String::new(), cql: CqlType::Varchar })).collect();
-    Ok(Translation { pieces: builder.pieces, markers, outcome, keyspace, table })
+    let markers = builder
+        .markers
+        .into_iter()
+        .map(|marker| {
+            marker.unwrap_or(Marker {
+                name: String::new(),
+                cql: CqlType::Varchar,
+            })
+        })
+        .collect();
+    Ok(Translation {
+        pieces: builder.pieces,
+        markers,
+        outcome,
+        keyspace,
+        table,
+    })
 }

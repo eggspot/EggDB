@@ -238,7 +238,12 @@ fn a_killed_process_keeps_a_triggers_changes_with_its_statement() {
         let file = TempPath::new("sql-trigger-killed");
         Database::open(file.path()).unwrap().close().unwrap();
         let prepared = eggdb_sql(file.path(), &["--dialect", "sqlite", "-c", setup], b"");
-        assert_eq!(prepared.status.code(), Some(0), "{}", text(&prepared.stderr));
+        assert_eq!(
+            prepared.status.code(),
+            Some(0),
+            "{}",
+            text(&prepared.stderr)
+        );
         let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
             .arg("sql")
             .arg(file.path())
@@ -260,7 +265,12 @@ fn a_killed_process_keeps_a_triggers_changes_with_its_statement() {
         let count = |table: &str| {
             let output = eggdb_sql(
                 file.path(),
-                &["--dialect", "sqlite", "-c", &format!("SELECT count(*) AS rows FROM {table}")],
+                &[
+                    "--dialect",
+                    "sqlite",
+                    "-c",
+                    &format!("SELECT count(*) AS rows FROM {table}"),
+                ],
                 b"",
             );
             assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
@@ -290,7 +300,10 @@ fn a_killed_process_keeps_a_procedures_writes_with_its_call() {
     let mut script = String::new();
     for call in 0..3_000 {
         if call % 5 == 0 {
-            script.push_str(&format!("DO $$BEGIN CALL deposit({}, 1); END$$;\n", call % 13));
+            script.push_str(&format!(
+                "DO $$BEGIN CALL deposit({}, 1); END$$;\n",
+                call % 13
+            ));
         } else {
             script.push_str(&format!("CALL deposit({}, 1);\n", call % 13));
         }
@@ -299,7 +312,12 @@ fn a_killed_process_keeps_a_procedures_writes_with_its_call() {
         let file = TempPath::new("sql-procedure-killed");
         Database::open(file.path()).unwrap().close().unwrap();
         let prepared = eggdb_sql(file.path(), &["-c", &setup], b"");
-        assert_eq!(prepared.status.code(), Some(0), "{}", text(&prepared.stderr));
+        assert_eq!(
+            prepared.status.code(),
+            Some(0),
+            "{}",
+            text(&prepared.stderr)
+        );
         let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
             .arg("sql")
             .arg(file.path())
@@ -750,14 +768,22 @@ fn oracle_scripts_run_their_sqlplus_commands() {
     assert!(lines[1].starts_with(r#"{"tag":"SELECT 1""#), "{printed}");
     assert_eq!(
         lines.last(),
-        Some(&r#"{"notices":["1 SQL*Plus command had no effect: SET 1 (eggdb sql runs the SQL only)"]}"#),
+        Some(
+            &r#"{"notices":["1 SQL*Plus command had no effect: SET 1 (eggdb sql runs the SQL only)"]}"#
+        ),
         "{printed}"
     );
     assert_eq!(text(&json.stderr), "");
 
     for (script, expected) in [
-        (&b"SELECT &missing FROM dual;\n"[..], "substitution variable &missing has no value"),
-        (&b"SET SQLTERMINATOR !\n"[..], "which EggDB does not support"),
+        (
+            &b"SELECT &missing FROM dual;\n"[..],
+            "substitution variable &missing has no value",
+        ),
+        (
+            &b"SET SQLTERMINATOR !\n"[..],
+            "which EggDB does not support",
+        ),
         (
             &b"BEGIN\n  RAISE_APPLICATION_ERROR(-20001, 'stop here');\nEND;\n/\n"[..],
             "ORA-20001: stop here",
@@ -781,13 +807,25 @@ fn oracle_scripts_run_their_sqlplus_commands() {
     );
     let plain = eggdb_sql(
         file.path(),
-        &["--dialect", "oracle", "-c", "SELECT 'Ada & Co' AS name FROM dual"],
+        &[
+            "--dialect",
+            "oracle",
+            "-c",
+            "SELECT 'Ada & Co' AS name FROM dual",
+        ],
         b"",
     );
     assert_eq!(plain.status.code(), Some(0), "{}", text(&plain.stderr));
     assert!(text(&plain.stdout).contains("Ada & Co"));
     for args in [
-        &["--dialect", "oracle", "--define", "x=1", "-c", "SELECT 1 FROM dual"][..],
+        &[
+            "--dialect",
+            "oracle",
+            "--define",
+            "x=1",
+            "-c",
+            "SELECT 1 FROM dual",
+        ][..],
         &["--define", "x=1", "-c", "SELECT 1"][..],
     ] {
         let refused = eggdb_sql(file.path(), args, b"");
@@ -967,6 +1005,10 @@ fn memory_runs_a_whole_database_without_a_file() {
         b"CREATE TABLE t (v integer); INSERT INTO t VALUES (1), (2); SELECT sum(v) FROM t;",
     );
     assert!(output.status.success(), "{}", text(&output.stderr));
-    assert!(text(&output.stdout).contains('3'), "{}", text(&output.stdout));
+    assert!(
+        text(&output.stdout).contains('3'),
+        "{}",
+        text(&output.stdout)
+    );
     assert!(!Path::new(":memory:").exists());
 }

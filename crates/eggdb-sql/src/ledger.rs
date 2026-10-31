@@ -67,12 +67,49 @@ mod tests {
         ] {
             run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
         }
-        assert_eq!(run(&mut session, "SELECT eggdb_ledger.verify('public', 'payments') AS broken").unwrap(), "broken\n0\nSELECT 1");
-        assert_eq!(run(&mut session, "UPDATE payments SET amount = 1000 WHERE id = 2").unwrap_err().state().code(), "55000");
-        assert_eq!(run(&mut session, "DELETE FROM payments WHERE id = 1").unwrap_err().state().code(), "55000");
-        run(&mut session, "ALTER TABLE payments DISABLE TRIGGER eggdb_ledger_refuse").unwrap();
-        run(&mut session, "UPDATE payments SET amount = 1000 WHERE id = 2").unwrap();
-        assert_eq!(run(&mut session, "SELECT eggdb_ledger.verify('public', 'payments') AS broken").unwrap(), "broken\n1\nSELECT 1");
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_ledger.verify('public', 'payments') AS broken"
+            )
+            .unwrap(),
+            "broken\n0\nSELECT 1"
+        );
+        assert_eq!(
+            run(
+                &mut session,
+                "UPDATE payments SET amount = 1000 WHERE id = 2"
+            )
+            .unwrap_err()
+            .state()
+            .code(),
+            "55000"
+        );
+        assert_eq!(
+            run(&mut session, "DELETE FROM payments WHERE id = 1")
+                .unwrap_err()
+                .state()
+                .code(),
+            "55000"
+        );
+        run(
+            &mut session,
+            "ALTER TABLE payments DISABLE TRIGGER eggdb_ledger_refuse",
+        )
+        .unwrap();
+        run(
+            &mut session,
+            "UPDATE payments SET amount = 1000 WHERE id = 2",
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_ledger.verify('public', 'payments') AS broken"
+            )
+            .unwrap(),
+            "broken\n1\nSELECT 1"
+        );
         assert_eq!(run(&mut session, "SELECT length(encode(sha256('abc'), 'hex')) AS n, encode(sha256('abc'), 'hex') = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' AS right").unwrap(), "n|right\n64|t\nSELECT 1");
     }
 }

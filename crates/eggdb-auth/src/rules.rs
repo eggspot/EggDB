@@ -102,7 +102,12 @@ fn required<'a>(
     })
 }
 
-fn seconds(found: &BTreeMap<&str, &str>, name: &str, default: u64, line: usize) -> Result<u64, RulesError> {
+fn seconds(
+    found: &BTreeMap<&str, &str>,
+    name: &str,
+    default: u64,
+    line: usize,
+) -> Result<u64, RulesError> {
     found.get(name).map_or(Ok(default), |value| {
         value.parse().map_err(|_| RulesError {
             line,
@@ -163,7 +168,11 @@ impl AuthRules {
                         policy: JwtPolicy {
                             issuer: required(&found, "issuer", line)?.to_owned(),
                             audience: required(&found, "audience", line)?.to_owned(),
-                            user_claim: found.get("user_claim").copied().unwrap_or("sub").to_owned(),
+                            user_claim: found
+                                .get("user_claim")
+                                .copied()
+                                .unwrap_or("sub")
+                                .to_owned(),
                             leeway_seconds: seconds(&found, "leeway", 60, line)?.min(3600) as i64,
                         },
                     }
@@ -192,7 +201,9 @@ impl AuthRules {
             message: format!("cannot read {}: {error}", path.display()),
         })?;
         let folder = path.parent().unwrap_or(Path::new("."));
-        Self::parse(&text, &|key_set| std::fs::read_to_string(folder.join(key_set)))
+        Self::parse(&text, &|key_set| {
+            std::fs::read_to_string(folder.join(key_set))
+        })
     }
 
     /// The method for `user`.
@@ -219,7 +230,9 @@ mod tests {
             &no_files,
         )
         .unwrap();
-        assert!(matches!(rules.method_for("ada"), AuthMethod::Ldap(config) if config.prefix == "uid="));
+        assert!(
+            matches!(rules.method_for("ada"), AuthMethod::Ldap(config) if config.prefix == "uid=")
+        );
         assert!(matches!(rules.method_for("mallory"), AuthMethod::Reject));
         assert!(matches!(rules.method_for("grace"), AuthMethod::ScramSha256));
         let everyone = AuthRules::parse("all reject\nada scram-sha-256", &no_files).unwrap();
@@ -236,7 +249,11 @@ mod tests {
             ("ada jwt jwks=k.json issuer=i audience=a", 1),
             ("ada ldap server=x timeout=soon", 1),
         ] {
-            assert_eq!(AuthRules::parse(text, &no_files).unwrap_err().line, line, "{text}");
+            assert_eq!(
+                AuthRules::parse(text, &no_files).unwrap_err().line,
+                line,
+                "{text}"
+            );
         }
     }
 }

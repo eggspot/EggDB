@@ -63,7 +63,11 @@ const PREDEFINED: [PredefinedException; 22] = [
     ),
     predefined("storage_error", 6500, "PL/SQL: storage error"),
     predefined("subscript_beyond_count", 6533, "Subscript beyond count"),
-    predefined("subscript_outside_limit", 6532, "Subscript outside of limit"),
+    predefined(
+        "subscript_outside_limit",
+        6532,
+        "Subscript outside of limit",
+    ),
     predefined("sys_invalid_rowid", 1410, "invalid ROWID"),
     predefined(
         "timeout_on_resource",
@@ -105,7 +109,9 @@ pub(crate) fn application_error_code(number: i64) -> Option<u16> {
     if !(APPLICATION_ERROR_LOWEST..=APPLICATION_ERROR_HIGHEST).contains(&number) {
         return None;
     }
-    number.checked_neg().and_then(|code| u16::try_from(code).ok())
+    number
+        .checked_neg()
+        .and_then(|code| u16::try_from(code).ok())
 }
 
 pub(crate) fn sqlerrm_of(sqlcode: i64) -> String {
@@ -115,16 +121,21 @@ pub(crate) fn sqlerrm_of(sqlcode: i64) -> String {
         100 => format!("ORA-{NO_DATA_FOUND_CODE:05}: no data found"),
         positive if positive > 0 => format!("-{positive}: non-ORACLE exception "),
         negative => {
-            let Some(code) = negative.checked_neg().and_then(|code| u16::try_from(code).ok())
+            let Some(code) = negative
+                .checked_neg()
+                .and_then(|code| u16::try_from(code).ok())
             else {
-                return format!("ORA{negative}: Message {} not found;  product=RDBMS; facility=ORA", negative.unsigned_abs());
+                return format!(
+                    "ORA{negative}: Message {} not found;  product=RDBMS; facility=ORA",
+                    negative.unsigned_abs()
+                );
             };
             match predefined_by_code(code) {
                 Some(predefined) => format!("ORA-{code:05}: {}", predefined.message),
                 None if application_error_code(negative).is_some() => format!("ORA-{code:05}: "),
-                None => format!(
-                    "ORA-{code:05}: Message {code} not found;  product=RDBMS; facility=ORA"
-                ),
+                None => {
+                    format!("ORA-{code:05}: Message {code} not found;  product=RDBMS; facility=ORA")
+                }
             }
         }
     }

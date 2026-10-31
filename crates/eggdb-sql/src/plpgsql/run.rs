@@ -15,12 +15,12 @@ use super::raise::{
     with_context_line,
 };
 use super::statements::{processed_rows, run_sql};
-use super::writes::{ReadOnlyWrite, UndoLog, UndoWrite};
+use super::writes::{UndoLog, UndoWrite};
 use super::{
     AliasTarget, Block, CaseArm, CursorDeclaration, CursorValue, Declaration, DeclarationKind,
     DiagnosticsItem, DynamicSql, FetchDirection, Fragment, Handler, IntoTargets, Loop, LoopKind,
-    OpenSource, Program, QuerySource, Raise, RaiseCondition, RaiseItem, RaiseLevel, Step,
-    StepKind, Target, TargetPart, VariableConflict, VariableType, is_trigger_function, line_of,
+    OpenSource, Program, QuerySource, Raise, RaiseCondition, RaiseItem, RaiseLevel, Step, StepKind,
+    Target, TargetPart, VariableConflict, VariableType, is_trigger_function, line_of,
 };
 use crate::arrays::{ArrayElement, ArrayValue};
 use crate::ast::Statement;
@@ -36,7 +36,7 @@ use crate::routines::{
 use crate::schemas::{base_name, display};
 use crate::session::QueryResult;
 use crate::settings::Settings;
-use crate::store::{KeyValueRead, KeyValueWrite};
+use crate::store::KeyValueWrite;
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
 use std::cell::Cell;
 use std::cmp::Ordering;
@@ -120,7 +120,11 @@ pub(crate) fn invoke(
         RoutineLanguage::PlPgSql => format!("PL/pgSQL function {}", definition.signature()),
         RoutineLanguage::Sql => format!("SQL function \"{}\"", base_name(&definition.name)),
         RoutineLanguage::PlSql => format!("\"{}\"", crate::plsql::shown_object(&definition.name)),
-        RoutineLanguage::MySql => format!("{} {}", definition.kind.keyword(), base_name(&definition.name)),
+        RoutineLanguage::MySql => format!(
+            "{} {}",
+            definition.kind.keyword(),
+            base_name(&definition.name)
+        ),
         RoutineLanguage::Tsql => {
             return crate::tsql::invoke_function(
                 writer,
@@ -147,16 +151,6 @@ pub(crate) fn invoke(
     let outcome = run.invoked(call.arguments, call.trigger, program.as_deref());
     run.share_packages();
     outcome
-}
-
-pub(crate) fn invoke_read_only(
-    reader: &dyn KeyValueRead,
-    tables: &mut TableCache,
-    settings: &Settings,
-    call: Call<'_>,
-) -> SqlResult<Returned> {
-    let mut writer = ReadOnlyWrite { inner: reader };
-    invoke(&mut writer, tables, settings, call)
 }
 
 fn inline_definition(code: &str) -> RoutineDefinition {
@@ -203,7 +197,10 @@ pub(crate) fn run_anonymous_block(
     let definition = crate::plsql::anonymous_block_definition(&block.code);
     let label = crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned();
     let mut run = Run::new(writer, tables, settings, &definition, label);
-    run.unit = Some(plsql::UnitLines::of_anonymous_block(&block.code, block.position));
+    run.unit = Some(plsql::UnitLines::of_anonymous_block(
+        &block.code,
+        block.position,
+    ));
     run.attach_packages(&block.program)?;
     run.bind_parameters(Vec::new());
     let outcome = run.program(&block.program).map(drop);
@@ -425,7 +422,7 @@ impl<'r> Run<'r> {
     ) -> SqlResult<Returned> {
         let definition = self.definition;
         let arguments = self.complete_arguments(arguments)?;
-        if definition.strict && arguments.iter().any(|argument| *argument == Value::Null) {
+        if definition.strict && arguments.contains(&Value::Null) {
             return Ok(if definition.returns.is_set() {
                 Returned::Set(Vec::new())
             } else {
@@ -563,8 +560,11 @@ impl<'r> Run<'r> {
         if self.oracle {
             self.declare_oracle_builtins();
         } else if procedural {
-            let mut found =
-                FrameVariable::new("found", Slot::Typed(SqlType::Boolean), Value::Boolean(false));
+            let mut found = FrameVariable::new(
+                "found",
+                Slot::Typed(SqlType::Boolean),
+                Value::Boolean(false),
+            );
             found.label = label;
             self.found = Some(self.frame.variables.len());
             self.frame.variables.push(found);
@@ -581,20 +581,52 @@ impl<'r> Run<'r> {
         let variables = [
             ("new", Slot::Record, trigger.new.unwrap_or(Value::Null)),
             ("old", Slot::Record, trigger.old.unwrap_or(Value::Null)),
-            ("tg_name", Slot::Typed(SqlType::Text), Value::Text(trigger.name)),
-            ("tg_when", Slot::Typed(SqlType::Text), Value::Text(trigger.when.to_owned())),
-            ("tg_level", Slot::Typed(SqlType::Text), Value::Text(trigger.level.to_owned())),
-            ("tg_op", Slot::Typed(SqlType::Text), Value::Text(trigger.operation.to_owned())),
+            (
+                "tg_name",
+                Slot::Typed(SqlType::Text),
+                Value::Text(trigger.name),
+            ),
+            (
+                "tg_when",
+                Slot::Typed(SqlType::Text),
+                Value::Text(trigger.when.to_owned()),
+            ),
+            (
+                "tg_level",
+                Slot::Typed(SqlType::Text),
+                Value::Text(trigger.level.to_owned()),
+            ),
+            (
+                "tg_op",
+                Slot::Typed(SqlType::Text),
+                Value::Text(trigger.operation.to_owned()),
+            ),
             ("tg_relid", Slot::Untyped, Value::Oid(trigger.relation_oid)),
-            ("tg_relname", Slot::Typed(SqlType::Text), Value::Text(trigger.table_name.clone())),
-            ("tg_table_name", Slot::Typed(SqlType::Text), Value::Text(trigger.table_name)),
-            ("tg_table_schema", Slot::Typed(SqlType::Text), Value::Text(trigger.table_schema)),
+            (
+                "tg_relname",
+                Slot::Typed(SqlType::Text),
+                Value::Text(trigger.table_name.clone()),
+            ),
+            (
+                "tg_table_name",
+                Slot::Typed(SqlType::Text),
+                Value::Text(trigger.table_name),
+            ),
+            (
+                "tg_table_schema",
+                Slot::Typed(SqlType::Text),
+                Value::Text(trigger.table_schema),
+            ),
             (
                 "tg_nargs",
                 Slot::Typed(SqlType::Integer),
                 Value::Integer(i32::try_from(arguments).unwrap_or(i32::MAX)),
             ),
-            ("tg_argv", Slot::Typed(SqlType::Array(ArrayElement::Text)), argv),
+            (
+                "tg_argv",
+                Slot::Typed(SqlType::Array(ArrayElement::Text)),
+                argv,
+            ),
         ];
         let label = Some(base_name(&self.definition.name).to_owned());
         for (name, slot, value) in variables {
@@ -883,9 +915,16 @@ impl<'r> Run<'r> {
     }
 
     fn integer(&mut self, fragment: &Fragment, null_message: &str) -> SqlResult<i64> {
-        match convert(self.value(fragment)?, SqlType::Integer, Conversion::Assignment)? {
+        match convert(
+            self.value(fragment)?,
+            SqlType::Integer,
+            Conversion::Assignment,
+        )? {
             Value::Integer(value) => Ok(i64::from(value)),
-            _ => Err(SqlError::new(SqlState::NULL_VALUE_NOT_ALLOWED, null_message)),
+            _ => Err(SqlError::new(
+                SqlState::NULL_VALUE_NOT_ALLOWED,
+                null_message,
+            )),
         }
     }
 
@@ -911,7 +950,12 @@ impl<'r> Run<'r> {
             Some(Relation::View(view)) => Ok(view
                 .columns
                 .iter()
-                .map(|column| (column.name.clone(), column.sql_type.unwrap_or(SqlType::Text)))
+                .map(|column| {
+                    (
+                        column.name.clone(),
+                        column.sql_type.unwrap_or(SqlType::Text),
+                    )
+                })
                 .collect()),
             None => self.dictionary_columns(name),
         }
@@ -1214,12 +1258,12 @@ impl<'r> Run<'r> {
                 otherwise,
             } => self.case(subject.as_ref(), arms, otherwise.as_deref()),
             StepKind::Loop(found) => self.run_loop(found),
-            StepKind::Exit { label, condition } => self.leave(condition.as_ref(), || {
-                Flow::Exit(label.clone())
-            }),
-            StepKind::Continue { label, condition } => self.leave(condition.as_ref(), || {
-                Flow::Continue(label.clone())
-            }),
+            StepKind::Exit { label, condition } => {
+                self.leave(condition.as_ref(), || Flow::Exit(label.clone()))
+            }
+            StepKind::Continue { label, condition } => {
+                self.leave(condition.as_ref(), || Flow::Continue(label.clone()))
+            }
             StepKind::Return(value) => self.return_value(value.as_ref()),
             StepKind::ReturnNext(value) => self.return_next(value.as_ref()),
             StepKind::ReturnQuery(source) => self.return_query(source),
@@ -1323,7 +1367,9 @@ impl<'r> Run<'r> {
                     SqlState::SYNTAX_ERROR,
                     "query has no destination for result data",
                 )
-                .with_hint("If you want to discard the results of a SELECT, use PERFORM instead."));
+                .with_hint(
+                    "If you want to discard the results of a SELECT, use PERFORM instead.",
+                ));
             }
             None => {}
         }
@@ -1437,10 +1483,8 @@ impl<'r> Run<'r> {
             [] => self.store(index, value),
             [TargetPart::Field(field)] => self.assign_field(index, field, value),
             [TargetPart::Index(subscript)] => {
-                let subscript = self.integer(
-                    subscript,
-                    "array subscript in assignment must not be null",
-                )?;
+                let subscript =
+                    self.integer(subscript, "array subscript in assignment must not be null")?;
                 self.assign_element(index, subscript, value)
             }
             _ => Err(SqlError::not_supported(
@@ -1524,7 +1568,10 @@ impl<'r> Run<'r> {
             items.append(&mut array.items);
             array.items = items;
             array.lower_bound = i32::try_from(subscript).map_err(|_| {
-                SqlError::new(SqlState::ARRAY_SUBSCRIPT_ERROR, "array subscript out of range")
+                SqlError::new(
+                    SqlState::ARRAY_SUBSCRIPT_ERROR,
+                    "array subscript out of range",
+                )
             })?;
         }
         let offset = usize::try_from(subscript - i64::from(array.lower_bound)).unwrap_or(0);
@@ -1617,7 +1664,8 @@ impl<'r> Run<'r> {
                 if self.oracle
                     && let [target] = targets.as_slice()
                 {
-                    let mut record = FrameVariable::new(target.name.clone(), Slot::Record, Value::Null);
+                    let mut record =
+                        FrameVariable::new(target.name.clone(), Slot::Record, Value::Null);
                     record.label = found.label.clone();
                     self.frame.variables.push(record);
                 }
@@ -1678,7 +1726,11 @@ impl<'r> Run<'r> {
                 self.set_found_flag(true);
                 return Ok(flow);
             }
-            current = if reverse { current - step } else { current + step };
+            current = if reverse {
+                current - step
+            } else {
+                current + step
+            };
         }
         self.set_found_flag(iterated);
         Ok(Flow::Next)
@@ -1722,7 +1774,12 @@ impl<'r> Run<'r> {
             path: Vec::new(),
             position: 0,
         };
-        self.rows_loop(found, std::slice::from_ref(&target), &opened.names, opened.rows)
+        self.rows_loop(
+            found,
+            std::slice::from_ref(&target),
+            &opened.names,
+            opened.rows,
+        )
     }
 
     fn foreach_loop(
@@ -1743,7 +1800,10 @@ impl<'r> Run<'r> {
             other => {
                 return Err(SqlError::new(
                     SqlState::DATATYPE_MISMATCH,
-                    format!("FOREACH expression must yield an array, not type {}", other.type_name()),
+                    format!(
+                        "FOREACH expression must yield an array, not type {}",
+                        other.type_name()
+                    ),
                 ));
             }
         };
@@ -1792,9 +1852,11 @@ impl<'r> Run<'r> {
         let mut frame = RoutineFrame::default();
         for (at, fragment) in using.iter().enumerate() {
             let value = self.value(fragment)?;
-            frame
-                .variables
-                .push(FrameVariable::new(format!("${}", at + 1), Slot::Untyped, value));
+            frame.variables.push(FrameVariable::new(
+                format!("${}", at + 1),
+                Slot::Untyped,
+                value,
+            ));
             frame.positional.push(at);
         }
         let statement = parsed(&text, self.settings, &frame, self.dialect())?;
@@ -1955,9 +2017,10 @@ impl<'r> Run<'r> {
                     Value::BigInt(i64::try_from(self.row_count).unwrap_or(i64::MAX))
                 }
                 (DiagnosticsItem::PgContext, _) => Value::Text(self.label.clone()),
-                (DiagnosticsItem::PgRoutineOid, _) => {
-                    Value::Oid(crate::pg_catalog::routine_oid(&*self.writer, self.definition)?)
-                }
+                (DiagnosticsItem::PgRoutineOid, _) => Value::Oid(crate::pg_catalog::routine_oid(
+                    &*self.writer,
+                    self.definition,
+                )?),
                 (item, Some(error)) => Value::Text(stacked_item(*item, error)),
                 (_, None) => Value::Null,
             };
@@ -2016,7 +2079,9 @@ impl<'r> Run<'r> {
                 let Some(declaration) = &declaration else {
                     return Err(SqlError::new(
                         SqlState::SYNTAX_ERROR,
-                        format!("cursor \"{variable}\" has no query; open it with OPEN {variable} FOR query"),
+                        format!(
+                            "cursor \"{variable}\" has no query; open it with OPEN {variable} FOR query"
+                        ),
                     ));
                 };
                 self.bound_rows(variable, declaration, values)?
@@ -2108,7 +2173,11 @@ impl<'r> Run<'r> {
             FetchDirection::Last => length,
             FetchDirection::Absolute(fragment) => {
                 let number = self.integer(fragment, count)?;
-                if number >= 0 { number } else { length + 1 + number }
+                if number >= 0 {
+                    number
+                } else {
+                    length + 1 + number
+                }
             }
             FetchDirection::Relative(fragment) | FetchDirection::Forward(Some(fragment)) => {
                 position + self.integer(fragment, count)?
@@ -2169,7 +2238,8 @@ impl<'r> Run<'r> {
     fn sql_body(&mut self) -> SqlResult<Returned> {
         let definition = self.definition;
         let text = definition.body.as_str();
-        let tokens = tokenize_in(text, Dialect::PostgreSql).map_err(|error| self.sql_located(error, 1))?;
+        let tokens =
+            tokenize_in(text, Dialect::PostgreSql).map_err(|error| self.sql_located(error, 1))?;
         let mut resume = (0, 0);
         let mut last = None;
         let mut number = 0;

@@ -17,27 +17,48 @@ pub struct HttpTarget {
 
 /// Reads an `http://host[:port][/path]` URL; `https` and anything else are refused.
 pub fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
-    let rest = url.strip_prefix("http://").ok_or_else(|| format!("{url}: only http:// URLs are supported yet"))?;
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("{url}: only http:// URLs are supported yet"))?;
     let (authority, path) = match rest.find('/') {
         Some(at) => (&rest[..at], &rest[at..]),
         None => (rest, "/"),
     };
-    if authority.is_empty() || authority.contains('@') || path.chars().any(|character| character.is_control() || character == ' ') {
+    if authority.is_empty()
+        || authority.contains('@')
+        || path
+            .chars()
+            .any(|character| character.is_control() || character == ' ')
+    {
         return Err(format!("{url} is not a valid http URL"));
     }
     let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if !host.ends_with(']') || authority.starts_with('[') => {
-            (host.to_owned(), port.parse::<u16>().map_err(|_| format!("{url} has an invalid port"))?)
-        }
+        Some((host, port)) if !host.ends_with(']') || authority.starts_with('[') => (
+            host.to_owned(),
+            port.parse::<u16>()
+                .map_err(|_| format!("{url} has an invalid port"))?,
+        ),
         _ => (authority.to_owned(), 80),
     };
-    Ok(HttpTarget { host, port, path: path.to_owned() })
+    Ok(HttpTarget {
+        host,
+        port,
+        path: path.to_owned(),
+    })
 }
 
 /// Sends `body` with `POST` to `target` and returns the response's status code, waiting at
 /// most `timeout` for each step.
-pub fn post(target: &HttpTarget, content_type: &str, body: &[u8], timeout: Duration) -> io::Result<u16> {
-    let address = (target.host.trim_start_matches('[').trim_end_matches(']'), target.port)
+pub fn post(
+    target: &HttpTarget,
+    content_type: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> io::Result<u16> {
+    let address = (
+        target.host.trim_start_matches('[').trim_end_matches(']'),
+        target.port,
+    )
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the host has no address"))?;
@@ -65,9 +86,15 @@ pub fn post(target: &HttpTarget, content_type: &str, body: &[u8], timeout: Durat
     }
     let text = String::from_utf8_lossy(&line);
     let mut words = text.split_whitespace();
-    match (words.next(), words.next().and_then(|code| code.parse::<u16>().ok())) {
+    match (
+        words.next(),
+        words.next().and_then(|code| code.parse::<u16>().ok()),
+    ) {
         (Some(version), Some(code)) if version.starts_with("HTTP/1.") => Ok(code),
-        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "the response has no HTTP status line")),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the response has no HTTP status line",
+        )),
     }
 }
 
@@ -87,7 +114,10 @@ pub struct ClientResponse {
 impl ClientResponse {
     /// The first value of header `name` (lower case).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(field, _)| field == name).map(|(_, value)| value.as_str())
+        self.headers
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
     }
 }
 
@@ -99,9 +129,16 @@ fn dechunk(raw: &[u8], max_body: usize) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
     let mut at = 0;
     loop {
-        let line_end = raw[at..].windows(2).position(|pair| pair == b"\r\n").ok_or_else(|| invalid("a chunk size line is cut short"))? + at;
-        let size_text = std::str::from_utf8(&raw[at..line_end]).map_err(|_| invalid("a chunk size is not text"))?;
-        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16).map_err(|_| invalid("a chunk size is not hexadecimal"))?;
+        let line_end = raw[at..]
+            .windows(2)
+            .position(|pair| pair == b"\r\n")
+            .ok_or_else(|| invalid("a chunk size line is cut short"))?
+            + at;
+        let size_text = std::str::from_utf8(&raw[at..line_end])
+            .map_err(|_| invalid("a chunk size is not text"))?;
+        let size =
+            usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
+                .map_err(|_| invalid("a chunk size is not hexadecimal"))?;
         at = line_end + 2;
         if size == 0 {
             return Ok(body);
@@ -109,14 +146,21 @@ fn dechunk(raw: &[u8], max_body: usize) -> io::Result<Vec<u8>> {
         if body.len() + size > max_body {
             return Err(invalid("the response body is larger than allowed"));
         }
-        body.extend_from_slice(raw.get(at..at + size).ok_or_else(|| invalid("a chunk is cut short"))?);
+        body.extend_from_slice(
+            raw.get(at..at + size)
+                .ok_or_else(|| invalid("a chunk is cut short"))?,
+        );
         at += size + 2;
     }
 }
 
 /// The `Host` header `target` is sent with: the host, and the port unless it is 80.
 pub fn host_header(target: &HttpTarget) -> String {
-    if target.port == 80 { target.host.clone() } else { format!("{}:{}", target.host, target.port) }
+    if target.port == 80 {
+        target.host.clone()
+    } else {
+        format!("{}:{}", target.host, target.port)
+    }
 }
 
 /// Sends one request to `target`'s host and port (`path_and_query` replaces its path) with
@@ -132,20 +176,32 @@ pub fn request(
     timeout: Duration,
     max_body: usize,
 ) -> io::Result<ClientResponse> {
-    let address = (target.host.trim_start_matches('[').trim_end_matches(']'), target.port)
+    let address = (
+        target.host.trim_start_matches('[').trim_end_matches(']'),
+        target.port,
+    )
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the host has no address"))?;
     let mut stream = TcpStream::connect_timeout(&address, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let mut head = format!("{method} {path_and_query} HTTP/1.1\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
-    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("host")) {
+    let mut head = format!(
+        "{method} {path_and_query} HTTP/1.1\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
         head.push_str(&format!("Host: {}\r\n", host_header(target)));
     }
     for (name, value) in headers {
         if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "a header holds a line break"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a header holds a line break",
+            ));
         }
         head.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -163,26 +219,45 @@ pub fn request(
         }
         let read = stream.read(&mut chunk)?;
         if read == 0 {
-            return Err(invalid("the connection closed before the response head ended"));
+            return Err(invalid(
+                "the connection closed before the response head ended",
+            ));
         }
         received.extend_from_slice(&chunk[..read]);
     };
-    let text = std::str::from_utf8(&received[..head_end]).map_err(|_| invalid("the response head is not text"))?;
+    let text = std::str::from_utf8(&received[..head_end])
+        .map_err(|_| invalid("the response head is not text"))?;
     let mut lines = text.split("\r\n");
     let status_line = lines.next().unwrap_or_default();
     let mut words = status_line.split_whitespace();
-    let status = match (words.next(), words.next().and_then(|code| code.parse::<u16>().ok())) {
+    let status = match (
+        words.next(),
+        words.next().and_then(|code| code.parse::<u16>().ok()),
+    ) {
         (Some(version), Some(code)) if version.starts_with("HTTP/1.") => code,
         _ => return Err(invalid("the response has no HTTP status line")),
     };
     let headers: Vec<(String, String)> = lines
         .filter(|line| !line.is_empty())
-        .filter_map(|line| line.split_once(':').map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned())))
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        })
         .collect();
-    let mut response = ClientResponse { status, headers, body: Vec::new() };
+    let mut response = ClientResponse {
+        status,
+        headers,
+        body: Vec::new(),
+    };
     let mut raw = received[head_end..].to_vec();
-    let length = response.header("content-length").map(str::parse::<usize>).transpose().map_err(|_| invalid("the Content-Length is not a number"))?;
-    let chunked = response.header("transfer-encoding").is_some_and(|coding| coding.eq_ignore_ascii_case("chunked"));
+    let length = response
+        .header("content-length")
+        .map(str::parse::<usize>)
+        .transpose()
+        .map_err(|_| invalid("the Content-Length is not a number"))?;
+    let chunked = response
+        .header("transfer-encoding")
+        .is_some_and(|coding| coding.eq_ignore_ascii_case("chunked"));
     if method == "HEAD" || status == 204 || status == 304 {
         return Ok(response);
     }
@@ -205,7 +280,9 @@ pub fn request(
             if length > max_body {
                 return Err(invalid("the response body is larger than allowed"));
             }
-            raw.get(..length).ok_or_else(|| invalid("the response body is cut short"))?.to_vec()
+            raw.get(..length)
+                .ok_or_else(|| invalid("the response body is cut short"))?
+                .to_vec()
         }
         (false, None) => {
             if raw.len() > max_body {

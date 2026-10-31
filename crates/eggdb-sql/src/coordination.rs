@@ -83,7 +83,9 @@ mod tests {
 
     fn installed() -> MemoryStore {
         let store = MemoryStore::default();
-        Session::new(&store).execute("CREATE EXTENSION eggdb_coordination", &mut |_| {}).unwrap();
+        Session::new(&store)
+            .execute("CREATE EXTENSION eggdb_coordination", &mut |_| {})
+            .unwrap();
         store
     }
 
@@ -94,13 +96,51 @@ mod tests {
         assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-a', interval '30 seconds') AS token").unwrap(), "token\n1\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-b', interval '30 seconds') AS token").unwrap(), "token\n\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-a', interval '30 seconds') AS token").unwrap(), "token\n1\nSELECT 1");
-        assert_eq!(run(&mut session, "SELECT eggdb_coordination.leader('scheduler') AS leader").unwrap(), "leader\nnode-a\nSELECT 1");
-        run(&mut session, "UPDATE eggdb_coordination.leases SET expires_at = now() - interval '1 second'").unwrap();
-        assert_eq!(run(&mut session, "SELECT eggdb_coordination.leader('scheduler') AS leader").unwrap(), "leader\n\nSELECT 1");
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_coordination.leader('scheduler') AS leader"
+            )
+            .unwrap(),
+            "leader\nnode-a\nSELECT 1"
+        );
+        run(
+            &mut session,
+            "UPDATE eggdb_coordination.leases SET expires_at = now() - interval '1 second'",
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_coordination.leader('scheduler') AS leader"
+            )
+            .unwrap(),
+            "leader\n\nSELECT 1"
+        );
         assert_eq!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-b', interval '30 seconds') AS token").unwrap(), "token\n2\nSELECT 1");
-        assert_eq!(run(&mut session, "SELECT eggdb_coordination.release('scheduler', 'node-a') AS released").unwrap(), "released\nf\nSELECT 1");
-        assert_eq!(run(&mut session, "SELECT eggdb_coordination.release('scheduler', 'node-b') AS released").unwrap(), "released\nt\nSELECT 1");
-        assert!(run(&mut session, "SELECT eggdb_coordination.acquire('scheduler', 'node-a', interval '0 seconds')").is_err());
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_coordination.release('scheduler', 'node-a') AS released"
+            )
+            .unwrap(),
+            "released\nf\nSELECT 1"
+        );
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_coordination.release('scheduler', 'node-b') AS released"
+            )
+            .unwrap(),
+            "released\nt\nSELECT 1"
+        );
+        assert!(
+            run(
+                &mut session,
+                "SELECT eggdb_coordination.acquire('scheduler', 'node-a', interval '0 seconds')"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -111,15 +151,34 @@ mod tests {
         let resolve = |session: &mut Session<'_, MemoryStore>, key: &str, context: &str| {
             run(session, &format!("SELECT eggdb_coordination.evaluate_flag('{key}', '{context}') ->> 'reason' AS reason")).unwrap()
         };
-        assert_eq!(resolve(&mut session, "new-checkout", r#"{"country": "VN"}"#), "reason\nTARGETING_MATCH\nSELECT 1");
-        assert_eq!(resolve(&mut session, "new-checkout", r#"{"country": "FR"}"#), "reason\nDEFAULT\nSELECT 1");
-        assert_eq!(resolve(&mut session, "banner", "{}"), "reason\nSTATIC\nSELECT 1");
-        assert_eq!(resolve(&mut session, "missing", "{}"), "reason\nERROR\nSELECT 1");
+        assert_eq!(
+            resolve(&mut session, "new-checkout", r#"{"country": "VN"}"#),
+            "reason\nTARGETING_MATCH\nSELECT 1"
+        );
+        assert_eq!(
+            resolve(&mut session, "new-checkout", r#"{"country": "FR"}"#),
+            "reason\nDEFAULT\nSELECT 1"
+        );
+        assert_eq!(
+            resolve(&mut session, "banner", "{}"),
+            "reason\nSTATIC\nSELECT 1"
+        );
+        assert_eq!(
+            resolve(&mut session, "missing", "{}"),
+            "reason\nERROR\nSELECT 1"
+        );
         assert_eq!(
             run(&mut session, r#"SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "SE"}') -> 'value' AS value"#).unwrap(),
             "value\ntrue\nSELECT 1"
         );
-        run(&mut session, "UPDATE eggdb_coordination.flags SET enabled = false WHERE flag_key = 'new-checkout'").unwrap();
-        assert_eq!(resolve(&mut session, "new-checkout", r#"{"country": "VN"}"#), "reason\nDISABLED\nSELECT 1");
+        run(
+            &mut session,
+            "UPDATE eggdb_coordination.flags SET enabled = false WHERE flag_key = 'new-checkout'",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(&mut session, "new-checkout", r#"{"country": "VN"}"#),
+            "reason\nDISABLED\nSELECT 1"
+        );
     }
 }

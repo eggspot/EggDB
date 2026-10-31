@@ -95,7 +95,12 @@ fn statements(script: &str) -> Vec<(String, u64)> {
 fn restore(store: &MemoryStore, script: &str) -> RestoreReport {
     let mut session = Session::with_dialect(store, Dialect::MySql);
     let mut input = script.as_bytes();
-    let report = restore_dump(&mut session, &mut input, RestoreOptions::default(), &mut |_| {});
+    let report = restore_dump(
+        &mut session,
+        &mut input,
+        RestoreOptions::default(),
+        &mut |_| {},
+    );
     let _ = session.close();
     report
 }
@@ -124,7 +129,10 @@ fn statements_end_at_the_delimiter_outside_strings_names_and_comments() {
             "SELECT 'it''s', 'back\\'slash'",
         ]
     );
-    assert_eq!(found.iter().map(|(_, line)| *line).collect::<Vec<_>>(), [1, 4, 5, 7, 9]);
+    assert_eq!(
+        found.iter().map(|(_, line)| *line).collect::<Vec<_>>(),
+        [1, 4, 5, 7, 9]
+    );
     let mut unclosed = "SELECT 'open;".as_bytes();
     let mut reader = MysqlScript::new(&mut unclosed);
     assert!(reader.next_item().is_err());
@@ -133,22 +141,63 @@ fn statements_end_at_the_delimiter_outside_strings_names_and_comments() {
 #[test]
 fn the_classifier_reports_what_each_dump_statement_does() {
     let none = |_: &str| false;
-    assert_eq!(classify_mysql("CREATE TABLE `shop`.`t` (a int)", &none), Action::Run(Effect::Table { name: "shop.t".to_owned(), constraints: 0 }));
-    assert_eq!(classify_mysql("INSERT IGNORE INTO `t` VALUES (1)", &none), Action::Run(Effect::Insert("t".to_owned())));
-    assert_eq!(classify_mysql("/*!40000 ALTER TABLE `t` DISABLE KEYS */", &none), Action::Ignore(Ignored::Other("ALTER TABLE ... DISABLE KEYS and ENABLE KEYS")));
-    assert!(matches!(classify_mysql("LOCK TABLES `t` WRITE", &none), Action::Ignore(_)));
-    assert!(matches!(classify_mysql("CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop`", &none), Action::Ignore(_)));
-    assert!(matches!(classify_mysql("USE `shop`", &none), Action::Ignore(_)));
-    assert_eq!(classify_mysql("SET @@GLOBAL.GTID_PURGED='x'", &none), Action::Ignore(Ignored::Set("gtid_purged".to_owned())));
-    assert_eq!(classify_mysql("SET @@SESSION.SQL_LOG_BIN= 0", &none), Action::Ignore(Ignored::Set("sql_log_bin".to_owned())));
-    assert_eq!(classify_mysql("/*!40101 SET NAMES utf8mb4 */", &none), Action::Run(Effect::Setting));
     assert_eq!(
-        classify_mysql("/*!50001 CREATE ALGORITHM=UNDEFINED */ /*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */ /*!50001 VIEW `v` AS select 1 */", &none),
+        classify_mysql("CREATE TABLE `shop`.`t` (a int)", &none),
+        Action::Run(Effect::Table {
+            name: "shop.t".to_owned(),
+            constraints: 0
+        })
+    );
+    assert_eq!(
+        classify_mysql("INSERT IGNORE INTO `t` VALUES (1)", &none),
+        Action::Run(Effect::Insert("t".to_owned()))
+    );
+    assert_eq!(
+        classify_mysql("/*!40000 ALTER TABLE `t` DISABLE KEYS */", &none),
+        Action::Ignore(Ignored::Other(
+            "ALTER TABLE ... DISABLE KEYS and ENABLE KEYS"
+        ))
+    );
+    assert!(matches!(
+        classify_mysql("LOCK TABLES `t` WRITE", &none),
+        Action::Ignore(_)
+    ));
+    assert!(matches!(
+        classify_mysql("CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop`", &none),
+        Action::Ignore(_)
+    ));
+    assert!(matches!(
+        classify_mysql("USE `shop`", &none),
+        Action::Ignore(_)
+    ));
+    assert_eq!(
+        classify_mysql("SET @@GLOBAL.GTID_PURGED='x'", &none),
+        Action::Ignore(Ignored::Set("gtid_purged".to_owned()))
+    );
+    assert_eq!(
+        classify_mysql("SET @@SESSION.SQL_LOG_BIN= 0", &none),
+        Action::Ignore(Ignored::Set("sql_log_bin".to_owned()))
+    );
+    assert_eq!(
+        classify_mysql("/*!40101 SET NAMES utf8mb4 */", &none),
+        Action::Run(Effect::Setting)
+    );
+    assert_eq!(
+        classify_mysql(
+            "/*!50001 CREATE ALGORITHM=UNDEFINED */ /*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */ /*!50001 VIEW `v` AS select 1 */",
+            &none
+        ),
         Action::Run(Effect::View("v".to_owned()))
     );
     assert_eq!(
-        classify_mysql("/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER `stamp` BEFORE INSERT ON `t` FOR EACH ROW SET NEW.a = 1 */", &none),
-        Action::Run(Effect::Routine { kind: "trigger", name: "stamp".to_owned() })
+        classify_mysql(
+            "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER `stamp` BEFORE INSERT ON `t` FOR EACH ROW SET NEW.a = 1 */",
+            &none
+        ),
+        Action::Run(Effect::Routine {
+            kind: "trigger",
+            name: "stamp".to_owned()
+        })
     );
 }
 
@@ -158,12 +207,29 @@ fn a_mysqldump_file_restores_tables_rows_and_keys() {
     let report = restore(&store, DUMP);
     assert!(report.error.is_none(), "{:?}", report.error);
     assert_eq!((report.tables, report.rows), (2, 5));
-    assert!(report.ignored.other.iter().any(|(reason, _)| reason.contains("LOCK TABLES")), "{:?}", report.ignored);
+    assert!(
+        report
+            .ignored
+            .other
+            .iter()
+            .any(|(reason, _)| reason.contains("LOCK TABLES")),
+        "{:?}",
+        report.ignored
+    );
     assert_eq!(
         query(&store, "SELECT id, name, note FROM customers ORDER BY id"),
-        query(&store, "SELECT 1 AS id, 'Ada' AS name, 'likes ; semicolons' AS note UNION ALL SELECT 2, 'O''Brien', 'line\nbreak' UNION ALL SELECT 3, 'Zoë', NULL")
+        query(
+            &store,
+            "SELECT 1 AS id, 'Ada' AS name, 'likes ; semicolons' AS note UNION ALL SELECT 2, 'O''Brien', 'line\nbreak' UNION ALL SELECT 3, 'Zoë', NULL"
+        )
     );
-    assert_eq!(query(&store, "SELECT SUM(total) FROM orders"), query(&store, "SELECT CAST(24.99 AS DECIMAL(10,2))"));
+    assert_eq!(
+        query(&store, "SELECT SUM(total) FROM orders"),
+        query(&store, "SELECT CAST(24.99 AS DECIMAL(10,2))")
+    );
     query(&store, "INSERT INTO customers (name) VALUES ('Grace')");
-    assert_eq!(query(&store, "SELECT MAX(id) FROM customers"), query(&store, "SELECT 4"));
+    assert_eq!(
+        query(&store, "SELECT MAX(id) FROM customers"),
+        query(&store, "SELECT 4")
+    );
 }

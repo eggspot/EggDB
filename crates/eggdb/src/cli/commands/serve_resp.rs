@@ -80,7 +80,9 @@ impl KeysRead for WriteKeys<'_, '_> {
 
 impl KeysWrite for WriteKeys<'_, '_> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
-        self.collection.put(key, value).map_err(|error| failed(&error))
+        self.collection
+            .put(key, value)
+            .map_err(|error| failed(&error))
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<bool, String> {
@@ -96,7 +98,11 @@ impl KeysWrite for WriteKeys<'_, '_> {
 }
 
 impl Keyspace for DatabaseKeyspace<'_> {
-    fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String> {
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String> {
         let transaction = self.db.begin_read().map_err(|error| failed(&error))?;
         let collection = match transaction.collection(&format!("{}{db}", self.prefix)) {
             Ok(collection) => Some(collection),
@@ -106,18 +112,27 @@ impl Keyspace for DatabaseKeyspace<'_> {
         body(&ReadKeys { collection })
     }
 
-    fn write(&self, db: u32, body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>) -> Result<(), String> {
+    fn write(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut transaction = self.db.begin_write().map_err(|error| failed(&error))?;
         let name = format!("{}{db}", self.prefix);
         let outcome = transaction
             .create_collection(&name)
             .map_err(|error| failed(&error))
             .and_then(|_| {
-                let collection = transaction.collection(&name).map_err(|error| failed(&error))?;
+                let collection = transaction
+                    .collection(&name)
+                    .map_err(|error| failed(&error))?;
                 body(&mut WriteKeys { collection })
             });
         match outcome {
-            Ok(()) => transaction.commit().map(|_| ()).map_err(|error| failed(&error)),
+            Ok(()) => transaction
+                .commit()
+                .map(|_| ())
+                .map_err(|error| failed(&error)),
             Err(error) => {
                 let _ = transaction.rollback();
                 Err(error)

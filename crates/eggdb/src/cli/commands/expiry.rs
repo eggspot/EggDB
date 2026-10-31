@@ -332,7 +332,9 @@ pub(super) fn with_time_to_live(object: JsonObject, left: Option<Duration>) -> J
 fn expires_at(left: Duration) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_micros()).unwrap_or(u64::MAX));
+        .map_or(0, |since| {
+            u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+        });
     let left = u64::try_from(left.as_micros()).unwrap_or(u64::MAX);
     let micros = render::utc_time(now.saturating_add(left), TimeStyle::Rfc3339);
     let without_micros = micros

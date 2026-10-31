@@ -1,7 +1,8 @@
 use crate::memory_store::MemoryStore;
 use crate::{Dialect, QueryResult, Session};
 
-const PROCEDURE: &str = "CREATE OR REPLACE PROCEDURE raise_salary(p_id IN NUMBER, p_amount IN NUMBER DEFAULT 100) IS
+const PROCEDURE: &str =
+    "CREATE OR REPLACE PROCEDURE raise_salary(p_id IN NUMBER, p_amount IN NUMBER DEFAULT 100) IS
 BEGIN
   UPDATE emp SET sal = sal + p_amount WHERE id = p_id;
 END raise_salary;";
@@ -140,7 +141,10 @@ fn user_source_lists_each_unit_line_by_line_from_its_keyword() {
             &mut session,
             "SELECT type, text FROM user_source WHERE name = 'EMP_CHECK' AND line IN (1, 6) ORDER BY line"
         ),
-        rows(&[&["TRIGGER", "TRIGGER emp_check\n"], &["TRIGGER", "  :new.sal := 0;\n"]])
+        rows(&[
+            &["TRIGGER", "TRIGGER emp_check\n"],
+            &["TRIGGER", "  :new.sal := 0;\n"]
+        ])
     );
     assert_eq!(
         texts(
@@ -225,14 +229,46 @@ fn user_arguments_lists_parameters_and_function_results_with_resolved_types() {
              FROM user_arguments ORDER BY object_name, overload, sequence"
         ),
         rows(&[
-            &["BONUS", "NULL", "NULL", "NULL", "0", "1", "NUMBER", "OUT", "N"],
-            &["BONUS", "NULL", "NULL", "P_SAL", "1", "2", "NUMBER", "IN", "N"],
-            &["HIRE", "EMP_API", "1", "P_NAME", "1", "1", "VARCHAR2", "IN", "N"],
-            &["HIRE", "EMP_API", "2", "P_NAME", "1", "1", "VARCHAR2", "IN", "N"],
-            &["HIRE", "EMP_API", "2", "P_SAL", "2", "2", "NUMBER", "IN", "N"],
-            &["RAISE_SALARY", "NULL", "NULL", "P_ID", "1", "1", "NUMBER", "IN", "N"],
-            &["RAISE_SALARY", "NULL", "NULL", "P_AMOUNT", "2", "2", "NUMBER", "IN", "Y"],
-            &["TOTAL", "EMP_API", "NULL", "NULL", "0", "1", "NUMBER", "OUT", "N"],
+            &[
+                "BONUS", "NULL", "NULL", "NULL", "0", "1", "NUMBER", "OUT", "N"
+            ],
+            &[
+                "BONUS", "NULL", "NULL", "P_SAL", "1", "2", "NUMBER", "IN", "N"
+            ],
+            &[
+                "HIRE", "EMP_API", "1", "P_NAME", "1", "1", "VARCHAR2", "IN", "N"
+            ],
+            &[
+                "HIRE", "EMP_API", "2", "P_NAME", "1", "1", "VARCHAR2", "IN", "N"
+            ],
+            &[
+                "HIRE", "EMP_API", "2", "P_SAL", "2", "2", "NUMBER", "IN", "N"
+            ],
+            &[
+                "RAISE_SALARY",
+                "NULL",
+                "NULL",
+                "P_ID",
+                "1",
+                "1",
+                "NUMBER",
+                "IN",
+                "N"
+            ],
+            &[
+                "RAISE_SALARY",
+                "NULL",
+                "NULL",
+                "P_AMOUNT",
+                "2",
+                "2",
+                "NUMBER",
+                "IN",
+                "Y"
+            ],
+            &[
+                "TOTAL", "EMP_API", "NULL", "NULL", "0", "1", "NUMBER", "OUT", "N"
+            ],
         ])
     );
 }

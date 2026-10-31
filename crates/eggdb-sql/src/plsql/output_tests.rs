@@ -3,7 +3,10 @@ use crate::{Dialect, QueryResult, Session, SqlError};
 
 fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
-    run(&mut session, "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))");
+    run(
+        &mut session,
+        "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))",
+    );
     session
 }
 
@@ -47,7 +50,10 @@ fn output_is_ignored_until_it_is_enabled() {
     run(&mut session, "BEGIN DBMS_OUTPUT.PUT_LINE('kept'); END;");
     assert_eq!(session.take_server_output(), lines(&["kept"]));
     session.disable_server_output();
-    run(&mut session, "BEGIN DBMS_OUTPUT.PUT_LINE('lost again'); END;");
+    run(
+        &mut session,
+        "BEGIN DBMS_OUTPUT.PUT_LINE('lost again'); END;",
+    );
     assert_eq!(session.take_server_output(), Vec::<String>::new());
 }
 
@@ -78,12 +84,15 @@ fn get_line_reads_the_buffer_back_with_its_status() {
     );
     let mut rows = Vec::new();
     session
-        .execute("SELECT n, msg FROM log ORDER BY n", &mut |result: QueryResult| {
-            for row in result.rows {
-                let text = |at: usize| row.get(at).and_then(|value| value.to_text());
-                rows.push((text(0), text(1)));
-            }
-        })
+        .execute(
+            "SELECT n, msg FROM log ORDER BY n",
+            &mut |result: QueryResult| {
+                for row in result.rows {
+                    let text = |at: usize| row.get(at).and_then(|value| value.to_text());
+                    rows.push((text(0), text(1)));
+                }
+            },
+        )
         .unwrap();
     assert_eq!(
         rows,

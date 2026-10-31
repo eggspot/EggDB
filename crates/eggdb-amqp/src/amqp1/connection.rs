@@ -43,12 +43,20 @@ const DATA_SECTION: u64 = 0x75;
 const VALUE_SECTION: u64 = 0x77;
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn frame(kind: u8, channel: u16, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + body.len());
-    out.extend_from_slice(&u32::try_from(8 + body.len()).unwrap_or(u32::MAX).to_be_bytes());
+    out.extend_from_slice(
+        &u32::try_from(8 + body.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     out.push(2);
     out.push(kind);
     out.extend_from_slice(&channel.to_be_bytes());
@@ -63,7 +71,13 @@ fn performative(code: u64, fields: Vec<Value>) -> Vec<u8> {
 }
 
 fn error(condition: &str, description: &str) -> Value {
-    Value::described(ERROR, vec![Value::Symbol(condition.to_owned()), Value::String(description.to_owned())])
+    Value::described(
+        ERROR,
+        vec![
+            Value::Symbol(condition.to_owned()),
+            Value::String(description.to_owned()),
+        ],
+    )
 }
 
 struct Incoming {
@@ -141,11 +155,29 @@ fn outgoing_payload(queue: &str, message: &eggdb_queues::Message) -> Vec<u8> {
     let mut out = Vec::with_capacity(message.body.len() + 64);
     let header = Value::described(
         HEADER_SECTION,
-        vec![Value::Bool(true), Value::Null, Value::Null, Value::Bool(message.receive_count <= 1), Value::Uint(message.receive_count.saturating_sub(1))],
+        vec![
+            Value::Bool(true),
+            Value::Null,
+            Value::Null,
+            Value::Bool(message.receive_count <= 1),
+            Value::Uint(message.receive_count.saturating_sub(1)),
+        ],
     );
     encode(&header, &mut out);
-    encode(&Value::described(PROPERTIES_SECTION, vec![Value::String(format!("{queue}-{}", message.id))]), &mut out);
-    encode(&Value::Described(Box::new(Value::Ulong(DATA_SECTION)), Box::new(Value::Binary(message.body.clone()))), &mut out);
+    encode(
+        &Value::described(
+            PROPERTIES_SECTION,
+            vec![Value::String(format!("{queue}-{}", message.id))],
+        ),
+        &mut out,
+    );
+    encode(
+        &Value::Described(
+            Box::new(Value::Ulong(DATA_SECTION)),
+            Box::new(Value::Binary(message.body.clone())),
+        ),
+        &mut out,
+    );
     out
 }
 
@@ -155,7 +187,11 @@ impl Connection<'_, '_> {
     }
 
     fn close_with(&mut self, condition: &str, description: &str) {
-        self.send(FRAME_AMQP, 0, &performative(CLOSE, vec![error(condition, description)]));
+        self.send(
+            FRAME_AMQP,
+            0,
+            &performative(CLOSE, vec![error(condition, description)]),
+        );
         self.stage = Stage::Closed;
     }
 
@@ -170,26 +206,63 @@ impl Connection<'_, '_> {
             _ => &[],
         };
         let mut parts = response.split(|&byte| byte == 0);
-        let (_, user, password) = (parts.next(), parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+        let (_, user, password) = (
+            parts.next(),
+            parts.next().unwrap_or_default(),
+            parts.next().unwrap_or_default(),
+        );
         let authorized = mechanism == "PLAIN"
             && eggdb_crypto::constant_time_eq(user, self.config.user.as_bytes())
-            && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(password), &self.config.password_sha256);
-        self.send(FRAME_SASL, 0, &performative(SASL_OUTCOME, vec![Value::Ubyte(if authorized { 0 } else { 1 })]));
-        self.stage = if authorized { Stage::AwaitHeader } else { Stage::Closed };
+            && eggdb_crypto::constant_time_eq(
+                &eggdb_crypto::sha256(password),
+                &self.config.password_sha256,
+            );
+        self.send(
+            FRAME_SASL,
+            0,
+            &performative(
+                SASL_OUTCOME,
+                vec![Value::Ubyte(if authorized { 0 } else { 1 })],
+            ),
+        );
+        self.stage = if authorized {
+            Stage::AwaitHeader
+        } else {
+            Stage::Closed
+        };
     }
 
     fn open(&mut self, body: &Value) {
         if body.descriptor() != Some(OPEN) {
-            self.close_with("amqp:connection:framing-error", "the first frame must be open");
+            self.close_with(
+                "amqp:connection:framing-error",
+                "the first frame must be open",
+            );
             return;
         }
-        let max_frame = body.field(2).unsigned().and_then(|size| u32::try_from(size).ok()).unwrap_or(u32::MAX);
+        let max_frame = body
+            .field(2)
+            .unsigned()
+            .and_then(|size| u32::try_from(size).ok())
+            .unwrap_or(u32::MAX);
         self.remote_max_frame = max_frame.clamp(MIN_FRAME, 1 << 20);
-        self.remote_idle = body.field(4).unsigned().filter(|ms| *ms > 0).map(Duration::from_millis);
+        self.remote_idle = body
+            .field(4)
+            .unsigned()
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis);
         self.send(
             FRAME_AMQP,
             0,
-            &performative(OPEN, vec![Value::String("eggdb".to_owned()), Value::Null, Value::Uint(MAX_FRAME), Value::Ushort(CHANNEL_MAX)]),
+            &performative(
+                OPEN,
+                vec![
+                    Value::String("eggdb".to_owned()),
+                    Value::Null,
+                    Value::Uint(MAX_FRAME),
+                    Value::Ushort(CHANNEL_MAX),
+                ],
+            ),
         );
         self.stage = Stage::Open;
     }
@@ -204,7 +277,11 @@ impl Connection<'_, '_> {
             Some(DETACH) => {
                 let handle = self.handle_of(body)?;
                 self.detach(channel, handle);
-                self.send(FRAME_AMQP, channel, &performative(DETACH, vec![Value::Uint(handle), Value::Bool(true)]));
+                self.send(
+                    FRAME_AMQP,
+                    channel,
+                    &performative(DETACH, vec![Value::Uint(handle), Value::Bool(true)]),
+                );
                 Ok(())
             }
             Some(END) => {
@@ -224,23 +301,49 @@ impl Connection<'_, '_> {
     }
 
     fn handle_of(&self, body: &Value) -> Result<u32, String> {
-        body.field(0).unsigned().and_then(|handle| u32::try_from(handle).ok()).ok_or_else(|| "the frame has no link handle".to_owned())
+        body.field(0)
+            .unsigned()
+            .and_then(|handle| u32::try_from(handle).ok())
+            .ok_or_else(|| "the frame has no link handle".to_owned())
     }
 
     fn session(&mut self, channel: u16) -> Result<&mut Session, String> {
-        self.sessions.get_mut(&channel).ok_or_else(|| format!("channel {channel} has no session"))
+        self.sessions
+            .get_mut(&channel)
+            .ok_or_else(|| format!("channel {channel} has no session"))
     }
 
     fn begin(&mut self, channel: u16, body: &Value) -> Result<(), String> {
         if channel > CHANNEL_MAX || self.sessions.contains_key(&channel) {
             return Err(format!("channel {channel} cannot begin a session"));
         }
-        let next_incoming_id = body.field(1).unsigned().and_then(|id| u32::try_from(id).ok()).unwrap_or(0);
-        self.sessions.insert(channel, Session { next_outgoing_id: 0, next_incoming_id, links: BTreeMap::new(), unsettled: BTreeMap::new() });
+        let next_incoming_id = body
+            .field(1)
+            .unsigned()
+            .and_then(|id| u32::try_from(id).ok())
+            .unwrap_or(0);
+        self.sessions.insert(
+            channel,
+            Session {
+                next_outgoing_id: 0,
+                next_incoming_id,
+                links: BTreeMap::new(),
+                unsettled: BTreeMap::new(),
+            },
+        );
         self.send(
             FRAME_AMQP,
             channel,
-            &performative(BEGIN, vec![Value::Ushort(channel), Value::Uint(0), Value::Uint(WINDOW), Value::Uint(WINDOW), Value::Uint(HANDLE_MAX)]),
+            &performative(
+                BEGIN,
+                vec![
+                    Value::Ushort(channel),
+                    Value::Uint(0),
+                    Value::Uint(WINDOW),
+                    Value::Uint(WINDOW),
+                    Value::Uint(HANDLE_MAX),
+                ],
+            ),
         );
         Ok(())
     }
@@ -263,14 +366,36 @@ impl Connection<'_, '_> {
     }
 
     fn attach(&mut self, channel: u16, body: &Value) -> Result<(), String> {
-        let handle = body.field(1).unsigned().and_then(|handle| u32::try_from(handle).ok()).filter(|handle| *handle <= HANDLE_MAX).ok_or("attach has no valid handle")?;
+        let handle = body
+            .field(1)
+            .unsigned()
+            .and_then(|handle| u32::try_from(handle).ok())
+            .filter(|handle| *handle <= HANDLE_MAX)
+            .ok_or("attach has no valid handle")?;
         let client_receives = body.field(2).flag().ok_or("attach has no role")?;
         if self.session(channel)?.links.contains_key(&handle) {
             return Err(format!("handle {handle} is already attached"));
         }
-        let terminus = if client_receives { body.field(5) } else { body.field(6) };
-        let address = terminus.field(0).text().unwrap_or_default().trim_start_matches("/queues/").trim_start_matches("/queue/").to_owned();
-        let declared = if address.is_empty() { Err("the link has no queue address".to_owned()) } else { self.broker.queues.declare(&address).map_err(|error| error.to_string()) };
+        let terminus = if client_receives {
+            body.field(5)
+        } else {
+            body.field(6)
+        };
+        let address = terminus
+            .field(0)
+            .text()
+            .unwrap_or_default()
+            .trim_start_matches("/queues/")
+            .trim_start_matches("/queue/")
+            .to_owned();
+        let declared = if address.is_empty() {
+            Err("the link has no queue address".to_owned())
+        } else {
+            self.broker
+                .queues
+                .declare(&address)
+                .map_err(|error| error.to_string())
+        };
         let snd_settle_mode = body.field(3).unsigned().unwrap_or(2);
         let reply = vec![
             body.field(0).clone(),
@@ -278,22 +403,64 @@ impl Connection<'_, '_> {
             Value::Bool(!client_receives),
             Value::Ubyte(u8::try_from(snd_settle_mode).unwrap_or(2)),
             Value::Ubyte(0),
-            if declared.is_ok() || client_receives { body.field(5).clone() } else { Value::Null },
-            if declared.is_ok() || !client_receives { body.field(6).clone() } else { Value::Null },
+            if declared.is_ok() || client_receives {
+                body.field(5).clone()
+            } else {
+                Value::Null
+            },
+            if declared.is_ok() || !client_receives {
+                body.field(6).clone()
+            } else {
+                Value::Null
+            },
             Value::Null,
             Value::Bool(false),
-            if client_receives { Value::Uint(0) } else { Value::Null },
+            if client_receives {
+                Value::Uint(0)
+            } else {
+                Value::Null
+            },
         ];
         self.send(FRAME_AMQP, channel, &performative(ATTACH, reply));
         if let Err(description) = declared {
-            self.send(FRAME_AMQP, channel, &performative(DETACH, vec![Value::Uint(handle), Value::Bool(true), error("amqp:invalid-field", &description)]));
+            self.send(
+                FRAME_AMQP,
+                channel,
+                &performative(
+                    DETACH,
+                    vec![
+                        Value::Uint(handle),
+                        Value::Bool(true),
+                        error("amqp:invalid-field", &description),
+                    ],
+                ),
+            );
             return Ok(());
         }
         let link = if client_receives {
-            Link { queue: address, direction: Direction::ToClient { presettled: snd_settle_mode == 1, drain: false }, credit: 0, delivery_count: 0, incoming: None }
+            Link {
+                queue: address,
+                direction: Direction::ToClient {
+                    presettled: snd_settle_mode == 1,
+                    drain: false,
+                },
+                credit: 0,
+                delivery_count: 0,
+                incoming: None,
+            }
         } else {
-            let delivery_count = body.field(9).unsigned().and_then(|count| u32::try_from(count).ok()).unwrap_or(0);
-            Link { queue: address, direction: Direction::FromClient, credit: LINK_CREDIT, delivery_count, incoming: None }
+            let delivery_count = body
+                .field(9)
+                .unsigned()
+                .and_then(|count| u32::try_from(count).ok())
+                .unwrap_or(0);
+            Link {
+                queue: address,
+                direction: Direction::FromClient,
+                credit: LINK_CREDIT,
+                delivery_count,
+                incoming: None,
+            }
         };
         let session = self.session(channel)?;
         let granted = matches!(link.direction, Direction::FromClient);
@@ -309,16 +476,31 @@ impl Connection<'_, '_> {
     fn flow(&mut self, channel: u16, body: &Value) -> Result<(), String> {
         let echo = body.field(9).flag().unwrap_or(false);
         let session = self.session(channel)?;
-        let Some(handle) = body.field(4).unsigned().and_then(|handle| u32::try_from(handle).ok()) else {
+        let Some(handle) = body
+            .field(4)
+            .unsigned()
+            .and_then(|handle| u32::try_from(handle).ok())
+        else {
             return Ok(());
         };
         let Some(link) = session.links.get_mut(&handle) else {
             return Err(format!("flow names handle {handle}, which is not attached"));
         };
         if let Direction::ToClient { drain, .. } = &mut link.direction {
-            let receiver_count = body.field(5).unsigned().and_then(|count| u32::try_from(count).ok()).unwrap_or(0);
-            let credit = body.field(6).unsigned().and_then(|credit| u32::try_from(credit).ok()).unwrap_or(0);
-            link.credit = receiver_count.wrapping_add(credit).wrapping_sub(link.delivery_count).min(1 << 20);
+            let receiver_count = body
+                .field(5)
+                .unsigned()
+                .and_then(|count| u32::try_from(count).ok())
+                .unwrap_or(0);
+            let credit = body
+                .field(6)
+                .unsigned()
+                .and_then(|credit| u32::try_from(credit).ok())
+                .unwrap_or(0);
+            link.credit = receiver_count
+                .wrapping_add(credit)
+                .wrapping_sub(link.delivery_count)
+                .min(1 << 20);
             *drain = body.field(8).flag().unwrap_or(false);
         }
         if echo {
@@ -333,17 +515,28 @@ impl Connection<'_, '_> {
         let handle = self.handle_of(body)?;
         let session = self.session(channel)?;
         session.next_incoming_id = session.next_incoming_id.wrapping_add(1);
-        let link = session.links.get_mut(&handle).ok_or_else(|| format!("transfer names handle {handle}, which is not attached"))?;
+        let link = session
+            .links
+            .get_mut(&handle)
+            .ok_or_else(|| format!("transfer names handle {handle}, which is not attached"))?;
         if !matches!(link.direction, Direction::FromClient) {
             return Err("the client sent a transfer on a link it receives from".to_owned());
         }
         let incoming = match link.incoming.take() {
             Some(incoming) => incoming,
             None => {
-                let delivery_id = body.field(1).unsigned().and_then(|id| u32::try_from(id).ok()).ok_or("the first transfer of a delivery has no delivery-id")?;
+                let delivery_id = body
+                    .field(1)
+                    .unsigned()
+                    .and_then(|id| u32::try_from(id).ok())
+                    .ok_or("the first transfer of a delivery has no delivery-id")?;
                 link.credit = link.credit.saturating_sub(1);
                 link.delivery_count = link.delivery_count.wrapping_add(1);
-                Incoming { delivery_id, settled: false, bytes: Vec::new() }
+                Incoming {
+                    delivery_id,
+                    settled: false,
+                    bytes: Vec::new(),
+                }
             }
         };
         let mut incoming = incoming;
@@ -364,13 +557,29 @@ impl Connection<'_, '_> {
         if top_up {
             link.credit = LINK_CREDIT;
         }
-        let stored = message_body(&incoming.bytes).and_then(|body| self.broker.queues.send(&queue, &body, 0, now_ms()).map_err(|error| error.to_string()));
+        let stored = message_body(&incoming.bytes).and_then(|body| {
+            self.broker
+                .queues
+                .send(&queue, &body, 0, now_ms())
+                .map_err(|error| error.to_string())
+        });
         if !incoming.settled {
             let state = match &stored {
                 Ok(_) => Value::described(ACCEPTED, Vec::new()),
-                Err(description) => Value::described(REJECTED, vec![error("amqp:internal-error", description)]),
+                Err(description) => {
+                    Value::described(REJECTED, vec![error("amqp:internal-error", description)])
+                }
             };
-            let disposition = performative(DISPOSITION, vec![Value::Bool(true), Value::Uint(incoming.delivery_id), Value::Null, Value::Bool(true), state]);
+            let disposition = performative(
+                DISPOSITION,
+                vec![
+                    Value::Bool(true),
+                    Value::Uint(incoming.delivery_id),
+                    Value::Null,
+                    Value::Bool(true),
+                    state,
+                ],
+            );
             self.send(FRAME_AMQP, channel, &disposition);
         }
         if top_up {
@@ -385,8 +594,16 @@ impl Connection<'_, '_> {
         if !body.field(0).flag().unwrap_or(false) {
             return Ok(());
         }
-        let first = body.field(1).unsigned().and_then(|id| u32::try_from(id).ok()).ok_or("disposition has no first delivery-id")?;
-        let last = body.field(2).unsigned().and_then(|id| u32::try_from(id).ok()).unwrap_or(first);
+        let first = body
+            .field(1)
+            .unsigned()
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or("disposition has no first delivery-id")?;
+        let last = body
+            .field(2)
+            .unsigned()
+            .and_then(|id| u32::try_from(id).ok())
+            .unwrap_or(first);
         if last.wrapping_sub(first) > MAX_RANGE {
             return Err("disposition covers too many deliveries".to_owned());
         }
@@ -407,10 +624,25 @@ impl Connection<'_, '_> {
         }
         let now = now_ms();
         for unsettled in done {
-            let _ = if accepted { self.broker.queues.ack(&unsettled.queue, unsettled.id) } else { self.broker.queues.release(&unsettled.queue, unsettled.id, now) };
+            let _ = if accepted {
+                self.broker.queues.ack(&unsettled.queue, unsettled.id)
+            } else {
+                self.broker
+                    .queues
+                    .release(&unsettled.queue, unsettled.id, now)
+            };
         }
         if !settled {
-            let reply = performative(DISPOSITION, vec![Value::Bool(false), Value::Uint(first), Value::Uint(last), Value::Bool(true), state]);
+            let reply = performative(
+                DISPOSITION,
+                vec![
+                    Value::Bool(false),
+                    Value::Uint(first),
+                    Value::Uint(last),
+                    Value::Bool(true),
+                    state,
+                ],
+            );
             self.send(FRAME_AMQP, channel, &reply);
         }
         Ok(())
@@ -419,7 +651,10 @@ impl Connection<'_, '_> {
     fn release_all(&self, unsettled: BTreeMap<u32, Unsettled>) {
         let now = now_ms();
         for (_, unsettled) in unsettled {
-            let _ = self.broker.queues.release(&unsettled.queue, unsettled.id, now);
+            let _ = self
+                .broker
+                .queues
+                .release(&unsettled.queue, unsettled.id, now);
         }
     }
 
@@ -428,14 +663,42 @@ impl Connection<'_, '_> {
             return;
         };
         session.links.remove(&handle);
-        let ids: Vec<u32> = session.unsettled.iter().filter(|(_, unsettled)| unsettled.handle == handle).map(|(id, _)| *id).collect();
-        let released: BTreeMap<u32, Unsettled> = ids.into_iter().filter_map(|id| session.unsettled.remove(&id).map(|unsettled| (id, unsettled))).collect();
+        let ids: Vec<u32> = session
+            .unsettled
+            .iter()
+            .filter(|(_, unsettled)| unsettled.handle == handle)
+            .map(|(id, _)| *id)
+            .collect();
+        let released: BTreeMap<u32, Unsettled> = ids
+            .into_iter()
+            .filter_map(|id| {
+                session
+                    .unsettled
+                    .remove(&id)
+                    .map(|unsettled| (id, unsettled))
+            })
+            .collect();
         self.release_all(released);
     }
 
-    fn send_transfer(&mut self, channel: u16, handle: u32, delivery_id: u32, tag: u64, presettled: bool, payload: &[u8]) {
-        let chunk = usize::try_from(self.remote_max_frame).unwrap_or(usize::MAX).saturating_sub(256).max(256);
-        let pieces: Vec<&[u8]> = if payload.is_empty() { vec![payload] } else { payload.chunks(chunk).collect() };
+    fn send_transfer(
+        &mut self,
+        channel: u16,
+        handle: u32,
+        delivery_id: u32,
+        tag: u64,
+        presettled: bool,
+        payload: &[u8],
+    ) {
+        let chunk = usize::try_from(self.remote_max_frame)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(256)
+            .max(256);
+        let pieces: Vec<&[u8]> = if payload.is_empty() {
+            vec![payload]
+        } else {
+            payload.chunks(chunk).collect()
+        };
         let count = pieces.len();
         for (index, piece) in pieces.into_iter().enumerate() {
             let mut body = performative(
@@ -461,12 +724,26 @@ impl Connection<'_, '_> {
                 if let Direction::ToClient { presettled, drain } = link.direction
                     && (link.credit > 0 || drain)
                 {
-                    wanted.push((channel, handle, link.queue.clone(), link.credit.min(MAX_PER_PUMP), presettled, drain));
+                    wanted.push((
+                        channel,
+                        handle,
+                        link.queue.clone(),
+                        link.credit.min(MAX_PER_PUMP),
+                        presettled,
+                        drain,
+                    ));
                 }
             }
         }
         for (channel, handle, queue, room, presettled, drain) in wanted {
-            let messages = if room > 0 { self.broker.queues.receive(&queue, room as usize, LEASE_MS, now_ms()).unwrap_or_default() } else { Vec::new() };
+            let messages = if room > 0 {
+                self.broker
+                    .queues
+                    .receive(&queue, room as usize, LEASE_MS, now_ms())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let mut sent = Vec::new();
             for message in &messages {
                 let Some(session) = self.sessions.get_mut(&channel) else {
@@ -479,10 +756,24 @@ impl Connection<'_, '_> {
                     link.delivery_count = link.delivery_count.wrapping_add(1);
                 }
                 if !presettled {
-                    session.unsettled.insert(delivery_id, Unsettled { handle, queue: queue.clone(), id: message.id });
+                    session.unsettled.insert(
+                        delivery_id,
+                        Unsettled {
+                            handle,
+                            queue: queue.clone(),
+                            id: message.id,
+                        },
+                    );
                 }
                 let payload = outgoing_payload(&queue, message);
-                self.send_transfer(channel, handle, delivery_id, message.id, presettled, &payload);
+                self.send_transfer(
+                    channel,
+                    handle,
+                    delivery_id,
+                    message.id,
+                    presettled,
+                    &payload,
+                );
                 sent.push(message.id);
             }
             if presettled {
@@ -517,8 +808,10 @@ fn take_frame(buffer: &mut Vec<u8>) -> Result<Option<(u8, u16, Vec<u8>)>, String
     let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
     let offset = usize::from(header[4]) * 4;
     let (kind, channel) = (header[5], u16::from_be_bytes([header[6], header[7]]));
-    if size > MAX_FRAME || size < 8 || offset < 8 || offset > size as usize {
-        return Err(format!("a frame of {size} bytes with data offset {offset} is not allowed"));
+    if !(8..=MAX_FRAME).contains(&size) || offset < 8 || offset > size as usize {
+        return Err(format!(
+            "a frame of {size} bytes with data offset {offset} is not allowed"
+        ));
     }
     let size = size as usize;
     if buffer.len() < size {
@@ -529,10 +822,31 @@ fn take_frame(buffer: &mut Vec<u8>) -> Result<Option<(u8, u16, Vec<u8>)>, String
     Ok(Some((kind, channel, body)))
 }
 
-pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reader: impl Read, writer: &mut impl Write, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub(crate) fn serve_stream(
+    broker: &Broker<'_>,
+    config: &ServerConfig,
+    mut reader: impl Read,
+    writer: &mut impl Write,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     writer.write_all(SASL_HEADER)?;
-    writer.write_all(&frame(FRAME_SASL, 0, &performative(SASL_MECHANISMS, vec![Value::Array(vec![Value::Symbol("PLAIN".to_owned())])])))?;
-    let mut connection = Connection { broker, config, stage: Stage::Sasl, remote_max_frame: MIN_FRAME, remote_idle: None, sessions: BTreeMap::new(), outgoing: Vec::new() };
+    writer.write_all(&frame(
+        FRAME_SASL,
+        0,
+        &performative(
+            SASL_MECHANISMS,
+            vec![Value::Array(vec![Value::Symbol("PLAIN".to_owned())])],
+        ),
+    ))?;
+    let mut connection = Connection {
+        broker,
+        config,
+        stage: Stage::Sasl,
+        remote_max_frame: MIN_FRAME,
+        remote_idle: None,
+        sessions: BTreeMap::new(),
+        outgoing: Vec::new(),
+    };
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     let mut last_sent = Instant::now();
@@ -543,7 +857,13 @@ pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reade
         match reader.read(&mut chunk) {
             Ok(0) => break Ok(()),
             Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
             Err(error) => break Err(error),
         }
         while connection.stage != Stage::Closed {
@@ -583,11 +903,16 @@ pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reade
                 (Stage::Sasl, FRAME_SASL) => connection.sasl(&performative),
                 (Stage::AwaitOpen, FRAME_AMQP) => connection.open(&performative),
                 (Stage::Open, FRAME_AMQP) => {
-                    if let Err(description) = connection.handle(channel, &performative, &body[used..]) {
+                    if let Err(description) =
+                        connection.handle(channel, &performative, &body[used..])
+                    {
                         connection.close_with("amqp:connection:framing-error", &description);
                     }
                 }
-                _ => connection.close_with("amqp:connection:framing-error", "the frame does not fit the connection's stage"),
+                _ => connection.close_with(
+                    "amqp:connection:framing-error",
+                    "the frame does not fit the connection's stage",
+                ),
             }
         }
         if connection.stage == Stage::Open {

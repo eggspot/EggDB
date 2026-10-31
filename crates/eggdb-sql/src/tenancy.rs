@@ -71,15 +71,50 @@ mod tests {
         ] {
             run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
         }
-        assert!(run(&mut session, "SELECT count(*) FROM notes").is_err(), "no tenant chosen must fail closed");
+        assert!(
+            run(&mut session, "SELECT count(*) FROM notes").is_err(),
+            "no tenant chosen must fail closed"
+        );
         run(&mut session, "SET eggdb.tenant = 'acme'").unwrap();
-        run(&mut session, "INSERT INTO notes (tenant, body) VALUES ('acme', 'one'), ('acme', 'two')").unwrap();
-        assert_eq!(run(&mut session, "INSERT INTO notes (tenant, body) VALUES ('acme', 'three')").unwrap_err().state().code(), "53400");
-        assert!(run(&mut session, "INSERT INTO notes (tenant, body) VALUES ('globex', 'sneaky')").is_err());
-        assert_eq!(run(&mut session, "SELECT count(*) AS n FROM notes").unwrap(), "n\n2\nSELECT 1");
+        run(
+            &mut session,
+            "INSERT INTO notes (tenant, body) VALUES ('acme', 'one'), ('acme', 'two')",
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &mut session,
+                "INSERT INTO notes (tenant, body) VALUES ('acme', 'three')"
+            )
+            .unwrap_err()
+            .state()
+            .code(),
+            "53400"
+        );
+        assert!(
+            run(
+                &mut session,
+                "INSERT INTO notes (tenant, body) VALUES ('globex', 'sneaky')"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            run(&mut session, "SELECT count(*) AS n FROM notes").unwrap(),
+            "n\n2\nSELECT 1"
+        );
         run(&mut session, "SET eggdb.tenant = 'globex'").unwrap();
-        assert_eq!(run(&mut session, "SELECT count(*) AS n FROM notes").unwrap(), "n\n0\nSELECT 1");
-        run(&mut session, "INSERT INTO notes (tenant, body) VALUES ('globex', 'mine')").unwrap();
-        assert_eq!(run(&mut session, "SELECT body FROM notes").unwrap(), "body\nmine\nSELECT 1");
+        assert_eq!(
+            run(&mut session, "SELECT count(*) AS n FROM notes").unwrap(),
+            "n\n0\nSELECT 1"
+        );
+        run(
+            &mut session,
+            "INSERT INTO notes (tenant, body) VALUES ('globex', 'mine')",
+        )
+        .unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT body FROM notes").unwrap(),
+            "body\nmine\nSELECT 1"
+        );
     }
 }

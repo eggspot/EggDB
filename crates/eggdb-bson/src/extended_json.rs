@@ -20,10 +20,12 @@ fn quoted(out: &mut String, text: &str) {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -35,7 +37,9 @@ fn base64(bytes: &[u8]) -> String {
             | u32::from(*chunk.get(2).unwrap_or(&0));
         for at in 0..4 {
             if at <= chunk.len() {
-                out.push(char::from(ALPHABET[((triple >> (18 - 6 * at)) & 63) as usize]));
+                out.push(char::from(
+                    ALPHABET[((triple >> (18 - 6 * at)) & 63) as usize],
+                ));
             } else {
                 out.push('=');
             }
@@ -48,7 +52,11 @@ fn double(out: &mut String, value: f64) {
     if value.is_nan() {
         out.push_str("{\"$numberDouble\":\"NaN\"}");
     } else if value.is_infinite() {
-        out.push_str(if value > 0.0 { "{\"$numberDouble\":\"Infinity\"}" } else { "{\"$numberDouble\":\"-Infinity\"}" });
+        out.push_str(if value > 0.0 {
+            "{\"$numberDouble\":\"Infinity\"}"
+        } else {
+            "{\"$numberDouble\":\"-Infinity\"}"
+        });
     } else if value.fract() == 0.0 && value.abs() < 1e15 {
         let _ = write!(out, "{value:.1}");
     } else {
@@ -85,7 +93,11 @@ fn write_value(out: &mut String, value: &Bson) {
             out.push(']');
         }
         Bson::Binary { subtype, bytes } => {
-            let _ = write!(out, "{{\"$binary\": {{\"base64\": \"{}\", \"subType\": \"{subtype:02x}\"}}}}", base64(bytes));
+            let _ = write!(
+                out,
+                "{{\"$binary\": {{\"base64\": \"{}\", \"subType\": \"{subtype:02x}\"}}}}",
+                base64(bytes)
+            );
         }
         Bson::Undefined => out.push_str("{\"$undefined\": true}"),
         Bson::ObjectId(id) => {
@@ -93,7 +105,10 @@ fn write_value(out: &mut String, value: &Bson) {
         }
         Bson::Boolean(flag) => out.push_str(if *flag { "true" } else { "false" }),
         Bson::DateTime(milliseconds) => {
-            let _ = write!(out, "{{\"$date\": {{\"$numberLong\": \"{milliseconds}\"}}}}");
+            let _ = write!(
+                out,
+                "{{\"$date\": {{\"$numberLong\": \"{milliseconds}\"}}}}"
+            );
         }
         Bson::Null => out.push_str("null"),
         Bson::Regex { pattern, options } => {
@@ -129,13 +144,20 @@ fn write_value(out: &mut String, value: &Bson) {
             let _ = write!(out, "{number}");
         }
         Bson::Timestamp { time, increment } => {
-            let _ = write!(out, "{{\"$timestamp\": {{\"t\": {time}, \"i\": {increment}}}}}");
+            let _ = write!(
+                out,
+                "{{\"$timestamp\": {{\"t\": {time}, \"i\": {increment}}}}}"
+            );
         }
         Bson::Int64(number) => {
             let _ = write!(out, "{number}");
         }
         Bson::Decimal128(_) => {
-            let _ = write!(out, "{{\"$numberDecimal\": \"{}\"}}", value.as_f64().unwrap_or(f64::NAN));
+            let _ = write!(
+                out,
+                "{{\"$numberDecimal\": \"{}\"}}",
+                value.as_f64().unwrap_or(f64::NAN)
+            );
         }
         Bson::MinKey => out.push_str("{\"$minKey\": 1}"),
         Bson::MaxKey => out.push_str("{\"$maxKey\": 1}"),

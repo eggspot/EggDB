@@ -54,7 +54,10 @@ impl TdsTransport {
         }
         let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
         self.left_in_packet = length.checked_sub(HEADER_BYTES).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "a packet is shorter than its header")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a packet is shorter than its header",
+            )
         })?;
         Ok(())
     }
@@ -99,7 +102,11 @@ impl Write for TdsTransport {
             let packets = pending.chunks(payload_bytes).count();
             let mut framed = Vec::with_capacity(pending.len() + packets * HEADER_BYTES);
             for (index, chunk) in pending.chunks(payload_bytes).enumerate() {
-                let status = if index + 1 == packets { END_OF_MESSAGE } else { 0 };
+                let status = if index + 1 == packets {
+                    END_OF_MESSAGE
+                } else {
+                    0
+                };
                 framed.push(PRELOGIN);
                 framed.push(status);
                 framed.extend_from_slice(&((chunk.len() + HEADER_BYTES) as u16).to_be_bytes());
@@ -133,7 +140,8 @@ mod tests {
         assert_eq!(u16::from_be_bytes([framed[2], framed[3]]), 13);
         assert_eq!(&framed[HEADER_BYTES..], b"hello");
 
-        peer.write_all(&[PRELOGIN, 1, 0, 11, 0, 0, 1, 0, b'a', b'b', b'c']).unwrap();
+        peer.write_all(&[PRELOGIN, 1, 0, 11, 0, 0, 1, 0, b'a', b'b', b'c'])
+            .unwrap();
         let mut unframed = [0u8; 3];
         transport.read_exact(&mut unframed).unwrap();
         assert_eq!(&unframed, b"abc");

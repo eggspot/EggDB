@@ -57,9 +57,13 @@ impl std::fmt::Display for TlsError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "TLS connection failed: {error}"),
-            Self::PeerAlert(alert) => write!(formatter, "the peer ended the TLS connection with {alert}"),
+            Self::PeerAlert(alert) => {
+                write!(formatter, "the peer ended the TLS connection with {alert}")
+            }
             Self::Protocol { reason, .. } => write!(formatter, "TLS handshake failed: {reason}"),
-            Self::Certificate(error) => write!(formatter, "the TLS certificate was refused: {error}"),
+            Self::Certificate(error) => {
+                write!(formatter, "the TLS certificate was refused: {error}")
+            }
         }
     }
 }
@@ -83,8 +87,14 @@ impl From<std::io::Error> for TlsError {
 impl From<CodecError> for TlsError {
     fn from(error: CodecError) -> Self {
         match error {
-            CodecError::IllegalValue => Self::protocol(AlertDescription::IllegalParameter, "a handshake field has a value TLS forbids"),
-            _ => Self::protocol(AlertDescription::DecodeError, "a handshake message could not be decoded"),
+            CodecError::IllegalValue => Self::protocol(
+                AlertDescription::IllegalParameter,
+                "a handshake field has a value TLS forbids",
+            ),
+            _ => Self::protocol(
+                AlertDescription::DecodeError,
+                "a handshake message could not be decoded",
+            ),
         }
     }
 }
@@ -92,11 +102,26 @@ impl From<CodecError> for TlsError {
 impl From<RecordError> for TlsError {
     fn from(error: RecordError) -> Self {
         match error {
-            RecordError::Overflow => Self::protocol(AlertDescription::RecordOverflow, "a record is longer than TLS allows"),
-            RecordError::BadRecordMac => Self::protocol(AlertDescription::BadRecordMac, "a record failed its integrity check"),
-            RecordError::UnexpectedMessage => Self::protocol(AlertDescription::UnexpectedMessage, "a record has an unexpected content type"),
-            RecordError::MalformedHeader => Self::protocol(AlertDescription::DecodeError, "the peer is not speaking TLS"),
-            RecordError::SequenceExhausted => Self::protocol(AlertDescription::InternalError, "too many records under one key"),
+            RecordError::Overflow => Self::protocol(
+                AlertDescription::RecordOverflow,
+                "a record is longer than TLS allows",
+            ),
+            RecordError::BadRecordMac => Self::protocol(
+                AlertDescription::BadRecordMac,
+                "a record failed its integrity check",
+            ),
+            RecordError::UnexpectedMessage => Self::protocol(
+                AlertDescription::UnexpectedMessage,
+                "a record has an unexpected content type",
+            ),
+            RecordError::MalformedHeader => Self::protocol(
+                AlertDescription::DecodeError,
+                "the peer is not speaking TLS",
+            ),
+            RecordError::SequenceExhausted => Self::protocol(
+                AlertDescription::InternalError,
+                "too many records under one key",
+            ),
         }
     }
 }

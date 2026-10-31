@@ -88,7 +88,10 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
                 .transpose();
             let _ = store.close();
             let unknown = unknown.map_err(|message| {
-                Failure::database(format!("cannot read {file}: {message}"), Exit::DatabaseError)
+                Failure::database(
+                    format!("cannot read {file}: {message}"),
+                    Exit::DatabaseError,
+                )
             })?;
             if let Some(unknown) = unknown
                 && !unknown.is_empty()

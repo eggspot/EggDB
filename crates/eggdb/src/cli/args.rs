@@ -70,6 +70,7 @@ impl TableAction {
 }
 
 impl CommandName {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 29] = [
         Self::Create,
         Self::Put,
@@ -185,13 +186,17 @@ impl CommandName {
 
     fn takes(self, option: OptionName) -> bool {
         match option {
-            OptionName::Cache | OptionName::KeyFile | OptionName::Help | OptionName::Version => true,
+            OptionName::Cache | OptionName::KeyFile | OptionName::Help | OptionName::Version => {
+                true
+            }
             OptionName::Color => true,
             OptionName::Format | OptionName::Json => {
                 !matches!(self, Self::Ui | Self::Shell | Self::Mcp)
             }
             OptionName::Mono | OptionName::Ascii => self == Self::Ui,
-            OptionName::ReadOnly => matches!(self, Self::Ui | Self::Serve | Self::Shell | Self::Sql),
+            OptionName::ReadOnly => {
+                matches!(self, Self::Ui | Self::Serve | Self::Shell | Self::Sql)
+            }
             OptionName::Verify => self == Self::Audit,
             OptionName::Kql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
@@ -609,7 +614,11 @@ fn read_key_file(value: &OsStr) -> Result<EncryptionKey, String> {
     let text = std::fs::read_to_string(value)
         .map_err(|error| format!("cannot read --key-file {path}: {error}"))?;
     let digits = text.trim();
-    let wrong = || format!("--key-file {path} must hold 64 hexadecimal digits (32 bytes), such as from: openssl rand -hex 32");
+    let wrong = || {
+        format!(
+            "--key-file {path} must hold 64 hexadecimal digits (32 bytes), such as from: openssl rand -hex 32"
+        )
+    };
     if digits.len() != 64 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(wrong());
     }
@@ -840,9 +849,11 @@ fn asks_for_json(tokens: &Tokens<'_>) -> bool {
         .rev()
         .find_map(|option| match option.name {
             OptionName::Json => Some(true),
-            OptionName::Format => {
-                Some(option.value.is_some_and(|value| value.as_encoded_bytes() == b"json"))
-            }
+            OptionName::Format => Some(
+                option
+                    .value
+                    .is_some_and(|value| value.as_encoded_bytes() == b"json"),
+            ),
             _ => None,
         })
         .unwrap_or(false)
@@ -1193,7 +1204,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::McpTokenFile => request.serve.mcp_token_file = Some(PathBuf::from(value)),
             OptionName::RespMaxMemory => {
-                request.serve.resp_max_memory = Some(parse_size(&option.spelled, value).map_err(usage)? as u64);
+                request.serve.resp_max_memory =
+                    Some(parse_size(&option.spelled, value).map_err(usage)? as u64);
             }
             OptionName::RespEviction => {
                 let name = value.to_str().unwrap_or_default();
@@ -1236,7 +1248,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::CdcQueue => {
                 let name = value.to_str().unwrap_or_default();
                 if name.is_empty() || name.len() > 255 || name.contains('\0') {
-                    return Err(usage(format!("{}: the queue name must be 1 to 255 characters", option.spelled)));
+                    return Err(usage(format!(
+                        "{}: the queue name must be 1 to 255 characters",
+                        option.spelled
+                    )));
                 }
                 request.serve.cdc_queue = Some(name.to_owned());
             }
@@ -1251,7 +1266,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::RestoreFrom => {
                 let url = value.to_str().unwrap_or_default();
                 if !url.starts_with("s3://") {
-                    return Err(usage(format!("{}: give the s3://bucket/prefix that eggdb backup archives into", option.spelled)));
+                    return Err(usage(format!(
+                        "{}: give the s3://bucket/prefix that eggdb backup archives into",
+                        option.spelled
+                    )));
                 }
                 request.serve.restore_from = Some(url.to_owned());
             }
@@ -1317,7 +1335,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     request.serve.mysql_socket = Some(PathBuf::from(value));
                 }
             }
-            OptionName::TlsCertificate => request.serve.tls_certificate = Some(PathBuf::from(value)),
+            OptionName::TlsCertificate => {
+                request.serve.tls_certificate = Some(PathBuf::from(value))
+            }
             OptionName::AuthRules => request.serve.auth_rules = Some(PathBuf::from(value)),
             OptionName::TlsKey => request.serve.tls_key = Some(PathBuf::from(value)),
             OptionName::TlsMinVersion => {
@@ -1416,8 +1436,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 );
             }
             OptionName::Collection => {
-                request.collection =
-                    Some(parse_collection_name(Some(option.spelled.as_str()), value).map_err(usage)?);
+                request.collection = Some(
+                    parse_collection_name(Some(option.spelled.as_str()), value).map_err(usage)?,
+                );
             }
             OptionName::Ttl => {
                 request.ttl = Some(parse_ttl_option(&option.spelled, value).map_err(usage)?);
@@ -1439,7 +1460,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.schema = Some(parse_name(&option.spelled, value).map_err(usage)?);
             }
             OptionName::Publication => {
-                request.follow.publication = Some(parse_name(&option.spelled, value).map_err(usage)?);
+                request.follow.publication =
+                    Some(parse_name(&option.spelled, value).map_err(usage)?);
             }
             OptionName::Poll => {
                 let seconds = parse_whole_number(value.as_encoded_bytes())
@@ -1495,7 +1517,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 .to_owned(),
         ));
     }
-    let swap_arguments = 2 + usize::from(!request.swap.if_absent) + usize::from(!request.swap.delete);
+    let swap_arguments =
+        2 + usize::from(!request.swap.if_absent) + usize::from(!request.swap.delete);
     let (least, most) = match command {
         CommandName::Create
         | CommandName::Scan
@@ -1528,7 +1551,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     }
     request.file = PathBuf::from(arguments[0]);
     if command == CommandName::Explain {
-        let given = matches!(&request.sql, Some(SqlSource::Command(text)) if !text.trim().is_empty());
+        let given =
+            matches!(&request.sql, Some(SqlSource::Command(text)) if !text.trim().is_empty());
         if !given {
             return Err(usage(EXPLAIN_NEEDS_A_STATEMENT.to_owned()));
         }
@@ -1889,7 +1913,9 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     let csv = &request.csv;
     if csv.sql_dump.is_some() {
         if csv.parquet.is_some() || csv.table.is_some() {
-            return Err("--sql writes every table; it does not go with --parquet or --table".to_owned());
+            return Err(
+                "--sql writes every table; it does not go with --parquet or --table".to_owned(),
+            );
         }
         return Ok(());
     }
@@ -1907,7 +1933,9 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             return Err("give --csv or --parquet, not both".to_owned());
         }
         if request.export_file.is_some() {
-            return Err("give the Parquet file with --parquet <file>, not as a second argument".to_owned());
+            return Err(
+                "give the Parquet file with --parquet <file>, not as a second argument".to_owned(),
+            );
         }
         if csv.table.is_none() {
             return Err("--parquet needs --table <name>, the table to load or write".to_owned());
@@ -2123,7 +2151,10 @@ fn unknown_option(spelled: &str, command: CommandName) -> Failure {
         _ => "",
     };
     Failure::usage(
-        format!("unknown option '{spelled}' for eggdb {}{hint}", command.name()),
+        format!(
+            "unknown option '{spelled}' for eggdb {}{hint}",
+            command.name()
+        ),
         Some(command),
     )
 }
@@ -2247,9 +2278,7 @@ fn parse_table_names(spelled: &str, value: &OsStr) -> Result<Vec<String>, String
         }
         let parts: Vec<&str> = name.split('.').collect();
         if parts.len() > 2 || parts.iter().any(|part| part.is_empty()) {
-            return Err(format!(
-                "{spelled} takes name or schema.name, not '{name}'"
-            ));
+            return Err(format!("{spelled} takes name or schema.name, not '{name}'"));
         }
         names.push(name.to_owned());
     }
@@ -2311,7 +2340,10 @@ mod tests {
         assert!(plain.tables.is_empty());
         assert_eq!(plain.call_gap_ms, None);
         assert_eq!(request("mcp app.db --call-gap 0").call_gap_ms, Some(0));
-        assert_eq!(request("mcp app.db --call-gap 10000").call_gap_ms, Some(10_000));
+        assert_eq!(
+            request("mcp app.db --call-gap 10000").call_gap_ms,
+            Some(10_000)
+        );
     }
 
     #[test]
@@ -2601,7 +2633,10 @@ mod tests {
             usage_message("collection rename app.db a"),
             "collection needs list, add or delete"
         );
-        assert_eq!(usage_message("collection list"), "eggdb collection list needs a file");
+        assert_eq!(
+            usage_message("collection list"),
+            "eggdb collection list needs a file"
+        );
         assert_eq!(
             usage_message("collection add"),
             "eggdb collection add needs a file and a collection name"
@@ -2627,7 +2662,11 @@ mod tests {
             "export app.db out.jsonl -C users",
             "import app.db in.jsonl --collection=users",
         ] {
-            assert_eq!(request(words).collection.as_deref(), Some("users"), "{words}");
+            assert_eq!(
+                request(words).collection.as_deref(),
+                Some("users"),
+                "{words}"
+            );
         }
         for command in ["check", "stats", "create", "ui", "sql"] {
             assert_eq!(
@@ -2669,17 +2708,29 @@ mod tests {
         assert_eq!(sample.table_action, Some(TableAction::Sample));
         assert_eq!(sample.table, Some(OsString::from("users")));
         assert_eq!(sample.scan.limit, Some(50));
-        assert_eq!(request("table show app.db sales.totals").file, PathBuf::from("app.db"));
+        assert_eq!(
+            request("table show app.db sales.totals").file,
+            PathBuf::from("app.db")
+        );
         assert_eq!(usage_message("table"), "table needs list, show or sample");
-        assert_eq!(usage_message("table frob app.db"), "table needs list, show or sample");
+        assert_eq!(
+            usage_message("table frob app.db"),
+            "table needs list, show or sample"
+        );
         assert_eq!(usage_message("table list"), "eggdb table list needs a file");
         assert_eq!(
             usage_message("table show"),
             "eggdb table show needs a file and a table name"
         );
-        assert_eq!(usage_message("table sample app.db"), "eggdb table sample needs a table name");
+        assert_eq!(
+            usage_message("table sample app.db"),
+            "eggdb table sample needs a table name"
+        );
         assert_eq!(request("table list app.db -n 5").scan.limit, Some(5));
-        assert_eq!(request("table list app.db --limit 5000").scan.limit, Some(5000));
+        assert_eq!(
+            request("table list app.db --limit 5000").scan.limit,
+            Some(5000)
+        );
         assert_eq!(
             usage_message("table show app.db users -n 5"),
             "unknown option '-n' for eggdb table show"
@@ -2689,7 +2740,9 @@ mod tests {
             "unknown option '--after' for eggdb table sample"
         );
         assert_eq!(
-            request("table list app.db --after t1.811c9dc5").after.as_deref(),
+            request("table list app.db --after t1.811c9dc5")
+                .after
+                .as_deref(),
             Some("t1.811c9dc5")
         );
         assert_eq!(
@@ -2728,8 +2781,14 @@ mod tests {
         assert_eq!((all.scan.limit, all.after), (None, None));
         assert_eq!(usage_message("row"), "row needs list");
         assert_eq!(usage_message("row show app.db orders"), "row needs list");
-        assert_eq!(usage_message("row list"), "eggdb row list needs a file and a table name");
-        assert_eq!(usage_message("row list app.db"), "eggdb row list needs a table name");
+        assert_eq!(
+            usage_message("row list"),
+            "eggdb row list needs a file and a table name"
+        );
+        assert_eq!(
+            usage_message("row list app.db"),
+            "eggdb row list needs a table name"
+        );
         assert_eq!(
             usage_message("row list app.db orders extra"),
             "too many arguments for eggdb row: 'extra'"
@@ -2775,7 +2834,12 @@ mod tests {
 
     #[test]
     fn help_names_a_noun_and_one_of_its_verbs() {
-        for words in ["help table", "help table list", "help collection del", "table --help"] {
+        for words in [
+            "help table",
+            "help table list",
+            "help collection del",
+            "table --help",
+        ] {
             assert!(
                 matches!(parse_words(words), Ok(Invocation::Help(Some(_)))),
                 "{words}"
@@ -2783,13 +2847,19 @@ mod tests {
         }
         assert_eq!(
             parse_words("help table sample --json"),
-            Ok(Invocation::HelpJson(Some(CommandName::Table), Some("sample")))
+            Ok(Invocation::HelpJson(
+                Some(CommandName::Table),
+                Some("sample")
+            ))
         );
         assert_eq!(
             parse_words("table show --help --json"),
             Ok(Invocation::HelpJson(Some(CommandName::Table), Some("show")))
         );
-        assert_eq!(usage_message("help table frob"), "table needs list, show or sample");
+        assert_eq!(
+            usage_message("help table frob"),
+            "table needs list, show or sample"
+        );
         assert_eq!(
             usage_message("help scan extra"),
             "too many arguments for eggdb: 'extra'"

@@ -16,7 +16,12 @@ pub enum Config {
 impl Config {
     /// The configuration named `name` (`english`, `simple`, optionally `pg_catalog.`-qualified).
     pub fn named(name: &str) -> Option<Self> {
-        match name.trim().trim_start_matches("pg_catalog.").to_ascii_lowercase().as_str() {
+        match name
+            .trim()
+            .trim_start_matches("pg_catalog.")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "english" => Some(Self::English),
             "simple" => Some(Self::Simple),
             _ => None,
@@ -177,8 +182,14 @@ mod tests {
         let vector = TsVector::from_text(Config::English, "The fat cats ate fat rats");
         assert_eq!(vector.to_string(), "'ate':4 'cat':3 'fat':2,5 'rat':6");
         assert_eq!(TsVector::parse(&vector.to_string()), Some(vector.clone()));
-        assert_eq!(TsVector::from_text(Config::Simple, "The Cat").to_string(), "'cat':2 'the':1");
-        assert_eq!(TsVector::parse("'it''s' 'x':1A"), TsVector::parse("'it''s' 'x':1"));
+        assert_eq!(
+            TsVector::from_text(Config::Simple, "The Cat").to_string(),
+            "'cat':2 'the':1"
+        );
+        assert_eq!(
+            TsVector::parse("'it''s' 'x':1A"),
+            TsVector::parse("'it''s' 'x':1")
+        );
         assert!(TsVector::parse("'open").is_none());
         assert!(vector.contains("ca", true) && !vector.contains("ca", false));
     }

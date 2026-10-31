@@ -21,9 +21,11 @@ use crate::information_schema::InformationRelation;
 use crate::oracle_dictionary::OracleRelation;
 use crate::sqlserver_catalog::SqlServerRelation;
 pub(crate) use deparse::{check_text, default_text};
-pub(crate) use monitoring::{function as monitoring_function, result_type as monitoring_result_type};
 pub(crate) use functions::{
     argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
+};
+pub(crate) use monitoring::{
+    function as monitoring_function, result_type as monitoring_result_type,
 };
 pub(crate) use oids::{OidRequest, Space as OidSpace, assign as assign_oids};
 pub(crate) use oids::{builtin_type, builtin_type_named, format_type, type_modifier};
@@ -31,9 +33,9 @@ pub(crate) use relations::generated_rows;
 pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{
     CatalogSnapshot, ConstraintSource, IndexSource, PackageEntry, RelationEntry, RelationKind,
-    RelationSource, RoutineEntry, TriggerEntry, current as current_snapshot, enter_statement, load_for_stored_expressions, load_if_wanted,
-    mentions_catalog, names_non_sequence_relation, routine_oid, snapshot_for, statement_settings,
-    session_user, text_needs_catalog,
+    RelationSource, RoutineEntry, TriggerEntry, current as current_snapshot, enter_statement,
+    load_for_stored_expressions, load_if_wanted, mentions_catalog, names_non_sequence_relation,
+    routine_oid, session_user, snapshot_for, statement_settings, text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
 
@@ -66,7 +68,9 @@ pub(crate) fn catalog_reference(
         crate::Dialect::Oracle => {
             Ok(crate::oracle_dictionary::reference(reader, name)?.map(CatalogRelation::Oracle))
         }
-        crate::Dialect::MySql => Ok(crate::mysql_catalog::MySqlRelation::referenced(name).map(CatalogRelation::MySql)),
+        crate::Dialect::MySql => {
+            Ok(crate::mysql_catalog::MySqlRelation::referenced(name).map(CatalogRelation::MySql))
+        }
         crate::Dialect::Sqlite => Ok(None),
     }
 }
@@ -344,7 +348,11 @@ impl CatalogRelation {
         Self::IN_PG_CATALOG
             .into_iter()
             .chain(InformationRelation::ALL.into_iter().map(Self::Information))
-            .chain(monitoring::MonitoringRelation::ALL.into_iter().map(Self::Monitoring))
+            .chain(
+                monitoring::MonitoringRelation::ALL
+                    .into_iter()
+                    .map(Self::Monitoring),
+            )
     }
 
     pub(crate) fn oid(self) -> u32 {

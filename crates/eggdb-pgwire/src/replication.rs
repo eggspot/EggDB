@@ -113,15 +113,25 @@ pub fn parse_stream_message(bytes: &[u8]) -> Result<StreamMessage, ReplicationEr
             let start = cursor.u64("start position")?;
             let wal_end = cursor.u64("WAL end")?;
             cursor.u64("send time")?;
-            Ok(StreamMessage::XLogData { start, wal_end, data: cursor.bytes.to_vec() })
+            Ok(StreamMessage::XLogData {
+                start,
+                wal_end,
+                data: cursor.bytes.to_vec(),
+            })
         }
         b'k' => {
             let wal_end = cursor.u64("WAL end")?;
             cursor.u64("send time")?;
             let reply_requested = cursor.u8("reply flag")? == 1;
-            Ok(StreamMessage::Keepalive { wal_end, reply_requested })
+            Ok(StreamMessage::Keepalive {
+                wal_end,
+                reply_requested,
+            })
         }
-        other => Err(ReplicationError(format!("unknown replication message '{}'", char::from(other)))),
+        other => Err(ReplicationError(format!(
+            "unknown replication message '{}'",
+            char::from(other)
+        ))),
     }
 }
 
@@ -239,11 +249,21 @@ fn tuple(cursor: &mut Cursor<'_>) -> Result<Vec<TupleValue>, ReplicationError> {
                 let length = cursor.u32("value length")? as usize;
                 let bytes = cursor.take(length, "value")?;
                 TupleValue::Text(
-                    String::from_utf8(bytes.to_vec()).map_err(|_| ReplicationError("a value is not UTF-8".to_owned()))?,
+                    String::from_utf8(bytes.to_vec())
+                        .map_err(|_| ReplicationError("a value is not UTF-8".to_owned()))?,
                 )
             }
-            b'b' => return Err(ReplicationError("binary tuple values are not requested and not supported".to_owned())),
-            other => return Err(ReplicationError(format!("unknown column kind '{}'", char::from(other)))),
+            b'b' => {
+                return Err(ReplicationError(
+                    "binary tuple values are not requested and not supported".to_owned(),
+                ));
+            }
+            other => {
+                return Err(ReplicationError(format!(
+                    "unknown column kind '{}'",
+                    char::from(other)
+                )));
+            }
         });
     }
     Ok(values)
@@ -264,7 +284,11 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
             let commit_lsn = cursor.u64("commit position")?;
             let end_lsn = cursor.u64("end position")?;
             let commit_time = cursor.u64("commit time")? as i64;
-            Ok(LogicalMessage::Commit { commit_lsn, end_lsn, commit_unix_micros: commit_time + POSTGRES_EPOCH_MICROS })
+            Ok(LogicalMessage::Commit {
+                commit_lsn,
+                end_lsn,
+                commit_unix_micros: commit_time + POSTGRES_EPOCH_MICROS,
+            })
         }
         b'R' => {
             let id = cursor.u32("relation ID")?;
@@ -278,17 +302,34 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
                 let name = cursor.string("column name")?;
                 let type_oid = cursor.u32("type OID")?;
                 cursor.u32("type modifier")?;
-                columns.push(RelationColumn { key: flags & 1 != 0, name, type_oid });
+                columns.push(RelationColumn {
+                    key: flags & 1 != 0,
+                    name,
+                    type_oid,
+                });
             }
-            let namespace = if namespace.is_empty() { "pg_catalog".to_owned() } else { namespace };
-            Ok(LogicalMessage::Relation(Relation { id, namespace, name, replica_identity, columns }))
+            let namespace = if namespace.is_empty() {
+                "pg_catalog".to_owned()
+            } else {
+                namespace
+            };
+            Ok(LogicalMessage::Relation(Relation {
+                id,
+                namespace,
+                name,
+                replica_identity,
+                columns,
+            }))
         }
         b'I' => {
             let relation = cursor.u32("relation ID")?;
             if cursor.u8("tuple kind")? != b'N' {
                 return Err(ReplicationError("an insert without its new row".to_owned()));
             }
-            Ok(LogicalMessage::Insert { relation, new: tuple(&mut cursor)? })
+            Ok(LogicalMessage::Insert {
+                relation,
+                new: tuple(&mut cursor)?,
+            })
         }
         b'U' => {
             let relation = cursor.u32("relation ID")?;
@@ -301,7 +342,11 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
             if kind != b'N' {
                 return Err(ReplicationError("an update without its new row".to_owned()));
             }
-            Ok(LogicalMessage::Update { relation, old, new: tuple(&mut cursor)? })
+            Ok(LogicalMessage::Update {
+                relation,
+                old,
+                new: tuple(&mut cursor)?,
+            })
         }
         b'D' => {
             let relation = cursor.u32("relation ID")?;
@@ -309,16 +354,27 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
             if kind != b'K' && kind != b'O' {
                 return Err(ReplicationError("a delete without its old key".to_owned()));
             }
-            Ok(LogicalMessage::Delete { relation, old: tuple(&mut cursor)? })
+            Ok(LogicalMessage::Delete {
+                relation,
+                old: tuple(&mut cursor)?,
+            })
         }
         b'T' => {
             let count = cursor.u32("relation count")?;
             let options = cursor.u8("truncate options")?;
-            let relations = (0..count).map(|_| cursor.u32("relation ID")).collect::<Result<_, _>>()?;
-            Ok(LogicalMessage::Truncate { cascade: options & 1 != 0, relations })
+            let relations = (0..count)
+                .map(|_| cursor.u32("relation ID"))
+                .collect::<Result<_, _>>()?;
+            Ok(LogicalMessage::Truncate {
+                cascade: options & 1 != 0,
+                relations,
+            })
         }
         b'Y' | b'O' | b'M' => Ok(LogicalMessage::Ignored),
-        other => Err(ReplicationError(format!("unknown pgoutput message '{}'", char::from(other)))),
+        other => Err(ReplicationError(format!(
+            "unknown pgoutput message '{}'",
+            char::from(other)
+        ))),
     }
 }
 
@@ -333,7 +389,11 @@ pub fn quote_literal(text: &str) -> String {
 }
 
 fn qualified(relation: &Relation) -> String {
-    format!("{}.{}", quote_identifier(&relation.namespace), quote_identifier(&relation.name))
+    format!(
+        "{}.{}",
+        quote_identifier(&relation.namespace),
+        quote_identifier(&relation.name)
+    )
 }
 
 fn value_sql(value: &TupleValue) -> String {
@@ -375,19 +435,27 @@ impl ChangeApplier {
     }
 
     fn relation(&self, id: u32) -> Result<&Relation, ReplicationError> {
-        self.relations
-            .get(&id)
-            .ok_or_else(|| ReplicationError(format!("a change to relation {id} came before its description")))
+        self.relations.get(&id).ok_or_else(|| {
+            ReplicationError(format!(
+                "a change to relation {id} came before its description"
+            ))
+        })
     }
 
-    fn key_condition(relation: &Relation, row: &[TupleValue], whole_row: bool) -> Result<String, ReplicationError> {
+    fn key_condition(
+        relation: &Relation,
+        row: &[TupleValue],
+        whole_row: bool,
+    ) -> Result<String, ReplicationError> {
         let mut conditions = Vec::new();
         for (column, value) in relation.columns.iter().zip(row) {
             if !whole_row && !column.key {
                 continue;
             }
             match value {
-                TupleValue::Null if whole_row => conditions.push(format!("{} IS NULL", quote_identifier(&column.name))),
+                TupleValue::Null if whole_row => {
+                    conditions.push(format!("{} IS NULL", quote_identifier(&column.name)))
+                }
                 TupleValue::Null | TupleValue::Unchanged if !whole_row => {
                     return Err(ReplicationError(format!(
                         "the key column {} of {} has no value",
@@ -396,7 +464,11 @@ impl ChangeApplier {
                     )));
                 }
                 TupleValue::Text(text) => {
-                    conditions.push(format!("{} = {}", quote_identifier(&column.name), quote_literal(text)));
+                    conditions.push(format!(
+                        "{} = {}",
+                        quote_identifier(&column.name),
+                        quote_literal(text)
+                    ));
                 }
                 _ => {}
             }
@@ -414,14 +486,25 @@ impl ChangeApplier {
     pub fn apply(&mut self, message: LogicalMessage) -> Result<Change, ReplicationError> {
         Ok(match message {
             LogicalMessage::Begin { .. } => Change::Begin,
-            LogicalMessage::Commit { end_lsn, commit_unix_micros, .. } => Change::Commit { end_lsn, commit_unix_micros },
+            LogicalMessage::Commit {
+                end_lsn,
+                commit_unix_micros,
+                ..
+            } => Change::Commit {
+                end_lsn,
+                commit_unix_micros,
+            },
             LogicalMessage::Relation(relation) => {
                 self.relations.insert(relation.id, relation);
                 Change::Nothing
             }
             LogicalMessage::Insert { relation, new } => {
                 let relation = self.relation(relation)?;
-                let columns: Vec<String> = relation.columns.iter().map(|column| quote_identifier(&column.name)).collect();
+                let columns: Vec<String> = relation
+                    .columns
+                    .iter()
+                    .map(|column| quote_identifier(&column.name))
+                    .collect();
                 let values: Vec<String> = new.iter().map(value_sql).collect();
                 Change::Statement(format!(
                     "INSERT INTO {} ({}) VALUES ({})",
@@ -437,7 +520,9 @@ impl ChangeApplier {
                     .iter()
                     .zip(&new)
                     .filter(|(_, value)| **value != TupleValue::Unchanged)
-                    .map(|(column, value)| format!("{} = {}", quote_identifier(&column.name), value_sql(value)))
+                    .map(|(column, value)| {
+                        format!("{} = {}", quote_identifier(&column.name), value_sql(value))
+                    })
                     .collect();
                 let whole_row = relation.replica_identity == b'f';
                 let condition = match &old {
@@ -457,8 +542,13 @@ impl ChangeApplier {
             }
             LogicalMessage::Delete { relation, old } => {
                 let relation = self.relation(relation)?;
-                let condition = Self::key_condition(relation, &old, relation.replica_identity == b'f')?;
-                Change::Statement(format!("DELETE FROM {} WHERE {}", qualified(relation), condition))
+                let condition =
+                    Self::key_condition(relation, &old, relation.replica_identity == b'f')?;
+                Change::Statement(format!(
+                    "DELETE FROM {} WHERE {}",
+                    qualified(relation),
+                    condition
+                ))
             }
             LogicalMessage::Truncate { cascade, relations } => {
                 let names = relations
@@ -522,15 +612,25 @@ mod tests {
     #[test]
     fn inserts_updates_and_deletes_become_sql() {
         let mut applier = ChangeApplier::new();
-        assert_eq!(applier.apply(parse_logical_message(&relation_message()).unwrap()).unwrap(), Change::Nothing);
+        assert_eq!(
+            applier
+                .apply(parse_logical_message(&relation_message()).unwrap())
+                .unwrap(),
+            Change::Nothing
+        );
 
         let mut insert = vec![b'I'];
         insert.extend_from_slice(&16_384u32.to_be_bytes());
         insert.push(b'N');
         insert.extend(tuple_bytes(&[Some("7"), Some("it's")]));
         assert_eq!(
-            applier.apply(parse_logical_message(&insert).unwrap()).unwrap(),
-            Change::Statement("INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('7', 'it''s')".to_owned())
+            applier
+                .apply(parse_logical_message(&insert).unwrap())
+                .unwrap(),
+            Change::Statement(
+                "INSERT INTO \"public\".\"orders\" (\"id\", \"note\") VALUES ('7', 'it''s')"
+                    .to_owned()
+            )
         );
 
         let mut update = vec![b'U'];
@@ -538,8 +638,13 @@ mod tests {
         update.push(b'N');
         update.extend(tuple_bytes(&[Some("7"), None]));
         assert_eq!(
-            applier.apply(parse_logical_message(&update).unwrap()).unwrap(),
-            Change::Statement("UPDATE \"public\".\"orders\" SET \"id\" = '7', \"note\" = NULL WHERE \"id\" = '7'".to_owned())
+            applier
+                .apply(parse_logical_message(&update).unwrap())
+                .unwrap(),
+            Change::Statement(
+                "UPDATE \"public\".\"orders\" SET \"id\" = '7', \"note\" = NULL WHERE \"id\" = '7'"
+                    .to_owned()
+            )
         );
 
         let mut delete = vec![b'D'];
@@ -547,7 +652,9 @@ mod tests {
         delete.push(b'K');
         delete.extend(tuple_bytes(&[Some("7"), None]));
         assert_eq!(
-            applier.apply(parse_logical_message(&delete).unwrap()).unwrap(),
+            applier
+                .apply(parse_logical_message(&delete).unwrap())
+                .unwrap(),
             Change::Statement("DELETE FROM \"public\".\"orders\" WHERE \"id\" = '7'".to_owned())
         );
     }
@@ -558,7 +665,11 @@ mod tests {
         insert.extend_from_slice(&99u32.to_be_bytes());
         insert.push(b'N');
         insert.extend(tuple_bytes(&[Some("1")]));
-        assert!(ChangeApplier::new().apply(parse_logical_message(&insert).unwrap()).is_err());
+        assert!(
+            ChangeApplier::new()
+                .apply(parse_logical_message(&insert).unwrap())
+                .is_err()
+        );
     }
 
     #[test]
@@ -569,7 +680,10 @@ mod tests {
         keepalive.push(1);
         assert_eq!(
             parse_stream_message(&keepalive).unwrap(),
-            StreamMessage::Keepalive { wal_end: 0x10, reply_requested: true }
+            StreamMessage::Keepalive {
+                wal_end: 0x10,
+                reply_requested: true
+            }
         );
         let update = standby_status_update(0x20, POSTGRES_EPOCH_MICROS + 5, false);
         assert_eq!(update.len(), 34);

@@ -152,12 +152,18 @@ fn a_cancel_stops_the_running_statement_until_it_is_cleared() {
     last(&mut session, "INSERT INTO t VALUES (1), (2), (3)");
     let signal = session.cancel_signal();
     signal.cancel();
-    assert_eq!(state(&mut session, "SELECT id FROM t WHERE id > 0"), "57014");
+    assert_eq!(
+        state(&mut session, "SELECT id FROM t WHERE id > 0"),
+        "57014"
+    );
     assert_eq!(state(&mut session, "SELECT pg_sleep(30)"), "57014");
     signal.clear();
     assert_eq!(count(&mut session), "3");
     assert_eq!(
-        last(&mut session, "SELECT pg_sleep(0.01), pg_sleep(NULL) IS NULL"),
+        last(
+            &mut session,
+            "SELECT pg_sleep(0.01), pg_sleep(NULL) IS NULL"
+        ),
         "pg_sleep|?column?\n|t\nSELECT 1"
     );
 }

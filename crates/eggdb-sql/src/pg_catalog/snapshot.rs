@@ -615,7 +615,7 @@ impl CatalogSnapshot {
         let requests: Vec<OidRequest> = stored
             .iter()
             .flat_map(|(internal, _)| {
-                [b'P', b'B'].map(|kind| OidRequest {
+                b"PB".map(|kind| OidRequest {
                     kind,
                     owner: String::new(),
                     name: internal.clone(),
@@ -1170,7 +1170,11 @@ fn routine_display_name(snapshot: &CatalogSnapshot, oid: u32) -> Option<String> 
     Some(if snapshot.routine_is_visible(routine) {
         quote_ident(&routine.name)
     } else {
-        format!("{}.{}", quote_ident(&routine.schema), quote_ident(&routine.name))
+        format!(
+            "{}.{}",
+            quote_ident(&routine.schema),
+            quote_ident(&routine.name)
+        )
     })
 }
 

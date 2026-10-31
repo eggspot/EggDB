@@ -97,9 +97,9 @@ $$;
 
 #[cfg(test)]
 mod tests {
+    use crate::error::SqlState;
     use crate::memory_store::MemoryStore;
     use crate::tests::render;
-    use crate::error::SqlState;
     use crate::{Session, SqlError};
 
     fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
@@ -126,11 +126,37 @@ mod tests {
     fn write_once_rows_are_never_changed_and_removed_only_after_retention() {
         let store = records();
         let mut session = Session::new(&store);
-        run(&mut session, "SELECT eggdb_retention.retain('public', 'trades', 'booked_at', interval '7 years')").unwrap();
-        assert_eq!(run(&mut session, "UPDATE trades SET client = 'eve' WHERE id = 1").unwrap_err().state(), SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE);
-        assert_eq!(run(&mut session, "DELETE FROM trades WHERE id = 2").unwrap_err().state(), SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE);
-        assert_eq!(run(&mut session, "DELETE FROM trades WHERE id = 1").unwrap(), "DELETE 1");
-        assert!(run(&mut session, "SELECT eggdb_retention.retain('public', 'trades', 'booked_at', interval '-1 day')").is_err());
+        run(
+            &mut session,
+            "SELECT eggdb_retention.retain('public', 'trades', 'booked_at', interval '7 years')",
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &mut session,
+                "UPDATE trades SET client = 'eve' WHERE id = 1"
+            )
+            .unwrap_err()
+            .state(),
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE
+        );
+        assert_eq!(
+            run(&mut session, "DELETE FROM trades WHERE id = 2")
+                .unwrap_err()
+                .state(),
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE
+        );
+        assert_eq!(
+            run(&mut session, "DELETE FROM trades WHERE id = 1").unwrap(),
+            "DELETE 1"
+        );
+        assert!(
+            run(
+                &mut session,
+                "SELECT eggdb_retention.retain('public', 'trades', 'booked_at', interval '-1 day')"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -138,19 +164,42 @@ mod tests {
         let store = records();
         let mut session = Session::new(&store);
         run(&mut session, "SELECT eggdb_retention.place_hold('case-42', 'public', 'trades', 'litigation with ada')").unwrap();
-        assert_eq!(run(&mut session, "DELETE FROM trades WHERE id = 3").unwrap_err().state(), SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE);
-        run(&mut session, "SELECT eggdb_retention.request_erasure('public', 'trades', 'client = ''ada''')").unwrap();
         assert_eq!(
-            run(&mut session, "SELECT waiting_for, erased_rows FROM eggdb_retention.erasure_requests").unwrap(),
+            run(&mut session, "DELETE FROM trades WHERE id = 3")
+                .unwrap_err()
+                .state(),
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE
+        );
+        run(
+            &mut session,
+            "SELECT eggdb_retention.request_erasure('public', 'trades', 'client = ''ada''')",
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT waiting_for, erased_rows FROM eggdb_retention.erasure_requests"
+            )
+            .unwrap(),
             "waiting_for|erased_rows\nlegal hold case-42|\nSELECT 1"
         );
         run(&mut session, "SELECT eggdb_retention.lift_hold('case-42')").unwrap();
-        assert_eq!(run(&mut session, "SELECT eggdb_retention.process_erasures() AS done").unwrap(), "done\n1\nSELECT 1");
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_retention.process_erasures() AS done"
+            )
+            .unwrap(),
+            "done\n1\nSELECT 1"
+        );
         assert_eq!(
             run(&mut session, "SELECT waiting_for IS NULL AS cleared, erased_rows FROM eggdb_retention.erasure_requests").unwrap(),
             "cleared|erased_rows\nt|2\nSELECT 1"
         );
-        assert_eq!(run(&mut session, "SELECT count(*) AS left FROM trades").unwrap(), "left\n1\nSELECT 1");
+        assert_eq!(
+            run(&mut session, "SELECT count(*) AS left FROM trades").unwrap(),
+            "left\n1\nSELECT 1"
+        );
         assert!(run(&mut session, "SELECT eggdb_retention.lift_hold('case-42')").is_err());
     }
 }

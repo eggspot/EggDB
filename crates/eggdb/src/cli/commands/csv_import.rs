@@ -36,7 +36,8 @@ fn load_bcp<S: KeyValueStore>(
     options: &CsvOptions,
 ) -> SqlResult<u64> {
     session.execute(statement, &mut |_| {})?;
-    let mut reader = BcpCharacterReader::new(input, terminators).skipping(u64::from(options.header));
+    let mut reader =
+        BcpCharacterReader::new(input, terminators).skipping(u64::from(options.header));
     let mut loaded: SqlResult<u64> = Ok(0);
     session.execute_bulk_load(&mut reader, &mut |step| {
         loaded = step.outcome.as_ref().map(loaded_rows).map_err(Clone::clone);
@@ -126,12 +127,14 @@ impl Session<'_> {
             None
         };
         let db = match &dry_run_copy {
-            Some(copy) => Database::open_with(copy, self.database_options(writing, Some(bulk_cache(size))))
-                .map(|db| Opened::Owned(Box::new(db)))
-                .map_err(|error| {
-                    let _ = std::fs::remove_file(copy);
-                    self.open_failure(&error, writing)
-                })?,
+            Some(copy) => {
+                Database::open_with(copy, self.database_options(writing, Some(bulk_cache(size))))
+                    .map(|db| Opened::Owned(Box::new(db)))
+                    .map_err(|error| {
+                        let _ = std::fs::remove_file(copy);
+                        self.open_failure(&error, writing)
+                    })?
+            }
             None => self.open(writing, Some(bulk_cache(size)))?,
         };
         let store = DatabaseStore(&db);

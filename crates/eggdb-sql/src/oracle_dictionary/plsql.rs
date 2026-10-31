@@ -190,7 +190,11 @@ struct SourceUnit<'s> {
     source: &'s str,
 }
 
-fn push_source_lines(dictionary: &Dictionary<'_>, rows: &mut Vec<Vec<Value>>, unit: SourceUnit<'_>) {
+fn push_source_lines(
+    dictionary: &Dictionary<'_>,
+    rows: &mut Vec<Vec<Value>>,
+    unit: SourceUnit<'_>,
+) {
     for (at, line) in unit.source.split_inclusive('\n').enumerate() {
         rows.push(
             dictionary
@@ -358,7 +362,10 @@ pub(super) fn procedure_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
                 .row()
                 .set("owner", dictionary.owner(signature.schema))
                 .set("object_name", shown(signature.object_name))
-                .set("procedure_name", signature.member.map_or(Value::Null, shown))
+                .set(
+                    "procedure_name",
+                    signature.member.map_or(Value::Null, shown),
+                )
                 .set("object_id", number(i64::from(signature.object_id)))
                 .set("subprogram_id", number(signature.subprogram_id))
                 .set("overload", overload_text(signature.overload))
@@ -464,7 +471,11 @@ fn package_type_name(declared: &TypeDeclaration) -> String {
     }
 }
 
-fn column_type(dictionary: &Dictionary<'_>, unit_schema: &str, parts: &[String]) -> Option<SqlType> {
+fn column_type(
+    dictionary: &Dictionary<'_>,
+    unit_schema: &str,
+    parts: &[String],
+) -> Option<SqlType> {
     let snapshot = dictionary.snapshot;
     let (at, column) = match parts {
         [table, column] => (
@@ -495,10 +506,7 @@ fn named_type<'p>(
     let (name, package) = match parts {
         [name] => (name, signature.package),
         [package, name] => (name, find_package(packages, None, package)),
-        [schema, package, name] => (
-            name,
-            find_package(packages, Some(schema.as_str()), package),
-        ),
+        [schema, package, name] => (name, find_package(packages, Some(schema.as_str()), package)),
         _ => return ArgumentType::named(UNDEFINED_TYPE),
     };
     match package.and_then(|package| package.type_named(name).map(|found| (package, found))) {
@@ -726,9 +734,8 @@ fn trigger_source(definition: &TriggerDefinition) -> TriggerSource {
         body,
     };
     match &definition.action {
-        TriggerAction::PlSql { body, .. } => {
-            oracle_trigger_source(unit_source(&definition.text)).unwrap_or_else(|| whole(body.clone()))
-        }
+        TriggerAction::PlSql { body, .. } => oracle_trigger_source(unit_source(&definition.text))
+            .unwrap_or_else(|| whole(body.clone())),
         TriggerAction::Function { name, arguments } => TriggerSource {
             action_type: "CALL",
             ..whole(format!("EXECUTE FUNCTION {name}({})", arguments.join(", ")))
@@ -737,7 +744,11 @@ fn trigger_source(definition: &TriggerDefinition) -> TriggerSource {
     }
 }
 
-fn timing_flag(definition: &TriggerDefinition, timing: TriggerTiming, level: TriggerLevel) -> Value {
+fn timing_flag(
+    definition: &TriggerDefinition,
+    timing: TriggerTiming,
+    level: TriggerLevel,
+) -> Value {
     flag(
         definition.timing == timing && definition.level == level,
         "YES",
@@ -779,7 +790,10 @@ pub(super) fn trigger_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
                     "referencing_names",
                     Value::Text(referencing_names(&definition.action)),
                 )
-                .set("when_clause", optional_text(definition.condition.as_deref()))
+                .set(
+                    "when_clause",
+                    optional_text(definition.condition.as_deref()),
+                )
                 .set("status", flag(definition.enabled, "ENABLED", "DISABLED"))
                 .set("description", Value::Text(source.description))
                 .set("action_type", text(source.action_type))

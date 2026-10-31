@@ -101,7 +101,10 @@ pub fn order(left: &Value, right: &Value) -> Ordering {
     }
     match (left, right) {
         (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-        (a, b) if a.as_f64().is_some() => a.as_f64().unwrap_or(0.0).total_cmp(&b.as_f64().unwrap_or(0.0)),
+        (a, b) if a.as_f64().is_some() => a
+            .as_f64()
+            .unwrap_or(0.0)
+            .total_cmp(&b.as_f64().unwrap_or(0.0)),
         (Value::String(a), Value::String(b)) => a.cmp(b),
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
         (Value::List(a), Value::List(b)) => {
@@ -123,7 +126,9 @@ pub fn order(left: &Value, right: &Value) -> Ordering {
 pub fn equals(left: &Value, right: &Value) -> Option<bool> {
     match (left, right) {
         (Value::Null, _) | (_, Value::Null) => None,
-        (Value::Integer(a), Value::Float(b)) | (Value::Float(b), Value::Integer(a)) => Some(*a as f64 == *b),
+        (Value::Integer(a), Value::Float(b)) | (Value::Float(b), Value::Integer(a)) => {
+            Some(*a as f64 == *b)
+        }
         (Value::List(a), Value::List(b)) => {
             if a.len() != b.len() {
                 return Some(false);

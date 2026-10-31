@@ -227,7 +227,8 @@ fn made_date(year: i64, month: i64, day: i64) -> SqlResult<i64> {
 }
 
 fn made_time(hour: i64, minute: i64, seconds: f64) -> SqlResult<i64> {
-    let fits = (0..=23).contains(&hour) && (0..=59).contains(&minute) && (0.0..60.0).contains(&seconds);
+    let fits =
+        (0..=23).contains(&hour) && (0..=59).contains(&minute) && (0.0..60.0).contains(&seconds);
     let midnight = hour == 24 && minute == 0 && seconds == 0.0;
     if !(fits || midnight) {
         return Err(time_field_error(hour, minute, seconds));
@@ -377,7 +378,11 @@ fn bucket_error(message: &str) -> SqlError {
     SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message)
 }
 
-fn time_bucket(width: &Interval, source: &Value, origin: Option<&Value>) -> Option<SqlResult<Value>> {
+fn time_bucket(
+    width: &Interval,
+    source: &Value,
+    origin: Option<&Value>,
+) -> Option<SqlResult<Value>> {
     if matches!(source, Value::Null) || matches!(origin, Some(Value::Null)) {
         return Some(Ok(Value::Null));
     }
@@ -388,10 +393,15 @@ fn time_bucket(width: &Interval, source: &Value, origin: Option<&Value>) -> Opti
     };
     let (origin_micros, offset_micros) = match origin {
         None => (None, 0i128),
-        Some(Value::Interval(offset)) if offset.months == 0 => {
-            (None, i128::from(offset.days) * i128::from(MICROS_PER_DAY) + i128::from(offset.micros))
+        Some(Value::Interval(offset)) if offset.months == 0 => (
+            None,
+            i128::from(offset.days) * i128::from(MICROS_PER_DAY) + i128::from(offset.micros),
+        ),
+        Some(Value::Interval(_)) => {
+            return Some(Err(bucket_error(
+                "time_bucket offsets cannot contain months or years",
+            )));
         }
-        Some(Value::Interval(_)) => return Some(Err(bucket_error("time_bucket offsets cannot contain months or years"))),
         Some(other) => match binned_instant(other, Some(zoned))? {
             Ok((found, _)) => (Some(found), 0),
             Err(error) => return Some(Err(error)),
@@ -399,14 +409,20 @@ fn time_bucket(width: &Interval, source: &Value, origin: Option<&Value>) -> Opti
     };
     let bucketed = if width.months != 0 {
         if width.days != 0 || width.micros != 0 || width.months < 0 {
-            return Some(Err(bucket_error("month intervals cannot have day or time component")));
+            return Some(Err(bucket_error(
+                "month intervals cannot have day or time component",
+            )));
         }
-        let origin_days = origin_micros.map_or(0, |origin| datetime::timestamp_to_date(origin));
+        let origin_days = origin_micros.map_or(0, datetime::timestamp_to_date);
         let (origin_year, origin_month, _) = datetime::civil_from_days(i64::from(origin_days));
         let shifted = i128::from(micros) - offset_micros;
-        let (year, month, _) = datetime::civil_from_days(shifted.div_euclid(i128::from(MICROS_PER_DAY)) as i64);
+        let (year, month, _) =
+            datetime::civil_from_days(shifted.div_euclid(i128::from(MICROS_PER_DAY)) as i64);
         let index = (year * 12 + month - 1) - (origin_year * 12 + origin_month - 1);
-        let start = index.div_euclid(i64::from(width.months)) * i64::from(width.months) + origin_year * 12 + origin_month - 1;
+        let start = index.div_euclid(i64::from(width.months)) * i64::from(width.months)
+            + origin_year * 12
+            + origin_month
+            - 1;
         let days = datetime::days_from_civil(start.div_euclid(12), start.rem_euclid(12) + 1, 1);
         i128::from(days) * i128::from(MICROS_PER_DAY) + offset_micros
     } else {
@@ -414,29 +430,48 @@ fn time_bucket(width: &Interval, source: &Value, origin: Option<&Value>) -> Opti
         if step <= 0 {
             return Some(Err(bucket_error("interval must be greater than zero")));
         }
-        let origin = origin_micros.map_or(i128::from(TIME_BUCKET_ORIGIN_DAYS) * i128::from(MICROS_PER_DAY) + offset_micros, i128::from);
+        let origin = origin_micros.map_or(
+            i128::from(TIME_BUCKET_ORIGIN_DAYS) * i128::from(MICROS_PER_DAY) + offset_micros,
+            i128::from,
+        );
         origin + (i128::from(micros) - origin).div_euclid(step) * step
     };
-    Some(datetime::checked_timestamp(bucketed).map(|micros| match (date, zoned) {
-        (true, _) => Value::Date(datetime::timestamp_to_date(micros)),
-        (false, true) => Value::TimestampTz(micros),
-        (false, false) => Value::Timestamp(micros),
-    }))
+    Some(
+        datetime::checked_timestamp(bucketed).map(|micros| match (date, zoned) {
+            (true, _) => Value::Date(datetime::timestamp_to_date(micros)),
+            (false, true) => Value::TimestampTz(micros),
+            (false, false) => Value::Timestamp(micros),
+        }),
+    )
 }
 
 fn integer_bucket(width: &Value, value: &Value, offset: &Value) -> Option<SqlResult<Value>> {
-    let (Some(width_number), Some(number), Some(offset_number)) = (width.as_integer(), value.as_integer(), offset.as_integer()) else {
-        return matches!((width, value, offset), (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null)).then_some(Ok(Value::Null));
+    let (Some(width_number), Some(number), Some(offset_number)) =
+        (width.as_integer(), value.as_integer(), offset.as_integer())
+    else {
+        return matches!(
+            (width, value, offset),
+            (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null)
+        )
+        .then_some(Ok(Value::Null));
     };
     if width_number <= 0 {
         return Some(Err(bucket_error("width must be greater than zero")));
     }
-    let bucket = (i128::from(number) - i128::from(offset_number)).div_euclid(i128::from(width_number)) * i128::from(width_number)
+    let bucket = (i128::from(number) - i128::from(offset_number))
+        .div_euclid(i128::from(width_number))
+        * i128::from(width_number)
         + i128::from(offset_number);
     Some(Ok(match value {
-        Value::SmallInt(_) => i16::try_from(bucket).map(Value::SmallInt).unwrap_or(Value::Null),
-        Value::Integer(_) => i32::try_from(bucket).map(Value::Integer).unwrap_or(Value::Null),
-        _ => i64::try_from(bucket).map(Value::BigInt).unwrap_or(Value::Null),
+        Value::SmallInt(_) => i16::try_from(bucket)
+            .map(Value::SmallInt)
+            .unwrap_or(Value::Null),
+        Value::Integer(_) => i32::try_from(bucket)
+            .map(Value::Integer)
+            .unwrap_or(Value::Null),
+        _ => i64::try_from(bucket)
+            .map(Value::BigInt)
+            .unwrap_or(Value::Null),
     }))
 }
 

@@ -50,8 +50,8 @@ impl Region {
         let types = &self.compiled.types;
         let offset_of = |index: usize| types.get(index).map_or(0, |local| local.offset);
         let transitions = &self.compiled.transitions;
-        let after = transitions
-            .partition_point(|&(at, index)| at + i64::from(offset_of(index)) <= local);
+        let after =
+            transitions.partition_point(|&(at, index)| at + i64::from(offset_of(index)) <= local);
         let index = after
             .checked_sub(1)
             .and_then(|last| transitions.get(last))
@@ -249,8 +249,14 @@ mod tests {
         assert_eq!(paris.offset_at(utc(2026, 3, 29, 1, 0)), 7200);
         assert_eq!(paris.offset_at(utc(2026, 10, 25, 0, 59)), 7200);
         assert_eq!(paris.offset_at(utc(2026, 10, 25, 1, 0)), 3600);
-        assert_eq!(paris.abbreviation_at(utc(2026, 7, 1, 12, 0)).as_deref(), Some("CEST"));
-        assert_eq!(paris.abbreviation_at(utc(2026, 1, 1, 12, 0)).as_deref(), Some("CET"));
+        assert_eq!(
+            paris.abbreviation_at(utc(2026, 7, 1, 12, 0)).as_deref(),
+            Some("CEST")
+        );
+        assert_eq!(
+            paris.abbreviation_at(utc(2026, 1, 1, 12, 0)).as_deref(),
+            Some("CET")
+        );
         assert!(paris.is_dst_at(utc(2026, 7, 1, 12, 0)));
         assert_eq!(paris.offset_at(utc(1900, 1, 1, 0, 0)), 561);
     }
@@ -273,17 +279,32 @@ mod tests {
         assert_eq!(sydney.offset_at(utc(2026, 7, 15, 0, 0)), 10 * 3600);
         let lord_howe = zone("Australia/Lord_Howe");
         assert_eq!(lord_howe.offset_at(utc(2026, 1, 15, 0, 0)), 11 * 3600);
-        assert_eq!(lord_howe.offset_at(utc(2026, 7, 15, 0, 0)), 10 * 3600 + 1800);
-        assert_eq!(zone("Asia/Kolkata").offset_at(utc(2026, 7, 15, 0, 0)), 5 * 3600 + 1800);
-        assert_eq!(zone("Asia/Kathmandu").offset_at(utc(2026, 7, 15, 0, 0)), 5 * 3600 + 2700);
+        assert_eq!(
+            lord_howe.offset_at(utc(2026, 7, 15, 0, 0)),
+            10 * 3600 + 1800
+        );
+        assert_eq!(
+            zone("Asia/Kolkata").offset_at(utc(2026, 7, 15, 0, 0)),
+            5 * 3600 + 1800
+        );
+        assert_eq!(
+            zone("Asia/Kathmandu").offset_at(utc(2026, 7, 15, 0, 0)),
+            5 * 3600 + 2700
+        );
     }
 
     #[test]
     fn dublin_keeps_postgresql_s_summer_time_flag() {
         let dublin = zone("Europe/Dublin");
         assert!(dublin.is_dst_at(utc(2026, 7, 1, 12, 0)));
-        assert_eq!(dublin.abbreviation_at(utc(2026, 7, 1, 12, 0)).as_deref(), Some("IST"));
-        assert_eq!(dublin.abbreviation_at(utc(2026, 1, 1, 12, 0)).as_deref(), Some("GMT"));
+        assert_eq!(
+            dublin.abbreviation_at(utc(2026, 7, 1, 12, 0)).as_deref(),
+            Some("IST")
+        );
+        assert_eq!(
+            dublin.abbreviation_at(utc(2026, 1, 1, 12, 0)).as_deref(),
+            Some("GMT")
+        );
     }
 
     #[test]
@@ -313,7 +334,10 @@ mod tests {
             let found = zone(name);
             for instant in [datetime::MIN_TIMESTAMP, 0, datetime::END_TIMESTAMP - 1] {
                 assert!(datetime::valid_offset(found.offset_at(instant)), "{name}");
-                assert!(datetime::valid_offset(found.offset_of_local(instant)), "{name}");
+                assert!(
+                    datetime::valid_offset(found.offset_of_local(instant)),
+                    "{name}"
+                );
             }
         }
     }

@@ -131,7 +131,10 @@ impl TextFunction {
 
 fn invalid_length(function: TextFunction) -> SqlError {
     let (code, message) = match function {
-        TextFunction::Right => (536, "Invalid length parameter passed to the RIGHT function."),
+        TextFunction::Right => (
+            536,
+            "Invalid length parameter passed to the RIGHT function.",
+        ),
         _ => (
             537,
             "Invalid length parameter passed to the LEFT or SUBSTRING function.",
@@ -181,13 +184,10 @@ fn count(value: &Value, argument: usize, function: TextFunction) -> SqlResult<Op
             }
             Some(number as i64)
         }
-        Value::Text(_) | Value::Bpchar(_) => crate::sqlserver_conversion::convert(
-            value.clone(),
-            SqlServerType::BigInt,
-            None,
-            None,
-        )?
-        .as_integer(),
+        Value::Text(_) | Value::Bpchar(_) => {
+            crate::sqlserver_conversion::convert(value.clone(), SqlServerType::BigInt, None, None)?
+                .as_integer()
+        }
         other => return Err(argument_type_invalid(other, argument, function)),
     })
 }
@@ -710,7 +710,10 @@ mod tests {
         assert_eq!(run(TextFunction::Left, &[text("abcdef"), int(2)]), "ab");
         assert_eq!(run(TextFunction::Right, &[text("abcdef"), int(2)]), "ef");
         assert_eq!(run(TextFunction::Right, &[text("ab"), int(9)]), "ab");
-        assert_eq!(run(TextFunction::Right, &[text("ab"), int(-1)]), "error 536");
+        assert_eq!(
+            run(TextFunction::Right, &[text("ab"), int(-1)]),
+            "error 536"
+        );
         assert_eq!(run(TextFunction::Left, &[text("ab"), int(-1)]), "error 537");
         assert_eq!(run(TextFunction::Reverse, &[text("é😀z")]), "z😀é");
     }
@@ -781,7 +784,10 @@ mod tests {
     #[test]
     fn replicate_and_space_stop_at_eight_thousand_bytes_unless_the_value_is_large() {
         let int = Value::Integer;
-        assert_eq!(run(TextFunction::Replicate, &[text("ab"), int(3)]), "ababab");
+        assert_eq!(
+            run(TextFunction::Replicate, &[text("ab"), int(3)]),
+            "ababab"
+        );
         assert_eq!(run(TextFunction::Replicate, &[text("ab"), int(-1)]), "NULL");
         let short = run(TextFunction::Replicate, &[text("ab"), int(10_000)]);
         assert_eq!(short.len(), 8000);
@@ -798,11 +804,7 @@ mod tests {
         let cut = run_from(TextFunction::Replicate, &[text("é"), int(10_000)], national);
         assert_eq!(cut.chars().count(), 4000);
         assert_eq!(
-            run_from(
-                TextFunction::Replicate,
-                &[text("ab"), int(i32::MAX)],
-                large
-            ),
+            run_from(TextFunction::Replicate, &[text("ab"), int(i32::MAX)], large),
             "error 7119"
         );
         assert_eq!(run(TextFunction::Space, &[int(3)]), "   ");
@@ -815,7 +817,12 @@ mod tests {
         assert_eq!(
             run(
                 TextFunction::Concat,
-                &[text("a"), Value::Null, Value::Integer(1), Value::Boolean(true)]
+                &[
+                    text("a"),
+                    Value::Null,
+                    Value::Integer(1),
+                    Value::Boolean(true)
+                ]
             ),
             "a11"
         );
@@ -827,7 +834,10 @@ mod tests {
             "a,b"
         );
         assert_eq!(
-            run(TextFunction::ConcatWs, &[text(","), Value::Null, Value::Null]),
+            run(
+                TextFunction::ConcatWs,
+                &[text(","), Value::Null, Value::Null]
+            ),
             ""
         );
     }
@@ -839,7 +849,10 @@ mod tests {
             declared: None,
         };
         assert_eq!(run(TextFunction::DataLength, &[text("abc")]), "3");
-        assert_eq!(run_from(TextFunction::DataLength, &[text("abc")], national), "6");
+        assert_eq!(
+            run_from(TextFunction::DataLength, &[text("abc")], national),
+            "6"
+        );
         assert_eq!(run(TextFunction::DataLength, &[Value::Integer(1)]), "4");
         assert_eq!(run(TextFunction::DataLength, &[Value::BigInt(1)]), "8");
         assert_eq!(run(TextFunction::DataLength, &[Value::Date(0)]), "3");

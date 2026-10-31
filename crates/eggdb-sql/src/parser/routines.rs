@@ -114,11 +114,18 @@ impl<'t> Parser<'t> {
     }
 
     fn user_variable_argument(&self) -> Option<String> {
-        if !self.mysql() || !matches!(self.peek_kind_at(1), TokenKind::Comma | TokenKind::RightParen) {
+        if !self.mysql()
+            || !matches!(
+                self.peek_kind_at(1),
+                TokenKind::Comma | TokenKind::RightParen
+            )
+        {
             return None;
         }
         match self.peek_kind() {
-            TokenKind::Variable(name) if !name.starts_with("@@") => Some(super::mysql::variable_name(name).to_owned()),
+            TokenKind::Variable(name) if !name.starts_with("@@") => {
+                Some(super::mysql::variable_name(name).to_owned())
+            }
             _ => None,
         }
     }
@@ -432,10 +439,8 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 let start = self.peek().start;
                 self.expression()?;
-                attributes.body = Some(format!(
-                    "SELECT {}",
-                    self.slice(start, self.previous_end())
-                ));
+                attributes.body =
+                    Some(format!("SELECT {}", self.slice(start, self.previous_end())));
                 attributes.language.get_or_insert(RoutineLanguage::Sql);
             } else if self.is_word("begin") && self.is_word_at(1, "atomic") {
                 self.at += 2;
@@ -473,7 +478,9 @@ impl<'t> Parser<'t> {
         let text = text.as_ref().to_owned();
         self.at += 1;
         if self.peek_kind() == &TokenKind::Comma {
-            return Err(self.not_supported("a routine in a loadable object file (AS 'file', 'symbol')"));
+            return Err(
+                self.not_supported("a routine in a loadable object file (AS 'file', 'symbol')")
+            );
         }
         let position = self.source_position(token.start, token.end, &text);
         Ok((text, position))

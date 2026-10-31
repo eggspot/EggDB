@@ -22,7 +22,13 @@ const LOGIC_WORDS: [&str; 12] = [
     "sp_executesql",
 ];
 
-const TRANSACTION_WORDS: [&str; 5] = ["tran", "transaction", "distributed", "dialog", "conversation"];
+const TRANSACTION_WORDS: [&str; 5] = [
+    "tran",
+    "transaction",
+    "distributed",
+    "dialog",
+    "conversation",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Instruction {
@@ -64,11 +70,15 @@ pub(crate) struct Program {
 
 impl Program {
     pub(crate) fn try_around(&self, at: usize) -> Option<usize> {
-        self.tries.iter().rposition(|block| block.body.contains(&at))
+        self.tries
+            .iter()
+            .rposition(|block| block.body.contains(&at))
     }
 
     pub(crate) fn handler_around(&self, at: usize) -> Option<usize> {
-        self.tries.iter().rposition(|block| block.handler.contains(&at))
+        self.tries
+            .iter()
+            .rposition(|block| block.handler.contains(&at))
     }
 }
 
@@ -103,7 +113,9 @@ pub(crate) fn uses_batch_logic(tokens: &[Token<'_>]) -> bool {
         .any(|(at, token)| match &token.kind {
             TokenKind::Variable(name) => !name.starts_with("@@"),
             TokenKind::Word(word) => match word.as_ref() {
-                "begin" => !word_at(tokens, at + 1).is_some_and(|next| TRANSACTION_WORDS.contains(&next)),
+                "begin" => {
+                    !word_at(tokens, at + 1).is_some_and(|next| TRANSACTION_WORDS.contains(&next))
+                }
                 "exec" | "execute" => tokens
                     .get(at + 1)
                     .is_some_and(|next| next.kind == TokenKind::LeftParen),

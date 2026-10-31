@@ -9,8 +9,8 @@ use crate::error::TlsError;
 use crate::handshake::HandshakeBuffer;
 use crate::record::{
     MAX_PLAINTEXT_BYTES, MAX_TLS12_CIPHERTEXT_BYTES, MAX_TLS13_CIPHERTEXT_BYTES,
-    RECORD_HEADER_BYTES, RecordHeader, Tls12RecordProtection, Tls13RecordProtection,
-    content_type, plaintext_record,
+    RECORD_HEADER_BYTES, RecordHeader, Tls12RecordProtection, Tls13RecordProtection, content_type,
+    plaintext_record,
 };
 
 /// How records in one direction are protected.
@@ -79,14 +79,12 @@ impl<S: Read + Write> RecordLayer<S> {
         self.write = protection;
     }
 
-    pub(crate) fn handshake_buffer_is_empty(&self) -> bool {
-        self.handshake.is_empty()
-    }
-
     fn fill_incoming(&mut self, wanted: usize) -> Result<bool, TlsError> {
         let mut chunk = [0u8; 4096];
         while self.incoming.len() < wanted {
-            let room = (wanted - self.incoming.len()).max(RECORD_HEADER_BYTES).min(chunk.len());
+            let room = (wanted - self.incoming.len())
+                .max(RECORD_HEADER_BYTES)
+                .min(chunk.len());
             match self.stream.read(&mut chunk[..room]) {
                 Ok(0) if self.incoming.is_empty() => return Ok(false),
                 Ok(0) => {
@@ -122,7 +120,11 @@ impl<S: Read + Write> RecordLayer<S> {
         if !self.fill_incoming(total)? {
             return Err(TlsError::Io(std::io::ErrorKind::UnexpectedEof.into()));
         }
-        let mut payload: Vec<u8> = self.incoming.drain(..total).skip(RECORD_HEADER_BYTES).collect();
+        let mut payload: Vec<u8> = self
+            .incoming
+            .drain(..total)
+            .skip(RECORD_HEADER_BYTES)
+            .collect();
         let content = match &mut self.read {
             Protection::Plaintext => {
                 if header.content_type == content_type::APPLICATION_DATA {
@@ -134,9 +136,11 @@ impl<S: Read + Write> RecordLayer<S> {
                 header.content_type
             }
             Protection::Tls13(protection) => {
-                let unprotected_during_handshake = self.ignore_change_cipher_spec
-                    && header.content_type == content_type::ALERT;
-                if header.content_type == content_type::CHANGE_CIPHER_SPEC || unprotected_during_handshake {
+                let unprotected_during_handshake =
+                    self.ignore_change_cipher_spec && header.content_type == content_type::ALERT;
+                if header.content_type == content_type::CHANGE_CIPHER_SPEC
+                    || unprotected_during_handshake
+                {
                     header.content_type
                 } else {
                     protection.open(&header, &mut payload)?
@@ -148,7 +152,10 @@ impl<S: Read + Write> RecordLayer<S> {
             }
         };
         if content == content_type::HANDSHAKE && payload.is_empty() {
-            return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "an empty handshake record"));
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "an empty handshake record",
+            ));
         }
         Ok(Some((content, payload)))
     }
@@ -175,7 +182,8 @@ impl<S: Read + Write> RecordLayer<S> {
             };
             match content {
                 content_type::HANDSHAKE => self.handshake.push(&payload)?,
-                content_type::CHANGE_CIPHER_SPEC if self.ignore_change_cipher_spec && payload == [1] => {}
+                content_type::CHANGE_CIPHER_SPEC
+                    if self.ignore_change_cipher_spec && payload == [1] => {}
                 content_type::ALERT => return Err(peer_alert(&payload)),
                 _ => {
                     return Err(TlsError::protocol(
@@ -190,12 +198,18 @@ impl<S: Read + Write> RecordLayer<S> {
     /// Reads the TLS 1.2 ChangeCipherSpec that must come next.
     pub(crate) fn read_change_cipher_spec(&mut self) -> Result<(), TlsError> {
         if !self.handshake.is_empty() {
-            return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "ChangeCipherSpec inside a handshake message"));
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "ChangeCipherSpec inside a handshake message",
+            ));
         }
         match self.read_record()? {
             Some((content_type::CHANGE_CIPHER_SPEC, payload)) if payload == [1] => Ok(()),
             Some((content_type::ALERT, payload)) => Err(peer_alert(&payload)),
-            Some(_) => Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "expected ChangeCipherSpec")),
+            Some(_) => Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "expected ChangeCipherSpec",
+            )),
             None => Err(TlsError::Io(std::io::ErrorKind::UnexpectedEof.into())),
         }
     }
@@ -253,6 +267,9 @@ impl<S: Read + Write> RecordLayer<S> {
 pub(crate) fn peer_alert(payload: &[u8]) -> TlsError {
     match Alert::decode(payload) {
         Ok(alert) => TlsError::PeerAlert(alert),
-        Err(_) => TlsError::protocol(AlertDescription::DecodeError, "the peer sent a malformed alert"),
+        Err(_) => TlsError::protocol(
+            AlertDescription::DecodeError,
+            "the peer sent a malformed alert",
+        ),
     }
 }

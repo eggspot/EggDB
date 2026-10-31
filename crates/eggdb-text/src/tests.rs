@@ -1,4 +1,7 @@
-use crate::{Form, case_fold, compare_accent_insensitive, compare_case_insensitive, is_normalized, normalize, primary_key};
+use crate::{
+    Form, case_fold, compare_accent_insensitive, compare_case_insensitive, is_normalized,
+    normalize, primary_key,
+};
 use std::cmp::Ordering;
 
 #[test]
@@ -23,7 +26,10 @@ fn case_folding_and_comparisons_ignore_what_they_say() {
     assert_eq!(primary_key("résumé"), primary_key("RESUME"));
     assert_eq!(compare_case_insensitive("apple", "Banana"), Ordering::Less);
     assert_eq!(compare_case_insensitive("Apple", "apple"), Ordering::Less);
-    assert_eq!(compare_accent_insensitive("café", "cafe"), Ordering::Greater);
+    assert_eq!(
+        compare_accent_insensitive("café", "cafe"),
+        Ordering::Greater
+    );
     assert_eq!(compare_accent_insensitive("same", "same"), Ordering::Equal);
 }
 
@@ -42,7 +48,12 @@ fn the_unicode_normalization_conformance_file_passes_when_given() {
         let columns: Vec<String> = data
             .split(';')
             .take(5)
-            .map(|column| column.split_whitespace().filter_map(|code| u32::from_str_radix(code, 16).ok().and_then(char::from_u32)).collect())
+            .map(|column| {
+                column
+                    .split_whitespace()
+                    .filter_map(|code| u32::from_str_radix(code, 16).ok().and_then(char::from_u32))
+                    .collect()
+            })
             .collect();
         let [source, nfc, nfd, nfkc, nfkd] = columns.as_slice() else {
             continue;

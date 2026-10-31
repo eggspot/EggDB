@@ -86,7 +86,15 @@ impl Painter<'_, '_> {
         self.canvas.fill_rect(Rect::new(x, y, w, h), color);
     }
 
-    fn text(&mut self, face: &dyn Typeface, text: &str, x: f32, top: f32, metrics: (f32, f32), color: Rgba) -> f32 {
+    fn text(
+        &mut self,
+        face: &dyn Typeface,
+        text: &str,
+        x: f32,
+        top: f32,
+        metrics: (f32, f32),
+        color: Rgba,
+    ) -> f32 {
         let style = TextStyle {
             size: metrics.0,
             line_height: metrics.1,
@@ -95,7 +103,15 @@ impl Painter<'_, '_> {
         face.draw_text(self.canvas, text, x, top, style)
     }
 
-    fn text_right(&mut self, face: &dyn Typeface, text: &str, right: f32, top: f32, metrics: (f32, f32), color: Rgba) {
+    fn text_right(
+        &mut self,
+        face: &dyn Typeface,
+        text: &str,
+        right: f32,
+        top: f32,
+        metrics: (f32, f32),
+        color: Rgba,
+    ) {
         let width = face.width(text, metrics.0);
         self.text(face, text, right - width, top, metrics, color);
     }
@@ -155,16 +171,40 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let faces = paint.faces;
     paint.rect(0.0, 0.0, 1280.0, 44.0, theme.bg2);
     paint.rect(0.0, 43.0, 1280.0, 1.0, theme.border);
-    paint.canvas.stroke_circle(20.0, 22.0, 16.0, 2.0, theme.accent);
+    paint
+        .canvas
+        .stroke_circle(20.0, 22.0, 16.0, 2.0, theme.accent);
     paint.canvas.fill_circle(20.0, 23.0, 6.0, theme.brand_yolk);
-    let after_name = paint.text(faces.ui_bold, &window.database, 36.0, 13.0, BODY, theme.text_primary);
-    paint.text(faces.ui, &window.location, (after_name + 8.0).max(72.0), 13.0, BODY, theme.text_secondary);
+    let after_name = paint.text(
+        faces.ui_bold,
+        &window.database,
+        36.0,
+        13.0,
+        BODY,
+        theme.text_primary,
+    );
+    paint.text(
+        faces.ui,
+        &window.location,
+        (after_name + 8.0).max(72.0),
+        13.0,
+        BODY,
+        theme.text_secondary,
+    );
     paint.rect(220.0, 12.0, 1.0, 20.0, theme.border);
     paint.button(Rect::new(232.0, 8.0, 72.0, 28.0), Button::Primary);
-    paint.polyline(&[(244.0, 17.0), (244.0, 27.0), (253.0, 22.0), (244.0, 17.0)], 1.5, theme.on_accent);
+    paint.polyline(
+        &[(244.0, 17.0), (244.0, 27.0), (253.0, 22.0), (244.0, 17.0)],
+        1.5,
+        theme.on_accent,
+    );
     paint.text(faces.ui, "Run", 260.0, 13.0, BODY, theme.on_accent);
     paint.button(Rect::new(312.0, 8.0, 88.0, 28.0), Button::Secondary);
-    paint.polyline(&[(324.0, 17.0), (324.0, 27.0), (333.0, 22.0), (324.0, 17.0)], 1.5, theme.text_primary);
+    paint.polyline(
+        &[(324.0, 17.0), (324.0, 27.0), (333.0, 22.0), (324.0, 17.0)],
+        1.5,
+        theme.text_primary,
+    );
     paint.rect(335.0, 17.0, 2.0, 10.0, theme.text_primary);
     paint.text(faces.ui, "Run all", 342.0, 13.0, BODY, theme.text_primary);
     paint.button(Rect::new(408.0, 8.0, 84.0, 28.0), Button::Secondary);
@@ -174,11 +214,24 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     paint.rect(421.0, 19.0, 1.0, 7.0, theme.text_primary);
     paint.text(faces.ui, "Explain", 436.0, 13.0, BODY, theme.text_primary);
     paint.button(Rect::new(500.0, 8.0, 68.0, 28.0), Button::Disabled);
-    paint.canvas.fill_rounded_rect(Rect::new(512.0, 17.0, 10.0, 10.0), 2.0, theme.text_disabled);
+    paint
+        .canvas
+        .fill_rounded_rect(Rect::new(512.0, 17.0, 10.0, 10.0), 2.0, theme.text_disabled);
     paint.text(faces.ui, "Stop", 528.0, 13.0, BODY, theme.text_disabled);
     paint.button(Rect::new(1056.0, 8.0, 120.0, 28.0), Button::Secondary);
-    paint.text(faces.ui, &window.dialect, 1068.0, 13.0, BODY, theme.text_primary);
-    paint.polyline(&[(1156.0, 20.0), (1160.0, 24.0), (1164.0, 20.0)], 1.5, theme.text_primary);
+    paint.text(
+        faces.ui,
+        &window.dialect,
+        1068.0,
+        13.0,
+        BODY,
+        theme.text_primary,
+    );
+    paint.polyline(
+        &[(1156.0, 20.0), (1160.0, 24.0), (1164.0, 20.0)],
+        1.5,
+        theme.text_primary,
+    );
     paint.button(Rect::new(1240.0, 8.0, 28.0, 28.0), Button::Ghost);
     for x in [1249.0, 1254.0, 1259.0] {
         paint.canvas.fill_circle(x, 22.0, 3.0, theme.text_primary);
@@ -188,16 +241,24 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
 fn icon_database(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let color = paint.theme.text_secondary;
     for top in [y, y + 7.0] {
-        paint.canvas.fill_rounded_rect(Rect::new(x, top, 12.0, 5.0), 2.0, color);
+        paint
+            .canvas
+            .fill_rounded_rect(Rect::new(x, top, 12.0, 5.0), 2.0, color);
         let background = paint.theme.bg1;
-        paint.canvas.fill_rounded_rect(Rect::new(x + 1.0, top + 1.0, 10.0, 3.0), 1.0, background);
+        paint
+            .canvas
+            .fill_rounded_rect(Rect::new(x + 1.0, top + 1.0, 10.0, 3.0), 1.0, background);
     }
 }
 
 fn icon_folder(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let theme = paint.theme;
-    paint.canvas.fill_rounded_rect(Rect::new(x, y + 2.0, 12.0, 9.0), 2.0, theme.text_secondary);
-    paint.canvas.fill_rounded_rect(Rect::new(x + 1.0, y + 3.0, 10.0, 7.0), 1.0, theme.bg1);
+    paint
+        .canvas
+        .fill_rounded_rect(Rect::new(x, y + 2.0, 12.0, 9.0), 2.0, theme.text_secondary);
+    paint
+        .canvas
+        .fill_rounded_rect(Rect::new(x + 1.0, y + 3.0, 10.0, 7.0), 1.0, theme.bg1);
     paint.rect(x, y + 5.0, 12.0, 1.0, theme.text_secondary);
 }
 
@@ -223,26 +284,68 @@ fn sidebar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     paint.rect(0.0, 44.0, 260.0, 732.0, theme.bg1);
     paint.rect(259.0, 44.0, 1.0, 732.0, theme.border);
     paint.button(Rect::new(8.0, 52.0, 244.0, 28.0), Button::Secondary);
-    paint.canvas.stroke_circle(20.0, 64.0, 8.0, 1.5, theme.text_secondary);
-    paint.canvas.line((23.0, 67.0), (26.0, 70.0), 1.5, theme.text_secondary);
-    paint.text(faces.ui, "Filter objects", 32.0, 57.0, BODY, theme.text_secondary);
+    paint
+        .canvas
+        .stroke_circle(20.0, 64.0, 8.0, 1.5, theme.text_secondary);
+    paint
+        .canvas
+        .line((23.0, 67.0), (26.0, 70.0), 1.5, theme.text_secondary);
+    paint.text(
+        faces.ui,
+        "Filter objects",
+        32.0,
+        57.0,
+        BODY,
+        theme.text_secondary,
+    );
     let mut y = 88.0;
     chevron(paint, 8.0, y + 8.0, true);
     icon_database(paint, 24.0, y + 6.0);
-    paint.text(faces.ui_bold, &window.database, 44.0, y + 3.0, BODY, theme.text_primary);
-    let access = if window.writable { "read-write" } else { "read-only" };
-    paint.text_right(faces.ui, access, 244.0, y + 5.0, SMALL, theme.text_secondary);
+    paint.text(
+        faces.ui_bold,
+        &window.database,
+        44.0,
+        y + 3.0,
+        BODY,
+        theme.text_primary,
+    );
+    let access = if window.writable {
+        "read-write"
+    } else {
+        "read-only"
+    };
+    paint.text_right(
+        faces.ui,
+        access,
+        244.0,
+        y + 5.0,
+        SMALL,
+        theme.text_secondary,
+    );
     y += 24.0;
     chevron(paint, 24.0, y + 8.0, true);
     icon_folder(paint, 40.0, y + 6.0);
     paint.text(faces.ui, "Tables", 60.0, y + 3.0, BODY, theme.text_primary);
-    paint.text_right(faces.ui, &window.tables.len().to_string(), 244.0, y + 5.0, SMALL, theme.text_secondary);
+    paint.text_right(
+        faces.ui,
+        &window.tables.len().to_string(),
+        244.0,
+        y + 5.0,
+        SMALL,
+        theme.text_secondary,
+    );
     y += 24.0;
     for (index, table) in window.tables.iter().enumerate() {
         let selected = window.selected_table == Some(index);
-        let background = if selected { theme.selection_inactive } else { theme.bg1 };
+        let background = if selected {
+            theme.selection_inactive
+        } else {
+            theme.bg1
+        };
         if selected {
-            paint.canvas.fill_rounded_rect(Rect::new(4.0, y, 252.0, 24.0), 4.0, background);
+            paint
+                .canvas
+                .fill_rounded_rect(Rect::new(4.0, y, 252.0, 24.0), 4.0, background);
         }
         icon_table(paint, 56.0, y + 6.0);
         paint.text(faces.ui, table, 76.0, y + 3.0, BODY, theme.text_primary);
@@ -267,10 +370,18 @@ fn tabs(paint: &mut Painter<'_, '_>) {
     paint.rect(260.0, 44.0, 140.0, 36.0, theme.bg0);
     paint.rect(260.0, 44.0, 140.0, 2.0, theme.accent);
     paint.text(faces.ui, "Query 1", 272.0, 53.0, BODY, theme.text_primary);
-    paint.canvas.line((380.0, 58.0), (388.0, 66.0), 1.5, theme.text_secondary);
-    paint.canvas.line((388.0, 58.0), (380.0, 66.0), 1.5, theme.text_secondary);
-    paint.canvas.line((417.0, 62.0), (427.0, 62.0), 1.5, theme.text_primary);
-    paint.canvas.line((422.0, 57.0), (422.0, 67.0), 1.5, theme.text_primary);
+    paint
+        .canvas
+        .line((380.0, 58.0), (388.0, 66.0), 1.5, theme.text_secondary);
+    paint
+        .canvas
+        .line((388.0, 58.0), (380.0, 66.0), 1.5, theme.text_secondary);
+    paint
+        .canvas
+        .line((417.0, 62.0), (427.0, 62.0), 1.5, theme.text_primary);
+    paint
+        .canvas
+        .line((422.0, 57.0), (422.0, 67.0), 1.5, theme.text_primary);
 }
 
 fn editor(paint: &mut Painter<'_, '_>, window: &MainWindow) {
@@ -286,9 +397,24 @@ fn editor(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         if number == caret_line {
             paint.rect(308.0, top, 972.0, 20.0, theme.bg1);
         }
-        let number_color = if number == caret_line { theme.text_primary } else { theme.text_secondary };
-        let number_color = if lines.len() == 1 { theme.text_secondary } else { number_color };
-        paint.text_right(faces.mono, &(number + 1).to_string(), 296.0, top, CODE, number_color);
+        let number_color = if number == caret_line {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        };
+        let number_color = if lines.len() == 1 {
+            theme.text_secondary
+        } else {
+            number_color
+        };
+        paint.text_right(
+            faces.mono,
+            &(number + 1).to_string(),
+            296.0,
+            top,
+            CODE,
+            number_color,
+        );
         let mut pen = 320.0;
         for (range, kind) in crate::highlight::tokens(line, &mut in_comment) {
             let color = match kind {
@@ -315,11 +441,29 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let faces = paint.faces;
     paint.rect(260.0, 386.0, 1020.0, 32.0, theme.bg1);
     paint.rect(260.0, 417.0, 1020.0, 1.0, theme.border);
-    paint.text(faces.ui_bold, "Results", 272.0, 393.0, BODY, theme.text_primary);
+    paint.text(
+        faces.ui_bold,
+        "Results",
+        272.0,
+        393.0,
+        BODY,
+        theme.text_primary,
+    );
     paint.rect(272.0, 414.0, 48.0, 2.0, theme.accent);
-    paint.text(faces.ui, "Messages", 344.0, 393.0, BODY, theme.text_secondary);
+    paint.text(
+        faces.ui,
+        "Messages",
+        344.0,
+        393.0,
+        BODY,
+        theme.text_secondary,
+    );
     let rows = window.rows.len();
-    let summary = format!("{rows} {} · {}", if rows == 1 { "row" } else { "rows" }, window.elapsed);
+    let summary = format!(
+        "{rows} {} · {}",
+        if rows == 1 { "row" } else { "rows" },
+        window.elapsed
+    );
     paint.text(faces.ui, &summary, 428.0, 393.0, BODY, theme.text_secondary);
     paint.text(faces.ui, "Export…", 1204.0, 393.0, BODY, theme.text_primary);
     paint.rect(260.0, 418.0, 1020.0, 28.0, theme.bg1);
@@ -333,7 +477,14 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     for (index, (name, numeric)) in window.columns.iter().enumerate() {
         let (left, right) = (edges[index], edges[index + 1]);
         if *numeric {
-            paint.text_right(faces.ui, name, right - 12.0, 423.0, BODY, theme.text_primary);
+            paint.text_right(
+                faces.ui,
+                name,
+                right - 12.0,
+                423.0,
+                BODY,
+                theme.text_primary,
+            );
         } else {
             paint.text(faces.ui, name, left + 12.0, 423.0, BODY, theme.text_primary);
         }
@@ -342,14 +493,28 @@ fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     paint.rect(307.0, 418.0, 1.0, 27.0, theme.border_strong);
     for (index, row) in window.rows.iter().enumerate() {
         let top = 446.0 + 24.0 * index as f32;
-        let fill = if index % 2 == 1 { theme.zebra } else { theme.bg0 };
+        let fill = if index % 2 == 1 {
+            theme.zebra
+        } else {
+            theme.bg0
+        };
         paint.rect(260.0, top, 1020.0, 24.0, fill);
-        paint.text_right(faces.mono, &(index + 1).to_string(), 296.0, top + 2.0, CODE, theme.text_secondary);
+        paint.text_right(
+            faces.mono,
+            &(index + 1).to_string(),
+            296.0,
+            top + 2.0,
+            CODE,
+            theme.text_secondary,
+        );
         for (column, value) in row.iter().enumerate() {
             let (Some(&left), Some(&right)) = (edges.get(column), edges.get(column + 1)) else {
                 continue;
             };
-            let numeric = window.columns.get(column).is_some_and(|(_, numeric)| *numeric);
+            let numeric = window
+                .columns
+                .get(column)
+                .is_some_and(|(_, numeric)| *numeric);
             let (text, color) = if value == "NULL" {
                 ("NULL", theme.text_disabled)
             } else {
@@ -371,7 +536,11 @@ fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     paint.rect(0.0, 776.0, 1280.0, 24.0, theme.bg2);
     paint.rect(0.0, 776.0, 1280.0, 1.0, theme.border);
     paint.canvas.fill_circle(16.0, 788.0, 8.0, theme.success);
-    let access = if window.writable { "read-write" } else { "read-only" };
+    let access = if window.writable {
+        "read-write"
+    } else {
+        "read-only"
+    };
     paint.text(
         faces.ui,
         &format!("Connected · {} · {access}", window.location),
@@ -390,9 +559,20 @@ fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     );
     let column = window.sql.chars().count() + 1;
     let mut right = 1268.0;
-    for item in [window.dialect.clone(), format!("Ln 1, Col {column}"), "UTF-8".to_owned()] {
+    for item in [
+        window.dialect.clone(),
+        format!("Ln 1, Col {column}"),
+        "UTF-8".to_owned(),
+    ] {
         let width = faces.ui.width(&item, SMALL.0);
-        paint.text(faces.ui, &item, right - width, 781.0, SMALL, theme.text_secondary);
+        paint.text(
+            faces.ui,
+            &item,
+            right - width,
+            781.0,
+            SMALL,
+            theme.text_secondary,
+        );
         right -= width + 16.0;
     }
 }

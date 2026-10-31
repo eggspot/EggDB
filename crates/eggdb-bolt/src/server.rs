@@ -1,4 +1,6 @@
-use crate::packstream::{Packed, Reader, write_integer, write_list_header, write_map_header, write_string, write_value};
+use crate::packstream::{
+    Packed, Reader, write_list_header, write_map_header, write_string, write_value,
+};
 use eggdb_graph::{QueryResult, Value};
 use eggdb_keyspace::Keyspace;
 use std::io::{self, Read, Write};
@@ -42,7 +44,10 @@ pub struct ServerConfig {
 
 impl std::fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerConfig").field("user", &self.user).field("max_connections", &self.max_connections).finish_non_exhaustive()
+        f.debug_struct("ServerConfig")
+            .field("user", &self.user)
+            .field("max_connections", &self.max_connections)
+            .finish_non_exhaustive()
     }
 }
 
@@ -118,7 +123,9 @@ fn read_message(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
         let mut size = [0u8; 2];
         match reader.read_exact(&mut size) {
             Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && payload.is_empty() => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && payload.is_empty() => {
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         }
         let size = usize::from(u16::from_be_bytes(size));
@@ -129,7 +136,10 @@ fn read_message(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
             return Ok(Some(payload));
         }
         if payload.len() + size > MAX_MESSAGE_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "a Bolt message is larger than 16 MiB"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a Bolt message is larger than 16 MiB",
+            ));
         }
         let start = payload.len();
         payload.resize(start + size, 0);
@@ -141,16 +151,29 @@ impl Connection<'_> {
     fn authenticate(&self, extra: &Packed) -> bool {
         let principal = extra.get("principal").and_then(Packed::as_str);
         let credentials = extra.get("credentials").and_then(Packed::as_str);
-        match (extra.get("scheme").and_then(Packed::as_str), principal, credentials) {
+        match (
+            extra.get("scheme").and_then(Packed::as_str),
+            principal,
+            credentials,
+        ) {
             (Some("basic"), Some(user), Some(password)) => {
-                user == self.config.user && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(password.as_bytes()), &self.config.password_sha256)
+                user == self.config.user
+                    && eggdb_crypto::constant_time_eq(
+                        &eggdb_crypto::sha256(password.as_bytes()),
+                        &self.config.password_sha256,
+                    )
             }
             _ => false,
         }
     }
 
     fn summary(&self) -> Vec<u8> {
-        metadata(&[("has_more", Value::Boolean(false)), ("type", Value::String("rw".to_owned())), ("t_last", Value::Integer(0)), ("db", Value::String("neo4j".to_owned()))])
+        metadata(&[
+            ("has_more", Value::Boolean(false)),
+            ("type", Value::String("rw".to_owned())),
+            ("t_last", Value::Integer(0)),
+            ("db", Value::String("neo4j".to_owned())),
+        ])
     }
 
     fn pull(&mut self, extra: Option<&Packed>, replies: &mut Vec<Vec<u8>>) {
@@ -189,13 +212,19 @@ impl Connection<'_> {
         }
         if !self.authenticated {
             if signature != HELLO {
-                replies.push(failure("Neo.ClientError.Request.Invalid", "HELLO must come first"));
+                replies.push(failure(
+                    "Neo.ClientError.Request.Invalid",
+                    "HELLO must come first",
+                ));
                 return false;
             }
             let extra = fields.first().cloned().unwrap_or(Packed::Map(Vec::new()));
             if !self.authenticate(&extra) {
                 std::thread::sleep(FAILED_LOGIN_PAUSE);
-                replies.push(failure("Neo.ClientError.Security.Unauthorized", "The client is unauthorized due to authentication failure."));
+                replies.push(failure(
+                    "Neo.ClientError.Security.Unauthorized",
+                    "The client is unauthorized due to authentication failure.",
+                ));
                 return false;
             }
             self.authenticated = true;
@@ -219,25 +248,43 @@ impl Connection<'_> {
         }
         match signature {
             RUN => {
-                let query = fields.first().and_then(Packed::as_str).unwrap_or_default().to_owned();
+                let query = fields
+                    .first()
+                    .and_then(Packed::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
                 let parameters = match fields.get(1) {
-                    Some(Packed::Map(entries)) => entries.iter().map(|(name, value)| Ok((name.clone(), value.to_value()?))).collect::<Result<Vec<_>, String>>(),
+                    Some(Packed::Map(entries)) => entries
+                        .iter()
+                        .map(|(name, value)| Ok((name.clone(), value.to_value()?)))
+                        .collect::<Result<Vec<_>, String>>(),
                     _ => Ok(Vec::new()),
                 };
                 let read_only = if self.in_transaction {
                     self.read_only_transaction
                 } else {
-                    fields.get(2).and_then(|extra| extra.get("mode")).and_then(Packed::as_str) == Some("r")
+                    fields
+                        .get(2)
+                        .and_then(|extra| extra.get("mode"))
+                        .and_then(Packed::as_str)
+                        == Some("r")
                 };
                 let outcome = parameters
-                    .map_err(|message| eggdb_graph::GraphError { code: "Neo.ClientError.Statement.TypeError".to_owned(), message })
-                    .and_then(|parameters| eggdb_graph::run(self.keyspace, &query, &parameters, read_only));
+                    .map_err(|message| eggdb_graph::GraphError {
+                        code: "Neo.ClientError.Statement.TypeError".to_owned(),
+                        message,
+                    })
+                    .and_then(|parameters| {
+                        eggdb_graph::run(self.keyspace, &query, &parameters, read_only)
+                    });
                 match outcome {
                     Ok(result) => {
                         if self.in_transaction && !read_only {
                             self.wrote_in_transaction = true;
                         }
-                        let columns = Value::List(result.columns.iter().cloned().map(Value::String).collect());
+                        let columns = Value::List(
+                            result.columns.iter().cloned().map(Value::String).collect(),
+                        );
                         let mut entries = vec![("fields", columns), ("t_first", Value::Integer(0))];
                         if self.in_transaction {
                             entries.push(("qid", Value::Integer(0)));
@@ -259,12 +306,19 @@ impl Connection<'_> {
             BEGIN => {
                 self.in_transaction = true;
                 self.wrote_in_transaction = false;
-                self.read_only_transaction = fields.first().and_then(|extra| extra.get("mode")).and_then(Packed::as_str) == Some("r");
+                self.read_only_transaction = fields
+                    .first()
+                    .and_then(|extra| extra.get("mode"))
+                    .and_then(Packed::as_str)
+                    == Some("r");
                 replies.push(metadata(&[]));
             }
             COMMIT => {
                 self.in_transaction = false;
-                replies.push(metadata(&[("bookmark", Value::String("eggdb:committed".to_owned()))]));
+                replies.push(metadata(&[(
+                    "bookmark",
+                    Value::String("eggdb:committed".to_owned()),
+                )]));
             }
             ROLLBACK => {
                 self.in_transaction = false;
@@ -324,7 +378,13 @@ pub(crate) fn serve_stream(
         let (signature, fields) = match parser.value(0) {
             Ok(Packed::Struct(signature, fields)) if parser.finished() => (signature, fields),
             _ => {
-                write_chunked(writer, &failure("Neo.ClientError.Request.Invalid", "the message is not a valid PackStream structure"))?;
+                write_chunked(
+                    writer,
+                    &failure(
+                        "Neo.ClientError.Request.Invalid",
+                        "the message is not a valid PackStream structure",
+                    ),
+                )?;
                 return Ok(());
             }
         };
@@ -352,7 +412,11 @@ impl Read for StopAware<'_> {
                 return Ok(0);
             }
             match self.stream.read(buffer) {
-                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
                 other => return other,
             }
         }
@@ -361,7 +425,12 @@ impl Read for StopAware<'_> {
 
 /// Serves Bolt clients on `listener` from the graph in `keyspace`, a thread per connection,
 /// until `stop` turns true.
-pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &ServerConfig, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub fn serve(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
     let next_id = AtomicU64::new(1);
@@ -374,7 +443,10 @@ pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &
                     continue;
                 }
             };
-            if stream.set_nonblocking(false).is_err() || stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
+            if stream.set_nonblocking(false).is_err()
+                || stream.set_read_timeout(Some(READ_POLL)).is_err()
+                || stream.set_nodelay(true).is_err()
+            {
                 continue;
             }
             if active.fetch_add(1, Ordering::AcqRel) >= config.max_connections {
@@ -383,12 +455,20 @@ pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &
             }
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let active = &active;
-            let spawned = std::thread::Builder::new().name("eggdb-bolt".to_owned()).spawn_scoped(scope, move || {
-                if let Ok(mut writer) = stream.try_clone() {
-                    let _ = serve_stream(keyspace, config, id, StopAware { stream, stop }, &mut writer);
-                }
-                active.fetch_sub(1, Ordering::AcqRel);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("eggdb-bolt".to_owned())
+                .spawn_scoped(scope, move || {
+                    if let Ok(mut writer) = stream.try_clone() {
+                        let _ = serve_stream(
+                            keyspace,
+                            config,
+                            id,
+                            StopAware { stream, stop },
+                            &mut writer,
+                        );
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                });
             if spawned.is_err() {
                 active.fetch_sub(1, Ordering::AcqRel);
             }
@@ -403,7 +483,7 @@ pub(crate) fn encode_request(signature: u8, fields: &[Packed]) -> Vec<u8> {
         match value {
             Packed::Null => out.push(0xc0),
             Packed::Boolean(flag) => out.push(if *flag { 0xc3 } else { 0xc2 }),
-            Packed::Integer(number) => write_integer(out, *number),
+            Packed::Integer(number) => crate::packstream::write_integer(out, *number),
             Packed::Float(number) => {
                 out.push(0xc1);
                 out.extend_from_slice(&number.to_be_bytes());

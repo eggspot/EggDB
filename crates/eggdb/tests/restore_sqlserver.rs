@@ -684,7 +684,10 @@ fn alias_types_identity_shapes_sequences_and_large_batches_restore_from_a_big_en
             &db,
             "SELECT Id, Caller, Ticket, LEN(Note), Raw FROM dbo.Calls ORDER BY Id"
         ),
-        format!("1|555-0100|100|{0}|<call/>\n2|555-0101|101|{0}|NULL\n", 3 << 20)
+        format!(
+            "1|555-0100|100|{0}|<call/>\n2|555-0101|101|{0}|NULL\n",
+            3 << 20
+        )
     );
     assert_eq!(
         tsql(

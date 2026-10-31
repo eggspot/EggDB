@@ -29,19 +29,19 @@ fn syntax_error(text: &str) -> SqlError {
 }
 
 fn vector_of(value: &str) -> TsVector {
-    if value.trim_start().starts_with('\'') {
-        if let Some(vector) = TsVector::parse(value) {
-            return vector;
-        }
+    if value.trim_start().starts_with('\'')
+        && let Some(vector) = TsVector::parse(value)
+    {
+        return vector;
     }
     TsVector::from_text(DEFAULT_CONFIG, value)
 }
 
 fn query_of(value: &str) -> TsQuery {
-    if value.contains('\'') {
-        if let Some(query) = TsQuery::parse_literal(value) {
-            return query;
-        }
+    if value.contains('\'')
+        && let Some(query) = TsQuery::parse_literal(value)
+    {
+        return query;
     }
     TsQuery::plain(DEFAULT_CONFIG, value)
 }
@@ -75,8 +75,11 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
     match name {
         "ts_rank" | "ts_rank_cd" => {
             let (vector, query) = match values {
-                [vector, query] | [vector, query, _] => (vector, query),
-                [_, vector, query] | [_, vector, query, _] => (vector, query),
+                [vector, query] => (vector, query),
+                [Value::Array(_), vector, query] | [Value::Array(_), vector, query, _] => {
+                    (vector, query)
+                }
+                [vector, query, _] => (vector, query),
                 _ => {
                     return Err(SqlError::new(
                         SqlState::UNDEFINED_FUNCTION,
@@ -87,7 +90,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
             let (Some(vector), Some(query)) = (text(vector), text(query)) else {
                 return Ok(Value::Null);
             };
-            Ok(Value::Real(eggdb_search::ts_rank(&vector_of(&vector), &query_of(&query)) as f32))
+            Ok(Value::Real(
+                eggdb_search::ts_rank(&vector_of(&vector), &query_of(&query)) as f32,
+            ))
         }
         _ => {
             let Some((config, input)) = with_config(values)? else {
@@ -95,7 +100,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
             };
             let written = match name {
                 "to_tsvector" => TsVector::from_text(config, &input).to_string(),
-                "to_tsquery" => TsQuery::parse(config, &input).ok_or_else(|| syntax_error(&input))?.to_string(),
+                "to_tsquery" => TsQuery::parse(config, &input)
+                    .ok_or_else(|| syntax_error(&input))?
+                    .to_string(),
                 "plainto_tsquery" => TsQuery::plain(config, &input).to_string(),
                 "phraseto_tsquery" => TsQuery::phrase(config, &input).to_string(),
                 _ => TsQuery::web(config, &input).to_string(),
@@ -110,7 +117,10 @@ mod tests {
     use super::*;
 
     fn call(name: &str, arguments: &[&str]) -> Value {
-        let values: Vec<Value> = arguments.iter().map(|text| Value::Text((*text).to_owned())).collect();
+        let values: Vec<Value> = arguments
+            .iter()
+            .map(|text| Value::Text((*text).to_owned()))
+            .collect();
         function(name, &values).unwrap()
     }
 
@@ -120,16 +130,32 @@ mod tests {
             call("to_tsvector", &["english", "The fat cats ate fat rats"]),
             Value::Text("'ate':4 'cat':3 'fat':2,5 'rat':6".to_owned())
         );
-        assert_eq!(call("to_tsquery", &["fat & rats"]), Value::Text("'fat' & 'rat'".to_owned()));
+        assert_eq!(
+            call("to_tsquery", &["fat & rats"]),
+            Value::Text("'fat' & 'rat'".to_owned())
+        );
         let vector = call("to_tsvector", &["a fat rat"]);
         let query = call("plainto_tsquery", &["fat rats"]);
         assert_eq!(matches(&vector, &query).unwrap(), Value::Boolean(true));
         assert_eq!(
-            matches(&Value::Text("a cat".to_owned()), &Value::Text("rat".to_owned())).unwrap(),
+            matches(
+                &Value::Text("a cat".to_owned()),
+                &Value::Text("rat".to_owned())
+            )
+            .unwrap(),
             Value::Boolean(false)
         );
         assert!(function("to_tsquery", &[Value::Text("fat &".to_owned())]).is_err());
-        assert!(function("to_tsvector", &[Value::Text("klingon".to_owned()), Value::Text("x".to_owned())]).is_err());
+        assert!(
+            function(
+                "to_tsvector",
+                &[
+                    Value::Text("klingon".to_owned()),
+                    Value::Text("x".to_owned())
+                ]
+            )
+            .is_err()
+        );
         assert_eq!(matches(&Value::Null, &query).unwrap(), Value::Null);
     }
 }

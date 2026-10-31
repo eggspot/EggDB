@@ -47,7 +47,11 @@ fn a_role_reads_and_writes_only_what_it_was_granted() {
         "SELECT a.id FROM accounts a JOIN audit b ON a.id = b.id",
     ] {
         let error = run(&mut clerk, sql).expect_err(sql);
-        assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE, "{sql}: {error}");
+        assert_eq!(
+            error.state(),
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}: {error}"
+        );
     }
 }
 
@@ -77,7 +81,10 @@ fn roles_are_stored_with_a_scram_verifier_and_never_the_password() {
     let verifier = clerk.scram_verifier.unwrap();
     assert!(!verifier.contains("secret"));
     let (iterations, salt, _, _) = parse_scram_verifier(&verifier).unwrap();
-    assert_eq!((iterations, salt.len()), (SCRAM_ITERATIONS, SCRAM_SALT_BYTES));
+    assert_eq!(
+        (iterations, salt.len()),
+        (SCRAM_ITERATIONS, SCRAM_SALT_BYTES)
+    );
     assert_eq!(login_verifier(&reader, "readers").unwrap(), None);
     assert_eq!(login_verifier(&reader, "clerk").unwrap(), Some(verifier));
 }
@@ -94,7 +101,10 @@ fn role_statements_refuse_what_postgresql_refuses() {
         ("DROP ROLE clerk", SqlState::DEPENDENT_OBJECTS_STILL_EXIST),
         ("GRANT clerk TO clerk", SqlState::INVALID_GRANT_OPERATION),
         ("GRANT clerk TO readers", SqlState::INVALID_GRANT_OPERATION),
-        ("GRANT SELECT ON nowhere TO clerk", SqlState::UNDEFINED_TABLE),
+        (
+            "GRANT SELECT ON nowhere TO clerk",
+            SqlState::UNDEFINED_TABLE,
+        ),
         ("ALTER ROLE nobody LOGIN", SqlState::UNDEFINED_OBJECT),
     ] {
         let error = run(&mut admin, sql).expect_err(sql);
@@ -104,7 +114,10 @@ fn role_statements_refuse_what_postgresql_refuses() {
     run(&mut admin, "DROP ROLE IF EXISTS nobody").unwrap();
     let mut nologin = Session::new(&store);
     assert_eq!(
-        nologin.identify_role("readers", "eggdb").unwrap_err().state(),
+        nologin
+            .identify_role("readers", "eggdb")
+            .unwrap_err()
+            .state(),
         SqlState::INVALID_AUTHORIZATION_SPECIFICATION
     );
 }

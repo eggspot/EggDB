@@ -11,7 +11,10 @@ impl std::fmt::Display for WasmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WasmError::Malformed(what) => write!(f, "the WebAssembly module is malformed: {what}"),
-            WasmError::Unsupported(what) => write!(f, "the WebAssembly module uses {what}, which is not supported yet"),
+            WasmError::Unsupported(what) => write!(
+                f,
+                "the WebAssembly module uses {what}, which is not supported yet"
+            ),
         }
     }
 }
@@ -60,13 +63,20 @@ pub(crate) struct Reader<'b> {
 
 impl<'b> Reader<'b> {
     pub(crate) fn byte(&mut self) -> Result<u8, WasmError> {
-        let byte = *self.bytes.get(self.at).ok_or(WasmError::Malformed("unexpected end"))?;
+        let byte = *self
+            .bytes
+            .get(self.at)
+            .ok_or(WasmError::Malformed("unexpected end"))?;
         self.at += 1;
         Ok(byte)
     }
 
     pub(crate) fn take(&mut self, count: usize) -> Result<&'b [u8], WasmError> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or(WasmError::Malformed("unexpected end"))?;
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(WasmError::Malformed("unexpected end"))?;
         let taken = &self.bytes[self.at..end];
         self.at = end;
         Ok(taken)
@@ -111,20 +121,24 @@ impl<'b> Reader<'b> {
     }
 
     pub(crate) fn u32(&mut self) -> Result<u32, WasmError> {
-        u32::try_from(self.unsigned(32)?).map_err(|_| WasmError::Malformed("an integer is out of range"))
+        u32::try_from(self.unsigned(32)?)
+            .map_err(|_| WasmError::Malformed("an integer is out of range"))
     }
 
     fn count(&mut self) -> Result<u32, WasmError> {
         let count = self.u32()?;
         if count > MAX_ITEMS {
-            return Err(WasmError::Unsupported("a section with more than 100,000 items"));
+            return Err(WasmError::Unsupported(
+                "a section with more than 100,000 items",
+            ));
         }
         Ok(count)
     }
 
     fn name(&mut self) -> Result<String, WasmError> {
         let length = self.u32()? as usize;
-        String::from_utf8(self.take(length)?.to_vec()).map_err(|_| WasmError::Malformed("a name is not UTF-8"))
+        String::from_utf8(self.take(length)?.to_vec())
+            .map_err(|_| WasmError::Malformed("a name is not UTF-8"))
     }
 
     fn value_type(&mut self) -> Result<u8, WasmError> {
@@ -140,7 +154,11 @@ impl<'b> Reader<'b> {
         let value = match (self.byte()?, value_type) {
             (0x41, I32) => u64::from(self.signed(32)? as i32 as u32),
             (0x42, I64) => self.signed(64)? as u64,
-            _ => return Err(WasmError::Unsupported("an initializer other than a constant")),
+            _ => {
+                return Err(WasmError::Unsupported(
+                    "an initializer other than a constant",
+                ));
+            }
         };
         if self.byte()? != 0x0b {
             return Err(WasmError::Malformed("an initializer does not end"));
@@ -156,21 +174,37 @@ impl Module {
         if reader.take(4)? != b"\0asm" || reader.take(4)? != [1, 0, 0, 0] {
             return Err(WasmError::Malformed("not a WebAssembly 1.0 binary"));
         }
-        let mut module = Module { types: Vec::new(), functions: Vec::new(), memory: None, globals: Vec::new(), exports: Vec::new(), data: Vec::new() };
+        let mut module = Module {
+            types: Vec::new(),
+            functions: Vec::new(),
+            memory: None,
+            globals: Vec::new(),
+            exports: Vec::new(),
+            data: Vec::new(),
+        };
         let mut type_indices = Vec::new();
         while reader.at < bytes.len() {
             let id = reader.byte()?;
             let size = reader.u32()? as usize;
-            let mut section = Reader { bytes: reader.take(size)?, at: 0 };
+            let mut section = Reader {
+                bytes: reader.take(size)?,
+                at: 0,
+            };
             match id {
                 0 => {}
                 1 => {
                     for _ in 0..section.count()? {
                         if section.byte()? != 0x60 {
-                            return Err(WasmError::Malformed("a function type does not start with 0x60"));
+                            return Err(WasmError::Malformed(
+                                "a function type does not start with 0x60",
+                            ));
                         }
-                        let params = (0..section.count()?).map(|_| section.value_type()).collect::<Result<_, _>>()?;
-                        let results: Vec<u8> = (0..section.count()?).map(|_| section.value_type()).collect::<Result<_, _>>()?;
+                        let params = (0..section.count()?)
+                            .map(|_| section.value_type())
+                            .collect::<Result<_, _>>()?;
+                        let results: Vec<u8> = (0..section.count()?)
+                            .map(|_| section.value_type())
+                            .collect::<Result<_, _>>()?;
                         if results.len() > 1 {
                             return Err(WasmError::Unsupported("several results"));
                         }
@@ -210,10 +244,18 @@ impl Module {
                         let mutable = match section.byte()? {
                             0 => false,
                             1 => true,
-                            _ => return Err(WasmError::Malformed("a global's mutability is not 0 or 1")),
+                            _ => {
+                                return Err(WasmError::Malformed(
+                                    "a global's mutability is not 0 or 1",
+                                ));
+                            }
                         };
                         let init = section.constant(value_type)?;
-                        module.globals.push(Global { value_type, mutable, init });
+                        module.globals.push(Global {
+                            value_type,
+                            mutable,
+                            init,
+                        });
                     }
                 }
                 7 => {
@@ -230,11 +272,16 @@ impl Module {
                 10 => {
                     let count = section.count()?;
                     if count as usize != type_indices.len() {
-                        return Err(WasmError::Malformed("the code and function sections differ in length"));
+                        return Err(WasmError::Malformed(
+                            "the code and function sections differ in length",
+                        ));
                     }
                     for type_index in &type_indices {
                         let size = section.u32()? as usize;
-                        let mut body = Reader { bytes: section.take(size)?, at: 0 };
+                        let mut body = Reader {
+                            bytes: section.take(size)?,
+                            at: 0,
+                        };
                         let mut locals = Vec::new();
                         for _ in 0..body.count()? {
                             let repeat = body.u32()?;
@@ -248,7 +295,11 @@ impl Module {
                         if code.last() != Some(&0x0b) {
                             return Err(WasmError::Malformed("a function body does not end"));
                         }
-                        module.functions.push(Function { type_index: *type_index, locals, code });
+                        module.functions.push(Function {
+                            type_index: *type_index,
+                            locals,
+                            code,
+                        });
                     }
                 }
                 11 => {
@@ -270,12 +321,16 @@ impl Module {
         }
         for function in &module.functions {
             if function.type_index as usize >= module.types.len() {
-                return Err(WasmError::Malformed("a function names a type that does not exist"));
+                return Err(WasmError::Malformed(
+                    "a function names a type that does not exist",
+                ));
             }
         }
         for (_, index) in &module.exports {
             if *index as usize >= module.functions.len() {
-                return Err(WasmError::Malformed("an export names a function that does not exist"));
+                return Err(WasmError::Malformed(
+                    "an export names a function that does not exist",
+                ));
             }
         }
         Ok(module)

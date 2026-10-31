@@ -111,14 +111,14 @@ impl Lane {
 fn sum(values: &[i64]) -> i128 {
     let mut high = [0i64; 8];
     let mut low = [0i64; 8];
-    let mut chunks = values.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, rest) = values.as_chunks::<8>();
+    for chunk in chunks {
         for lane in 0..8 {
             high[lane] += chunk[lane] >> 32;
             low[lane] += chunk[lane] & 0xffff_ffff;
         }
     }
-    let mut total: i128 = chunks.remainder().iter().map(|&value| i128::from(value)).sum();
+    let mut total: i128 = rest.iter().map(|&value| i128::from(value)).sum();
     for lane in 0..8 {
         total += (i128::from(high[lane]) << 32) + i128::from(low[lane]);
     }
@@ -133,7 +133,10 @@ fn greatest(values: &[i64]) -> i64 {
     values.iter().copied().fold(i64::MIN, i64::max)
 }
 
-pub(crate) fn run_batched(calls: &[BatchCall], feed: &mut RowFeed<'_>) -> SqlResult<Vec<Accumulator>> {
+pub(crate) fn run_batched(
+    calls: &[BatchCall],
+    feed: &mut RowFeed<'_>,
+) -> SqlResult<Vec<Accumulator>> {
     let mut lanes: Vec<Lane> = calls.iter().map(|_| Lane::new()).collect();
     feed(&mut |row| {
         for (call, lane) in calls.iter().zip(lanes.iter_mut()) {
@@ -171,7 +174,10 @@ mod tests {
             .collect();
         let plain: i128 = values.iter().map(|&value| i128::from(value)).sum();
         assert_eq!(sum(&values), plain);
-        assert_eq!(sum(&values[..7]), values[..7].iter().map(|&v| i128::from(v)).sum::<i128>());
+        assert_eq!(
+            sum(&values[..7]),
+            values[..7].iter().map(|&v| i128::from(v)).sum::<i128>()
+        );
         assert_eq!(least(&values), i64::MIN);
         assert_eq!(greatest(&values), i64::MAX);
         assert_eq!(sum(&[]), 0);

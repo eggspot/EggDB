@@ -58,7 +58,10 @@ pub(crate) fn import(db: &Database, path: &Path) -> Result<Vec<String>, Error> {
     let mut warnings = Vec::new();
     let mut run = |sql: &str, warnings: &mut Vec<String>| {
         if let Err(error) = session.execute(sql, &mut |_| {}) {
-            warnings.push(format!("skipped `{}`: {error}", sql.lines().next().unwrap_or(sql)));
+            warnings.push(format!(
+                "skipped `{}`: {error}",
+                sql.lines().next().unwrap_or(sql)
+            ));
             return false;
         }
         true
@@ -66,7 +69,8 @@ pub(crate) fn import(db: &Database, path: &Path) -> Result<Vec<String>, Error> {
     let user_object = |name: &str| !name.starts_with("sqlite_");
     let mut tables = Vec::new();
     for entry in &schema {
-        if entry.kind == "table" && user_object(&entry.name)
+        if entry.kind == "table"
+            && user_object(&entry.name)
             && let Some(sql) = &entry.sql
             && run(sql, &mut warnings)
         {
@@ -91,11 +95,16 @@ pub(crate) fn import(db: &Database, path: &Path) -> Result<Vec<String>, Error> {
                 }),
                 _ => None,
             });
-        let rows = file.rows(entry.root_page).map_err(|error| failed(path, error))?;
+        let rows = file
+            .rows(entry.root_page)
+            .map_err(|error| failed(path, error))?;
         insert_rows(&mut run, &mut warnings, &entry.name, &rows, alias);
     }
     for kind in ["index", "view", "trigger"] {
-        for entry in schema.iter().filter(|entry| entry.kind == kind && user_object(&entry.name)) {
+        for entry in schema
+            .iter()
+            .filter(|entry| entry.kind == kind && user_object(&entry.name))
+        {
             if let Some(sql) = &entry.sql {
                 run(sql, &mut warnings);
             }

@@ -3,8 +3,8 @@
 //! `r || s`), and every Wycheproof ECDH P-256 case, whose invalid public keys must be refused.
 
 use eggdb_crypto::{
-    EcdsaP256Signature, HashFunction, P256PrivateKey, P256PublicKey, Sha1, Sha256, Sha384,
-    Sha512, ecdsa_p256_sign, ecdsa_p256_verify, p256_shared_secret,
+    EcdsaP256Signature, HashFunction, P256PrivateKey, P256PublicKey, Sha1, Sha256, Sha384, Sha512,
+    ecdsa_p256_sign, ecdsa_p256_verify, p256_shared_secret,
 };
 
 const RFC_6979_PRIVATE_KEY: &str =
@@ -140,17 +140,15 @@ fn check_wycheproof_ecdsa<H: HashFunction>(data: &str) -> usize {
 
 #[test]
 fn ecdsa_with_sha_256_passes_every_wycheproof_case() {
-    let checked = check_wycheproof_ecdsa::<Sha256>(include_str!(
-        "data/wycheproof_ecdsa_p256_sha256.txt"
-    ));
+    let checked =
+        check_wycheproof_ecdsa::<Sha256>(include_str!("data/wycheproof_ecdsa_p256_sha256.txt"));
     assert_eq!(checked, 262);
 }
 
 #[test]
 fn ecdsa_with_sha_512_passes_every_wycheproof_case() {
-    let checked = check_wycheproof_ecdsa::<Sha512>(include_str!(
-        "data/wycheproof_ecdsa_p256_sha512.txt"
-    ));
+    let checked =
+        check_wycheproof_ecdsa::<Sha512>(include_str!("data/wycheproof_ecdsa_p256_sha512.txt"));
     assert_eq!(checked, 332);
 }
 

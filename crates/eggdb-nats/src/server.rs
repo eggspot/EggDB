@@ -26,7 +26,9 @@ pub struct ServerConfig {
 
 impl std::fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerConfig").field("user", &self.user).finish_non_exhaustive()
+        f.debug_struct("ServerConfig")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
     }
 }
 
@@ -62,7 +64,10 @@ struct Published<'p> {
 
 impl Broker {
     pub(crate) fn new() -> Self {
-        Self { clients: Mutex::new(BTreeMap::new()), turn: AtomicUsize::new(0) }
+        Self {
+            clients: Mutex::new(BTreeMap::new()),
+            turn: AtomicUsize::new(0),
+        }
     }
 
     fn clients(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Client>> {
@@ -82,7 +87,10 @@ impl Broker {
                     continue;
                 }
                 match &subscription.queue {
-                    Some(queue) => groups.entry(queue.as_str()).or_default().push((id, sid.clone())),
+                    Some(queue) => groups
+                        .entry(queue.as_str())
+                        .or_default()
+                        .push((id, sid.clone())),
                     None => targets.push((id, sid.clone())),
                 }
             }
@@ -95,11 +103,25 @@ impl Broker {
             let Some(client) = clients.get_mut(&id) else {
                 continue;
             };
-            let packet = message(published.subject, &sid, published.reply, published.headers, published.payload, client.headers);
-            let _ = client.writer.lock().unwrap_or_else(PoisonError::into_inner).write_all(&packet);
+            let packet = message(
+                published.subject,
+                &sid,
+                published.reply,
+                published.headers,
+                published.payload,
+                client.headers,
+            );
+            let _ = client
+                .writer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .write_all(&packet);
             if let Some(subscription) = client.subscriptions.get_mut(&sid) {
                 subscription.delivered += 1;
-                if subscription.max.is_some_and(|max| subscription.delivered >= max) {
+                if subscription
+                    .max
+                    .is_some_and(|max| subscription.delivered >= max)
+                {
                     client.subscriptions.remove(&sid);
                 }
             }
@@ -123,7 +145,10 @@ enum Next {
 
 fn member<'n>(node: &'n Node, name: &str) -> Option<&'n Json> {
     match &node.value {
-        Json::Object(members) => members.iter().find(|(key, _)| key == name).map(|(_, node)| &node.value),
+        Json::Object(members) => members
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, node)| &node.value),
         _ => None,
     }
 }
@@ -144,7 +169,10 @@ fn text<'n>(node: &'n Node, name: &str) -> Option<&'n str> {
 
 impl Session<'_> {
     fn send(&self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.lock().unwrap_or_else(PoisonError::into_inner).write_all(bytes)
+        self.writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write_all(bytes)
     }
 
     fn error(&self, message: &str) -> io::Result<()> {
@@ -152,7 +180,11 @@ impl Session<'_> {
     }
 
     fn ok(&self) -> io::Result<()> {
-        if self.verbose { self.send(b"+OK\r\n") } else { Ok(()) }
+        if self.verbose {
+            self.send(b"+OK\r\n")
+        } else {
+            Ok(())
+        }
     }
 
     fn connect(&mut self, options: &str) -> io::Result<Next> {
@@ -162,8 +194,12 @@ impl Session<'_> {
         };
         let user = text(&options, "user").unwrap_or_default();
         let password = text(&options, "pass").unwrap_or_default();
-        let authorized = eggdb_crypto::constant_time_eq(user.as_bytes(), self.config.user.as_bytes())
-            && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(password.as_bytes()), &self.config.password_sha256);
+        let authorized =
+            eggdb_crypto::constant_time_eq(user.as_bytes(), self.config.user.as_bytes())
+                && eggdb_crypto::constant_time_eq(
+                    &eggdb_crypto::sha256(password.as_bytes()),
+                    &self.config.password_sha256,
+                );
         if !authorized {
             self.error("Authorization Violation")?;
             return Ok(Next::Close);
@@ -194,17 +230,36 @@ impl Session<'_> {
             Frame::Connect(options) => return self.connect(&options),
             Frame::Ping => self.send(b"PONG\r\n")?,
             Frame::Pong => {}
-            Frame::Publish { subject, reply, headers, payload } => {
-                let reply_valid = reply.as_deref().is_none_or(|reply| valid_subject(reply, false));
+            Frame::Publish {
+                subject,
+                reply,
+                headers,
+                payload,
+            } => {
+                let reply_valid = reply
+                    .as_deref()
+                    .is_none_or(|reply| valid_subject(reply, false));
                 if !valid_subject(&subject, false) || !reply_valid {
                     self.error("Invalid Subject")?;
                 } else {
-                    self.broker.publish(&Published { from: self.id, subject: &subject, reply: reply.as_deref(), headers: &headers, payload: &payload });
+                    self.broker.publish(&Published {
+                        from: self.id,
+                        subject: &subject,
+                        reply: reply.as_deref(),
+                        headers: &headers,
+                        payload: &payload,
+                    });
                     self.ok()?;
                 }
             }
-            Frame::Subscribe { subject, queue, sid } => {
-                let queue_valid = queue.as_deref().is_none_or(|queue| valid_subject(queue, false));
+            Frame::Subscribe {
+                subject,
+                queue,
+                sid,
+            } => {
+                let queue_valid = queue
+                    .as_deref()
+                    .is_none_or(|queue| valid_subject(queue, false));
                 if !valid_subject(&subject, true) || !queue_valid {
                     self.error("Invalid Subject")?;
                     return Ok(Next::Continue);
@@ -213,12 +268,22 @@ impl Session<'_> {
                 let Some(client) = clients.get_mut(&self.id) else {
                     return Ok(Next::Close);
                 };
-                if client.subscriptions.len() >= MAX_SUBSCRIPTIONS && !client.subscriptions.contains_key(&sid) {
+                if client.subscriptions.len() >= MAX_SUBSCRIPTIONS
+                    && !client.subscriptions.contains_key(&sid)
+                {
                     drop(clients);
                     self.error("Maximum Subscriptions Exceeded")?;
                     return Ok(Next::Continue);
                 }
-                client.subscriptions.insert(sid, Subscription { subject, queue, delivered: 0, max: None });
+                client.subscriptions.insert(
+                    sid,
+                    Subscription {
+                        subject,
+                        queue,
+                        delivered: 0,
+                        max: None,
+                    },
+                );
                 drop(clients);
                 self.ok()?;
             }
@@ -226,7 +291,9 @@ impl Session<'_> {
                 let mut clients = self.broker.clients();
                 if let Some(client) = clients.get_mut(&self.id) {
                     match (client.subscriptions.get_mut(&sid), max) {
-                        (Some(subscription), Some(max)) if subscription.delivered < max => subscription.max = Some(max),
+                        (Some(subscription), Some(max)) if subscription.delivered < max => {
+                            subscription.max = Some(max)
+                        }
                         _ => {
                             client.subscriptions.remove(&sid);
                         }
@@ -262,7 +329,13 @@ impl Session<'_> {
             match reader.read(&mut chunk) {
                 Ok(0) => return Ok(()),
                 Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -286,14 +359,27 @@ pub(crate) fn serve_stream(
     writer: SharedWriter,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> io::Result<()> {
-    let mut session = Session { broker, config, id, writer, connected: false, verbose: false };
-    let result = session.send(info(address, id).as_bytes()).and_then(|()| session.run(reader, stop));
+    let mut session = Session {
+        broker,
+        config,
+        id,
+        writer,
+        connected: false,
+        verbose: false,
+    };
+    let result = session
+        .send(info(address, id).as_bytes())
+        .and_then(|()| session.run(reader, stop));
     broker.clients().remove(&id);
     result
 }
 
 /// Serves NATS clients on `listener` until `stop` turns true.
-pub fn serve(listener: &TcpListener, config: &ServerConfig, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub fn serve(
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
     let broker = Broker::new();
@@ -321,13 +407,23 @@ pub fn serve(listener: &TcpListener, config: &ServerConfig, stop: &(dyn Fn() -> 
             }
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let (broker, active) = (&broker, &active);
-            let spawned = std::thread::Builder::new().name("eggdb-nats".to_owned()).spawn_scoped(scope, move || {
-                if let Ok(writer) = stream.try_clone() {
-                    let shared: SharedWriter = Arc::new(Mutex::new(writer));
-                    let _ = serve_stream(broker, config, id, address, ReadHalf(stream), shared, stop);
-                }
-                active.fetch_sub(1, Ordering::AcqRel);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("eggdb-nats".to_owned())
+                .spawn_scoped(scope, move || {
+                    if let Ok(writer) = stream.try_clone() {
+                        let shared: SharedWriter = Arc::new(Mutex::new(writer));
+                        let _ = serve_stream(
+                            broker,
+                            config,
+                            id,
+                            address,
+                            ReadHalf(stream),
+                            shared,
+                            stop,
+                        );
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                });
             if spawned.is_err() {
                 active.fetch_sub(1, Ordering::AcqRel);
             }

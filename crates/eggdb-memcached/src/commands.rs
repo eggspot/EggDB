@@ -26,7 +26,9 @@ impl Shared<'_> {
 }
 
 fn valid_key(key: &[u8]) -> bool {
-    !key.is_empty() && key.len() <= MAX_KEY_BYTES && key.iter().all(|byte| *byte > b' ' && *byte != 0x7f)
+    !key.is_empty()
+        && key.len() <= MAX_KEY_BYTES
+        && key.iter().all(|byte| *byte > b' ' && *byte != 0x7f)
 }
 
 fn load(keys: &dyn KeysRead, key: &[u8], now: u64) -> Result<Option<Item>, String> {
@@ -40,7 +42,10 @@ fn store(keys: &mut dyn KeysWrite, key: &[u8], item: &Item) -> Result<(), String
     keys.put(key, &item.encode())
 }
 
-fn read<T>(shared: &Shared<'_>, body: impl FnOnce(&dyn KeysRead) -> Result<T, String>) -> Result<T, String> {
+fn read<T>(
+    shared: &Shared<'_>,
+    body: impl FnOnce(&dyn KeysRead) -> Result<T, String>,
+) -> Result<T, String> {
     let mut body = Some(body);
     let mut out = None;
     shared.keyspace.read(0, &mut |keys| {
@@ -52,7 +57,10 @@ fn read<T>(shared: &Shared<'_>, body: impl FnOnce(&dyn KeysRead) -> Result<T, St
     out.ok_or_else(|| "the read did not run".to_owned())
 }
 
-fn write<T>(shared: &Shared<'_>, body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, String>) -> Result<T, String> {
+fn write<T>(
+    shared: &Shared<'_>,
+    body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, String>,
+) -> Result<T, String> {
     let mut body = Some(body);
     let mut out = None;
     shared.keyspace.write(0, &mut |keys| {
@@ -95,7 +103,15 @@ pub enum Stored {
 }
 
 /// Runs `set`, `add`, `replace`, `append`, `prepend` or `cas`.
-pub fn storage(shared: &Shared<'_>, mode: Mode, key: &[u8], flags: u32, exptime: i64, data: Vec<u8>, now: u64) -> Result<Stored, String> {
+pub fn storage(
+    shared: &Shared<'_>,
+    mode: Mode,
+    key: &[u8],
+    flags: u32,
+    exptime: i64,
+    data: Vec<u8>,
+    now: u64,
+) -> Result<Stored, String> {
     let cas = shared.cas();
     write(shared, |keys| {
         let existing = load(keys, key, now)?;
@@ -104,7 +120,9 @@ pub fn storage(shared: &Shared<'_>, mode: Mode, key: &[u8], flags: u32, exptime:
                 return Ok(Stored::NotStored);
             }
             (Mode::Cas(_), None) => return Ok(Stored::NotFound),
-            (Mode::Cas(expected), Some(existing)) if existing.cas != expected => return Ok(Stored::Exists),
+            (Mode::Cas(expected), Some(existing)) if existing.cas != expected => {
+                return Ok(Stored::Exists);
+            }
             (Mode::Append, Some(mut existing)) => {
                 existing.data.extend_from_slice(&data);
                 existing.cas = cas;
@@ -117,7 +135,12 @@ pub fn storage(shared: &Shared<'_>, mode: Mode, key: &[u8], flags: u32, exptime:
                 existing.cas = cas;
                 existing
             }
-            _ => Item { data, flags, cas, expires_at_ms: expiry_of(exptime, now) },
+            _ => Item {
+                data,
+                flags,
+                cas,
+                expires_at_ms: expiry_of(exptime, now),
+            },
         };
         if item.data.len() > MAX_ITEM_BYTES {
             return Err("SERVER_ERROR object too large for cache".to_owned());
@@ -132,7 +155,12 @@ pub fn storage(shared: &Shared<'_>, mode: Mode, key: &[u8], flags: u32, exptime:
 }
 
 /// The items of `keys` that exist, with their keys.
-pub fn get(shared: &Shared<'_>, keys_wanted: &[Vec<u8>], touch: Option<i64>, now: u64) -> Result<Vec<(Vec<u8>, Item)>, String> {
+pub fn get(
+    shared: &Shared<'_>,
+    keys_wanted: &[Vec<u8>],
+    touch: Option<i64>,
+    now: u64,
+) -> Result<Vec<(Vec<u8>, Item)>, String> {
     let fetch = |keys: &dyn KeysRead| -> Result<Vec<(Vec<u8>, Item)>, String> {
         let mut found = Vec::new();
         for key in keys_wanted {
@@ -167,7 +195,13 @@ pub fn delete(shared: &Shared<'_>, key: &[u8], now: u64) -> Result<bool, String>
 }
 
 /// Adds or subtracts `delta` from a decimal item; `None` when it does not exist.
-pub fn arithmetic(shared: &Shared<'_>, key: &[u8], delta: u64, increment: bool, now: u64) -> Result<Option<u64>, String> {
+pub fn arithmetic(
+    shared: &Shared<'_>,
+    key: &[u8],
+    delta: u64,
+    increment: bool,
+    now: u64,
+) -> Result<Option<u64>, String> {
     let cas = shared.cas();
     write(shared, |keys| {
         let Some(mut item) = load(keys, key, now)? else {
@@ -176,8 +210,14 @@ pub fn arithmetic(shared: &Shared<'_>, key: &[u8], delta: u64, increment: bool, 
         let current: u64 = std::str::from_utf8(&item.data)
             .ok()
             .and_then(|text| text.trim().parse().ok())
-            .ok_or_else(|| "CLIENT_ERROR cannot increment or decrement non-numeric value".to_owned())?;
-        let next = if increment { current.wrapping_add(delta) } else { current.saturating_sub(delta) };
+            .ok_or_else(|| {
+                "CLIENT_ERROR cannot increment or decrement non-numeric value".to_owned()
+            })?;
+        let next = if increment {
+            current.wrapping_add(delta)
+        } else {
+            current.saturating_sub(delta)
+        };
         item.data = next.to_string().into_bytes();
         item.cas = cas;
         store(keys, key, &item)?;

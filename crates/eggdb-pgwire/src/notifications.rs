@@ -59,7 +59,8 @@ impl NotificationHub {
             .get_mut(&process_id)
             .map(|listener| listener.waiting.drain(..).collect())
             .unwrap_or_default();
-        listeners.retain(|_, listener| !listener.channels.is_empty() || !listener.waiting.is_empty());
+        listeners
+            .retain(|_, listener| !listener.channels.is_empty() || !listener.waiting.is_empty());
         delivered
     }
 

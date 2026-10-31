@@ -1,4 +1,6 @@
-use crate::ast::{DerivedTable, Expr, ExprKind, JoinKind, Name, Query, Select, SelectItem, SetExpr};
+use crate::ast::{
+    DerivedTable, Expr, ExprKind, JoinKind, Name, Query, Select, SelectItem, SetExpr,
+};
 use crate::eval::{children, children_mut, output_name};
 
 /// The visible columns, in order, of the stored table a derived table's `SELECT *` reads, or
@@ -7,9 +9,12 @@ pub(crate) type StoredColumns<'c> = dyn FnMut(&Name) -> Option<Vec<String>> + 'c
 
 fn keeps_every_row_of_its_tables(select: &Select) -> bool {
     select.from.as_ref().is_some_and(|from| {
-        from.joins
-            .iter()
-            .all(|join| matches!(join.kind, JoinKind::Inner | JoinKind::Cross | JoinKind::Comma))
+        from.joins.iter().all(|join| {
+            matches!(
+                join.kind,
+                JoinKind::Inner | JoinKind::Cross | JoinKind::Comma
+            )
+        })
     })
 }
 
@@ -84,11 +89,18 @@ fn plain_column(name: String, position: usize) -> Expr {
 
 fn outputs_of(derived: &DerivedTable, stored_columns: &mut StoredColumns<'_>) -> Option<Outputs> {
     let select = filters_rows_only(&derived.query)?;
-    let renamed = |index: usize| derived.column_names.get(index).map(|name| name.text.clone());
-    if let [SelectItem::Wildcard {
-        qualifier: None,
-        position,
-    }] = select.items.as_slice()
+    let renamed = |index: usize| {
+        derived
+            .column_names
+            .get(index)
+            .map(|name| name.text.clone())
+    };
+    if let [
+        SelectItem::Wildcard {
+            qualifier: None,
+            position,
+        },
+    ] = select.items.as_slice()
     {
         let from = select.from.as_ref()?;
         if !from.joins.is_empty() || from.first.derived.is_some() || from.first.generated.is_some()
@@ -205,7 +217,8 @@ pub(crate) fn push_conditions_into_derived(
         return;
     };
     let alone = from.joins.is_empty();
-    let references = std::iter::once(&mut from.first).chain(from.joins.iter_mut().map(|join| &mut join.table));
+    let references =
+        std::iter::once(&mut from.first).chain(from.joins.iter_mut().map(|join| &mut join.table));
     for reference in references {
         let label = reference
             .alias
@@ -223,7 +236,8 @@ pub(crate) fn push_conditions_into_derived(
         let moved: Vec<Expr> = conjuncts(&filter)
             .into_iter()
             .filter(|conjunct| {
-                depends_only_on_its_columns(conjunct) && names_only(conjunct, &label, alone, &outputs)
+                depends_only_on_its_columns(conjunct)
+                    && names_only(conjunct, &label, alone, &outputs)
             })
             .map(|conjunct| {
                 let mut inside = conjunct.clone();
@@ -280,7 +294,9 @@ mod tests {
 
     #[test]
     fn a_condition_on_a_plain_column_moves_into_the_derived_table() {
-        let select = pushed("SELECT v.name FROM (SELECT id AS k, name FROM people) v WHERE v.k = 5 AND name <> 'x'");
+        let select = pushed(
+            "SELECT v.name FROM (SELECT id AS k, name FROM people) v WHERE v.k = 5 AND name <> 'x'",
+        );
         let filter = derived_filter(&select).expect("a moved condition");
         assert!(filter.contains("\"id\""), "{filter}");
         assert!(filter.contains("String(\"x\")"), "{filter}");

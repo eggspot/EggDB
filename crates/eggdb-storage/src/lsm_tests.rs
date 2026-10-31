@@ -59,14 +59,21 @@ fn scanned(store: &Store<SimFile>, tree: &LsmTree, order: ScanOrder) -> Vec<(Vec
 fn assert_matches(store: &Store<SimFile>, tree: &LsmTree, model: &Model, context: &str) {
     let expected: Vec<(Vec<u8>, Vec<u8>)> =
         model.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    assert!(scanned(store, tree, ScanOrder::Ascending) == expected, "{context}: ascending");
+    assert!(
+        scanned(store, tree, ScanOrder::Ascending) == expected,
+        "{context}: ascending"
+    );
     let mut backward = scanned(store, tree, ScanOrder::Descending);
     backward.reverse();
     assert!(backward == expected, "{context}: descending");
     let read = store.begin_read().unwrap();
     for index in 0..300 {
         let key = key(index);
-        assert_eq!(read.lsm_get(tree, &key).unwrap(), model.get(&key).cloned(), "{context}: {index}");
+        assert_eq!(
+            read.lsm_get(tree, &key).unwrap(),
+            model.get(&key).cloned(),
+            "{context}: {index}"
+        );
     }
 }
 
@@ -120,12 +127,18 @@ fn a_reader_keeps_its_snapshot_while_runs_merge_under_it() {
     write.lsm_finish_merges(&tree).unwrap();
     write.commit().unwrap();
     for index in 0..100 {
-        assert_eq!(read.lsm_get(&tree, &key(index)).unwrap(), Some(b"old".to_vec()));
+        assert_eq!(
+            read.lsm_get(&tree, &key(index)).unwrap(),
+            Some(b"old".to_vec())
+        );
     }
     assert_eq!(read.lsm_get(&tree, &key(120)).unwrap(), None);
     drop(read);
     let after = store.begin_read().unwrap();
-    assert_eq!(after.lsm_get(&tree, &key(120)).unwrap(), Some(b"new".to_vec()));
+    assert_eq!(
+        after.lsm_get(&tree, &key(120)).unwrap(),
+        Some(b"new".to_vec())
+    );
 }
 
 #[test]
@@ -159,10 +172,22 @@ fn values_at_the_limit_and_beyond_are_handled() {
     let fs = SimFileSystem::new();
     let (store, tree) = created(&fs);
     let mut write = store.begin_write().unwrap();
-    assert_eq!(LsmTree::MAX_VALUE_BYTES, crate::btree::BTree::MAX_VALUE_BYTES - 1);
+    assert_eq!(
+        LsmTree::MAX_VALUE_BYTES,
+        crate::btree::BTree::MAX_VALUE_BYTES - 1
+    );
     write.lsm_put(&tree, b"", b"empty key").unwrap();
     write.lsm_put(&tree, b"large", &vec![9u8; 20_000]).unwrap();
-    assert_eq!(write.lsm_get(&tree, b"").unwrap(), Some(b"empty key".to_vec()));
-    assert_eq!(write.lsm_get(&tree, b"large").unwrap().map(|value| value.len()), Some(20_000));
+    assert_eq!(
+        write.lsm_get(&tree, b"").unwrap(),
+        Some(b"empty key".to_vec())
+    );
+    assert_eq!(
+        write
+            .lsm_get(&tree, b"large")
+            .unwrap()
+            .map(|value| value.len()),
+        Some(20_000)
+    );
     write.commit().unwrap();
 }

@@ -7,7 +7,10 @@ fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
         &mut session,
         "CREATE TABLE emp (id NUMBER, name VARCHAR2(40), sal NUMBER)",
     );
-    run(&mut session, "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))");
+    run(
+        &mut session,
+        "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))",
+    );
     session
 }
 
@@ -80,7 +83,10 @@ BEGIN
   END IF;
 END;",
     );
-    run(&mut session, "INSERT INTO emp (id, name) VALUES (1, 'king')");
+    run(
+        &mut session,
+        "INSERT INTO emp (id, name) VALUES (1, 'king')",
+    );
     run(&mut session, "UPDATE emp SET name = 'blake' WHERE id = 1");
     assert_eq!(
         texts(&mut session, "SELECT id, name, sal FROM emp"),
@@ -240,11 +246,17 @@ fn alter_trigger_disables_enables_renames_and_drop_removes_it() {
     run(&mut session, "ALTER TABLE emp DISABLE ALL TRIGGERS");
     run(&mut session, "INSERT INTO emp VALUES (3, 'SCOTT', 3000)");
     run(&mut session, "ALTER TABLE emp ENABLE ALL TRIGGERS");
-    run(&mut session, "ALTER TRIGGER emp_audit RENAME TO emp_history");
+    run(
+        &mut session,
+        "ALTER TRIGGER emp_audit RENAME TO emp_history",
+    );
     run(&mut session, "INSERT INTO emp VALUES (4, 'FORD', 3000)");
     run(&mut session, "DROP TRIGGER emp_history");
     run(&mut session, "INSERT INTO emp VALUES (5, 'ADAMS', 1100)");
-    assert_eq!(messages(&mut session), row(&["insert BLAKE", "insert FORD"]));
+    assert_eq!(
+        messages(&mut session),
+        row(&["insert BLAKE", "insert FORD"])
+    );
     let missing = failure(&mut session, "DROP TRIGGER emp_history");
     assert_eq!(missing.vendor_code(), Some(4080));
     assert_eq!(missing.message(), "trigger 'EMP_HISTORY' does not exist");
@@ -369,7 +381,9 @@ fn trigger_definitions_oracle_refuses_are_refused_at_create() {
         "CREATE TRIGGER t8 BEFORE INSERT ON emp FOR EACH ROW BEGIN :new.salary := 1; END;",
     );
     assert!(
-        bad_bind.message().contains("PLS-00049: bad bind variable 'NEW.SALARY'"),
+        bad_bind
+            .message()
+            .contains("PLS-00049: bad bind variable 'NEW.SALARY'"),
         "{bad_bind}"
     );
     let compound = failure(

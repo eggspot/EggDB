@@ -102,9 +102,7 @@ impl std::fmt::Display for DerError {
             Self::IntegerEncoding => f.write_str("the DER integer is not validly encoded"),
             Self::PrimitiveEncoding => f.write_str("the DER BOOLEAN or NULL is not valid"),
             Self::BitStringEncoding => f.write_str("the DER BIT STRING is not valid"),
-            Self::ObjectIdentifierEncoding => {
-                f.write_str("the DER OBJECT IDENTIFIER is not valid")
-            }
+            Self::ObjectIdentifierEncoding => f.write_str("the DER OBJECT IDENTIFIER is not valid"),
         }
     }
 }
@@ -168,9 +166,7 @@ impl<'a> DerReader<'a> {
             if count == 0 || count > MAX_LENGTH_BYTES {
                 return Err(DerError::LengthEncoding);
             }
-            let (length_bytes, rest) = rest
-                .split_at_checked(count)
-                .ok_or(DerError::Truncated)?;
+            let (length_bytes, rest) = rest.split_at_checked(count).ok_or(DerError::Truncated)?;
             if length_bytes[0] == 0 {
                 return Err(DerError::LengthEncoding);
             }

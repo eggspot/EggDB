@@ -8,8 +8,8 @@ use crate::cli::render::{JsonObject, json_string};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_commands::Category;
 use eggdb_sql::{
-    CopyChannel, Dialect, IncludeOpener, QueryResult, ServerOutputSetting,
-    SqlError, SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlState, TransactionStatus, Value,
+    CopyChannel, Dialect, IncludeOpener, QueryResult, ServerOutputSetting, SqlError,
+    SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlState, TransactionStatus, Value,
 };
 use std::cell::{Cell, RefCell};
 use std::io::Read;
@@ -17,16 +17,26 @@ use std::io::Read;
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
         super::foreign::allow_from_environment();
-        if let Some(url) = self.request.file.to_str().filter(|text| text.starts_with(super::archive::BUCKET_SCHEME)).map(str::to_owned) {
+        if let Some(url) = self
+            .request
+            .file
+            .to_str()
+            .filter(|text| text.starts_with(super::archive::BUCKET_SCHEME))
+            .map(str::to_owned)
+        {
             let at = self.request.restore.at.clone();
-            self.request.file = super::archive::edge_copy(&url, at.as_deref())
-                .map_err(|message| Failure::usage(message, Some(crate::cli::args::CommandName::Sql)))?;
+            self.request.file =
+                super::archive::edge_copy(&url, at.as_deref()).map_err(|message| {
+                    Failure::usage(message, Some(crate::cli::args::CommandName::Sql))
+                })?;
             self.request.read_only = true;
         } else if self.request.file.join(super::archive::MANIFEST).is_file() {
             let directory = self.request.file.clone();
             let at = self.request.restore.at.clone();
-            let copy = super::archive::archived_copy(&directory, at.as_deref())
-                .map_err(|message| Failure::usage(message, Some(crate::cli::args::CommandName::Sql)))?;
+            let copy =
+                super::archive::archived_copy(&directory, at.as_deref()).map_err(|message| {
+                    Failure::usage(message, Some(crate::cli::args::CommandName::Sql))
+                })?;
             self.request.file = copy;
             self.request.read_only = true;
         } else if self.request.restore.at.is_some() {
@@ -38,7 +48,10 @@ impl Session<'_> {
         let mut text = self.sql_text()?;
         if self.request.kql {
             text = eggdb_kql::translate(&text).map_err(|error| {
-                Failure::usage(format!("the KQL query is not valid: {}", error.0), Some(CommandName::Sql))
+                Failure::usage(
+                    format!("the KQL query is not valid: {}", error.0),
+                    Some(CommandName::Sql),
+                )
             })?;
         }
         let json = self.format == Format::Json;
@@ -549,9 +562,10 @@ pub(crate) fn statement_object(result: &QueryResult, dialect: Dialect) -> JsonOb
         let columns: Vec<String> = columns
             .iter()
             .map(|column| {
-                let kind = column
-                    .sql_type
-                    .map_or_else(|| "null".to_owned(), |sql_type| json_string(&sql_type.name()));
+                let kind = column.sql_type.map_or_else(
+                    || "null".to_owned(),
+                    |sql_type| json_string(&sql_type.name()),
+                );
                 JsonObject::new()
                     .string("name", &column.name)
                     .raw("type", &kind)

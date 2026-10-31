@@ -72,8 +72,7 @@ pub enum ServerOutputSetting {
     Off,
 }
 
-const SERVER_OUTPUT_FORM: &str =
-    "the form is SET SERVEROUTPUT ON|OFF [SIZE 2000..1000000|UNLIMITED] [FORMAT WRAPPED|WORD_WRAPPED|TRUNCATED]";
+const SERVER_OUTPUT_FORM: &str = "the form is SET SERVEROUTPUT ON|OFF [SIZE 2000..1000000|UNLIMITED] [FORMAT WRAPPED|WORD_WRAPPED|TRUNCATED]";
 const SERVER_OUTPUT_HINT: &str =
     "SET SERVEROUTPUT ON alone keeps every line, up to EggDB's 1 MiB buffer.";
 const SMALLEST_SERVER_OUTPUT_SIZE: usize = 2_000;
@@ -287,7 +286,10 @@ impl<'r> SqlPlusScript<'r> {
             return format!("line {line}");
         }
         let names = self.reader.script_names();
-        match usize::try_from(script).ok().and_then(|index| names.get(index)) {
+        match usize::try_from(script)
+            .ok()
+            .and_then(|index| names.get(index))
+        {
             Some(name) => format!("{name} line {line}"),
             None => format!("line {line}"),
         }

@@ -156,9 +156,20 @@ pub(crate) struct AlterPackage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MaterializedViewCommand {
-    Create { name: Name, query: String, with_data: bool, if_not_exists: bool },
-    Refresh { name: Name, with_data: bool },
-    Drop { names: Vec<Name>, if_exists: bool },
+    Create {
+        name: Name,
+        query: String,
+        with_data: bool,
+        if_not_exists: bool,
+    },
+    Refresh {
+        name: Name,
+        with_data: bool,
+    },
+    Drop {
+        names: Vec<Name>,
+        if_exists: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -351,11 +362,11 @@ pub(crate) struct WithStatement {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WithTable {
-    Query(CommonTable),
+    Query(Box<CommonTable>),
     Modifying {
         name: Name,
         column_names: Vec<Name>,
-        statement: Statement,
+        statement: Box<Statement>,
     },
 }
 
@@ -1463,7 +1474,10 @@ impl AggregateFunction {
     }
 
     pub(crate) fn is_ordered_set(self) -> bool {
-        matches!(self, Self::PercentileCont | Self::PercentileDisc | Self::Mode)
+        matches!(
+            self,
+            Self::PercentileCont | Self::PercentileDisc | Self::Mode
+        )
     }
 
     pub(crate) fn named(name: &str) -> Option<Self> {
@@ -1517,10 +1531,6 @@ impl AggregateFunction {
 
     pub(crate) fn keeps_nulls(self) -> bool {
         self.builds_json() || self == Self::ArrayAgg
-    }
-
-    pub(crate) fn combines_truth(self) -> bool {
-        matches!(self, Self::BoolAnd | Self::BoolOr | Self::Every)
     }
 
     pub(crate) fn builds_json(self) -> bool {

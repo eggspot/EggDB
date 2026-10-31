@@ -24,7 +24,15 @@ use crate::types::SqlType;
 const STATEMENTS_WITH_INTO: [&str; 6] = ["select", "with", "insert", "update", "delete", "merge"];
 
 const SQL_STATEMENT_WORDS: [&str; 9] = [
-    "select", "with", "insert", "update", "delete", "merge", "lock", "savepoint", "set",
+    "select",
+    "with",
+    "insert",
+    "update",
+    "delete",
+    "merge",
+    "lock",
+    "savepoint",
+    "set",
 ];
 
 const FORALL_STATEMENT_WORDS: [&str; 5] = ["insert", "update", "delete", "merge", "execute"];
@@ -152,7 +160,9 @@ impl Heading {
         let returns = match (&self.returns, self.options.pipelined) {
             (None, _) => RoutineReturns::Nothing,
             (Some(declared), true) => RoutineReturns::Set(ReturnType::Type(declared.engine_type())),
-            (Some(declared), false) => RoutineReturns::One(ReturnType::Type(declared.engine_type())),
+            (Some(declared), false) => {
+                RoutineReturns::One(ReturnType::Type(declared.engine_type()))
+            }
         };
         RoutineDefinition {
             name: self.name.text.clone(),
@@ -384,8 +394,7 @@ impl<'t> Parser<'t> {
         let start = self.position();
         let first = self.at;
         let program = Compiler::new(self, None, false).anonymous_block();
-        let mut program =
-            program.map_err(|error| self.plsql_compilation_error(start, error))?;
+        let mut program = program.map_err(|error| self.plsql_compilation_error(start, error))?;
         program.package_candidates =
             crate::plsql::package_candidates(self.tokens.get(first..self.at).unwrap_or_default());
         Ok((program, self.slice(start, self.previous_end())))
@@ -731,9 +740,8 @@ impl<'p, 't> Compiler<'p, 't> {
         let [name] = parts.as_slice() else {
             return false;
         };
-        self.variable(name).is_some_and(|variable| {
-            variable.binding == Binding::Type { ref_cursor: true }
-        })
+        self.variable(name)
+            .is_some_and(|variable| variable.binding == Binding::Type { ref_cursor: true })
     }
 
     fn exception_identity(&self, name: &str, position: usize) -> String {
@@ -812,7 +820,8 @@ impl<'p, 't> Compiler<'p, 't> {
         }
         let heading = self.heading()?;
         if self.take(&TokenKind::Semicolon) {
-            let definition = heading.definition(self.parser.slice(start, self.parser.previous_end()));
+            let definition =
+                heading.definition(self.parser.slice(start, self.parser.previous_end()));
             return Ok(CompiledSubprogram {
                 heading,
                 definition,
@@ -987,10 +996,9 @@ impl<'p, 't> Compiler<'p, 't> {
             } else if self.take_word("accessible") {
                 self.expect_word("by")?;
                 self.skip_parenthesized()?;
-            } else if self.is_word("sharing") && self.is_operator_at(1, "=") {
-                self.parser.at += 2;
-                self.any_word()?;
-            } else if self.is_word("default") && self.is_word_at(1, "collation") {
+            } else if (self.is_word("sharing") && self.is_operator_at(1, "="))
+                || (self.is_word("default") && self.is_word_at(1, "collation"))
+            {
                 self.parser.at += 2;
                 self.any_word()?;
             } else if self.is_word("aggregate") {
@@ -1229,10 +1237,9 @@ impl<'p, 't> Compiler<'p, 't> {
         let word = self.any_word()?;
         match word.as_str() {
             "exception_init" => self.exception_init(earlier),
-            "autonomous_transaction" => Err(not_supported(
-                "PRAGMA AUTONOMOUS_TRANSACTION",
-                position,
-            )),
+            "autonomous_transaction" => {
+                Err(not_supported("PRAGMA AUTONOMOUS_TRANSACTION", position))
+            }
             other if IGNORED_PRAGMAS.contains(&other) => {
                 self.skip_to_semicolon();
                 self.expect_semicolon()
@@ -1524,7 +1531,9 @@ impl<'p, 't> Compiler<'p, 't> {
                 Err(error) => return Err(error),
             },
         };
-        let written = self.parser.slice(first_position, self.parser.previous_end());
+        let written = self
+            .parser
+            .slice(first_position, self.parser.previous_end());
         self.skip_type_constraint()?;
         Ok(DeclaredType::sql(sql_type, &written))
     }
@@ -1618,10 +1627,7 @@ impl<'p, 't> Compiler<'p, 't> {
         }
         if self.take_word("rowtype") {
             if parts.len() > 2 {
-                return Err(SqlError::syntax(
-                    "syntax error at or near \"%\"",
-                    position,
-                ));
+                return Err(SqlError::syntax("syntax error at or near \"%\"", position));
             }
             return Ok(Some(DeclaredType::RowType(parts)));
         }
@@ -1872,7 +1878,8 @@ impl<'p, 't> Compiler<'p, 't> {
         if depth > MAX_NESTING {
             return Err(nested_too_deeply(self.position()));
         }
-        self.scopes.push(Scope::new(label.clone(), false, Vec::new()));
+        self.scopes
+            .push(Scope::new(label.clone(), false, Vec::new()));
         let block = self.block_contents(label, depth);
         self.scopes.pop();
         block
@@ -2260,7 +2267,8 @@ impl<'p, 't> Compiler<'p, 't> {
     }
 
     fn starts_parenthesized_query(&self) -> bool {
-        self.kind() == &TokenKind::LeftParen && (self.is_word_at(1, "select") || self.is_word_at(1, "with"))
+        self.kind() == &TokenKind::LeftParen
+            && (self.is_word_at(1, "select") || self.is_word_at(1, "with"))
     }
 
     fn for_head(&mut self, loop_variables: &mut Vec<Variable>) -> SqlResult<LoopKind> {
@@ -2281,7 +2289,9 @@ impl<'p, 't> Compiler<'p, 't> {
                 source: QuerySource::Static(query),
             });
         }
-        if self.is_cursor_at(0) && (self.kind_at(1) == &TokenKind::LeftParen || self.is_word_at(1, "loop")) {
+        if self.is_cursor_at(0)
+            && (self.kind_at(1) == &TokenKind::LeftParen || self.is_word_at(1, "loop"))
+        {
             let cursor = self.any_word()?;
             let arguments = if self.kind() == &TokenKind::LeftParen {
                 self.cursor_values()?
@@ -2459,7 +2469,10 @@ impl<'p, 't> Compiler<'p, 't> {
             Some(label) => pls_error(
                 SqlState::SYNTAX_ERROR,
                 373,
-                &format!("EXIT/CONTINUE label '{}' must label a LOOP statement", shown(label)),
+                &format!(
+                    "EXIT/CONTINUE label '{}' must label a LOOP statement",
+                    shown(label)
+                ),
                 position,
             ),
         })
@@ -2474,9 +2487,9 @@ impl<'p, 't> Compiler<'p, 't> {
             Some(self.fragment(&[])?)
         };
         self.expect_semicolon()?;
-        let (kind, pipelined) = self
-            .unit()
-            .map_or((RoutineKind::Procedure, false), |unit| (unit.kind, unit.pipelined));
+        let (kind, pipelined) = self.unit().map_or((RoutineKind::Procedure, false), |unit| {
+            (unit.kind, unit.pipelined)
+        });
         match (kind, pipelined, value.is_some()) {
             (RoutineKind::Procedure, _, true) => Err(pls_error(
                 SqlState::DATATYPE_MISMATCH,
@@ -2574,7 +2587,7 @@ impl<'p, 't> Compiler<'p, 't> {
         Ok(values)
     }
 
-    fn into_clause_ahead(&self) -> bool {
+    fn has_into_clause_ahead(&self) -> bool {
         self.is_word("into")
             || (self.is_word("bulk") && self.is_word_at(1, "collect"))
             || ((self.is_word("returning") || self.is_word("return"))
@@ -2595,7 +2608,7 @@ impl<'p, 't> Compiler<'p, 't> {
         let mut using = None;
         loop {
             let position = self.position();
-            if self.into_clause_ahead() {
+            if self.has_into_clause_ahead() {
                 if into.is_some() {
                     return Err(SqlError::syntax("INTO specified more than once", position));
                 }

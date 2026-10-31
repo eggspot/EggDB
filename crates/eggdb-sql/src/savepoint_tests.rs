@@ -33,7 +33,10 @@ fn rollback_to_a_savepoint_undoes_only_what_came_after_it() {
     assert_eq!(values(&mut session), "v\n1\n2\nSELECT 2");
     answer(&mut session, "ROLLBACK TO a");
     assert_eq!(values(&mut session), "v\n1\nSELECT 1");
-    answer(&mut session, "INSERT INTO t VALUES (4); RELEASE SAVEPOINT a; COMMIT");
+    answer(
+        &mut session,
+        "INSERT INTO t VALUES (4); RELEASE SAVEPOINT a; COMMIT",
+    );
     assert_eq!(values(&mut session), "v\n1\n4\nSELECT 2");
 }
 
@@ -66,7 +69,10 @@ fn savepoints_follow_each_dialect() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
     answer(&mut session, "CREATE TABLE t (v INTEGER PRIMARY KEY)");
-    answer(&mut session, "SAVEPOINT outer; INSERT INTO t VALUES (5); RELEASE outer");
+    answer(
+        &mut session,
+        "SAVEPOINT outer; INSERT INTO t VALUES (5); RELEASE outer",
+    );
     assert_eq!(values(&mut session), "v\n5\nSELECT 1");
 
     let store = MemoryStore::default();
@@ -94,7 +100,10 @@ fn savepoints_follow_each_dialect() {
 fn row_locking_clauses_and_lock_table_are_accepted() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    answer(&mut session, "CREATE TABLE t (v integer PRIMARY KEY); INSERT INTO t VALUES (1)");
+    answer(
+        &mut session,
+        "CREATE TABLE t (v integer PRIMARY KEY); INSERT INTO t VALUES (1)",
+    );
     answer(&mut session, "BEGIN");
     for sql in [
         "SELECT v FROM t FOR UPDATE",

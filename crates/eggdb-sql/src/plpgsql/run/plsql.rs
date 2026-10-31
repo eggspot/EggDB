@@ -2,9 +2,9 @@ mod packages;
 
 use packages::AttachedPackage;
 
+use super::super::collections::CollectionShape;
 use super::super::frame::{FrameVariable, Slot, row_record};
 use super::super::raise::{display_value, with_context_line};
-use super::super::collections::CollectionShape;
 use super::super::{
     Block, ExceptionCondition, Fragment, Handler, Program, RaisedException, Subprogram,
     TypeDeclaration, VariableType, line_of,
@@ -12,9 +12,8 @@ use super::super::{
 use super::{Flow, Run, coerce};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::plsql::{
-    ANONYMOUS_BLOCK_NAME, DeclaredType, NORMAL_COMPLETION, NO_DATA_FOUND_CODE, USER_EXCEPTION_CODE,
-    USER_EXCEPTION_MESSAGE,
-    application_error_code, predefined_by_code, shown_object, sqlcode_of,
+    ANONYMOUS_BLOCK_NAME, DeclaredType, NO_DATA_FOUND_CODE, NORMAL_COMPLETION, USER_EXCEPTION_CODE,
+    USER_EXCEPTION_MESSAGE, application_error_code, predefined_by_code, shown_object, sqlcode_of,
 };
 use crate::routines::{NamedRoutines, RoutineDefinition, RoutineKind};
 use crate::types::{SqlType, Value};
@@ -197,10 +196,9 @@ fn plsql_code(error: &SqlError) -> Option<(u16, &'static str)> {
         SqlState::DUPLICATE_CURSOR if message.contains("already in use") => {
             (CURSOR_ALREADY_OPEN_CODE, "PL/SQL: cursor already open")
         }
-        SqlState::NULL_VALUE_NOT_ALLOWED if message.contains("declared NOT NULL") => (
-            VALUE_ERROR_CODE,
-            "PL/SQL: numeric or value error",
-        ),
+        SqlState::NULL_VALUE_NOT_ALLOWED if message.contains("declared NOT NULL") => {
+            (VALUE_ERROR_CODE, "PL/SQL: numeric or value error")
+        }
         _ => return None,
     })
 }
@@ -243,7 +241,10 @@ fn assignment_error(error: SqlError) -> SqlError {
 
 fn sqlcode_and_message(error: &SqlError) -> (i32, String) {
     if error.declared_exception().is_some() {
-        return (sqlcode_of(USER_EXCEPTION_CODE), USER_EXCEPTION_MESSAGE.to_owned());
+        return (
+            sqlcode_of(USER_EXCEPTION_CODE),
+            USER_EXCEPTION_MESSAGE.to_owned(),
+        );
     }
     match (error.vendor(), error.vendor_code()) {
         (Some(crate::Dialect::Oracle), Some(code)) => (sqlcode_of(code), error.to_string()),
@@ -418,7 +419,11 @@ impl Run<'_> {
         });
     }
 
-    pub(super) fn declare_subprogram(&mut self, name: &str, subprogram: &Subprogram) -> SqlResult<()> {
+    pub(super) fn declare_subprogram(
+        &mut self,
+        name: &str,
+        subprogram: &Subprogram,
+    ) -> SqlResult<()> {
         let Some(program) = &subprogram.program else {
             return Ok(());
         };
@@ -476,7 +481,10 @@ impl Run<'_> {
         (self.plsql.types.len(), entries, constructors)
     }
 
-    pub(super) fn leave_local_scope(&mut self, (types, entries, constructors): (usize, usize, usize)) {
+    pub(super) fn leave_local_scope(
+        &mut self,
+        (types, entries, constructors): (usize, usize, usize),
+    ) {
         self.plsql.types.truncate(types);
         if let Some(frame) = self.frame.plsql.as_mut() {
             frame.constructors.truncate(constructors);
@@ -502,10 +510,12 @@ impl Run<'_> {
     fn declared_type_named(&self, parts: &[String]) -> Option<TypeDeclaration> {
         let named = |known: &str| match parts {
             [name] => known == name,
-            [package, name] => known
-                .strip_prefix(package.as_str())
-                .and_then(|rest| rest.strip_prefix('.'))
-                == Some(name.as_str()),
+            [package, name] => {
+                known
+                    .strip_prefix(package.as_str())
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    == Some(name.as_str())
+            }
             _ => false,
         };
         self.plsql
@@ -535,7 +545,10 @@ impl Run<'_> {
             TypeDeclaration::Record(fields) => {
                 let mut columns = Vec::with_capacity(fields.len());
                 for field in &fields {
-                    columns.push((field.name.clone(), self.engine_type_of(&field.variable_type)?));
+                    columns.push((
+                        field.name.clone(),
+                        self.engine_type_of(&field.variable_type)?,
+                    ));
                 }
                 Ok(Slot::Row(columns))
             }
@@ -568,7 +581,10 @@ impl Run<'_> {
                 }
                 None => Value::Null,
             };
-            columns.push((field.name.clone(), self.engine_type_of(&field.variable_type)?));
+            columns.push((
+                field.name.clone(),
+                self.engine_type_of(&field.variable_type)?,
+            ));
             values.push(value);
         }
         Ok(Some(row_record(&columns, values)))
@@ -638,7 +654,11 @@ impl Run<'_> {
     }
 
     pub(super) fn assignment_error(&self, error: SqlError) -> SqlError {
-        if self.oracle { assignment_error(error) } else { error }
+        if self.oracle {
+            assignment_error(error)
+        } else {
+            error
+        }
     }
 
     pub(super) fn declare_oracle_builtins(&mut self) {
@@ -718,7 +738,11 @@ impl Run<'_> {
     pub(super) fn push_error_variables(&mut self, error: &SqlError) {
         let (code, message) = sqlcode_and_message(error);
         for (name, slot, value) in [
-            ("sqlcode", Slot::Typed(SqlType::Integer), Value::Integer(code)),
+            (
+                "sqlcode",
+                Slot::Typed(SqlType::Integer),
+                Value::Integer(code),
+            ),
             ("sqlerrm", Slot::Typed(SqlType::Text), Value::Text(message)),
         ] {
             let mut variable = FrameVariable::new(name, slot, value);
@@ -755,11 +779,16 @@ impl Run<'_> {
         message: &Fragment,
         keep: Option<&Fragment>,
     ) -> SqlResult<Flow> {
-        let number = self.integer(number, "error number argument to raise_application_error is null")?;
+        let number = self.integer(
+            number,
+            "error number argument to raise_application_error is null",
+        )?;
         let Some(code) = application_error_code(number) else {
             return Err(SqlError::new(
                 SqlState::INVALID_PARAMETER_VALUE,
-                format!("error number argument to raise_application_error of {number} is out of range"),
+                format!(
+                    "error number argument to raise_application_error of {number} is out of range"
+                ),
             )
             .with_oracle_code(APPLICATION_ERROR_RANGE_CODE));
         };

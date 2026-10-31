@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
+type McpSession<'d> = (Option<String>, Server<'d, SharedOpener<'d>>);
+
 const MAX_SESSIONS: usize = 64;
 const SESSION_HEADER: &str = "mcp-session-id";
 const TIME_LIMIT: Duration = Duration::from_secs(5);
@@ -39,7 +41,7 @@ pub(super) struct McpEndpoint<'d> {
     tokens: Vec<AgentToken>,
     database_name: String,
     audit: PathBuf,
-    sessions: Mutex<HashMap<String, (Option<String>, Server<'d, SharedOpener<'d>>)>>,
+    sessions: Mutex<HashMap<String, McpSession<'d>>>,
     order: Mutex<Vec<String>>,
 }
 
@@ -162,7 +164,10 @@ impl<'d> McpEndpoint<'d> {
         };
         if request.method == "DELETE" {
             if let Some(id) = request.header(SESSION_HEADER) {
-                let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut sessions = self
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if sessions.get(id).is_some_and(|(owner, _)| *owner == role) {
                     sessions.remove(id);
                 }
@@ -170,9 +175,15 @@ impl<'d> McpEndpoint<'d> {
             return eggdb_http::Response::text(200, "session ended");
         }
         if request.method != "POST" {
-            return eggdb_http::Response::text(405, "this endpoint takes POST (no event streams yet)");
+            return eggdb_http::Response::text(
+                405,
+                "this endpoint takes POST (no event streams yet)",
+            );
         }
-        let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (id, created) = match request.header(SESSION_HEADER) {
             Some(id) if sessions.get(id).is_some_and(|(owner, _)| *owner == role) => {
                 (id.to_owned(), false)
@@ -182,7 +193,10 @@ impl<'d> McpEndpoint<'d> {
                 let Some((id, server)) = self.new_session(role.clone()) else {
                     return json_error(500, "the MCP session could not start");
                 };
-                let mut order = self.order.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut order = self
+                    .order
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if order.len() >= MAX_SESSIONS {
                     let oldest = order.remove(0);
                     sessions.remove(&oldest);

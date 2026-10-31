@@ -19,8 +19,8 @@ pub(crate) use frame::{FrameVariable, RoutineFrame};
 pub(crate) use raise::take_raised_notices;
 pub(crate) use run::{
     Call, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionEnd, TriggerCall,
-    invoke, invoke_read_only, local_program, local_routines, run_anonymous_block, run_inline,
-    run_plsql_trigger, take_transaction_end,
+    invoke, local_program, local_routines, run_anonymous_block, run_inline, run_plsql_trigger,
+    take_transaction_end,
 };
 pub(crate) use writes::ReadOnlyWrite;
 
@@ -336,7 +336,10 @@ pub(crate) struct Forall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ForallBounds {
-    Range { lower: Fragment, upper: Fragment },
+    Range {
+        lower: Fragment,
+        upper: Fragment,
+    },
     Indices {
         collection: Target,
         between: Option<(Fragment, Fragment)>,
@@ -708,7 +711,9 @@ pub(crate) fn check(definition: &RoutineDefinition, body_position: Option<usize>
             SqlState::INVALID_FUNCTION_DEFINITION,
             "trigger functions cannot have declared arguments",
         )
-        .with_hint("The arguments of the trigger can be accessed through TG_NARGS and TG_ARGV instead."));
+        .with_hint(
+            "The arguments of the trigger can be accessed through TG_NARGS and TG_ARGV instead.",
+        ));
     }
     let compiled = compile(definition).and_then(|program| check_expressions(&program));
     compiled.map_err(|error| compilation_error(definition, body_position, error))
@@ -752,7 +757,8 @@ fn check_expression(fragment: &Fragment) -> SqlResult<()> {
         None => error.at(fragment.position),
     };
     let tokens = tokenize_in(&fragment.text, Dialect::PostgreSql).map_err(shifted)?;
-    let mut parser = crate::parser::Parser::new(&fragment.text, &tokens).in_dialect(Dialect::PostgreSql);
+    let mut parser =
+        crate::parser::Parser::new(&fragment.text, &tokens).in_dialect(Dialect::PostgreSql);
     let parsed = parser.expression().and_then(|_| {
         if parser.at_end() {
             Ok(())

@@ -109,9 +109,8 @@ fn the_statements_of_one_query_message_commit_or_roll_back_together() {
     assert_eq!(answer[2].code(), "22012");
     assert_eq!(count(&mut client), "0");
 
-    let answer = client.query(
-        "INSERT INTO t VALUES (3); COMMIT; INSERT INTO t VALUES (4); SELECT 1 / 0",
-    );
+    let answer =
+        client.query("INSERT INTO t VALUES (3); COMMIT; INSERT INTO t VALUES (4); SELECT 1 / 0");
     assert_eq!(tags(&answer), "CNCCEZ");
     assert_eq!(answer[1].code(), "25P01");
     assert_eq!(count(&mut client), "1");
@@ -175,7 +174,8 @@ fn discard_all_drops_prepared_statements_and_returns_to_the_startup_settings() {
     assert!(
         answer
             .iter()
-            .any(|message| message.tag == b'S' && message.text().starts_with("application_name\0tests")),
+            .any(|message| message.tag == b'S'
+                && message.text().starts_with("application_name\0tests")),
         "{answer:?}"
     );
     client.send(b'B', &bind("", "s1"));
@@ -236,13 +236,8 @@ fn a_cancel_rolls_back_the_pipeline_it_stops() {
 fn npgsql_type_loading_queries_answer_in_one_round_trip() {
     let server = TestServer::start(8);
     let (mut client, _) = Client::login(server.address);
-    let answer = client.query(include_str!(
-        "../../eggdb/tests/data/npgsql/load-types.sql"
-    ));
-    let shape: String = tags(&answer)
-        .chars()
-        .filter(|tag| *tag != 'D')
-        .collect();
+    let answer = client.query(include_str!("../../eggdb/tests/data/npgsql/load-types.sql"));
+    let shape: String = tags(&answer).chars().filter(|tag| *tag != 'D').collect();
     assert_eq!(shape, "TCTCTCTCZ", "{answer:?}");
     let int_array = answer
         .iter()

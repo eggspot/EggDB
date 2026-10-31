@@ -138,7 +138,10 @@ fn missing(name: &Name, dialect: Dialect) -> SqlError {
 }
 
 impl<S: KeyValueStore> Session<'_, S> {
-    pub(super) fn savepoint_command(&mut self, command: &SavepointCommand) -> SqlResult<QueryResult> {
+    pub(super) fn savepoint_command(
+        &mut self,
+        command: &SavepointCommand,
+    ) -> SqlResult<QueryResult> {
         match command {
             SavepointCommand::Set(name) => self.set_savepoint(name),
             SavepointCommand::RollbackTo(name) => self.rollback_to_savepoint(name),

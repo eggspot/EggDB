@@ -3,7 +3,11 @@ use crate::server::{ServerConfig, encode_request, serve_stream};
 use eggdb_keyspace::MemoryKeyspace;
 
 fn config() -> ServerConfig {
-    ServerConfig { user: "eggdb".to_owned(), password_sha256: eggdb_crypto::sha256(b"secret"), max_connections: 4 }
+    ServerConfig {
+        user: "eggdb".to_owned(),
+        password_sha256: eggdb_crypto::sha256(b"secret"),
+        max_connections: 4,
+    }
 }
 
 fn text(value: &str) -> Packed {
@@ -11,13 +15,23 @@ fn text(value: &str) -> Packed {
 }
 
 fn map(entries: Vec<(&str, Packed)>) -> Packed {
-    Packed::Map(entries.into_iter().map(|(name, value)| (name.to_owned(), value)).collect())
+    Packed::Map(
+        entries
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect(),
+    )
 }
 
 fn hello(password: &str) -> Vec<u8> {
     encode_request(
         0x01,
-        &[map(vec![("user_agent", text("test/1.0")), ("scheme", text("basic")), ("principal", text("eggdb")), ("credentials", text(password))])],
+        &[map(vec![
+            ("user_agent", text("test/1.0")),
+            ("scheme", text("basic")),
+            ("principal", text("eggdb")),
+            ("credentials", text(password)),
+        ])],
     )
 }
 
@@ -60,22 +74,51 @@ fn a_driver_session_creates_and_reads_nodes() {
     let keyspace = MemoryKeyspace::default();
     let mut input = handshake([[0, 4, 4, 5], [0, 0, 4, 4], [0; 4], [0; 4]]);
     input.extend(hello("secret"));
-    input.extend(encode_request(0x10, &[text("CREATE (p:Person {name: $name}) RETURN p"), map(vec![("name", text("Ada"))]), map(vec![])]));
-    input.extend(encode_request(0x3f, &[map(vec![("n", Packed::Integer(-1))])]));
-    input.extend(encode_request(0x10, &[text("MATCH (p:Person) RETURN p.name AS name"), map(vec![]), map(vec![("mode", text("r"))])]));
-    input.extend(encode_request(0x3f, &[map(vec![("n", Packed::Integer(1000))])]));
+    input.extend(encode_request(
+        0x10,
+        &[
+            text("CREATE (p:Person {name: $name}) RETURN p"),
+            map(vec![("name", text("Ada"))]),
+            map(vec![]),
+        ],
+    ));
+    input.extend(encode_request(
+        0x3f,
+        &[map(vec![("n", Packed::Integer(-1))])],
+    ));
+    input.extend(encode_request(
+        0x10,
+        &[
+            text("MATCH (p:Person) RETURN p.name AS name"),
+            map(vec![]),
+            map(vec![("mode", text("r"))]),
+        ],
+    ));
+    input.extend(encode_request(
+        0x3f,
+        &[map(vec![("n", Packed::Integer(1000))])],
+    ));
     input.extend(encode_request(0x02, &[]));
     let (version, messages) = session(input, &keyspace);
     assert_eq!(version, [0, 0, 0, 5]);
-    let signatures: Vec<u8> = messages.iter().map(|message| match message {
-        Packed::Struct(signature, _) => *signature,
-        _ => 0,
-    }).collect();
+    let signatures: Vec<u8> = messages
+        .iter()
+        .map(|message| match message {
+            Packed::Struct(signature, _) => *signature,
+            _ => 0,
+        })
+        .collect();
     assert_eq!(signatures, [0x70, 0x70, 0x71, 0x70, 0x70, 0x71, 0x70]);
-    let Packed::Struct(_, record) = &messages[2] else { unreachable!() };
-    let Packed::List(values) = &record[0] else { unreachable!() };
+    let Packed::Struct(_, record) = &messages[2] else {
+        unreachable!()
+    };
+    let Packed::List(values) = &record[0] else {
+        unreachable!()
+    };
     assert!(matches!(&values[0], Packed::Struct(0x4e, fields) if fields.len() == 4));
-    let Packed::Struct(_, record) = &messages[5] else { unreachable!() };
+    let Packed::Struct(_, record) = &messages[5] else {
+        unreachable!()
+    };
     assert_eq!(record[0], Packed::List(vec![text("Ada")]));
 }
 
@@ -94,18 +137,29 @@ fn wrong_passwords_and_failed_queries_are_reported() {
     let mut input = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
     input.extend(hello("wrong"));
     let (_, messages) = session(input, &keyspace);
-    assert!(matches!(&messages[0], Packed::Struct(0x7f, fields) if fields[0].get("code") == Some(&text("Neo.ClientError.Security.Unauthorized"))));
+    assert!(
+        matches!(&messages[0], Packed::Struct(0x7f, fields) if fields[0].get("code") == Some(&text("Neo.ClientError.Security.Unauthorized")))
+    );
     let mut input = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
     input.extend(hello("secret"));
-    input.extend(encode_request(0x10, &[text("MATCH (n RETURN n"), map(vec![]), map(vec![])]));
+    input.extend(encode_request(
+        0x10,
+        &[text("MATCH (n RETURN n"), map(vec![]), map(vec![])],
+    ));
     input.extend(encode_request(0x3f, &[map(vec![])]));
     input.extend(encode_request(0x0f, &[]));
-    input.extend(encode_request(0x10, &[text("RETURN 1 AS one"), map(vec![]), map(vec![])]));
+    input.extend(encode_request(
+        0x10,
+        &[text("RETURN 1 AS one"), map(vec![]), map(vec![])],
+    ));
     let (_, messages) = session(input, &keyspace);
-    let signatures: Vec<u8> = messages.iter().map(|message| match message {
-        Packed::Struct(signature, _) => *signature,
-        _ => 0,
-    }).collect();
+    let signatures: Vec<u8> = messages
+        .iter()
+        .map(|message| match message {
+            Packed::Struct(signature, _) => *signature,
+            _ => 0,
+        })
+        .collect();
     assert_eq!(signatures, [0x70, 0x7f, 0x7e, 0x70, 0x70]);
 }
 
@@ -114,7 +168,10 @@ fn hostile_bytes_end_the_connection_without_panicking() {
     let keyspace = MemoryKeyspace::default();
     let mut valid = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
     valid.extend(hello("secret"));
-    valid.extend(encode_request(0x10, &[text("RETURN 1"), map(vec![]), map(vec![])]));
+    valid.extend(encode_request(
+        0x10,
+        &[text("RETURN 1"), map(vec![]), map(vec![])],
+    ));
     for cut in 0..valid.len() {
         let mut output = Vec::new();
         let _ = serve_stream(&keyspace, &config(), 1, &valid[..cut], &mut output);

@@ -11,6 +11,8 @@ mod json;
 pub mod jwt;
 pub mod ldap;
 pub mod rules;
+/// SCRAM-SHA-256 (RFC 5802, RFC 7677): verifiers, the server's side of the exchange and
+/// parsing stored verifiers.
 pub mod scram;
 pub mod sigv4;
 

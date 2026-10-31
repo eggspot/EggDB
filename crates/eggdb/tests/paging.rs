@@ -117,7 +117,15 @@ fn a_ten_thousand_row_table_pages_without_repeats_or_gaps_while_a_writer_commits
     let limit = PAGE.to_string();
     let mut pages = 0;
     loop {
-        let mut args = vec!["row", "list", path.as_str(), "orders", "--limit", limit.as_str(), "--json"];
+        let mut args = vec![
+            "row",
+            "list",
+            path.as_str(),
+            "orders",
+            "--limit",
+            limit.as_str(),
+            "--json",
+        ];
         if let Some(cursor) = &cursor {
             args.extend(["--after", cursor.as_str()]);
         }
@@ -177,14 +185,20 @@ fn a_ten_thousand_row_table_pages_without_repeats_or_gaps_while_a_writer_commits
         );
     }
     for id in added_before.iter().chain(&removed_ahead) {
-        assert!(!seen.contains(id), "{id} was added behind the cursor or removed ahead of it");
+        assert!(
+            !seen.contains(id),
+            "{id} was added behind the cursor or removed ahead of it"
+        );
     }
 
     let everything = page_of(
         &succeeded(&eggdb(&["row", "list", &path, "orders", "--json"])),
         usize::MAX,
     );
-    assert!(everything.next_cursor.is_none(), "without --limit nothing is cut");
+    assert!(
+        everything.next_cursor.is_none(),
+        "without --limit nothing is cut"
+    );
     assert_eq!(everything.records.len(), present.len());
 }
 
@@ -213,7 +227,8 @@ fn text_pages_print_the_next_page_s_command_and_it_runs() {
     assert!(shown.contains("note 1") && shown.contains("note 2") && !shown.contains("note 3"));
     assert!(shown.ends_with("(2 rows)\n\n"), "{shown}");
     let hint = text(&first.stderr);
-    let prefix = format!("more rows follow; next page: eggdb row list {path} orders --limit 2 --after r1.");
+    let prefix =
+        format!("more rows follow; next page: eggdb row list {path} orders --limit 2 --after r1.");
     assert!(hint.starts_with(&prefix), "{hint}");
     let words: Vec<&str> = hint
         .trim_end()
@@ -223,16 +238,26 @@ fn text_pages_print_the_next_page_s_command_and_it_runs() {
         .collect();
     let second = eggdb(&words);
     let rest = succeeded(&second);
-    assert!(rest.contains("note 3") && rest.ends_with("(1 row)\n\n"), "{rest}");
+    assert!(
+        rest.contains("note 3") && rest.ends_with("(1 row)\n\n"),
+        "{rest}"
+    );
     assert!(second.stderr.is_empty(), "{}", text(&second.stderr));
 
-    let bag = page_of(&succeeded(&eggdb(&["row", "list", &path, "bag", "--json"])), usize::MAX);
+    let bag = page_of(
+        &succeeded(&eggdb(&["row", "list", &path, "bag", "--json"])),
+        usize::MAX,
+    );
     let words: Vec<String> = bag
         .records
         .iter()
         .map(|record| scalar(member(record, "word")))
         .collect();
-    assert_eq!(words, ["y", "x", "z"], "a table without a primary key pages in the order its rows were added");
+    assert_eq!(
+        words,
+        ["y", "x", "z"],
+        "a table without a primary key pages in the order its rows were added"
+    );
     let bag_page = page_of(
         &succeeded(&eggdb(&["row", "list", &path, "bag", "-n", "1", "--json"])),
         1,
@@ -241,7 +266,9 @@ fn text_pages_print_the_next_page_s_command_and_it_runs() {
         panic!("one of three rows is a cut page");
     };
     let rest = page_of(
-        &succeeded(&eggdb(&["row", "list", &path, "bag", "--json", "--after", &after_y])),
+        &succeeded(&eggdb(&[
+            "row", "list", &path, "bag", "--json", "--after", &after_y,
+        ])),
         usize::MAX,
     );
     assert_eq!(rest.records.len(), 2);
@@ -261,26 +288,40 @@ fn row_list_refuses_views_foreign_cursors_and_missing_tables() {
         ),
     );
     let first = page_of(
-        &succeeded(&eggdb(&["row", "list", &path, "orders", "-n", "2", "--json"])),
+        &succeeded(&eggdb(&[
+            "row", "list", &path, "orders", "-n", "2", "--json",
+        ])),
         2,
     );
     let Some(after_two) = first.next_cursor else {
         panic!("two of three rows is a cut page");
     };
     let last = page_of(
-        &succeeded(&eggdb(&["row", "list", &path, "orders", "-n", "1", "--json", "--after", &after_two])),
+        &succeeded(&eggdb(&[
+            "row", "list", &path, "orders", "-n", "1", "--json", "--after", &after_two,
+        ])),
         1,
     );
     assert_eq!(last.records.len(), 1);
-    assert!(last.next_cursor.is_none(), "the last row ends the last page");
+    assert!(
+        last.next_cursor.is_none(),
+        "the last row ends the last page"
+    );
     let whole = page_of(
-        &succeeded(&eggdb(&["row", "list", &path, "orders", "-n", "3", "--json"])),
+        &succeeded(&eggdb(&[
+            "row", "list", &path, "orders", "-n", "3", "--json",
+        ])),
         3,
     );
-    assert!(whole.next_cursor.is_none(), "exactly a page of rows is not cut");
+    assert!(
+        whole.next_cursor.is_none(),
+        "exactly a page of rows is not cut"
+    );
 
     let users = page_of(
-        &succeeded(&eggdb(&["row", "list", &path, "users", "-n", "1", "--json"])),
+        &succeeded(&eggdb(&[
+            "row", "list", &path, "users", "-n", "1", "--json",
+        ])),
         1,
     );
     let users_cursor = users.next_cursor.unwrap();
@@ -295,7 +336,9 @@ fn row_list_refuses_views_foreign_cursors_and_missing_tables() {
     );
     let malformed = eggdb(&["row", "list", &path, "orders", "--after", "42", "--json"]);
     assert_eq!(malformed.status.code(), Some(2));
-    assert!(text(&malformed.stderr).contains("\"code\":\"invalid_arguments\",\"category\":\"usage\""));
+    assert!(
+        text(&malformed.stderr).contains("\"code\":\"invalid_arguments\",\"category\":\"usage\"")
+    );
 
     let view = eggdb(&["row", "list", &path, "sales.totals", "--json"]);
     assert_eq!(view.status.code(), Some(3));
@@ -305,7 +348,9 @@ fn row_list_refuses_views_foreign_cursors_and_missing_tables() {
         "{error}"
     );
     assert!(
-        error.contains(&format!("\"fix_command\":\"eggdb table sample {path} sales.totals\"")),
+        error.contains(&format!(
+            "\"fix_command\":\"eggdb table sample {path} sales.totals\""
+        )),
         "{error}"
     );
 
@@ -323,7 +368,10 @@ fn table_list_pages_in_its_order_while_tables_are_added() {
         .collect();
     write(
         file.path(),
-        &format!("{}; CREATE VIEW v1 AS SELECT id FROM m00", created.join("; ")),
+        &format!(
+            "{}; CREATE VIEW v1 AS SELECT id FROM m00",
+            created.join("; ")
+        ),
     );
     let mut seen: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
@@ -334,11 +382,13 @@ fn table_list_pages_in_its_order_while_tables_are_added() {
             args.extend(["--after", cursor.as_str()]);
         }
         let page = page_of(&succeeded(&eggdb(&args)), 7);
-        seen.extend(
-            page.records
-                .iter()
-                .map(|record| format!("{}:{}", scalar(member(record, "kind")), scalar(member(record, "name")))),
-        );
+        seen.extend(page.records.iter().map(|record| {
+            format!(
+                "{}:{}",
+                scalar(member(record, "kind")),
+                scalar(member(record, "name"))
+            )
+        }));
         let Some(next) = page.next_cursor else {
             break;
         };
@@ -352,13 +402,22 @@ fn table_list_pages_in_its_order_while_tables_are_added() {
         cursor = Some(next);
     }
     let distinct: BTreeSet<&String> = seen.iter().collect();
-    assert_eq!(distinct.len(), seen.len(), "no table is listed twice: {seen:?}");
+    assert_eq!(
+        distinct.len(),
+        seen.len(),
+        "no table is listed twice: {seen:?}"
+    );
     for n in 0..30 {
         assert!(seen.contains(&format!("table:m{n:02}")), "m{n:02}");
     }
-    assert!(seen.iter().all(|item| !item.starts_with("table:a")), "{seen:?}");
+    assert!(
+        seen.iter().all(|item| !item.starts_with("table:a")),
+        "{seen:?}"
+    );
     assert_eq!(
-        seen.iter().filter(|item| item.starts_with("table:z")).count(),
+        seen.iter()
+            .filter(|item| item.starts_with("table:z"))
+            .count(),
         round,
         "every table added after the cursor is read"
     );
@@ -368,7 +427,9 @@ fn table_list_pages_in_its_order_while_tables_are_added() {
     succeeded(&text_page);
     let hint = text(&text_page.stderr);
     assert!(
-        hint.starts_with("2 tables, 0 views\nmore tables or views follow; next page: eggdb table list "),
+        hint.starts_with(
+            "2 tables, 0 views\nmore tables or views follow; next page: eggdb table list "
+        ),
         "{hint}"
     );
     assert!(hint.contains(" --limit 2 --after t1."), "{hint}");

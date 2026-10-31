@@ -5,8 +5,8 @@
 
 use super::snapshot::{self, CatalogSnapshot};
 use super::{CatalogColumn, CatalogRow, CatalogType, oids};
-use crate::error::{SqlError, SqlResult, SqlState};
 use crate::arrays::ArrayElement;
+use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{SqlType, Value};
 use std::sync::OnceLock;
 
@@ -409,11 +409,17 @@ impl MonitoringRelation {
     }
 
     pub(crate) fn named(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|relation| relation.name() == name)
+        Self::ALL
+            .into_iter()
+            .find(|relation| relation.name() == name)
     }
 
     pub(crate) fn oid(self) -> u32 {
-        FIRST_OID + Self::ALL.iter().position(|relation| *relation == self).unwrap_or(0) as u32
+        FIRST_OID
+            + Self::ALL
+                .iter()
+                .position(|relation| *relation == self)
+                .unwrap_or(0) as u32
     }
 
     pub(crate) fn columns(self) -> &'static [CatalogColumn] {
@@ -484,7 +490,10 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             row()
                 .set("datid", Value::Oid(oids::DATABASE))
                 .set("datname", Value::Text(snapshot.database.clone()))
-                .set("pid", Value::Integer(i32::try_from(std::process::id()).unwrap_or(i32::MAX)))
+                .set(
+                    "pid",
+                    Value::Integer(i32::try_from(std::process::id()).unwrap_or(i32::MAX)),
+                )
                 .set("usesysid", Value::Oid(oids::SESSION_USER))
                 .set("usename", Value::Text(session_user_name()))
                 .set("application_name", Value::Text(String::new()))
@@ -548,7 +557,10 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
                 row()
                     .set("partrelid", Value::Oid(relation))
                     .set("partstrat", Value::Text(strategy.to_owned()))
-                    .set("partnatts", Value::SmallInt(i16::try_from(columns).unwrap_or(i16::MAX)))
+                    .set(
+                        "partnatts",
+                        Value::SmallInt(i16::try_from(columns).unwrap_or(i16::MAX)),
+                    )
                     .done()
             })
             .collect(),
@@ -574,8 +586,12 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "pg_backend_pid" => SqlType::Integer,
         "pg_postmaster_start_time" | "pg_conf_load_time" => STAMP,
         "pg_size_pretty" | "pg_tablespace_location" | "pg_current_wal_lsn" => SqlType::Text,
-        "pg_database_size" | "pg_total_relation_size" | "pg_relation_size" | "pg_table_size"
-        | "pg_indexes_size" | "pg_tablespace_size" => SqlType::BigInt,
+        "pg_database_size"
+        | "pg_total_relation_size"
+        | "pg_relation_size"
+        | "pg_table_size"
+        | "pg_indexes_size"
+        | "pg_tablespace_size" => SqlType::BigInt,
         _ => return None,
     })
 }
@@ -608,7 +624,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     }
     Some(match name {
         "pg_is_in_recovery" | "pg_is_wal_replay_paused" => Ok(Value::Boolean(false)),
-        "pg_backend_pid" => Ok(Value::Integer(i32::try_from(std::process::id()).unwrap_or(i32::MAX))),
+        "pg_backend_pid" => Ok(Value::Integer(
+            i32::try_from(std::process::id()).unwrap_or(i32::MAX),
+        )),
         "pg_postmaster_start_time" | "pg_conf_load_time" => Ok(started_at().clone()),
         "pg_tablespace_location" => Ok(Value::Text(String::new())),
         "pg_current_wal_lsn" => Ok(Value::Text("0/0".to_owned())),
@@ -616,9 +634,15 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             [Value::Null] => Ok(Value::Null),
             [value] => match value.as_integer() {
                 Some(bytes) => Ok(Value::Text(size_pretty(bytes))),
-                None => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "pg_size_pretty takes a bigint")),
+                None => Err(SqlError::new(
+                    SqlState::UNDEFINED_FUNCTION,
+                    "pg_size_pretty takes a bigint",
+                )),
             },
-            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "pg_size_pretty takes one argument")),
+            _ => Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                "pg_size_pretty takes one argument",
+            )),
         },
         _ if result_type == SqlType::BigInt => Ok(Value::BigInt(0)),
         _ => Ok(Value::Boolean(true)),
@@ -640,11 +664,17 @@ mod tests {
 
     #[test]
     fn every_relation_has_a_unique_name_and_oid() {
-        let mut names: Vec<&str> = MonitoringRelation::ALL.iter().map(|relation| relation.name()).collect();
+        let mut names: Vec<&str> = MonitoringRelation::ALL
+            .iter()
+            .map(|relation| relation.name())
+            .collect();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), MonitoringRelation::ALL.len());
-        let mut oids: Vec<u32> = MonitoringRelation::ALL.iter().map(|relation| relation.oid()).collect();
+        let mut oids: Vec<u32> = MonitoringRelation::ALL
+            .iter()
+            .map(|relation| relation.oid())
+            .collect();
         oids.sort_unstable();
         oids.dedup();
         assert_eq!(oids.len(), MonitoringRelation::ALL.len());
@@ -653,10 +683,20 @@ mod tests {
     #[test]
     fn privileges_are_all_granted_and_unknowns_are_none() {
         assert_eq!(
-            function("has_table_privilege", &[Value::Text("t".to_owned()), Value::Text("SELECT".to_owned())]).map(Result::ok),
+            function(
+                "has_table_privilege",
+                &[
+                    Value::Text("t".to_owned()),
+                    Value::Text("SELECT".to_owned())
+                ]
+            )
+            .map(Result::ok),
             Some(Some(Value::Boolean(true)))
         );
         assert!(function("not_a_function", &[]).is_none());
-        assert_eq!(function("pg_is_in_recovery", &[]).map(Result::ok), Some(Some(Value::Boolean(false))));
+        assert_eq!(
+            function("pg_is_in_recovery", &[]).map(Result::ok),
+            Some(Some(Value::Boolean(false)))
+        );
     }
 }

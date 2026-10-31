@@ -3,12 +3,12 @@ use super::{
     OpenSource, Program, QuerySource, RaiseCondition, RaiseItem, RaiseLevel, Step, StepKind,
     TargetPart, VariableConflict, VariableType, compile,
 };
+use crate::Session;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlState};
 use crate::memory_store::MemoryStore;
 use crate::routines::{RoutineDefinition, parse_definition};
 use crate::types::SqlType;
-use crate::Session;
 
 fn definition(sql: &str) -> RoutineDefinition {
     match parse_definition(sql, Dialect::PostgreSql) {
@@ -81,13 +81,23 @@ END outer;
         .collect();
     assert_eq!(
         names,
-        ["quantity", "total", "label_text", "row_data", "copy_of", "first_arg"]
+        [
+            "quantity",
+            "total",
+            "label_text",
+            "row_data",
+            "copy_of",
+            "first_arg"
+        ]
     );
     let DeclarationKind::Variable(quantity) = &block.declarations[0].kind else {
         panic!("{:?}", block.declarations[0]);
     };
     assert_eq!(quantity.variable_type, VariableType::Sql(SqlType::Integer));
-    assert_eq!(quantity.default.as_ref().map(|value| value.text.as_str()), Some("30"));
+    assert_eq!(
+        quantity.default.as_ref().map(|value| value.text.as_str()),
+        Some("30")
+    );
     let DeclarationKind::Variable(total) = &block.declarations[1].kind else {
         panic!("{:?}", block.declarations[1]);
     };
@@ -103,7 +113,10 @@ END outer;
     let DeclarationKind::Variable(copied) = &block.declarations[4].kind else {
         panic!("{:?}", block.declarations[4]);
     };
-    assert_eq!(copied.variable_type, VariableType::TypeOf(vec!["quantity".to_owned()]));
+    assert_eq!(
+        copied.variable_type,
+        VariableType::TypeOf(vec!["quantity".to_owned()])
+    );
     assert_eq!(
         block.declarations[5].kind,
         DeclarationKind::Alias(AliasTarget::Parameter(1))
@@ -188,7 +201,10 @@ fn sql_statements_keep_their_text_and_lose_their_into_clause() {
         panic!("{:?}", found[2]);
     };
     assert_eq!(statement.text, "INSERT INTO t (id) VALUES (a) RETURNING id");
-    assert!(into.as_ref().is_some_and(|into| !into.strict && into.targets[0].name == "n"));
+    assert!(
+        into.as_ref()
+            .is_some_and(|into| !into.strict && into.targets[0].name == "n")
+    );
     let StepKind::Sql { statement, into } = &found[3] else {
         panic!("{:?}", found[3]);
     };
@@ -197,7 +213,10 @@ fn sql_statements_keep_their_text_and_lose_their_into_clause() {
     let StepKind::Sql { statement, .. } = &found[4] else {
         panic!("{:?}", found[4]);
     };
-    assert_eq!(statement.text, "WITH x AS (SELECT 1 AS one) SELECT one FROM x");
+    assert_eq!(
+        statement.text,
+        "WITH x AS (SELECT 1 AS one) SELECT one FROM x"
+    );
     assert!(matches!(&found[5], StepKind::Sql { into: None, .. }));
 }
 
@@ -220,10 +239,15 @@ fn perform_execute_call_and_diagnostics_compile() {
     let StepKind::Execute(dynamic) = &found[1] else {
         panic!("{:?}", found[1]);
     };
-    assert_eq!(dynamic.command.text, "'SELECT count(*) FROM ' || quote_ident(b)");
+    assert_eq!(
+        dynamic.command.text,
+        "'SELECT count(*) FROM ' || quote_ident(b)"
+    );
     assert_eq!(dynamic.using.len(), 2);
     assert!(dynamic.into.is_some());
-    assert!(matches!(&found[2], StepKind::Execute(dynamic) if dynamic.into.is_none() && dynamic.using.is_empty()));
+    assert!(
+        matches!(&found[2], StepKind::Execute(dynamic) if dynamic.into.is_none() && dynamic.using.is_empty())
+    );
     assert!(matches!(&found[3], StepKind::Call(call) if call.text == "CALL p(a, n)"));
     assert!(matches!(
         &found[4],
@@ -259,13 +283,28 @@ fn conditionals_compile_with_every_branch() {
         branches[0].condition.text,
         "CASE WHEN a = 1 THEN true ELSE false END"
     );
-    let StepKind::Case { subject, arms, otherwise } = &found[2] else {
+    let StepKind::Case {
+        subject,
+        arms,
+        otherwise,
+    } = &found[2]
+    else {
         panic!("{:?}", found[2]);
     };
-    assert_eq!(subject.as_ref().map(|subject| subject.text.as_str()), Some("a"));
+    assert_eq!(
+        subject.as_ref().map(|subject| subject.text.as_str()),
+        Some("a")
+    );
     assert_eq!(arms[0].values.len(), 2);
     assert!(otherwise.is_some());
-    assert!(matches!(&found[3], StepKind::Case { subject: None, otherwise: None, .. }));
+    assert!(matches!(
+        &found[3],
+        StepKind::Case {
+            subject: None,
+            otherwise: None,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -334,7 +373,9 @@ fn every_loop_form_compiles() {
         loops[4],
         LoopKind::Query { source: QuerySource::Static(query), .. } if query.text == "SELECT * FROM t"
     ));
-    assert!(matches!(loops[5], LoopKind::Query { source: QuerySource::Dynamic { using, .. }, .. } if using.len() == 1));
+    assert!(
+        matches!(loops[5], LoopKind::Query { source: QuerySource::Dynamic { using, .. }, .. } if using.len() == 1)
+    );
     let LoopKind::Cursor {
         record,
         cursor,
@@ -369,8 +410,13 @@ fn set_returning_functions_take_return_next_and_return_query() {
             RETURN;
         END $$",
     );
-    assert!(matches!(&found[1], StepKind::ReturnQuery(QuerySource::Static(query)) if query.text == "SELECT 100"));
-    assert!(matches!(&found[2], StepKind::ReturnQuery(QuerySource::Dynamic { .. })));
+    assert!(
+        matches!(&found[1], StepKind::ReturnQuery(QuerySource::Static(query)) if query.text == "SELECT 100")
+    );
+    assert!(matches!(
+        &found[2],
+        StepKind::ReturnQuery(QuerySource::Dynamic { .. })
+    ));
     assert_eq!(found[3], StepKind::Return(None));
     let found = kinds(
         "CREATE FUNCTION pairs() RETURNS TABLE (x integer, y text) LANGUAGE plpgsql AS $$
@@ -453,15 +499,56 @@ fn cursors_assert_and_transaction_control_compile() {
             RETURN;
         END $$",
     );
-    assert!(matches!(&found[0], StepKind::Open { source: OpenSource::Bound(arguments), .. } if arguments.is_empty()));
-    assert!(matches!(&found[1], StepKind::Fetch { direction: FetchDirection::Next, .. }));
-    assert!(matches!(&found[2], StepKind::Fetch { direction: FetchDirection::Last, .. }));
-    assert!(matches!(&found[3], StepKind::Fetch { direction: FetchDirection::Relative(count), .. } if count.text == "-1"));
-    assert!(matches!(&found[4], StepKind::Move { direction: FetchDirection::ForwardAll, .. }));
+    assert!(
+        matches!(&found[0], StepKind::Open { source: OpenSource::Bound(arguments), .. } if arguments.is_empty())
+    );
+    assert!(matches!(
+        &found[1],
+        StepKind::Fetch {
+            direction: FetchDirection::Next,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &found[2],
+        StepKind::Fetch {
+            direction: FetchDirection::Last,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&found[3], StepKind::Fetch { direction: FetchDirection::Relative(count), .. } if count.text == "-1")
+    );
+    assert!(matches!(
+        &found[4],
+        StepKind::Move {
+            direction: FetchDirection::ForwardAll,
+            ..
+        }
+    ));
     assert_eq!(found[5], StepKind::Close("bound".to_owned()));
-    assert!(matches!(&found[6], StepKind::Open { scroll: Some(false), source: OpenSource::Query(QuerySource::Static(_)), .. }));
-    assert!(matches!(&found[7], StepKind::Open { source: OpenSource::Query(QuerySource::Dynamic { .. }), .. }));
-    assert!(matches!(&found[8], StepKind::Assert { message: Some(_), .. }));
+    assert!(matches!(
+        &found[6],
+        StepKind::Open {
+            scroll: Some(false),
+            source: OpenSource::Query(QuerySource::Static(_)),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &found[7],
+        StepKind::Open {
+            source: OpenSource::Query(QuerySource::Dynamic { .. }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &found[8],
+        StepKind::Assert {
+            message: Some(_),
+            ..
+        }
+    ));
     assert_eq!(found[9], StepKind::Commit { chain: false });
     assert_eq!(found[10], StepKind::Rollback { chain: true });
 }
@@ -564,17 +651,20 @@ fn bodies_with_mistakes_are_refused_with_postgresql_messages() {
             "cannot use RETURN QUERY in a non-SETOF function",
         ),
         (
-            "CREATE FUNCTION v() RETURNS void LANGUAGE plpgsql AS $$BEGIN RETURN 1; END$$".to_owned(),
+            "CREATE FUNCTION v() RETURNS void LANGUAGE plpgsql AS $$BEGIN RETURN 1; END$$"
+                .to_owned(),
             SqlState::DATATYPE_MISMATCH,
             "RETURN cannot have a parameter in function returning void",
         ),
         (
-            "CREATE FUNCTION s() RETURNS SETOF integer LANGUAGE plpgsql AS $$BEGIN RETURN 1; END$$".to_owned(),
+            "CREATE FUNCTION s() RETURNS SETOF integer LANGUAGE plpgsql AS $$BEGIN RETURN 1; END$$"
+                .to_owned(),
             SqlState::DATATYPE_MISMATCH,
             "RETURN cannot have a parameter in function returning set",
         ),
         (
-            "CREATE FUNCTION o(OUT x integer) LANGUAGE plpgsql AS $$BEGIN RETURN 1; END$$".to_owned(),
+            "CREATE FUNCTION o(OUT x integer) LANGUAGE plpgsql AS $$BEGIN RETURN 1; END$$"
+                .to_owned(),
             SqlState::DATATYPE_MISMATCH,
             "RETURN cannot have a parameter in function with OUT parameters",
         ),
@@ -589,7 +679,9 @@ fn bodies_with_mistakes_are_refused_with_postgresql_messages() {
             "variable \"n\" must have a default value, since it's declared NOT NULL",
         ),
         (
-            function("DECLARE c CURSOR FOR SELECT 1; n integer; BEGIN FETCH FORWARD 2 FROM c INTO n; RETURN n; END"),
+            function(
+                "DECLARE c CURSOR FOR SELECT 1; n integer; BEGIN FETCH FORWARD 2 FROM c INTO n; RETURN n; END",
+            ),
             SqlState::SYNTAX_ERROR,
             "FETCH statement cannot return multiple rows",
         ),
@@ -614,7 +706,11 @@ fn bodies_with_mistakes_are_refused_with_postgresql_messages() {
         "BEGIN RETURN 1; END; extra",
         "DECLARE BEGIN FOR i IN 1.. LOOP END LOOP; RETURN 1; END",
     ] {
-        assert_eq!(failure(&function(broken)).state(), SqlState::SYNTAX_ERROR, "{broken}");
+        assert_eq!(
+            failure(&function(broken)).state(),
+            SqlState::SYNTAX_ERROR,
+            "{broken}"
+        );
     }
 }
 
@@ -625,9 +721,15 @@ fn nesting_and_size_are_bounded() {
         "IF a > 0 THEN ".repeat(200),
         "END IF; ".repeat(200)
     );
-    assert_eq!(failure(&function(&deep)).state(), SqlState::STATEMENT_TOO_COMPLEX);
+    assert_eq!(
+        failure(&function(&deep)).state(),
+        SqlState::STATEMENT_TOO_COMPLEX
+    );
     let blocks = format!("{} RETURN 1; {}", "BEGIN ".repeat(200), "END; ".repeat(200));
-    assert_eq!(failure(&function(&blocks)).state(), SqlState::STATEMENT_TOO_COMPLEX);
+    assert_eq!(
+        failure(&function(&blocks)).state(),
+        SqlState::STATEMENT_TOO_COMPLEX
+    );
     let fine = format!(
         "BEGIN {} RETURN 1; {} END",
         "IF a > 0 THEN ".repeat(30),
@@ -654,13 +756,15 @@ fn create_function_checks_the_body_and_points_into_the_statement() {
         error.context(),
         Some("compilation of PL/pgSQL function \"f\" near line 3")
     );
-    let quoted = "CREATE FUNCTION g() RETURNS integer LANGUAGE plpgsql AS 'BEGIN RETURN ''x'' +; END'";
+    let quoted =
+        "CREATE FUNCTION g() RETURNS integer LANGUAGE plpgsql AS 'BEGIN RETURN ''x'' +; END'";
     let Err(error) = run(&mut session, quoted) else {
         panic!("{quoted} succeeded");
     };
     assert_eq!(error.state(), SqlState::SYNTAX_ERROR);
     assert_eq!(error.position(), None);
-    run(&mut session, "SET check_function_bodies = false").unwrap_or_else(|error| panic!("{error}"));
+    run(&mut session, "SET check_function_bodies = false")
+        .unwrap_or_else(|error| panic!("{error}"));
     run(&mut session, sql).unwrap_or_else(|error| panic!("{error}"));
     run(&mut session, "SET check_function_bodies = on").unwrap_or_else(|error| panic!("{error}"));
     let good = "CREATE FUNCTION h(n integer) RETURNS integer LANGUAGE plpgsql AS $$BEGIN RETURN n * 2; END$$";
@@ -681,15 +785,96 @@ impl Scrambler {
 #[test]
 fn hostile_bodies_compile_to_errors_and_never_panic() {
     let pieces = [
-        "BEGIN", "END", "DECLARE", "IF", "THEN", "ELSIF", "ELSE", "END IF", "LOOP", "END LOOP",
-        "WHILE", "FOR", "IN", "REVERSE", "..", "BY", "FOREACH", "SLICE", "ARRAY", "CASE", "WHEN",
-        "END CASE", "EXIT", "CONTINUE", "RETURN", "NEXT", "QUERY", "RAISE", "NOTICE", "USING",
-        "MESSAGE", "=", ":=", ":", "SQLSTATE", "'22012'", "EXCEPTION", "OTHERS", "OR", "PERFORM",
-        "EXECUTE", "INTO", "STRICT", "GET", "STACKED", "DIAGNOSTICS", "ROW_COUNT", "OPEN", "FETCH",
-        "MOVE", "CLOSE", "CURSOR", "SCROLL", "NO", "ALIAS", "$1", "$9", "CONSTANT", "NOT NULL",
-        "DEFAULT", "%TYPE", "%ROWTYPE", "record", "integer", "a", "b", "x", "<<", ">>", "lbl",
-        ";", ",", "(", ")", "[", "]", ".", "'%'", "1", "SELECT", "COMMIT", "ROLLBACK", "AND",
-        "CHAIN", "NULL", "ASSERT", "#variable_conflict", "use_column", "CALL", "\"q\"",
+        "BEGIN",
+        "END",
+        "DECLARE",
+        "IF",
+        "THEN",
+        "ELSIF",
+        "ELSE",
+        "END IF",
+        "LOOP",
+        "END LOOP",
+        "WHILE",
+        "FOR",
+        "IN",
+        "REVERSE",
+        "..",
+        "BY",
+        "FOREACH",
+        "SLICE",
+        "ARRAY",
+        "CASE",
+        "WHEN",
+        "END CASE",
+        "EXIT",
+        "CONTINUE",
+        "RETURN",
+        "NEXT",
+        "QUERY",
+        "RAISE",
+        "NOTICE",
+        "USING",
+        "MESSAGE",
+        "=",
+        ":=",
+        ":",
+        "SQLSTATE",
+        "'22012'",
+        "EXCEPTION",
+        "OTHERS",
+        "OR",
+        "PERFORM",
+        "EXECUTE",
+        "INTO",
+        "STRICT",
+        "GET",
+        "STACKED",
+        "DIAGNOSTICS",
+        "ROW_COUNT",
+        "OPEN",
+        "FETCH",
+        "MOVE",
+        "CLOSE",
+        "CURSOR",
+        "SCROLL",
+        "NO",
+        "ALIAS",
+        "$1",
+        "$9",
+        "CONSTANT",
+        "NOT NULL",
+        "DEFAULT",
+        "%TYPE",
+        "%ROWTYPE",
+        "record",
+        "integer",
+        "a",
+        "b",
+        "x",
+        "<<",
+        ">>",
+        "lbl",
+        ";",
+        ",",
+        "(",
+        ")",
+        "[",
+        "]",
+        ".",
+        "'%'",
+        "1",
+        "SELECT",
+        "COMMIT",
+        "ROLLBACK",
+        "AND",
+        "CHAIN",
+        "NULL",
+        "ASSERT",
+        "#variable_conflict",
+        "use_column",
+        "CALL",
+        "\"q\"",
     ];
     let header = definition(&function("BEGIN RETURN 1; END"));
     let mut random = Scrambler(0x5EED_1234_ABCD_0001);

@@ -110,19 +110,54 @@ fn arithmetic_type(
     }
 }
 
-fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Option<SqlType>> {
+fn added_function_type(
+    name: &str,
+    arguments: &[Expr],
+    scope: Scope<'_>,
+) -> Option<Option<SqlType>> {
     if let Some(sql_type) = crate::advisory_locks::result_type(name) {
         return Some(Some(sql_type));
     }
-    let argument_type = |at: usize| arguments.get(at).and_then(|argument| static_type(argument, scope));
+    let argument_type = |at: usize| {
+        arguments
+            .get(at)
+            .and_then(|argument| static_type(argument, scope))
+    };
     Some(match name {
-        "split_part" | "concat" | "concat_ws" | "replace" | "left" | "right" | "lpad" | "rpad"
-        | "repeat" | "initcap" | "translate" | "reverse" | "chr" | "md5" | "format"
-        | "overlay" | "quote_literal" | "quote_nullable" | "regexp_replace" | "regexp_substr"
-        | "similar_to_escape" | "similar_substring_pattern" | "to_char" | "jsonb_pretty"
-        | "json_extract_path_text" | "jsonb_extract_path_text" | "pg_sleep" | "pg_notify"
-        | "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery"
-        | "websearch_to_tsquery" | "normalize" => Some(SqlType::Text),
+        "split_part"
+        | "concat"
+        | "concat_ws"
+        | "replace"
+        | "left"
+        | "right"
+        | "lpad"
+        | "rpad"
+        | "repeat"
+        | "initcap"
+        | "translate"
+        | "reverse"
+        | "chr"
+        | "md5"
+        | "format"
+        | "overlay"
+        | "quote_literal"
+        | "quote_nullable"
+        | "regexp_replace"
+        | "regexp_substr"
+        | "similar_to_escape"
+        | "similar_substring_pattern"
+        | "to_char"
+        | "jsonb_pretty"
+        | "json_extract_path_text"
+        | "jsonb_extract_path_text"
+        | "pg_sleep"
+        | "pg_notify"
+        | "to_tsvector"
+        | "to_tsquery"
+        | "plainto_tsquery"
+        | "phraseto_tsquery"
+        | "websearch_to_tsquery"
+        | "normalize" => Some(SqlType::Text),
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
         "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm" => {
             Some(SqlType::Double)
@@ -130,13 +165,17 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         "vector_dims" => Some(SqlType::Integer),
         "eggdb_embed" => Some(SqlType::Text),
         "rrf_score" => Some(SqlType::Double),
-        name if crate::geo_functions::FUNCTIONS.contains(&name) => crate::geo_functions::result_type(name),
-        name if crate::standards::FUNCTIONS.contains(&name) => Some(crate::standards::result_type(name)),
-        name if crate::privacy::FUNCTIONS.contains(&name) => Some(crate::privacy::result_type(name)),
-        "l2_normalize" => Some(SqlType::Text),
-        "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => {
-            Some(SqlType::Integer)
+        name if crate::geo_functions::FUNCTIONS.contains(&name) => {
+            crate::geo_functions::result_type(name)
         }
+        name if crate::standards::FUNCTIONS.contains(&name) => {
+            Some(crate::standards::result_type(name))
+        }
+        name if crate::privacy::FUNCTIONS.contains(&name) => {
+            Some(crate::privacy::result_type(name))
+        }
+        "l2_normalize" => Some(SqlType::Text),
+        "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => Some(SqlType::Integer),
         "starts_with" | "regexp_like" | "isfinite" | "is_normalized" => Some(SqlType::Boolean),
         "regexp_match" | "regexp_split_to_array" => {
             Some(SqlType::Array(crate::arrays::ArrayElement::Text))
@@ -171,8 +210,13 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
             Some(_) => Some(SqlType::Timestamp(None)),
             None => None,
         },
-        "to_json" | "row_to_json" | "json_build_object" | "json_build_array"
-        | "json_strip_nulls" | "json_extract_path" | crate::json_functions::WHOLE_ROW
+        "to_json"
+        | "row_to_json"
+        | "json_build_object"
+        | "json_build_array"
+        | "json_strip_nulls"
+        | "json_extract_path"
+        | crate::json_functions::WHOLE_ROW
         | crate::json_functions::ROW_OBJECT => Some(SqlType::Json),
         "to_jsonb" | "jsonb_build_object" | "jsonb_build_array" | "jsonb_set" | "jsonb_insert"
         | "jsonb_strip_nulls" | "jsonb_extract_path" => Some(SqlType::Jsonb),
@@ -210,7 +254,10 @@ fn defined_function_type(
                 let array = inner.first().and_then(|array| static_type(array, scope));
                 return Some(crate::records::expanded_field_type(array, field));
             }
-            return Some(crate::records::field_type(static_type(record, scope), field));
+            return Some(crate::records::field_type(
+                static_type(record, scope),
+                field,
+            ));
         }
         _ => {}
     }

@@ -599,6 +599,7 @@ impl Outbox {
         });
     }
 
+    /// Queues ReadyForQuery with the transaction status: `I` idle, `T` in a transaction, `E` failed.
     pub fn ready_for_query(&mut self, status: u8) {
         self.message(b'Z', |body| body.push(status));
     }

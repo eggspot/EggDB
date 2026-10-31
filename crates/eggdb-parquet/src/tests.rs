@@ -3,20 +3,88 @@ use crate::{Cell, Column, ColumnType, read, write};
 fn sample() -> Vec<Column> {
     let rows = 1_000;
     vec![
-        Column { name: "id".to_owned(), column_type: ColumnType::Int64, nullable: false, cells: (0..rows).map(Cell::Int).collect() },
+        Column {
+            name: "id".to_owned(),
+            column_type: ColumnType::Int64,
+            nullable: false,
+            cells: (0..rows).map(Cell::Int).collect(),
+        },
         Column {
             name: "name".to_owned(),
             column_type: ColumnType::Text,
             nullable: true,
-            cells: (0..rows).map(|row| if row % 7 == 0 { Cell::Null } else { Cell::Bytes(format!("user {row}").into_bytes()) }).collect(),
+            cells: (0..rows)
+                .map(|row| {
+                    if row % 7 == 0 {
+                        Cell::Null
+                    } else {
+                        Cell::Bytes(format!("user {row}").into_bytes())
+                    }
+                })
+                .collect(),
         },
-        Column { name: "active".to_owned(), column_type: ColumnType::Boolean, nullable: false, cells: (0..rows).map(|row| Cell::Boolean(row % 3 == 0)).collect() },
-        Column { name: "score".to_owned(), column_type: ColumnType::Double, nullable: true, cells: (0..rows).map(|row| if row == 5 { Cell::Null } else { Cell::Float(row as f64 / 4.0) }).collect() },
-        Column { name: "born".to_owned(), column_type: ColumnType::Date, nullable: false, cells: (0..rows).map(|row| Cell::Int(19_000 + row)).collect() },
-        Column { name: "seen".to_owned(), column_type: ColumnType::Timestamp { utc: true }, nullable: false, cells: (0..rows).map(|row| Cell::Int(1_700_000_000_000_000 + row)).collect() },
-        Column { name: "price".to_owned(), column_type: ColumnType::Decimal { precision: 10, scale: 2 }, nullable: false, cells: (0..rows).map(|row| Cell::Decimal(i128::from(row) * 101)).collect() },
-        Column { name: "big".to_owned(), column_type: ColumnType::Decimal { precision: 30, scale: 0 }, nullable: false, cells: (0..rows).map(|row| Cell::Decimal(-i128::from(row) * 10i128.pow(25))).collect() },
-        Column { name: "small".to_owned(), column_type: ColumnType::Int32, nullable: true, cells: (0..rows).map(|row| Cell::Int(-row)).collect() },
+        Column {
+            name: "active".to_owned(),
+            column_type: ColumnType::Boolean,
+            nullable: false,
+            cells: (0..rows).map(|row| Cell::Boolean(row % 3 == 0)).collect(),
+        },
+        Column {
+            name: "score".to_owned(),
+            column_type: ColumnType::Double,
+            nullable: true,
+            cells: (0..rows)
+                .map(|row| {
+                    if row == 5 {
+                        Cell::Null
+                    } else {
+                        Cell::Float(row as f64 / 4.0)
+                    }
+                })
+                .collect(),
+        },
+        Column {
+            name: "born".to_owned(),
+            column_type: ColumnType::Date,
+            nullable: false,
+            cells: (0..rows).map(|row| Cell::Int(19_000 + row)).collect(),
+        },
+        Column {
+            name: "seen".to_owned(),
+            column_type: ColumnType::Timestamp { utc: true },
+            nullable: false,
+            cells: (0..rows)
+                .map(|row| Cell::Int(1_700_000_000_000_000 + row))
+                .collect(),
+        },
+        Column {
+            name: "price".to_owned(),
+            column_type: ColumnType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            nullable: false,
+            cells: (0..rows)
+                .map(|row| Cell::Decimal(i128::from(row) * 101))
+                .collect(),
+        },
+        Column {
+            name: "big".to_owned(),
+            column_type: ColumnType::Decimal {
+                precision: 30,
+                scale: 0,
+            },
+            nullable: false,
+            cells: (0..rows)
+                .map(|row| Cell::Decimal(-i128::from(row) * 10i128.pow(25)))
+                .collect(),
+        },
+        Column {
+            name: "small".to_owned(),
+            column_type: ColumnType::Int32,
+            nullable: true,
+            cells: (0..rows).map(|row| Cell::Int(-row)).collect(),
+        },
     ]
 }
 

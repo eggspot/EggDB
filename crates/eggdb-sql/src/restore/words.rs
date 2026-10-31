@@ -124,7 +124,11 @@ impl<'t> Words<'t> {
                     self.open_executable_comments -= 1;
                     self.at += 2;
                 }
-                Some(b'/') if self.rules.mysql && self.peek(1) == Some(b'*') && self.peek(2) == Some(b'!') => {
+                Some(b'/')
+                    if self.rules.mysql
+                        && self.peek(1) == Some(b'*')
+                        && self.peek(2) == Some(b'!') =>
+                {
                     self.at += 3;
                     while self.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
                         self.at += 1;

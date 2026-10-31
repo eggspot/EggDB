@@ -11,7 +11,11 @@ fn field(bytes: &[u8], table: usize, index: usize) -> Option<usize> {
     if 4 + 2 * index >= vtable_size {
         return None;
     }
-    let offset = u16::from_le_bytes(bytes[vtable + 4 + 2 * index..vtable + 6 + 2 * index].try_into().unwrap()) as usize;
+    let offset = u16::from_le_bytes(
+        bytes[vtable + 4 + 2 * index..vtable + 6 + 2 * index]
+            .try_into()
+            .unwrap(),
+    ) as usize;
     (offset != 0).then_some(table + offset)
 }
 
@@ -27,11 +31,43 @@ fn string(bytes: &[u8], at: usize) -> String {
 
 fn sample() -> Vec<Column> {
     vec![
-        Column { name: "id".to_owned(), column_type: ColumnType::Int64, nullable: false, cells: vec![Cell::Int(1), Cell::Int(2), Cell::Int(3)] },
-        Column { name: "name".to_owned(), column_type: ColumnType::Text, nullable: true, cells: vec![Cell::Bytes(b"egg".to_vec()), Cell::Null, Cell::Bytes(b"omelette".to_vec())] },
-        Column { name: "fresh".to_owned(), column_type: ColumnType::Boolean, nullable: true, cells: vec![Cell::Boolean(true), Cell::Boolean(false), Cell::Null] },
-        Column { name: "price".to_owned(), column_type: ColumnType::Decimal { precision: 9, scale: 2 }, nullable: true, cells: vec![Cell::Decimal(150), Cell::Decimal(-5), Cell::Null] },
-        Column { name: "laid".to_owned(), column_type: ColumnType::Timestamp { utc: true }, nullable: true, cells: vec![Cell::Int(0), Cell::Null, Cell::Int(1_000_000)] },
+        Column {
+            name: "id".to_owned(),
+            column_type: ColumnType::Int64,
+            nullable: false,
+            cells: vec![Cell::Int(1), Cell::Int(2), Cell::Int(3)],
+        },
+        Column {
+            name: "name".to_owned(),
+            column_type: ColumnType::Text,
+            nullable: true,
+            cells: vec![
+                Cell::Bytes(b"egg".to_vec()),
+                Cell::Null,
+                Cell::Bytes(b"omelette".to_vec()),
+            ],
+        },
+        Column {
+            name: "fresh".to_owned(),
+            column_type: ColumnType::Boolean,
+            nullable: true,
+            cells: vec![Cell::Boolean(true), Cell::Boolean(false), Cell::Null],
+        },
+        Column {
+            name: "price".to_owned(),
+            column_type: ColumnType::Decimal {
+                precision: 9,
+                scale: 2,
+            },
+            nullable: true,
+            cells: vec![Cell::Decimal(150), Cell::Decimal(-5), Cell::Null],
+        },
+        Column {
+            name: "laid".to_owned(),
+            column_type: ColumnType::Timestamp { utc: true },
+            nullable: true,
+            cells: vec![Cell::Int(0), Cell::Null, Cell::Int(1_000_000)],
+        },
     ]
 }
 
@@ -43,7 +79,11 @@ fn the_stream_frames_a_schema_a_batch_and_the_end() {
     assert_eq!(schema_length % 8, 0);
     let metadata = &stream[8..8 + schema_length];
     let root = u32_at(metadata, 0);
-    assert_eq!(metadata[field(metadata, root, 1).unwrap()], 1, "the first message is a schema");
+    assert_eq!(
+        metadata[field(metadata, root, 1).unwrap()],
+        1,
+        "the first message is a schema"
+    );
     let schema = follow(metadata, field(metadata, root, 2).unwrap());
     let fields = follow(metadata, field(metadata, schema, 1).unwrap());
     assert_eq!(u32_at(metadata, fields), 5);
@@ -60,10 +100,24 @@ fn the_stream_frames_a_schema_a_batch_and_the_end() {
     let batch_length = u32_at(&stream, batch_start + 4);
     let batch_metadata = &stream[batch_start + 8..batch_start + 8 + batch_length];
     let batch_root = u32_at(batch_metadata, 0);
-    assert_eq!(batch_metadata[field(batch_metadata, batch_root, 1).unwrap()], 3, "the second message is a record batch");
-    let body_length = i64::from_le_bytes(batch_metadata[field(batch_metadata, batch_root, 3).unwrap()..][..8].try_into().unwrap()) as usize;
-    assert_eq!(stream.len(), batch_start + 8 + batch_length + body_length + 8);
-    assert_eq!(&stream[stream.len() - 8..], &[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
+    assert_eq!(
+        batch_metadata[field(batch_metadata, batch_root, 1).unwrap()],
+        3,
+        "the second message is a record batch"
+    );
+    let body_length = i64::from_le_bytes(
+        batch_metadata[field(batch_metadata, batch_root, 3).unwrap()..][..8]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    assert_eq!(
+        stream.len(),
+        batch_start + 8 + batch_length + body_length + 8
+    );
+    assert_eq!(
+        &stream[stream.len() - 8..],
+        &[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]
+    );
 }
 
 #[test]

@@ -624,11 +624,7 @@ mod unsupported {
             Err(Error::new(ErrorKind::Unsupported))
         }
 
-        pub(crate) fn submit(
-            &mut self,
-            _op: NetOp<OsListener, OsStream>,
-            _user_data: u64,
-        ) {
+        pub(crate) fn submit(&mut self, _op: NetOp<OsListener, OsStream>, _user_data: u64) {
             match self.0 {}
         }
 

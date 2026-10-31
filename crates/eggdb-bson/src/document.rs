@@ -87,14 +87,21 @@ impl Bson {
         match self {
             Self::Int32(value) => Some(i64::from(*value)),
             Self::Int64(value) => Some(*value),
-            Self::Double(value) if value.fract() == 0.0 && value.abs() < 9.223_372_036_854_775e18 => Some(*value as i64),
+            Self::Double(value)
+                if value.fract() == 0.0 && value.abs() < 9.223_372_036_854_775e18 =>
+            {
+                Some(*value as i64)
+            }
             _ => None,
         }
     }
 
     /// Whether the value is a number.
     pub fn is_number(&self) -> bool {
-        matches!(self, Self::Double(_) | Self::Int32(_) | Self::Int64(_) | Self::Decimal128(_))
+        matches!(
+            self,
+            Self::Double(_) | Self::Int32(_) | Self::Int64(_) | Self::Decimal128(_)
+        )
     }
 
     /// The string when the value is one.
@@ -185,10 +192,17 @@ fn decimal128_to_f64(bytes: &[u8; 16]) -> f64 {
         return f64::NAN;
     }
     if combination == 0x1e {
-        return if negative { f64::NEG_INFINITY } else { f64::INFINITY };
+        return if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
     }
     let (exponent, coefficient) = if (bits >> 125) & 0b11 == 0b11 {
-        (((bits >> 111) & 0x3fff) as i32, (bits & ((1u128 << 111) - 1)) | (0b100u128 << 111))
+        (
+            ((bits >> 111) & 0x3fff) as i32,
+            (bits & ((1u128 << 111) - 1)) | (0b100u128 << 111),
+        )
     } else {
         (((bits >> 113) & 0x3fff) as i32, bits & ((1u128 << 113) - 1))
     };
@@ -216,12 +230,18 @@ impl Document {
 
     /// The value named `key`, the first when it appears twice.
     pub fn get(&self, key: &str) -> Option<&Bson> {
-        self.entries.iter().find(|(name, _)| name == key).map(|(_, value)| value)
+        self.entries
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
     }
 
     /// The value named `key`, to change.
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Bson> {
-        self.entries.iter_mut().find(|(name, _)| name == key).map(|(_, value)| value)
+        self.entries
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
     }
 
     /// Sets `key` to `value`: in place when it is there, else at the end.
@@ -317,6 +337,8 @@ impl Document {
 
 impl FromIterator<(String, Bson)> for Document {
     fn from_iter<I: IntoIterator<Item = (String, Bson)>>(iter: I) -> Self {
-        Self { entries: iter.into_iter().collect() }
+        Self {
+            entries: iter.into_iter().collect(),
+        }
     }
 }

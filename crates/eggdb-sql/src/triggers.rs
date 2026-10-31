@@ -125,8 +125,15 @@ pub(crate) enum TriggerLevel {
 pub(crate) enum TriggerAction {
     Statements(String),
     Batch(String),
-    Function { name: String, arguments: Vec<String> },
-    PlSql { body: String, new: String, old: String },
+    Function {
+        name: String,
+        arguments: Vec<String>,
+    },
+    PlSql {
+        body: String,
+        new: String,
+        old: String,
+    },
 }
 
 impl TriggerAction {
@@ -193,11 +200,10 @@ impl TriggerDefinition {
             && self.events.contains(event)
             && (event != TriggerEvent::Update
                 || self.columns.is_empty()
-                || self.columns.iter().any(|column| {
-                    updated
-                        .iter()
-                        .any(|name| name.eq_ignore_ascii_case(column))
-                }))
+                || self
+                    .columns
+                    .iter()
+                    .any(|column| updated.iter().any(|name| name.eq_ignore_ascii_case(column))))
     }
 }
 
@@ -444,8 +450,10 @@ fn check_target(
             Err(errors::not_a_base_table(&table.text, definition.dialect).at(table.position))
         }
         (true, false, dialect) => {
-            Err(errors::view_needs_instead_of(&table.text, definition.timing, dialect)
-                .at(table.position))
+            Err(
+                errors::view_needs_instead_of(&table.text, definition.timing, dialect)
+                    .at(table.position),
+            )
         }
         (false, true, Dialect::SqlServer) => Ok(()),
         (false, true, dialect) => {
@@ -498,10 +506,15 @@ fn placed(
     });
     let Some(other) = other else {
         if oracle {
-            return Err(errors::missing_trigger(&placement.other, None, Dialect::Oracle));
+            return Err(errors::missing_trigger(
+                &placement.other,
+                None,
+                Dialect::Oracle,
+            ));
         }
-        return Err(errors::missing_referenced_trigger(&placement.other.text)
-            .at(placement.other.position));
+        return Err(
+            errors::missing_referenced_trigger(&placement.other.text).at(placement.other.position)
+        );
     };
     let at = if placement.follows { other + 1 } else { other };
     triggers.insert(at, definition);
@@ -543,7 +556,9 @@ pub(crate) fn create_trigger(
             return Ok(result);
         }
         if !create.replace {
-            return Err(errors::duplicate(&definition.name, &owner, dialect).at(create.name.position));
+            return Err(
+                errors::duplicate(&definition.name, &owner, dialect).at(create.name.position)
+            );
         }
         if owner != create.table.text {
             if matches!(dialect, Dialect::SqlServer | Dialect::Oracle) {
@@ -619,7 +634,11 @@ pub(crate) fn drop_triggers(
                 }
                 continue;
             }
-            return Err(errors::missing_trigger(&target.name, drop.table.as_ref(), dialect));
+            return Err(errors::missing_trigger(
+                &target.name,
+                drop.table.as_ref(),
+                dialect,
+            ));
         };
         let mut triggers = stored(&*writer, &found.table)?;
         if found.index < triggers.triggers.len() {
@@ -955,9 +974,7 @@ impl Firing {
             return Ok(None);
         };
         let firing = Self::build(&view.name, &listed, event, updated, || view_columns(view))?;
-        let firing = firing.filter(|firing| {
-            !firing.instead.is_empty() || firing.replaces_writes
-        });
+        let firing = firing.filter(|firing| !firing.instead.is_empty() || firing.replaces_writes);
         Self::fire_before_statement(writer, tables, firing)
     }
 
@@ -1161,17 +1178,9 @@ impl Firing {
         Ok(())
     }
 
-    pub(crate) fn runs_row_triggers(&self) -> bool {
-        !self.before.is_empty() || !self.after.is_empty() || !self.instead.is_empty()
-    }
-
     pub(crate) fn finish(self) {
         queue_statement_calls(self.calls);
     }
-}
-
-pub(crate) fn is_ignored_row(error: &SqlError) -> bool {
-    errors::is_ignored_row(error)
 }
 
 pub(crate) fn raise(

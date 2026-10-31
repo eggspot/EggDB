@@ -379,7 +379,15 @@ mod tests {
             encode_value(&Value::Null, INT4_ARRAY_OID, Format::Binary, TimeZone::UTC).unwrap(),
             None
         );
-        assert!(encode_value(&Value::Integer(7), INT4_ARRAY_OID, Format::Binary, TimeZone::UTC).is_err());
+        assert!(
+            encode_value(
+                &Value::Integer(7),
+                INT4_ARRAY_OID,
+                Format::Binary,
+                TimeZone::UTC
+            )
+            .is_err()
+        );
         let empty = Value::Array(Box::new(ArrayValue {
             element: ArrayElement::Text,
             lower_bound: 1,
@@ -451,14 +459,25 @@ mod tests {
             Some(b"t".to_vec())
         );
         assert_eq!(
-            encode_value(&Value::Double(2.5), FLOAT8_OID, Format::Binary, TimeZone::UTC).unwrap(),
+            encode_value(
+                &Value::Double(2.5),
+                FLOAT8_OID,
+                Format::Binary,
+                TimeZone::UTC
+            )
+            .unwrap(),
             Some(2.5f64.to_bits().to_be_bytes().to_vec())
         );
         assert_eq!(
-            encode_value(&Value::BigInt(1 << 40), INT4_OID, Format::Binary, TimeZone::UTC)
-                .unwrap_err()
-                .state()
-                .code(),
+            encode_value(
+                &Value::BigInt(1 << 40),
+                INT4_OID,
+                Format::Binary,
+                TimeZone::UTC
+            )
+            .unwrap_err()
+            .state()
+            .code(),
             "XX000"
         );
         assert_eq!(

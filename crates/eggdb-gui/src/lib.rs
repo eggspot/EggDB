@@ -6,12 +6,18 @@
 
 mod canvas;
 mod color;
+/// The query editor: text, cursor, selection and editing commands.
 pub mod editor;
 mod font;
+/// The result grid: columns, rows, scrolling and cell selection.
 pub mod grid;
+/// SQL syntax highlighting for the editor.
 pub mod highlight;
+/// The window layout: panes, splitters and their sizes.
 pub mod layout;
+/// The main window: what it draws and how it answers input.
 pub mod main_window;
+/// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
 mod system_faces;
 

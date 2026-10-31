@@ -8,8 +8,14 @@ fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
         "CREATE TABLE emp (id NUMBER PRIMARY KEY, name VARCHAR2(20), sal NUMBER, dept NUMBER)",
     );
     run(&mut session, "INSERT INTO emp VALUES (1, 'KING', 5000, 10)");
-    run(&mut session, "INSERT INTO emp VALUES (2, 'BLAKE', 2850, 30)");
-    run(&mut session, "INSERT INTO emp VALUES (3, 'ALLEN', 1600, 30)");
+    run(
+        &mut session,
+        "INSERT INTO emp VALUES (2, 'BLAKE', 2850, 30)",
+    );
+    run(
+        &mut session,
+        "INSERT INTO emp VALUES (3, 'ALLEN', 1600, 30)",
+    );
     session.enable_server_output(None);
     session
 }
@@ -150,7 +156,10 @@ BEGIN
   RETURN total;
 END dept_total;",
     );
-    assert_eq!(single(&mut session, "SELECT dept_total(30) FROM dual"), "4450");
+    assert_eq!(
+        single(&mut session, "SELECT dept_total(30) FROM dual"),
+        "4450"
+    );
     assert_eq!(single(&mut session, "SELECT dept_total(99) FROM dual"), "0");
 }
 
@@ -183,7 +192,10 @@ BEGIN
 END counter;",
     );
     let block = "DECLARE\n  v NUMBER;\nBEGIN\n  counter.bump;\n  v := counter.value_of;\n  DBMS_OUTPUT.PUT_LINE(v);\nEND;";
-    assert_eq!(printed(&mut session, block), lines(&["counter starts at 10", "11"]));
+    assert_eq!(
+        printed(&mut session, block),
+        lines(&["counter starts at 10", "11"])
+    );
     assert_eq!(printed(&mut session, block), lines(&["12"]));
 }
 
@@ -208,7 +220,10 @@ END;",
     );
     assert_eq!(
         output,
-        lines(&["inner handler", "outer handler: ORA-01476: divisor is equal to zero"])
+        lines(&[
+            "inner handler",
+            "outer handler: ORA-01476: divisor is equal to zero"
+        ])
     );
 }
 
@@ -257,5 +272,8 @@ BEGIN
   CLOSE c;
 END;",
     );
-    assert_eq!(output, lines(&["2 fetched, 2 so far", "1 fetched, 3 so far"]));
+    assert_eq!(
+        output,
+        lines(&["2 fetched, 2 so far", "1 fetched, 3 so far"])
+    );
 }

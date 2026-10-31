@@ -16,7 +16,11 @@ pub fn encode_batch(batch: &Batch) -> Vec<u8> {
     out.extend_from_slice(&(batch.changes.len() as u64).to_le_bytes());
     for change in &batch.changes {
         match change {
-            Change::Put { collection, key, value } => {
+            Change::Put {
+                collection,
+                key,
+                value,
+            } => {
                 out.push(1);
                 put_bytes(&mut out, collection.as_bytes());
                 put_bytes(&mut out, key);
@@ -39,9 +43,14 @@ struct Reader<'b> {
 
 impl<'b> Reader<'b> {
     fn u64(&mut self) -> Result<u64, String> {
-        let raw = self.bytes.get(self.at..self.at + 8).ok_or("a batch ends early")?;
+        let raw = self
+            .bytes
+            .get(self.at..self.at + 8)
+            .ok_or("a batch ends early")?;
         self.at += 8;
-        Ok(u64::from_le_bytes(raw.try_into().map_err(|_| "a batch ends early")?))
+        Ok(u64::from_le_bytes(
+            raw.try_into().map_err(|_| "a batch ends early")?,
+        ))
     }
 
     fn bytes(&mut self) -> Result<&'b [u8], String> {
@@ -68,10 +77,15 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Batch, String> {
     for _ in 0..count {
         let kind = *bytes.get(reader.at).ok_or("a batch ends early")?;
         reader.at += 1;
-        let collection = String::from_utf8(reader.bytes()?.to_vec()).map_err(|_| "a collection name is not UTF-8")?;
+        let collection = String::from_utf8(reader.bytes()?.to_vec())
+            .map_err(|_| "a collection name is not UTF-8")?;
         let key = reader.bytes()?.to_vec();
         changes.push(match kind {
-            1 => Change::Put { collection, key, value: reader.bytes()?.to_vec() },
+            1 => Change::Put {
+                collection,
+                key,
+                value: reader.bytes()?.to_vec(),
+            },
             2 => Change::Delete { collection, key },
             _ => return Err("a change has an unknown kind".to_owned()),
         });
@@ -79,5 +93,9 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Batch, String> {
     if reader.at != bytes.len() {
         return Err("bytes follow the batch".to_owned());
     }
-    Ok(Batch { term, sequence, changes })
+    Ok(Batch {
+        term,
+        sequence,
+        changes,
+    })
 }

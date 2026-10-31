@@ -24,7 +24,10 @@ fn open(file: &TempPath, clock: &Arc<SimClock>) -> Database {
 fn keys(db: &Database, collection: Option<&str>) -> Vec<Vec<u8>> {
     db.read(|tx| {
         let scan = match collection {
-            Some(name) => tx.collection(name)?.scan(..).collect::<eggdb::Result<Vec<_>>>()?,
+            Some(name) => tx
+                .collection(name)?
+                .scan(..)
+                .collect::<eggdb::Result<Vec<_>>>()?,
             None => tx.scan(..).collect::<eggdb::Result<Vec<_>>>()?,
         };
         Ok(scan.into_iter().map(|(key, _)| key).collect())
@@ -78,8 +81,14 @@ fn a_key_expires_exactly_at_its_deadline_across_a_crash_and_a_reopen() {
     drop(db);
 
     let db = open(&file, &clock);
-    assert_eq!(db.collection("sessions").get("s1").unwrap(), Some(b"alice".to_vec()));
-    assert_eq!(db.collection("sessions").time_to_live("s1").unwrap(), Some(MICRO));
+    assert_eq!(
+        db.collection("sessions").get("s1").unwrap(),
+        Some(b"alice".to_vec())
+    );
+    assert_eq!(
+        db.collection("sessions").time_to_live("s1").unwrap(),
+        Some(MICRO)
+    );
     clock.advance(MICRO);
     assert_eq!(db.get("b").unwrap(), None);
     assert_eq!(db.get_with_len("b"), None);
@@ -164,7 +173,10 @@ fn a_read_only_open_hides_expired_keys_without_removing_them() {
     assert_eq!(reader.get("k").unwrap(), None);
     assert_eq!(keys(&reader, None), owned(&["kept"]));
     assert_eq!(reader.check().unwrap().entries, 4);
-    assert_eq!(reader.remove_expired().unwrap_err().kind(), ErrorKind::ReadOnly);
+    assert_eq!(
+        reader.remove_expired().unwrap_err().kind(),
+        ErrorKind::ReadOnly
+    );
 }
 
 #[test]
@@ -268,7 +280,10 @@ fn increments_from_many_threads_sum_exactly() {
         }
     });
     assert_eq!(db.get("hits").unwrap(), Some(b"800".to_vec()));
-    assert_eq!(db.collection("stats").get("hits").unwrap(), Some(b"1600".to_vec()));
+    assert_eq!(
+        db.collection("stats").get("hits").unwrap(),
+        Some(b"1600".to_vec())
+    );
     assert_eq!(db.get("balance").unwrap(), Some(b"-1200".to_vec()));
     db.close().unwrap();
 }
@@ -280,14 +295,26 @@ fn a_value_that_is_not_a_counter_or_an_overflow_changes_nothing() {
     db.put("name", "Ada").unwrap();
     db.put("big", i64::MAX.to_string()).unwrap();
     let mut tx = db.begin_write().unwrap();
-    assert_eq!(tx.increment("name", 1).unwrap_err().kind(), ErrorKind::NotAnInteger);
-    assert_eq!(tx.increment("big", 1).unwrap_err().kind(), ErrorKind::NotAnInteger);
+    assert_eq!(
+        tx.increment("name", 1).unwrap_err().kind(),
+        ErrorKind::NotAnInteger
+    );
+    assert_eq!(
+        tx.increment("big", 1).unwrap_err().kind(),
+        ErrorKind::NotAnInteger
+    );
     assert_eq!(tx.increment("big", -1).unwrap(), i64::MAX - 1);
     tx.commit().unwrap();
     assert_eq!(db.get("name").unwrap(), Some(b"Ada".to_vec()));
-    assert_eq!(db.get("big").unwrap(), Some((i64::MAX - 1).to_string().into_bytes()));
+    assert_eq!(
+        db.get("big").unwrap(),
+        Some((i64::MAX - 1).to_string().into_bytes())
+    );
     assert_eq!(db.increment("fresh", i64::MIN).unwrap(), i64::MIN);
-    assert_eq!(db.increment("fresh", -1).unwrap_err().kind(), ErrorKind::NotAnInteger);
+    assert_eq!(
+        db.increment("fresh", -1).unwrap_err().kind(),
+        ErrorKind::NotAnInteger
+    );
     db.close().unwrap();
 }
 
@@ -298,12 +325,18 @@ fn compare_and_set_changes_only_the_value_it_expects() {
     let some = |text: &'static str| Some(text.as_bytes());
     assert!(db.compare_and_set("lock", None, some("me")).unwrap());
     assert!(!db.compare_and_set("lock", None, some("you")).unwrap());
-    assert!(!db.compare_and_set("lock", some("you"), some("you")).unwrap());
+    assert!(
+        !db.compare_and_set("lock", some("you"), some("you"))
+            .unwrap()
+    );
     assert_eq!(db.get("lock").unwrap(), Some(b"me".to_vec()));
     let stamp = db.stats().unwrap().last_commit;
     assert!(!db.compare_and_set("lock", some("other"), None).unwrap());
     assert_eq!(db.stats().unwrap().last_commit, stamp);
-    assert!(db.compare_and_set("lock", some("me"), some("again")).unwrap());
+    assert!(
+        db.compare_and_set("lock", some("me"), some("again"))
+            .unwrap()
+    );
     assert!(db.compare_and_set("lock", some("again"), None).unwrap());
     assert_eq!(db.get("lock").unwrap(), None);
     db.create_collection("locks").unwrap();
@@ -313,7 +346,9 @@ fn compare_and_set_changes_only_the_value_it_expects() {
     assert_eq!(locks.get("l").unwrap(), Some(b"a".to_vec()));
     assert_eq!(db.get("l").unwrap(), None);
     assert_eq!(
-        db.compare_and_set(b"\xffCOL\x00x", None, some("v")).unwrap_err().kind(),
+        db.compare_and_set(b"\xffCOL\x00x", None, some("v"))
+            .unwrap_err()
+            .kind(),
         ErrorKind::ReservedKey
     );
     db.close().unwrap();
@@ -332,7 +367,9 @@ fn a_key_with_a_time_to_live_is_fourteen_bytes_shorter() {
     assert_eq!(db.get(vec![b'l'; longest + 1]).unwrap(), None);
     db.put(vec![b'm'; longest + 1], "v").unwrap();
     assert_eq!(
-        db.set_expiry(vec![b'm'; longest + 1], TTL).unwrap_err().kind(),
+        db.set_expiry(vec![b'm'; longest + 1], TTL)
+            .unwrap_err()
+            .kind(),
         ErrorKind::TooLarge
     );
     db.create_collection("c").unwrap();
@@ -346,7 +383,9 @@ fn a_key_with_a_time_to_live_is_fourteen_bytes_shorter() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::TooLarge);
     assert_eq!(
-        db.put_with_expiry(b"\xffCOL\x00\x04x", "v", TTL).unwrap_err().kind(),
+        db.put_with_expiry(b"\xffCOL\x00\x04x", "v", TTL)
+            .unwrap_err()
+            .kind(),
         ErrorKind::ReservedKey
     );
     db.close().unwrap();
@@ -365,7 +404,10 @@ fn dropping_a_collection_removes_the_times_to_live_of_its_keys() {
     db.create_collection("c").unwrap();
     db.collection("c").put("k", "permanent").unwrap();
     clock.advance(TTL);
-    assert_eq!(db.collection("c").get("k").unwrap(), Some(b"permanent".to_vec()));
+    assert_eq!(
+        db.collection("c").get("k").unwrap(),
+        Some(b"permanent".to_vec())
+    );
     assert_eq!(db.get("k").unwrap(), Some(b"default".to_vec()));
     clock.advance(TTL);
     assert_eq!(db.get("k").unwrap(), None);

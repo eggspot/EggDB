@@ -845,9 +845,10 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
             crate::oracle_intervals::IntervalKind::YearToMonth,
         ),
         ("oracle_listagg", [parts, rest @ ..]) => crate::oracle_listagg::joined(parts, rest),
-        ("oracle_fetch_percent" | "oracle_fetch_with_ties" | "oracle_fetch_percent_with_ties", [count]) => {
-            Ok(count.clone())
-        }
+        (
+            "oracle_fetch_percent" | "oracle_fetch_with_ties" | "oracle_fetch_percent_with_ties",
+            [count],
+        ) => Ok(count.clone()),
         ("oracle_date_literal", [Value::Text(text)]) => crate::oracle_datetime::date_literal(text),
         ("oracle_timestamp_literal", [Value::Text(text)]) => {
             crate::oracle_datetime::timestamp_literal(text)

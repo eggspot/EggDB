@@ -71,7 +71,9 @@ impl Default for Editor {
 }
 
 fn byte_at(line: &str, column: usize) -> usize {
-    line.char_indices().nth(column).map_or(line.len(), |(at, _)| at)
+    line.char_indices()
+        .nth(column)
+        .map_or(line.len(), |(at, _)| at)
 }
 
 fn closing(character: char) -> Option<char> {
@@ -139,8 +141,16 @@ impl Editor {
         let mut out = String::new();
         for line in start.line..=end.line {
             let text = &self.lines[line];
-            let from = if line == start.line { byte_at(text, start.column) } else { 0 };
-            let to = if line == end.line { byte_at(text, end.column) } else { text.len() };
+            let from = if line == start.line {
+                byte_at(text, start.column)
+            } else {
+                0
+            };
+            let to = if line == end.line {
+                byte_at(text, end.column)
+            } else {
+                text.len()
+            };
             out.push_str(&text[from..to]);
             if line != end.line {
                 out.push('\n');
@@ -307,10 +317,22 @@ impl Editor {
                 };
                 self.moved(select, to);
             }
-            Key::Home => self.moved(false, Position { column: 0, ..self.caret }),
+            Key::Home => self.moved(
+                false,
+                Position {
+                    column: 0,
+                    ..self.caret
+                },
+            ),
             Key::End => {
                 let column = self.line_length(self.caret.line);
-                self.moved(false, Position { column, ..self.caret });
+                self.moved(
+                    false,
+                    Position {
+                        column,
+                        ..self.caret
+                    },
+                );
             }
             Key::SelectAll => {
                 self.anchor = Some(Position::default());

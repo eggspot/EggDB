@@ -191,7 +191,9 @@ mod platform {
         }
         let error = std::io::Error::last_os_error();
         let kind = match error.kind() {
-            std::io::ErrorKind::OutOfMemory | std::io::ErrorKind::PermissionDenied => ErrorKind::OutOfMemory,
+            std::io::ErrorKind::OutOfMemory | std::io::ErrorKind::PermissionDenied => {
+                ErrorKind::OutOfMemory
+            }
             _ => ErrorKind::Unsupported,
         };
         Err(Error::from(error).with_kind(kind))
@@ -581,7 +583,10 @@ mod platform {
     use super::{Error, ErrorKind, MemoryRegion, NonNull, PageMode, Result};
 
     pub(super) fn lock(_: NonNull<u8>, len: usize) -> Result<()> {
-        Err(Error::new(ErrorKind::Unsupported, format!("locking {len} bytes in memory is not supported on this platform")))
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            format!("locking {len} bytes in memory is not supported on this platform"),
+        ))
     }
 
     pub(super) fn unlock(_: NonNull<u8>, _: usize) {}
@@ -667,7 +672,9 @@ mod locking_tests {
     #[test]
     fn a_page_locks_in_memory_and_unlocks_when_asked_or_dropped() {
         let memory = OsMemory;
-        let mut region = memory.allocate(memory.page_size(), PageMode::Normal).expect("one page");
+        let mut region = memory
+            .allocate(memory.page_size(), PageMode::Normal)
+            .expect("one page");
         assert!(!region.is_locked());
         match region.lock() {
             Ok(()) => {
@@ -678,7 +685,10 @@ mod locking_tests {
                 region.lock().expect("locks again");
             }
             Err(error) => assert!(
-                matches!(error.kind(), crate::ErrorKind::OutOfMemory | crate::ErrorKind::Unsupported),
+                matches!(
+                    error.kind(),
+                    crate::ErrorKind::OutOfMemory | crate::ErrorKind::Unsupported
+                ),
                 "{error}"
             ),
         }

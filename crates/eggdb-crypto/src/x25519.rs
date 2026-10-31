@@ -94,7 +94,13 @@ fn to_bytes(h: &Element) -> [u8; 32] {
 }
 
 fn add(a: &Element, b: &Element) -> Element {
-    carry([a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4]])
+    carry([
+        a[0] + b[0],
+        a[1] + b[1],
+        a[2] + b[2],
+        a[3] + b[3],
+        a[4] + b[4],
+    ])
 }
 
 fn subtract(a: &Element, b: &Element) -> Element {
@@ -175,7 +181,10 @@ fn conditional_swap(swap: u64, a: &mut Element, b: &mut Element) {
 /// The X25519 function of RFC 7748: the u-coordinate of `scalar` (clamped as the RFC says)
 /// times the point with u-coordinate `u` (its top bit ignored), by a Montgomery ladder whose
 /// steps and memory accesses do not depend on the scalar.
-pub fn x25519(scalar: &[u8; X25519_KEY_BYTES], u: &[u8; X25519_KEY_BYTES]) -> [u8; X25519_KEY_BYTES] {
+pub fn x25519(
+    scalar: &[u8; X25519_KEY_BYTES],
+    u: &[u8; X25519_KEY_BYTES],
+) -> [u8; X25519_KEY_BYTES] {
     let mut clamped = *scalar;
     clamped[0] &= 248;
     clamped[31] &= 127;

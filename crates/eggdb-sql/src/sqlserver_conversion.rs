@@ -1324,9 +1324,7 @@ pub(crate) fn convert(
             within_limit(text.len())?;
             Ok(Value::Text(text))
         }
-        SqlServerType::Binary(length) => {
-            sized_bytes(to_styled_bytes(&value, style)?, length, true)
-        }
+        SqlServerType::Binary(length) => sized_bytes(to_styled_bytes(&value, style)?, length, true),
         SqlServerType::VarBinary(length) => {
             sized_bytes(to_styled_bytes(&value, style)?, length, false)
         }
@@ -1662,13 +1660,19 @@ mod tests {
             assert_eq!(styled(style), expected, "{style}");
         }
         let time = Value::Time((13 * 3600 + 5 * 60) * MICROS_PER_SECOND);
-        assert_eq!(text_of(&time, Some(100), None).ok().as_deref(), Some("1:05PM"));
+        assert_eq!(
+            text_of(&time, Some(100), None).ok().as_deref(),
+            Some("1:05PM")
+        );
         assert_eq!(
             text_of(&time, Some(101), None).ok().as_deref(),
             Some("01/01/1900")
         );
         let date = Value::Date(day as i32);
-        assert_eq!(text_of(&date, Some(108), None).ok().as_deref(), Some("00:00:00"));
+        assert_eq!(
+            text_of(&date, Some(108), None).ok().as_deref(),
+            Some("00:00:00")
+        );
     }
 
     #[test]
@@ -1683,7 +1687,10 @@ mod tests {
             .and_then(|value| text_of(&value, Some(121), Some(3)))
             .unwrap_or_else(|error| format!("error {}", error.vendor_code().unwrap_or(0)))
         };
-        assert_eq!(read("Jul  4 2020  1:05PM", Some(100)), "2020-07-04 13:05:00.000");
+        assert_eq!(
+            read("Jul  4 2020  1:05PM", Some(100)),
+            "2020-07-04 13:05:00.000"
+        );
         assert_eq!(
             read("04 Jul 2020 13:05:09:123", Some(113)),
             "2020-07-04 13:05:09.123"
@@ -1695,7 +1702,8 @@ mod tests {
 
     #[test]
     fn floats_money_and_binary_take_their_own_styles() {
-        let float = |number: f64, style| text_of(&Value::Double(number), style, None).unwrap_or_default();
+        let float =
+            |number: f64, style| text_of(&Value::Double(number), style, None).unwrap_or_default();
         assert_eq!(float(1_234_567.0, None), "1.23457e+006");
         assert_eq!(float(123_456.0, None), "123456");
         assert_eq!(float(0.1 + 0.2, None), "0.3");
@@ -1708,7 +1716,10 @@ mod tests {
         assert_eq!(money_text(1), "4,235.99");
         assert_eq!(money_text(2), "4235.9877");
         let bytes = Value::Bytea(vec![0x4E, 0x61]);
-        assert_eq!(text_of(&bytes, Some(1), None).ok().as_deref(), Some("0x4E61"));
+        assert_eq!(
+            text_of(&bytes, Some(1), None).ok().as_deref(),
+            Some("0x4E61")
+        );
         assert_eq!(text_of(&bytes, Some(2), None).ok().as_deref(), Some("4E61"));
         let to_binary = |text: &str, style| {
             convert(
@@ -1718,10 +1729,18 @@ mod tests {
                 None,
             )
         };
-        assert_eq!(to_binary("0x4E61", 1).ok(), Some(Value::Bytea(vec![0x4E, 0x61])));
-        assert_eq!(to_binary("4E61", 2).ok(), Some(Value::Bytea(vec![0x4E, 0x61])));
         assert_eq!(
-            to_binary("0x123", 1).err().and_then(|error| error.vendor_code()),
+            to_binary("0x4E61", 1).ok(),
+            Some(Value::Bytea(vec![0x4E, 0x61]))
+        );
+        assert_eq!(
+            to_binary("4E61", 2).ok(),
+            Some(Value::Bytea(vec![0x4E, 0x61]))
+        );
+        assert_eq!(
+            to_binary("0x123", 1)
+                .err()
+                .and_then(|error| error.vendor_code()),
             Some(8114)
         );
     }

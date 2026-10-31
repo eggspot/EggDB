@@ -101,22 +101,58 @@ impl Stored {
     fn decode(bytes: &[u8]) -> Result<Self> {
         let damaged = || QueueError::Storage("a stored message is damaged".to_owned());
         Ok(Self {
-            visible_ms: u64::from_be_bytes(bytes.get(..8).ok_or_else(damaged)?.try_into().map_err(|_| damaged())?),
-            receive_count: u32::from_be_bytes(bytes.get(8..12).ok_or_else(damaged)?.try_into().map_err(|_| damaged())?),
-            sent_ms: u64::from_be_bytes(bytes.get(12..20).ok_or_else(damaged)?.try_into().map_err(|_| damaged())?),
+            visible_ms: u64::from_be_bytes(
+                bytes
+                    .get(..8)
+                    .ok_or_else(damaged)?
+                    .try_into()
+                    .map_err(|_| damaged())?,
+            ),
+            receive_count: u32::from_be_bytes(
+                bytes
+                    .get(8..12)
+                    .ok_or_else(damaged)?
+                    .try_into()
+                    .map_err(|_| damaged())?,
+            ),
+            sent_ms: u64::from_be_bytes(
+                bytes
+                    .get(12..20)
+                    .ok_or_else(damaged)?
+                    .try_into()
+                    .map_err(|_| damaged())?,
+            ),
             body: bytes[20..].to_vec(),
         })
     }
 }
 
-fn append(keys: &mut dyn KeysWrite, name: &str, body: &[u8], delay_ms: u64, now_ms: u64) -> Result<u64> {
+fn append(
+    keys: &mut dyn KeysWrite,
+    name: &str,
+    body: &[u8],
+    delay_ms: u64,
+    now_ms: u64,
+) -> Result<u64> {
     let Some(counter) = keys.get(&queue_key(name)).map_err(storage)? else {
         return Err(QueueError::NoQueue(name.to_owned()));
     };
-    let id = u64::from_be_bytes(counter.get(..8).and_then(|raw| raw.try_into().ok()).unwrap_or_default()) + 1;
-    keys.put(&queue_key(name), &id.to_be_bytes()).map_err(storage)?;
-    let stored = Stored { visible_ms: now_ms.saturating_add(delay_ms), receive_count: 0, sent_ms: now_ms, body: body.to_vec() };
-    keys.put(&message_key(name, id), &stored.encode()).map_err(storage)?;
+    let id = u64::from_be_bytes(
+        counter
+            .get(..8)
+            .and_then(|raw| raw.try_into().ok())
+            .unwrap_or_default(),
+    ) + 1;
+    keys.put(&queue_key(name), &id.to_be_bytes())
+        .map_err(storage)?;
+    let stored = Stored {
+        visible_ms: now_ms.saturating_add(delay_ms),
+        receive_count: 0,
+        sent_ms: now_ms,
+        body: body.to_vec(),
+    };
+    keys.put(&message_key(name, id), &stored.encode())
+        .map_err(storage)?;
     Ok(id)
 }
 
@@ -172,7 +208,11 @@ impl<'k> Queues<'k> {
             let outcome = body(keys);
             let failed = outcome.is_err();
             out = Some(outcome);
-            if failed { Err("the queue operation was rolled back".to_owned()) } else { Ok(()) }
+            if failed {
+                Err("the queue operation was rolled back".to_owned())
+            } else {
+                Ok(())
+            }
         });
         match (result, out) {
             (_, Some(Err(error))) => Err(error),
@@ -189,7 +229,8 @@ impl<'k> Queues<'k> {
             if keys.get(&queue_key(name)).map_err(storage)?.is_some() {
                 return Ok(false);
             }
-            keys.put(&queue_key(name), &0u64.to_be_bytes()).map_err(storage)?;
+            keys.put(&queue_key(name), &0u64.to_be_bytes())
+                .map_err(storage)?;
             Ok(true)
         })
     }
@@ -202,7 +243,12 @@ impl<'k> Queues<'k> {
     /// The queue names, in order.
     pub fn names(&self) -> Result<Vec<String>> {
         self.read(|keys| {
-            Ok(keys.scan(&[QUEUE]).map_err(storage)?.into_iter().filter_map(|(key, _)| String::from_utf8(key[1..].to_vec()).ok()).collect())
+            Ok(keys
+                .scan(&[QUEUE])
+                .map_err(storage)?
+                .into_iter()
+                .filter_map(|(key, _)| String::from_utf8(key[1..].to_vec()).ok())
+                .collect())
         })
     }
 
@@ -245,14 +291,28 @@ impl<'k> Queues<'k> {
 
     /// Appends every `(queue, body)` message in one transaction, all or none; returns their ids.
     pub fn send_all(&self, messages: &[(&str, &[u8])], now_ms: u64) -> Result<Vec<u64>> {
-        if messages.iter().any(|(_, body)| body.len() > MAX_MESSAGE_BYTES) {
+        if messages
+            .iter()
+            .any(|(_, body)| body.len() > MAX_MESSAGE_BYTES)
+        {
             return Err(QueueError::TooLarge);
         }
-        self.write(|keys| messages.iter().map(|(name, body)| append(keys, name, body, 0, now_ms)).collect())
+        self.write(|keys| {
+            messages
+                .iter()
+                .map(|(name, body)| append(keys, name, body, 0, now_ms))
+                .collect()
+        })
     }
 
     /// Leases up to `max` of the oldest messages visible at `now_ms` for `lease_ms`.
-    pub fn receive(&self, name: &str, max: usize, lease_ms: u64, now_ms: u64) -> Result<Vec<Message>> {
+    pub fn receive(
+        &self,
+        name: &str,
+        max: usize,
+        lease_ms: u64,
+        now_ms: u64,
+    ) -> Result<Vec<Message>> {
         let any_visible = self.read(|keys| {
             if keys.get(&queue_key(name)).map_err(storage)?.is_none() {
                 return Err(QueueError::NoQueue(name.to_owned()));
@@ -284,7 +344,12 @@ impl<'k> Queues<'k> {
                 stored.receive_count = stored.receive_count.saturating_add(1);
                 keys.put(&key, &stored.encode()).map_err(storage)?;
                 let id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap_or_default());
-                out.push(Message { id, body: stored.body, receive_count: stored.receive_count, sent_ms: stored.sent_ms });
+                out.push(Message {
+                    id,
+                    body: stored.body,
+                    receive_count: stored.receive_count,
+                    sent_ms: stored.sent_ms,
+                });
             }
             Ok(out)
         })
@@ -344,18 +409,41 @@ mod tests {
         queues.send("jobs", b"two", 0, 1_000).unwrap();
         queues.send("jobs", b"later", 5_000, 1_000).unwrap();
         let leased = queues.receive("jobs", 10, 30_000, 1_000).unwrap();
-        assert_eq!(leased.iter().map(|message| message.body.as_slice()).collect::<Vec<_>>(), [&b"one"[..], b"two"]);
-        assert!(queues.receive("jobs", 10, 30_000, 2_000).unwrap().is_empty());
+        assert_eq!(
+            leased
+                .iter()
+                .map(|message| message.body.as_slice())
+                .collect::<Vec<_>>(),
+            [&b"one"[..], b"two"]
+        );
+        assert!(
+            queues
+                .receive("jobs", 10, 30_000, 2_000)
+                .unwrap()
+                .is_empty()
+        );
         assert!(queues.ack("jobs", first).unwrap());
-        assert_eq!(queues.depth("jobs", 7_000).unwrap(), Depth { ready: 1, waiting: 1 });
+        assert_eq!(
+            queues.depth("jobs", 7_000).unwrap(),
+            Depth {
+                ready: 1,
+                waiting: 1
+            }
+        );
         let again = queues.receive("jobs", 10, 30_000, 40_000).unwrap();
         assert_eq!(again.len(), 2);
         assert_eq!(again[0].receive_count, 2);
         assert!(queues.release("jobs", again[1].id, 40_000).unwrap());
-        assert_eq!(queues.receive("jobs", 1, 30_000, 40_000).unwrap()[0].body, b"later");
+        assert_eq!(
+            queues.receive("jobs", 1, 30_000, 40_000).unwrap()[0].body,
+            b"later"
+        );
         assert_eq!(queues.purge("jobs").unwrap(), 2);
         assert_eq!(queues.delete("jobs").unwrap(), 0);
-        assert!(matches!(queues.send("jobs", b"x", 0, 0), Err(QueueError::NoQueue(_))));
+        assert!(matches!(
+            queues.send("jobs", b"x", 0, 0),
+            Err(QueueError::NoQueue(_))
+        ));
         assert!(matches!(queues.declare(""), Err(QueueError::BadName(_))));
     }
 
@@ -365,8 +453,22 @@ mod tests {
         let queues = Queues::new(&keyspace);
         queues.declare("a").unwrap();
         queues.declare("b").unwrap();
-        assert_eq!(queues.send_all(&[("a", b"1"), ("b", b"2"), ("a", b"3")], 0).unwrap(), [1, 1, 2]);
-        assert!(matches!(queues.send_all(&[("a", b"4"), ("missing", b"5")], 0), Err(QueueError::NoQueue(_))));
-        assert_eq!(queues.depth("a", 0).unwrap(), Depth { ready: 2, waiting: 0 });
+        assert_eq!(
+            queues
+                .send_all(&[("a", b"1"), ("b", b"2"), ("a", b"3")], 0)
+                .unwrap(),
+            [1, 1, 2]
+        );
+        assert!(matches!(
+            queues.send_all(&[("a", b"4"), ("missing", b"5")], 0),
+            Err(QueueError::NoQueue(_))
+        ));
+        assert_eq!(
+            queues.depth("a", 0).unwrap(),
+            Depth {
+                ready: 2,
+                waiting: 0
+            }
+        );
     }
 }

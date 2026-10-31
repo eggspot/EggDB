@@ -1,6 +1,4 @@
-use super::routines::{
-    module_definition, parameter_facts, routine_definition, scalar_return_type,
-};
+use super::routines::{module_definition, parameter_facts, routine_definition, scalar_return_type};
 use super::{
     CatalogRow, ObjectKind, ObjectSource, SqlServerColumnType, SqlServerObject, SqlServerObjects,
     column, default_definition, foreign_key_facts, int, optional_int, optional_small,
@@ -914,7 +912,10 @@ fn routines_rows(
                 .set("routine_type", text(routine_type))
                 .set("data_type", data_type.map_or(Value::Null, text))
                 .set("routine_body", text("SQL"))
-                .set("routine_definition", definition.map_or(Value::Null, Value::Text))
+                .set(
+                    "routine_definition",
+                    definition.map_or(Value::Null, Value::Text),
+                )
                 .set("created", super::UNKNOWN_DATE)
                 .set("last_altered", super::UNKNOWN_DATE)
                 .done()
@@ -967,7 +968,13 @@ fn parameters_rows(
         for (position, facts) in parameter_facts(definition).into_iter().enumerate() {
             let mode = if facts.output { "INOUT" } else { "IN" };
             let ordinal = i64::try_from(position).map_or(i64::MAX, |at| at + 1);
-            rows.push(parameter_row(ordinal, mode, false, facts.name, facts.column_type));
+            rows.push(parameter_row(
+                ordinal,
+                mode,
+                false,
+                facts.name,
+                facts.column_type,
+            ));
         }
     }
     rows

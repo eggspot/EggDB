@@ -17,7 +17,10 @@ fn bad(message: &str) -> GeoError {
 
 impl Reader<'_> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N], GeoError> {
-        let raw = self.bytes.get(self.at..self.at + N).ok_or_else(|| bad("it ends early"))?;
+        let raw = self
+            .bytes
+            .get(self.at..self.at + N)
+            .ok_or_else(|| bad("it ends early"))?;
         self.at += N;
         let mut out = [0u8; N];
         out.copy_from_slice(raw);
@@ -26,12 +29,20 @@ impl Reader<'_> {
 
     fn u32(&mut self) -> Result<u32, GeoError> {
         let raw = self.take::<4>()?;
-        Ok(if self.little { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) })
+        Ok(if self.little {
+            u32::from_le_bytes(raw)
+        } else {
+            u32::from_be_bytes(raw)
+        })
     }
 
     fn f64(&mut self) -> Result<f64, GeoError> {
         let raw = self.take::<8>()?;
-        Ok(if self.little { f64::from_le_bytes(raw) } else { f64::from_be_bytes(raw) })
+        Ok(if self.little {
+            f64::from_le_bytes(raw)
+        } else {
+            f64::from_be_bytes(raw)
+        })
     }
 
     fn count(&mut self, each: usize) -> Result<usize, GeoError> {
@@ -47,7 +58,10 @@ impl Reader<'_> {
         if self.points > MAX_POINTS {
             return Err(bad("too many points"));
         }
-        Ok(Coord { x: self.f64()?, y: self.f64()? })
+        Ok(Coord {
+            x: self.f64()?,
+            y: self.f64()?,
+        })
     }
 
     fn coords(&mut self) -> Result<Vec<Coord>, GeoError> {
@@ -71,9 +85,15 @@ impl Reader<'_> {
         };
         let kind = self.u32()?;
         if kind & (Z_FLAG | M_FLAG) != 0 || (kind & 0xffff) > 1000 {
-            return Err(GeoError("only two-dimensional geometries are supported yet".to_owned()));
+            return Err(GeoError(
+                "only two-dimensional geometries are supported yet".to_owned(),
+            ));
         }
-        let srid = if kind & SRID_FLAG != 0 { Some(self.u32()? as i32) } else { None };
+        let srid = if kind & SRID_FLAG != 0 {
+            Some(self.u32()? as i32)
+        } else {
+            None
+        };
         let geometry = match kind & 0xff {
             1 => {
                 let coord = self.coord()?;
@@ -81,7 +101,7 @@ impl Reader<'_> {
             }
             2 => Geometry::LineString(self.coords()?),
             3 => Geometry::Polygon(self.rings()?),
-            4 | 5 | 6 | 7 => {
+            4..=7 => {
                 let count = self.count(5)?;
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -89,18 +109,35 @@ impl Reader<'_> {
                 }
                 let wanted = kind & 0xff;
                 match wanted {
-                    4 => Geometry::MultiPoint(items.into_iter().map(|item| match item {
-                        Geometry::Point(Some(coord)) => Ok(coord),
-                        _ => Err(bad("a multipoint holds something other than points")),
-                    }).collect::<Result<_, _>>()?),
-                    5 => Geometry::MultiLineString(items.into_iter().map(|item| match item {
-                        Geometry::LineString(line) => Ok(line),
-                        _ => Err(bad("a multilinestring holds something other than line strings")),
-                    }).collect::<Result<_, _>>()?),
-                    6 => Geometry::MultiPolygon(items.into_iter().map(|item| match item {
-                        Geometry::Polygon(rings) => Ok(rings),
-                        _ => Err(bad("a multipolygon holds something other than polygons")),
-                    }).collect::<Result<_, _>>()?),
+                    4 => Geometry::MultiPoint(
+                        items
+                            .into_iter()
+                            .map(|item| match item {
+                                Geometry::Point(Some(coord)) => Ok(coord),
+                                _ => Err(bad("a multipoint holds something other than points")),
+                            })
+                            .collect::<Result<_, _>>()?,
+                    ),
+                    5 => Geometry::MultiLineString(
+                        items
+                            .into_iter()
+                            .map(|item| match item {
+                                Geometry::LineString(line) => Ok(line),
+                                _ => Err(bad(
+                                    "a multilinestring holds something other than line strings",
+                                )),
+                            })
+                            .collect::<Result<_, _>>()?,
+                    ),
+                    6 => Geometry::MultiPolygon(
+                        items
+                            .into_iter()
+                            .map(|item| match item {
+                                Geometry::Polygon(rings) => Ok(rings),
+                                _ => Err(bad("a multipolygon holds something other than polygons")),
+                            })
+                            .collect::<Result<_, _>>()?,
+                    ),
                     _ => Geometry::Collection(items),
                 }
             }
@@ -112,12 +149,20 @@ impl Reader<'_> {
 
 /// Reads WKB or PostGIS's EWKB (with an SRID).
 pub fn from_wkb(bytes: &[u8]) -> Result<Spatial, GeoError> {
-    let mut reader = Reader { bytes, at: 0, little: true, points: 0 };
+    let mut reader = Reader {
+        bytes,
+        at: 0,
+        little: true,
+        points: 0,
+    };
     let (srid, geometry) = reader.geometry(0)?;
     if reader.at != bytes.len() {
         return Err(bad("bytes follow the geometry"));
     }
-    Ok(Spatial { srid: srid.filter(|srid| *srid != 0), geometry })
+    Ok(Spatial {
+        srid: srid.filter(|srid| *srid != 0),
+        geometry,
+    })
 }
 
 fn put_coords(out: &mut Vec<u8>, coords: &[Coord]) {
@@ -152,7 +197,10 @@ fn put(out: &mut Vec<u8>, geometry: &Geometry, srid: Option<i32>) {
     }
     match geometry {
         Geometry::Point(point) => {
-            let coord = point.unwrap_or(Coord { x: f64::NAN, y: f64::NAN });
+            let coord = point.unwrap_or(Coord {
+                x: f64::NAN,
+                y: f64::NAN,
+            });
             out.extend_from_slice(&coord.x.to_le_bytes());
             out.extend_from_slice(&coord.y.to_le_bytes());
         }
@@ -188,6 +236,10 @@ fn put(out: &mut Vec<u8>, geometry: &Geometry, srid: Option<i32>) {
 /// Writes little-endian WKB; with `extended`, EWKB carrying the SRID.
 pub fn to_wkb(spatial: &Spatial, extended: bool) -> Vec<u8> {
     let mut out = Vec::new();
-    put(&mut out, &spatial.geometry, if extended { spatial.srid } else { None });
+    put(
+        &mut out,
+        &spatial.geometry,
+        if extended { spatial.srid } else { None },
+    );
     out
 }

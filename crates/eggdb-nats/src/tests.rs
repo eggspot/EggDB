@@ -6,7 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 fn config() -> ServerConfig {
-    ServerConfig { user: "eggdb".to_owned(), password_sha256: eggdb_crypto::sha256(b"secret"), max_connections: 8 }
+    ServerConfig {
+        user: "eggdb".to_owned(),
+        password_sha256: eggdb_crypto::sha256(b"secret"),
+        max_connections: 8,
+    }
 }
 
 struct Client {
@@ -17,8 +21,13 @@ struct Client {
 impl Client {
     fn open(address: SocketAddr) -> Self {
         let stream = TcpStream::connect(address).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut client = Self { reader: BufReader::new(stream.try_clone().unwrap()), writer: stream };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut client = Self {
+            reader: BufReader::new(stream.try_clone().unwrap()),
+            writer: stream,
+        };
         assert!(client.line().starts_with("INFO {"));
         client
     }
@@ -69,12 +78,39 @@ fn with_server(test: impl FnOnce(SocketAddr)) {
 #[test]
 fn frames_parse_and_wait_for_whole_payloads() {
     assert_eq!(next_frame(b"PUB foo 5\r\nhel"), Ok(None));
-    let (frame, used) = next_frame(b"pub foo reply 5\r\nhello\r\nPING\r\n").unwrap().unwrap();
-    assert_eq!(frame, Frame::Publish { subject: "foo".to_owned(), reply: Some("reply".to_owned()), headers: Vec::new(), payload: b"hello".to_vec() });
+    let (frame, used) = next_frame(b"pub foo reply 5\r\nhello\r\nPING\r\n")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frame,
+        Frame::Publish {
+            subject: "foo".to_owned(),
+            reply: Some("reply".to_owned()),
+            headers: Vec::new(),
+            payload: b"hello".to_vec()
+        }
+    );
     assert_eq!(used, 24);
-    let (frame, _) = next_frame(b"HPUB foo 12 14\r\nNATS/1.0\r\n\r\nhi\r\n").unwrap().unwrap();
-    assert_eq!(frame, Frame::Publish { subject: "foo".to_owned(), reply: None, headers: b"NATS/1.0\r\n\r\n".to_vec(), payload: b"hi".to_vec() });
-    assert_eq!(next_frame(b"SUB foo workers 7\r\n").unwrap().unwrap().0, Frame::Subscribe { subject: "foo".to_owned(), queue: Some("workers".to_owned()), sid: "7".to_owned() });
+    let (frame, _) = next_frame(b"HPUB foo 12 14\r\nNATS/1.0\r\n\r\nhi\r\n")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frame,
+        Frame::Publish {
+            subject: "foo".to_owned(),
+            reply: None,
+            headers: b"NATS/1.0\r\n\r\n".to_vec(),
+            payload: b"hi".to_vec()
+        }
+    );
+    assert_eq!(
+        next_frame(b"SUB foo workers 7\r\n").unwrap().unwrap().0,
+        Frame::Subscribe {
+            subject: "foo".to_owned(),
+            queue: Some("workers".to_owned()),
+            sid: "7".to_owned()
+        }
+    );
     assert!(next_frame(b"PUB foo 5\r\nhelloXX").is_err());
     assert!(next_frame(b"PUB foo 99999999999\r\n").is_err());
     assert!(next_frame(b"HPUB foo 9 3\r\n").is_err());
@@ -85,7 +121,10 @@ fn frames_parse_and_wait_for_whole_payloads() {
 #[test]
 fn subjects_match_wildcards() {
     assert!(subject_matches("orders.*.created", "orders.eu.created"));
-    assert!(!subject_matches("orders.*.created", "orders.eu.west.created"));
+    assert!(!subject_matches(
+        "orders.*.created",
+        "orders.eu.west.created"
+    ));
     assert!(subject_matches("orders.>", "orders.eu.west.created"));
     assert!(!subject_matches("orders.>", "orders"));
     assert!(subject_matches("orders", "orders"));
@@ -109,21 +148,31 @@ fn messages_reach_subscribers_and_queue_groups_share_them() {
         worker_b.send("SUB jobs workers b\r\n");
         worker_b.sync();
         let mut publisher = Client::connected(address, LOGIN);
-        publisher.send("PUB orders.new inbox.1 5\r\nhello\r\nPUB jobs 1\r\nx\r\nPUB jobs 1\r\ny\r\n");
+        publisher
+            .send("PUB orders.new inbox.1 5\r\nhello\r\nPUB jobs 1\r\nx\r\nPUB jobs 1\r\ny\r\n");
         publisher.sync();
         let mut deliveries = vec![subscriber.line(), subscriber.line()];
         deliveries.sort();
-        assert_eq!(deliveries, ["MSG orders.new 1 inbox.1 5", "MSG orders.new 2 inbox.1 5"]);
+        assert_eq!(
+            deliveries,
+            ["MSG orders.new 1 inbox.1 5", "MSG orders.new 2 inbox.1 5"]
+        );
         let first = worker_a.line();
         let second = worker_b.line();
-        assert!(first.starts_with("MSG jobs a ") && second.starts_with("MSG jobs b "), "{first} / {second}");
+        assert!(
+            first.starts_with("MSG jobs a ") && second.starts_with("MSG jobs b "),
+            "{first} / {second}"
+        );
     });
 }
 
 #[test]
 fn headers_auto_unsubscribe_and_echo_follow_the_client_options() {
     with_server(|address| {
-        let mut client = Client::connected(address, r#"{"user":"eggdb","pass":"secret","headers":true,"echo":false}"#);
+        let mut client = Client::connected(
+            address,
+            r#"{"user":"eggdb","pass":"secret","headers":true,"echo":false}"#,
+        );
         client.send("SUB events 1\r\nUNSUB 1 1\r\n");
         client.sync();
         let mut other = Client::connected(address, LOGIN);

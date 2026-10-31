@@ -572,6 +572,9 @@ fn a_key_using_an_index_of_another_name_takes_it_over_when_the_columns_match() {
         "ALTER TABLE emp ADD CONSTRAINT emp_dept_uk UNIQUE (dept) USING INDEX no_such_ix",
     );
     assert_eq!(missing.vendor_code(), Some(1418));
-    let duplicate = failure(&mut session, "INSERT INTO emp VALUES (1, 'grace@example.com', 20)");
+    let duplicate = failure(
+        &mut session,
+        "INSERT INTO emp VALUES (1, 'grace@example.com', 20)",
+    );
     assert_eq!(duplicate.vendor_code(), Some(1));
 }

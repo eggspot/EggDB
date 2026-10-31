@@ -1,11 +1,15 @@
 use crate::encoding::{IdentityGeneration, TableDefinition, integer_type_range};
 use crate::lexer::TokenKind;
-use crate::routines::{ParameterMode, ReturnType, RoutineKind, RoutineLanguage, RoutineReturns, Volatility};
 use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, CatalogType, ConstraintSource, RelationEntry, RelationSource,
     RoutineEntry, builtin_type, check_text, default_text, format_type, type_modifier, type_oid,
 };
-use crate::triggers::{TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming};
+use crate::routines::{
+    ParameterMode, ReturnType, RoutineKind, RoutineLanguage, RoutineReturns, Volatility,
+};
+use crate::triggers::{
+    TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming,
+};
 use crate::types::{SqlType, Value};
 use std::collections::HashMap;
 
@@ -553,10 +557,9 @@ fn identity_facts(
         .iter()
         .find_map(|entry| match &entry.source {
             RelationSource::Sequence(sequence)
-                if sequence
-                    .owned_by
-                    .as_ref()
-                    .is_some_and(|(owner, owned)| *owner == table.name && *owned == column.name) =>
+                if sequence.owned_by.as_ref().is_some_and(|(owner, owned)| {
+                    *owner == table.name && *owned == column.name
+                }) =>
             {
                 Some(sequence)
             }
@@ -830,7 +833,12 @@ fn column_row(
         .set("is_identity", yes_or_no(column.identity.is_some()))
         .set(
             "identity_cycle",
-            yes_or_no(column.identity.as_ref().is_some_and(|identity| identity.cycle)),
+            yes_or_no(
+                column
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.cycle),
+            ),
         )
         .set("is_generated", character_data("NEVER"))
         .set("is_updatable", yes_or_no(!view));
@@ -874,7 +882,10 @@ fn column_row(
         };
         row = row
             .set("identity_generation", character_data(generation))
-            .set("identity_start", character_data(&identity.start.to_string()))
+            .set(
+                "identity_start",
+                character_data(&identity.start.to_string()),
+            )
             .set(
                 "identity_increment",
                 character_data(&identity.increment.to_string()),
@@ -984,7 +995,10 @@ fn triggers_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("action_reference_old_row", identifier("OLD"))
                 .set("action_reference_new_row", identifier("NEW"));
             if let Some(condition) = &definition.condition {
-                row = row.set("action_condition", character_data(&format!("({condition})")));
+                row = row.set(
+                    "action_condition",
+                    character_data(&format!("({condition})")),
+                );
             }
             if let Some(name) = &definition.old_table {
                 row = row.set("action_reference_old_table", identifier(name));
@@ -1481,7 +1495,10 @@ fn with_type_description(
                 .map_or(Value::Null, character_data),
         );
     let (schema, name) = match (described.udt_name, sql_type.defined()) {
-        (Some(udt_name), _) => (crate::schemas::CATALOG_SCHEMA.to_owned(), udt_name.to_owned()),
+        (Some(udt_name), _) => (
+            crate::schemas::CATALOG_SCHEMA.to_owned(),
+            udt_name.to_owned(),
+        ),
         (None, Some(defined)) => match snapshot.user_types.of_oid(defined.oid) {
             Some(found) => (
                 crate::schemas::schema_of(&found.name).to_owned(),
@@ -1491,9 +1508,12 @@ fn with_type_description(
         },
         (None, None) => return row,
     };
-    row.set(&format!("{udt_prefix}udt_catalog"), identifier(&snapshot.database))
-        .set(&format!("{udt_prefix}udt_schema"), identifier(&schema))
-        .set(&format!("{udt_prefix}udt_name"), identifier(&name))
+    row.set(
+        &format!("{udt_prefix}udt_catalog"),
+        identifier(&snapshot.database),
+    )
+    .set(&format!("{udt_prefix}udt_schema"), identifier(&schema))
+    .set(&format!("{udt_prefix}udt_name"), identifier(&name))
 }
 
 fn pseudo_type_name(returned: &ReturnType) -> Option<&'static str> {
@@ -1505,7 +1525,11 @@ fn pseudo_type_name(returned: &ReturnType) -> Option<&'static str> {
     }
 }
 
-fn with_return_type(row: InformationRow, snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> InformationRow {
+fn with_return_type(
+    row: InformationRow,
+    snapshot: &CatalogSnapshot,
+    routine: &RoutineEntry,
+) -> InformationRow {
     let returned = match &routine.definition.returns {
         RoutineReturns::Nothing => return row,
         RoutineReturns::One(returned) | RoutineReturns::Set(returned) => returned.clone(),
@@ -1518,7 +1542,10 @@ fn with_return_type(row: InformationRow, snapshot: &CatalogSnapshot, routine: &R
         (_, Some(name)) => row
             .set("data_type", character_data(name))
             .set("type_udt_catalog", identifier(&snapshot.database))
-            .set("type_udt_schema", identifier(crate::schemas::CATALOG_SCHEMA))
+            .set(
+                "type_udt_schema",
+                identifier(crate::schemas::CATALOG_SCHEMA),
+            )
             .set("type_udt_name", identifier(name)),
         (ReturnType::Type(sql_type), None) => {
             with_type_description(row, snapshot, *sql_type, "type_")
@@ -1526,7 +1553,10 @@ fn with_return_type(row: InformationRow, snapshot: &CatalogSnapshot, routine: &R
         (ReturnType::Relation(name), None) => row
             .set("data_type", character_data("USER-DEFINED"))
             .set("type_udt_catalog", identifier(&snapshot.database))
-            .set("type_udt_schema", identifier(crate::schemas::schema_of(name)))
+            .set(
+                "type_udt_schema",
+                identifier(crate::schemas::schema_of(name)),
+            )
             .set("type_udt_name", identifier(crate::schemas::base_name(name))),
         _ => row,
     }
@@ -1549,12 +1579,18 @@ fn routines_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("routine_type", character_data(definition.kind.keyword()))
                 .set(
                     "dtd_identifier",
-                    if function { identifier("0") } else { Value::Null },
+                    if function {
+                        identifier("0")
+                    } else {
+                        Value::Null
+                    },
                 )
                 .set(
                     "routine_body",
                     character_data(match definition.language {
-                        RoutineLanguage::Sql | RoutineLanguage::Tsql | RoutineLanguage::MySql => "SQL",
+                        RoutineLanguage::Sql | RoutineLanguage::Tsql | RoutineLanguage::MySql => {
+                            "SQL"
+                        }
                         RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => "EXTERNAL",
                     }),
                 )
@@ -1583,7 +1619,11 @@ fn routines_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("is_implicitly_invocable", yes_or_no(false))
                 .set(
                     "security_type",
-                    character_data(if definition.security_definer { "DEFINER" } else { "INVOKER" }),
+                    character_data(if definition.security_definer {
+                        "DEFINER"
+                    } else {
+                        "INVOKER"
+                    }),
                 )
                 .set("as_locator", yes_or_no(false))
                 .set("is_udt_dependent", yes_or_no(false));
@@ -1635,7 +1675,10 @@ fn parameters_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("as_locator", yes_or_no(false))
                 .set("parameter_name", name.map_or(Value::Null, identifier))
                 .set("dtd_identifier", identifier(&position.to_string()))
-                .set("parameter_default", default.map_or(Value::Null, character_data));
+                .set(
+                    "parameter_default",
+                    default.map_or(Value::Null, character_data),
+                );
             rows.push(with_type_description(row, snapshot, sql_type, "").done());
         }
     }

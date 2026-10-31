@@ -43,7 +43,9 @@ pub(super) fn postgresql_identity_seed(
     if let Some(cache) = options.cache
         && cache <= 0
     {
-        return Err(invalid(format!("CACHE ({cache}) must be greater than zero")));
+        return Err(invalid(format!(
+            "CACHE ({cache}) must be greater than zero"
+        )));
     }
     let ascending = increment > 0;
     let min = options.min.flatten();
@@ -1208,9 +1210,17 @@ impl Parser<'_> {
     }
 
     fn at_identity_option(&self) -> bool {
-        ["generated", "increment", "start", "minvalue", "maxvalue", "cache", "cycle"]
-            .iter()
-            .any(|word| self.is_word(word))
+        [
+            "generated",
+            "increment",
+            "start",
+            "minvalue",
+            "maxvalue",
+            "cache",
+            "cycle",
+        ]
+        .iter()
+        .any(|word| self.is_word(word))
             || (self.is_word("no")
                 && ["minvalue", "maxvalue", "cycle"]
                     .iter()

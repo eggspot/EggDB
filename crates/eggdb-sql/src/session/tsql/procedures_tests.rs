@@ -39,7 +39,12 @@ fn printed(steps: &[BatchStep]) -> Vec<String> {
     steps
         .iter()
         .filter_map(|step| step.outcome.as_ref().ok())
-        .flat_map(|result| result.info_messages.iter().map(|message| message.text.clone()))
+        .flat_map(|result| {
+            result
+                .info_messages
+                .iter()
+                .map(|message| message.text.clone())
+        })
         .collect()
 }
 
@@ -114,11 +119,31 @@ fn arguments_that_do_not_fit_the_parameters_fail_with_sqlserver_numbers() {
         &mut session,
         "CREATE FUNCTION dbo.one() RETURNS int AS BEGIN RETURN 1 END",
     );
-    fails_with(&mut session, "DECLARE @s int; EXEC add_numbers @sum = @s OUTPUT", 201);
-    fails_with(&mut session, "DECLARE @s int; EXEC add_numbers 1, 2, @s OUTPUT, 4", 8144);
-    fails_with(&mut session, "DECLARE @s int; EXEC add_numbers @a = 1, @c = 2, @sum = @s", 8145);
-    fails_with(&mut session, "DECLARE @s int; EXEC add_numbers @a = 1, @a = 2, @sum = @s", 8143);
-    fails_with(&mut session, "DECLARE @s int; EXEC add_numbers @s OUTPUT, 1, @s", 8162);
+    fails_with(
+        &mut session,
+        "DECLARE @s int; EXEC add_numbers @sum = @s OUTPUT",
+        201,
+    );
+    fails_with(
+        &mut session,
+        "DECLARE @s int; EXEC add_numbers 1, 2, @s OUTPUT, 4",
+        8144,
+    );
+    fails_with(
+        &mut session,
+        "DECLARE @s int; EXEC add_numbers @a = 1, @c = 2, @sum = @s",
+        8145,
+    );
+    fails_with(
+        &mut session,
+        "DECLARE @s int; EXEC add_numbers @a = 1, @a = 2, @sum = @s",
+        8143,
+    );
+    fails_with(
+        &mut session,
+        "DECLARE @s int; EXEC add_numbers @s OUTPUT, 1, @s",
+        8162,
+    );
     fails_with(&mut session, "EXEC no_such_procedure", 2812);
     fails_with(&mut session, "EXEC dbo.one", 2809);
 }
@@ -127,7 +152,10 @@ fn arguments_that_do_not_fit_the_parameters_fail_with_sqlserver_numbers() {
 fn procedures_write_print_and_return_without_a_value() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    succeeds(&mut session, "CREATE TABLE audit (id int, note nvarchar(20))");
+    succeeds(
+        &mut session,
+        "CREATE TABLE audit (id int, note nvarchar(20))",
+    );
     succeeds(
         &mut session,
         "CREATE PROC record_note @id int, @note nvarchar(20) = N'none' AS \
@@ -154,8 +182,14 @@ fn procedures_write_print_and_return_without_a_value() {
 fn nested_procedures_see_their_nesting_level_and_recursion_stops_at_32() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    succeeds(&mut session, "CREATE PROCEDURE inner_level AS SELECT @@NESTLEVEL AS level");
-    succeeds(&mut session, "CREATE PROCEDURE outer_level AS EXEC inner_level");
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE inner_level AS SELECT @@NESTLEVEL AS level",
+    );
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE outer_level AS EXEC inner_level",
+    );
     let steps = succeeds(&mut session, "SELECT @@NESTLEVEL; EXEC outer_level");
     assert_eq!(
         rows(&steps),
@@ -219,7 +253,12 @@ fn stored_procedures_are_found_by_the_names_clients_write() {
     let store = MemoryStore::default();
     let mut session = session(&store);
     create_add_numbers(&mut session);
-    for written in ["add_numbers", "dbo.add_numbers", "[dbo].[ADD_NUMBERS]", "db..add_numbers"] {
+    for written in [
+        "add_numbers",
+        "dbo.add_numbers",
+        "[dbo].[ADD_NUMBERS]",
+        "db..add_numbers",
+    ] {
         let found = session
             .stored_procedure(written)
             .unwrap_or_else(|error| panic!("{written}: {error}"))
@@ -234,5 +273,8 @@ fn stored_procedures_are_found_by_the_names_clients_write() {
         assert_eq!(found.parameters[0].sql_type, SqlType::Integer);
     }
     assert_eq!(session.stored_procedure("other").ok().flatten(), None);
-    assert_eq!(session.stored_procedure("p; DROP TABLE t").ok().flatten(), None);
+    assert_eq!(
+        session.stored_procedure("p; DROP TABLE t").ok().flatten(),
+        None
+    );
 }

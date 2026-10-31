@@ -1,5 +1,5 @@
-use crate::ast::Expr;
 use crate::arrays::{ArrayElement, ArrayValue};
+use crate::ast::Expr;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::Evaluator;
 use crate::types::{DefinedKind, DefinedValue, SqlType, Value};
@@ -102,7 +102,10 @@ pub(crate) fn function(
         }
         _ => Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
-            format!("function {name} does not exist with {} arguments", arguments.len()),
+            format!(
+                "function {name} does not exist with {} arguments",
+                arguments.len()
+            ),
         )),
     }
 }
@@ -110,7 +113,9 @@ pub(crate) fn function(
 fn text_array<'l>(labels: impl Iterator<Item = &'l EnumLabel>) -> Value {
     Value::Array(Box::new(ArrayValue::new(
         ArrayElement::Text,
-        labels.map(|label| Value::Text(label.label.clone())).collect(),
+        labels
+            .map(|label| Value::Text(label.label.clone()))
+            .collect(),
     )))
 }
 

@@ -35,14 +35,14 @@ mod btree_delete_tests;
 #[cfg(test)]
 mod btree_tests;
 mod cells;
-mod compression;
 #[cfg(test)]
 mod checkpoint_tests;
-#[cfg(test)]
-mod encryption_tests;
+mod compression;
 #[cfg(test)]
 mod crash_sweep_tests;
 mod cursor;
+#[cfg(test)]
+mod encryption_tests;
 mod error;
 use eggdb_format::{bytes, format};
 mod frames;
@@ -68,22 +68,22 @@ mod snapshot_copy;
 mod snapshot_copy_tests;
 mod store;
 #[cfg(test)]
-mod stream_tests;
-#[cfg(test)]
 mod store_tests;
+#[cfg(test)]
+mod stream_tests;
 #[cfg(test)]
 mod test_rng;
 mod tree_page;
 
 pub use btree::{BTree, TreeReport};
 pub use compression::ValueCompression;
-pub use eggdb_format::crc32c::{self, crc32c, crc32c_append};
 pub use cursor::{Cursor, ScanOrder};
+pub use eggdb_format::crc32c::{self, crc32c, crc32c_append};
 pub use error::{FormatError, StorageError};
 pub use format::{
     Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC,
-    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
-    PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
+    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK,
+    PageChecksum, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
 pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};

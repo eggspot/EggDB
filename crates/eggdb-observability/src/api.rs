@@ -21,12 +21,18 @@ pub struct Endpoint<'s, S: KeyValueStore> {
 
 impl<S: KeyValueStore> std::fmt::Debug for Endpoint<'_, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Endpoint").field("user", &self.user).finish_non_exhaustive()
+        f.debug_struct("Endpoint")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
     }
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 fn json_string(text: &str) -> String {
@@ -37,7 +43,9 @@ fn json_string(text: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
-            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            control if (control as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", control as u32))
+            }
             other => out.push(other),
         }
     }
@@ -46,7 +54,12 @@ fn json_string(text: &str) -> String {
 }
 
 fn json(status: u16, body: String) -> Response {
-    Response { status, content_type: "application/json".to_owned(), body: body.into_bytes(), headers: Vec::new() }
+    Response {
+        status,
+        content_type: "application/json".to_owned(),
+        body: body.into_bytes(),
+        headers: Vec::new(),
+    }
 }
 
 fn success(data: &str) -> Response {
@@ -54,12 +67,20 @@ fn success(data: &str) -> Response {
 }
 
 fn bad_data(message: &str) -> Response {
-    json(400, format!("{{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":{}}}", json_string(message)))
+    json(
+        400,
+        format!(
+            "{{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":{}}}",
+            json_string(message)
+        ),
+    )
 }
 
 fn no_content() -> Response {
     let mut response = json(204, String::new());
-    response.headers.push(("X-Influxdb-Version".to_owned(), "eggdb".to_owned()));
+    response
+        .headers
+        .push(("X-Influxdb-Version".to_owned(), "eggdb".to_owned()));
     response
 }
 
@@ -67,7 +88,11 @@ fn number_text(value: f64) -> String {
     if value.is_nan() {
         "NaN".to_owned()
     } else if value.is_infinite() {
-        if value > 0.0 { "+Inf".to_owned() } else { "-Inf".to_owned() }
+        if value > 0.0 {
+            "+Inf".to_owned()
+        } else {
+            "-Inf".to_owned()
+        }
     } else {
         format!("{value}")
     }
@@ -78,7 +103,10 @@ fn seconds_text(ms: i64) -> String {
 }
 
 fn labels_json(labels: &Labels) -> String {
-    let fields: Vec<String> = labels.iter().map(|(name, value)| format!("{}:{}", json_string(name), json_string(value))).collect();
+    let fields: Vec<String> = labels
+        .iter()
+        .map(|(name, value)| format!("{}:{}", json_string(name), json_string(value)))
+        .collect();
     format!("{{{}}}", fields.join(","))
 }
 
@@ -90,8 +118,17 @@ fn strings_json(values: &BTreeSet<String>) -> String {
 fn matrix_json<'m>(series: impl Iterator<Item = (&'m Labels, &'m Vec<(i64, f64)>)>) -> String {
     let items: Vec<String> = series
         .map(|(labels, samples)| {
-            let points: Vec<String> = samples.iter().map(|(time, value)| format!("[{},\"{}\"]", seconds_text(*time), number_text(*value))).collect();
-            format!("{{\"metric\":{},\"values\":[{}]}}", labels_json(labels), points.join(","))
+            let points: Vec<String> = samples
+                .iter()
+                .map(|(time, value)| {
+                    format!("[{},\"{}\"]", seconds_text(*time), number_text(*value))
+                })
+                .collect();
+            format!(
+                "{{\"metric\":{},\"values\":[{}]}}",
+                labels_json(labels),
+                points.join(",")
+            )
         })
         .collect();
     format!("[{}]", items.join(","))
@@ -104,7 +141,10 @@ fn percent_decode(text: &str) -> String {
     while at < bytes.len() {
         match bytes[at] {
             b'+' => out.push(b' '),
-            b'%' => match text.get(at + 1..at + 3).and_then(|pair| u8::from_str_radix(pair, 16).ok()) {
+            b'%' => match text
+                .get(at + 1..at + 3)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            {
                 Some(byte) => {
                     out.push(byte);
                     at += 2;
@@ -132,7 +172,9 @@ fn time_param(text: Option<&str>, default: i64) -> Result<i64, String> {
     let Some(text) = text else {
         return Ok(default);
     };
-    let seconds: f64 = text.parse().map_err(|_| format!("cannot parse {text:?} to a valid timestamp: use Unix seconds"))?;
+    let seconds: f64 = text
+        .parse()
+        .map_err(|_| format!("cannot parse {text:?} to a valid timestamp: use Unix seconds"))?;
     if !seconds.is_finite() {
         return Err(format!("{text} is not a time"));
     }
@@ -143,7 +185,8 @@ fn step_param(text: Option<&str>) -> Result<i64, String> {
     let text = text.ok_or("missing parameter step")?;
     let ms = match text.parse::<f64>() {
         Ok(seconds) if seconds.is_finite() => (seconds * 1000.0).round() as i64,
-        _ => promql::duration_ms(text).ok_or_else(|| format!("cannot parse {text:?} to a valid duration"))?,
+        _ => promql::duration_ms(text)
+            .ok_or_else(|| format!("cannot parse {text:?} to a valid duration"))?,
     };
     if ms <= 0 {
         return Err("zero or negative query resolution step widths are not accepted".to_owned());
@@ -156,7 +199,12 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     /// `database`, for clients that sign in with `user` and the password whose SHA-256 is
     /// `password_sha256`.
     pub fn new(store: &'s S, user: &str, password_sha256: [u8; 32], database: &str) -> Self {
-        Self { store, user: user.to_owned(), password_sha256, database: database.to_owned() }
+        Self {
+            store,
+            user: user.to_owned(),
+            password_sha256,
+            database: database.to_owned(),
+        }
     }
 
     fn session(&self) -> Session<'s, S> {
@@ -171,7 +219,10 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
 
     fn authorized(&self, request: &Request, parameters: &[(String, String)]) -> bool {
         if let Some(header) = request.header("authorization") {
-            if let Some(token) = header.strip_prefix("Token ").or_else(|| header.strip_prefix("Bearer ")) {
+            if let Some(token) = header
+                .strip_prefix("Token ")
+                .or_else(|| header.strip_prefix("Bearer "))
+            {
                 return self.password_ok(token.trim().as_bytes());
             }
             if let Some(encoded) = header.strip_prefix("Basic ") {
@@ -181,13 +232,22 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 let Some(split) = decoded.iter().position(|&byte| byte == b':') else {
                     return false;
                 };
-                return eggdb_crypto::constant_time_eq(&decoded[..split], self.user.as_bytes()) && self.password_ok(&decoded[split + 1..]);
+                return eggdb_crypto::constant_time_eq(&decoded[..split], self.user.as_bytes())
+                    && self.password_ok(&decoded[split + 1..]);
             }
             return false;
         }
-        let value = |name: &str| parameters.iter().find(|(field, _)| field == name).map(|(_, value)| value.as_str());
+        let value = |name: &str| {
+            parameters
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.as_str())
+        };
         match (value("u"), value("p")) {
-            (Some(user), Some(password)) => eggdb_crypto::constant_time_eq(user.as_bytes(), self.user.as_bytes()) && self.password_ok(password.as_bytes()),
+            (Some(user), Some(password)) => {
+                eggdb_crypto::constant_time_eq(user.as_bytes(), self.user.as_bytes())
+                    && self.password_ok(password.as_bytes())
+            }
             _ => false,
         }
     }
@@ -195,64 +255,123 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     /// Answers one HTTP request.
     pub fn answer(&self, request: &Request) -> Response {
         let mut parameters = form(request.query.as_deref().unwrap_or_default());
-        if request.method == "POST" && request.header("content-type").is_some_and(|kind| kind.starts_with("application/x-www-form-urlencoded")) {
+        if request.method == "POST"
+            && request
+                .header("content-type")
+                .is_some_and(|kind| kind.starts_with("application/x-www-form-urlencoded"))
+        {
             parameters.extend(form(&String::from_utf8_lossy(&request.body)));
         }
         match (request.method.as_str(), request.path.as_str()) {
             ("GET" | "HEAD", "/ping") => return no_content(),
-            ("GET", "/health" | "/-/healthy" | "/-/ready") => return json(200, "{\"name\":\"eggdb\",\"status\":\"pass\"}".to_owned()),
+            ("GET", "/health" | "/-/healthy" | "/-/ready") => {
+                return json(200, "{\"name\":\"eggdb\",\"status\":\"pass\"}".to_owned());
+            }
             _ => {}
         }
         if !self.authorized(request, &parameters) {
-            let mut response = json(401, "{\"code\":\"unauthorized\",\"message\":\"unauthorized access\"}".to_owned());
-            response.headers.push(("WWW-Authenticate".to_owned(), "Basic realm=\"eggdb\"".to_owned()));
+            let mut response = json(
+                401,
+                "{\"code\":\"unauthorized\",\"message\":\"unauthorized access\"}".to_owned(),
+            );
+            response.headers.push((
+                "WWW-Authenticate".to_owned(),
+                "Basic realm=\"eggdb\"".to_owned(),
+            ));
             return response;
         }
-        let value = |name: &str| parameters.iter().find(|(field, _)| field == name).map(|(_, value)| value.as_str());
+        let value = |name: &str| {
+            parameters
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.as_str())
+        };
         match (request.method.as_str(), request.path.as_str()) {
-            ("POST", "/write" | "/api/v2/write") => self.write_lines(request, value("precision").unwrap_or("ns")),
+            ("POST", "/write" | "/api/v2/write") => {
+                self.write_lines(request, value("precision").unwrap_or("ns"))
+            }
             ("POST", "/api/v1/write") => self.remote_write(request),
             ("GET" | "POST", "/api/v1/query") => self.query(value("query"), value("time")),
-            ("GET" | "POST", "/api/v1/query_range") => self.query_range(value("query"), value("start"), value("end"), value("step")),
+            ("GET" | "POST", "/api/v1/query_range") => {
+                self.query_range(value("query"), value("start"), value("end"), value("step"))
+            }
             ("GET" | "POST", "/api/v1/labels") => self.labels(),
             ("GET" | "POST", "/api/v1/series") => {
-                let matches: Vec<&str> = parameters.iter().filter(|(name, _)| name == "match[]").map(|(_, value)| value.as_str()).collect();
+                let matches: Vec<&str> = parameters
+                    .iter()
+                    .filter(|(name, _)| name == "match[]")
+                    .map(|(_, value)| value.as_str())
+                    .collect();
                 self.series(&matches, value("start"), value("end"))
             }
-            ("GET", "/api/v1/status/buildinfo") => success(&format!("{{\"version\":\"{VERSION}\",\"revision\":\"eggdb\",\"branch\":\"\",\"buildUser\":\"\",\"buildDate\":\"\",\"goVersion\":\"\"}}")),
+            ("GET", "/api/v1/status/buildinfo") => success(&format!(
+                "{{\"version\":\"{VERSION}\",\"revision\":\"eggdb\",\"branch\":\"\",\"buildUser\":\"\",\"buildDate\":\"\",\"goVersion\":\"\"}}"
+            )),
             ("GET", path) if path.starts_with("/api/v1/label/") && path.ends_with("/values") => {
-                let name = percent_decode(&path["/api/v1/label/".len()..path.len() - "/values".len()]);
+                let name =
+                    percent_decode(&path["/api/v1/label/".len()..path.len() - "/values".len()]);
                 self.label_values(&name)
             }
-            _ => json(404, "{\"status\":\"error\",\"errorType\":\"not_found\",\"error\":\"not found\"}".to_owned()),
+            _ => json(
+                404,
+                "{\"status\":\"error\",\"errorType\":\"not_found\",\"error\":\"not found\"}"
+                    .to_owned(),
+            ),
         }
     }
 
     fn write_lines(&self, request: &Request, precision: &str) -> Response {
-        if request.header("content-encoding").is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity")) {
+        if request
+            .header("content-encoding")
+            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        {
             return json(415, "{\"code\":\"unsupported media type\",\"message\":\"compressed line protocol is not supported yet\"}".to_owned());
         }
         let Some(unit) = precision_ns(precision) else {
-            return json(400, format!("{{\"code\":\"invalid\",\"message\":{}}}", json_string(&format!("invalid precision {precision}"))));
+            return json(
+                400,
+                format!(
+                    "{{\"code\":\"invalid\",\"message\":{}}}",
+                    json_string(&format!("invalid precision {precision}"))
+                ),
+            );
         };
         let Ok(body) = std::str::from_utf8(&request.body) else {
-            return json(400, "{\"code\":\"invalid\",\"message\":\"the body is not UTF-8\"}".to_owned());
+            return json(
+                400,
+                "{\"code\":\"invalid\",\"message\":\"the body is not UTF-8\"}".to_owned(),
+            );
         };
-        let written = line_protocol::parse(body, unit, now_ms().saturating_mul(1_000_000)).and_then(|points| store::write(&mut self.session(), &points));
+        let written = line_protocol::parse(body, unit, now_ms().saturating_mul(1_000_000))
+            .and_then(|points| store::write(&mut self.session(), &points));
         match written {
             Ok(_) => no_content(),
-            Err(message) => json(400, format!("{{\"code\":\"invalid\",\"message\":{},\"error\":{}}}", json_string(&message), json_string(&message))),
+            Err(message) => json(
+                400,
+                format!(
+                    "{{\"code\":\"invalid\",\"message\":{},\"error\":{}}}",
+                    json_string(&message),
+                    json_string(&message)
+                ),
+            ),
         }
     }
 
     fn remote_write(&self, request: &Request) -> Response {
-        match crate::remote_write::decode(&request.body).and_then(|points| store::write(&mut self.session(), &points)) {
+        match crate::remote_write::decode(&request.body)
+            .and_then(|points| store::write(&mut self.session(), &points))
+        {
             Ok(_) => no_content(),
             Err(message) => json(400, format!("{{\"error\":{}}}", json_string(&message))),
         }
     }
 
-    fn fetch(&self, expr: &promql::Expr, start: i64, end: i64) -> Result<BTreeMap<String, Vec<Series>>, String> {
+    fn fetch(
+        &self,
+        expr: &promql::Expr,
+        start: i64,
+        end: i64,
+    ) -> Result<BTreeMap<String, Vec<Series>>, String> {
         let mut wanted = Vec::new();
         promql::selectors(expr, &mut wanted);
         let mut data = BTreeMap::new();
@@ -282,17 +401,43 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
 
     fn query(&self, query: Option<&str>, time: Option<&str>) -> Response {
         match self.instant(query, time) {
-            Ok((Data::Scalar(value), time)) => success(&format!("{{\"resultType\":\"scalar\",\"result\":[{},\"{}\"]}}", seconds_text(time), number_text(value))),
+            Ok((Data::Scalar(value), time)) => success(&format!(
+                "{{\"resultType\":\"scalar\",\"result\":[{},\"{}\"]}}",
+                seconds_text(time),
+                number_text(value)
+            )),
             Ok((Data::Vector(vector), time)) => {
-                let items: Vec<String> = vector.iter().map(|(labels, value)| format!("{{\"metric\":{},\"value\":[{},\"{}\"]}}", labels_json(labels), seconds_text(time), number_text(*value))).collect();
-                success(&format!("{{\"resultType\":\"vector\",\"result\":[{}]}}", items.join(",")))
+                let items: Vec<String> = vector
+                    .iter()
+                    .map(|(labels, value)| {
+                        format!(
+                            "{{\"metric\":{},\"value\":[{},\"{}\"]}}",
+                            labels_json(labels),
+                            seconds_text(time),
+                            number_text(*value)
+                        )
+                    })
+                    .collect();
+                success(&format!(
+                    "{{\"resultType\":\"vector\",\"result\":[{}]}}",
+                    items.join(",")
+                ))
             }
-            Ok((Data::Matrix(matrix), _)) => success(&format!("{{\"resultType\":\"matrix\",\"result\":{}}}", matrix_json(matrix.iter().map(|(labels, samples)| (labels, samples))))),
+            Ok((Data::Matrix(matrix), _)) => success(&format!(
+                "{{\"resultType\":\"matrix\",\"result\":{}}}",
+                matrix_json(matrix.iter().map(|(labels, samples)| (labels, samples)))
+            )),
             Err(message) => bad_data(&message),
         }
     }
 
-    fn range(&self, query: Option<&str>, start: Option<&str>, end: Option<&str>, step: Option<&str>) -> Result<BTreeMap<Labels, Vec<(i64, f64)>>, String> {
+    fn range(
+        &self,
+        query: Option<&str>,
+        start: Option<&str>,
+        end: Option<&str>,
+        step: Option<&str>,
+    ) -> Result<BTreeMap<Labels, Vec<(i64, f64)>>, String> {
         let expr = promql::parse(query.ok_or("missing parameter query")?)?;
         let start = time_param(Some(start.ok_or("missing parameter start")?), 0)?;
         let end = time_param(Some(end.ok_or("missing parameter end")?), 0)?;
@@ -314,16 +459,29 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                         series.entry(labels).or_default().push((time, value));
                     }
                 }
-                Data::Matrix(_) => return Err("a range query needs an instant vector or scalar expression".to_owned()),
+                Data::Matrix(_) => {
+                    return Err(
+                        "a range query needs an instant vector or scalar expression".to_owned()
+                    );
+                }
             }
             time += step;
         }
         Ok(series)
     }
 
-    fn query_range(&self, query: Option<&str>, start: Option<&str>, end: Option<&str>, step: Option<&str>) -> Response {
+    fn query_range(
+        &self,
+        query: Option<&str>,
+        start: Option<&str>,
+        end: Option<&str>,
+        step: Option<&str>,
+    ) -> Response {
         match self.range(query, start, end, step) {
-            Ok(series) => success(&format!("{{\"resultType\":\"matrix\",\"result\":{}}}", matrix_json(series.iter()))),
+            Ok(series) => success(&format!(
+                "{{\"resultType\":\"matrix\",\"result\":{}}}",
+                matrix_json(series.iter())
+            )),
             Err(message) => bad_data(&message),
         }
     }
@@ -333,7 +491,12 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             Ok(tables) => {
                 let mut names: BTreeSet<String> = BTreeSet::from(["__name__".to_owned()]);
                 for columns in tables.values() {
-                    names.extend(columns.iter().filter(|(name, data_type)| data_type == "text" && name != "time").map(|(name, _)| name.clone()));
+                    names.extend(
+                        columns
+                            .iter()
+                            .filter(|(name, data_type)| data_type == "text" && name != "time")
+                            .map(|(name, _)| name.clone()),
+                    );
                 }
                 success(&strings_json(&names))
             }
@@ -354,10 +517,24 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                         values.insert(format!("{table}_{column}"));
                     }
                 }
-            } else if columns.iter().any(|(column, data_type)| column == name && data_type == "text") {
-                let sql = format!("SELECT DISTINCT {} FROM {}.{} WHERE {} IS NOT NULL", store::identifier(name), store::SCHEMA, store::identifier(table), store::identifier(name));
+            } else if columns
+                .iter()
+                .any(|(column, data_type)| column == name && data_type == "text")
+            {
+                let sql = format!(
+                    "SELECT DISTINCT {} FROM {}.{} WHERE {} IS NOT NULL",
+                    store::identifier(name),
+                    store::SCHEMA,
+                    store::identifier(table),
+                    store::identifier(name)
+                );
                 for result in store::run(&mut session, &sql)? {
-                    values.extend(result.rows.iter().filter_map(|row| row.first().and_then(Value::to_text)));
+                    values.extend(
+                        result
+                            .rows
+                            .iter()
+                            .filter_map(|row| row.first().and_then(Value::to_text)),
+                    );
                 }
             }
         }
@@ -371,7 +548,12 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
     }
 
-    fn matching_series(&self, matches: &[&str], start: Option<&str>, end: Option<&str>) -> Result<BTreeSet<Labels>, String> {
+    fn matching_series(
+        &self,
+        matches: &[&str],
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<BTreeSet<Labels>, String> {
         if matches.is_empty() {
             return Err("no match[] parameter provided".to_owned());
         }
@@ -385,8 +567,16 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             };
             let data = self.fetch(&expr, start, end)?;
             for series in data.get(&selector.name).into_iter().flatten() {
-                let inside = series.samples.iter().any(|(time, _)| *time >= start && *time <= end);
-                if inside && selector.matchers.iter().all(|matcher| matcher.matches(&series.labels)) {
+                let inside = series
+                    .samples
+                    .iter()
+                    .any(|(time, _)| *time >= start && *time <= end);
+                if inside
+                    && selector
+                        .matchers
+                        .iter()
+                        .all(|matcher| matcher.matches(&series.labels))
+                {
                     found.insert(series.labels.clone());
                 }
             }

@@ -327,7 +327,7 @@ impl<'s, F: File> ReadTransaction<'s, F> {
     pub fn lsm_next<'c>(
         &self,
         cursor: &'c mut LsmCursor,
-    ) -> Result<Option<(&'c [u8], &'c [u8])>, StorageError> {
+    ) -> Result<Option<crate::lsm::EntryRef<'c>>, StorageError> {
         let state = self.store.lock()?;
         let snapshot = Snapshot {
             cache: &state.cache,
@@ -517,7 +517,12 @@ impl<'s, F: File> WriteTransaction<'s, F> {
 
     /// Stores `value` under `key` in the LSM tree (see [`LsmTree::put`]). An error other than
     /// a refused key or value rolls the transaction back.
-    pub fn lsm_put(&mut self, tree: &LsmTree, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+    pub fn lsm_put(
+        &mut self,
+        tree: &LsmTree,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), StorageError> {
         self.change(|cache| tree.put(cache, key, value))
     }
 
@@ -548,7 +553,7 @@ impl<'s, F: File> WriteTransaction<'s, F> {
     pub fn lsm_next<'c>(
         &self,
         cursor: &'c mut LsmCursor,
-    ) -> Result<Option<(&'c [u8], &'c [u8])>, StorageError> {
+    ) -> Result<Option<crate::lsm::EntryRef<'c>>, StorageError> {
         self.check_open()?;
         let state = self.store.lock()?;
         cursor.next(&state.cache)
@@ -830,7 +835,9 @@ impl<F: File> Store<F> {
 }
 
 fn read_exactly(source: &mut dyn std::io::Read, into: &mut [u8]) -> Result<(), StorageError> {
-    source.read_exact(into).map_err(|error| StorageError::Io(error.into()))
+    source
+        .read_exact(into)
+        .map_err(|error| StorageError::Io(error.into()))
 }
 
 fn source_ended(source: &mut dyn std::io::Read) -> Result<(), StorageError> {

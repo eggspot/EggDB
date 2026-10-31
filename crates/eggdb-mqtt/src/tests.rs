@@ -5,7 +5,11 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 fn config() -> ServerConfig {
-    ServerConfig { user: "eggdb".to_owned(), password_sha256: eggdb_crypto::sha256(b"secret"), max_connections: 4 }
+    ServerConfig {
+        user: "eggdb".to_owned(),
+        password_sha256: eggdb_crypto::sha256(b"secret"),
+        max_connections: 4,
+    }
 }
 
 fn connect(version: u8, password: &str, will: Option<(&str, &str)>) -> Vec<u8> {
@@ -56,7 +60,9 @@ fn packets(output: &[u8]) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
-fn session(broker: &Broker<'_>, id: u64, input: Vec<u8>) -> (Arc<Mutex<Vec<u8>>>, Vec<(u8, Vec<u8>)>) {
+type Packets = Vec<(u8, Vec<u8>)>;
+
+fn session(broker: &Broker<'_>, id: u64, input: Vec<u8>) -> (Arc<Mutex<Vec<u8>>>, Packets) {
     let output = Arc::new(Mutex::new(Vec::new()));
     let shared: Arc<Mutex<dyn Write + Send>> = output.clone();
     serve_stream(broker, &config(), id, input.as_slice(), shared, &|| false).unwrap();
@@ -101,7 +107,15 @@ fn wrong_passwords_are_refused_and_wills_are_published_on_abnormal_ends() {
         let shared: Arc<Mutex<dyn Write + Send>> = watcher_output.clone();
         let mut input = connect(4, "secret", None);
         input.extend(subscribe("status/#", 0));
-        serve_stream(&broker, &config(), 3, input.as_slice(), shared.clone(), &|| false).unwrap();
+        serve_stream(
+            &broker,
+            &config(),
+            3,
+            input.as_slice(),
+            shared.clone(),
+            &|| false,
+        )
+        .unwrap();
     }
     let mut retained_will = connect(4, "secret", Some(("status/device", "offline")));
     retained_will[9] |= 0x20;
@@ -111,7 +125,11 @@ fn wrong_passwords_are_refused_and_wills_are_published_on_abnormal_ends() {
         input.extend(subscribe("status/#", 0));
         input
     });
-    assert!(answers.iter().any(|(kind, body)| *kind == 3 && body.ends_with(b"offline")));
+    assert!(
+        answers
+            .iter()
+            .any(|(kind, body)| *kind == 3 && body.ends_with(b"offline"))
+    );
 }
 
 #[test]

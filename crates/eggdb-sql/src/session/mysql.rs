@@ -271,15 +271,20 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
             MySqlStatement::ShowCreateTrigger(name) => {
                 let listed = self.read(|reader, _| crate::triggers::every_trigger(reader))?;
-                let found = listed.iter().flat_map(|table| &table.triggers).find(|trigger| {
-                    trigger
-                        .name
-                        .eq_ignore_ascii_case(crate::schemas::base_name(&name.text))
-                });
+                let found = listed
+                    .iter()
+                    .flat_map(|table| &table.triggers)
+                    .find(|trigger| {
+                        trigger
+                            .name
+                            .eq_ignore_ascii_case(crate::schemas::base_name(&name.text))
+                    });
                 let Some(trigger) = found else {
-                    return Err(SqlError::new(SqlState::MYSQL_GENERAL, "Trigger does not exist")
-                        .with_vendor_code(1360)
-                        .at(name.position));
+                    return Err(
+                        SqlError::new(SqlState::MYSQL_GENERAL, "Trigger does not exist")
+                            .with_vendor_code(1360)
+                            .at(name.position),
+                    );
                 };
                 Ok(rows_result(
                     create_trigger_columns(),

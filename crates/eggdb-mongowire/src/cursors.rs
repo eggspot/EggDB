@@ -25,13 +25,23 @@ pub(crate) struct Cursors {
 
 impl Cursors {
     pub(crate) fn new(seed: u64) -> Self {
-        Self { open: HashMap::new(), next: 1, seed }
+        Self {
+            open: HashMap::new(),
+            next: 1,
+            seed,
+        }
     }
 
     fn sweep(&mut self, now: Instant) {
-        self.open.retain(|_, cursor| now.duration_since(cursor.last_used) < IDLE_LIMIT);
+        self.open
+            .retain(|_, cursor| now.duration_since(cursor.last_used) < IDLE_LIMIT);
         while self.open.len() >= MOST_CURSORS {
-            let Some(oldest) = self.open.iter().min_by_key(|(_, cursor)| cursor.last_used).map(|(id, _)| *id) else {
+            let Some(oldest) = self
+                .open
+                .iter()
+                .min_by_key(|(_, cursor)| cursor.last_used)
+                .map(|(id, _)| *id)
+            else {
                 break;
             };
             self.open.remove(&oldest);
@@ -45,7 +55,14 @@ impl Cursors {
         mixed ^= mixed >> 29;
         self.next += 1;
         let id = (mixed & 0x7fff_ffff_ffff_ffff).max(1) as i64;
-        self.open.insert(id, Cursor { namespace, remaining, last_used: now });
+        self.open.insert(
+            id,
+            Cursor {
+                namespace,
+                remaining,
+                last_used: now,
+            },
+        );
         id
     }
 

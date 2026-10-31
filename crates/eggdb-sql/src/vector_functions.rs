@@ -14,20 +14,33 @@ fn vector_error(error: eggdb_vector::VectorError) -> SqlError {
 fn vector_of(value: &Value) -> SqlResult<Option<Vec<f32>>> {
     Ok(match value {
         Value::Null => None,
-        Value::Text(text) | Value::Bpchar(text) => Some(eggdb_vector::parse(text).map_err(vector_error)?),
+        Value::Text(text) | Value::Bpchar(text) => {
+            Some(eggdb_vector::parse(text).map_err(vector_error)?)
+        }
         Value::Array(array) => {
             let mut values = Vec::with_capacity(array.items.len());
             for element in &array.items {
                 match element.as_float() {
                     Some(number) if number.is_finite() => values.push(number as f32),
                     None if matches!(element, Value::Null) => {
-                        return Err(SqlError::new(SqlState::NULL_VALUE_NOT_ALLOWED, "array must not contain nulls"));
+                        return Err(SqlError::new(
+                            SqlState::NULL_VALUE_NOT_ALLOWED,
+                            "array must not contain nulls",
+                        ));
                     }
-                    _ => return Err(SqlError::new(SqlState::DATA_EXCEPTION, "NaN and infinite values are not allowed in vector")),
+                    _ => {
+                        return Err(SqlError::new(
+                            SqlState::DATA_EXCEPTION,
+                            "NaN and infinite values are not allowed in vector",
+                        ));
+                    }
                 }
             }
             if values.is_empty() {
-                return Err(SqlError::new(SqlState::DATA_EXCEPTION, "vector must have at least 1 dimension"));
+                return Err(SqlError::new(
+                    SqlState::DATA_EXCEPTION,
+                    "vector must have at least 1 dimension",
+                ));
             }
             Some(values)
         }
@@ -67,16 +80,25 @@ pub(crate) fn operator(operator: BinaryOperator, left: &Value, right: &Value) ->
 
 /// pgvector's functions.
 pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
-    let vectors: Vec<Option<Vec<f32>>> = arguments.iter().map(vector_of).collect::<SqlResult<_>>()?;
-    let wrong_count = || SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("function {name} takes a different number of arguments"));
+    let vectors: Vec<Option<Vec<f32>>> =
+        arguments.iter().map(vector_of).collect::<SqlResult<_>>()?;
+    let wrong_count = || {
+        SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            format!("function {name} takes a different number of arguments"),
+        )
+    };
     match (name, vectors.as_slice()) {
         (_, [_, None] | [None, _] | [None]) => Ok(Value::Null),
         ("vector_dims", [Some(vector)]) => Ok(Value::Integer(vector.len() as i32)),
         ("vector_norm", [Some(vector)]) => Ok(Value::Double(eggdb_vector::norm(vector))),
-        ("l2_normalize", [Some(vector)]) => Ok(Value::Text(eggdb_vector::format(&eggdb_vector::l2_normalize(vector)))),
-        ("l2_distance" | "cosine_distance" | "inner_product" | "l1_distance", [Some(left), Some(right)]) => {
-            Ok(Value::Double(distance(name, left, right)?))
-        }
+        ("l2_normalize", [Some(vector)]) => Ok(Value::Text(eggdb_vector::format(
+            &eggdb_vector::l2_normalize(vector),
+        ))),
+        (
+            "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance",
+            [Some(left), Some(right)],
+        ) => Ok(Value::Double(distance(name, left, right)?)),
         _ => Err(wrong_count()),
     }
 }
@@ -100,16 +122,30 @@ pub(crate) fn ai_function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 Value::Text(text) | Value::Bpchar(text) => text.clone(),
                 other => other.to_text().unwrap_or_default(),
             };
-            Ok(Value::Text(eggdb_vector::format(&eggdb_ai::embed(&text, dimensions))))
+            Ok(Value::Text(eggdb_vector::format(&eggdb_ai::embed(
+                &text, dimensions,
+            ))))
         }
         ("rrf_score", [rank]) | ("rrf_score", [rank, _]) => {
-            let rank = rank.as_integer().filter(|rank| *rank >= 1).ok_or_else(|| bad("a rank starts at 1"))?;
+            let rank = rank
+                .as_integer()
+                .filter(|rank| *rank >= 1)
+                .ok_or_else(|| bad("a rank starts at 1"))?;
             let k = match arguments.get(1) {
                 None => eggdb_ai::DEFAULT_RRF_K,
-                Some(value) => value.as_float().filter(|k| *k >= 0.0).ok_or_else(|| bad("k must not be negative"))?,
+                Some(value) => value
+                    .as_float()
+                    .filter(|k| *k >= 0.0)
+                    .ok_or_else(|| bad("k must not be negative"))?,
             };
-            Ok(Value::Double(eggdb_ai::reciprocal_rank_fusion(&[Some(rank as u64)], k)))
+            Ok(Value::Double(eggdb_ai::reciprocal_rank_fusion(
+                &[Some(rank as u64)],
+                k,
+            )))
         }
-        _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("function {name} takes one or two arguments"))),
+        _ => Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            format!("function {name} takes one or two arguments"),
+        )),
     }
 }

@@ -1,5 +1,5 @@
-use std::io::{self, Read, Write};
 use eggdb_tls::{ServerConnection, SessionInfo};
+use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);

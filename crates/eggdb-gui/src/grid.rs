@@ -20,7 +20,9 @@ pub fn column_widths(
                 .filter_map(|row| row.get(column))
                 .map(|cell| width(cell))
                 .fold(width(header), f32::max);
-            (widest + 2.0 * CELL_PADDING).clamp(MIN_COLUMN, MAX_COLUMN).ceil()
+            (widest + 2.0 * CELL_PADDING)
+                .clamp(MIN_COLUMN, MAX_COLUMN)
+                .ceil()
         })
         .collect()
 }
@@ -44,7 +46,10 @@ mod tests {
             vec!["1".into(), "Ada Lovelace".into(), "x".repeat(200)],
             vec!["2".into(), "Grace".into(), String::new()],
         ];
-        assert_eq!(column_widths(&headers, &rows, &measure), vec![48.0, 120.0, 480.0]);
+        assert_eq!(
+            column_widths(&headers, &rows, &measure),
+            vec![48.0, 120.0, 480.0]
+        );
         assert_eq!(visible_rows(10, 8, 100.0), 8..10);
         assert_eq!(visible_rows(10, 20, 100.0), 10..10);
     }

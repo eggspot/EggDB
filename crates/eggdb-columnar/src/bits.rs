@@ -2,7 +2,11 @@ use crate::{DecodeError, damaged};
 
 /// The bits needed for the largest of `values` (0 when all are 0).
 pub fn bit_width(values: &[u64]) -> u8 {
-    values.iter().fold(0u64, |all, value| all | value).checked_ilog2().map_or(0, |log| log as u8 + 1)
+    values
+        .iter()
+        .fold(0u64, |all, value| all | value)
+        .checked_ilog2()
+        .map_or(0, |log| log as u8 + 1)
 }
 
 /// Packs `values` into `width` bits each, least significant bit first, as Parquet's
@@ -14,7 +18,11 @@ pub fn pack(values: &[u64], width: u8, out: &mut Vec<u8>) {
     }
     let mut buffer: u128 = 0;
     let mut filled = 0u32;
-    let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+    let mask = if width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
     for value in values {
         buffer |= u128::from(value & mask) << filled;
         filled += width;
@@ -42,14 +50,20 @@ pub fn unpack(bytes: &[u8], width: u8, count: usize) -> Result<Vec<u64>, DecodeE
     if needed > bytes.len() as u128 {
         return Err(damaged("bit-packed values run past their bytes"));
     }
-    let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+    let mask = if width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
     let mut out = Vec::with_capacity(count);
     let mut buffer: u128 = 0;
     let mut filled = 0u32;
     let mut next = bytes.iter();
     for _ in 0..count {
         while filled < width {
-            let byte = next.next().ok_or_else(|| damaged("bit-packed values run past their bytes"))?;
+            let byte = next
+                .next()
+                .ok_or_else(|| damaged("bit-packed values run past their bytes"))?;
             buffer |= u128::from(*byte) << filled;
             filled += 8;
         }

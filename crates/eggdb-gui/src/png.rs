@@ -7,7 +7,11 @@ fn crc32(bytes: &[u8]) -> u32 {
     for &byte in bytes {
         crc ^= u32::from(byte);
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc

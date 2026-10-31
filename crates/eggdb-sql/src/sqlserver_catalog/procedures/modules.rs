@@ -2,9 +2,10 @@ use super::super::routines::{
     ParameterFacts, module_definition, parameter_facts, routine_definition, scalar_return_type,
 };
 use super::super::types::SqlServerTypeName;
+use super::super::{ObjectKind, SqlServerColumnType, SqlServerObject};
 use super::{
     Arguments, INT, NVARCHAR_128, NVARCHAR_4000, NameFilter, ODBC_2, PROCEDURE_COLUMN_COLUMNS,
-    STORED_PROCEDURE_COLUMNS, SYSNAME, SMALLINT, Scope, int, object_named, odbc_sql_type,
+    SMALLINT, STORED_PROCEDURE_COLUMNS, SYSNAME, Scope, int, object_named, odbc_sql_type,
     odbc_type, optional_int, optional_small, procedure_error, result, small, sort_rows, text,
     yes_or_no,
 };
@@ -13,7 +14,6 @@ use crate::routines::RoutineDefinition;
 use crate::session::QueryResult;
 use crate::tsql::TsqlReturns;
 use crate::types::{SqlType, Value};
-use super::super::{ObjectKind, SqlServerColumnType, SqlServerObject};
 
 const SQL_PT_PROCEDURE: i64 = 2;
 const SQL_PT_FUNCTION: i64 = 3;
@@ -322,7 +322,11 @@ pub(super) fn procedure_parameters(
             continue;
         };
         let defaults: Vec<Option<&str>> = std::iter::once(None)
-            .chain(parameter_facts(definition).into_iter().map(|facts| facts.default))
+            .chain(
+                parameter_facts(definition)
+                    .into_iter()
+                    .map(|facts| facts.default),
+            )
             .collect();
         let shown_name = match codes {
             ParameterTypeCodes::SqlDbType => object.name.clone(),

@@ -165,7 +165,10 @@ fn every_committed_pg_dump_fixture_restores_and_matches_postgresql_table_for_tab
         assert!(report.contains("\"views\":3,"), "{name}: {report}");
         assert!(report.contains("\"tables_skipped\":0,"), "{name}: {report}");
         assert!(!report.contains("public.mood"), "{name}: {report}");
-        assert!(!report.contains("public.positive_amount"), "{name}: {report}");
+        assert!(
+            !report.contains("public.positive_amount"),
+            "{name}: {report}"
+        );
         let db = Database::open(&target).unwrap();
         for (query, rows) in &expected {
             let found = copied_out(&db, query);

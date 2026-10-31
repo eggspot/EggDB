@@ -28,8 +28,10 @@ fn must_return_trigger(name: &str) -> SqlError {
 }
 
 fn transition_tables_not_supported() -> SqlError {
-    SqlError::not_supported("transition tables (REFERENCING OLD TABLE or NEW TABLE) in a PostgreSQL trigger")
-        .with_hint("Query the table itself from the trigger function, or use a row-level trigger.")
+    SqlError::not_supported(
+        "transition tables (REFERENCING OLD TABLE or NEW TABLE) in a PostgreSQL trigger",
+    )
+    .with_hint("Query the table itself from the trigger function, or use a row-level trigger.")
 }
 
 fn mismatched_row(returned: usize, expected: usize) -> SqlError {

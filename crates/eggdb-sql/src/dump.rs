@@ -23,7 +23,10 @@ pub struct DumpReport {
 }
 
 fn io_error(error: std::io::Error) -> SqlError {
-    SqlError::new(SqlState::IO_ERROR, format!("cannot write the dump: {error}"))
+    SqlError::new(
+        SqlState::IO_ERROR,
+        format!("cannot write the dump: {error}"),
+    )
 }
 
 fn name_in(dialect: Dialect, name: &str) -> String {
@@ -35,7 +38,10 @@ fn name_in(dialect: Dialect, name: &str) -> String {
 }
 
 fn base_name(table: &TableSchema) -> &str {
-    table.name.strip_prefix(&format!("{}.", table.schema)).unwrap_or(&table.name)
+    table
+        .name
+        .strip_prefix(&format!("{}.", table.schema))
+        .unwrap_or(&table.name)
 }
 
 fn table_name_in(dialect: Dialect, table: &TableSchema) -> String {
@@ -55,7 +61,9 @@ fn mysql_type(sql_type: SqlType) -> String {
         SqlType::Boolean => "BOOLEAN".to_owned(),
         SqlType::Varchar(Some(length)) if length <= 16_383 => format!("VARCHAR({length})"),
         SqlType::Bpchar(Some(length)) if length <= 255 => format!("CHAR({length})"),
-        SqlType::Numeric(Some(modifier)) if modifier.precision <= 65 && (0..=30).contains(&modifier.scale) => {
+        SqlType::Numeric(Some(modifier))
+            if modifier.precision <= 65 && (0..=30).contains(&modifier.scale) =>
+        {
             format!("DECIMAL({},{})", modifier.precision, modifier.scale)
         }
         SqlType::Numeric(_) => "DECIMAL(65,30)".to_owned(),
@@ -79,7 +87,9 @@ fn sqlserver_type(sql_type: SqlType) -> String {
         SqlType::Boolean => "bit".to_owned(),
         SqlType::Varchar(Some(length)) if length <= 4_000 => format!("nvarchar({length})"),
         SqlType::Bpchar(Some(length)) if length <= 4_000 => format!("nchar({length})"),
-        SqlType::Numeric(Some(modifier)) if modifier.precision <= 38 && (0..=38).contains(&modifier.scale) => {
+        SqlType::Numeric(Some(modifier))
+            if modifier.precision <= 38 && (0..=38).contains(&modifier.scale) =>
+        {
             format!("decimal({},{})", modifier.precision, modifier.scale)
         }
         SqlType::Numeric(_) => "decimal(38,10)".to_owned(),
@@ -95,22 +105,40 @@ fn sqlserver_type(sql_type: SqlType) -> String {
 
 fn create_table(dialect: Dialect, table: &TableSchema) -> String {
     match dialect {
-        Dialect::PostgreSql | Dialect::Sqlite | Dialect::Oracle => table.create_statement_in(dialect),
+        Dialect::PostgreSql | Dialect::Sqlite | Dialect::Oracle => {
+            table.create_statement_in(dialect)
+        }
         Dialect::MySql | Dialect::SqlServer => {
             let column = |column: &ColumnSchema| {
-                let sql_type = if dialect == Dialect::MySql { mysql_type(column.sql_type) } else { sqlserver_type(column.sql_type) };
+                let sql_type = if dialect == Dialect::MySql {
+                    mysql_type(column.sql_type)
+                } else {
+                    sqlserver_type(column.sql_type)
+                };
                 let identity = match (dialect, column.auto_increment) {
                     (Dialect::MySql, true) => " AUTO_INCREMENT",
                     _ => "",
                 };
-                format!("{} {sql_type}{}{identity}", name_in(dialect, &column.name), if column.not_null { " NOT NULL" } else { "" })
+                format!(
+                    "{} {sql_type}{}{identity}",
+                    name_in(dialect, &column.name),
+                    if column.not_null { " NOT NULL" } else { "" }
+                )
             };
             let mut parts: Vec<String> = table.columns.iter().map(column).collect();
             if !table.primary_key.is_empty() {
-                let keys: Vec<String> = table.primary_key.iter().map(|key| name_in(dialect, key)).collect();
+                let keys: Vec<String> = table
+                    .primary_key
+                    .iter()
+                    .map(|key| name_in(dialect, key))
+                    .collect();
                 parts.push(format!("PRIMARY KEY ({})", keys.join(", ")));
             }
-            format!("CREATE TABLE {} (\n  {}\n);", table_name_in(dialect, table), parts.join(",\n  "))
+            format!(
+                "CREATE TABLE {} (\n  {}\n);",
+                table_name_in(dialect, table),
+                parts.join(",\n  ")
+            )
         }
     }
 }
@@ -156,8 +184,14 @@ fn literal(dialect: Dialect, value: &Value) -> String {
             Dialect::Oracle => format!("HEXTORAW('{}')", hex(bytes)),
             _ => format!("X'{}'", hex(bytes)),
         },
-        Value::Date(_) if dialect == Dialect::Oracle => format!("DATE {}", quoted_text(dialect, &value.to_text().unwrap_or_default())),
-        Value::Timestamp(_) if dialect == Dialect::Oracle => format!("TIMESTAMP {}", quoted_text(dialect, &value.to_text().unwrap_or_default())),
+        Value::Date(_) if dialect == Dialect::Oracle => format!(
+            "DATE {}",
+            quoted_text(dialect, &value.to_text().unwrap_or_default())
+        ),
+        Value::Timestamp(_) if dialect == Dialect::Oracle => format!(
+            "TIMESTAMP {}",
+            quoted_text(dialect, &value.to_text().unwrap_or_default())
+        ),
         Value::TimestampTz(micros) if dialect != Dialect::PostgreSql => {
             let utc = Value::Timestamp(*micros).to_text().unwrap_or_default();
             match dialect {
@@ -170,14 +204,35 @@ fn literal(dialect: Dialect, value: &Value) -> String {
     }
 }
 
-fn write_rows(out: &mut dyn Write, dialect: Dialect, table: &TableSchema, rows: &[Vec<Value>]) -> SqlResult<()> {
-    let columns: Vec<String> = table.columns.iter().map(|column| name_in(dialect, &column.name)).collect();
-    let head = format!("INSERT INTO {} ({}) VALUES", table_name_in(dialect, table), columns.join(", "));
+fn write_rows(
+    out: &mut dyn Write,
+    dialect: Dialect,
+    table: &TableSchema,
+    rows: &[Vec<Value>],
+) -> SqlResult<()> {
+    let columns: Vec<String> = table
+        .columns
+        .iter()
+        .map(|column| name_in(dialect, &column.name))
+        .collect();
+    let head = format!(
+        "INSERT INTO {} ({}) VALUES",
+        table_name_in(dialect, table),
+        columns.join(", ")
+    );
     let one_row_each = dialect == Dialect::Oracle;
     for chunk in rows.chunks(if one_row_each { 1 } else { ROWS_PER_INSERT }) {
         let tuples: Vec<String> = chunk
             .iter()
-            .map(|row| format!("({})", row.iter().map(|value| literal(dialect, value)).collect::<Vec<_>>().join(", ")))
+            .map(|row| {
+                format!(
+                    "({})",
+                    row.iter()
+                        .map(|value| literal(dialect, value))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
             .collect();
         writeln!(out, "{head}\n  {};", tuples.join(",\n  ")).map_err(io_error)?;
     }
@@ -187,10 +242,23 @@ fn write_rows(out: &mut dyn Write, dialect: Dialect, table: &TableSchema, rows: 
 /// Writes every table of the database as plain SQL in `dialect`: `CREATE TABLE`, the rows as
 /// `INSERT` statements, then the secondary indexes, so that dialect's own client, or `eggdb
 /// restore`, loads it into an empty database. Views are counted, not written.
-pub fn dump_sql<S: KeyValueStore>(session: &mut Session<'_, S>, dialect: Dialect, out: &mut dyn Write) -> SqlResult<DumpReport> {
+pub fn dump_sql<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+    dialect: Dialect,
+    out: &mut dyn Write,
+) -> SqlResult<DumpReport> {
     let mut report = DumpReport::default();
     let relations = session.relations()?;
-    writeln!(out, "-- EggDB {} dump of {} tables", dialect.name(), relations.iter().filter(|relation| matches!(relation.kind, RelationKind::Table(_))).count()).map_err(io_error)?;
+    writeln!(
+        out,
+        "-- EggDB {} dump of {} tables",
+        dialect.name(),
+        relations
+            .iter()
+            .filter(|relation| matches!(relation.kind, RelationKind::Table(_)))
+            .count()
+    )
+    .map_err(io_error)?;
     if dialect == Dialect::MySql {
         writeln!(out, "SET FOREIGN_KEY_CHECKS=0;").map_err(io_error)?;
     }
@@ -199,7 +267,12 @@ pub fn dump_sql<S: KeyValueStore>(session: &mut Session<'_, S>, dialect: Dialect
             continue;
         };
         if dialect == Dialect::PostgreSql && table.schema != crate::schemas::DEFAULT_SCHEMA {
-            writeln!(out, "CREATE SCHEMA IF NOT EXISTS {};", name_in(dialect, &table.schema)).map_err(io_error)?;
+            writeln!(
+                out,
+                "CREATE SCHEMA IF NOT EXISTS {};",
+                name_in(dialect, &table.schema)
+            )
+            .map_err(io_error)?;
         }
         writeln!(out, "\n{}", create_table(dialect, table)).map_err(io_error)?;
         report.tables += 1;
@@ -223,7 +296,11 @@ pub fn dump_sql<S: KeyValueStore>(session: &mut Session<'_, S>, dialect: Dialect
         write_rows(out, dialect, table, &batch)?;
         report.rows += batch.len() as u64;
         for index in &table.indexes {
-            let columns: Vec<String> = index.columns.iter().map(|column| name_in(dialect, column)).collect();
+            let columns: Vec<String> = index
+                .columns
+                .iter()
+                .map(|column| name_in(dialect, column))
+                .collect();
             writeln!(
                 out,
                 "CREATE {}INDEX {} ON {} ({});",
@@ -236,7 +313,10 @@ pub fn dump_sql<S: KeyValueStore>(session: &mut Session<'_, S>, dialect: Dialect
             report.indexes += 1;
         }
     }
-    report.views_skipped = relations.iter().filter(|relation| matches!(relation.kind, RelationKind::View(_))).count() as u64;
+    report.views_skipped = relations
+        .iter()
+        .filter(|relation| matches!(relation.kind, RelationKind::View(_)))
+        .count() as u64;
     if dialect == Dialect::MySql {
         writeln!(out, "SET FOREIGN_KEY_CHECKS=1;").map_err(io_error)?;
     }

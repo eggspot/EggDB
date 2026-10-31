@@ -343,9 +343,11 @@ impl Parser<'_> {
                 if !self.take_word("text") {
                     return Err(self.not_supported("EXPLAIN formats other than TEXT"));
                 }
-            } else if ["verbose", "costs", "timing", "buffers", "summary", "settings", "wal"]
-                .iter()
-                .any(|word| self.is_word(word))
+            } else if [
+                "verbose", "costs", "timing", "buffers", "summary", "settings", "wal",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
             {
                 self.at += 1;
                 let _ = self.take_word("true")

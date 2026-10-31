@@ -126,7 +126,7 @@ impl Parser<'_> {
         let with = tables
             .into_iter()
             .filter_map(|table| match table {
-                WithTable::Query(table) => Some(table),
+                WithTable::Query(table) => Some(*table),
                 WithTable::Modifying { .. } => None,
             })
             .collect();
@@ -246,7 +246,7 @@ impl Parser<'_> {
         let tables = tables
             .into_iter()
             .filter_map(|table| match table {
-                WithTable::Query(table) => Some(table),
+                WithTable::Query(table) => Some(*table),
                 WithTable::Modifying { .. } => None,
             })
             .collect();
@@ -297,7 +297,7 @@ impl Parser<'_> {
                 tables.push(WithTable::Modifying {
                     name,
                     column_names,
-                    statement,
+                    statement: Box::new(statement),
                 });
             } else {
                 if !self.starts_query() && !self.starts_query_in_parentheses() {
@@ -308,12 +308,12 @@ impl Parser<'_> {
                 if self.is_word("search") || self.is_word("cycle") {
                     return Err(self.not_supported("SEARCH and CYCLE clauses"));
                 }
-                tables.push(WithTable::Query(CommonTable {
+                tables.push(WithTable::Query(Box::new(CommonTable {
                     name,
                     column_names,
                     query,
                     dialect: self.dialect,
-                }));
+                })));
             }
             if !self.take(&TokenKind::Comma) {
                 return Ok((tables, recursive));

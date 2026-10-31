@@ -3,7 +3,10 @@ use crate::{Dialect, QueryResult, Session, SqlError};
 
 fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
-    run(&mut session, "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))");
+    run(
+        &mut session,
+        "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))",
+    );
     run(
         &mut session,
         "CREATE TABLE emp (id NUMBER, name VARCHAR2(20), dept NUMBER)",
@@ -29,16 +32,19 @@ fn failure(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
 fn logged(session: &mut Session<'_, MemoryStore>) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     session
-        .execute("SELECT n, msg FROM log ORDER BY n", &mut |result: QueryResult| {
-            for row in result.rows {
-                let text = |at: usize| {
-                    row.get(at)
-                        .and_then(|value| value.to_text())
-                        .unwrap_or_else(|| "NULL".to_owned())
-                };
-                rows.push((text(0), text(1)));
-            }
-        })
+        .execute(
+            "SELECT n, msg FROM log ORDER BY n",
+            &mut |result: QueryResult| {
+                for row in result.rows {
+                    let text = |at: usize| {
+                        row.get(at)
+                            .and_then(|value| value.to_text())
+                            .unwrap_or_else(|| "NULL".to_owned())
+                    };
+                    rows.push((text(0), text(1)));
+                }
+            },
+        )
         .unwrap();
     rows
 }
@@ -57,7 +63,12 @@ fn an_integer_indexed_table_is_walked_with_first_and_next_in_key_order() {
     );
     assert_eq!(
         logged(&mut session),
-        [pair("1", "a"), pair("2", "b"), pair("3", "c"), pair("30", "count")]
+        [
+            pair("1", "a"),
+            pair("2", "b"),
+            pair("3", "c"),
+            pair("30", "count")
+        ]
     );
 }
 
@@ -189,11 +200,18 @@ fn save_exceptions_reports_every_failed_index() {
         &mut session,
         "DECLARE\n  TYPE t_ids IS TABLE OF NUMBER;\n  ids t_ids := t_ids(1, 2, 1, 3, 2);\n  dml_errors EXCEPTION;\n  PRAGMA EXCEPTION_INIT(dml_errors, -24381);\nBEGIN\n  FORALL i IN 1..ids.COUNT SAVE EXCEPTIONS\n    INSERT INTO k VALUES (ids(i));\nEXCEPTION\n  WHEN dml_errors THEN\n    FOR j IN 1..SQL%BULK_EXCEPTIONS.COUNT LOOP\n      INSERT INTO log VALUES (SQL%BULK_EXCEPTIONS(j).ERROR_INDEX, 'ORA-' || SQL%BULK_EXCEPTIONS(j).ERROR_CODE);\n    END LOOP;\nEND;",
     );
-    assert_eq!(logged(&mut session), [pair("3", "ORA-1"), pair("5", "ORA-1")]);
+    assert_eq!(
+        logged(&mut session),
+        [pair("3", "ORA-1"), pair("5", "ORA-1")]
+    );
     let mut kept = 0;
     session
         .execute("SELECT COUNT(*) FROM k", &mut |result: QueryResult| {
-            kept = result.rows[0][0].to_text().unwrap_or_default().parse().unwrap_or(0);
+            kept = result.rows[0][0]
+                .to_text()
+                .unwrap_or_default()
+                .parse()
+                .unwrap_or(0);
         })
         .unwrap();
     assert_eq!(kept, 3);

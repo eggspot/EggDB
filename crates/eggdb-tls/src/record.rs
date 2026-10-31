@@ -51,7 +51,9 @@ impl std::fmt::Display for RecordError {
             Self::BadRecordMac => "a TLS record failed its integrity check",
             Self::UnexpectedMessage => "a TLS record has an unknown content type",
             Self::MalformedHeader => "the peer did not send a TLS record header",
-            Self::SequenceExhausted => "the TLS connection protected too many records under one key",
+            Self::SequenceExhausted => {
+                "the TLS connection protected too many records under one key"
+            }
         })
     }
 }
@@ -93,7 +95,11 @@ impl RecordHeader {
         if length > max_body_bytes {
             return Err(RecordError::Overflow);
         }
-        Ok(Self { content_type, legacy_version, length })
+        Ok(Self {
+            content_type,
+            legacy_version,
+            length,
+        })
     }
 
     /// The five header bytes.
@@ -106,7 +112,11 @@ impl RecordHeader {
 
 /// An unprotected record of `content_type` carrying `fragment`, which must fit in one record.
 pub fn plaintext_record(content_type: u8, legacy_version: u16, fragment: &[u8]) -> Vec<u8> {
-    let header = RecordHeader { content_type, legacy_version, length: fragment.len() };
+    let header = RecordHeader {
+        content_type,
+        legacy_version,
+        length: fragment.len(),
+    };
     let mut record = header.encode().to_vec();
     record.extend_from_slice(fragment);
     record
@@ -114,14 +124,20 @@ pub fn plaintext_record(content_type: u8, legacy_version: u16, fragment: &[u8]) 
 
 fn sequence_nonce(iv: &[u8; AEAD_NONCE_BYTES], sequence: u64) -> [u8; AEAD_NONCE_BYTES] {
     let mut nonce = *iv;
-    for (byte, sequence_byte) in nonce[AEAD_NONCE_BYTES - 8..].iter_mut().zip(sequence.to_be_bytes()) {
+    for (byte, sequence_byte) in nonce[AEAD_NONCE_BYTES - 8..]
+        .iter_mut()
+        .zip(sequence.to_be_bytes())
+    {
         *byte ^= sequence_byte;
     }
     nonce
 }
 
 fn split_tag(payload: &mut Vec<u8>) -> Result<[u8; AEAD_TAG_BYTES], RecordError> {
-    let body_length = payload.len().checked_sub(AEAD_TAG_BYTES).ok_or(RecordError::BadRecordMac)?;
+    let body_length = payload
+        .len()
+        .checked_sub(AEAD_TAG_BYTES)
+        .ok_or(RecordError::BadRecordMac)?;
     let mut tag = [0u8; AEAD_TAG_BYTES];
     tag.copy_from_slice(&payload[body_length..]);
     payload.truncate(body_length);
@@ -139,12 +155,19 @@ pub struct Tls13RecordProtection {
 impl Tls13RecordProtection {
     /// Protection with `keys` for `aead`, or `None` when the key length is wrong.
     pub fn new(aead: AeadKind, keys: &TrafficKeys) -> Option<Self> {
-        Some(Self { aead: RecordAead::new(aead, &keys.key)?, iv: keys.iv, sequence: 0 })
+        Some(Self {
+            aead: RecordAead::new(aead, &keys.key)?,
+            iv: keys.iv,
+            sequence: 0,
+        })
     }
 
     fn next_nonce(&mut self) -> Result<[u8; AEAD_NONCE_BYTES], RecordError> {
         let nonce = sequence_nonce(&self.iv, self.sequence);
-        self.sequence = self.sequence.checked_add(1).ok_or(RecordError::SequenceExhausted)?;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(RecordError::SequenceExhausted)?;
         Ok(nonce)
     }
 
@@ -165,7 +188,9 @@ impl Tls13RecordProtection {
         record.extend_from_slice(&header);
         record.extend_from_slice(fragment);
         record.push(content_type);
-        let tag = self.aead.seal_in_place(&nonce, &header, &mut record[RECORD_HEADER_BYTES..]);
+        let tag = self
+            .aead
+            .seal_in_place(&nonce, &header, &mut record[RECORD_HEADER_BYTES..]);
         record.extend_from_slice(&tag);
         Ok(record)
     }
@@ -188,7 +213,10 @@ impl Tls13RecordProtection {
         self.aead
             .open_in_place(&nonce, &header.encode(), payload, &tag)
             .map_err(|_| RecordError::BadRecordMac)?;
-        let content_end = payload.iter().rposition(|&byte| byte != 0).ok_or(RecordError::UnexpectedMessage)?;
+        let content_end = payload
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .ok_or(RecordError::UnexpectedMessage)?;
         let inner_type = payload[content_end];
         payload.truncate(content_end);
         if payload.len() > MAX_PLAINTEXT_BYTES {
@@ -224,10 +252,17 @@ impl Tls12RecordProtection {
             AeadKind::Aes128Gcm | AeadKind::Aes256Gcm if iv.len() == TLS12_GCM_FIXED_IV_BYTES => {
                 full_iv[..TLS12_GCM_FIXED_IV_BYTES].copy_from_slice(iv);
             }
-            AeadKind::ChaCha20Poly1305 if iv.len() == AEAD_NONCE_BYTES => full_iv.copy_from_slice(iv),
+            AeadKind::ChaCha20Poly1305 if iv.len() == AEAD_NONCE_BYTES => {
+                full_iv.copy_from_slice(iv)
+            }
             _ => return None,
         }
-        Some(Self { aead, kind, iv: full_iv, sequence: 0 })
+        Some(Self {
+            aead,
+            kind,
+            iv: full_iv,
+            sequence: 0,
+        })
     }
 
     /// The fixed IV length a suite with `kind` takes from the key block.
@@ -262,7 +297,10 @@ impl Tls12RecordProtection {
     }
 
     fn advance(&mut self) -> Result<(), RecordError> {
-        self.sequence = self.sequence.checked_add(1).ok_or(RecordError::SequenceExhausted)?;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(RecordError::SequenceExhausted)?;
         Ok(())
     }
 
@@ -274,7 +312,11 @@ impl Tls12RecordProtection {
         let explicit = self.sequence.to_be_bytes();
         let nonce = self.nonce_for(&explicit);
         let additional_data = self.additional_data(content_type, fragment.len());
-        let explicit_bytes = if self.uses_explicit_nonce() { TLS12_EXPLICIT_NONCE_BYTES } else { 0 };
+        let explicit_bytes = if self.uses_explicit_nonce() {
+            TLS12_EXPLICIT_NONCE_BYTES
+        } else {
+            0
+        };
         let header = RecordHeader {
             content_type,
             legacy_version: version::TLS12,
@@ -290,7 +332,9 @@ impl Tls12RecordProtection {
         }
         let body_start = record.len();
         record.extend_from_slice(fragment);
-        let tag = self.aead.seal_in_place(&nonce, &additional_data, &mut record[body_start..]);
+        let tag = self
+            .aead
+            .seal_in_place(&nonce, &additional_data, &mut record[body_start..]);
         record.extend_from_slice(&tag);
         self.advance()?;
         Ok(record)
@@ -298,7 +342,11 @@ impl Tls12RecordProtection {
 
     /// Opens the protected body `payload` of a record with `header` in place, leaving the
     /// plaintext in `payload`.
-    pub fn open(&mut self, header: &RecordHeader, payload: &mut Vec<u8>) -> Result<(), RecordError> {
+    pub fn open(
+        &mut self,
+        header: &RecordHeader,
+        payload: &mut Vec<u8>,
+    ) -> Result<(), RecordError> {
         if payload.len() > MAX_TLS12_CIPHERTEXT_BYTES {
             return Err(RecordError::Overflow);
         }
@@ -328,7 +376,10 @@ mod tests {
     use super::*;
 
     fn keys() -> TrafficKeys {
-        TrafficKeys { key: vec![9u8; 16], iv: [3u8; AEAD_NONCE_BYTES] }
+        TrafficKeys {
+            key: vec![9u8; 16],
+            iv: [3u8; AEAD_NONCE_BYTES],
+        }
     }
 
     fn header_of(record: &[u8]) -> RecordHeader {
@@ -346,7 +397,10 @@ mod tests {
             assert_eq!(record[0], content_type::APPLICATION_DATA);
             let header = header_of(&record);
             let mut payload = record[RECORD_HEADER_BYTES..].to_vec();
-            assert_eq!(reader.open(&header, &mut payload), Ok(content_type::HANDSHAKE));
+            assert_eq!(
+                reader.open(&header, &mut payload),
+                Ok(content_type::HANDSHAKE)
+            );
             assert_eq!(payload, message);
         }
     }
@@ -354,28 +408,49 @@ mod tests {
     #[test]
     fn a_changed_byte_or_a_replayed_record_fails_authentication() {
         let mut writer = Tls13RecordProtection::new(AeadKind::Aes128Gcm, &keys()).unwrap();
-        let record = writer.seal(content_type::APPLICATION_DATA, b"data").unwrap();
+        let record = writer
+            .seal(content_type::APPLICATION_DATA, b"data")
+            .unwrap();
         let header = header_of(&record);
         let mut reader = Tls13RecordProtection::new(AeadKind::Aes128Gcm, &keys()).unwrap();
         let mut tampered = record[RECORD_HEADER_BYTES..].to_vec();
         tampered[0] ^= 1;
-        assert_eq!(reader.open(&header, &mut tampered), Err(RecordError::BadRecordMac));
+        assert_eq!(
+            reader.open(&header, &mut tampered),
+            Err(RecordError::BadRecordMac)
+        );
         let mut replayed = record[RECORD_HEADER_BYTES..].to_vec();
-        assert_eq!(reader.open(&header, &mut replayed), Err(RecordError::BadRecordMac));
+        assert_eq!(
+            reader.open(&header, &mut replayed),
+            Err(RecordError::BadRecordMac)
+        );
     }
 
     #[test]
     fn short_and_oversized_records_are_refused() {
         let mut reader = Tls13RecordProtection::new(AeadKind::Aes128Gcm, &keys()).unwrap();
-        let header = RecordHeader { content_type: 23, legacy_version: 0x0303, length: 3 };
-        assert_eq!(reader.open(&header, &mut vec![1, 2, 3]), Err(RecordError::BadRecordMac));
+        let header = RecordHeader {
+            content_type: 23,
+            legacy_version: 0x0303,
+            length: 3,
+        };
+        assert_eq!(
+            reader.open(&header, &mut vec![1, 2, 3]),
+            Err(RecordError::BadRecordMac)
+        );
         let mut oversized = vec![0u8; MAX_TLS13_CIPHERTEXT_BYTES + 1];
-        assert_eq!(reader.open(&header, &mut oversized), Err(RecordError::Overflow));
+        assert_eq!(
+            reader.open(&header, &mut oversized),
+            Err(RecordError::Overflow)
+        );
         assert_eq!(
             RecordHeader::parse(&[23, 3, 3, 0x48, 0x01], MAX_TLS13_CIPHERTEXT_BYTES),
             Err(RecordError::Overflow)
         );
-        assert_eq!(RecordHeader::parse(&[0x47, 0x45, 0x54, 0x20, 0x2f], 100), Err(RecordError::MalformedHeader));
+        assert_eq!(
+            RecordHeader::parse(&[0x47, 0x45, 0x54, 0x20, 0x2f], 100),
+            Err(RecordError::MalformedHeader)
+        );
     }
 
     #[test]
@@ -388,7 +463,9 @@ mod tests {
             let mut writer = Tls12RecordProtection::new(kind, &key, &iv).unwrap();
             let mut reader = Tls12RecordProtection::new(kind, &key, &iv).unwrap();
             for message in [&b"one"[..], b"two"] {
-                let record = writer.seal(content_type::APPLICATION_DATA, message).unwrap();
+                let record = writer
+                    .seal(content_type::APPLICATION_DATA, message)
+                    .unwrap();
                 let header = header_of(&record);
                 let mut payload = record[RECORD_HEADER_BYTES..].to_vec();
                 assert_eq!(reader.open(&header, &mut payload), Ok(()));

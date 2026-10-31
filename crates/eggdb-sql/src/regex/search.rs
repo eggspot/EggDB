@@ -290,7 +290,10 @@ fn is_word(character: Option<char>) -> bool {
 }
 
 fn holds(assertion: Assertion, text: &[char], at: usize) -> bool {
-    let before = at.checked_sub(1).and_then(|previous| text.get(previous)).copied();
+    let before = at
+        .checked_sub(1)
+        .and_then(|previous| text.get(previous))
+        .copied();
     let after = text.get(at).copied();
     match assertion {
         Assertion::TextStart => at == 0,

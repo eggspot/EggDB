@@ -104,7 +104,11 @@ impl Canvas {
                 let inside_corner = (radius - distance + 0.5).clamp(0.0, 1.0);
                 let edge = Self::coverage_span(rect.x, rect.x + rect.w, x)
                     * Self::coverage_span(rect.y, rect.y + rect.h, y);
-                let coverage = if radius > 0.0 { inside_corner.min(edge) } else { edge };
+                let coverage = if radius > 0.0 {
+                    inside_corner.min(edge)
+                } else {
+                    edge
+                };
                 self.blend(x, y, color, coverage);
             }
         }
@@ -115,7 +119,10 @@ impl Canvas {
         self.fill_rect(Rect::new(rect.x, rect.y, rect.w, 1.0), color);
         self.fill_rect(Rect::new(rect.x, rect.y + rect.h - 1.0, rect.w, 1.0), color);
         self.fill_rect(Rect::new(rect.x, rect.y + 1.0, 1.0, rect.h - 2.0), color);
-        self.fill_rect(Rect::new(rect.x + rect.w - 1.0, rect.y + 1.0, 1.0, rect.h - 2.0), color);
+        self.fill_rect(
+            Rect::new(rect.x + rect.w - 1.0, rect.y + 1.0, 1.0, rect.h - 2.0),
+            color,
+        );
     }
 
     /// Fills the circle of `diameter` centred at (`cx`, `cy`).

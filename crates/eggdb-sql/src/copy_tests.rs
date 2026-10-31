@@ -673,7 +673,10 @@ fn options_are_checked_as_postgresql_checks_them() {
         ("COPY t FROM STDIN (FORMAT binary, DELIMITER ',')", "42601"),
         ("COPY t FROM STDIN (FORMAT binary, NULL 'x')", "42601"),
         ("COPY t TO STDOUT (FORMAT binary, HEADER)", "42601"),
-        ("COPY t FROM STDIN (FORMAT binary, ON_ERROR ignore)", "0A000"),
+        (
+            "COPY t FROM STDIN (FORMAT binary, ON_ERROR ignore)",
+            "0A000",
+        ),
         ("COPY t FROM STDIN (FORMAT xml)", "22023"),
         ("COPY t FROM STDIN (DELIMITER '::')", "0A000"),
         ("COPY t FROM STDIN (DELIMITER E'\\n')", "22023"),
@@ -1253,7 +1256,11 @@ fn copy_to_stdout_in_the_binary_format_writes_postgresqls_file_layout() {
     );
     let mut client = Client::default();
     session
-        .execute_with_copy("COPY pair (b) TO STDOUT (FORMAT binary)", &mut |_| true, &mut client)
+        .execute_with_copy(
+            "COPY pair (b) TO STDOUT (FORMAT binary)",
+            &mut |_| true,
+            &mut client,
+        )
         .unwrap();
     assert_eq!(
         client.started_out,
@@ -1285,11 +1292,18 @@ fn binary_copy_round_trips_every_type_through_any_pieces() {
     let before = rows(&mut session, "SELECT * FROM typed ORDER BY id");
     for chunk in [1, 3, 64, 1 << 20] {
         rows(&mut session, "DELETE FROM typed");
-        let loaded =
-            copy_in_bytes(&mut session, "COPY typed FROM STDIN (FORMAT binary)", &file, chunk)
-                .unwrap();
+        let loaded = copy_in_bytes(
+            &mut session,
+            "COPY typed FROM STDIN (FORMAT binary)",
+            &file,
+            chunk,
+        )
+        .unwrap();
         assert_eq!(loaded.tag, "COPY 3", "{chunk}");
-        assert_eq!(rows(&mut session, "SELECT * FROM typed ORDER BY id"), before);
+        assert_eq!(
+            rows(&mut session, "SELECT * FROM typed ORDER BY id"),
+            before
+        );
     }
     rows(
         &mut session,
@@ -1300,12 +1314,20 @@ fn binary_copy_round_trips_every_type_through_any_pieces() {
     let before = rows(&mut session, "SELECT * FROM listed ORDER BY id");
     rows(&mut session, "DELETE FROM listed");
     assert_eq!(
-        copy_in_bytes(&mut session, "COPY listed FROM STDIN (FORMAT binary)", &file, 5)
-            .unwrap()
-            .tag,
+        copy_in_bytes(
+            &mut session,
+            "COPY listed FROM STDIN (FORMAT binary)",
+            &file,
+            5
+        )
+        .unwrap()
+        .tag,
         "COPY 2"
     );
-    assert_eq!(rows(&mut session, "SELECT * FROM listed ORDER BY id"), before);
+    assert_eq!(
+        rows(&mut session, "SELECT * FROM listed ORDER BY id"),
+        before
+    );
 }
 
 #[test]
@@ -1375,23 +1397,35 @@ fn binary_data_that_breaks_the_format_fails_with_postgresqls_messages() {
         ),
     ];
     for (data, code, message, context) in cases {
-        let error =
-            copy_in_bytes(&mut session, "COPY pair FROM STDIN (FORMAT binary)", &data, 3)
-                .unwrap_err();
+        let error = copy_in_bytes(
+            &mut session,
+            "COPY pair FROM STDIN (FORMAT binary)",
+            &data,
+            3,
+        )
+        .unwrap_err();
         assert_eq!(error.state().code(), code, "{message}: {error}");
         assert_eq!(error.message(), message);
         assert_eq!(error.context(), Some(context), "{message}");
     }
-    assert_eq!(rows(&mut session, "SELECT count(*) FROM pair"), "count\n0\nSELECT 1");
+    assert_eq!(
+        rows(&mut session, "SELECT count(*) FROM pair"),
+        "count\n0\nSELECT 1"
+    );
     let mut extended = b"PGCOPY\n\xff\r\n\0".to_vec();
     extended.extend_from_slice(&0u32.to_be_bytes());
     extended.extend_from_slice(&3u32.to_be_bytes());
     extended.extend_from_slice(b"ext");
     extended.extend_from_slice(&good[19..]);
     assert_eq!(
-        copy_in_bytes(&mut session, "COPY pair FROM STDIN (FORMAT binary)", &extended, 2)
-            .unwrap()
-            .tag,
+        copy_in_bytes(
+            &mut session,
+            "COPY pair FROM STDIN (FORMAT binary)",
+            &extended,
+            2
+        )
+        .unwrap()
+        .tag,
         "COPY 1"
     );
     let failed = script(
@@ -1405,9 +1439,12 @@ fn binary_data_that_breaks_the_format_fails_with_postgresqls_messages() {
         "CREATE TABLE spans (id integer PRIMARY KEY, span int4range)",
     );
     assert_eq!(
-        failure(copy_out(&mut session, "COPY spans TO STDOUT (FORMAT binary)"))
-            .state()
-            .code(),
+        failure(copy_out(
+            &mut session,
+            "COPY spans TO STDOUT (FORMAT binary)"
+        ))
+        .state()
+        .code(),
         "0A000"
     );
 }
@@ -1424,7 +1461,11 @@ fn random_binary_data_never_panics_and_loads_nothing_when_it_fails() {
     let header = binary_file(&[]);
     for round in 0..3_000 {
         let length = rng.below(80);
-        let mut data: Vec<u8> = if round % 2 == 0 { header.clone() } else { Vec::new() };
+        let mut data: Vec<u8> = if round % 2 == 0 {
+            header.clone()
+        } else {
+            Vec::new()
+        };
         data.extend((0..length).map(|_| match rng.below(4) {
             0 => 0,
             1 => 0xff,
@@ -1512,7 +1553,10 @@ fn on_error_ignore_skips_rows_whose_values_do_not_convert_and_says_so() {
         .unwrap_err();
         assert_eq!(error.state().code(), code);
     }
-    assert_eq!(rows(&mut session, "SELECT count(*) FROM kept"), "count\n0\nSELECT 1");
+    assert_eq!(
+        rows(&mut session, "SELECT count(*) FROM kept"),
+        "count\n0\nSELECT 1"
+    );
 }
 
 #[test]
@@ -1544,7 +1588,10 @@ fn copy_from_where_loads_only_the_rows_its_condition_keeps() {
         "COPY 2"
     );
     assert_eq!(
-        rows(&mut session, "SELECT id FROM picked WHERE id > 4 ORDER BY id"),
+        rows(
+            &mut session,
+            "SELECT id FROM picked WHERE id > 4 ORDER BY id"
+        ),
         "id\n5\n7\nSELECT 2"
     );
     let shown = script(
@@ -1559,7 +1606,10 @@ fn copy_from_where_loads_only_the_rows_its_condition_keeps() {
 fn encodings_other_than_utf8_are_converted_in_and_out() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    rows(&mut session, "CREATE TABLE words (id integer PRIMARY KEY, w text)");
+    rows(
+        &mut session,
+        "CREATE TABLE words (id integer PRIMARY KEY, w text)",
+    );
     assert_eq!(
         copy_in_bytes(
             &mut session,
@@ -1588,9 +1638,14 @@ fn encodings_other_than_utf8_are_converted_in_and_out() {
         .flat_map(u16::to_le_bytes)
         .collect();
     assert_eq!(
-        copy_in_bytes(&mut session, "COPY words FROM STDIN (ENCODING 'UTF16')", &utf16, 3)
-            .unwrap()
-            .tag,
+        copy_in_bytes(
+            &mut session,
+            "COPY words FROM STDIN (ENCODING 'UTF16')",
+            &utf16,
+            3
+        )
+        .unwrap()
+        .tag,
         "COPY 1"
     );
     assert_eq!(
@@ -1605,17 +1660,19 @@ fn encodings_other_than_utf8_are_converted_in_and_out() {
         .unwrap(),
         b"caf\xe9\n\x93quoted\x94 \x80\n"
     );
-    let untranslatable = copy_out_bytes(&mut session, "COPY words TO STDOUT (ENCODING 'LATIN1')")
-        .unwrap_err();
+    let untranslatable =
+        copy_out_bytes(&mut session, "COPY words TO STDOUT (ENCODING 'LATIN1')").unwrap_err();
     assert_eq!(untranslatable.state().code(), "22P05");
     assert_eq!(
-        failure(copy_in_bytes(
-            &mut session,
-            "COPY words FROM STDIN (ENCODING 'WIN1252')",
-            b"9\t\x81\n",
-            1,
+        failure(
+            copy_in_bytes(
+                &mut session,
+                "COPY words FROM STDIN (ENCODING 'WIN1252')",
+                b"9\t\x81\n",
+                1,
+            )
+            .map(|result| result.tag)
         )
-        .map(|result| result.tag))
         .state()
         .code(),
         "22P05"

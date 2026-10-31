@@ -83,7 +83,9 @@ fn every_command_has_the_fields_its_slice_requires() {
         for option in command.options {
             assert!(!option.long.is_empty() && !option.help.is_empty(), "{name}");
             assert!(
-                !COMMON_OPTIONS.iter().any(|common| common.long == option.long),
+                !COMMON_OPTIONS
+                    .iter()
+                    .any(|common| common.long == option.long),
                 "{name}: --{} is a common option",
                 option.long
             );
@@ -131,7 +133,11 @@ fn every_error_code_has_one_category_and_every_command_s_codes_are_known() {
     let mut codes: Vec<&str> = ERROR_CODES.iter().map(|known| known.code).collect();
     codes.sort_unstable();
     codes.dedup();
-    assert_eq!(codes.len(), ERROR_CODES.len(), "an error code is listed twice");
+    assert_eq!(
+        codes.len(),
+        ERROR_CODES.len(),
+        "an error code is listed twice"
+    );
     for known in ERROR_CODES {
         assert!(is_snake_case(known.code), "{}", known.code);
         assert!(!known.when.is_empty(), "{}", known.code);
@@ -152,7 +158,12 @@ fn every_error_code_has_one_category_and_every_command_s_codes_are_known() {
                 error.code,
                 error.exit
             );
-            assert!(!seen.contains(&error.code), "{}: {}", command.name(), error.code);
+            assert!(
+                !seen.contains(&error.code),
+                "{}: {}",
+                command.name(),
+                error.code
+            );
             seen.push(error.code);
         }
         assert_eq!(command.exit_for("invalid_arguments"), Some(2));
@@ -177,7 +188,10 @@ fn every_error_code_has_one_category_and_every_command_s_codes_are_known() {
 
 #[test]
 fn categories_and_verbs_are_distinct_snake_case_names() {
-    let mut categories: Vec<&str> = Category::ALL.iter().map(|category| category.name()).collect();
+    let mut categories: Vec<&str> = Category::ALL
+        .iter()
+        .map(|category| category.name())
+        .collect();
     assert!(categories.iter().all(|name| is_snake_case(name)));
     categories.sort_unstable();
     categories.dedup();
@@ -186,7 +200,9 @@ fn categories_and_verbs_are_distinct_snake_case_names() {
     verbs.sort_unstable();
     verbs.dedup();
     assert_eq!(verbs.len(), CORE_VERBS.len());
-    for name in ["list", "show", "get", "sample", "explain", "export", "delete", "run"] {
+    for name in [
+        "list", "show", "get", "sample", "explain", "export", "delete", "run",
+    ] {
         assert!(is_core_verb(name), "{name}");
     }
 }
@@ -207,7 +223,10 @@ fn new_tool_names_join_their_command_s_words_and_shipped_names_come_from_the_lis
         );
     }
     for shipped in SHIPPED_TOOL_NAMES {
-        assert!(tool(shipped).is_some(), "the shipped tool {shipped} is gone");
+        assert!(
+            tool(shipped).is_some(),
+            "the shipped tool {shipped} is gone"
+        );
     }
 }
 
@@ -215,7 +234,12 @@ fn new_tool_names_join_their_command_s_words_and_shipped_names_come_from_the_lis
 fn every_tool_s_annotations_follow_from_its_fields() {
     for tool in TOOLS {
         let annotations = tool.annotations();
-        assert_eq!(annotations.read_only, tool.max_effect == Effect::Read, "{}", tool.name);
+        assert_eq!(
+            annotations.read_only,
+            tool.max_effect == Effect::Read,
+            "{}",
+            tool.name
+        );
         assert_eq!(
             annotations.destructive,
             matches!(tool.max_effect, Effect::Destroy | Effect::Control),
@@ -232,7 +256,12 @@ fn every_tool_s_annotations_follow_from_its_fields() {
             );
         }
         if tool.max_effect != Effect::Read {
-            assert_ne!(tool.grant, Grant::Nothing, "{} writes without a grant", tool.name);
+            assert_ne!(
+                tool.grant,
+                Grant::Nothing,
+                "{} writes without a grant",
+                tool.name
+            );
         }
         let every = Grants {
             allow_write: true,
@@ -313,7 +342,10 @@ fn the_shipped_tools_keep_their_annotations() {
 fn every_tool_maps_onto_its_cli_twin() {
     for tool in TOOLS {
         let Some(words) = tool.command else {
-            panic!("{} has no CLI twin: from slice 2 every tool has one", tool.name);
+            panic!(
+                "{} has no CLI twin: from slice 2 every tool has one",
+                tool.name
+            );
         };
         let Some(twin) = command(words) else {
             panic!("{}'s command is not in the registry", tool.name);
@@ -343,9 +375,14 @@ fn every_tool_maps_onto_its_cli_twin() {
                     argument.name
                 ),
                 ArgumentTarget::NoTwin => {
-                    panic!("{}: {} has a twin but maps nowhere", tool.name, argument.name)
+                    panic!(
+                        "{}: {} has a twin but maps nowhere",
+                        tool.name, argument.name
+                    )
                 }
-                ArgumentTarget::Stdin | ArgumentTarget::CallLimit | ArgumentTarget::Confirmation => {}
+                ArgumentTarget::Stdin
+                | ArgumentTarget::CallLimit
+                | ArgumentTarget::Confirmation => {}
             }
         }
         for field in tool.envelope {
@@ -360,9 +397,15 @@ fn every_tool_maps_onto_its_cli_twin() {
 
 #[test]
 fn lookups_find_commands_by_words_and_tools_by_name() {
-    assert_eq!(command(&["get"]).map(|found| found.usage), Some("eggdb get <file> <key> [-C <name>]"));
+    assert_eq!(
+        command(&["get"]).map(|found| found.usage),
+        Some("eggdb get <file> <key> [-C <name>]")
+    );
     assert!(command(&["frob"]).is_none());
-    assert_eq!(command(&["delete"]).map(CommandDefinition::name), Some("del".to_owned()));
+    assert_eq!(
+        command(&["delete"]).map(CommandDefinition::name),
+        Some("del".to_owned())
+    );
     assert_eq!(
         command(&["collection", "del"]).map(CommandDefinition::name),
         Some("collection delete".to_owned())
@@ -378,7 +421,8 @@ fn lookups_find_commands_by_words_and_tools_by_name() {
     );
     assert_eq!(tool("kv_scan").map(|found| found.title), Some("Scan keys"));
     assert!(tool("drop_table").is_none());
-    let run_sql = tool("run_sql").map(|found| (found.description_for(false), found.description_for(true)));
+    let run_sql =
+        tool("run_sql").map(|found| (found.description_for(false), found.description_for(true)));
     let Some((read_only, writing)) = run_sql else {
         panic!("run_sql");
     };
@@ -393,7 +437,10 @@ fn is_list_command(definition: &CommandDefinition) -> bool {
 #[test]
 fn new_list_commands_take_limit_and_after_and_new_list_tools_answer_in_pages() {
     let mut paged = 0;
-    for definition in COMMANDS.iter().filter(|definition| is_list_command(definition)) {
+    for definition in COMMANDS
+        .iter()
+        .filter(|definition| is_list_command(definition))
+    {
         let name = definition.name();
         if SHIPPED_LIST_COMMANDS.contains(&name.as_str()) {
             continue;
@@ -456,12 +503,23 @@ fn new_list_commands_take_limit_and_after_and_new_list_tools_answer_in_pages() {
 fn dry_run_is_offered_only_where_it_is_exact() {
     let offering: Vec<String> = COMMANDS
         .iter()
-        .filter(|definition| definition.options.iter().any(|option| option.long == "dry-run"))
+        .filter(|definition| {
+            definition
+                .options
+                .iter()
+                .any(|option| option.long == "dry-run")
+        })
         .map(CommandDefinition::name)
         .collect();
-    assert_eq!(offering, EXACT_DRY_RUNS, "never sql: a rolled-back statement still moves sequences");
+    assert_eq!(
+        offering, EXACT_DRY_RUNS,
+        "never sql: a rolled-back statement still moves sequences"
+    );
     for name in EXACT_DRY_RUNS {
-        assert_eq!(command(&[*name]).map(|found| found.max_effect), Some(Effect::Change));
+        assert_eq!(
+            command(&[*name]).map(|found| found.max_effect),
+            Some(Effect::Change)
+        );
     }
 }
 

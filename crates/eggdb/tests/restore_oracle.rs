@@ -236,7 +236,11 @@ fn the_hr_installer_restores_unchanged_from_another_directory() {
     ] {
         assert!(report.contains(part), "{part:?} in\n{report}");
     }
-    for absent in ["PL/SQL settings", "\"kind\":\"procedure\"", "\"kind\":\"trigger\""] {
+    for absent in [
+        "PL/SQL settings",
+        "\"kind\":\"procedure\"",
+        "\"kind\":\"trigger\"",
+    ] {
         assert!(!report.contains(absent), "{absent:?} in\n{report}");
     }
     assert_eq!(
@@ -921,7 +925,9 @@ fn identities_column_disabled_constraints_and_a_named_using_index_restore() {
         Some(2291)
     );
     assert_eq!(
-        shop("INSERT INTO tickets (code, order_id) VALUES ('C3', 2); SELECT MAX(ticket_id) FROM tickets"),
+        shop(
+            "INSERT INTO tickets (code, order_id) VALUES ('C3', 2); SELECT MAX(ticket_id) FROM tickets"
+        ),
         "41\n"
     );
     db.close().unwrap();

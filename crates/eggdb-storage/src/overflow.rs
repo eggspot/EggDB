@@ -165,7 +165,10 @@ fn stored_length(stored: &[u8], first_page: u64) -> Result<usize, StorageError> 
         .ok_or_else(|| corrupt(first_page, "a compressed value is shorter than its length"))?;
     let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
     if length > MAX_VALUE_BYTES {
-        return Err(corrupt(first_page, "a compressed value is longer than the largest value"));
+        return Err(corrupt(
+            first_page,
+            "a compressed value is longer than the largest value",
+        ));
     }
     Ok(length)
 }
@@ -183,7 +186,10 @@ pub(crate) fn chain_layout(
     let page = pages.page(reference.first_page)?;
     match page.header().layout {
         layout @ (LAYOUT | COMPRESSED_LAYOUT) => Ok(layout),
-        _ => Err(corrupt(reference.first_page, "the page has an unknown layout")),
+        _ => Err(corrupt(
+            reference.first_page,
+            "the page has an unknown layout",
+        )),
     }
 }
 
@@ -316,7 +322,10 @@ fn check_page(
         ));
     }
     if header.layout != layout {
-        return Err(corrupt(page_id, "the page's layout differs from its chain's"));
+        return Err(corrupt(
+            page_id,
+            "the page's layout differs from its chain's",
+        ));
     }
     if read_u64(page, FIRST) != reference.first_page || u64::from(read_u32(page, INDEX)) != index {
         return Err(corrupt(

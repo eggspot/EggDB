@@ -166,11 +166,7 @@ impl<'r> DecodedLines<'r> {
         }
     }
 
-    fn next_unit(
-        &mut self,
-        number: u64,
-        unit_of: fn([u8; 2]) -> u16,
-    ) -> SqlResult<Option<u16>> {
+    fn next_unit(&mut self, number: u64, unit_of: fn([u8; 2]) -> u16) -> SqlResult<Option<u16>> {
         let Some(first) = self.next_byte()? else {
             return Ok(None);
         };

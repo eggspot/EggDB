@@ -88,7 +88,10 @@ pub(crate) fn encode_user_type(user_type: &UserType) -> Vec<u8> {
 
 fn member_type(reader: &mut Reader<'_>, own_oid: u32) -> SqlResult<SqlType> {
     let sql_type = reader.sql_type(true, true, true)?;
-    if sql_type.defined().is_some_and(|defined| defined.oid == own_oid) {
+    if sql_type
+        .defined()
+        .is_some_and(|defined| defined.oid == own_oid)
+    {
         return Err(reader.damaged());
     }
     Ok(sql_type)
@@ -191,7 +194,8 @@ pub(crate) fn decode_user_type(name: &str, bytes: &[u8]) -> SqlResult<UserType> 
                     1 => true,
                     _ => return Err(reader.damaged()),
                 };
-                if expression.trim().is_empty() || checks.iter().any(|known| known.name == check_name)
+                if expression.trim().is_empty()
+                    || checks.iter().any(|known| known.name == check_name)
                 {
                     return Err(reader.damaged());
                 }

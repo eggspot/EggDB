@@ -28,7 +28,10 @@ pub struct Endpoint<'s, S: KeyValueStore> {
 
 impl<S: KeyValueStore> std::fmt::Debug for Endpoint<'_, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Endpoint").field("user", &self.user).field("schema", &self.schema).finish_non_exhaustive()
+        f.debug_struct("Endpoint")
+            .field("user", &self.user)
+            .field("schema", &self.schema)
+            .finish_non_exhaustive()
     }
 }
 
@@ -42,7 +45,9 @@ fn json_string(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            control if (control as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", control as u32))
+            }
             other => out.push(other),
         }
     }
@@ -51,18 +56,32 @@ fn json_string(text: &str) -> String {
 }
 
 fn json(status: u16, body: String) -> Response {
-    Response { status, content_type: "application/json; charset=utf-8".to_owned(), body: body.into_bytes(), headers: Vec::new() }
+    Response {
+        status,
+        content_type: "application/json; charset=utf-8".to_owned(),
+        body: body.into_bytes(),
+        headers: Vec::new(),
+    }
 }
 
 fn failure(status: u16, code: &str, message: &str) -> Response {
-    json(status, format!("{{\"code\":{},\"message\":{},\"details\":null,\"hint\":null}}", json_string(code), json_string(message)))
+    json(
+        status,
+        format!(
+            "{{\"code\":{},\"message\":{},\"details\":null,\"hint\":null}}",
+            json_string(code),
+            json_string(message)
+        ),
+    )
 }
 
 fn value_json(value: &Value) -> String {
     match value {
         Value::Null => "null".to_owned(),
         Value::Boolean(flag) => flag.to_string(),
-        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Numeric(_) => value.to_text().unwrap_or_default(),
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Numeric(_) => {
+            value.to_text().unwrap_or_default()
+        }
         Value::Double(number) if number.is_finite() => format!("{number}"),
         Value::Real(number) if number.is_finite() => format!("{number}"),
         Value::Json(text) | Value::Jsonb(text) => text.clone(),
@@ -71,12 +90,21 @@ fn value_json(value: &Value) -> String {
 }
 
 fn rows_json(result: &QueryResult) -> String {
-    let names: Vec<String> = result.columns.iter().flatten().map(|column| json_string(&column.name)).collect();
+    let names: Vec<String> = result
+        .columns
+        .iter()
+        .flatten()
+        .map(|column| json_string(&column.name))
+        .collect();
     let rows: Vec<String> = result
         .rows
         .iter()
         .map(|row| {
-            let fields: Vec<String> = names.iter().zip(row).map(|(name, value)| format!("{name}:{}", value_json(value))).collect();
+            let fields: Vec<String> = names
+                .iter()
+                .zip(row)
+                .map(|(name, value)| format!("{name}:{}", value_json(value)))
+                .collect();
             format!("{{{}}}", fields.join(","))
         })
         .collect();
@@ -88,13 +116,18 @@ fn json_literal(node: &Node, text: &str) -> Result<String, String> {
         Json::Null => "NULL".to_owned(),
         Json::Boolean(flag) => if *flag { "TRUE" } else { "FALSE" }.to_owned(),
         Json::Number(number) => {
-            if !number.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')) {
+            if !number.bytes().all(|byte| {
+                byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
+            }) {
                 return Err(format!("{number} is not a number"));
             }
             number.clone()
         }
         Json::String(value) => literal(value),
-        Json::Array(_) | Json::Object(_) => format!("{}::jsonb", literal(text.get(node.start..node.end).unwrap_or_default())),
+        Json::Array(_) | Json::Object(_) => format!(
+            "{}::jsonb",
+            literal(text.get(node.start..node.end).unwrap_or_default())
+        ),
     })
 }
 
@@ -113,12 +146,27 @@ fn sql_failure(error: &eggdb_sql::SqlError) -> Response {
 impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     /// The API over `store`'s tables in `schema`, run as `user` in `database`, for clients
     /// that sign in with `user` and the password whose SHA-256 is `password_sha256`.
-    pub fn new(store: &'s S, user: &str, password_sha256: [u8; 32], database: &str, schema: &str) -> Self {
-        Self { store, user: user.to_owned(), password_sha256, database: database.to_owned(), schema: schema.to_owned() }
+    pub fn new(
+        store: &'s S,
+        user: &str,
+        password_sha256: [u8; 32],
+        database: &str,
+        schema: &str,
+    ) -> Self {
+        Self {
+            store,
+            user: user.to_owned(),
+            password_sha256,
+            database: database.to_owned(),
+            schema: schema.to_owned(),
+        }
     }
 
     fn authorized(&self, request: &Request) -> bool {
-        let Some(encoded) = request.header("authorization").and_then(|header| header.strip_prefix("Basic ")) else {
+        let Some(encoded) = request
+            .header("authorization")
+            .and_then(|header| header.strip_prefix("Basic "))
+        else {
             return false;
         };
         let Ok(decoded) = eggdb_crypto::base64_decode(encoded.trim().as_bytes()) else {
@@ -127,7 +175,11 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let Some(split) = decoded.iter().position(|&byte| byte == b':') else {
             return false;
         };
-        eggdb_crypto::constant_time_eq(&decoded[..split], self.user.as_bytes()) && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(&decoded[split + 1..]), &self.password_sha256)
+        eggdb_crypto::constant_time_eq(&decoded[..split], self.user.as_bytes())
+            && eggdb_crypto::constant_time_eq(
+                &eggdb_crypto::sha256(&decoded[split + 1..]),
+                &self.password_sha256,
+            )
     }
 
     fn run(&self, sql: &str) -> Result<Vec<QueryResult>, eggdb_sql::SqlError> {
@@ -141,8 +193,15 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     /// Answers one HTTP request.
     pub fn answer(&self, request: &Request) -> Response {
         if !self.authorized(request) {
-            let mut response = failure(401, "PGRST301", "sign in with the server's user and password (HTTP Basic)");
-            response.headers.push(("WWW-Authenticate".to_owned(), "Basic realm=\"eggdb\"".to_owned()));
+            let mut response = failure(
+                401,
+                "PGRST301",
+                "sign in with the server's user and password (HTTP Basic)",
+            );
+            response.headers.push((
+                "WWW-Authenticate".to_owned(),
+                "Basic realm=\"eggdb\"".to_owned(),
+            ));
             return response;
         }
         let path = request.path.trim_matches('/');
@@ -156,8 +215,14 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             Ok(query) => query,
             Err(message) => return failure(400, "PGRST100", &message),
         };
-        let target = format!("{}.{table}", identifier(&self.schema).unwrap_or_else(|| "public".to_owned()));
-        let prefer = request.header("prefer").unwrap_or_default().to_ascii_lowercase();
+        let target = format!(
+            "{}.{table}",
+            identifier(&self.schema).unwrap_or_else(|| "public".to_owned())
+        );
+        let prefer = request
+            .header("prefer")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let representation = prefer.contains("return=representation");
         match request.method.as_str() {
             "GET" | "HEAD" => self.read(&target, &query, prefer.contains("count=exact")),
@@ -176,25 +241,58 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         match self.run(&sql) {
             Ok(results) => {
                 let mut tables: Vec<(String, Vec<String>)> = Vec::new();
-                for row in results.iter().filter(|result| result.columns.is_some()).flat_map(|result| result.rows.iter()) {
+                for row in results
+                    .iter()
+                    .filter(|result| result.columns.is_some())
+                    .flat_map(|result| result.rows.iter())
+                {
                     let text = |at: usize| row.get(at).and_then(Value::to_text).unwrap_or_default();
-                    let column = format!("{}:{{\"type\":{}}}", json_string(&text(1)), json_string(&text(2)));
+                    let column = format!(
+                        "{}:{{\"type\":{}}}",
+                        json_string(&text(1)),
+                        json_string(&text(2))
+                    );
                     match tables.last_mut() {
                         Some((name, columns)) if *name == text(0) => columns.push(column),
                         _ => tables.push((text(0), vec![column])),
                     }
                 }
-                let described: Vec<String> = tables.iter().map(|(name, columns)| format!("{}:{{\"columns\":{{{}}}}}", json_string(name), columns.join(","))).collect();
-                json(200, format!("{{\"schema\":{},\"tables\":{{{}}}}}", json_string(&self.schema), described.join(",")))
+                let described: Vec<String> = tables
+                    .iter()
+                    .map(|(name, columns)| {
+                        format!(
+                            "{}:{{\"columns\":{{{}}}}}",
+                            json_string(name),
+                            columns.join(",")
+                        )
+                    })
+                    .collect();
+                json(
+                    200,
+                    format!(
+                        "{{\"schema\":{},\"tables\":{{{}}}}}",
+                        json_string(&self.schema),
+                        described.join(",")
+                    ),
+                )
             }
             Err(error) => sql_failure(&error),
         }
     }
 
     fn read(&self, target: &str, query: &Query, count: bool) -> Response {
-        let sql = format!("SELECT {} FROM {target}{}{}{}", query.projection(), query.where_clause(), query.order_clause(), query.page_clause());
+        let sql = format!(
+            "SELECT {} FROM {target}{}{}{}",
+            query.projection(),
+            query.where_clause(),
+            query.order_clause(),
+            query.page_clause()
+        );
         let rows = match self.run(&sql) {
-            Ok(results) => results.into_iter().rev().find(|result| result.columns.is_some()),
+            Ok(results) => results
+                .into_iter()
+                .rev()
+                .find(|result| result.columns.is_some()),
             Err(error) => return sql_failure(&error),
         };
         let Some(rows) = rows else {
@@ -203,16 +301,35 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let mut response = json(200, rows_json(&rows));
         let first = query.offset.unwrap_or(0);
         let shown = rows.rows.len() as u64;
-        let range = if shown == 0 { "*".to_owned() } else { format!("{first}-{}", first + shown - 1) };
+        let range = if shown == 0 {
+            "*".to_owned()
+        } else {
+            format!("{first}-{}", first + shown - 1)
+        };
         let total = if count {
-            match self.run(&format!("SELECT count(*) FROM {target}{}", query.where_clause())) {
-                Ok(results) => results.iter().rev().find_map(|result| result.rows.first().and_then(|row| row.first()).and_then(Value::to_text)).unwrap_or_else(|| "*".to_owned()),
+            match self.run(&format!(
+                "SELECT count(*) FROM {target}{}",
+                query.where_clause()
+            )) {
+                Ok(results) => results
+                    .iter()
+                    .rev()
+                    .find_map(|result| {
+                        result
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(Value::to_text)
+                    })
+                    .unwrap_or_else(|| "*".to_owned()),
                 Err(error) => return sql_failure(&error),
             }
         } else {
             "*".to_owned()
         };
-        response.headers.push(("Content-Range".to_owned(), format!("{range}/{total}")));
+        response
+            .headers
+            .push(("Content-Range".to_owned(), format!("{range}/{total}")));
         response
     }
 
@@ -265,8 +382,16 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             }
             rows.push(format!("({})", cells.join(", ")));
         }
-        let returning = if representation { format!(" RETURNING {}", query.projection()) } else { String::new() };
-        let sql = format!("INSERT INTO {target} ({}) VALUES {}{returning}", quoted.join(", "), rows.join(", "));
+        let returning = if representation {
+            format!(" RETURNING {}", query.projection())
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "INSERT INTO {target} ({}) VALUES {}{returning}",
+            quoted.join(", "),
+            rows.join(", ")
+        );
         self.changed(&sql, representation, 201)
     }
 
@@ -276,7 +401,11 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             return failure(400, "PGRST102", "the body is not valid JSON");
         };
         let Json::Object(members) = &document.value else {
-            return failure(400, "PGRST102", "send a JSON object of the columns to change");
+            return failure(
+                400,
+                "PGRST102",
+                "send a JSON object of the columns to change",
+            );
         };
         let mut assignments = Vec::with_capacity(members.len());
         for (name, node) in members {
@@ -291,13 +420,33 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         if assignments.is_empty() {
             return failure(400, "PGRST102", "the object has no columns");
         }
-        let returning = if representation { format!(" RETURNING {}", query.projection()) } else { String::new() };
-        self.changed(&format!("UPDATE {target} SET {}{}{returning}", assignments.join(", "), query.where_clause()), representation, 200)
+        let returning = if representation {
+            format!(" RETURNING {}", query.projection())
+        } else {
+            String::new()
+        };
+        self.changed(
+            &format!(
+                "UPDATE {target} SET {}{}{returning}",
+                assignments.join(", "),
+                query.where_clause()
+            ),
+            representation,
+            200,
+        )
     }
 
     fn delete(&self, target: &str, query: &Query, representation: bool) -> Response {
-        let returning = if representation { format!(" RETURNING {}", query.projection()) } else { String::new() };
-        self.changed(&format!("DELETE FROM {target}{}{returning}", query.where_clause()), representation, 200)
+        let returning = if representation {
+            format!(" RETURNING {}", query.projection())
+        } else {
+            String::new()
+        };
+        self.changed(
+            &format!("DELETE FROM {target}{}{returning}", query.where_clause()),
+            representation,
+            200,
+        )
     }
 
     fn changed(&self, sql: &str, representation: bool, status: u16) -> Response {

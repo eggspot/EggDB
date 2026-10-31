@@ -1112,7 +1112,10 @@ fn descending_and_hash_indexes_keep_their_options_and_find_the_same_rows() {
     );
     for (query, expected) in [
         ("SELECT count(*) FROM t WHERE b = 7", "count\n5\nSELECT 1"),
-        ("SELECT count(*) FROM t WHERE c = 'c3'", "count\n71\nSELECT 1"),
+        (
+            "SELECT count(*) FROM t WHERE c = 'c3'",
+            "count\n71\nSELECT 1",
+        ),
         (
             "SELECT id FROM t WHERE b >= 98 ORDER BY b DESC, id LIMIT 3",
             "id\n99\n199\n299\nSELECT 3",
@@ -1125,7 +1128,8 @@ fn descending_and_hash_indexes_keep_their_options_and_find_the_same_rows() {
     let mut reopened = Session::new(&store);
     let tables = reopened.tables().unwrap();
     let t = tables.iter().find(|table| table.name == "t").unwrap();
-    let shown: Vec<(&str, &str, Vec<(bool, bool)>)> = t
+    type Shown<'a> = Vec<(&'a str, &'a str, Vec<(bool, bool)>)>;
+    let shown: Shown<'_> = t
         .indexes
         .iter()
         .map(|index| {

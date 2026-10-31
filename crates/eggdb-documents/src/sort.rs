@@ -24,12 +24,20 @@ pub fn parse_sort(spec: &Document) -> DocumentResult<SortSpec> {
             Some(1) => false,
             Some(-1) => true,
             _ if matches!(direction, Bson::Document(inner) if inner.contains_key("$meta")) => {
-                return Err(DocumentError::not_implemented("$meta sort keys are not supported yet"));
+                return Err(DocumentError::not_implemented(
+                    "$meta sort keys are not supported yet",
+                ));
             }
-            _ => return Err(DocumentError::bad_value(format!("$sort key ordering must be 1 (for ascending) or -1 (for descending) for {path}"))),
+            _ => {
+                return Err(DocumentError::bad_value(format!(
+                    "$sort key ordering must be 1 (for ascending) or -1 (for descending) for {path}"
+                )));
+            }
         };
         if path.is_empty() {
-            return Err(DocumentError::bad_value("FieldPath cannot be constructed with empty string"));
+            return Err(DocumentError::bad_value(
+                "FieldPath cannot be constructed with empty string",
+            ));
         }
         keys.push((path.clone(), descending));
     }
@@ -50,7 +58,11 @@ fn key_of(document: &Document, path: &str, descending: bool) -> Bson {
                 None => true,
                 Some(held) => {
                     let ordering = compare(candidate, held);
-                    if descending { ordering == Ordering::Greater } else { ordering == Ordering::Less }
+                    if descending {
+                        ordering == Ordering::Greater
+                    } else {
+                        ordering == Ordering::Less
+                    }
                 }
             };
             if better {
@@ -65,8 +77,15 @@ fn key_of(document: &Document, path: &str, descending: bool) -> Bson {
 /// greatest descending, as MongoDB documents.
 pub fn compare_by(spec: &SortSpec, left: &Document, right: &Document) -> Ordering {
     for (path, descending) in &spec.keys {
-        let ordering = compare(&key_of(left, path, *descending), &key_of(right, path, *descending));
-        let ordering = if *descending { ordering.reverse() } else { ordering };
+        let ordering = compare(
+            &key_of(left, path, *descending),
+            &key_of(right, path, *descending),
+        );
+        let ordering = if *descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
         if ordering != Ordering::Equal {
             return ordering;
         }

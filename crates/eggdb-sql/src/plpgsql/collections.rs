@@ -76,7 +76,10 @@ pub(crate) fn collection_is_null() -> SqlError {
 }
 
 pub(crate) fn subscript_outside_limit() -> SqlError {
-    oracle_failure(SqlState::ARRAY_SUBSCRIPT_ERROR, SUBSCRIPT_OUTSIDE_LIMIT_CODE)
+    oracle_failure(
+        SqlState::ARRAY_SUBSCRIPT_ERROR,
+        SUBSCRIPT_OUTSIDE_LIMIT_CODE,
+    )
 }
 
 pub(crate) fn subscript_beyond_count() -> SqlError {
@@ -195,9 +198,9 @@ impl CollectionShape {
             return Err(value_error("NULL index table key value"));
         }
         match self.kind {
-            CollectionKind::IndexedByText => Ok(CollectionKey::Text(
-                value.to_text().unwrap_or_default(),
-            )),
+            CollectionKind::IndexedByText => {
+                Ok(CollectionKey::Text(value.to_text().unwrap_or_default()))
+            }
             _ => integer_of(value).map(CollectionKey::Integer),
         }
     }
@@ -297,7 +300,9 @@ impl CollectionShape {
             })),
             ("limit", None) => match (record, self.limit()) {
                 (None, _) => Err(collection_is_null()),
-                (Some(_), Some(limit)) => Ok(Value::Integer(i32::try_from(limit).unwrap_or(i32::MAX))),
+                (Some(_), Some(limit)) => {
+                    Ok(Value::Integer(i32::try_from(limit).unwrap_or(i32::MAX)))
+                }
                 (Some(_), None) => Ok(Value::Null),
             },
             ("count" | "first" | "last", None) | ("next" | "prior", Some(_)) => {
@@ -392,7 +397,11 @@ impl CollectionShape {
         Ok(())
     }
 
-    pub(crate) fn delete(&self, collection: &mut Value, range: Option<(&Value, &Value)>) -> SqlResult<()> {
+    pub(crate) fn delete(
+        &self,
+        collection: &mut Value,
+        range: Option<(&Value, &Value)>,
+    ) -> SqlResult<()> {
         if range.is_some() && matches!(self.kind, CollectionKind::Varray(_)) {
             return Err(wrong_arguments("DELETE"));
         }
@@ -430,7 +439,11 @@ impl CollectionShape {
         let Some(record) = entries(collection) else {
             return Err(collection_is_null());
         };
-        Ok(record.names.iter().map(|name| self.key_value(name)).collect())
+        Ok(record
+            .names
+            .iter()
+            .map(|name| self.key_value(name))
+            .collect())
     }
 
     pub(crate) fn elements(&self, collection: &Value) -> SqlResult<Vec<Value>> {
@@ -570,7 +583,9 @@ impl RoutineFrame {
 fn attribute_value(attributes: CursorAttributes, attribute: &str) -> Value {
     match attribute {
         "found" => attributes.found.map_or(Value::Null, Value::Boolean),
-        "notfound" => attributes.found.map_or(Value::Null, |found| Value::Boolean(!found)),
+        "notfound" => attributes
+            .found
+            .map_or(Value::Null, |found| Value::Boolean(!found)),
         _ => attributes.rowcount.map_or(Value::Null, |rows| {
             integer_value(i64::try_from(rows).unwrap_or(i64::MAX))
         }),

@@ -428,7 +428,10 @@ fn sqlite_views_follow_sqlite() {
         fails(&mut session, "SELECT * FROM v").message(),
         "no such table: v"
     );
-    assert_eq!(last(&mut session, "CREATE VIEW temp.w AS SELECT 1 AS one"), "CREATE VIEW");
+    assert_eq!(
+        last(&mut session, "CREATE VIEW temp.w AS SELECT 1 AS one"),
+        "CREATE VIEW"
+    );
     assert_eq!(last(&mut session, "SELECT one FROM w"), "one\n1\nSELECT 1");
 }
 

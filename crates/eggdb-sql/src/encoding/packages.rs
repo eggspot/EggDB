@@ -71,7 +71,10 @@ mod tests {
     #[test]
     fn package_records_round_trip_with_and_without_a_body() {
         let with_body = sample();
-        assert_eq!(decode_package("p", &encode_package(&with_body)).unwrap(), with_body);
+        assert_eq!(
+            decode_package("p", &encode_package(&with_body)).unwrap(),
+            with_body
+        );
         let without_body = StoredPackage {
             body: None,
             ..sample()

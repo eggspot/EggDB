@@ -70,7 +70,13 @@ pub fn finished_verify_data(hash: HashKind, base_key: &[u8], transcript_hash: &[
 
 /// The next application traffic secret after a KeyUpdate.
 pub fn next_traffic_secret(hash: HashKind, traffic_secret: &[u8]) -> Vec<u8> {
-    hkdf_expand_label(hash, traffic_secret, b"traffic upd", &[], hash.digest_bytes())
+    hkdf_expand_label(
+        hash,
+        traffic_secret,
+        b"traffic upd",
+        &[],
+        hash.digest_bytes(),
+    )
 }
 
 /// The client's and server's traffic secrets of one stage of the handshake.
@@ -109,7 +115,10 @@ impl KeySchedule {
     pub fn new(hash: HashKind, pre_shared_key: Option<&[u8]>) -> Self {
         let zeros = vec![0u8; hash.digest_bytes()];
         let input = pre_shared_key.unwrap_or(&zeros);
-        Self { hash, stage_secret: hash.hkdf_extract(&zeros, input) }
+        Self {
+            hash,
+            stage_secret: hash.hkdf_extract(&zeros, input),
+        }
     }
 
     /// The hash this schedule uses.
@@ -157,13 +166,23 @@ impl KeySchedule {
                 server_finished_hash,
             ),
         };
-        let exporter = derive_secret(self.hash, &self.stage_secret, b"exp master", server_finished_hash);
+        let exporter = derive_secret(
+            self.hash,
+            &self.stage_secret,
+            b"exp master",
+            server_finished_hash,
+        );
         (secrets, exporter)
     }
 
     /// The resumption master secret over the transcript hash of ClientHello..client Finished.
     pub fn resumption_master_secret(&self, client_finished_hash: &[u8]) -> Vec<u8> {
-        derive_secret(self.hash, &self.stage_secret, b"res master", client_finished_hash)
+        derive_secret(
+            self.hash,
+            &self.stage_secret,
+            b"res master",
+            client_finished_hash,
+        )
     }
 }
 

@@ -29,7 +29,10 @@ pub struct Ff1 {
 
 impl std::fmt::Debug for Ff1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Ff1").field("radix", &self.radix).finish_non_exhaustive()
+        formatter
+            .debug_struct("Ff1")
+            .field("radix", &self.radix)
+            .finish_non_exhaustive()
     }
 }
 
@@ -39,7 +42,10 @@ impl Ff1 {
         if !(2..=65536).contains(&radix) {
             return Err(Ff1Error::Radix);
         }
-        Ok(Self { aes: Aes::new(key).map_err(Ff1Error::KeyLength)?, radix })
+        Ok(Self {
+            aes: Aes::new(key).map_err(Ff1Error::KeyLength)?,
+            radix,
+        })
     }
 
     /// Encrypts `numerals` under `tweak`.
@@ -54,11 +60,16 @@ impl Ff1 {
 
     fn modulus(&self, length: usize) -> Result<u128, Ff1Error> {
         let exponent = u32::try_from(length).map_err(|_| Ff1Error::Length)?;
-        u128::from(self.radix).checked_pow(exponent).filter(|modulus| *modulus <= MAX_MODULUS).ok_or(Ff1Error::Length)
+        u128::from(self.radix)
+            .checked_pow(exponent)
+            .filter(|modulus| *modulus <= MAX_MODULUS)
+            .ok_or(Ff1Error::Length)
     }
 
     fn number(&self, numerals: &[u32]) -> u128 {
-        numerals.iter().fold(0, |number, numeral| number * u128::from(self.radix) + u128::from(*numeral))
+        numerals.iter().fold(0, |number, numeral| {
+            number * u128::from(self.radix) + u128::from(*numeral)
+        })
     }
 
     fn numerals(&self, mut number: u128, length: usize) -> Vec<u32> {
@@ -81,7 +92,15 @@ impl Ff1 {
         state
     }
 
-    fn round_value(&self, prefix: &[u8], round: u8, half: u128, b: usize, d: usize, modulus: u128) -> u128 {
+    fn round_value(
+        &self,
+        prefix: &[u8],
+        round: u8,
+        half: u128,
+        b: usize,
+        d: usize,
+        modulus: u128,
+    ) -> u128 {
         let mut block = prefix.to_vec();
         block.push(round);
         block.extend_from_slice(&half.to_be_bytes()[AES_BLOCK_BYTES - b..]);
@@ -97,7 +116,9 @@ impl Ff1 {
             s.extend_from_slice(&extra);
             counter += 1;
         }
-        s[..d].iter().fold(0u128, |y, byte| (y * 256 + u128::from(*byte)) % modulus)
+        s[..d]
+            .iter()
+            .fold(0u128, |y, byte| (y * 256 + u128::from(*byte)) % modulus)
     }
 
     fn run(&self, numerals: &[u32], tweak: &[u8], encrypt: bool) -> Result<Vec<u32>, Ff1Error> {
@@ -158,15 +179,23 @@ mod tests {
     const TWEAK_36: &str = "3737373770717273373737";
 
     fn bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect()
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect()
     }
 
     fn numerals(text: &str) -> Vec<u32> {
-        text.chars().map(|character| character.to_digit(36).unwrap()).collect()
+        text.chars()
+            .map(|character| character.to_digit(36).unwrap())
+            .collect()
     }
 
     fn text(numerals: &[u32]) -> String {
-        numerals.iter().map(|numeral| char::from_digit(*numeral, 36).unwrap()).collect()
+        numerals
+            .iter()
+            .map(|numeral| char::from_digit(*numeral, 36).unwrap())
+            .collect()
     }
 
     #[test]
@@ -174,19 +203,40 @@ mod tests {
         let samples = [
             (KEY_128, 10, "", "0123456789", "2433477484"),
             (KEY_128, 10, TWEAK_10, "0123456789", "6124200773"),
-            (KEY_128, 36, TWEAK_36, "0123456789abcdefghi", "a9tv40mll9kdu509eum"),
+            (
+                KEY_128,
+                36,
+                TWEAK_36,
+                "0123456789abcdefghi",
+                "a9tv40mll9kdu509eum",
+            ),
             (KEY_192, 10, "", "0123456789", "2830668132"),
             (KEY_192, 10, TWEAK_10, "0123456789", "2496655549"),
-            (KEY_192, 36, TWEAK_36, "0123456789abcdefghi", "xbj3kv35jrawxv32ysr"),
+            (
+                KEY_192,
+                36,
+                TWEAK_36,
+                "0123456789abcdefghi",
+                "xbj3kv35jrawxv32ysr",
+            ),
             (KEY_256, 10, "", "0123456789", "6657667009"),
             (KEY_256, 10, TWEAK_10, "0123456789", "1001623463"),
-            (KEY_256, 36, TWEAK_36, "0123456789abcdefghi", "xs8a0azh2avyalyzuwd"),
+            (
+                KEY_256,
+                36,
+                TWEAK_36,
+                "0123456789abcdefghi",
+                "xs8a0azh2avyalyzuwd",
+            ),
         ];
         for (key, radix, tweak, plain, cipher) in samples {
             let ff1 = Ff1::new(&bytes(key), radix).unwrap();
             let encrypted = ff1.encrypt(&numerals(plain), &bytes(tweak)).unwrap();
             assert_eq!(text(&encrypted), cipher, "{key} {radix} {tweak}");
-            assert_eq!(text(&ff1.decrypt(&encrypted, &bytes(tweak)).unwrap()), plain);
+            assert_eq!(
+                text(&ff1.decrypt(&encrypted, &bytes(tweak)).unwrap()),
+                plain
+            );
         }
     }
 
@@ -196,8 +246,14 @@ mod tests {
         assert_eq!(ff1.encrypt(&numerals("12345"), &[]), Err(Ff1Error::Length));
         assert_eq!(ff1.encrypt(&[1; 73], &[]), Err(Ff1Error::Length));
         assert!(ff1.encrypt(&[1; 72], &[]).is_ok());
-        assert_eq!(ff1.encrypt(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[]), Err(Ff1Error::Numeral));
-        assert!(matches!(Ff1::new(&[0; 15], 10), Err(Ff1Error::KeyLength(_))));
+        assert_eq!(
+            ff1.encrypt(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[]),
+            Err(Ff1Error::Numeral)
+        );
+        assert!(matches!(
+            Ff1::new(&[0; 15], 10),
+            Err(Ff1Error::KeyLength(_))
+        ));
         assert!(matches!(Ff1::new(&bytes(KEY_128), 1), Err(Ff1Error::Radix)));
     }
 }

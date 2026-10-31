@@ -26,8 +26,8 @@ pub use projection::{Projection, parse_projection};
 pub use restore::{RestoredCollection, restore_collection};
 pub use sort::{SortSpec, compare_by, parse_sort, sort_documents};
 pub use store::{
-    InsertOutcome, MAX_DOCUMENT_BYTES, Modification, Store, UpdateOptions, UpdateOutcome, check_collection_name,
-    check_database_name,
+    InsertOutcome, MAX_DOCUMENT_BYTES, Modification, Store, UpdateOptions, UpdateOutcome,
+    check_collection_name, check_database_name,
 };
 pub use update::{Operator, Update, apply_update, parse_update, upsert_document};
 

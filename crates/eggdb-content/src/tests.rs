@@ -26,7 +26,10 @@ const DOCX: [&str; 11] = [
 
 fn bytes(parts: &[&str]) -> Vec<u8> {
     let hex: String = parts.concat();
-    (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect()
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+        .collect()
 }
 
 fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
@@ -70,8 +73,14 @@ fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
 #[test]
 fn inflate_reads_stored_fixed_and_dynamic_blocks() {
     assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-    assert_eq!(inflate(&bytes(&["cb48cdc9c957c8409000"]), 100).unwrap(), b"hello hello hello");
-    assert_eq!(inflate(&[1, 3, 0, 0xfc, 0xff, b'a', b'b', b'c'], 100).unwrap(), b"abc");
+    assert_eq!(
+        inflate(&bytes(&["cb48cdc9c957c8409000"]), 100).unwrap(),
+        b"hello hello hello"
+    );
+    assert_eq!(
+        inflate(&[1, 3, 0, 0xfc, 0xff, b'a', b'b', b'c'], 100).unwrap(),
+        b"abc"
+    );
     let dynamic = inflate(&bytes(&DYNAMIC_STREAM), 1_000).unwrap();
     assert_eq!((dynamic.len(), crc32(&dynamic)), (600, 1_157_992_099));
 }
@@ -85,25 +94,47 @@ fn inflate_refuses_corrupt_streams_and_bombs() {
     assert!(inflate(&[0b111], 10).is_err());
     assert!(inflate(&[1, 3, 0, 0xfc, 0xfe, b'a', b'b', b'c'], 100).is_err());
     for seed in 0u32..2_000 {
-        let noise: Vec<u8> = (0..64u32).map(|at| (seed.wrapping_mul(2_654_435_761).wrapping_add(at.wrapping_mul(40_503)) >> 13) as u8).collect();
+        let noise: Vec<u8> = (0..64u32)
+            .map(|at| {
+                (seed
+                    .wrapping_mul(2_654_435_761)
+                    .wrapping_add(at.wrapping_mul(40_503))
+                    >> 13) as u8
+            })
+            .collect();
         let _ = inflate(&noise, 1 << 16);
     }
 }
 
 #[test]
 fn office_documents_give_their_text() {
-    assert_eq!(extract_text(&bytes(&DOCX), 1 << 20).unwrap(), "Hello EggDB & friends\nSecond\tline \u{e9}");
+    assert_eq!(
+        extract_text(&bytes(&DOCX), 1 << 20).unwrap(),
+        "Hello EggDB & friends\nSecond\tline \u{e9}"
+    );
     let odt = stored_zip(&[
         ("mimetype", b"application/vnd.oasis.opendocument.text"),
         ("content.xml", b"<office:document-content><office:body><office:text><text:h>Title</text:h><text:p>One<text:s text:c=\"2\"/>two<![CDATA[ <three> ]]></text:p><text:p/><text:p>&#x45;nd</text:p></office:text></office:body></office:document-content>"),
     ]);
-    assert_eq!(extract_text(&odt, 1 << 20).unwrap(), "Title\nOne  two <three> \n\nEnd");
+    assert_eq!(
+        extract_text(&odt, 1 << 20).unwrap(),
+        "Title\nOne  two <three> \n\nEnd"
+    );
     let pptx = stored_zip(&[
-        ("ppt/slides/slide10.xml", b"<p:sld><a:p><a:r><a:t>Last</a:t></a:r></a:p></p:sld>"),
-        ("ppt/slides/slide2.xml", b"<p:sld><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>"),
+        (
+            "ppt/slides/slide10.xml",
+            b"<p:sld><a:p><a:r><a:t>Last</a:t></a:r></a:p></p:sld>",
+        ),
+        (
+            "ppt/slides/slide2.xml",
+            b"<p:sld><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>",
+        ),
     ]);
     assert_eq!(extract_text(&pptx, 1 << 20).unwrap(), "First\n\nLast");
-    let xlsx = stored_zip(&[("xl/sharedStrings.xml", b"<sst><si><t>Name</t></si><si><r><t>Ada</t></r><r><t> L.</t></r></si></sst>")]);
+    let xlsx = stored_zip(&[(
+        "xl/sharedStrings.xml",
+        b"<sst><si><t>Name</t></si><si><r><t>Ada</t></r><r><t> L.</t></r></si></sst>",
+    )]);
     assert_eq!(extract_text(&xlsx, 1 << 20).unwrap(), "Name\nAda L.");
 }
 
@@ -112,9 +143,14 @@ fn archives_that_are_not_documents_or_are_damaged_are_refused() {
     assert!(extract_text(b"plain text", 1 << 20).is_err());
     assert!(extract_text(&stored_zip(&[("notes.txt", b"hi")]), 1 << 20).is_err());
     let mut damaged = stored_zip(&[("content.xml", b"<text:p>abc</text:p>")]);
-    let at = damaged.windows(3).position(|window| window == b"abc").unwrap();
+    let at = damaged
+        .windows(3)
+        .position(|window| window == b"abc")
+        .unwrap();
     damaged[at] = b'x';
-    assert!(matches!(extract_text(&damaged, 1 << 20), Err(ContentError(message)) if message.contains("CRC")));
+    assert!(
+        matches!(extract_text(&damaged, 1 << 20), Err(ContentError(message)) if message.contains("CRC"))
+    );
     assert!(extract_text(&bytes(&DOCX), 16).is_err());
     let docx = bytes(&DOCX);
     let archive = ZipArchive::new(&docx).unwrap();

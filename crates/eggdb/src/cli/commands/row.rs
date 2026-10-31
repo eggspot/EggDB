@@ -59,24 +59,25 @@ impl Session<'_> {
         };
         let mut written: Result<(), Failure> = Ok(());
         let out = &mut self.out;
-        let read = session.read_stored_rows(&relation, after.as_deref(), &mut |position, values| {
-            if page_rows.is_some_and(|rows| page.shown >= rows) {
-                page.more = true;
-                return Ok(false);
-            }
-            if json {
-                out.text(&row_record(table, &values));
-                if let Err(failure) = out.line_done() {
-                    written = Err(failure);
+        let read =
+            session.read_stored_rows(&relation, after.as_deref(), &mut |position, values| {
+                if page_rows.is_some_and(|rows| page.shown >= rows) {
+                    page.more = true;
                     return Ok(false);
                 }
-            } else {
-                page.rows.push(values);
-            }
-            page.shown += 1;
-            page.last = Some(position.to_vec());
-            Ok(true)
-        });
+                if json {
+                    out.text(&row_record(table, &values));
+                    if let Err(failure) = out.line_done() {
+                        written = Err(failure);
+                        return Ok(false);
+                    }
+                } else {
+                    page.rows.push(values);
+                }
+                page.shown += 1;
+                page.last = Some(position.to_vec());
+                Ok(true)
+            });
         let _ = session.close();
         drop(db);
         written?;
@@ -155,7 +156,10 @@ pub(super) fn cursor_refused(
         CursorList::Rows => CommandName::Row,
         CursorList::Tables => CommandName::Table,
     };
-    Failure::usage(refusal.message("--after", list, scope, &shown), Some(command))
+    Failure::usage(
+        refusal.message("--after", list, scope, &shown),
+        Some(command),
+    )
 }
 
 fn row_scope(relation: &Relation) -> String {
@@ -222,7 +226,10 @@ mod tests {
             name: "orders".to_owned(),
             schema: "public".to_owned(),
             comment: None,
-            columns: vec![column("id", SqlType::Integer), column("customer", SqlType::Text)],
+            columns: vec![
+                column("id", SqlType::Integer),
+                column("customer", SqlType::Text),
+            ],
             primary_key: vec!["id".to_owned()],
             indexes: Vec::new(),
         }
@@ -235,7 +242,10 @@ mod tests {
             row_record(&table, &[Value::Integer(1), Value::Text("Ada".to_owned())]),
             "{\"id\":1,\"customer\":\"Ada\"}\n"
         );
-        assert_eq!(row_record(&table, &[Value::Integer(2), Value::Null]), "{\"id\":2,\"customer\":null}\n");
+        assert_eq!(
+            row_record(&table, &[Value::Integer(2), Value::Null]),
+            "{\"id\":2,\"customer\":null}\n"
+        );
         assert_eq!(
             page_trailer("r1.818549630180000002"),
             "{\"truncated\":true,\"next_cursor\":\"r1.818549630180000002\"}\n"

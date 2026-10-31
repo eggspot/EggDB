@@ -106,9 +106,8 @@ impl P256PublicKey {
 }
 
 fn read_coordinate(bytes: &[u8]) -> Result<FieldElement, P256Error> {
-    let bytes: &[u8; P256_ELEMENT_BYTES] = bytes
-        .try_into()
-        .map_err(|_| P256Error::PublicKeyEncoding)?;
+    let bytes: &[u8; P256_ELEMENT_BYTES] =
+        bytes.try_into().map_err(|_| P256Error::PublicKeyEncoding)?;
     FieldElement::from_be_bytes(bytes).ok_or(P256Error::PublicKeyEncoding)
 }
 

@@ -45,7 +45,9 @@ fn json_string(text: &str) -> String {
         match character {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            control if (control as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", control as u32))
+            }
             other => out.push(other),
         }
     }
@@ -63,7 +65,15 @@ fn text_of(value: Option<&Value>) -> Option<String> {
 
 /// The Debezium-style envelope of one change: `before`, `after`, `source` (connector, database,
 /// schema, table, `ts_ms`), `op` (`c`, `u` or `d`) and `ts_ms`.
-pub fn debezium_event(database: &str, schema: &str, table: &str, op: &str, before: Option<&str>, after: Option<&str>, captured_ms: i64) -> String {
+pub fn debezium_event(
+    database: &str,
+    schema: &str,
+    table: &str,
+    op: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+    captured_ms: i64,
+) -> String {
     format!(
         "{{\"before\":{},\"after\":{},\"source\":{{\"connector\":\"eggdb\",\"db\":{},\"schema\":{},\"table\":{},\"ts_ms\":{captured_ms}}},\"op\":{},\"ts_ms\":{captured_ms}}}",
         before.unwrap_or("null"),
@@ -78,7 +88,12 @@ pub fn debezium_event(database: &str, schema: &str, table: &str, op: &str, befor
 /// Hands up to `limit` of the oldest captured changes to `deliver`, in order, as Debezium-style
 /// JSON; stops at the first one `deliver` refuses, and removes the ones it accepted. Returns
 /// how many were delivered. A file without the extension has nothing to deliver.
-pub fn deliver_changes<S: KeyValueStore>(store: &S, database: &str, limit: u64, deliver: &mut dyn FnMut(&str) -> bool) -> SqlResult<u64> {
+pub fn deliver_changes<S: KeyValueStore>(
+    store: &S,
+    database: &str,
+    limit: u64,
+    deliver: &mut dyn FnMut(&str) -> bool,
+) -> SqlResult<u64> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     let mut rows = Vec::new();
     let listed = session.execute(
@@ -89,7 +104,14 @@ pub fn deliver_changes<S: KeyValueStore>(store: &S, database: &str, limit: u64, 
     );
     if let Err(error) = listed {
         let _ = session.close();
-        return if matches!(error.state(), SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME) { Ok(0) } else { Err(error) };
+        return if matches!(
+            error.state(),
+            SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME
+        ) {
+            Ok(0)
+        } else {
+            Err(error)
+        };
     }
     let mut last_delivered = None;
     let mut delivered = 0;
@@ -106,7 +128,15 @@ pub fn deliver_changes<S: KeyValueStore>(store: &S, database: &str, limit: u64, 
             Some(Value::BigInt(milliseconds)) => *milliseconds,
             _ => 0,
         };
-        let event = debezium_event(database, &schema, &table, &op, before.as_deref(), after.as_deref(), captured_ms);
+        let event = debezium_event(
+            database,
+            &schema,
+            &table,
+            &op,
+            before.as_deref(),
+            after.as_deref(),
+            captured_ms,
+        );
         if !deliver(&event) {
             break;
         }
@@ -114,7 +144,10 @@ pub fn deliver_changes<S: KeyValueStore>(store: &S, database: &str, limit: u64, 
         delivered += 1;
     }
     if let Some(last) = last_delivered {
-        session.execute(&format!("DELETE FROM eggdb_cdc.outbox WHERE id <= {last}"), &mut |_| {})?;
+        session.execute(
+            &format!("DELETE FROM eggdb_cdc.outbox WHERE id <= {last}"),
+            &mut |_| {},
+        )?;
     }
     session.close()?;
     Ok(delivered)
@@ -129,7 +162,10 @@ mod tests {
     #[test]
     fn captured_changes_are_delivered_once_in_order() {
         let store = MemoryStore::default();
-        assert_eq!(deliver_changes(&store, "app", 10, &mut |_| true).unwrap(), 0);
+        assert_eq!(
+            deliver_changes(&store, "app", 10, &mut |_| true).unwrap(),
+            0
+        );
         let mut session = Session::new(&store);
         for statement in [
             "CREATE EXTENSION eggdb_cdc",
@@ -139,7 +175,9 @@ mod tests {
             "UPDATE accounts SET balance = 50 WHERE id = 1",
             "DELETE FROM accounts WHERE id = 1",
         ] {
-            session.execute(statement, &mut |_| {}).unwrap_or_else(|error| panic!("{statement}: {error}"));
+            session
+                .execute(statement, &mut |_| {})
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
         }
         let mut seen = Vec::new();
         let mut refuse_after = 2;
@@ -159,10 +197,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(second, 1);
-        assert!(seen[0].contains("\"op\":\"c\"") && seen[0].contains("\"before\":null"), "{}", seen[0]);
-        assert!(seen[1].contains("\"op\":\"u\"") && seen[1].contains("\"balance\": 100") || seen[1].contains("\"balance\":100"), "{}", seen[1]);
-        assert!(seen[2].contains("\"op\":\"d\"") && seen[2].contains("\"after\":null"), "{}", seen[2]);
-        assert_eq!(deliver_changes(&store, "app", 10, &mut |_| true).unwrap(), 0);
+        assert!(
+            seen[0].contains("\"op\":\"c\"") && seen[0].contains("\"before\":null"),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[1].contains("\"op\":\"u\"") && seen[1].contains("\"balance\": 100")
+                || seen[1].contains("\"balance\":100"),
+            "{}",
+            seen[1]
+        );
+        assert!(
+            seen[2].contains("\"op\":\"d\"") && seen[2].contains("\"after\":null"),
+            "{}",
+            seen[2]
+        );
+        assert_eq!(
+            deliver_changes(&store, "app", 10, &mut |_| true).unwrap(),
+            0
+        );
     }
 
     #[test]

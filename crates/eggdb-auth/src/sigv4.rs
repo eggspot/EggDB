@@ -51,7 +51,9 @@ impl std::fmt::Display for SigV4Error {
             SigV4Error::Missing => "the request is not signed",
             SigV4Error::Malformed => "the request's signature is malformed",
             SigV4Error::UnknownAccessKey => "the access key is not known",
-            SigV4Error::TimeSkewed => "the request's date is more than 15 minutes from the server's clock",
+            SigV4Error::TimeSkewed => {
+                "the request's date is more than 15 minutes from the server's clock"
+            }
             SigV4Error::Expired => "the presigned URL has expired",
             SigV4Error::PayloadMismatch => "the payload does not match its stated SHA-256",
             SigV4Error::UnsupportedPayload => "streaming (aws-chunked) payloads are not supported",
@@ -71,7 +73,11 @@ fn hmac(key: &[u8], message: &str) -> [u8; 32] {
 }
 
 fn header<'r>(request: &SignedRequest<'r>, name: &str) -> Option<&'r str> {
-    request.headers.iter().find(|(field, _)| field == name).map(|(_, value)| value.as_str())
+    request
+        .headers
+        .iter()
+        .find(|(field, _)| field == name)
+        .map(|(_, value)| value.as_str())
 }
 
 fn percent_decode(text: &str) -> Result<Vec<u8>, SigV4Error> {
@@ -96,7 +102,9 @@ pub fn uri_encode(bytes: &[u8], keep_slash: bool) -> String {
     bytes
         .iter()
         .map(|&byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => char::from(byte).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(byte).to_string()
+            }
             b'/' if keep_slash => "/".to_owned(),
             other => format!("%{other:02X}"),
         })
@@ -110,8 +118,10 @@ fn query_pairs(query: Option<&str>) -> Result<Vec<(String, String)>, SigV4Error>
         .filter(|pair| !pair.is_empty())
         .map(|pair| {
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-            let name = String::from_utf8(percent_decode(name)?).map_err(|_| SigV4Error::Malformed)?;
-            let value = String::from_utf8(percent_decode(value)?).map_err(|_| SigV4Error::Malformed)?;
+            let name =
+                String::from_utf8(percent_decode(name)?).map_err(|_| SigV4Error::Malformed)?;
+            let value =
+                String::from_utf8(percent_decode(value)?).map_err(|_| SigV4Error::Malformed)?;
             Ok((name, value))
         })
         .collect()
@@ -121,29 +131,76 @@ fn canonical_query(pairs: &[(String, String)], skip: Option<&str>) -> String {
     let mut encoded: Vec<(String, String)> = pairs
         .iter()
         .filter(|(name, _)| Some(name.as_str()) != skip)
-        .map(|(name, value)| (uri_encode(name.as_bytes(), false), uri_encode(value.as_bytes(), false)))
+        .map(|(name, value)| {
+            (
+                uri_encode(name.as_bytes(), false),
+                uri_encode(value.as_bytes(), false),
+            )
+        })
         .collect();
     encoded.sort();
-    encoded.iter().map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>().join("&")
+    encoded
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
-fn canonical_request(request: &SignedRequest<'_>, query: &str, signed_headers: &str, payload_hash: &str) -> Result<String, SigV4Error> {
-    let path = if request.path.is_empty() { "/" } else { request.path };
+fn canonical_request(
+    request: &SignedRequest<'_>,
+    query: &str,
+    signed_headers: &str,
+    payload_hash: &str,
+) -> Result<String, SigV4Error> {
+    let path = if request.path.is_empty() {
+        "/"
+    } else {
+        request.path
+    };
     let mut headers = String::new();
     for name in signed_headers.split(';') {
-        let values: Vec<&str> = request.headers.iter().filter(|(field, _)| field == name).map(|(_, value)| value.as_str()).collect();
+        let values: Vec<&str> = request
+            .headers
+            .iter()
+            .filter(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
+            .collect();
         if values.is_empty() {
             return Err(SigV4Error::Malformed);
         }
-        let joined: Vec<String> = values.iter().map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+        let joined: Vec<String> = values
+            .iter()
+            .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
         headers.push_str(&format!("{name}:{}\n", joined.join(",")));
     }
-    Ok(format!("{}\n{}\n{query}\n{headers}\n{signed_headers}\n{payload_hash}", request.method, uri_encode(&percent_decode(path)?, true)))
+    Ok(format!(
+        "{}\n{}\n{query}\n{headers}\n{signed_headers}\n{payload_hash}",
+        request.method,
+        uri_encode(&percent_decode(path)?, true)
+    ))
 }
 
-fn signature(secret: &str, date: &str, region: &str, service: &str, amz_date: &str, scope: &str, canonical: &str) -> String {
-    let string_to_sign = format!("{ALGORITHM}\n{amz_date}\n{scope}\n{}", hex(&eggdb_crypto::sha256(canonical.as_bytes())));
-    let key = hmac(&hmac(&hmac(&hmac(format!("AWS4{secret}").as_bytes(), date), region), service), "aws4_request");
+fn signature(
+    secret: &str,
+    date: &str,
+    region: &str,
+    service: &str,
+    amz_date: &str,
+    scope: &str,
+    canonical: &str,
+) -> String {
+    let string_to_sign = format!(
+        "{ALGORITHM}\n{amz_date}\n{scope}\n{}",
+        hex(&eggdb_crypto::sha256(canonical.as_bytes()))
+    );
+    let key = hmac(
+        &hmac(
+            &hmac(&hmac(format!("AWS4{secret}").as_bytes(), date), region),
+            service,
+        ),
+        "aws4_request",
+    );
     hex(&hmac(&key, &string_to_sign))
 }
 
@@ -165,7 +222,12 @@ pub fn parse_amz_date(text: &str) -> Option<i64> {
     let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
     let (year, month, day) = (number(0..4)?, number(4..6)?, number(6..8)?);
     let (hour, minute, second) = (number(9..11)?, number(11..13)?, number(13..15)?);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
         return None;
     }
     Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
@@ -185,7 +247,13 @@ fn scope(credential: &str) -> Result<Scope<'_>, SigV4Error> {
     let [date, region, service, "aws4_request"] = parts.as_slice() else {
         return Err(SigV4Error::Malformed);
     };
-    Ok(Scope { access_key, date, region, service, text })
+    Ok(Scope {
+        access_key,
+        date,
+        region,
+        service,
+        text,
+    })
 }
 
 fn payload_hash(request: &SignedRequest<'_>) -> Result<String, SigV4Error> {
@@ -204,15 +272,27 @@ fn payload_hash(request: &SignedRequest<'_>) -> Result<String, SigV4Error> {
 }
 
 fn check_signature(expected: &str, given: &str) -> Result<(), SigV4Error> {
-    if eggdb_crypto::constant_time_eq(expected.as_bytes(), given.as_bytes()) { Ok(()) } else { Err(SigV4Error::SignatureMismatch) }
+    if eggdb_crypto::constant_time_eq(expected.as_bytes(), given.as_bytes()) {
+        Ok(())
+    } else {
+        Err(SigV4Error::SignatureMismatch)
+    }
 }
 
 /// Checks `request`'s signature, in its `Authorization` header or its query, against
 /// `access_key` and `secret`, at the Unix time `now`.
-pub fn verify(request: &SignedRequest<'_>, access_key: &str, secret: &str, now: i64) -> Result<(), SigV4Error> {
+pub fn verify(
+    request: &SignedRequest<'_>,
+    access_key: &str,
+    secret: &str,
+    now: i64,
+) -> Result<(), SigV4Error> {
     let pairs = query_pairs(request.query)?;
     if let Some(authorization) = header(request, "authorization") {
-        let fields = authorization.strip_prefix(ALGORITHM).and_then(|rest| rest.strip_prefix(' ')).ok_or(SigV4Error::Malformed)?;
+        let fields = authorization
+            .strip_prefix(ALGORITHM)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .ok_or(SigV4Error::Malformed)?;
         let mut credential = None;
         let mut signed_headers = None;
         let mut given = None;
@@ -226,7 +306,9 @@ pub fn verify(request: &SignedRequest<'_>, access_key: &str, secret: &str, now: 
                 given = Some(value);
             }
         }
-        let (Some(credential), Some(signed_headers), Some(given)) = (credential, signed_headers, given) else {
+        let (Some(credential), Some(signed_headers), Some(given)) =
+            (credential, signed_headers, given)
+        else {
             return Err(SigV4Error::Malformed);
         };
         let scope = scope(credential)?;
@@ -244,20 +326,42 @@ pub fn verify(request: &SignedRequest<'_>, access_key: &str, secret: &str, now: 
         if !signed_headers.split(';').any(|name| name == "host") {
             return Err(SigV4Error::Malformed);
         }
-        let canonical = canonical_request(request, &canonical_query(&pairs, None), signed_headers, &payload_hash(request)?)?;
-        let expected = signature(secret, scope.date, scope.region, scope.service, amz_date, scope.text, &canonical);
+        let canonical = canonical_request(
+            request,
+            &canonical_query(&pairs, None),
+            signed_headers,
+            &payload_hash(request)?,
+        )?;
+        let expected = signature(
+            secret,
+            scope.date,
+            scope.region,
+            scope.service,
+            amz_date,
+            scope.text,
+            &canonical,
+        );
         return check_signature(&expected, given);
     }
-    let value = |name: &str| pairs.iter().find(|(field, _)| field == name).map(|(_, value)| value.as_str());
+    let value = |name: &str| {
+        pairs
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
+    };
     let Some(algorithm) = value("X-Amz-Algorithm") else {
         return Err(SigV4Error::Missing);
     };
     if algorithm != ALGORITHM {
         return Err(SigV4Error::Malformed);
     }
-    let (Some(credential), Some(amz_date), Some(expires), Some(signed_headers), Some(given)) =
-        (value("X-Amz-Credential"), value("X-Amz-Date"), value("X-Amz-Expires"), value("X-Amz-SignedHeaders"), value("X-Amz-Signature"))
-    else {
+    let (Some(credential), Some(amz_date), Some(expires), Some(signed_headers), Some(given)) = (
+        value("X-Amz-Credential"),
+        value("X-Amz-Date"),
+        value("X-Amz-Expires"),
+        value("X-Amz-SignedHeaders"),
+        value("X-Amz-Signature"),
+    ) else {
         return Err(SigV4Error::Malformed);
     };
     let scope = scope(credential)?;
@@ -266,29 +370,62 @@ pub fn verify(request: &SignedRequest<'_>, access_key: &str, secret: &str, now: 
     }
     let signed_at = parse_amz_date(amz_date).ok_or(SigV4Error::Malformed)?;
     let expires: i64 = expires.parse().map_err(|_| SigV4Error::Malformed)?;
-    if !amz_date.starts_with(scope.date) || scope.date.len() != 8 || !signed_headers.split(';').any(|name| name == "host") {
+    if !amz_date.starts_with(scope.date)
+        || scope.date.len() != 8
+        || !signed_headers.split(';').any(|name| name == "host")
+    {
         return Err(SigV4Error::Malformed);
     }
-    if !(1..=MAX_PRESIGNED_SECONDS).contains(&expires) || now > signed_at + expires || now + MAX_SKEW_SECONDS < signed_at {
+    if !(1..=MAX_PRESIGNED_SECONDS).contains(&expires)
+        || now > signed_at + expires
+        || now + MAX_SKEW_SECONDS < signed_at
+    {
         return Err(SigV4Error::Expired);
     }
-    let canonical = canonical_request(request, &canonical_query(&pairs, Some("X-Amz-Signature")), signed_headers, UNSIGNED_PAYLOAD)?;
-    let expected = signature(secret, scope.date, scope.region, scope.service, amz_date, scope.text, &canonical);
+    let canonical = canonical_request(
+        request,
+        &canonical_query(&pairs, Some("X-Amz-Signature")),
+        signed_headers,
+        UNSIGNED_PAYLOAD,
+    )?;
+    let expected = signature(
+        secret,
+        scope.date,
+        scope.region,
+        scope.service,
+        amz_date,
+        scope.text,
+        &canonical,
+    );
     check_signature(&expected, given)
 }
 
 /// The `Authorization` header value that signs `request` with the headers `signed_headers`
 /// (lower case, `host` and `x-amz-date` among them), for `region` and `service`.
-pub fn authorization(request: &SignedRequest<'_>, signed_headers: &[&str], access_key: &str, secret: &str, region: &str, service: &str) -> Result<String, SigV4Error> {
+pub fn authorization(
+    request: &SignedRequest<'_>,
+    signed_headers: &[&str],
+    access_key: &str,
+    secret: &str,
+    region: &str,
+    service: &str,
+) -> Result<String, SigV4Error> {
     let amz_date = header(request, "x-amz-date").ok_or(SigV4Error::Malformed)?;
     let date = amz_date.get(..8).ok_or(SigV4Error::Malformed)?;
     let scope = format!("{date}/{region}/{service}/aws4_request");
     let mut names: Vec<&str> = signed_headers.to_vec();
     names.sort_unstable();
     let signed = names.join(";");
-    let canonical = canonical_request(request, &canonical_query(&query_pairs(request.query)?, None), &signed, &payload_hash(request)?)?;
+    let canonical = canonical_request(
+        request,
+        &canonical_query(&query_pairs(request.query)?, None),
+        &signed,
+        &payload_hash(request)?,
+    )?;
     let signature = signature(secret, date, region, service, amz_date, &scope, &canonical);
-    Ok(format!("{ALGORITHM} Credential={access_key}/{scope}, SignedHeaders={signed}, Signature={signature}"))
+    Ok(format!(
+        "{ALGORITHM} Credential={access_key}/{scope}, SignedHeaders={signed}, Signature={signature}"
+    ))
 }
 
 /// What a presigned URL allows: one `method` on `path` at `host`, for `region` and `service`,
@@ -317,16 +454,37 @@ pub fn presigned_query(presign: &Presign<'_>, access_key: &str, secret: &str) ->
     let scope = format!("{date}/{}/{}/aws4_request", presign.region, presign.service);
     let pairs = vec![
         ("X-Amz-Algorithm".to_owned(), ALGORITHM.to_owned()),
-        ("X-Amz-Credential".to_owned(), format!("{access_key}/{scope}")),
+        (
+            "X-Amz-Credential".to_owned(),
+            format!("{access_key}/{scope}"),
+        ),
         ("X-Amz-Date".to_owned(), presign.amz_date.to_owned()),
-        ("X-Amz-Expires".to_owned(), presign.expires_seconds.to_string()),
+        (
+            "X-Amz-Expires".to_owned(),
+            presign.expires_seconds.to_string(),
+        ),
         ("X-Amz-SignedHeaders".to_owned(), "host".to_owned()),
     ];
     let query = canonical_query(&pairs, None);
     let headers = [("host".to_owned(), presign.host.to_owned())];
-    let request = SignedRequest { method: presign.method, path: presign.path, query: Some(&query), headers: &headers, body: &[] };
-    let canonical = canonical_request(&request, &query, "host", UNSIGNED_PAYLOAD).unwrap_or_default();
-    let signature = signature(secret, date, presign.region, presign.service, presign.amz_date, &scope, &canonical);
+    let request = SignedRequest {
+        method: presign.method,
+        path: presign.path,
+        query: Some(&query),
+        headers: &headers,
+        body: &[],
+    };
+    let canonical =
+        canonical_request(&request, &query, "host", UNSIGNED_PAYLOAD).unwrap_or_default();
+    let signature = signature(
+        secret,
+        date,
+        presign.region,
+        presign.service,
+        presign.amz_date,
+        &scope,
+        &canonical,
+    );
     format!("{query}&X-Amz-Signature={signature}")
 }
 
@@ -356,11 +514,16 @@ pub fn utc_time(unix: i64) -> UtcTime {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_index = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
     UtcTime {
         year: year_of_era + era * 400 + i64::from(month <= 2),
         month,
@@ -375,7 +538,10 @@ pub fn utc_time(unix: i64) -> UtcTime {
 /// The Unix time `unix` as an ISO 8601 basic timestamp, `YYYYMMDDTHHMMSSZ`.
 pub fn format_amz_date(unix: i64) -> String {
     let time = utc_time(unix);
-    format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", time.year, time.month, time.day, time.hour, time.minute, time.second)
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        time.year, time.month, time.day, time.hour, time.minute, time.second
+    )
 }
 
 #[cfg(test)]
@@ -385,41 +551,133 @@ mod tests {
     const NOW: i64 = 1_440_938_160;
 
     fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect()
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
     }
 
     #[test]
     fn the_aws_get_vanilla_example_signs_as_documented() {
-        let fields = headers(&[("host", "example.amazonaws.com"), ("x-amz-date", "20150830T123600Z")]);
-        let request = SignedRequest { method: "GET", path: "/", query: None, headers: &fields, body: b"" };
-        let authorization = authorization(&request, &["host", "x-amz-date"], "AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", "us-east-1", "service").unwrap();
+        let fields = headers(&[
+            ("host", "example.amazonaws.com"),
+            ("x-amz-date", "20150830T123600Z"),
+        ]);
+        let request = SignedRequest {
+            method: "GET",
+            path: "/",
+            query: None,
+            headers: &fields,
+            body: b"",
+        };
+        let authorization = authorization(
+            &request,
+            &["host", "x-amz-date"],
+            "AKIDEXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "us-east-1",
+            "service",
+        )
+        .unwrap();
         assert_eq!(
             authorization,
             "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
         );
         let mut signed = fields.clone();
         signed.push(("authorization".to_owned(), authorization));
-        let request = SignedRequest { headers: &signed, ..request };
-        assert_eq!(verify(&request, "AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", NOW), Ok(()));
-        assert_eq!(verify(&request, "AKIDEXAMPLE", "other", NOW), Err(SigV4Error::SignatureMismatch));
-        assert_eq!(verify(&request, "SOMEONE", "x", NOW), Err(SigV4Error::UnknownAccessKey));
-        assert_eq!(verify(&request, "AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", NOW + 3600), Err(SigV4Error::TimeSkewed));
+        let request = SignedRequest {
+            headers: &signed,
+            ..request
+        };
+        assert_eq!(
+            verify(
+                &request,
+                "AKIDEXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                NOW
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            verify(&request, "AKIDEXAMPLE", "other", NOW),
+            Err(SigV4Error::SignatureMismatch)
+        );
+        assert_eq!(
+            verify(&request, "SOMEONE", "x", NOW),
+            Err(SigV4Error::UnknownAccessKey)
+        );
+        assert_eq!(
+            verify(
+                &request,
+                "AKIDEXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                NOW + 3600
+            ),
+            Err(SigV4Error::TimeSkewed)
+        );
     }
 
     #[test]
     fn payload_hashes_are_checked_and_presigned_urls_expire() {
-        let fields = headers(&[("host", "h"), ("x-amz-date", "20150830T123600Z"), ("x-amz-content-sha256", "00")]);
-        let request = SignedRequest { method: "PUT", path: "/b/k", query: None, headers: &fields, body: b"data" };
-        assert_eq!(authorization(&request, &["host"], "a", "s", "r", "s3"), Err(SigV4Error::PayloadMismatch));
-        let presign = Presign { method: "GET", path: "/bucket/a%20key", host: "h", region: "us-east-1", service: "s3", amz_date: "20150830T123600Z", expires_seconds: 60 };
+        let fields = headers(&[
+            ("host", "h"),
+            ("x-amz-date", "20150830T123600Z"),
+            ("x-amz-content-sha256", "00"),
+        ]);
+        let request = SignedRequest {
+            method: "PUT",
+            path: "/b/k",
+            query: None,
+            headers: &fields,
+            body: b"data",
+        };
+        assert_eq!(
+            authorization(&request, &["host"], "a", "s", "r", "s3"),
+            Err(SigV4Error::PayloadMismatch)
+        );
+        let presign = Presign {
+            method: "GET",
+            path: "/bucket/a%20key",
+            host: "h",
+            region: "us-east-1",
+            service: "s3",
+            amz_date: "20150830T123600Z",
+            expires_seconds: 60,
+        };
         let query = presigned_query(&presign, "a", "s");
         let fields = headers(&[("host", "h")]);
-        let request = SignedRequest { method: "GET", path: "/bucket/a%20key", query: Some(&query), headers: &fields, body: b"" };
+        let request = SignedRequest {
+            method: "GET",
+            path: "/bucket/a%20key",
+            query: Some(&query),
+            headers: &fields,
+            body: b"",
+        };
         assert_eq!(verify(&request, "a", "s", NOW), Ok(()));
-        assert_eq!(verify(&request, "a", "s", NOW + 61), Err(SigV4Error::Expired));
-        let tampered = SignedRequest { path: "/bucket/other", ..request };
-        assert_eq!(verify(&tampered, "a", "s", NOW), Err(SigV4Error::SignatureMismatch));
-        assert_eq!(verify(&SignedRequest { query: None, ..request }, "a", "s", NOW), Err(SigV4Error::Missing));
+        assert_eq!(
+            verify(&request, "a", "s", NOW + 61),
+            Err(SigV4Error::Expired)
+        );
+        let tampered = SignedRequest {
+            path: "/bucket/other",
+            ..request
+        };
+        assert_eq!(
+            verify(&tampered, "a", "s", NOW),
+            Err(SigV4Error::SignatureMismatch)
+        );
+        assert_eq!(
+            verify(
+                &SignedRequest {
+                    query: None,
+                    ..request
+                },
+                "a",
+                "s",
+                NOW
+            ),
+            Err(SigV4Error::Missing)
+        );
         assert_eq!(parse_amz_date("19700101T000000Z"), Some(0));
         assert_eq!(parse_amz_date("20150830T123600Z"), Some(NOW));
         assert_eq!(parse_amz_date("2015-08-30"), None);

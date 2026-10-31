@@ -11,7 +11,10 @@ fn string(out: &mut Vec<u8>, text: &str) {
     out.push(0);
 }
 
-fn entries<'e>(out: &mut Vec<u8>, entries: impl Iterator<Item = (std::borrow::Cow<'e, str>, &'e Bson)>) {
+fn entries<'e>(
+    out: &mut Vec<u8>,
+    entries: impl Iterator<Item = (std::borrow::Cow<'e, str>, &'e Bson)>,
+) {
     let start = out.len();
     out.extend_from_slice(&[0; 4]);
     for (name, value) in entries {
@@ -39,7 +42,10 @@ fn write_value(out: &mut Vec<u8>, value: &Bson) {
         Bson::Document(document) => document.write(out),
         Bson::Array(items) => entries(
             out,
-            items.iter().enumerate().map(|(at, item)| (std::borrow::Cow::Owned(at.to_string()), item)),
+            items
+                .iter()
+                .enumerate()
+                .map(|(at, item)| (std::borrow::Cow::Owned(at.to_string()), item)),
         ),
         Bson::Binary { subtype, bytes } => {
             out.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
@@ -80,7 +86,11 @@ impl Document {
     /// Appends the document's BSON bytes to `out`. A NUL inside a name or a regular expression,
     /// which BSON cannot hold there, is left out.
     pub fn write(&self, out: &mut Vec<u8>) {
-        entries(out, self.iter().map(|(name, value)| (std::borrow::Cow::Borrowed(name.as_str()), value)));
+        entries(
+            out,
+            self.iter()
+                .map(|(name, value)| (std::borrow::Cow::Borrowed(name.as_str()), value)),
+        );
     }
 
     /// The document's BSON bytes.

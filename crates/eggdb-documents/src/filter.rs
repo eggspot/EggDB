@@ -70,21 +70,30 @@ pub enum Condition {
 }
 
 fn is_operator_document(value: &Bson) -> bool {
-    value.as_document().and_then(Document::first).is_some_and(|(name, _)| name.starts_with('$'))
+    value
+        .as_document()
+        .and_then(Document::first)
+        .is_some_and(|(name, _)| name.starts_with('$'))
 }
 
 fn filters_of(value: &Bson, operator: &str, depth: usize) -> DocumentResult<Vec<Filter>> {
     let Bson::Array(items) = value else {
-        return Err(DocumentError::bad_value(format!("{operator} must be an array")));
+        return Err(DocumentError::bad_value(format!(
+            "{operator} must be an array"
+        )));
     };
     if items.is_empty() {
-        return Err(DocumentError::bad_value(format!("{operator} argument must be a non-empty array")));
+        return Err(DocumentError::bad_value(format!(
+            "{operator} argument must be a non-empty array"
+        )));
     }
     items
         .iter()
         .map(|item| match item {
             Bson::Document(document) => parse_at(document, depth + 1),
-            _ => Err(DocumentError::bad_value(format!("{operator} argument's entries must be objects"))),
+            _ => Err(DocumentError::bad_value(format!(
+                "{operator} argument's entries must be objects"
+            ))),
         })
         .collect()
 }
@@ -106,23 +115,36 @@ fn parse_at(filter: &Document, depth: usize) -> DocumentResult<Filter> {
             "$nor" => all.push(Filter::Nor(filters_of(value, "$nor", depth)?)),
             "$comment" => {}
             "$where" | "$expr" | "$text" | "$jsonSchema" => {
-                return Err(DocumentError::not_implemented(format!("{name} is not supported yet")));
+                return Err(DocumentError::not_implemented(format!(
+                    "{name} is not supported yet"
+                )));
             }
             other if other.starts_with('$') => {
-                return Err(DocumentError::bad_value(format!("unknown top level operator: {other}")));
+                return Err(DocumentError::bad_value(format!(
+                    "unknown top level operator: {other}"
+                )));
             }
-            path => all.push(Filter::Field { path: path.to_owned(), condition: parse_condition(value, depth)? }),
+            path => all.push(Filter::Field {
+                path: path.to_owned(),
+                condition: parse_condition(value, depth)?,
+            }),
         }
     }
-    Ok(if all.len() == 1 { all.remove(0) } else { Filter::And(all) })
+    Ok(if all.len() == 1 {
+        all.remove(0)
+    } else {
+        Filter::And(all)
+    })
 }
 
 fn number_of(value: &Bson, operator: &str) -> DocumentResult<i64> {
     match value {
-        Bson::Double(number) if number.fract() != 0.0 => {
-            Err(DocumentError::bad_value(format!("{operator} must be a whole number")))
-        }
-        other => other.as_i64().ok_or_else(|| DocumentError::bad_value(format!("{operator} needs a number"))),
+        Bson::Double(number) if number.fract() != 0.0 => Err(DocumentError::bad_value(format!(
+            "{operator} must be a whole number"
+        ))),
+        other => other
+            .as_i64()
+            .ok_or_else(|| DocumentError::bad_value(format!("{operator} needs a number"))),
     }
 }
 
@@ -161,7 +183,9 @@ fn type_code(value: &Bson) -> DocumentResult<i32> {
 fn array_of(value: &Bson, operator: &str) -> DocumentResult<Vec<Bson>> {
     match value {
         Bson::Array(items) => Ok(items.clone()),
-        _ => Err(DocumentError::bad_value(format!("{operator} needs an array"))),
+        _ => Err(DocumentError::bad_value(format!(
+            "{operator} needs an array"
+        ))),
     }
 }
 
@@ -171,7 +195,10 @@ fn parse_condition(value: &Bson, depth: usize) -> DocumentResult<Condition> {
     }
     let Some(operators) = value.as_document().filter(|_| is_operator_document(value)) else {
         return Ok(match value {
-            Bson::Regex { pattern, options } => Condition::Regex { pattern: pattern.clone(), options: options.clone() },
+            Bson::Regex { pattern, options } => Condition::Regex {
+                pattern: pattern.clone(),
+                options: options.clone(),
+            },
             other => Condition::Eq(other.clone()),
         });
     };
@@ -229,7 +256,9 @@ fn parse_condition(value: &Bson, depth: usize) -> DocumentResult<Condition> {
             "$mod" => {
                 let items = array_of(argument, "$mod")?;
                 let [divisor, remainder] = items.as_slice() else {
-                    return Err(DocumentError::bad_value("malformed mod, not enough elements"));
+                    return Err(DocumentError::bad_value(
+                        "malformed mod, not enough elements",
+                    ));
                 };
                 let divisor = number_of(divisor, "$mod")?;
                 if divisor == 0 {
@@ -238,24 +267,35 @@ fn parse_condition(value: &Bson, depth: usize) -> DocumentResult<Condition> {
                 Condition::Mod(divisor, number_of(remainder, "$mod")?)
             }
             "$not" => match argument {
-                Bson::Regex { pattern, options } => {
-                    Condition::Not(Box::new(Condition::Regex { pattern: pattern.clone(), options: options.clone() }))
-                }
+                Bson::Regex { pattern, options } => Condition::Not(Box::new(Condition::Regex {
+                    pattern: pattern.clone(),
+                    options: options.clone(),
+                })),
                 Bson::Document(inner) if is_operator_document(argument) && !inner.is_empty() => {
                     Condition::Not(Box::new(parse_condition(argument, depth + 1)?))
                 }
                 _ => return Err(DocumentError::bad_value("$not needs a regex or a document")),
             },
-            other => return Err(DocumentError::bad_value(format!("unknown operator: {other}"))),
+            other => {
+                return Err(DocumentError::bad_value(format!(
+                    "unknown operator: {other}"
+                )));
+            }
         };
         conditions.push(condition);
     }
-    Ok(if conditions.len() == 1 { conditions.remove(0) } else { Condition::Every(conditions) })
+    Ok(if conditions.len() == 1 {
+        conditions.remove(0)
+    } else {
+        Condition::Every(conditions)
+    })
 }
 
 fn equal(value: &Bson, wanted: &Bson) -> bool {
     match wanted {
-        Bson::Regex { pattern, options } if !matches!(value, Bson::Regex { .. }) => regex_matches(value, pattern, options),
+        Bson::Regex { pattern, options } if !matches!(value, Bson::Regex { .. }) => {
+            regex_matches(value, pattern, options)
+        }
         _ => compare(value, wanted) == Ordering::Equal,
     }
 }
@@ -265,14 +305,20 @@ fn regex_matches(value: &Bson, pattern: &str, options: &str) -> bool {
         Bson::String(text) | Bson::Symbol(text) => {
             eggdb_sql::regex_matches_with_flags(text, pattern, options).unwrap_or(false)
         }
-        Bson::Regex { pattern: stored, options: stored_options } => stored == pattern && stored_options == options,
+        Bson::Regex {
+            pattern: stored,
+            options: stored_options,
+        } => stored == pattern && stored_options == options,
         _ => false,
     }
 }
 
 fn ordered(value: &Bson, bound: &Bson, accept: fn(Ordering) -> bool) -> bool {
     let same_kind = type_rank(value) == type_rank(bound)
-        || matches!((value, bound), (Bson::MinKey | Bson::MaxKey, _) | (_, Bson::MinKey | Bson::MaxKey));
+        || matches!(
+            (value, bound),
+            (Bson::MinKey | Bson::MaxKey, _) | (_, Bson::MinKey | Bson::MaxKey)
+        );
     same_kind && accept(compare(value, bound))
 }
 
@@ -298,36 +344,59 @@ fn any_leaf(reached: &[Reached<'_>], test: impl Fn(Option<&Bson>) -> bool) -> bo
 
 fn condition_holds(condition: &Condition, reached: &[Reached<'_>]) -> bool {
     match condition {
-        Condition::Eq(Bson::Null) => any_leaf(reached, |value| matches!(value, None | Some(Bson::Null | Bson::Undefined))),
-        Condition::Eq(wanted) => any_leaf(reached, |value| value.is_some_and(|value| equal(value, wanted))),
+        Condition::Eq(Bson::Null) => any_leaf(reached, |value| {
+            matches!(value, None | Some(Bson::Null | Bson::Undefined))
+        }),
+        Condition::Eq(wanted) => any_leaf(reached, |value| {
+            value.is_some_and(|value| equal(value, wanted))
+        }),
         Condition::Ne(wanted) => !condition_holds(&Condition::Eq(wanted.clone()), reached),
-        Condition::Gt(bound) => any_leaf(reached, |value| value.is_some_and(|value| ordered(value, bound, Ordering::is_gt))),
+        Condition::Gt(bound) => any_leaf(reached, |value| {
+            value.is_some_and(|value| ordered(value, bound, Ordering::is_gt))
+        }),
         Condition::Gte(bound) => {
             (matches!(bound, Bson::Null) && condition_holds(&Condition::Eq(Bson::Null), reached))
-                || any_leaf(reached, |value| value.is_some_and(|value| ordered(value, bound, Ordering::is_ge)))
+                || any_leaf(reached, |value| {
+                    value.is_some_and(|value| ordered(value, bound, Ordering::is_ge))
+                })
         }
-        Condition::Lt(bound) => any_leaf(reached, |value| value.is_some_and(|value| ordered(value, bound, Ordering::is_lt))),
+        Condition::Lt(bound) => any_leaf(reached, |value| {
+            value.is_some_and(|value| ordered(value, bound, Ordering::is_lt))
+        }),
         Condition::Lte(bound) => {
             (matches!(bound, Bson::Null) && condition_holds(&Condition::Eq(Bson::Null), reached))
-                || any_leaf(reached, |value| value.is_some_and(|value| ordered(value, bound, Ordering::is_le)))
+                || any_leaf(reached, |value| {
+                    value.is_some_and(|value| ordered(value, bound, Ordering::is_le))
+                })
         }
-        Condition::In(values) => values.iter().any(|wanted| condition_holds(&Condition::Eq(wanted.clone()), reached)),
+        Condition::In(values) => values
+            .iter()
+            .any(|wanted| condition_holds(&Condition::Eq(wanted.clone()), reached)),
         Condition::Nin(values) => !condition_holds(&Condition::In(values.clone()), reached),
-        Condition::Exists(wanted) => reached.iter().any(|item| matches!(item, Reached::Value(_))) == *wanted,
-        Condition::Type(codes) => any_leaf(reached, |value| {
-            value.is_some_and(|value| {
-                codes.iter().any(|code| *code == value.type_number() || (*code == 0 && value.is_number()))
-            })
-        }) || reached.iter().any(|item| matches!(item, Reached::Value(Bson::Array(_))) && codes.contains(&4)),
-        Condition::Regex { pattern, options } => {
-            any_leaf(reached, |value| value.is_some_and(|value| regex_matches(value, pattern, options)))
+        Condition::Exists(wanted) => {
+            reached.iter().any(|item| matches!(item, Reached::Value(_))) == *wanted
         }
+        Condition::Type(codes) => {
+            any_leaf(reached, |value| {
+                value.is_some_and(|value| {
+                    codes.iter().any(|code| {
+                        *code == value.type_number() || (*code == 0 && value.is_number())
+                    })
+                })
+            }) || reached
+                .iter()
+                .any(|item| matches!(item, Reached::Value(Bson::Array(_))) && codes.contains(&4))
+        }
+        Condition::Regex { pattern, options } => any_leaf(reached, |value| {
+            value.is_some_and(|value| regex_matches(value, pattern, options))
+        }),
         Condition::Size(length) => arrays(reached).any(|items| items.len() as i64 == *length),
         Condition::All(values) => {
             !values.is_empty()
                 && values.iter().all(|wanted| match wanted {
                     Bson::Document(inner) if inner.get("$elemMatch").is_some() => {
-                        parse_condition(wanted, 1).is_ok_and(|condition| condition_holds(&condition, reached))
+                        parse_condition(wanted, 1)
+                            .is_ok_and(|condition| condition_holds(&condition, reached))
                     }
                     _ => condition_holds(&Condition::Eq(wanted.clone()), reached),
                 })
@@ -335,7 +404,9 @@ fn condition_holds(condition: &Condition, reached: &[Reached<'_>]) -> bool {
         Condition::ElemMatchValue(conditions) => arrays(reached).any(|items| {
             items.iter().any(|item| {
                 let one = [Reached::Value(item)];
-                conditions.iter().all(|condition| condition_holds(condition, &one))
+                conditions
+                    .iter()
+                    .all(|condition| condition_holds(condition, &one))
             })
         }),
         Condition::ElemMatchDocument(filter) => arrays(reached).any(|items| {
@@ -345,12 +416,17 @@ fn condition_holds(condition: &Condition, reached: &[Reached<'_>]) -> bool {
             })
         }),
         Condition::Mod(divisor, remainder) => any_leaf(reached, |value| {
-            value.and_then(|value| value.as_f64()).is_some_and(|number| {
-                number.is_finite() && (number.trunc() as i64).wrapping_rem(*divisor) == *remainder
-            })
+            value
+                .and_then(|value| value.as_f64())
+                .is_some_and(|number| {
+                    number.is_finite()
+                        && (number.trunc() as i64).wrapping_rem(*divisor) == *remainder
+                })
         }),
         Condition::Not(inner) => !condition_holds(inner, reached),
-        Condition::Every(conditions) => conditions.iter().all(|condition| condition_holds(condition, reached)),
+        Condition::Every(conditions) => conditions
+            .iter()
+            .all(|condition| condition_holds(condition, reached)),
     }
 }
 
@@ -375,7 +451,17 @@ pub fn matches(filter: &Filter, document: &Document) -> bool {
 /// one document instead of scanning.
 pub fn only_id(filter: &Filter) -> Option<&Bson> {
     match filter {
-        Filter::Field { path, condition: Condition::Eq(value) } if path == "_id" && !matches!(value, Bson::Regex { .. } | Bson::Document(_) | Bson::Array(_) | Bson::Null) => Some(value),
+        Filter::Field {
+            path,
+            condition: Condition::Eq(value),
+        } if path == "_id"
+            && !matches!(
+                value,
+                Bson::Regex { .. } | Bson::Document(_) | Bson::Array(_) | Bson::Null
+            ) =>
+        {
+            Some(value)
+        }
         _ => None,
     }
 }

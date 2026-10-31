@@ -582,10 +582,7 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
         .iter()
         .map(|consequence| (consequence.line, consequence.uses.as_str()))
         .collect();
-    assert_eq!(
-        consequences,
-        [(139, "materialized view public.counts")]
-    );
+    assert_eq!(consequences, [(139, "materialized view public.counts")]);
     let ignored = &report.ignored;
     assert_eq!((ignored.owner_to, ignored.grant, ignored.revoke), (5, 1, 1));
     assert_eq!(ignored.set, ["default_toast_compression"]);
@@ -605,7 +602,11 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
         .collect();
     assert_eq!(
         rows,
-        [("public.people", 2), ("public.feelings", 1), ("shop.items", 2)]
+        [
+            ("public.people", 2),
+            ("public.feelings", 1),
+            ("shop.items", 2)
+        ]
     );
     assert_eq!(
         query(&store, "SELECT id, feeling FROM public.feelings"),

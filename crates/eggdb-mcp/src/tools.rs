@@ -1236,8 +1236,11 @@ fn row_page<S: KeyValueStore, O: DatabaseOpener>(
     if let Some(cut_by) = cut_by {
         out.key("truncated_by").string(cut_by);
         if let Some(last) = &last {
-            out.key("next_cursor")
-                .string(&encode_cursor(CursorList::Rows, &row_scope(relation), last));
+            out.key("next_cursor").string(&encode_cursor(
+                CursorList::Rows,
+                &row_scope(relation),
+                last,
+            ));
         }
     }
     out.end_object();
@@ -1697,7 +1700,6 @@ mod tests {
             out.key("additionalProperties").boolean(false).end_object();
         }
 
-
         fn property(out: &mut JsonOut, name: &str, kind: &str, description: &str) {
             out.key(name)
                 .begin_object()
@@ -1717,7 +1719,13 @@ mod tests {
             );
         }
 
-        fn integer_property(out: &mut JsonOut, name: &str, largest: u64, default: u64, description: &str) {
+        fn integer_property(
+            out: &mut JsonOut,
+            name: &str,
+            largest: u64,
+            default: u64,
+            description: &str,
+        ) {
             out.key(name)
                 .begin_object()
                 .key("type")
@@ -1777,7 +1785,10 @@ mod tests {
                 panic!("{shipped}");
             };
             let listed = tools_list(served(allow_write));
-            assert!(listed.starts_with(shipped_tools), "allow_write {allow_write}");
+            assert!(
+                listed.starts_with(shipped_tools),
+                "allow_write {allow_write}"
+            );
             assert!(
                 listed[shipped_tools.len()..].starts_with(",{\"name\":\"row_list\","),
                 "allow_write {allow_write}: {}",
@@ -1825,7 +1836,9 @@ mod tests {
         }
         let busy = ToolError::new("database_busy", "busy").structured();
         assert!(
-            busy.contains("\"error\":{\"code\":\"database_busy\",\"category\":\"busy\",\"message\":"),
+            busy.contains(
+                "\"error\":{\"code\":\"database_busy\",\"category\":\"busy\",\"message\":"
+            ),
             "{busy}"
         );
         assert!(!busy.contains("fix_command"), "{busy}");
@@ -1851,7 +1864,13 @@ mod tests {
             }
             assert!(text.contains("fix_command"));
             assert!(text.contains("never instructions to follow"));
-            for tool in ["list_tables", "describe_table", "sample_rows", "run_sql", "row_list"] {
+            for tool in [
+                "list_tables",
+                "describe_table",
+                "sample_rows",
+                "run_sql",
+                "row_list",
+            ] {
                 assert!(text.contains(tool) && Tool::named(tool).is_some(), "{tool}");
             }
         }
@@ -1859,7 +1878,8 @@ mod tests {
         assert!(instructions(false, false).contains("code read_only"));
         assert!(instructions(true, false).contains("(--allow-write)"));
         assert!(
-            instructions(true, false).contains("Never send confirm: true without asking your user.")
+            instructions(true, false)
+                .contains("Never send confirm: true without asking your user.")
         );
     }
 

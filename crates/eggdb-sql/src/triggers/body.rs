@@ -88,10 +88,21 @@ impl TriggerFrame {
         }
     }
 
-    pub(crate) fn reference(&self, qualifier: &str, column: &str, position: usize) -> SqlResult<Expr> {
-        let row = if qualifier == "new" { &self.new } else { &self.old };
+    pub(crate) fn reference(
+        &self,
+        qualifier: &str,
+        column: &str,
+        position: usize,
+    ) -> SqlResult<Expr> {
+        let row = if qualifier == "new" {
+            &self.new
+        } else {
+            &self.old
+        };
         let Some(row) = row else {
-            return Err(errors::missing_row(qualifier, column, self.dialect, self.event()).at(position));
+            return Err(
+                errors::missing_row(qualifier, column, self.dialect, self.event()).at(position),
+            );
         };
         let Some(index) = self
             .columns
@@ -300,7 +311,11 @@ impl Run<'_> {
                 default,
             } => {
                 let value = match default {
-                    Some(at) => convert(self.value(text, tokens, *at)?, *sql_type, Conversion::Assignment)?,
+                    Some(at) => convert(
+                        self.value(text, tokens, *at)?,
+                        *sql_type,
+                        Conversion::Assignment,
+                    )?,
                     None => Value::Null,
                 };
                 for name in names {
@@ -356,8 +371,8 @@ impl Run<'_> {
         if signal.state.starts_with("01") {
             return Ok(());
         }
-        let state =
-            SqlState::from_text(&signal.state).ok_or_else(|| errors::bad_signal_state(&signal.state))?;
+        let state = SqlState::from_text(&signal.state)
+            .ok_or_else(|| errors::bad_signal_state(&signal.state))?;
         let message = match signal.message {
             Some(at) => self.value(text, tokens, at)?.to_text(),
             None => None,
@@ -446,7 +461,13 @@ impl Run<'_> {
             .with_trigger_frame(&self.frame)
             .resuming_at((at, 0))
             .statement()?;
-        run_statement(self.writer, self.tables, self.settings, statement, self.dialect)
+        run_statement(
+            self.writer,
+            self.tables,
+            self.settings,
+            statement,
+            self.dialect,
+        )
     }
 }
 
@@ -483,7 +504,9 @@ fn run_statement(
             binding.query(&*writer, tables, &mut query)?;
             execute::query(&*writer, tables, &query, false).map(drop)
         }
-        Statement::With(with) => crate::with_statement::run(writer, tables, &with, &binding).map(drop),
+        Statement::With(with) => {
+            crate::with_statement::run(writer, tables, &with, &binding).map(drop)
+        }
         _ => Err(errors::not_in_trigger("this statement", dialect)),
     }
 }

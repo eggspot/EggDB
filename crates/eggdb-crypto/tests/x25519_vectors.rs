@@ -71,8 +71,14 @@ fn the_diffie_hellman_example_of_rfc_7748_section_6_1_agrees() {
         "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"
     );
     let shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
-    assert_eq!(hex(&x25519_shared_secret(&alice, &bob_public).unwrap()), shared);
-    assert_eq!(hex(&x25519_shared_secret(&bob, &alice_public).unwrap()), shared);
+    assert_eq!(
+        hex(&x25519_shared_secret(&alice, &bob_public).unwrap()),
+        shared
+    );
+    assert_eq!(
+        hex(&x25519_shared_secret(&bob, &alice_public).unwrap()),
+        shared
+    );
 }
 
 #[test]
@@ -93,7 +99,11 @@ fn x25519_passes_every_wycheproof_case_and_refuses_low_order_points() {
         if zero == "zero" {
             assert_eq!(outcome, Err(X25519LowOrderPoint), "case {id}");
         } else {
-            assert_eq!(outcome.map(|secret| hex(&secret)), Ok(shared.to_string()), "case {id}");
+            assert_eq!(
+                outcome.map(|secret| hex(&secret)),
+                Ok(shared.to_string()),
+                "case {id}"
+            );
         }
         checked += 1;
     }

@@ -327,8 +327,14 @@ impl BTree {
         written: OverflowReference,
         hint: &mut AppendHint,
     ) -> Result<(), StorageError> {
-        self.store_in(cache, key, EntryValue::Written(written), Existing::Replace, hint)
-            .map(|_| ())
+        self.store_in(
+            cache,
+            key,
+            EntryValue::Written(written),
+            Existing::Replace,
+            hint,
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn put_if_absent_hinted<F: File>(

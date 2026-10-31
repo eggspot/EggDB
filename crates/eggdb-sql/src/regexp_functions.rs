@@ -5,6 +5,8 @@ use crate::eval::Evaluator;
 use crate::regex::{OptionLetter, Options, Regex, Span, compiled_with};
 use crate::types::{SqlType, Value};
 
+type Matched = (Vec<char>, Option<Vec<Option<Span>>>);
+
 pub(crate) const FUNCTIONS: [&str; 9] = [
     "regexp_like",
     "regexp_match",
@@ -112,7 +114,9 @@ fn text_array(items: Vec<Value>) -> SqlResult<Value> {
 
 fn captured(regex: &Regex, chars: &[char], spans: &[Option<Span>]) -> SqlResult<Value> {
     if regex.groups() == 0 {
-        return text_array(vec![Value::Text(whole(spans).map_or_else(String::new, |span| piece(chars, span)))]);
+        return text_array(vec![Value::Text(
+            whole(spans).map_or_else(String::new, |span| piece(chars, span)),
+        )]);
     }
     let items = spans
         .iter()
@@ -239,9 +243,7 @@ pub(crate) fn split_rows(
 
 fn split_to_array(values: &[Value]) -> Option<SqlResult<Value>> {
     let (text, pattern, flags) = three_texts(values)?;
-    Some(
-        split_pieces(text, pattern, flags, "regexp_split_to_array").and_then(text_array),
-    )
+    Some(split_pieces(text, pattern, flags, "regexp_split_to_array").and_then(text_array))
 }
 
 fn replacement(
@@ -373,10 +375,7 @@ struct Search<'v> {
     group: i64,
 }
 
-fn search_arguments<'v>(
-    values: &'v [Value],
-    layout: &[&str],
-) -> Option<SqlResult<Search<'v>>> {
+fn search_arguments<'v>(values: &'v [Value], layout: &[&str]) -> Option<SqlResult<Search<'v>>> {
     let mut search = Search {
         text: values.first()?.character_text()?,
         pattern: values.get(1)?.character_text()?,
@@ -424,10 +423,7 @@ fn search_arguments<'v>(
     Some(Ok(search))
 }
 
-fn nth_match(
-    function: &str,
-    search: &Search<'_>,
-) -> SqlResult<(Vec<char>, Option<Vec<Option<Span>>>)> {
+fn nth_match(function: &str, search: &Search<'_>) -> SqlResult<Matched> {
     let options = single_match_flags(function, search.flags, None)?;
     let regex = compiled_with(search.pattern, options)?;
     let chars = chars_of(search.text);
@@ -510,11 +506,10 @@ fn escape_character(value: Option<&Value>) -> SqlResult<Option<char>> {
     match (characters.next(), characters.next()) {
         (None, _) => Ok(None),
         (Some(only), None) => Ok(Some(only)),
-        _ => Err(SqlError::new(
-            SqlState::INVALID_ESCAPE_SEQUENCE,
-            "invalid escape string",
-        )
-        .with_hint("Escape string must be empty or one character.")),
+        _ => Err(
+            SqlError::new(SqlState::INVALID_ESCAPE_SEQUENCE, "invalid escape string")
+                .with_hint("Escape string must be empty or one character."),
+        ),
     }
 }
 
@@ -555,11 +550,10 @@ fn separated_parts(pattern: &str, escape: Option<char>) -> SqlResult<Vec<String>
         }
     }
     if after_escape {
-        return Err(SqlError::new(
-            SqlState::INVALID_ESCAPE_SEQUENCE,
-            "invalid escape string",
-        )
-        .with_hint("Escape string must be empty or one character."));
+        return Err(
+            SqlError::new(SqlState::INVALID_ESCAPE_SEQUENCE, "invalid escape string")
+                .with_hint("Escape string must be empty or one character."),
+        );
     }
     Ok(parts)
 }
@@ -716,10 +710,7 @@ fn is_pattern_argument(evaluator: &Evaluator<'_>, expr: &Expr) -> bool {
     }
 }
 
-pub(crate) fn substring(
-    evaluator: &Evaluator<'_>,
-    arguments: &[Expr],
-) -> Option<SqlResult<Value>> {
+pub(crate) fn substring(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> Option<SqlResult<Value>> {
     let (text, pattern, escape) = match arguments {
         [text, pattern] => (text, pattern, None),
         [text, pattern, escape] => (text, pattern, Some(escape)),
@@ -786,11 +777,20 @@ mod tests {
 
     #[test]
     fn the_manuals_regexp_examples_give_its_results() {
-        assert_eq!(call("regexp_match", &["foobarbequebaz", "bar.*que"]), "{barbeque}");
-        assert_eq!(call("regexp_match", &["foobarbequebaz", "(bar)(beque)"]), "{bar,beque}");
+        assert_eq!(
+            call("regexp_match", &["foobarbequebaz", "bar.*que"]),
+            "{barbeque}"
+        );
+        assert_eq!(
+            call("regexp_match", &["foobarbequebaz", "(bar)(beque)"]),
+            "{bar,beque}"
+        );
         assert_eq!(call("regexp_match", &["foobarbequebaz", "x"]), "NULL");
         assert_eq!(call("regexp_replace", &["Thomas", ".[mN]a.", "M"]), "ThM");
-        assert_eq!(call("regexp_replace", &["foobarbaz", "b(..)", "X\\1Y", "g"]), "fooXarYXazY");
+        assert_eq!(
+            call("regexp_replace", &["foobarbaz", "b(..)", "X\\1Y", "g"]),
+            "fooXarYXazY"
+        );
         assert_eq!(
             call("regexp_split_to_array", &["hello world", "\\s+"]),
             "{hello,world}"
@@ -829,24 +829,49 @@ mod tests {
             Value::Integer(2),
         ];
         assert_eq!(text(function("regexp_substr", &values).unwrap()), "FGH");
-        let values = [Value::Text("x".into()), Value::Text("x".into()), Value::Integer(0)];
-        assert_eq!(text(function("regexp_count", &values).unwrap()), "error 22023");
+        let values = [
+            Value::Text("x".into()),
+            Value::Text("x".into()),
+            Value::Integer(0),
+        ];
+        assert_eq!(
+            text(function("regexp_count", &values).unwrap()),
+            "error 22023"
+        );
     }
 
     #[test]
     fn similar_patterns_convert_to_anchored_regular_expressions() {
-        assert_eq!(substring_pattern("%#\"o_b#\"%", Some('#')).unwrap(), "^(?:.*?)(o.b)(?:.*)$");
-        assert_eq!(text(pattern_substring("foobar", "^(?:.*?)(o.b)(?:.*)$")), "oob");
+        assert_eq!(
+            substring_pattern("%#\"o_b#\"%", Some('#')).unwrap(),
+            "^(?:.*?)(o.b)(?:.*)$"
+        );
+        assert_eq!(
+            text(pattern_substring("foobar", "^(?:.*?)(o.b)(?:.*)$")),
+            "oob"
+        );
         assert!(separated_parts("a#\"b#\"c#\"d", Some('#')).is_err());
-        assert_eq!(similar_to_escape_text("a.b(c|d)_", Some('\\')).unwrap(), "^(?:a\\.b(?:c|d).)$");
-        assert_eq!(escape_character(Some(&Value::Text("ab".into()))).unwrap_err().state().code(), "22025");
+        assert_eq!(
+            similar_to_escape_text("a.b(c|d)_", Some('\\')).unwrap(),
+            "^(?:a\\.b(?:c|d).)$"
+        );
+        assert_eq!(
+            escape_character(Some(&Value::Text("ab".into())))
+                .unwrap_err()
+                .state()
+                .code(),
+            "22025"
+        );
     }
 
     #[test]
     fn global_flags_are_refused_where_the_manual_refuses_them() {
         assert_eq!(call("regexp_match", &["a", "a", "g"]), "error 22023");
         assert_eq!(call("regexp_like", &["a", "a", "z"]), "error 22023");
-        assert_eq!(call("regexp_split_to_array", &["a", "a", "g"]), "error 22023");
+        assert_eq!(
+            call("regexp_split_to_array", &["a", "a", "g"]),
+            "error 22023"
+        );
     }
 
     #[test]
@@ -866,14 +891,31 @@ mod tests {
             let pattern: String = (0..next(8))
                 .map(|_| PIECES[next(PIECES.len() as u64) as usize])
                 .collect();
-            let text: String = (0..next(16)).map(|_| ['a', 'b', ' ', '#'][next(4) as usize]).collect();
-            let values = [Value::Text(text.clone()), Value::Text(pattern.clone()), Value::Text("X\\1\\&".into()), Value::Text("g".into())];
+            let text: String = (0..next(16))
+                .map(|_| ['a', 'b', ' ', '#'][next(4) as usize])
+                .collect();
+            let values = [
+                Value::Text(text.clone()),
+                Value::Text(pattern.clone()),
+                Value::Text("X\\1\\&".into()),
+                Value::Text("g".into()),
+            ];
             let _ = function("regexp_replace", &values);
             let _ = function("regexp_match", &values[..2]);
             let _ = function("regexp_split_to_array", &values[..2]);
-            let _ = function("similar_to_escape", &[Value::Text(pattern.clone()), Value::Text("#".into())]);
+            let _ = function(
+                "similar_to_escape",
+                &[Value::Text(pattern.clone()), Value::Text("#".into())],
+            );
             let _ = substring_pattern(&pattern, Some('#'));
-            let _ = matches_rows(&[Value::Text(text), Value::Text(pattern), Value::Text("g".into())], &mut |_| Ok(()));
+            let _ = matches_rows(
+                &[
+                    Value::Text(text),
+                    Value::Text(pattern),
+                    Value::Text("g".into()),
+                ],
+                &mut |_| Ok(()),
+            );
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::arrays::ArrayValue;
-use crate::set_returning::RowSink;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::set_returning::RowSink;
 use crate::types::{
     Conversion, DefinedKind, DefinedType, DefinedValue, SqlType, Value, compare_values,
 };
@@ -179,7 +179,12 @@ pub(crate) fn field_names(record: &RecordValue) -> Vec<String> {
         return record.names.clone();
     }
     crate::user_types::composite_attributes(record.type_oid)
-        .map(|attributes| attributes.into_iter().map(|attribute| attribute.name).collect())
+        .map(|attributes| {
+            attributes
+                .into_iter()
+                .map(|attribute| attribute.name)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -287,7 +292,10 @@ fn expand(array: &ArrayValue, sink: &mut RowSink<'_>) -> SqlResult<()> {
         sink(record_value(
             RECORD_OID,
             vec![item.clone(), Value::Integer(position)],
-            EXPANDED_FIELDS.iter().map(|name| (*name).to_owned()).collect(),
+            EXPANDED_FIELDS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
         ))?;
     }
     Ok(())
@@ -349,7 +357,9 @@ mod tests {
 
     #[test]
     fn malformed_records_are_errors_never_panics() {
-        for text in ["", "1,2", "(1,2", "(1,2) x", "(\"open", "(\\", "((((", "(,,,"] {
+        for text in [
+            "", "1,2", "(1,2", "(1,2) x", "(\"open", "(\\", "((((", "(,,,",
+        ] {
             assert!(split_fields(text).is_err(), "{text}");
         }
         for text in ["()", " (1) ", "(,)", "(\"\")"] {

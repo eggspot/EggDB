@@ -78,10 +78,22 @@ impl Layout {
         match self {
             Self::EggDb => &["Results", "Messages"],
             Self::Ssms => &["Results", "Messages", "Execution plan"],
-            Self::PgAdmin => &["Data Output", "Messages", "Notifications", "Explain", "Query History"],
+            Self::PgAdmin => &[
+                "Data Output",
+                "Messages",
+                "Notifications",
+                "Explain",
+                "Query History",
+            ],
             Self::DBeaver => &["Statistics", "Output", "Execution Log"],
             Self::DataGrip => &["Output"],
-            Self::Workbench => &["Result Grid", "Form Editor", "Field Types", "Query Stats", "Execution Plan"],
+            Self::Workbench => &[
+                "Result Grid",
+                "Form Editor",
+                "Field Types",
+                "Query Stats",
+                "Execution Plan",
+            ],
             Self::Compass => &["List", "JSON", "Table"],
             Self::RedisInsight => &[],
         }
@@ -184,10 +196,15 @@ mod tests {
     fn every_layout_keeps_its_regions_inside_the_window_without_overlap() {
         for layout in Layout::ALL {
             let regions = layout.regions();
-            let mut shown: Vec<Rect> = [regions.toolbar, regions.sidebar, regions.tabs, regions.statusbar]
-                .into_iter()
-                .flatten()
-                .collect();
+            let mut shown: Vec<Rect> = [
+                regions.toolbar,
+                regions.sidebar,
+                regions.tabs,
+                regions.statusbar,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             shown.push(regions.editor);
             shown.push(regions.results);
             if let Some((_, extra)) = regions.extra {
@@ -195,15 +212,24 @@ mod tests {
             }
             for rect in &shown {
                 assert!(rect.x >= 0.0 && rect.y >= 0.0, "{layout:?}");
-                assert!(rect.x + rect.w <= 1280.0 && rect.y + rect.h <= 800.0, "{layout:?} {rect:?}");
+                assert!(
+                    rect.x + rect.w <= 1280.0 && rect.y + rect.h <= 800.0,
+                    "{layout:?} {rect:?}"
+                );
             }
             for (index, first) in shown.iter().enumerate() {
                 for second in &shown[index + 1..] {
-                    assert!(!overlap(first, second), "{layout:?}: {first:?} and {second:?}");
+                    assert!(
+                        !overlap(first, second),
+                        "{layout:?}: {first:?} and {second:?}"
+                    );
                 }
             }
             let covered: f32 = shown.iter().map(area).sum();
-            assert!(covered <= 1280.0 * 800.0 && covered > 1280.0 * 800.0 * 0.95, "{layout:?} covers {covered}");
+            assert!(
+                covered <= 1280.0 * 800.0 && covered > 1280.0 * 800.0 * 0.95,
+                "{layout:?} covers {covered}"
+            );
             assert!(layout == Layout::EggDb || layout.label().starts_with("Works like "));
         }
     }

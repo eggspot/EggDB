@@ -1195,7 +1195,9 @@ pub(crate) fn define_foreign_key(
         deferrable: key.deferrable,
     });
     if key.initially_deferred {
-        let name = table.foreign_keys[table.foreign_keys.len() - 1].name.clone();
+        let name = table.foreign_keys[table.foreign_keys.len() - 1]
+            .name
+            .clone();
         table.set_status(&name, true, true);
     }
     Ok(table.foreign_keys.len() - 1)
@@ -1230,12 +1232,19 @@ pub(crate) fn check_pending(
                 let Some(child) = tables.table(reader, child)? else {
                     continue;
                 };
-                let Some(key) = child.foreign_keys.iter().find(|key| key.name == *constraint)
+                let Some(key) = child
+                    .foreign_keys
+                    .iter()
+                    .find(|key| key.name == *constraint)
                 else {
                     continue;
                 };
-                let pairs: Vec<(usize, Value)> =
-                    key.columns.iter().copied().zip(values.iter().cloned()).collect();
+                let pairs: Vec<(usize, Value)> = key
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(values.iter().cloned())
+                    .collect();
                 if let Some(row) = first_row_with(reader, &child, &pairs)? {
                     check_parent(reader, tables, &child, key, &row, false)?;
                 }
@@ -1251,7 +1260,10 @@ pub(crate) fn check_pending(
                 else {
                     continue;
                 };
-                let Some(key) = child.foreign_keys.iter().find(|key| key.name == *constraint)
+                let Some(key) = child
+                    .foreign_keys
+                    .iter()
+                    .find(|key| key.name == *constraint)
                 else {
                     continue;
                 };
@@ -1266,8 +1278,12 @@ pub(crate) fn check_pending(
                 if parent_has_key(reader, &parent, &parent_columns, values)? {
                     continue;
                 }
-                let pairs: Vec<(usize, Value)> =
-                    key.columns.iter().copied().zip(values.iter().cloned()).collect();
+                let pairs: Vec<(usize, Value)> = key
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(values.iter().cloned())
+                    .collect();
                 if first_row_with(reader, &child, &pairs)?.is_some() {
                     let mut parent_row = vec![Value::Null; parent.columns.len()];
                     for (&column, value) in parent_columns.iter().zip(values) {

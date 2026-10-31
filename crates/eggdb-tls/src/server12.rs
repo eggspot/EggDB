@@ -11,8 +11,7 @@ use crate::error::TlsError;
 use crate::handshake::{
     CertificateMessage, ClientHello, DOWNGRADE_TO_TLS12_SENTINEL, DigitallySigned,
     EcdheServerKeyExchange, Extension, ServerHello, decode_ecdhe_client_key_exchange,
-    extension_type, finished_message, handshake_message, handshake_type, message_body,
-    named_group,
+    extension_type, finished_message, handshake_message, handshake_type, message_body, named_group,
 };
 use crate::negotiation::{
     EphemeralKey, SUPPORTED_GROUPS, choose_application_protocol, choose_signature_scheme,
@@ -35,7 +34,10 @@ pub(crate) fn tls12_protection(
 ) -> Result<Protection, TlsError> {
     Tls12RecordProtection::new(suite.aead(), key, iv)
         .map(Protection::Tls12)
-        .ok_or(TlsError::protocol(AlertDescription::InternalError, "TLS 1.2 key of the wrong length"))
+        .ok_or(TlsError::protocol(
+            AlertDescription::InternalError,
+            "TLS 1.2 key of the wrong length",
+        ))
 }
 
 fn suite_for_key(offered: &[u16], key: &SubjectPublicKey) -> Option<CipherSuite> {
@@ -57,20 +59,34 @@ pub(crate) fn handshake<S: Read + Write>(
     hello: ClientHello,
     fill_random: FillRandom<'_>,
 ) -> Result<Established, TlsError> {
-    let suite = suite_for_key(&hello.cipher_suites, &config.private_key().public_key())
-        .ok_or(TlsError::protocol(AlertDescription::HandshakeFailure, "no TLS 1.2 cipher suite in common"))?;
+    let suite = suite_for_key(&hello.cipher_suites, &config.private_key().public_key()).ok_or(
+        TlsError::protocol(
+            AlertDescription::HandshakeFailure,
+            "no TLS 1.2 cipher suite in common",
+        ),
+    )?;
     let hash = suite.hash();
     let renegotiation_signalled = match hello.extension(extension_type::RENEGOTIATION_INFO) {
         Some([0]) => true,
-        Some(_) => return Err(TlsError::protocol(AlertDescription::HandshakeFailure, "renegotiation is not supported")),
+        Some(_) => {
+            return Err(TlsError::protocol(
+                AlertDescription::HandshakeFailure,
+                "renegotiation is not supported",
+            ));
+        }
         None => hello.cipher_suites.contains(&EMPTY_RENEGOTIATION_INFO_SCSV),
     };
-    let extended_master = hello.extension(extension_type::EXTENDED_MASTER_SECRET).is_some();
+    let extended_master = hello
+        .extension(extension_type::EXTENDED_MASTER_SECRET)
+        .is_some();
     let point_formats = hello.extension(extension_type::EC_POINT_FORMATS);
     if let Some(formats) = point_formats
         && !formats.get(1..).is_some_and(|list| list.contains(&0))
     {
-        return Err(TlsError::protocol(AlertDescription::IllegalParameter, "the client cannot read uncompressed points"));
+        return Err(TlsError::protocol(
+            AlertDescription::IllegalParameter,
+            "the client cannot read uncompressed points",
+        ));
     }
     let client_groups = hello.supported_groups()?;
     let group = if client_groups.is_empty() {
@@ -79,14 +95,31 @@ pub(crate) fn handshake<S: Read + Write>(
         SUPPORTED_GROUPS
             .into_iter()
             .find(|group| client_groups.contains(group))
-            .ok_or(TlsError::protocol(AlertDescription::HandshakeFailure, "no key exchange group in common"))?
+            .ok_or(TlsError::protocol(
+                AlertDescription::HandshakeFailure,
+                "no key exchange group in common",
+            ))?
     };
-    let scheme = choose_signature_scheme(config.private_key(), &hello.signature_algorithms()?, false)
-        .ok_or(TlsError::protocol(AlertDescription::HandshakeFailure, "no signature scheme in common"))?;
-    let algorithm = scheme_algorithm(scheme, false)
-        .ok_or(TlsError::protocol(AlertDescription::InternalError, "the chosen signature scheme has no algorithm"))?;
-    let application_protocol = choose_application_protocol(&config.application_protocols, &hello.application_protocols()?)
-        .map_err(|_| TlsError::protocol(AlertDescription::NoApplicationProtocol, "no application protocol in common"))?;
+    let scheme =
+        choose_signature_scheme(config.private_key(), &hello.signature_algorithms()?, false)
+            .ok_or(TlsError::protocol(
+                AlertDescription::HandshakeFailure,
+                "no signature scheme in common",
+            ))?;
+    let algorithm = scheme_algorithm(scheme, false).ok_or(TlsError::protocol(
+        AlertDescription::InternalError,
+        "the chosen signature scheme has no algorithm",
+    ))?;
+    let application_protocol = choose_application_protocol(
+        &config.application_protocols,
+        &hello.application_protocols()?,
+    )
+    .map_err(|_| {
+        TlsError::protocol(
+            AlertDescription::NoApplicationProtocol,
+            "no application protocol in common",
+        )
+    })?;
     let server_name = hello.server_name()?;
 
     let mut transcript = hash.transcript();
@@ -125,13 +158,19 @@ pub(crate) fn handshake<S: Read + Write>(
     transcript.update(&server_hello);
     layer.queue(content_type::HANDSHAKE, &server_hello)?;
 
-    let chain: Vec<&[u8]> = config.chain().iter().map(|certificate| certificate.der()).collect();
+    let chain: Vec<&[u8]> = config
+        .chain()
+        .iter()
+        .map(|certificate| certificate.der())
+        .collect();
     let certificate = CertificateMessage::from_chain(&chain).encode_tls12();
     transcript.update(&certificate);
     layer.queue(content_type::HANDSHAKE, &certificate)?;
 
-    let ephemeral = EphemeralKey::generate(group, &mut *fill_random)?
-        .ok_or(TlsError::protocol(AlertDescription::InternalError, "unsupported group chosen"))?;
+    let ephemeral = EphemeralKey::generate(group, &mut *fill_random)?.ok_or(TlsError::protocol(
+        AlertDescription::InternalError,
+        "unsupported group chosen",
+    ))?;
     let public_key = ephemeral.public_key();
     let mut signed_content = hello.random.to_vec();
     signed_content.extend_from_slice(&server_random);
@@ -139,8 +178,18 @@ pub(crate) fn handshake<S: Read + Write>(
     let signature = config
         .private_key()
         .sign(algorithm, &signed_content, &mut *fill_random)
-        .map_err(|_| TlsError::protocol(AlertDescription::InternalError, "signing the key exchange failed"))?;
-    let key_exchange = EcdheServerKeyExchange { group, public_key, signed: DigitallySigned { scheme, signature } }.encode();
+        .map_err(|_| {
+            TlsError::protocol(
+                AlertDescription::InternalError,
+                "signing the key exchange failed",
+            )
+        })?;
+    let key_exchange = EcdheServerKeyExchange {
+        group,
+        public_key,
+        signed: DigitallySigned { scheme, signature },
+    }
+    .encode();
     transcript.update(&key_exchange);
     layer.queue(content_type::HANDSHAKE, &key_exchange)?;
     let done = handshake_message(handshake_type::SERVER_HELLO_DONE, &[]);
@@ -150,35 +199,60 @@ pub(crate) fn handshake<S: Read + Write>(
 
     let (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
     if message_type != handshake_type::CLIENT_KEY_EXCHANGE {
-        return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "expected ClientKeyExchange"));
+        return Err(TlsError::protocol(
+            AlertDescription::UnexpectedMessage,
+            "expected ClientKeyExchange",
+        ));
     }
     let client_public_key = decode_ecdhe_client_key_exchange(message_body(&message))?;
-    let pre_master_secret = ephemeral
-        .shared_secret(&client_public_key)
-        .ok_or(TlsError::protocol(AlertDescription::IllegalParameter, "the client's key exchange is not a valid public key"))?;
+    let pre_master_secret =
+        ephemeral
+            .shared_secret(&client_public_key)
+            .ok_or(TlsError::protocol(
+                AlertDescription::IllegalParameter,
+                "the client's key exchange is not a valid public key",
+            ))?;
     let master = if extended_master {
         extended_master_secret(hash, &pre_master_secret, &transcript.current())
     } else {
         master_secret(hash, &pre_master_secret, &hello.random, &server_random)
     };
     let iv_bytes = Tls12RecordProtection::iv_bytes(suite.aead());
-    let keys = key_block(hash, &master, &hello.random, &server_random, suite.aead().key_bytes(), iv_bytes);
+    let keys = key_block(
+        hash,
+        &master,
+        &hello.random,
+        &server_random,
+        suite.aead().key_bytes(),
+        iv_bytes,
+    );
 
     layer.read_change_cipher_spec()?;
     layer.set_read_protection(tls12_protection(suite, &keys.client_key, &keys.client_iv)?)?;
     let expected = finished_verify_data(hash, &master, true, &transcript.current());
     let (message_type, message) = layer.read_handshake_message(None)?;
     if message_type != handshake_type::FINISHED {
-        return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "expected the client's Finished"));
+        return Err(TlsError::protocol(
+            AlertDescription::UnexpectedMessage,
+            "expected the client's Finished",
+        ));
     }
     if !constant_time_eq(message_body(&message), &expected) {
-        return Err(TlsError::protocol(AlertDescription::DecryptError, "the client's Finished does not verify"));
+        return Err(TlsError::protocol(
+            AlertDescription::DecryptError,
+            "the client's Finished does not verify",
+        ));
     }
     transcript.update(&message);
 
     layer.queue_change_cipher_spec();
     layer.set_write_protection(tls12_protection(suite, &keys.server_key, &keys.server_iv)?);
-    let finished = finished_message(&finished_verify_data(hash, &master, false, &transcript.current()));
+    let finished = finished_message(&finished_verify_data(
+        hash,
+        &master,
+        false,
+        &transcript.current(),
+    ));
     layer.queue(content_type::HANDSHAKE, &finished)?;
     layer.flush()?;
 

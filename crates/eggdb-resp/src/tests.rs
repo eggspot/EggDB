@@ -21,7 +21,10 @@ impl Harness {
     }
 
     fn run(&mut self, line: &str) -> Reply {
-        let arguments: Vec<Vec<u8>> = line.split(' ').map(|word| word.as_bytes().to_vec()).collect();
+        let arguments: Vec<Vec<u8>> = line
+            .split(' ')
+            .map(|word| word.as_bytes().to_vec())
+            .collect();
         let context = Context {
             keyspace: &self.keyspace,
             password_sha256: self.password.as_ref(),
@@ -46,7 +49,10 @@ fn strings_counters_and_expiry_follow_the_documented_semantics() {
     assert_eq!(redis.text("SET k w XX GET"), "$1|v|");
     assert_eq!(redis.text("INCR n"), ":1|");
     assert_eq!(redis.text("INCRBY n 41"), ":42|");
-    assert_eq!(redis.text("INCR k"), "-ERR value is not an integer or out of range|");
+    assert_eq!(
+        redis.text("INCR k"),
+        "-ERR value is not an integer or out of range|"
+    );
     assert_eq!(redis.text("INCRBYFLOAT f 2.5"), "$3|2.5|");
     assert_eq!(redis.text("APPEND k xyz"), ":4|");
     assert_eq!(redis.text("GETRANGE k 1 -1"), "$3|xyz|");
@@ -65,7 +71,10 @@ fn strings_counters_and_expiry_follow_the_documented_semantics() {
     assert_eq!(redis.text("RENAME b c"), "+OK|");
     assert_eq!(redis.text("DBSIZE"), ":3|");
     assert_eq!(redis.text("BOGUS"), "-ERR unknown command 'bogus'|");
-    assert_eq!(redis.text("GET"), "-ERR wrong number of arguments for 'get' command|");
+    assert_eq!(
+        redis.text("GET"),
+        "-ERR wrong number of arguments for 'get' command|"
+    );
 }
 
 #[test]
@@ -76,7 +85,10 @@ fn hashes_lists_sets_and_sorted_sets_behave_as_documented() {
     assert_eq!(redis.text("HINCRBY h n 5"), ":5|");
     assert_eq!(redis.text("HDEL h f1 nope"), ":1|");
     assert_eq!(redis.text("HGETALL h"), "*4|$2|f2|$1|b|$1|n|$1|5|");
-    assert_eq!(redis.text("GET h"), "-WRONGTYPE Operation against a key holding the wrong kind of value|");
+    assert_eq!(
+        redis.text("GET h"),
+        "-WRONGTYPE Operation against a key holding the wrong kind of value|"
+    );
     assert_eq!(redis.text("RPUSH l a b c"), ":3|");
     assert_eq!(redis.text("LPUSH l z"), ":4|");
     assert_eq!(redis.text("LRANGE l 0 -1"), "*4|$1|z|$1|a|$1|b|$1|c|");
@@ -91,7 +103,10 @@ fn hashes_lists_sets_and_sorted_sets_behave_as_documented() {
     assert_eq!(redis.text("SUNION s t"), "*3|$1|x|$1|y|$1|z|");
     assert_eq!(redis.text("SISMEMBER s x"), ":1|");
     assert_eq!(redis.text("ZADD z 2 b 1 a 3 c"), ":3|");
-    assert_eq!(redis.text("ZRANGE z 0 -1 WITHSCORES"), "*6|$1|a|$1|1|$1|b|$1|2|$1|c|$1|3|");
+    assert_eq!(
+        redis.text("ZRANGE z 0 -1 WITHSCORES"),
+        "*6|$1|a|$1|1|$1|b|$1|2|$1|c|$1|3|"
+    );
     assert_eq!(redis.text("ZINCRBY z 10 a"), "$2|11|");
     assert_eq!(redis.text("ZRANK z a"), ":2|");
     assert_eq!(redis.text("ZRANGEBYSCORE z (2 +inf"), "*2|$1|c|$1|a|");
@@ -105,7 +120,10 @@ fn auth_hello_and_select_guard_the_connection() {
     redis.password = Some(eggdb_crypto::sha256(b"secret"));
     redis.client.authenticated = false;
     assert_eq!(redis.text("GET k"), "-NOAUTH Authentication required.|");
-    assert_eq!(redis.text("AUTH wrong"), "-WRONGPASS invalid username-password pair or user is disabled.|");
+    assert_eq!(
+        redis.text("AUTH wrong"),
+        "-WRONGPASS invalid username-password pair or user is disabled.|"
+    );
     assert_eq!(redis.text("AUTH secret"), "+OK|");
     assert!(redis.text("HELLO 3").starts_with("%7|"));
     assert_eq!(redis.text("HGETALL nope"), "%0|");
@@ -129,8 +147,14 @@ fn a_server_answers_a_pipelined_client_over_tcp() {
     };
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            serve(&keyspace, &listener, &config, &|| stopped.load(std::sync::atomic::Ordering::Acquire), &|_| {})
-                .unwrap();
+            serve(
+                &keyspace,
+                &listener,
+                &config,
+                &|| stopped.load(std::sync::atomic::Ordering::Acquire),
+                &|_| {},
+            )
+            .unwrap();
         });
         let mut client = std::net::TcpStream::connect(address).unwrap();
         client
@@ -147,7 +171,10 @@ fn a_server_answers_a_pipelined_client_over_tcp() {
 fn transactions_queue_and_run_together_and_watch_aborts_them() {
     let mut redis = Harness::new();
     let mut run = |line: &str| {
-        let arguments: Vec<Vec<u8>> = line.split(' ').map(|word| word.as_bytes().to_vec()).collect();
+        let arguments: Vec<Vec<u8>> = line
+            .split(' ')
+            .map(|word| word.as_bytes().to_vec())
+            .collect();
         let context = Context {
             keyspace: &redis.keyspace,
             password_sha256: None,
@@ -176,12 +203,24 @@ fn streams_add_range_read_and_trim() {
     redis.now_ms = 5;
     assert_eq!(redis.text("XADD s * a 1"), "$3|5-0|");
     assert_eq!(redis.text("XADD s * b 2"), "$3|5-1|");
-    assert_eq!(redis.text("XADD s 3-0 c 3"), "-ERR The ID specified in XADD is equal or smaller than the target stream top item|");
+    assert_eq!(
+        redis.text("XADD s 3-0 c 3"),
+        "-ERR The ID specified in XADD is equal or smaller than the target stream top item|"
+    );
     assert_eq!(redis.text("XADD s 9-9 c 3"), "$3|9-9|");
     assert_eq!(redis.text("XLEN s"), ":3|");
-    assert_eq!(redis.text("XRANGE s - + COUNT 1"), "*1|*2|$3|5-0|*2|$1|a|$1|1|");
-    assert_eq!(redis.text("XREVRANGE s + (5-1"), "*1|*2|$3|9-9|*2|$1|c|$1|3|");
-    assert_eq!(redis.text("XREAD STREAMS s 5-0"), "*1|*2|$1|s|*2|*2|$3|5-1|*2|$1|b|$1|2|*2|$3|9-9|*2|$1|c|$1|3|");
+    assert_eq!(
+        redis.text("XRANGE s - + COUNT 1"),
+        "*1|*2|$3|5-0|*2|$1|a|$1|1|"
+    );
+    assert_eq!(
+        redis.text("XREVRANGE s + (5-1"),
+        "*1|*2|$3|9-9|*2|$1|c|$1|3|"
+    );
+    assert_eq!(
+        redis.text("XREAD STREAMS s 5-0"),
+        "*1|*2|$1|s|*2|*2|$3|5-1|*2|$1|b|$1|2|*2|$3|9-9|*2|$1|c|$1|3|"
+    );
     assert_eq!(redis.text("XREAD STREAMS s $"), "*-1|");
     assert_eq!(redis.text("XTRIM s MAXLEN 1"), ":2|");
     assert_eq!(redis.text("TYPE s"), "+stream|");

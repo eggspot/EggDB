@@ -1,7 +1,7 @@
 use super::*;
+use crate::Session;
 use crate::memory_store::MemoryStore;
 use crate::tests::render;
-use crate::Session;
 
 fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlResult<String> {
     let mut last = String::new();
@@ -41,7 +41,11 @@ fn each_role_sees_and_changes_only_its_own_rows() {
         "id\n1\n3\nSELECT 2"
     );
     assert_eq!(
-        run(&mut ada, "SELECT count(*) FROM notes n JOIN notes m ON n.id = m.id").unwrap(),
+        run(
+            &mut ada,
+            "SELECT count(*) FROM notes n JOIN notes m ON n.id = m.id"
+        )
+        .unwrap(),
         "count\n2\nSELECT 1"
     );
     assert_eq!(run(&mut ada, "DELETE FROM notes").unwrap(), "DELETE 2");
@@ -69,7 +73,10 @@ fn without_a_matching_policy_a_role_sees_nothing_and_cannot_insert() {
     )
     .unwrap();
     let mut ada = as_role(&store, "ada");
-    assert_eq!(run(&mut ada, "SELECT id FROM notes").unwrap(), "id\nSELECT 0");
+    assert_eq!(
+        run(&mut ada, "SELECT id FROM notes").unwrap(),
+        "id\nSELECT 0"
+    );
     let error = run(&mut ada, "INSERT INTO notes VALUES (9, 'ada', 'x')").unwrap_err();
     assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE);
     let mut grace = as_role(&store, "grace");
@@ -116,9 +123,18 @@ fn policy_statements_refuse_what_postgresql_refuses() {
     setup(&store);
     let mut admin = Session::new(&store);
     for (sql, state) in [
-        ("CREATE POLICY own_notes ON notes USING (true)", SqlState::DUPLICATE_OBJECT),
-        ("CREATE POLICY p ON nowhere USING (true)", SqlState::UNDEFINED_TABLE),
-        ("CREATE POLICY p ON notes TO nobody USING (true)", SqlState::UNDEFINED_OBJECT),
+        (
+            "CREATE POLICY own_notes ON notes USING (true)",
+            SqlState::DUPLICATE_OBJECT,
+        ),
+        (
+            "CREATE POLICY p ON nowhere USING (true)",
+            SqlState::UNDEFINED_TABLE,
+        ),
+        (
+            "CREATE POLICY p ON notes TO nobody USING (true)",
+            SqlState::UNDEFINED_OBJECT,
+        ),
         ("DROP POLICY missing ON notes", SqlState::UNDEFINED_OBJECT),
     ] {
         assert_eq!(run(&mut admin, sql).unwrap_err().state(), state, "{sql}");

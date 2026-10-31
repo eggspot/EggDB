@@ -36,11 +36,9 @@ impl Sketch {
         }
         self.key.clear();
         encode_key_value(&mut self.key, value);
-        let hash = mixed(
-            self.key
-                .iter()
-                .fold(FNV_OFFSET, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)),
-        );
+        let hash = mixed(self.key.iter().fold(FNV_OFFSET, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+        }));
         let register = (hash >> (64 - PRECISION)) as usize;
         let rest = (hash << PRECISION) | (1 << (PRECISION - 1));
         let rank = rest.leading_zeros() as u8 + 1;
@@ -84,8 +82,15 @@ mod tests {
             sketch.add(&Value::Null);
             let estimate = sketch.estimate() as f64;
             let truth = f64::from(distinct);
-            let error = if truth == 0.0 { estimate } else { (estimate - truth).abs() / truth };
-            assert!(error < 0.05, "{distinct} distinct values estimated as {estimate}");
+            let error = if truth == 0.0 {
+                estimate
+            } else {
+                (estimate - truth).abs() / truth
+            };
+            assert!(
+                error < 0.05,
+                "{distinct} distinct values estimated as {estimate}"
+            );
         }
     }
 }

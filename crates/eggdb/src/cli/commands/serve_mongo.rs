@@ -2,7 +2,11 @@ use eggdb_auth::scram::ScramVerifier;
 
 const MONGO_SCRAM_ITERATIONS: u32 = 15_000;
 
-pub(super) fn config(user: &str, password: &str, max_connections: usize) -> std::io::Result<eggdb_mongowire::ServerConfig> {
+pub(super) fn config(
+    user: &str,
+    password: &str,
+    max_connections: usize,
+) -> std::io::Result<eggdb_mongowire::ServerConfig> {
     let mut salt = [0u8; 16];
     eggdb_platform::secure_random::fill(&mut salt)?;
     let mut unknown_user_secret = [0u8; 32];

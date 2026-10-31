@@ -50,7 +50,11 @@ pub fn encode_hybrid(values: &[u64], width: u8, out: &mut Vec<u8>) {
 }
 
 /// Decodes `count` values of a hybrid run sequence; returns them and the bytes used.
-pub fn decode_hybrid(bytes: &[u8], width: u8, count: usize) -> Result<(Vec<u64>, usize), DecodeError> {
+pub fn decode_hybrid(
+    bytes: &[u8],
+    width: u8,
+    count: usize,
+) -> Result<(Vec<u64>, usize), DecodeError> {
     if width > 64 {
         return Err(damaged("a bit width is above 64"));
     }
@@ -60,9 +64,15 @@ pub fn decode_hybrid(bytes: &[u8], width: u8, count: usize) -> Result<(Vec<u64>,
         let header = read_varint(bytes, &mut at)?;
         if header & 1 == 1 {
             let groups = usize::try_from(header >> 1).map_err(|_| damaged("a run is too long"))?;
-            let values = groups.checked_mul(8).ok_or_else(|| damaged("a run is too long"))?;
-            let length = groups.checked_mul(usize::from(width)).ok_or_else(|| damaged("a run is too long"))?;
-            let packed = bytes.get(at..at.saturating_add(length)).ok_or_else(|| damaged("a bit-packed run runs past its bytes"))?;
+            let values = groups
+                .checked_mul(8)
+                .ok_or_else(|| damaged("a run is too long"))?;
+            let length = groups
+                .checked_mul(usize::from(width))
+                .ok_or_else(|| damaged("a run is too long"))?;
+            let packed = bytes
+                .get(at..at.saturating_add(length))
+                .ok_or_else(|| damaged("a bit-packed run runs past its bytes"))?;
             let wanted = (count - out.len()).min(values);
             out.extend(unpack(packed, width, wanted)?);
             at += length;
@@ -72,7 +82,9 @@ pub fn decode_hybrid(bytes: &[u8], width: u8, count: usize) -> Result<(Vec<u64>,
                 return Err(damaged("a repeated run is empty"));
             }
             let size = value_bytes(width);
-            let raw = bytes.get(at..at + size).ok_or_else(|| damaged("a repeated run runs past its bytes"))?;
+            let raw = bytes
+                .get(at..at + size)
+                .ok_or_else(|| damaged("a repeated run runs past its bytes"))?;
             let mut buffer = [0u8; 8];
             buffer[..size].copy_from_slice(raw);
             at += size;

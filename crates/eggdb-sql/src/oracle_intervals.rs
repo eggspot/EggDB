@@ -145,7 +145,8 @@ impl Qualifier {
 }
 
 pub(crate) fn invalid_interval() -> SqlError {
-    SqlError::new(SqlState::INVALID_DATETIME_FORMAT, "the interval is invalid").with_oracle_code(1867)
+    SqlError::new(SqlState::INVALID_DATETIME_FORMAT, "the interval is invalid")
+        .with_oracle_code(1867)
 }
 
 fn leading_precision_too_small() -> SqlError {
@@ -231,7 +232,9 @@ impl Cursor<'_> {
         let start = self.at;
         let mut value = 0i128;
         while let Some(byte) = self.peek().filter(u8::is_ascii_digit) {
-            value = value.checked_mul(10)?.checked_add(i128::from(byte - b'0'))?;
+            value = value
+                .checked_mul(10)?
+                .checked_add(i128::from(byte - b'0'))?;
             self.at += 1;
         }
         let count = self.at - start;
@@ -254,7 +257,9 @@ impl Cursor<'_> {
         let mut micros = 0i128;
         for index in 0..KEPT_FRACTION_DIGITS as usize {
             let digit = if index < kept {
-                digits.get(index).map_or(0, |digit| i128::from(digit - b'0'))
+                digits
+                    .get(index)
+                    .map_or(0, |digit| i128::from(digit - b'0'))
             } else {
                 0
             };
@@ -378,8 +383,15 @@ fn iso_duration(text: &str, kind: IntervalKind) -> SqlResult<Interval> {
             continue;
         }
         let (value, _) = cursor.digits().ok_or_else(invalid_interval)?;
-        let fraction = if in_time { cursor.fraction(MAX_PRECISION)? } else { 0 };
-        let designator = cursor.peek().ok_or_else(invalid_interval)?.to_ascii_uppercase();
+        let fraction = if in_time {
+            cursor.fraction(MAX_PRECISION)?
+        } else {
+            0
+        };
+        let designator = cursor
+            .peek()
+            .ok_or_else(invalid_interval)?
+            .to_ascii_uppercase();
         cursor.at += 1;
         let (unit, of_months) = match (in_time, designator) {
             (false, b'Y') => (MONTHS_PER_YEAR, true),
@@ -416,9 +428,7 @@ pub(crate) fn parse_text(text: &str, kind: IntervalKind) -> SqlResult<Interval> 
         return Err(invalid_interval());
     }
     let trimmed = text.trim();
-    let iso = trimmed
-        .trim_start_matches('-')
-        .starts_with(['P', 'p']);
+    let iso = trimmed.trim_start_matches('-').starts_with(['P', 'p']);
     if iso {
         return iso_duration(trimmed, kind);
     }
@@ -497,7 +507,10 @@ pub(crate) fn conformed(interval: Interval, sql_type: SqlType) -> SqlResult<Valu
         }
     };
     shaped
-        .with_modifier(Some(kind.fields()), (kind == IntervalKind::DayToSecond).then_some(digits))
+        .with_modifier(
+            Some(kind.fields()),
+            (kind == IntervalKind::DayToSecond).then_some(digits),
+        )
         .map(Value::Interval)
 }
 
@@ -519,8 +532,10 @@ fn scaled_whole(amount: &Numeric, unit: i64) -> SqlResult<i128> {
 }
 
 pub(crate) fn number_to_day_to_second(amount: &Value, unit: &Value) -> SqlResult<Value> {
-    let (Some(amount), Some(unit)) = (crate::oracle_functions::decimal_of(amount)?, unit_named(unit)?)
-    else {
+    let (Some(amount), Some(unit)) = (
+        crate::oracle_functions::decimal_of(amount)?,
+        unit_named(unit)?,
+    ) else {
         return Ok(Value::Null);
     };
     if unit.of_months() {
@@ -530,8 +545,10 @@ pub(crate) fn number_to_day_to_second(amount: &Value, unit: &Value) -> SqlResult
 }
 
 pub(crate) fn number_to_year_to_month(amount: &Value, unit: &Value) -> SqlResult<Value> {
-    let (Some(amount), Some(unit)) = (crate::oracle_functions::decimal_of(amount)?, unit_named(unit)?)
-    else {
+    let (Some(amount), Some(unit)) = (
+        crate::oracle_functions::decimal_of(amount)?,
+        unit_named(unit)?,
+    ) else {
         return Ok(Value::Null);
     };
     let months_per_unit = match unit {
@@ -557,7 +574,11 @@ pub(crate) fn kind_of_type(sql_type: SqlType) -> Option<IntervalKind> {
     IntervalKind::of_type(sql_type).map(|(kind, _)| kind)
 }
 
-pub(crate) fn extract(field: &str, interval: Interval, kind: Option<IntervalKind>) -> Option<Numeric> {
+pub(crate) fn extract(
+    field: &str,
+    interval: Interval,
+    kind: Option<IntervalKind>,
+) -> Option<Numeric> {
     let kind = kind.or_else(|| IntervalKind::of_value(interval))?;
     let field = IntervalField::named(field)?;
     if field.of_months() != (kind == IntervalKind::YearToMonth) {
@@ -569,12 +590,12 @@ pub(crate) fn extract(field: &str, interval: Interval, kind: Option<IntervalKind
         IntervalField::Year => Numeric::from_i64(months / MONTHS_PER_YEAR),
         IntervalField::Month => Numeric::from_i64(months % MONTHS_PER_YEAR),
         IntervalField::Day => Numeric::from_i128(total / i128::from(MICROS_PER_DAY)),
-        IntervalField::Hour => Numeric::from_i128(
-            total % i128::from(MICROS_PER_DAY) / i128::from(MICROS_PER_HOUR),
-        ),
-        IntervalField::Minute => Numeric::from_i128(
-            total % i128::from(MICROS_PER_HOUR) / i128::from(MICROS_PER_MINUTE),
-        ),
+        IntervalField::Hour => {
+            Numeric::from_i128(total % i128::from(MICROS_PER_DAY) / i128::from(MICROS_PER_HOUR))
+        }
+        IntervalField::Minute => {
+            Numeric::from_i128(total % i128::from(MICROS_PER_HOUR) / i128::from(MICROS_PER_MINUTE))
+        }
         IntervalField::Second => {
             let micros = total % i128::from(MICROS_PER_MINUTE);
             let written = Numeric::from_scaled(micros, 6).to_string();
@@ -666,14 +687,19 @@ fn scaled_interval(interval: Interval, factor: &Numeric, divide: bool) -> SqlRes
     };
     let result = if divide {
         if factor.is_zero() {
-            return Err(SqlError::new(SqlState::DIVISION_BY_ZERO, "divisor is equal to zero")
-                .with_oracle_code(1476));
+            return Err(
+                SqlError::new(SqlState::DIVISION_BY_ZERO, "divisor is equal to zero")
+                    .with_oracle_code(1476),
+            );
         }
         amount.divide(factor)?
     } else {
         amount.multiply(factor)?
     };
-    let whole = result.rounded(0)?.integral_value().ok_or_else(out_of_range)?;
+    let whole = result
+        .rounded(0)?
+        .integral_value()
+        .ok_or_else(out_of_range)?;
     match kind {
         IntervalKind::YearToMonth => year_to_month(whole).map(Value::Interval),
         IntervalKind::DayToSecond => day_to_second(whole).map(Value::Interval),
@@ -697,8 +723,13 @@ pub(crate) fn arithmetic(
         {
             shifted(stamp, *interval, -1)
         }
-        (BinaryOperator::Add | BinaryOperator::Subtract, Value::Interval(a), Value::Interval(b)) => {
-            let (Some(first), Some(second)) = (IntervalKind::of_value(*a), IntervalKind::of_value(*b))
+        (
+            BinaryOperator::Add | BinaryOperator::Subtract,
+            Value::Interval(a),
+            Value::Interval(b),
+        ) => {
+            let (Some(first), Some(second)) =
+                (IntervalKind::of_value(*a), IntervalKind::of_value(*b))
             else {
                 return None;
             };
@@ -734,7 +765,12 @@ mod tests {
     use crate::interval::Interval;
     use crate::types::Value;
 
-    fn qualifier(leading: IntervalField, trailing: IntervalField, precision: u8, digits: u8) -> Qualifier {
+    fn qualifier(
+        leading: IntervalField,
+        trailing: IntervalField,
+        precision: u8,
+        digits: u8,
+    ) -> Qualifier {
         Qualifier {
             leading,
             trailing,
@@ -743,7 +779,11 @@ mod tests {
         }
     }
 
-    fn literal(text_value: &str, leading: IntervalField, trailing: IntervalField) -> Result<String, u16> {
+    fn literal(
+        text_value: &str,
+        leading: IntervalField,
+        trailing: IntervalField,
+    ) -> Result<String, u16> {
         let qualifier = qualifier(leading, trailing, 2, 6);
         parse_literal(text_value, qualifier)
             .map(|interval| text(interval, Some(qualifier.kind()), 6))
@@ -770,18 +810,30 @@ mod tests {
             shown("4 5:12:10.222", qualifier(Day, Second, 2, 3)).as_deref(),
             Ok("+04 05:12:10.222")
         );
-        assert_eq!(literal("4 5:12", Day, Minute).as_deref(), Ok("+04 05:12:00.000000"));
+        assert_eq!(
+            literal("4 5:12", Day, Minute).as_deref(),
+            Ok("+04 05:12:00.000000")
+        );
         assert_eq!(
             shown("400 5", qualifier(Day, Hour, 3, 6)).as_deref(),
             Ok("+400 05:00:00.000000")
         );
-        assert_eq!(literal("25", Hour, Hour).as_deref(), Ok("+01 01:00:00.000000"));
-        assert_eq!(literal("10:22", Minute, Second).as_deref(), Ok("+00 00:10:22.000000"));
+        assert_eq!(
+            literal("25", Hour, Hour).as_deref(),
+            Ok("+01 01:00:00.000000")
+        );
+        assert_eq!(
+            literal("10:22", Minute, Second).as_deref(),
+            Ok("+00 00:10:22.000000")
+        );
         assert_eq!(
             shown("30.12345", qualifier(Second, Second, 2, 4)).as_deref(),
             Ok("+00 00:00:30.1235")
         );
-        assert_eq!(literal("-1 2:00:00", Day, Second).as_deref(), Ok("-01 02:00:00.000000"));
+        assert_eq!(
+            literal("-1 2:00:00", Day, Second).as_deref(),
+            Ok("-01 02:00:00.000000")
+        );
         assert_eq!(literal("4 24:00", Day, Minute), Err(1850));
         assert_eq!(literal("4 5:60", Day, Minute), Err(1851));
         assert_eq!(literal("4:5", Day, Minute), Err(1867));
@@ -808,8 +860,14 @@ mod tests {
             read("-P1DT0.5S", IntervalKind::DayToSecond).as_deref(),
             Ok("-01 00:00:00.500000")
         );
-        assert_eq!(read("1-2", IntervalKind::YearToMonth).as_deref(), Ok("+01-02"));
-        assert_eq!(read("P1Y2M", IntervalKind::YearToMonth).as_deref(), Ok("+01-02"));
+        assert_eq!(
+            read("1-2", IntervalKind::YearToMonth).as_deref(),
+            Ok("+01-02")
+        );
+        assert_eq!(
+            read("P1Y2M", IntervalKind::YearToMonth).as_deref(),
+            Ok("+01-02")
+        );
         assert_eq!(read("P", IntervalKind::YearToMonth), Err(1867));
         assert_eq!(read("P1X", IntervalKind::YearToMonth), Err(1867));
     }
@@ -822,13 +880,18 @@ mod tests {
         };
         let unit = |name: &str| Value::Text(name.to_owned());
         assert_eq!(
-            number_to_day_to_second(&Value::BigInt(36), &unit("HOUR")).map(text_of).as_deref(),
+            number_to_day_to_second(&Value::BigInt(36), &unit("HOUR"))
+                .map(text_of)
+                .as_deref(),
             Ok("+01 12:00:00.000000")
         );
         assert_eq!(
-            number_to_year_to_month(&Value::Numeric(crate::numeric::Numeric::parse("1.5").expect("1.5")), &unit("year"))
-                .map(text_of)
-                .as_deref(),
+            number_to_year_to_month(
+                &Value::Numeric(crate::numeric::Numeric::parse("1.5").expect("1.5")),
+                &unit("year")
+            )
+            .map(text_of)
+            .as_deref(),
             Ok("+01-06")
         );
         assert_eq!(
@@ -888,8 +951,8 @@ mod tests {
             arithmetic(BinaryOperator::Add, &month, &day_and_half)
                 .is_some_and(|result| result.is_err())
         );
-        let difference = timestamp_difference(&date(2024, 1, 2), &date(2024, 1, 1))
-            .and_then(Result::ok);
+        let difference =
+            timestamp_difference(&date(2024, 1, 2), &date(2024, 1, 1)).and_then(Result::ok);
         assert_eq!(
             difference,
             Some(Value::Interval(Interval {
@@ -918,8 +981,18 @@ mod tests {
             days: 0,
             micros: 0,
         };
-        assert_eq!(extract("year", months, None).map(|value| value.to_string()).as_deref(), Some("-1"));
-        assert_eq!(extract("month", months, None).map(|value| value.to_string()).as_deref(), Some("-2"));
+        assert_eq!(
+            extract("year", months, None)
+                .map(|value| value.to_string())
+                .as_deref(),
+            Some("-1")
+        );
+        assert_eq!(
+            extract("month", months, None)
+                .map(|value| value.to_string())
+                .as_deref(),
+            Some("-2")
+        );
     }
 
     #[test]
@@ -933,8 +1006,24 @@ mod tests {
             .and_then(|seed| seed.parse().ok())
             .unwrap_or(0x0049_7e11);
         let pieces = [
-            "1", "99", "-", "+", " ", ":", ".", "5", "P", "T", "Y", "M", "D", "H", "S", "x",
-            "99999999999999999999", "é",
+            "1",
+            "99",
+            "-",
+            "+",
+            " ",
+            ":",
+            ".",
+            "5",
+            "P",
+            "T",
+            "Y",
+            "M",
+            "D",
+            "H",
+            "S",
+            "x",
+            "99999999999999999999",
+            "é",
         ];
         let mut next = || {
             state ^= state << 13;

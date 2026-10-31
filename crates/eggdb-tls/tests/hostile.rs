@@ -1,3 +1,5 @@
+//! Hostile TLS records and handshake messages are refused without a crash or hang (D9).
+
 use std::io::{Cursor, Read, Write};
 
 use eggdb_tls::cipher_suite::AeadKind;
@@ -6,7 +8,9 @@ use eggdb_tls::handshake::{
     NewSessionTicket, ServerHello, message_body,
 };
 use eggdb_tls::key_schedule::TrafficKeys;
-use eggdb_tls::record::{RECORD_HEADER_BYTES, RecordHeader, Tls12RecordProtection, Tls13RecordProtection};
+use eggdb_tls::record::{
+    RECORD_HEADER_BYTES, RecordHeader, Tls12RecordProtection, Tls13RecordProtection,
+};
 use eggdb_tls::self_signed::{SelfSignedCertificateRequest, generate_self_signed_certificate};
 use eggdb_tls::x509::SubjectAlternativeName;
 use eggdb_tls::{ServerConfig, TlsStream};
@@ -97,17 +101,24 @@ fn mutated_handshake_messages_never_panic_a_decoder() {
         }
         let _ = CertificateMessage::decode_tls13(&mutations.mutate(message_body(&certificate)));
         let _ = CertificateMessage::decode_tls12(&mutations.mutate(message_body(&certificate)));
-        if let Ok(extensions) = EncryptedExtensions::decode(&mutations.mutate(message_body(&encrypted_extensions))) {
+        if let Ok(extensions) =
+            EncryptedExtensions::decode(&mutations.mutate(message_body(&encrypted_extensions)))
+        {
             let _ = extensions.application_protocol();
         }
         let _ = NewSessionTicket::decode(&mutations.mutate(message_body(&ticket)));
-        let _ = EcdheServerKeyExchange::decode(&mutations.mutate(&[3, 0, 0x1d, 4, 1, 2, 3, 4, 8, 4, 0, 1, 9]));
+        let _ = EcdheServerKeyExchange::decode(
+            &mutations.mutate(&[3, 0, 0x1d, 4, 1, 2, 3, 4, 8, 4, 0, 1, 9]),
+        );
     }
 }
 
 #[test]
 fn random_records_never_panic_record_protection() {
-    let keys = TrafficKeys { key: vec![1u8; 16], iv: [2u8; 12] };
+    let keys = TrafficKeys {
+        key: vec![1u8; 16],
+        iv: [2u8; 12],
+    };
     let mut mutations = Mutations::new(0x1234_5678_9abc_def1);
     let sample = value("server_flight_record");
     for _ in 0..2_000 {
@@ -122,7 +133,8 @@ fn random_records_never_panic_record_protection() {
         let mut tls13 = Tls13RecordProtection::new(AeadKind::Aes128Gcm, &keys).expect("key");
         let mut payload = mutated[RECORD_HEADER_BYTES..].to_vec();
         let _ = tls13.open(&header, &mut payload);
-        let mut tls12 = Tls12RecordProtection::new(AeadKind::Aes128Gcm, &[1u8; 16], &[2u8; 4]).expect("key");
+        let mut tls12 =
+            Tls12RecordProtection::new(AeadKind::Aes128Gcm, &[1u8; 16], &[2u8; 4]).expect("key");
         let mut payload = mutated[RECORD_HEADER_BYTES..].to_vec();
         let _ = tls12.open(&header, &mut payload);
     }
@@ -179,14 +191,25 @@ fn a_server_given_mutated_client_hellos_fails_cleanly() {
         not_after_unix_seconds: now + 3_600,
     };
     let (certificate, key) =
-        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill).expect("certificate");
+        generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill)
+            .expect("certificate");
     let config = ServerConfig::new(vec![certificate], key).expect("config");
     let record = value("client_hello_record");
     let mut mutations = Mutations::new(0x5eed_5eed_5eed_5eed);
     for round in 0..300 {
-        let input = if round == 0 { record.clone() } else { mutations.mutate(&record) };
-        let stream = Scripted { input: Cursor::new(input), output: Vec::new() };
+        let input = if round == 0 {
+            record.clone()
+        } else {
+            mutations.mutate(&record)
+        };
+        let stream = Scripted {
+            input: Cursor::new(input),
+            output: Vec::new(),
+        };
         let outcome = TlsStream::accept(stream, &config);
-        assert!(outcome.is_err(), "a lone ClientHello can never finish a handshake");
+        assert!(
+            outcome.is_err(),
+            "a lone ClientHello can never finish a handshake"
+        );
     }
 }

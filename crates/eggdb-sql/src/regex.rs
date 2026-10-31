@@ -295,7 +295,10 @@ impl Node {
     fn prefers_longest(&self) -> Option<bool> {
         match self {
             Self::Repeat {
-                node, greedy, fixed, ..
+                node,
+                greedy,
+                fixed,
+                ..
             } => {
                 if *fixed {
                     node.prefers_longest()
@@ -1129,6 +1132,7 @@ impl Threads {
 }
 
 impl Regex {
+    #[cfg(test)]
     pub(crate) fn compile(pattern: &str, case: CaseSensitivity) -> SqlResult<Self> {
         Self::compile_with(pattern, Options::of_case(case))
     }

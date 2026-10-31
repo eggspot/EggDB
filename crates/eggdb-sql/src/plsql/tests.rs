@@ -20,8 +20,14 @@ fn predefined_exceptions_are_found_by_name_and_by_number() {
     let found = predefined_by_name("no_data_found").expect("NO_DATA_FOUND is predefined");
     assert_eq!(found.code, NO_DATA_FOUND_CODE);
     assert_eq!(found.message, "no data found");
-    assert_eq!(predefined_by_name("zero_divide").map(|found| found.code), Some(1476));
-    assert_eq!(predefined_by_name("dup_val_on_index").map(|found| found.code), Some(1));
+    assert_eq!(
+        predefined_by_name("zero_divide").map(|found| found.code),
+        Some(1476)
+    );
+    assert_eq!(
+        predefined_by_name("dup_val_on_index").map(|found| found.code),
+        Some(1)
+    );
     assert_eq!(
         predefined_by_code(1422).map(|found| found.name),
         Some("too_many_rows")

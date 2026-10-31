@@ -15,11 +15,11 @@ mod triggers;
 pub(crate) use catalog::*;
 pub(crate) use defined::*;
 pub(crate) use packages::{decode_package, encode_package, package_key, packages_prefix};
-pub(crate) use routines::{decode_routines, encode_routines, routine_key, routines_prefix};
-pub(crate) use triggers::{decode_triggers, encode_triggers, trigger_key, triggers_prefix};
 pub(crate) use partitions::{
     decode_partitioning, encode_partitioning, partition_key, partitions_prefix,
 };
+pub(crate) use routines::{decode_routines, encode_routines, routine_key, routines_prefix};
+pub(crate) use triggers::{decode_triggers, encode_triggers, trigger_key, triggers_prefix};
 
 pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];
 const META_SPACE: u8 = 0x01;
@@ -163,10 +163,9 @@ pub(crate) fn is_temporary_key(key: &[u8]) -> bool {
         return false;
     };
     match space {
-        TABLE_SPACE
-        | SEQUENCE_SPACE
-        | triggers::TRIGGER_SPACE
-        | partitions::PARTITION_SPACE => names_temporary_object(rest),
+        TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE | partitions::PARTITION_SPACE => {
+            names_temporary_object(rest)
+        }
         ROW_SPACE | INDEX_SPACE => has_temporary_id(rest),
         TEMPORARY_ACTION_SPACE => true,
         REFERENCE_SPACE | catalog::DEPENDENCY_SPACE => {
@@ -202,10 +201,9 @@ pub(crate) fn key_owner(key: &[u8]) -> KeyOwner<'_> {
         return KeyOwner::Everyone;
     };
     match space {
-        TABLE_SPACE
-        | SEQUENCE_SPACE
-        | triggers::TRIGGER_SPACE
-        | partitions::PARTITION_SPACE => KeyOwner::Relation(rest),
+        TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE | partitions::PARTITION_SPACE => {
+            KeyOwner::Relation(rest)
+        }
         ROW_SPACE | INDEX_SPACE => rest
             .get(..4)
             .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
@@ -217,7 +215,9 @@ pub(crate) fn key_owner(key: &[u8]) -> KeyOwner<'_> {
                 KeyOwner::Relations(first, second)
             }),
         catalog::COMMENT_SPACE => split_length_prefixed(rest)
-            .map_or(KeyOwner::Unreadable, |(owner, _)| KeyOwner::CommentOn(owner)),
+            .map_or(KeyOwner::Unreadable, |(owner, _)| {
+                KeyOwner::CommentOn(owner)
+            }),
         _ => KeyOwner::Everyone,
     }
 }
@@ -418,7 +418,12 @@ impl SortOptions {
             .unwrap_or(0)
     }
 
-    pub(crate) fn with_column(mut self, position: usize, descending: bool, nulls_first: bool) -> Self {
+    pub(crate) fn with_column(
+        mut self,
+        position: usize,
+        descending: bool,
+        nulls_first: bool,
+    ) -> Self {
         let bit = Self::bit(position);
         if descending {
             self.descending |= bit;
@@ -647,7 +652,8 @@ impl TableDefinition {
     pub(crate) fn set_default_dialect(&mut self, column: usize, dialect: crate::Dialect) {
         self.default_dialects.retain(|entry| entry.column != column);
         if dialect != crate::Dialect::PostgreSql {
-            self.default_dialects.push(DefaultDialect { column, dialect });
+            self.default_dialects
+                .push(DefaultDialect { column, dialect });
             self.default_dialects.sort_by_key(|entry| entry.column);
         }
     }
@@ -725,7 +731,12 @@ impl TableDefinition {
             .is_some_and(|status| status.initially_deferred)
     }
 
-    pub(crate) fn set_status(&mut self, constraint: &str, validated: bool, initially_deferred: bool) {
+    pub(crate) fn set_status(
+        &mut self,
+        constraint: &str,
+        validated: bool,
+        initially_deferred: bool,
+    ) {
         self.constraint_statuses
             .retain(|status| status.name != constraint);
         if !validated || initially_deferred {
@@ -790,24 +801,29 @@ impl TableDefinition {
                     .checked_sub(1)
                     .and_then(|previous| self.domains.get(previous))
                     .is_none_or(|previous| previous.column < entry.column)
-                && self.columns[entry.column].sql_type.defined().is_none_or(|defined| {
-                    defined.kind != DefinedKind::Domain
-                })
+                && self.columns[entry.column]
+                    .sql_type
+                    .defined()
+                    .is_none_or(|defined| defined.kind != DefinedKind::Domain)
         });
-        let statuses_fit = self.constraint_statuses.iter().enumerate().all(|(at, status)| {
-            let key = self.foreign_keys.iter().find(|key| key.name == status.name);
-            let names_constraint =
-                key.is_some() || self.checks.iter().any(|check| check.name == status.name);
-            let deferral_fits =
-                !status.initially_deferred || key.is_some_and(|key| key.deferrable);
-            names_constraint
-                && deferral_fits
-                && status.flags() != 0
-                && at
-                    .checked_sub(1)
-                    .and_then(|previous| self.constraint_statuses.get(previous))
-                    .is_none_or(|previous| previous.name < status.name)
-        });
+        let statuses_fit = self
+            .constraint_statuses
+            .iter()
+            .enumerate()
+            .all(|(at, status)| {
+                let key = self.foreign_keys.iter().find(|key| key.name == status.name);
+                let names_constraint =
+                    key.is_some() || self.checks.iter().any(|check| check.name == status.name);
+                let deferral_fits =
+                    !status.initially_deferred || key.is_some_and(|key| key.deferrable);
+                names_constraint
+                    && deferral_fits
+                    && status.flags() != 0
+                    && at
+                        .checked_sub(1)
+                        .and_then(|previous| self.constraint_statuses.get(previous))
+                        .is_none_or(|previous| previous.name < status.name)
+            });
         domains_fit && statuses_fit
     }
 
@@ -1878,119 +1894,119 @@ fn double_of_ordered(ordered: u64) -> f64 {
 }
 
 fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
-        match value {
-            Value::Defined(defined) => match defined.as_ref() {
-                DefinedValue::Enum(label) => {
-                    out.push(ENUM_TAG);
-                    out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
-                }
-                DefinedValue::Record(record) => {
-                    out.push(RECORD_TAG);
-                    put_record(out, record);
-                }
-                DefinedValue::Range(range) => {
-                    out.push(RANGE_TAG);
-                    put_range(out, range);
-                }
-            },
-            Value::Null => out.push(0),
-            Value::SmallInt(number) => {
-                out.push(1);
-                out.extend_from_slice(&number.to_le_bytes());
+    match value {
+        Value::Defined(defined) => match defined.as_ref() {
+            DefinedValue::Enum(label) => {
+                out.push(ENUM_TAG);
+                out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
             }
-            Value::Integer(number) => {
-                out.push(2);
-                out.extend_from_slice(&number.to_le_bytes());
+            DefinedValue::Record(record) => {
+                out.push(RECORD_TAG);
+                put_record(out, record);
             }
-            Value::BigInt(number) => {
-                out.push(3);
-                out.extend_from_slice(&number.to_le_bytes());
+            DefinedValue::Range(range) => {
+                out.push(RANGE_TAG);
+                put_range(out, range);
             }
-            Value::Real(number) => {
-                out.push(4);
-                out.extend_from_slice(&number.to_bits().to_le_bytes());
-            }
-            Value::Double(number) => {
-                out.push(5);
-                out.extend_from_slice(&number.to_bits().to_le_bytes());
-            }
-            Value::Boolean(flag) => {
-                out.push(6);
-                out.push(u8::from(*flag));
-            }
-            Value::Text(text) => {
-                out.push(7);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Numeric(number) => {
-                out.push(9);
-                number.encode_row(out);
-            }
-            Value::Date(days) => {
-                out.push(10);
-                out.extend_from_slice(&days.to_le_bytes());
-            }
-            Value::Timestamp(micros) => {
-                out.push(11);
-                out.extend_from_slice(&micros.to_le_bytes());
-            }
-            Value::TimestampTz(micros) => {
-                out.push(12);
-                out.extend_from_slice(&micros.to_le_bytes());
-            }
-            Value::Json(text) => {
-                out.push(13);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Jsonb(text) => {
-                out.push(14);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Time(micros) => {
-                out.push(15);
-                out.extend_from_slice(&micros.to_le_bytes());
-            }
-            Value::TimeTz {
-                micros,
-                offset_seconds,
-            } => {
-                out.push(16);
-                out.extend_from_slice(&micros.to_le_bytes());
-                out.extend_from_slice(&offset_seconds.to_le_bytes());
-            }
-            Value::Interval(interval) => {
-                out.push(17);
-                out.extend_from_slice(&interval.months.to_le_bytes());
-                out.extend_from_slice(&interval.days.to_le_bytes());
-                out.extend_from_slice(&interval.micros.to_le_bytes());
-            }
-            Value::Bytea(bytes) => {
-                out.push(18);
-                put_bytes(out, bytes);
-            }
-            Value::Uuid(bytes) => {
-                out.push(19);
-                out.extend_from_slice(bytes);
-            }
-            Value::Bpchar(text) => {
-                out.push(20);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Array(array) => {
-                out.push(21);
-                put_bytes(out, &crate::arrays::encode_stored(array));
-            }
-            Value::Oid(oid) => {
-                out.push(OID_TAG);
-                out.extend_from_slice(&oid.to_le_bytes());
-            }
-            Value::Reg(reg) => {
-                out.push(REG_TAG);
-                out.push(reg_kind_code(reg.kind));
-                out.extend_from_slice(&reg.oid.to_le_bytes());
-                put_bytes(out, reg.name.as_bytes());
-            }
+        },
+        Value::Null => out.push(0),
+        Value::SmallInt(number) => {
+            out.push(1);
+            out.extend_from_slice(&number.to_le_bytes());
         }
+        Value::Integer(number) => {
+            out.push(2);
+            out.extend_from_slice(&number.to_le_bytes());
+        }
+        Value::BigInt(number) => {
+            out.push(3);
+            out.extend_from_slice(&number.to_le_bytes());
+        }
+        Value::Real(number) => {
+            out.push(4);
+            out.extend_from_slice(&number.to_bits().to_le_bytes());
+        }
+        Value::Double(number) => {
+            out.push(5);
+            out.extend_from_slice(&number.to_bits().to_le_bytes());
+        }
+        Value::Boolean(flag) => {
+            out.push(6);
+            out.push(u8::from(*flag));
+        }
+        Value::Text(text) => {
+            out.push(7);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Numeric(number) => {
+            out.push(9);
+            number.encode_row(out);
+        }
+        Value::Date(days) => {
+            out.push(10);
+            out.extend_from_slice(&days.to_le_bytes());
+        }
+        Value::Timestamp(micros) => {
+            out.push(11);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::TimestampTz(micros) => {
+            out.push(12);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::Json(text) => {
+            out.push(13);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Jsonb(text) => {
+            out.push(14);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Time(micros) => {
+            out.push(15);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::TimeTz {
+            micros,
+            offset_seconds,
+        } => {
+            out.push(16);
+            out.extend_from_slice(&micros.to_le_bytes());
+            out.extend_from_slice(&offset_seconds.to_le_bytes());
+        }
+        Value::Interval(interval) => {
+            out.push(17);
+            out.extend_from_slice(&interval.months.to_le_bytes());
+            out.extend_from_slice(&interval.days.to_le_bytes());
+            out.extend_from_slice(&interval.micros.to_le_bytes());
+        }
+        Value::Bytea(bytes) => {
+            out.push(18);
+            put_bytes(out, bytes);
+        }
+        Value::Uuid(bytes) => {
+            out.push(19);
+            out.extend_from_slice(bytes);
+        }
+        Value::Bpchar(text) => {
+            out.push(20);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Array(array) => {
+            out.push(21);
+            put_bytes(out, &crate::arrays::encode_stored(array));
+        }
+        Value::Oid(oid) => {
+            out.push(OID_TAG);
+            out.extend_from_slice(&oid.to_le_bytes());
+        }
+        Value::Reg(reg) => {
+            out.push(REG_TAG);
+            out.push(reg_kind_code(reg.kind));
+            out.extend_from_slice(&reg.oid.to_le_bytes());
+            put_bytes(out, reg.name.as_bytes());
+        }
+    }
 }
 
 const OID_TAG: u8 = 22;
@@ -2626,7 +2642,8 @@ impl<'b> Reader<'b> {
             return Err(self.damaged());
         }
         let flags = self.byte()?;
-        let known = RANGE_EMPTY | RANGE_LOWER | RANGE_LOWER_INCLUSIVE | RANGE_UPPER | RANGE_UPPER_INCLUSIVE;
+        let known =
+            RANGE_EMPTY | RANGE_LOWER | RANGE_LOWER_INCLUSIVE | RANGE_UPPER | RANGE_UPPER_INCLUSIVE;
         if flags & !known != 0
             || (flags & RANGE_EMPTY != 0 && flags != RANGE_EMPTY)
             || (flags & RANGE_LOWER_INCLUSIVE != 0 && flags & RANGE_LOWER == 0)
@@ -3950,10 +3967,7 @@ mod tests {
         let encoded = restored.encode();
         assert_eq!(encoded[0], 9);
         assert_eq!(TableDefinition::decode("t", &encoded), Ok(restored.clone()));
-        assert_eq!(
-            restored.identity_of(1),
-            Some(IdentityGeneration::ByDefault)
-        );
+        assert_eq!(restored.identity_of(1), Some(IdentityGeneration::ByDefault));
         restored.columns[1].default = None;
         assert_eq!(restored.identity_of(1), None);
         assert_eq!(restored.encode()[0], 1);
@@ -4104,7 +4118,10 @@ mod tests {
         seed_without_identity.columns[0].auto_increment = false;
         seed_without_identity.set_default_dialect(1, crate::Dialect::PostgreSql);
         assert_eq!(seed_without_identity.encode()[0], 1);
-        assert_eq!(seed_without_identity.identity_seed(), IdentitySeed::ONE_BY_ONE);
+        assert_eq!(
+            seed_without_identity.identity_seed(),
+            IdentitySeed::ONE_BY_ONE
+        );
     }
 
     #[test]

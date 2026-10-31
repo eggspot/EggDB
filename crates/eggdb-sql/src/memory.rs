@@ -35,24 +35,22 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
         Value::Reg(reg) => reg.name.len(),
         Value::Defined(defined) => match defined.as_ref() {
             crate::types::DefinedValue::Enum(label) => label.label.len(),
-            crate::types::DefinedValue::Record(record) => record
-                .fields
-                .iter()
-                .map(held_bytes)
-                .fold(record.names.iter().map(String::len).sum(), usize::saturating_add),
-            crate::types::DefinedValue::Range(range) => range
-                .bounds
-                .as_ref()
-                .map_or(0, |bounds| {
-                    [&bounds.lower, &bounds.upper]
-                        .into_iter()
-                        .map(|bound| match bound {
-                            crate::ranges::RangeBound::Unbounded => 0,
-                            crate::ranges::RangeBound::Inclusive(value)
-                            | crate::ranges::RangeBound::Exclusive(value) => held_bytes(value),
-                        })
-                        .sum()
-                }),
+            crate::types::DefinedValue::Record(record) => {
+                record.fields.iter().map(held_bytes).fold(
+                    record.names.iter().map(String::len).sum(),
+                    usize::saturating_add,
+                )
+            }
+            crate::types::DefinedValue::Range(range) => range.bounds.as_ref().map_or(0, |bounds| {
+                [&bounds.lower, &bounds.upper]
+                    .into_iter()
+                    .map(|bound| match bound {
+                        crate::ranges::RangeBound::Unbounded => 0,
+                        crate::ranges::RangeBound::Inclusive(value)
+                        | crate::ranges::RangeBound::Exclusive(value) => held_bytes(value),
+                    })
+                    .sum()
+            }),
         },
         _ => 0,
     }
@@ -379,7 +377,9 @@ mod tests {
         assert_eq!(error.state().code(), "54000");
         assert_eq!(
             error.message(),
-            format!("a row of more than {MAX_ROW_BYTES} bytes is larger than EggDB's limit on one row")
+            format!(
+                "a row of more than {MAX_ROW_BYTES} bytes is larger than EggDB's limit on one row"
+            )
         );
         let _higher = enter_row_limit(usize::MAX);
         let mut row = RowBytes::default();

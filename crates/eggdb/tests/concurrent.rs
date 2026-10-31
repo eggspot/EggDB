@@ -39,7 +39,10 @@ fn the_first_committer_wins_a_write_write_conflict_in_both_isolations() {
 
 #[test]
 fn serializable_refuses_write_skew_that_snapshot_isolation_allows() {
-    for (isolation, both_commit) in [(Isolation::Snapshot, true), (Isolation::Serializable, false)] {
+    for (isolation, both_commit) in [
+        (Isolation::Snapshot, true),
+        (Isolation::Serializable, false),
+    ] {
         let file = TempPath::new("concurrent-skew");
         let db = Database::open(file.path()).unwrap();
         db.put("on_call:alice", "yes").unwrap();
@@ -67,7 +70,12 @@ fn a_phantom_in_a_scanned_range_fails_a_serializable_commit() {
     let file = TempPath::new("concurrent-phantom");
     let db = Database::open(file.path()).unwrap();
     let mut reader = db.begin_concurrent(Isolation::Serializable).unwrap();
-    assert!(reader.scan("order:".to_owned().."order;".to_owned()).unwrap().is_empty());
+    assert!(
+        reader
+            .scan("order:".to_owned().."order;".to_owned())
+            .unwrap()
+            .is_empty()
+    );
     reader.put("summary", "0 orders").unwrap();
     db.put("order:1", "new").unwrap();
     assert_eq!(reader.commit().unwrap_err().kind(), ErrorKind::Conflict);
@@ -105,7 +113,10 @@ fn committed_transfers_match_running_them_one_at_a_time_in_commit_order() {
             let from_balance = tx.get(key(from)).unwrap();
             let to_balance = tx.get(key(to)).unwrap();
             let mut recorded = Recorded {
-                reads: vec![(key(from), from_balance.clone()), (key(to), to_balance.clone())],
+                reads: vec![
+                    (key(from), from_balance.clone()),
+                    (key(to), to_balance.clone()),
+                ],
                 writes: Vec::new(),
             };
             if from != to && number(from_balance.clone()) >= amount {
@@ -133,13 +144,19 @@ fn committed_transfers_match_running_them_one_at_a_time_in_commit_order() {
         (0..8).map(|index| (key(index), b"100".to_vec())).collect();
     for recorded in &committed {
         for (key, seen) in &recorded.reads {
-            assert_eq!(serial.get(key), seen.as_ref(), "a committed read differs from serial order");
+            assert_eq!(
+                serial.get(key),
+                seen.as_ref(),
+                "a committed read differs from serial order"
+            );
         }
         for (key, value) in &recorded.writes {
             serial.insert(key.clone(), value.clone());
         }
     }
-    let total: i64 = (0..8).map(|index| number(db.get(key(index)).unwrap())).sum();
+    let total: i64 = (0..8)
+        .map(|index| number(db.get(key(index)).unwrap()))
+        .sum();
     assert_eq!(total, 800);
     for (key, value) in serial {
         assert_eq!(db.get(&key).unwrap(), Some(value));
@@ -173,6 +190,8 @@ fn transactions_on_many_threads_keep_every_transfer() {
             });
         }
     });
-    let total: i64 = (0..4).map(|index| number(db.get(key(index)).unwrap())).sum();
+    let total: i64 = (0..4)
+        .map(|index| number(db.get(key(index)).unwrap()))
+        .sum();
     assert_eq!(total, 4000);
 }

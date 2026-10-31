@@ -3,7 +3,10 @@ use crate::{Dialect, QueryResult, Session, SqlError};
 
 fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
-    run(&mut session, "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))");
+    run(
+        &mut session,
+        "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))",
+    );
     session
 }
 
@@ -34,16 +37,19 @@ fn single(session: &mut Session<'_, MemoryStore>, text: &str) -> String {
 fn logged(session: &mut Session<'_, MemoryStore>) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     session
-        .execute("SELECT n, msg FROM log ORDER BY n", &mut |result: QueryResult| {
-            for row in result.rows {
-                let text = |at: usize| {
-                    row.get(at)
-                        .and_then(|value| value.to_text())
-                        .unwrap_or_else(|| "NULL".to_owned())
-                };
-                rows.push((text(0), text(1)));
-            }
-        })
+        .execute(
+            "SELECT n, msg FROM log ORDER BY n",
+            &mut |result: QueryResult| {
+                for row in result.rows {
+                    let text = |at: usize| {
+                        row.get(at)
+                            .and_then(|value| value.to_text())
+                            .unwrap_or_else(|| "NULL".to_owned())
+                    };
+                    rows.push((text(0), text(1)));
+                }
+            },
+        )
         .unwrap();
     rows
 }
@@ -54,8 +60,7 @@ fn pair(n: &str, msg: &str) -> (String, String) {
 
 const LOG_IT: &str = "CREATE OR REPLACE PROCEDURE log_it (\n  p_n   IN log.n%TYPE,\n  p_msg IN log.msg%TYPE DEFAULT 'none'\n) AS\nBEGIN\n  INSERT INTO log VALUES (p_n, p_msg);\nEND log_it;";
 
-const DOUBLE_IT: &str =
-    "CREATE OR REPLACE FUNCTION double_it (n IN NUMBER) RETURN NUMBER IS\nBEGIN\n  RETURN n * 2;\nEND;";
+const DOUBLE_IT: &str = "CREATE OR REPLACE FUNCTION double_it (n IN NUMBER) RETURN NUMBER IS\nBEGIN\n  RETURN n * 2;\nEND;";
 
 #[test]
 fn call_binds_positional_named_and_default_arguments() {
@@ -67,7 +72,11 @@ fn call_binds_positional_named_and_default_arguments() {
     run(&mut session, "CALL log_it(3)");
     assert_eq!(
         logged(&mut session),
-        [pair("1", "positional"), pair("2", "named"), pair("3", "none")]
+        [
+            pair("1", "positional"),
+            pair("2", "named"),
+            pair("3", "none")
+        ]
     );
 }
 
@@ -92,7 +101,10 @@ fn a_stored_function_runs_in_sql_and_in_plsql() {
     let mut session = session(&store);
     run(&mut session, DOUBLE_IT);
     assert_eq!(single(&mut session, "SELECT double_it(21) FROM dual"), "42");
-    assert_eq!(single(&mut session, "SELECT double_it(n => 5) FROM dual"), "10");
+    assert_eq!(
+        single(&mut session, "SELECT double_it(n => 5) FROM dual"),
+        "10"
+    );
     run(&mut session, "INSERT INTO log VALUES (4, 'row')");
     assert_eq!(
         single(&mut session, "SELECT double_it(n) FROM log WHERE n = 4"),

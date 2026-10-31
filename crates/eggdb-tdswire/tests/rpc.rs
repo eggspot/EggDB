@@ -326,10 +326,7 @@ fn exec_sp_unprepare_in_a_batch_forgets_the_handle() {
     assert!(errors(&prepared).is_empty(), "{prepared:?}");
     let released = client.batch("EXEC sp_unprepare 1;");
     assert!(errors(&released).is_empty(), "{released:?}");
-    let executed = client.rpc(&[call_by_id(
-        SP_EXECUTE,
-        &[int_parameter("", Some(1), false)],
-    )]);
+    let executed = client.rpc(&[call_by_id(SP_EXECUTE, &[int_parameter("", Some(1), false)])]);
     assert_eq!(errors(&executed)[0].0, 8179);
 }
 
@@ -530,18 +527,21 @@ fn a_user_procedure_called_by_name_returns_its_rows_status_and_output_parameters
     );
     let positional = client.rpc(&[call_by_name(
         "[dbo].[split]",
-        &[int_parameter("", Some(4), false), int_parameter("", Some(0), true)],
+        &[
+            int_parameter("", Some(4), false),
+            int_parameter("", Some(0), true),
+        ],
     )]);
     assert!(errors(&positional).is_empty(), "{positional:?}");
-    assert!(positional.contains(&Token::ReturnStatus(0)), "{positional:?}");
+    assert!(
+        positional.contains(&Token::ReturnStatus(0)),
+        "{positional:?}"
+    );
     assert_eq!(
         returned(&positional),
         vec![(1, String::new(), Some("2".to_owned()))]
     );
-    let missing = client.rpc(&[call_by_name(
-        "split",
-        &[int_parameter("@half", None, true)],
-    )]);
+    let missing = client.rpc(&[call_by_name("split", &[int_parameter("@half", None, true)])]);
     assert_eq!(errors(&missing)[0].0, 201, "{missing:?}");
     assert_eq!(
         rows(&client.batch("DECLARE @h int; EXEC dbo.split 9, @h OUTPUT; SELECT @h")),

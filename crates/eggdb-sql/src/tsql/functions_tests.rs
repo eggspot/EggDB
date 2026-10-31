@@ -64,7 +64,10 @@ fn integers(values: &[&[i32]]) -> Vec<Vec<Value>> {
 
 fn with_numbers(session: &mut Session<'_, MemoryStore>) {
     succeeds(session, "CREATE TABLE numbers (id int PRIMARY KEY, n int)");
-    succeeds(session, "INSERT INTO numbers VALUES (1, 10), (2, 20), (3, 30)");
+    succeeds(
+        session,
+        "INSERT INTO numbers VALUES (1, 10), (2, 20), (3, 30)",
+    );
 }
 
 fn create_twice(session: &mut Session<'_, MemoryStore>) {
@@ -89,9 +92,15 @@ fn a_scalar_function_runs_once_per_row_and_in_where() {
     let mut session = session(&store);
     with_numbers(&mut session);
     create_twice(&mut session);
-    let steps = succeeds(&mut session, "SELECT id, dbo.twice(n) FROM numbers ORDER BY id");
+    let steps = succeeds(
+        &mut session,
+        "SELECT id, dbo.twice(n) FROM numbers ORDER BY id",
+    );
     assert_eq!(rows(&steps), integers(&[&[1, 20], &[2, 40], &[3, 60]]));
-    let steps = succeeds(&mut session, "SELECT id FROM numbers WHERE dbo.twice(n) > 30 ORDER BY id");
+    let steps = succeeds(
+        &mut session,
+        "SELECT id FROM numbers WHERE dbo.twice(n) > 30 ORDER BY id",
+    );
     assert_eq!(rows(&steps), integers(&[&[2], &[3]]));
 }
 
@@ -100,7 +109,10 @@ fn a_scalar_function_result_can_be_assigned_to_a_variable() {
     let store = MemoryStore::default();
     let mut session = session(&store);
     create_twice(&mut session);
-    let steps = succeeds(&mut session, "DECLARE @x int; SET @x = dbo.twice(4); SELECT @x");
+    let steps = succeeds(
+        &mut session,
+        "DECLARE @x int; SET @x = dbo.twice(4); SELECT @x",
+    );
     assert_eq!(rows(&steps), integers(&[&[8]]));
 }
 
@@ -112,7 +124,10 @@ fn default_takes_the_parameter_default_and_missing_arguments_fail() {
         &mut session,
         "CREATE FUNCTION dbo.scaled(@n int, @by int = 3) RETURNS int AS BEGIN RETURN @n * @by END",
     );
-    let steps = succeeds(&mut session, "SELECT dbo.scaled(2, DEFAULT), dbo.scaled(2, 5)");
+    let steps = succeeds(
+        &mut session,
+        "SELECT dbo.scaled(2, DEFAULT), dbo.scaled(2, 5)",
+    );
     assert_eq!(rows(&steps), integers(&[&[6, 10]]));
     fails_with(&mut session, "SELECT dbo.scaled(2)", 313);
     fails_with(&mut session, "SELECT dbo.scaled(1, 2, 3)", 8144);
@@ -148,7 +163,10 @@ fn a_function_reads_tables_with_select_assignment() {
          RETURN ISNULL(@total, 0); \
          END",
     );
-    let steps = succeeds(&mut session, "SELECT dbo.total_above(15), dbo.total_above(100)");
+    let steps = succeeds(
+        &mut session,
+        "SELECT dbo.total_above(15), dbo.total_above(100)",
+    );
     assert_eq!(rows(&steps), integers(&[&[50, 0]]));
 }
 
@@ -187,7 +205,10 @@ fn an_inline_table_valued_function_is_a_parameterized_view() {
         &mut session,
         "CREATE FUNCTION dbo.at_least(@floor int) RETURNS TABLE AS RETURN (SELECT id, n FROM numbers WHERE n >= @floor)",
     );
-    let steps = succeeds(&mut session, "SELECT id, n FROM dbo.at_least(15) ORDER BY id");
+    let steps = succeeds(
+        &mut session,
+        "SELECT id, n FROM dbo.at_least(15) ORDER BY id",
+    );
     assert_eq!(rows(&steps), integers(&[&[2, 20], &[3, 30]]));
     let steps = succeeds(&mut session, "SELECT * FROM at_least(1000)");
     assert_eq!(rows(&steps), Vec::<Vec<Value>>::new());
@@ -208,11 +229,17 @@ fn a_multi_statement_table_valued_function_returns_its_table_variable() {
          RETURN; \
          END",
     );
-    let steps = succeeds(&mut session, "SELECT number, square FROM dbo.squares(3) AS s");
+    let steps = succeeds(
+        &mut session,
+        "SELECT number, square FROM dbo.squares(3) AS s",
+    );
     assert_eq!(rows(&steps), integers(&[&[1, 1], &[3, 1009]]));
     let steps = succeeds(&mut session, "SELECT * FROM dbo.squares(0)");
     assert_eq!(rows(&steps), Vec::<Vec<Value>>::new());
-    assert_eq!(column_names(&steps), vec!["number".to_owned(), "square".to_owned()]);
+    assert_eq!(
+        column_names(&steps),
+        vec!["number".to_owned(), "square".to_owned()]
+    );
 }
 
 #[test]

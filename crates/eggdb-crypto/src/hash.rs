@@ -1,8 +1,6 @@
 use crate::sha1::{SHA1_BLOCK_BYTES, SHA1_DIGEST_BYTES, Sha1};
 use crate::sha256::{SHA256_BLOCK_BYTES, SHA256_DIGEST_BYTES, Sha256};
-use crate::sha512::{
-    SHA384_DIGEST_BYTES, SHA512_BLOCK_BYTES, SHA512_DIGEST_BYTES, Sha384, Sha512,
-};
+use crate::sha512::{SHA384_DIGEST_BYTES, SHA512_BLOCK_BYTES, SHA512_DIGEST_BYTES, Sha384, Sha512};
 
 /// The largest message block of any [`HashFunction`] in this crate, in bytes.
 pub const MAX_HASH_BLOCK_BYTES: usize = SHA512_BLOCK_BYTES;

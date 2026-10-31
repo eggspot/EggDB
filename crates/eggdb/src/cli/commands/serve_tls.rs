@@ -1,11 +1,11 @@
 use crate::cli::args::{CommandName, ServeOptions};
 use crate::cli::failure::Failure;
 use crate::cli::render::{self, TimeStyle};
+use eggdb_tls::config::ServerConfigError;
 use eggdb_tls::private_key::{PrivateKey, PrivateKeyError};
 use eggdb_tls::self_signed::{SelfSignedCertificateRequest, generate_self_signed_certificate};
 use eggdb_tls::signature::{SignatureHash, SubjectPublicKey};
 use eggdb_tls::x509::{Certificate, SubjectAlternativeName, certificates_from_pem};
-use eggdb_tls::config::ServerConfigError;
 use eggdb_tls::{MinimumVersion, ServerConfig};
 use std::net::IpAddr;
 use std::path::Path;
@@ -107,9 +107,8 @@ fn read_text(option: &str, path: &Path) -> Result<String, Failure> {
 
 fn load_chain(path: &Path) -> Result<Vec<Certificate>, Failure> {
     let text = read_text("--tls-certificate", path)?;
-    let chain = certificates_from_pem(&text).map_err(|error| {
-        usage(format!("--tls-certificate {}: {error}", shown(path)))
-    })?;
+    let chain = certificates_from_pem(&text)
+        .map_err(|error| usage(format!("--tls-certificate {}: {error}", shown(path))))?;
     if chain.is_empty() {
         return Err(usage(format!(
             "--tls-certificate {} has no CERTIFICATE block: expected PEM, -----BEGIN CERTIFICATE-----",

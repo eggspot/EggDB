@@ -20,7 +20,10 @@ pub(crate) fn unescape(text: &str) -> Result<String, String> {
     let mut rest = text;
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
-        let end = rest[at..].find(';').map(|offset| at + offset).ok_or("an XML entity is not closed")?;
+        let end = rest[at..]
+            .find(';')
+            .map(|offset| at + offset)
+            .ok_or("an XML entity is not closed")?;
         let entity = &rest[at + 1..end];
         let character = match entity {
             "amp" => '&',
@@ -32,9 +35,12 @@ pub(crate) fn unescape(text: &str) -> Result<String, String> {
                 let code = if let Some(hex) = entity.strip_prefix("#x") {
                     u32::from_str_radix(hex, 16).ok()
                 } else {
-                    entity.strip_prefix('#').and_then(|decimal| decimal.parse::<u32>().ok())
+                    entity
+                        .strip_prefix('#')
+                        .and_then(|decimal| decimal.parse::<u32>().ok())
                 };
-                code.and_then(char::from_u32).ok_or_else(|| format!("&{entity}; is not an XML entity this endpoint reads"))?
+                code.and_then(char::from_u32)
+                    .ok_or_else(|| format!("&{entity}; is not an XML entity this endpoint reads"))?
             }
         };
         out.push(character);
@@ -56,7 +62,10 @@ pub(crate) fn elements<'x>(xml: &'x str, name: &str) -> Result<Vec<&'x str>, Str
             return Err("the XML document has too many elements".to_owned());
         }
         let body_start = start + open.len();
-        let end = rest[body_start..].find(&close).map(|offset| body_start + offset).ok_or_else(|| format!("<{name}> is not closed"))?;
+        let end = rest[body_start..]
+            .find(&close)
+            .map(|offset| body_start + offset)
+            .ok_or_else(|| format!("<{name}> is not closed"))?;
         found.push(&rest[body_start..end]);
         rest = &rest[end + close.len()..];
     }

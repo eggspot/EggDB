@@ -17,9 +17,7 @@ fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<BatchStep> {
 }
 
 fn refused(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
-    session
-        .execute_batch(text, &mut |_| true)
-        .expect_err(text)
+    session.execute_batch(text, &mut |_| true).expect_err(text)
 }
 
 fn last_rows(steps: &[BatchStep]) -> Vec<Vec<Value>> {
@@ -74,7 +72,10 @@ fn declared_variables_take_their_types_and_initial_values() {
         "DECLARE @i int = 1; SET @i += 4; SET @i *= 2; SET @i = @i - 1; SELECT @i AS i",
     );
     assert_eq!(last_rows(&steps), vec![vec![Value::Integer(9)]]);
-    let steps = batch(&mut session, "DECLARE @s nvarchar(20) = N'a'; SET @s += N'b'; SELECT @s AS s");
+    let steps = batch(
+        &mut session,
+        "DECLARE @s nvarchar(20) = N'a'; SET @s += N'b'; SELECT @s AS s",
+    );
     assert_eq!(last_rows(&steps), vec![vec![text("ab")]]);
 }
 
@@ -160,7 +161,11 @@ SELECT 'after' AS word",
         .collect();
     assert_eq!(
         words,
-        vec![vec![text("two")], vec![text("still two")], vec![text("after")]]
+        vec![
+            vec![text("two")],
+            vec![text("still two")],
+            vec![text("after")]
+        ]
     );
 }
 
@@ -190,7 +195,10 @@ SELECT @n AS n, @s AS s, @total AS total, @none AS none, @@ROWCOUNT AS counted",
             Value::Integer(0)
         ]]
     );
-    let error = refused(&mut session, "DECLARE @s int = 0; SELECT @s = @s + id FROM t");
+    let error = refused(
+        &mut session,
+        "DECLARE @s int = 0; SELECT @s = @s + id FROM t",
+    );
     assert_eq!(error.vendor_code(), Some(40517));
 }
 
@@ -246,7 +254,11 @@ SELECT 'not reached' AS x",
     );
     assert_eq!(
         last_rows(&steps),
-        vec![vec![Value::Integer(51_000), Value::Integer(3), text("custom failure")]]
+        vec![vec![
+            Value::Integer(51_000),
+            Value::Integer(3),
+            text("custom failure")
+        ]]
     );
     let failure = steps
         .last()
@@ -341,7 +353,10 @@ SELECT @@ERROR AS e",
 fn error_and_rowcount_follow_each_statement() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    batch(&mut session, "CREATE TABLE t (id INT PRIMARY KEY) INSERT INTO t VALUES (1)");
+    batch(
+        &mut session,
+        "CREATE TABLE t (id INT PRIMARY KEY) INSERT INTO t VALUES (1)",
+    );
     let steps = batch(
         &mut session,
         "INSERT INTO t VALUES (1)
@@ -371,7 +386,10 @@ IF @@ROWCOUNT = 1 SELECT 'one row' AS counted",
 fn return_ends_the_batch() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    let steps = batch(&mut session, "SELECT 1 AS a; IF 1 = 1 RETURN; SELECT 2 AS b");
+    let steps = batch(
+        &mut session,
+        "SELECT 1 AS a; IF 1 = 1 RETURN; SELECT 2 AS b",
+    );
     assert_eq!(steps.len(), 1);
 }
 
@@ -404,7 +422,13 @@ SELECT id, name FROM @t ORDER BY id",
         .collect();
     assert_eq!(
         tags,
-        ["INSERT 0 3", "UPDATE 1", "DELETE 1", "INSERT 0 1", "SELECT 3"]
+        [
+            "INSERT 0 3",
+            "UPDATE 1",
+            "DELETE 1",
+            "INSERT 0 1",
+            "SELECT 3"
+        ]
     );
     let steps = batch(
         &mut session,
@@ -562,7 +586,8 @@ fn hostile_batch_logic_returns_errors_and_never_panics() {
     let mut session = session(&store);
     let deep_if = format!("{}SELECT 1", "IF 1 = 1 ".repeat(5_000));
     let deep_begin = format!("{}SELECT 1{}", "BEGIN ".repeat(5_000), " END".repeat(5_000));
-    let deep_dynamic = "DECLARE @s nvarchar(200) = N'EXEC sp_executesql @s, N''@s nvarchar(200)'', @s'
+    let deep_dynamic =
+        "DECLARE @s nvarchar(200) = N'EXEC sp_executesql @s, N''@s nvarchar(200)'', @s'
 EXEC sp_executesql @s, N'@s nvarchar(200)', @s";
     for text in [
         deep_if.as_str(),
@@ -629,7 +654,10 @@ fn xact_abort_on_rolls_back_the_transaction_and_ends_the_batch_at_a_run_time_err
     let continued = batch(&mut session, &format!("SET XACT_ABORT OFF\n{insert_twice}"));
     assert_eq!(errors(&continued), vec![Some(2627)]);
     assert_eq!(
-        shown(&last_rows(&batch(&mut session, "SELECT COUNT(*) AS n FROM t"))),
+        shown(&last_rows(&batch(
+            &mut session,
+            "SELECT COUNT(*) AS n FROM t"
+        ))),
         vec![vec!["2".to_owned()]]
     );
     let raised = batch(
@@ -645,7 +673,9 @@ fn xact_abort_on_rolls_back_the_transaction_and_ends_the_batch_at_a_run_time_err
         vec![vec!["2".to_owned()]]
     );
     session.execute("BEGIN TRANSACTION", &mut |_| {}).unwrap();
-    session.execute("INSERT INTO t VALUES (40)", &mut |_| {}).unwrap();
+    session
+        .execute("INSERT INTO t VALUES (40)", &mut |_| {})
+        .unwrap();
     let error = session
         .execute("INSERT INTO t VALUES (40)", &mut |_| {})
         .unwrap_err();

@@ -12,7 +12,10 @@ pub struct HnswOptions {
 
 impl Default for HnswOptions {
     fn default() -> Self {
-        Self { m: 16, ef_construction: 64 }
+        Self {
+            m: 16,
+            ef_construction: 64,
+        }
     }
 }
 
@@ -26,7 +29,9 @@ impl Eq for Candidate {}
 
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.distance.total_cmp(&other.distance).then(self.node.cmp(&other.node))
+        self.distance
+            .total_cmp(&other.distance)
+            .then(self.node.cmp(&other.node))
     }
 }
 
@@ -50,14 +55,20 @@ pub struct Hnsw {
 }
 
 fn distance(left: &[f32], right: &[f32]) -> f64 {
-    left.iter().zip(right).map(|(a, b)| f64::from(a - b).powi(2)).sum()
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| f64::from(a - b).powi(2))
+        .sum()
 }
 
 impl Hnsw {
     /// An empty graph for vectors of `dimensions`.
     pub fn new(dimensions: usize, options: HnswOptions) -> Self {
         Self {
-            options: HnswOptions { m: options.m.max(2), ef_construction: options.ef_construction.max(options.m.max(2)) },
+            options: HnswOptions {
+                m: options.m.max(2),
+                ef_construction: options.ef_construction.max(options.m.max(2)),
+            },
             dimensions,
             vectors: Vec::new(),
             ids: Vec::new(),
@@ -86,25 +97,48 @@ impl Hnsw {
         ((-uniform.ln() * scale) as usize).min(16)
     }
 
-    fn search_layer(&self, query: &[f32], entries: &[usize], ef: usize, layer: usize) -> Vec<Candidate> {
+    fn search_layer(
+        &self,
+        query: &[f32],
+        entries: &[usize],
+        ef: usize,
+        layer: usize,
+    ) -> Vec<Candidate> {
         let mut visited: HashSet<usize> = entries.iter().copied().collect();
         let mut candidates: BinaryHeap<std::cmp::Reverse<Candidate>> = BinaryHeap::new();
         let mut found: BinaryHeap<Candidate> = BinaryHeap::new();
         for &node in entries {
-            let candidate = Candidate { distance: distance(query, &self.vectors[node]), node };
+            let candidate = Candidate {
+                distance: distance(query, &self.vectors[node]),
+                node,
+            };
             candidates.push(std::cmp::Reverse(candidate));
             found.push(candidate);
         }
         while let Some(std::cmp::Reverse(nearest)) = candidates.pop() {
-            if found.len() >= ef && found.peek().is_some_and(|furthest| nearest.distance > furthest.distance) {
+            if found.len() >= ef
+                && found
+                    .peek()
+                    .is_some_and(|furthest| nearest.distance > furthest.distance)
+            {
                 break;
             }
-            for &neighbour in self.links[nearest.node].get(layer).map_or(&[][..], Vec::as_slice) {
+            for &neighbour in self.links[nearest.node]
+                .get(layer)
+                .map_or(&[][..], Vec::as_slice)
+            {
                 if !visited.insert(neighbour) {
                     continue;
                 }
-                let candidate = Candidate { distance: distance(query, &self.vectors[neighbour]), node: neighbour };
-                if found.len() < ef || found.peek().is_some_and(|furthest| candidate.distance < furthest.distance) {
+                let candidate = Candidate {
+                    distance: distance(query, &self.vectors[neighbour]),
+                    node: neighbour,
+                };
+                if found.len() < ef
+                    || found
+                        .peek()
+                        .is_some_and(|furthest| candidate.distance < furthest.distance)
+                {
                     candidates.push(std::cmp::Reverse(candidate));
                     found.push(candidate);
                     if found.len() > ef {
@@ -122,17 +156,27 @@ impl Hnsw {
         let base = self.vectors[node].clone();
         let mut neighbours: Vec<Candidate> = self.links[node][layer]
             .iter()
-            .map(|&other| Candidate { distance: distance(&base, &self.vectors[other]), node: other })
+            .map(|&other| Candidate {
+                distance: distance(&base, &self.vectors[other]),
+                node: other,
+            })
             .collect();
         neighbours.sort();
         neighbours.truncate(keep);
-        self.links[node][layer] = neighbours.into_iter().map(|candidate| candidate.node).collect();
+        self.links[node][layer] = neighbours
+            .into_iter()
+            .map(|candidate| candidate.node)
+            .collect();
     }
 
     /// Adds `vector` under `id`. Fails when its dimensions differ from the graph's.
     pub fn insert(&mut self, id: u64, vector: Vec<f32>) -> Result<(), crate::VectorError> {
         if vector.len() != self.dimensions {
-            return Err(crate::VectorError(format!("expected {} dimensions, not {}", self.dimensions, vector.len())));
+            return Err(crate::VectorError(format!(
+                "expected {} dimensions, not {}",
+                self.dimensions,
+                vector.len()
+            )));
         }
         let level = self.random_level();
         let node = self.vectors.len();
@@ -151,8 +195,16 @@ impl Hnsw {
         }
         for layer in (0..=level.min(top)).rev() {
             let found = self.search_layer(&query, &nearest, self.options.ef_construction, layer);
-            let keep = if layer == 0 { self.options.m * 2 } else { self.options.m };
-            let chosen: Vec<usize> = found.iter().take(self.options.m).map(|candidate| candidate.node).collect();
+            let keep = if layer == 0 {
+                self.options.m * 2
+            } else {
+                self.options.m
+            };
+            let chosen: Vec<usize> = found
+                .iter()
+                .take(self.options.m)
+                .map(|candidate| candidate.node)
+                .collect();
             for &neighbour in &chosen {
                 self.links[neighbour][layer].push(node);
                 if self.links[neighbour][layer].len() > keep {

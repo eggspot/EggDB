@@ -53,13 +53,19 @@ const NAMES: [(&str, CqlType); 20] = [
 
 impl CqlType {
     pub(crate) fn from_name(name: &str) -> Option<Self> {
-        NAMES.iter().find(|(known, _)| known.eq_ignore_ascii_case(name)).map(|(_, cql)| *cql)
+        NAMES
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(name))
+            .map(|(_, cql)| *cql)
     }
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             CqlType::Varchar => "text",
-            other => NAMES.iter().find(|(_, cql)| *cql == other).map_or("text", |(name, _)| name),
+            other => NAMES
+                .iter()
+                .find(|(_, cql)| *cql == other)
+                .map_or("text", |(name, _)| name),
         }
     }
 
@@ -218,7 +224,11 @@ fn varint_text(bytes: &[u8]) -> String {
         negate(&mut magnitude);
     }
     let digits = digits_from_magnitude(magnitude);
-    if negative { format!("-{digits}") } else { digits }
+    if negative {
+        format!("-{digits}")
+    } else {
+        digits
+    }
 }
 
 fn decimal_parts(text: &str) -> Result<(bool, String, i32), String> {
@@ -227,10 +237,16 @@ fn decimal_parts(text: &str) -> Result<(bool, String, i32), String> {
         None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
     let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
-    if whole.is_empty() && fraction.is_empty() || !whole.bytes().chain(fraction.bytes()).all(|byte| byte.is_ascii_digit()) {
+    if whole.is_empty() && fraction.is_empty()
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|byte| byte.is_ascii_digit())
+    {
         return Err(format!("{text} is not a decimal number CQL can carry"));
     }
-    let scale = i32::try_from(fraction.len()).map_err(|_| "the decimal has too many digits".to_owned())?;
+    let scale =
+        i32::try_from(fraction.len()).map_err(|_| "the decimal has too many digits".to_owned())?;
     Ok((negative, format!("{whole}{fraction}"), scale))
 }
 
@@ -238,23 +254,38 @@ fn civil(days_since_1970: i64) -> (i64, i64, i64) {
     let z = days_since_1970 + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_index = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
     (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
 fn fixed<const N: usize>(bytes: &[u8], cql: CqlType) -> Result<[u8; N], String> {
-    bytes.try_into().map_err(|_| format!("a {} value must be {N} bytes, not {}", cql.name(), bytes.len()))
+    bytes.try_into().map_err(|_| {
+        format!(
+            "a {} value must be {N} bytes, not {}",
+            cql.name(),
+            bytes.len()
+        )
+    })
 }
 
 fn float_text(value: f64) -> String {
     if value.is_nan() {
         "NaN".to_owned()
     } else if value.is_infinite() {
-        if value > 0.0 { "Infinity".to_owned() } else { "-Infinity".to_owned() }
+        if value > 0.0 {
+            "Infinity".to_owned()
+        } else {
+            "-Infinity".to_owned()
+        }
     } else {
         format!("{value:?}")
     }
@@ -266,7 +297,14 @@ fn hex(bytes: &[u8]) -> String {
 
 fn uuid_text(bytes: &[u8; 16]) -> String {
     let text = hex(bytes);
-    format!("{}-{}-{}-{}-{}", &text[..8], &text[8..12], &text[12..16], &text[16..20], &text[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &text[..8],
+        &text[8..12],
+        &text[12..16],
+        &text[16..20],
+        &text[20..]
+    )
 }
 
 /// A bound value in the text form a SQL parameter takes, or `None` for NULL.
@@ -275,7 +313,9 @@ pub(crate) fn parameter_text(bytes: Option<&[u8]>, cql: CqlType) -> Result<Optio
         return Ok(None);
     };
     let text = match cql {
-        CqlType::Ascii | CqlType::Varchar => String::from_utf8(bytes.to_vec()).map_err(|_| "a text value is not UTF-8".to_owned())?,
+        CqlType::Ascii | CqlType::Varchar => {
+            String::from_utf8(bytes.to_vec()).map_err(|_| "a text value is not UTF-8".to_owned())?
+        }
         CqlType::Int => i32::from_be_bytes(fixed(bytes, cql)?).to_string(),
         CqlType::BigInt | CqlType::Counter => i64::from_be_bytes(fixed(bytes, cql)?).to_string(),
         CqlType::SmallInt => i16::from_be_bytes(fixed(bytes, cql)?).to_string(),
@@ -285,17 +325,25 @@ pub(crate) fn parameter_text(bytes: Option<&[u8]>, cql: CqlType) -> Result<Optio
         CqlType::Float => float_text(f64::from(f32::from_be_bytes(fixed(bytes, cql)?))),
         CqlType::Varint => varint_text(bytes),
         CqlType::Decimal => {
-            let scale = i32::from_be_bytes(fixed(bytes.get(..4).ok_or("a decimal value is cut short")?, cql)?);
+            let scale = i32::from_be_bytes(fixed(
+                bytes.get(..4).ok_or("a decimal value is cut short")?,
+                cql,
+            )?);
             let digits = varint_text(&bytes[4..]);
             let (negative, digits) = match digits.strip_prefix('-') {
                 Some(rest) => (true, rest.to_owned()),
                 None => (false, digits),
             };
-            let scale = usize::try_from(scale).map_err(|_| "a decimal with a negative scale is not supported".to_owned())?;
+            let scale = usize::try_from(scale)
+                .map_err(|_| "a decimal with a negative scale is not supported".to_owned())?;
             let padded = format!("{digits:0>width$}", width = scale + 1);
             let (whole, fraction) = padded.split_at(padded.len() - scale);
             let sign = if negative { "-" } else { "" };
-            if fraction.is_empty() { format!("{sign}{whole}") } else { format!("{sign}{whole}.{fraction}") }
+            if fraction.is_empty() {
+                format!("{sign}{whole}")
+            } else {
+                format!("{sign}{whole}.{fraction}")
+            }
         }
         CqlType::Uuid | CqlType::TimeUuid => uuid_text(&fixed(bytes, cql)?),
         CqlType::Timestamp => {
@@ -311,12 +359,19 @@ pub(crate) fn parameter_text(bytes: Option<&[u8]>, cql: CqlType) -> Result<Optio
             )
         }
         CqlType::Date => {
-            let (year, month, day) = civil(i64::from(u32::from_be_bytes(fixed(bytes, cql)?)) - DATE_CENTER);
+            let (year, month, day) =
+                civil(i64::from(u32::from_be_bytes(fixed(bytes, cql)?)) - DATE_CENTER);
             format!("{year:04}-{month:02}-{day:02}")
         }
         CqlType::Time => {
             let micros = i64::from_be_bytes(fixed(bytes, cql)?) / 1000;
-            format!("{:02}:{:02}:{:02}.{:06}", micros / 3_600_000_000, micros / 60_000_000 % 60, micros / 1_000_000 % 60, micros % 1_000_000)
+            format!(
+                "{:02}:{:02}:{:02}.{:06}",
+                micros / 3_600_000_000,
+                micros / 60_000_000 % 60,
+                micros / 1_000_000 % 60,
+                micros % 1_000_000
+            )
         }
         CqlType::Blob => format!("\\x{}", hex(bytes)),
         CqlType::Inet => match bytes.len() {
@@ -338,7 +393,11 @@ fn integer(value: &Value) -> Option<i64> {
 }
 
 fn mismatch(value: &Value, cql: CqlType) -> String {
-    format!("the value {} does not fit the CQL type {}", value.to_text().unwrap_or_default(), cql.name())
+    format!(
+        "the value {} does not fit the CQL type {}",
+        value.to_text().unwrap_or_default(),
+        cql.name()
+    )
 }
 
 /// `value` in the binary form of `cql`, or `None` for NULL.
@@ -348,10 +407,22 @@ pub(crate) fn encode_value(value: &Value, cql: CqlType) -> Result<Option<Vec<u8>
     }
     let bytes = match cql {
         CqlType::Ascii | CqlType::Varchar => value.to_text().unwrap_or_default().into_bytes(),
-        CqlType::Int => i32::try_from(integer(value).ok_or_else(|| mismatch(value, cql))?).map_err(|_| mismatch(value, cql))?.to_be_bytes().to_vec(),
-        CqlType::BigInt | CqlType::Counter => integer(value).ok_or_else(|| mismatch(value, cql))?.to_be_bytes().to_vec(),
-        CqlType::SmallInt => i16::try_from(integer(value).ok_or_else(|| mismatch(value, cql))?).map_err(|_| mismatch(value, cql))?.to_be_bytes().to_vec(),
-        CqlType::TinyInt => i8::try_from(integer(value).ok_or_else(|| mismatch(value, cql))?).map_err(|_| mismatch(value, cql))?.to_be_bytes().to_vec(),
+        CqlType::Int => i32::try_from(integer(value).ok_or_else(|| mismatch(value, cql))?)
+            .map_err(|_| mismatch(value, cql))?
+            .to_be_bytes()
+            .to_vec(),
+        CqlType::BigInt | CqlType::Counter => integer(value)
+            .ok_or_else(|| mismatch(value, cql))?
+            .to_be_bytes()
+            .to_vec(),
+        CqlType::SmallInt => i16::try_from(integer(value).ok_or_else(|| mismatch(value, cql))?)
+            .map_err(|_| mismatch(value, cql))?
+            .to_be_bytes()
+            .to_vec(),
+        CqlType::TinyInt => i8::try_from(integer(value).ok_or_else(|| mismatch(value, cql))?)
+            .map_err(|_| mismatch(value, cql))?
+            .to_be_bytes()
+            .to_vec(),
         CqlType::Boolean => match value {
             Value::Boolean(flag) => vec![u8::from(*flag)],
             _ => return Err(mismatch(value, cql)),
@@ -359,11 +430,21 @@ pub(crate) fn encode_value(value: &Value, cql: CqlType) -> Result<Option<Vec<u8>
         CqlType::Double => match value {
             Value::Double(number) => number.to_be_bytes().to_vec(),
             Value::Real(number) => f64::from(*number).to_be_bytes().to_vec(),
-            _ => value.to_text().and_then(|text| text.parse::<f64>().ok()).ok_or_else(|| mismatch(value, cql))?.to_be_bytes().to_vec(),
+            _ => value
+                .to_text()
+                .and_then(|text| text.parse::<f64>().ok())
+                .ok_or_else(|| mismatch(value, cql))?
+                .to_be_bytes()
+                .to_vec(),
         },
         CqlType::Float => match value {
             Value::Real(number) => number.to_be_bytes().to_vec(),
-            _ => value.to_text().and_then(|text| text.parse::<f32>().ok()).ok_or_else(|| mismatch(value, cql))?.to_be_bytes().to_vec(),
+            _ => value
+                .to_text()
+                .and_then(|text| text.parse::<f32>().ok())
+                .ok_or_else(|| mismatch(value, cql))?
+                .to_be_bytes()
+                .to_vec(),
         },
         CqlType::Decimal => {
             let (negative, digits, scale) = decimal_parts(&value.to_text().unwrap_or_default())?;
@@ -373,21 +454,38 @@ pub(crate) fn encode_value(value: &Value, cql: CqlType) -> Result<Option<Vec<u8>
         }
         CqlType::Varint => {
             let (negative, digits, scale) = decimal_parts(&value.to_text().unwrap_or_default())?;
-            if scale != 0 && digits[digits.len() - usize::try_from(scale).unwrap_or(0)..].bytes().any(|byte| byte != b'0') {
+            if scale != 0
+                && digits[digits.len() - usize::try_from(scale).unwrap_or(0)..]
+                    .bytes()
+                    .any(|byte| byte != b'0')
+            {
                 return Err(mismatch(value, cql));
             }
-            varint_bytes(negative, magnitude_from_digits(&digits[..digits.len() - usize::try_from(scale).unwrap_or(0)]))
+            varint_bytes(
+                negative,
+                magnitude_from_digits(
+                    &digits[..digits.len() - usize::try_from(scale).unwrap_or(0)],
+                ),
+            )
         }
         CqlType::Uuid | CqlType::TimeUuid => match value {
             Value::Uuid(bytes) => bytes.to_vec(),
             _ => return Err(mismatch(value, cql)),
         },
         CqlType::Timestamp => match value {
-            Value::TimestampTz(micros) | Value::Timestamp(micros) => (micros.div_euclid(1000) + UNIX_EPOCH_FROM_2000_MS).to_be_bytes().to_vec(),
+            Value::TimestampTz(micros) | Value::Timestamp(micros) => (micros.div_euclid(1000)
+                + UNIX_EPOCH_FROM_2000_MS)
+                .to_be_bytes()
+                .to_vec(),
             _ => return Err(mismatch(value, cql)),
         },
         CqlType::Date => match value {
-            Value::Date(days) => u32::try_from(i64::from(*days) + UNIX_EPOCH_FROM_2000_DAYS + DATE_CENTER).map_err(|_| mismatch(value, cql))?.to_be_bytes().to_vec(),
+            Value::Date(days) => {
+                u32::try_from(i64::from(*days) + UNIX_EPOCH_FROM_2000_DAYS + DATE_CENTER)
+                    .map_err(|_| mismatch(value, cql))?
+                    .to_be_bytes()
+                    .to_vec()
+            }
             _ => return Err(mismatch(value, cql)),
         },
         CqlType::Time => match value {

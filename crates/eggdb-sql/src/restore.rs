@@ -37,7 +37,8 @@ pub const MAX_LISTED: usize = 10_000;
 const MAX_REMEMBERED_NAMES: usize = 100_000;
 const SHOWN_STATEMENT_CHARS: usize = 48;
 const PROGRESS_EVERY_LINES: u64 = 4096;
-const IDENTITY_INSERT_WITHOUT_IDENTITY: &str = "SET IDENTITY_INSERT of a table whose IDENTITY was not kept";
+const IDENTITY_INSERT_WITHOUT_IDENTITY: &str =
+    "SET IDENTITY_INSERT of a table whose IDENTITY was not kept";
 
 /// A batch of a Transact-SQL script: its text up to the `GO` line that ends it, as sqlcmd
 /// sends it to SQL Server.

@@ -28,7 +28,20 @@ impl Cluster {
     fn new(size: u64, seed: u64) -> Self {
         let members: Vec<NodeId> = (1..=size).collect();
         Self {
-            nodes: members.iter().map(|id| (*id, Node::new(*id, &members, Timing::default(), seed.wrapping_mul(31).wrapping_add(*id)))).collect(),
+            nodes: members
+                .iter()
+                .map(|id| {
+                    (
+                        *id,
+                        Node::new(
+                            *id,
+                            &members,
+                            Timing::default(),
+                            seed.wrapping_mul(31).wrapping_add(*id),
+                        ),
+                    )
+                })
+                .collect(),
             down: BTreeSet::new(),
             in_flight: Vec::new(),
             leaders: BTreeMap::new(),
@@ -38,20 +51,26 @@ impl Cluster {
 
     fn check_and_apply(&mut self) {
         for (id, node) in &mut self.nodes {
-            if node.role() == Role::Leader {
-                if let Some(other) = self.leaders.insert(node.term(), *id) {
-                    assert_eq!(other, *id, "two leaders in term {}", node.term());
-                }
+            if node.role() == Role::Leader
+                && let Some(other) = self.leaders.insert(node.term(), *id)
+            {
+                assert_eq!(other, *id, "two leaders in term {}", node.term());
             }
             for entry in node.take_committed() {
-                self.applied.entry(*id).or_default().push((entry.index, entry.command));
+                self.applied
+                    .entry(*id)
+                    .or_default()
+                    .push((entry.index, entry.command));
             }
         }
         let mut by_index: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         for entries in self.applied.values() {
             for (index, command) in entries {
                 if let Some(known) = by_index.insert(*index, command.clone()) {
-                    assert_eq!(&known, command, "two different commands committed at index {index}");
+                    assert_eq!(
+                        &known, command,
+                        "two different commands committed at index {index}"
+                    );
                 }
             }
         }
@@ -67,7 +86,11 @@ impl Cluster {
         let delivering = std::mem::take(&mut self.in_flight);
         for envelope in delivering.into_iter().chain(outgoing) {
             let crosses = partition.contains(&envelope.from) != partition.contains(&envelope.to);
-            if crosses || self.down.contains(&envelope.to) || self.down.contains(&envelope.from) || rng.chance(drop_percent) {
+            if crosses
+                || self.down.contains(&envelope.to)
+                || self.down.contains(&envelope.from)
+                || rng.chance(drop_percent)
+            {
                 continue;
             }
             if rng.chance(10) {
@@ -75,7 +98,8 @@ impl Cluster {
                 continue;
             }
             if let Some(node) = self.nodes.get_mut(&envelope.to) {
-                self.in_flight.extend(node.step(envelope.from, envelope.message));
+                self.in_flight
+                    .extend(node.step(envelope.from, envelope.message));
             }
         }
         self.check_and_apply();
@@ -99,7 +123,12 @@ fn a_cluster_elects_one_leader_and_commits_proposals() {
         cluster.round(&mut rng, 0, &none);
     }
     let leader = cluster.leader().expect("a leader is elected");
-    let (index, outgoing) = cluster.nodes.get_mut(&leader).unwrap().propose(b"set x".to_vec()).unwrap();
+    let (index, outgoing) = cluster
+        .nodes
+        .get_mut(&leader)
+        .unwrap()
+        .propose(b"set x".to_vec())
+        .unwrap();
     cluster.in_flight.extend(outgoing);
     for _ in 0..50 {
         cluster.round(&mut rng, 0, &none);
@@ -107,8 +136,22 @@ fn a_cluster_elects_one_leader_and_commits_proposals() {
     for node in cluster.nodes.values() {
         assert!(node.commit_index() >= index);
     }
-    let follower = cluster.nodes.keys().copied().find(|id| *id != leader).unwrap();
-    assert_eq!(cluster.nodes.get_mut(&follower).unwrap().propose(Vec::new()).unwrap_err().leader, Some(leader));
+    let follower = cluster
+        .nodes
+        .keys()
+        .copied()
+        .find(|id| *id != leader)
+        .unwrap();
+    assert_eq!(
+        cluster
+            .nodes
+            .get_mut(&follower)
+            .unwrap()
+            .propose(Vec::new())
+            .unwrap_err()
+            .leader,
+        Some(leader)
+    );
 }
 
 #[test]
@@ -130,7 +173,11 @@ fn partitions_crashes_and_drops_never_break_safety_and_the_cluster_recovers() {
         let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let mut proposed = 0u64;
         for step in 0..1_500u64 {
-            let partition: BTreeSet<NodeId> = if (step / 200) % 2 == 1 { [1, 2].into_iter().collect() } else { BTreeSet::new() };
+            let partition: BTreeSet<NodeId> = if (step / 200) % 2 == 1 {
+                [1, 2].into_iter().collect()
+            } else {
+                BTreeSet::new()
+            };
             if rng.chance(1) {
                 let victim = rng.next() % 5 + 1;
                 if cluster.down.contains(&victim) {
@@ -142,7 +189,11 @@ fn partitions_crashes_and_drops_never_break_safety_and_the_cluster_recovers() {
             }
             if rng.chance(20)
                 && let Some(leader) = cluster.leader()
-                && let Ok((_, outgoing)) = cluster.nodes.get_mut(&leader).unwrap().propose(proposed.to_be_bytes().to_vec())
+                && let Ok((_, outgoing)) = cluster
+                    .nodes
+                    .get_mut(&leader)
+                    .unwrap()
+                    .propose(proposed.to_be_bytes().to_vec())
             {
                 proposed += 1;
                 cluster.in_flight.extend(outgoing);
@@ -158,12 +209,25 @@ fn partitions_crashes_and_drops_never_break_safety_and_the_cluster_recovers() {
         for _ in 0..300 {
             cluster.round(&mut rng, 0, &none);
         }
-        let leader = cluster.leader().unwrap_or_else(|| panic!("seed {seed}: no leader after healing"));
-        let (index, outgoing) = cluster.nodes.get_mut(&leader).unwrap().propose(b"final".to_vec()).unwrap();
+        let leader = cluster
+            .leader()
+            .unwrap_or_else(|| panic!("seed {seed}: no leader after healing"));
+        let (index, outgoing) = cluster
+            .nodes
+            .get_mut(&leader)
+            .unwrap()
+            .propose(b"final".to_vec())
+            .unwrap();
         cluster.in_flight.extend(outgoing);
         for _ in 0..200 {
             cluster.round(&mut rng, 0, &none);
         }
-        assert!(cluster.nodes.values().all(|node| node.commit_index() >= index), "seed {seed}: the final proposal did not commit everywhere");
+        assert!(
+            cluster
+                .nodes
+                .values()
+                .all(|node| node.commit_index() >= index),
+            "seed {seed}: the final proposal did not commit everywhere"
+        );
     }
 }

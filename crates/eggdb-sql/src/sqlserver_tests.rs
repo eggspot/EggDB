@@ -462,9 +462,7 @@ fn any_transact_sql_default_is_kept_as_written_and_runs_in_transact_sql() {
         "CREATE TABLE h (id INT PRIMARY KEY, n INT DEFAULT ((SELECT 1)))",
         "CREATE TABLE h (id INT PRIMARY KEY, a INT, n INT DEFAULT (a + 1))",
     ] {
-        let error = session
-            .execute(refused, &mut |_| {})
-            .expect_err(refused);
+        let error = session.execute(refused, &mut |_| {}).expect_err(refused);
         assert_eq!(error.state().code(), "0A000", "{refused}: {error}");
     }
 }
@@ -970,7 +968,12 @@ fn stored_transact_sql_texts_keep_their_meaning() {
 fn stored_transact_sql_defaults_keep_their_text_and_meaning() {
     const DEFAULTS: [(&str, &str, &str, &str); 6] = [
         ("INT", "(abs(-2)*(3))", "abs(-2)*(3)", "6"),
-        ("NVARCHAR(10)", "(CONCAT(N'a',N'b'))", "CONCAT(N'a',N'b')", "ab"),
+        (
+            "NVARCHAR(10)",
+            "(CONCAT(N'a',N'b'))",
+            "CONCAT(N'a',N'b')",
+            "ab",
+        ),
         (
             "INT",
             "(datepart(year,CONVERT([date],'20240115',(112))))",
@@ -995,9 +998,14 @@ fn stored_transact_sql_defaults_keep_their_text_and_meaning() {
                 "CREATE TABLE [dbo].[Defaults] ([ID] INT PRIMARY KEY, [V] {column_type} NULL CONSTRAINT [DF_Defaults_{index}] DEFAULT {written})"
             ),
         );
-        let table = crate::encoding::TableDefinition::decode("defaults", &stored(&store, "defaults"))
-            .unwrap();
-        assert_eq!(table.columns[1].default.as_deref(), Some(*kept), "{written}");
+        let table =
+            crate::encoding::TableDefinition::decode("defaults", &stored(&store, "defaults"))
+                .unwrap();
+        assert_eq!(
+            table.columns[1].default.as_deref(),
+            Some(*kept),
+            "{written}"
+        );
         assert_eq!(table.default_dialect(1), Dialect::SqlServer, "{written}");
         values(&mut session, "INSERT INTO Defaults (ID) VALUES (1)");
         let rows = values(&mut session, "SELECT V FROM Defaults");
@@ -1248,7 +1256,11 @@ fn if_and_else_choose_their_statements_by_any_condition() {
     )
     .unwrap();
     assert_eq!(rows_of(&steps), vec![vec![Value::Integer(7)]]);
-    let steps = batch(&mut session, "IF 1 = 1 BEGIN SELECT 8 AS n SELECT 9 AS n END").unwrap();
+    let steps = batch(
+        &mut session,
+        "IF 1 = 1 BEGIN SELECT 8 AS n SELECT 9 AS n END",
+    )
+    .unwrap();
     assert_eq!(steps.len(), 2);
     let steps = batch(&mut session, "IF id = 1 SELECT 1").unwrap();
     assert_eq!(codes(&steps), vec![Some(207)]);

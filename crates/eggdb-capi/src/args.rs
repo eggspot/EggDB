@@ -1,7 +1,11 @@
 use crate::status::Failure;
 use std::ffi::{CStr, c_char};
 
-pub(crate) unsafe fn bytes<'a>(data: *const u8, len: usize, what: &str) -> Result<&'a [u8], Failure> {
+pub(crate) unsafe fn bytes<'a>(
+    data: *const u8,
+    len: usize,
+    what: &str,
+) -> Result<&'a [u8], Failure> {
     if len == 0 {
         return Ok(&[]);
     }

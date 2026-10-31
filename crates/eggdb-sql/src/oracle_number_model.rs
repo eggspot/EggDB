@@ -57,9 +57,17 @@ impl Currency {
 enum Shape {
     Fixed,
     Scientific,
-    Roman { lower: bool },
-    Hexadecimal { lower: bool, zeros: bool, digits: usize },
-    TextMinimum { scientific: bool },
+    Roman {
+        lower: bool,
+    },
+    Hexadecimal {
+        lower: bool,
+        zeros: bool,
+        digits: usize,
+    },
+    TextMinimum {
+        scientific: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,7 +119,10 @@ fn special_shape(rest: &str) -> Option<SqlResult<Shape>> {
             lower: rest.starts_with('r'),
         }));
     }
-    let zeros = rest.chars().take_while(|character| *character == '0').count();
+    let zeros = rest
+        .chars()
+        .take_while(|character| *character == '0')
+        .count();
     let hex = &rest[zeros..];
     if !hex.is_empty() && hex.chars().all(|character| matches!(character, 'X' | 'x')) {
         return Some(Ok(Shape::Hexadecimal {
@@ -132,7 +143,10 @@ fn model_of(format: &str) -> SqlResult<NumberModel> {
     if let Some(shape) = special_shape(rest) {
         return Ok(NumberModel::new(width, fill_mode, shape?));
     }
-    let upper: Vec<char> = rest.chars().map(|character| character.to_ascii_uppercase()).collect();
+    let upper: Vec<char> = rest
+        .chars()
+        .map(|character| character.to_ascii_uppercase())
+        .collect();
     let mut model = NumberModel::new(width, fill_mode, Shape::Fixed);
     let mut multiplier = false;
     let mut at = 0;
@@ -194,9 +208,7 @@ fn model_of(format: &str) -> SqlResult<NumberModel> {
             'V' if !model.point && !multiplier => multiplier = true,
             _ => return Err(invalid_format()),
         }
-        if model
-            .currency
-            .is_some_and(|(_, trailing)| trailing)
+        if model.currency.is_some_and(|(_, trailing)| trailing)
             && matches!(character, '9' | '0' | ',' | 'G' | '.' | 'D' | 'V')
         {
             return Err(invalid_format());
@@ -299,7 +311,8 @@ fn fixed(number: &Number, model: &NumberModel) -> SqlResult<String> {
     let (whole, fraction) = digits.split_once('.').unwrap_or((&digits, ""));
     let slots = model.digit_slots();
     let zero_integer = whole == "0";
-    let whole: Vec<char> = if zero_integer && (!model.fraction.is_empty() || model.blank_when_zero) {
+    let whole: Vec<char> = if zero_integer && (!model.fraction.is_empty() || model.blank_when_zero)
+    {
         Vec::new()
     } else {
         whole.chars().collect()
@@ -383,7 +396,11 @@ fn significant_digits(number: &Number) -> (Vec<u8>, i64) {
         Number::Float(float) => {
             let written = format!("{:e}", float.abs());
             let (mantissa, exponent) = written.split_once('e').unwrap_or((&written, "0"));
-            let digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).map(|digit| digit - b'0').collect();
+            let digits: Vec<u8> = mantissa
+                .bytes()
+                .filter(u8::is_ascii_digit)
+                .map(|digit| digit - b'0')
+                .collect();
             let exponent = exponent.parse::<i64>().unwrap_or(0);
             return if digits.iter().all(|digit| *digit == 0) {
                 (vec![0], 0)
@@ -618,7 +635,10 @@ fn signed_body<'t>(text: &'t str, model: &NumberModel) -> SqlResult<(bool, &'t s
                 false
             }
         }
-        Sign::Brackets => match rest.strip_prefix('<').and_then(|body| body.strip_suffix('>')) {
+        Sign::Brackets => match rest
+            .strip_prefix('<')
+            .and_then(|body| body.strip_suffix('>'))
+        {
             Some(body) => {
                 rest = body;
                 true
@@ -718,7 +738,9 @@ mod tests {
     fn read(text: &str, format: &str) -> Result<String, u16> {
         number_by_model(text, format)
             .map(|number| match number.value() {
-                crate::types::Value::Numeric(decimal) => crate::dialect::oracle_numeric_text(&decimal),
+                crate::types::Value::Numeric(decimal) => {
+                    crate::dialect::oracle_numeric_text(&decimal)
+                }
                 other => format!("{other:?}"),
             })
             .map_err(|error| error.vendor_code().unwrap_or(0))
@@ -736,7 +758,10 @@ mod tests {
         assert_eq!(shaped("12", "$99").as_deref(), Ok(" $12"));
         assert_eq!(shaped("12", "S99").as_deref(), Ok("+12"));
         assert_eq!(shaped("-12", "99MI").as_deref(), Ok("12-"));
-        assert_eq!(shaped("1234567890", "9999999999S").as_deref(), Ok("1234567890+"));
+        assert_eq!(
+            shaped("1234567890", "9999999999S").as_deref(),
+            Ok("1234567890+")
+        );
         assert_eq!(shaped("-12", "99PR").as_deref(), Ok("<12>"));
         assert_eq!(shaped("12", "99PR").as_deref(), Ok(" 12 "));
         assert_eq!(shaped("12.345", "999V99").as_deref(), Ok("  1235"));
@@ -819,7 +844,15 @@ mod tests {
             "9", "0", ".", "D", ",", "G", "$", "S", "MI", "PR", "FM", "X", "x", "EEEE", "RN", "rn",
             "L", "C", "U", "V", "B", "TM", "TME", "-", "1", "e", " ", "<", ">", "é",
         ];
-        let numbers = ["0", "-1", "12.345", "1e100", "-0.0001", "255", "99999999999999999999"];
+        let numbers = [
+            "0",
+            "-1",
+            "12.345",
+            "1e100",
+            "-0.0001",
+            "255",
+            "99999999999999999999",
+        ];
         let mut next = || {
             state ^= state << 13;
             state ^= state >> 7;

@@ -129,7 +129,10 @@ fn reason(status: u16) -> &'static str {
 }
 
 fn head_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n").map(|at| at + 4)
+    bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| at + 4)
 }
 
 /// Reads a request from `stream`: its head, at most 16 KiB, and a body of at most 1 MiB given
@@ -140,7 +143,11 @@ pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {
 
 /// Reads a request as [`read_request`] does, with a body of at most `max_body_bytes`, calling
 /// `on_continue` before reading the body of a request that asks for `100 Continue`.
-pub fn read_request_limited(stream: &mut impl Read, max_body_bytes: usize, on_continue: &mut dyn FnMut()) -> Result<Request, HttpError> {
+pub fn read_request_limited(
+    stream: &mut impl Read,
+    max_body_bytes: usize,
+    on_continue: &mut dyn FnMut(),
+) -> Result<Request, HttpError> {
     let mut head = Vec::new();
     let mut chunk = [0u8; 8192];
     let end = loop {
@@ -203,7 +210,12 @@ pub fn read_request_limited(stream: &mut impl Read, max_body_bytes: usize, on_co
     if length > max_body_bytes {
         return Err(HttpError::TooLarge);
     }
-    if length > 0 && head.len() == end && request.header("expect").is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue")) {
+    if length > 0
+        && head.len() == end
+        && request
+            .header("expect")
+            .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"))
+    {
         on_continue();
     }
     let mut body = head[end..].to_vec();
@@ -235,7 +247,11 @@ pub fn write_response(
         reason(response.status),
         response.content_type,
     );
-    if !response.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-length")) {
+    if !response
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
         head.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
     }
     for (name, value) in &response.headers {
@@ -249,7 +265,11 @@ pub fn write_response(
     stream.flush()
 }
 
-fn serve_one(mut stream: TcpStream, handler: &(dyn Fn(&Request) -> Response + Sync), max_body_bytes: usize) {
+fn serve_one(
+    mut stream: TcpStream,
+    handler: &(dyn Fn(&Request) -> Response + Sync),
+    max_body_bytes: usize,
+) {
     if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(READ_TIMEOUT)).is_err()
     {
@@ -344,10 +364,15 @@ mod tests {
         );
         assert_eq!((request, continued), (Err(HttpError::TooLarge), 0));
         let body = vec![7u8; 2_000_000];
-        let mut bytes = b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n".to_vec();
+        let mut bytes =
+            b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n"
+                .to_vec();
         let head = bytes.len();
         bytes.extend_from_slice(&body);
-        let mut reader = SplitReader { bytes: &bytes, head };
+        let mut reader = SplitReader {
+            bytes: &bytes,
+            head,
+        };
         let request = read_request_limited(&mut reader, 4_000_000, &mut || continued += 1).unwrap();
         assert_eq!((request.body.len(), continued), (2_000_000, 1));
     }
@@ -359,7 +384,11 @@ mod tests {
 
     impl Read for SplitReader<'_> {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            let limit = if self.head > 0 { self.head } else { self.bytes.len() };
+            let limit = if self.head > 0 {
+                self.head
+            } else {
+                self.bytes.len()
+            };
             let count = buffer.len().min(limit).min(self.bytes.len());
             buffer[..count].copy_from_slice(&self.bytes[..count]);
             self.bytes = &self.bytes[count..];
@@ -374,7 +403,10 @@ mod tests {
             &mut &b"GET /metrics?x=1 HTTP/1.1\r\nHost: a\r\nAccept: text/plain\r\n\r\nignored"[..],
         )
         .unwrap();
-        assert_eq!((request.method.as_str(), request.path.as_str()), ("GET", "/metrics"));
+        assert_eq!(
+            (request.method.as_str(), request.path.as_str()),
+            ("GET", "/metrics")
+        );
         assert_eq!(request.query.as_deref(), Some("x=1"));
         assert_eq!(request.header("accept"), Some("text/plain"));
         for (bytes, expected) in [
@@ -382,12 +414,16 @@ mod tests {
             (b"GET /\r\n\r\n", HttpError::Malformed),
             (b"GET x HTTP/1.1\r\n\r\n", HttpError::Malformed),
             (b"get / HTTP/1.1\r\n\r\n", HttpError::Malformed),
-            (b"GET / HTTP/1.1\r\nbad header\r\n\r\n", HttpError::Malformed),
+            (
+                b"GET / HTTP/1.1\r\nbad header\r\n\r\n",
+                HttpError::Malformed,
+            ),
             (b"GET / HTTP/1.1\r\n\xff: x\r\n\r\n", HttpError::Malformed),
         ] {
             assert_eq!(read_request(&mut &bytes[..]), Err(expected), "{bytes:?}");
         }
-        let posted = read_request(&mut &b"POST /x HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcdef"[..]).unwrap();
+        let posted =
+            read_request(&mut &b"POST /x HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcdef"[..]).unwrap();
         assert_eq!(posted.body, b"abc");
         for hostile in [
             &b"POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n"[..],
@@ -445,7 +481,9 @@ mod tests {
                 .unwrap();
             });
             let mut client = TcpStream::connect(address).unwrap();
-            client.write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            client
+                .write_all(b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
             let mut answer = String::new();
             client.read_to_string(&mut answer).unwrap();
             assert!(answer.ends_with("/hello"), "{answer}");

@@ -107,7 +107,9 @@ fn unsupported_culture(name: &str) -> SqlError {
     } else {
         SqlError::new(
             SqlState::INVALID_PARAMETER_VALUE,
-            format!("The culture parameter '{name}' provided in the function call is not supported."),
+            format!(
+                "The culture parameter '{name}' provided in the function call is not supported."
+            ),
         )
         .with_sqlserver_code(9818)
     }
@@ -194,7 +196,7 @@ fn is_negative(number: &Numeric) -> bool {
 pub(crate) fn grouped(digits: &str) -> String {
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -240,15 +242,27 @@ fn significant(number: &Numeric) -> Option<(String, i64)> {
     Some((digits, exponent))
 }
 
-fn scientific(number: &Numeric, places: usize, letter: char, exponent_digits: usize) -> Option<String> {
+fn scientific(
+    number: &Numeric,
+    places: usize,
+    letter: char,
+    exponent_digits: usize,
+) -> Option<String> {
     let negative = is_negative(number);
     let (mantissa, exponent) = match significant(number) {
-        None => ("0".to_owned() + &".".repeat(usize::from(places > 0)) + &"0".repeat(places), 0),
+        None => (
+            "0".to_owned() + &".".repeat(usize::from(places > 0)) + &"0".repeat(places),
+            0,
+        ),
         Some((_, exponent)) => {
             let scaled = number.absolute().multiply(&power_of_ten(-exponent)?).ok()?;
             let rounded = scaled.rounded(places as i64).ok()?;
             if rounded.compare(&Numeric::from_i64(10)) != std::cmp::Ordering::Less {
-                let again = scaled.multiply(&power_of_ten(-1)?).ok()?.rounded(places as i64).ok()?;
+                let again = scaled
+                    .multiply(&power_of_ten(-1)?)
+                    .ok()?
+                    .rounded(places as i64)
+                    .ok()?;
                 (again.to_string(), exponent + 1)
             } else {
                 (rounded.to_string(), exponent)
@@ -317,12 +331,21 @@ fn hexadecimal(number: &Number, precision: usize, upper: bool) -> Option<String>
     Some(format!("{text:0>precision$}"))
 }
 
-fn standard_number(number: &Number, letter: char, precision: Option<usize>, culture: Culture) -> Option<String> {
+fn standard_number(
+    number: &Number,
+    letter: char,
+    precision: Option<usize>,
+    culture: Culture,
+) -> Option<String> {
     let places = |default: usize| precision.unwrap_or(default);
     match letter {
         'c' | 'C' => {
             let (negative, whole, fraction) = fixed_parts(&number.exact()?, places(2))?;
-            let body = format!("{}{}", culture.currency(), joined_fixed(&whole, &fraction, true));
+            let body = format!(
+                "{}{}",
+                culture.currency(),
+                joined_fixed(&whole, &fraction, true)
+            );
             Some(if negative { format!("({body})") } else { body })
         }
         'd' | 'D' => {
@@ -607,7 +630,7 @@ fn custom_number(number: &Numeric, pattern: &str) -> Option<String> {
     let push_digit = |out: &mut String, index: usize| {
         out.push(whole_digits[index]);
         let from_right = whole_digits.len() - 1 - index;
-        if layout.grouping && from_right > 0 && from_right % 3 == 0 {
+        if layout.grouping && from_right > 0 && from_right.is_multiple_of(3) {
             out.push(',');
         }
     };
@@ -615,7 +638,11 @@ fn custom_number(number: &Numeric, pattern: &str) -> Option<String> {
         match token {
             NumberToken::Zero | NumberToken::Hash if !after_point => {
                 let position = integral_seen as i64 + offset;
-                let from = if integral_seen == 0 { 0 } else { position.max(0) };
+                let from = if integral_seen == 0 {
+                    0
+                } else {
+                    position.max(0)
+                };
                 if position >= 0 {
                     for index in from as usize..=position as usize {
                         if index < whole_digits.len() {
@@ -657,7 +684,11 @@ fn custom_number(number: &Numeric, pattern: &str) -> Option<String> {
                 } else if *always_signed {
                     out.push('+');
                 }
-                let shown = format!("{:0>width$}", exponent_value.unsigned_abs(), width = *digits);
+                let shown = format!(
+                    "{:0>width$}",
+                    exponent_value.unsigned_abs(),
+                    width = *digits
+                );
                 out.push_str(&shown);
             }
             NumberToken::Literal(text) => out.push_str(text),
@@ -822,7 +853,9 @@ fn date_text(moment: &Moment, pattern: &str) -> Option<String> {
                 width => format!("{year:0width$}"),
             }),
             'z' => out.push_str(&offset_text(
-                moment.offset_seconds.unwrap_or_else(datetime::session_offset_now),
+                moment
+                    .offset_seconds
+                    .unwrap_or_else(datetime::session_offset_now),
                 run,
             )),
             ':' => {
@@ -985,7 +1018,9 @@ mod tests {
 
     fn moment() -> Value {
         let day = datetime::days_from_civil(2020, 7, 4);
-        Value::Timestamp(day * MICROS_PER_DAY + (13 * 3600 + 5 * 60 + 9) * MICROS_PER_SECOND + 120_000)
+        Value::Timestamp(
+            day * MICROS_PER_DAY + (13 * 3600 + 5 * 60 + 9) * MICROS_PER_SECOND + 120_000,
+        )
     }
 
     #[test]
@@ -1045,10 +1080,7 @@ mod tests {
         for (pattern, expected) in cases {
             assert_eq!(shown(&[moment(), text(pattern)]), expected, "{pattern}");
         }
-        assert_eq!(
-            shown(&[moment(), text("d"), text("")]),
-            "07/04/2020"
-        );
+        assert_eq!(shown(&[moment(), text("d"), text("")]), "07/04/2020");
         assert_eq!(shown(&[moment(), text("d"), text("de-DE")]), "error 40517");
         assert_eq!(shown(&[moment(), text("d"), text("??")]), "error 9818");
     }

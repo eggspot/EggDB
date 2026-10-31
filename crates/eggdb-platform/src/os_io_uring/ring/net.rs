@@ -376,8 +376,8 @@ fn next_step(in_flight: &mut InFlight, res: i32) -> Next {
     if res == -ECANCELED {
         return canceled();
     }
-    let retry = res == -EAGAIN
-        || (res == -ECONNABORTED && matches!(in_flight.op, NetOp::Accept { .. }));
+    let retry =
+        res == -EAGAIN || (res == -ECONNABORTED && matches!(in_flight.op, NetOp::Accept { .. }));
     if in_flight.canceling && (retry || in_flight.stage == Stage::WaitingForReadiness) {
         return canceled();
     }
@@ -385,7 +385,9 @@ fn next_step(in_flight: &mut InFlight, res: i32) -> Next {
         return Next::Again(Stage::WaitingForReadiness);
     }
     if res < 0 {
-        return Next::Done(Err(io::Error::from_raw_os_error(res.saturating_neg()).into()));
+        return Next::Done(Err(
+            io::Error::from_raw_os_error(res.saturating_neg()).into()
+        ));
     }
     match (&in_flight.op, in_flight.stage) {
         (NetOp::Connect { .. }, _) => {

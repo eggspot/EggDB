@@ -7,10 +7,9 @@ use crate::ast::{
 use crate::constraints::{self, PreparedChecks, RowChange};
 use crate::dialect::Dialect;
 use crate::encoding::{
-    Column, IdentityGeneration, IdentitySeed, MAX_COLUMNS, TableDefinition, ViewDefinition, decode_meta,
-    decode_row, decode_row_into,
-    encode_key_value, encode_meta, encode_row, encode_row_into, is_view_record, meta_key,
-    prefix_end, rows_prefix, table_key,
+    Column, IdentityGeneration, IdentitySeed, MAX_COLUMNS, TableDefinition, ViewDefinition,
+    decode_meta, decode_row, decode_row_into, encode_key_value, encode_meta, encode_row,
+    encode_row_into, is_view_record, meta_key, prefix_end, rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{
@@ -33,6 +32,8 @@ use crate::typing;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+pub(crate) type TieCheck<'a, K> = Option<&'a dyn Fn(&K, &K) -> bool>;
 
 const DELETE_BATCH: usize = 1024;
 
@@ -61,7 +62,10 @@ fn stored_expressions_need_user_types(relation: &Relation) -> bool {
     }
 }
 
-pub(crate) fn column_storage(sql_type: SqlType, position: usize) -> SqlResult<(SqlType, Option<u32>)> {
+pub(crate) fn column_storage(
+    sql_type: SqlType,
+    position: usize,
+) -> SqlResult<(SqlType, Option<u32>)> {
     match sql_type {
         SqlType::Defined(defined) if defined.kind == crate::types::DefinedKind::Domain => {
             let base = crate::user_types::domain_base(defined.oid).ok_or_else(|| {
@@ -73,11 +77,13 @@ pub(crate) fn column_storage(sql_type: SqlType, position: usize) -> SqlResult<(S
             })?;
             Ok((base, Some(defined.oid)))
         }
-        SqlType::Defined(defined) if defined.oid == crate::records::RECORD_OID => Err(SqlError::new(
-            SqlState::INVALID_TABLE_DEFINITION,
-            "column cannot be of type record",
-        )
-        .at(position)),
+        SqlType::Defined(defined) if defined.oid == crate::records::RECORD_OID => {
+            Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "column cannot be of type record",
+            )
+            .at(position))
+        }
         SqlType::Array(element) if !element.is_storable() => {
             Err(crate::arrays::unsupported_element(element.sql_type()).at(position))
         }
@@ -1258,7 +1264,13 @@ pub(crate) fn insert(
     let mut update_firing = match &updates {
         Some(updates) => {
             let assigned: Vec<usize> = updates.iter().map(|(index, _)| *index).collect();
-            Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Update, &assigned)?
+            Firing::for_table(
+                &mut *writer,
+                tables,
+                &table,
+                TriggerEvent::Update,
+                &assigned,
+            )?
         }
         None => None,
     };
@@ -1273,12 +1285,12 @@ pub(crate) fn insert(
     let mut warnings = Vec::new();
     for values in rows {
         let mut row = Vec::with_capacity(table.columns.len());
-        for index in 0..table.columns.len() {
+        for (index, ignored) in given_ignored.iter().enumerate() {
             let given = targets
                 .iter()
                 .position(|&target| target == index)
                 .and_then(|slot| values.get(slot))
-                .filter(|_| !given_ignored[index]);
+                .filter(|_| !*ignored);
             row.push(match given {
                 Some(value) => assigned_value(&constants, value, &table, index, rule)?,
                 None => default_value(&table, index)?,
@@ -1771,14 +1783,23 @@ impl<'a> StoredRows<'a> {
         combined.truncate(table.columns.len());
         if let Some((firing, tables)) = firing.as_mut()
             && firing.has_before()
-            && firing.before_row(writer, tables, Some(existing.as_slice()), Some(&mut combined))?
-                == RowOutcome::Skip
+            && firing.before_row(
+                writer,
+                tables,
+                Some(existing.as_slice()),
+                Some(&mut combined),
+            )? == RowOutcome::Skip
         {
             return Ok(0);
         }
         if combined == existing {
             if let Some((firing, tables)) = firing {
-                firing.after_row(writer, tables, Some(existing.as_slice()), Some(combined.as_slice()))?;
+                firing.after_row(
+                    writer,
+                    tables,
+                    Some(existing.as_slice()),
+                    Some(combined.as_slice()),
+                )?;
             }
             return Ok(0);
         }
@@ -1819,7 +1840,12 @@ impl<'a> StoredRows<'a> {
             }
         }
         if let Some((firing, tables)) = firing {
-            firing.after_row(writer, tables, Some(existing.as_slice()), Some(combined.as_slice()))?;
+            firing.after_row(
+                writer,
+                tables,
+                Some(existing.as_slice()),
+                Some(combined.as_slice()),
+            )?;
         }
         Ok(2)
     }
@@ -2130,8 +2156,8 @@ impl<'a> Projection<'a> {
                                     .at(*position)
                                 })?;
                             (source.offset..source.offset + source.table.columns.len())
-                            .filter(|&offset| !scope.is_hidden(offset))
-                            .collect()
+                                .filter(|&offset| !scope.is_hidden(offset))
+                                .collect()
                         }
                     };
                     for offset in offsets {
@@ -2660,7 +2686,7 @@ pub(crate) fn rows_within_limit<K>(
     rows: impl Iterator<Item = (K, Vec<Value>)>,
     skip: usize,
     take: usize,
-    ties: Option<&dyn Fn(&K, &K) -> bool>,
+    ties: TieCheck<'_, K>,
 ) -> Vec<Vec<Value>> {
     let mut output = Vec::new();
     let mut last: Option<K> = None;
@@ -3405,7 +3431,7 @@ fn sorted_rows(
     let tied = |left: &Vec<Value>, right: &Vec<Value>| {
         compare_sort_keys(order_by, left, right) == Ordering::Equal
     };
-    let ties: Option<&dyn Fn(&Vec<Value>, &Vec<Value>) -> bool> = if window.limit.with_ties {
+    let ties: TieCheck<'_, Vec<Value>> = if window.limit.with_ties {
         Some(&tied)
     } else {
         None
@@ -3547,7 +3573,8 @@ pub(crate) fn update(
         }
     }
     check_updated_to_default(&table, &targets, &update.assignments)?;
-    let mut firing = Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Update, &targets)?;
+    let mut firing =
+        Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Update, &targets)?;
     let keep_old = keep_old || firing.is_some();
     if let Some(filter) = &update.filter {
         reject_aggregates(filter, "WHERE")?;
@@ -3640,7 +3667,12 @@ pub(crate) fn update(
     write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
     if let Some(mut firing) = firing {
         for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
-            firing.after_row(writer, tables, Some(old_row.as_slice()), Some(new_row.as_slice()))?;
+            firing.after_row(
+                writer,
+                tables,
+                Some(old_row.as_slice()),
+                Some(new_row.as_slice()),
+            )?;
         }
         firing.finish();
     }
@@ -3787,7 +3819,13 @@ pub(crate) fn truncate(
             }
         }
     }
-    let firing = Firing::for_table(&mut *writer, tables, &definition, TriggerEvent::Truncate, &[])?;
+    let firing = Firing::for_table(
+        &mut *writer,
+        tables,
+        &definition,
+        TriggerEvent::Truncate,
+        &[],
+    )?;
     let every_row = Delete {
         table: table.clone(),
         filter: None,

@@ -33,7 +33,9 @@ fn le_i32(bytes: &[u8], at: usize) -> Option<i32> {
 
 pub(crate) fn read_header(bytes: &[u8; HEADER_BYTES]) -> Result<Header, String> {
     let length = le_i32(bytes, 0).unwrap_or(0);
-    let length = usize::try_from(length).ok().filter(|length| (HEADER_BYTES..=MAX_MESSAGE_BYTES).contains(length));
+    let length = usize::try_from(length)
+        .ok()
+        .filter(|length| (HEADER_BYTES..=MAX_MESSAGE_BYTES).contains(length));
     let Some(length) = length else {
         return Err("the message length is out of range".to_owned());
     };
@@ -46,13 +48,18 @@ pub(crate) fn read_header(bytes: &[u8; HEADER_BYTES]) -> Result<Header, String> 
 
 fn cstring(bytes: &[u8], at: usize) -> Result<(String, usize), String> {
     let rest = bytes.get(at..).ok_or("a name runs past the message")?;
-    let end = rest.iter().position(|byte| *byte == 0).ok_or("a name is not terminated")?;
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or("a name is not terminated")?;
     let text = std::str::from_utf8(&rest[..end]).map_err(|_| "a name is not UTF-8".to_owned())?;
     Ok((text.to_owned(), at + end + 1))
 }
 
 fn document_at(bytes: &[u8], at: usize) -> Result<(Document, usize), String> {
-    let (document, used) = read_document(bytes.get(at..).ok_or("a document runs past the message")?).map_err(|error| error.to_string())?;
+    let (document, used) =
+        read_document(bytes.get(at..).ok_or("a document runs past the message")?)
+            .map_err(|error| error.to_string())?;
     Ok((document, at + used))
 }
 
@@ -62,10 +69,14 @@ pub(crate) fn read_message(body: &[u8]) -> Result<Request, String> {
     let flags = le_i32(body, 0).ok_or("the message has no flags")? as u32;
     let unknown_required = flags & 0xffff & !(CHECKSUM_PRESENT | MORE_TO_COME);
     if unknown_required != 0 {
-        return Err(format!("the message sets unknown required flag bits {unknown_required:#x}"));
+        return Err(format!(
+            "the message sets unknown required flag bits {unknown_required:#x}"
+        ));
     }
     let end = if flags & CHECKSUM_PRESENT != 0 {
-        body.len().checked_sub(4).ok_or("the message has no room for its checksum")?
+        body.len()
+            .checked_sub(4)
+            .ok_or("the message has no room for its checksum")?
     } else {
         body.len()
     };
@@ -87,8 +98,14 @@ pub(crate) fn read_message(body: &[u8]) -> Result<Request, String> {
             }
             1 => {
                 let size = le_i32(sections, at).ok_or("a document sequence has no size")?;
-                let size = usize::try_from(size).ok().filter(|size| *size >= 5).ok_or("a document sequence has a bad size")?;
-                let stop = at.checked_add(size).filter(|stop| *stop <= sections.len()).ok_or("a document sequence runs past the message")?;
+                let size = usize::try_from(size)
+                    .ok()
+                    .filter(|size| *size >= 5)
+                    .ok_or("a document sequence has a bad size")?;
+                let stop = at
+                    .checked_add(size)
+                    .filter(|stop| *stop <= sections.len())
+                    .ok_or("a document sequence runs past the message")?;
                 let (identifier, mut next) = cstring(&sections[..stop], at + 4)?;
                 let mut documents = Vec::new();
                 while next < stop {
@@ -105,11 +122,16 @@ pub(crate) fn read_message(body: &[u8]) -> Result<Request, String> {
     let mut command = command.ok_or("the message has no body section")?;
     for (identifier, documents) in sequences {
         if command.contains_key(&identifier) {
-            return Err(format!("the field {identifier} is both in the body and a document sequence"));
+            return Err(format!(
+                "the field {identifier} is both in the body and a document sequence"
+            ));
         }
         command.insert(identifier, Bson::Array(documents));
     }
-    Ok(Request::Message { body: command, more_to_come: flags & MORE_TO_COME != 0 })
+    Ok(Request::Message {
+        body: command,
+        more_to_come: flags & MORE_TO_COME != 0,
+    })
 }
 
 /// Reads a legacy `OP_QUERY` body, as drivers send their first `hello` in.
@@ -117,7 +139,9 @@ pub(crate) fn read_query(body: &[u8]) -> Result<Request, String> {
     let (namespace, at) = cstring(body, 4)?;
     let (mut query, _) = document_at(body, at + 8)?;
     if let Some(Bson::Document(inner)) = query.get("$query").or_else(|| query.get("query")).cloned()
-        && query.first().is_some_and(|(name, _)| name == "$query" || name == "query")
+        && query
+            .first()
+            .is_some_and(|(name, _)| name == "$query" || name == "query")
     {
         query = inner;
     }
@@ -148,7 +172,12 @@ pub(crate) fn message_reply(request_id: i32, response_to: i32, document: &Docume
 }
 
 /// An `OP_REPLY` holding `document`, marked as a failure when `failed`.
-pub(crate) fn query_reply(request_id: i32, response_to: i32, document: &Document, failed: bool) -> Vec<u8> {
+pub(crate) fn query_reply(
+    request_id: i32,
+    response_to: i32,
+    document: &Document,
+    failed: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     header(&mut out, request_id, response_to, OP_REPLY);
     out.extend_from_slice(&(if failed { QUERY_FAILURE } else { 0 }).to_le_bytes());

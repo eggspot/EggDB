@@ -132,7 +132,10 @@ fn returns_table_trigger_void_and_standard_bodies_parse() {
 
 #[test]
 fn identity_type_names_leave_out_modifiers() {
-    assert_eq!(identity_type_name(SqlType::Varchar(Some(20))), "character varying");
+    assert_eq!(
+        identity_type_name(SqlType::Varchar(Some(20))),
+        "character varying"
+    );
     assert_eq!(identity_type_name(SqlType::Integer), "integer");
 }
 
@@ -140,11 +143,20 @@ fn identity_type_names_leave_out_modifiers() {
 fn headers_without_a_body_language_or_result_are_refused() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    let error = refusal(&mut session, "CREATE FUNCTION f() RETURNS integer LANGUAGE sql");
+    let error = refusal(
+        &mut session,
+        "CREATE FUNCTION f() RETURNS integer LANGUAGE sql",
+    );
     assert_eq!(error.state(), SqlState::INVALID_FUNCTION_DEFINITION);
-    let error = refusal(&mut session, "CREATE FUNCTION f() RETURNS integer AS 'SELECT 1'");
+    let error = refusal(
+        &mut session,
+        "CREATE FUNCTION f() RETURNS integer AS 'SELECT 1'",
+    );
     assert_eq!(error.state(), SqlState::INVALID_FUNCTION_DEFINITION);
-    let error = refusal(&mut session, "CREATE FUNCTION f() LANGUAGE sql AS 'SELECT 1'");
+    let error = refusal(
+        &mut session,
+        "CREATE FUNCTION f() LANGUAGE sql AS 'SELECT 1'",
+    );
     assert_eq!(error.state(), SqlState::INVALID_FUNCTION_DEFINITION);
     let error = refusal(
         &mut session,
@@ -194,7 +206,10 @@ fn overloads_are_kept_replaced_and_dropped_by_argument_types() {
     assert_eq!(error.state(), SqlState::INVALID_FUNCTION_DEFINITION);
     let error = refusal(&mut session, "DROP FUNCTION area");
     assert_eq!(error.state(), SqlState::AMBIGUOUS_FUNCTION);
-    assert_eq!(answer(&mut session, "DROP FUNCTION area(integer)"), "DROP FUNCTION");
+    assert_eq!(
+        answer(&mut session, "DROP FUNCTION area(integer)"),
+        "DROP FUNCTION"
+    );
     assert_eq!(answer(&mut session, "DROP FUNCTION area"), "DROP FUNCTION");
     let error = refusal(&mut session, "DROP FUNCTION area(integer, integer)");
     assert_eq!(error.state(), SqlState::UNDEFINED_FUNCTION);

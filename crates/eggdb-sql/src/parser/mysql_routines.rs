@@ -4,11 +4,14 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{TokenKind, tokenize_in};
 use crate::plpgsql::{
-    Block, Branch, CaseArm, Declaration, DeclarationKind, Fragment, IntoTargets, Loop, LoopKind, Program, Raise,
-    RaiseCondition, RaiseItem, RaiseLevel, RaiseOption, Step, StepKind, Target, VariableConflict, VariableDeclaration,
-    VariableType,
+    Block, Branch, CaseArm, Declaration, DeclarationKind, Fragment, IntoTargets, Loop, LoopKind,
+    Program, Raise, RaiseCondition, RaiseItem, RaiseLevel, RaiseOption, Step, StepKind, Target,
+    VariableConflict, VariableDeclaration, VariableType,
 };
-use crate::routines::{ParameterMode, ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineParameter, RoutineReturns, Volatility};
+use crate::routines::{
+    ParameterMode, ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineParameter,
+    RoutineReturns, Volatility,
+};
 
 const MAX_NESTING: usize = 64;
 
@@ -26,7 +29,10 @@ impl<'t> Parser<'t> {
     pub(super) fn creates_mysql_routine(&self) -> bool {
         let mut ahead = 1;
         if self.is_word_at(1, "definer") {
-            while ahead < 8 && !self.is_word_at(ahead, "procedure") && !self.is_word_at(ahead, "function") {
+            while ahead < 8
+                && !self.is_word_at(ahead, "procedure")
+                && !self.is_word_at(ahead, "function")
+            {
                 ahead += 1;
             }
         }
@@ -47,7 +53,9 @@ impl<'t> Parser<'t> {
             return Ok(());
         }
         match self.peek_kind() {
-            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) | TokenKind::String(_) => self.at += 1,
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) | TokenKind::String(_) => {
+                self.at += 1
+            }
             _ => return Err(self.unexpected()),
         }
         if let TokenKind::Variable(_) = self.peek_kind() {
@@ -55,7 +63,9 @@ impl<'t> Parser<'t> {
         } else if self.is_operator("@") {
             self.at += 1;
             match self.peek_kind() {
-                TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) | TokenKind::String(_) => self.at += 1,
+                TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) | TokenKind::String(_) => {
+                    self.at += 1
+                }
                 _ => return Err(self.unexpected()),
             }
         }
@@ -75,7 +85,13 @@ impl<'t> Parser<'t> {
         };
         let name = self.name()?.text;
         let sql_type = self.mysql_type()?;
-        Ok(RoutineParameter { name: Some(name), mode, sql_type, default: None, declared: None })
+        Ok(RoutineParameter {
+            name: Some(name),
+            mode,
+            sql_type,
+            default: None,
+            declared: None,
+        })
     }
 
     fn mysql_characteristics(&mut self) -> SqlResult<(Volatility, bool)> {
@@ -93,9 +109,14 @@ impl<'t> Parser<'t> {
                 self.at += 2;
             } else if self.take_word("deterministic") {
                 volatility = Volatility::Immutable;
-            } else if self.is_word("contains") && self.is_word_at(1, "sql") || self.is_word("no") && self.is_word_at(1, "sql") {
+            } else if self.is_word("contains") && self.is_word_at(1, "sql")
+                || self.is_word("no") && self.is_word_at(1, "sql")
+            {
                 self.at += 2;
-            } else if (self.is_word("reads") || self.is_word("modifies")) && self.is_word_at(1, "sql") && self.is_word_at(2, "data") {
+            } else if (self.is_word("reads") || self.is_word("modifies"))
+                && self.is_word_at(1, "sql")
+                && self.is_word_at(2, "data")
+            {
                 self.at += 3;
             } else if self.is_word("sql") && self.is_word_at(1, "security") {
                 self.at += 2;
@@ -121,7 +142,8 @@ impl<'t> Parser<'t> {
             self.expect_word("procedure")?;
             RoutineKind::Procedure
         };
-        let if_not_exists = self.is_word("if") && self.is_word_at(1, "not") && self.is_word_at(2, "exists");
+        let if_not_exists =
+            self.is_word("if") && self.is_word_at(1, "not") && self.is_word_at(2, "exists");
         if if_not_exists {
             self.at += 3;
         }
@@ -189,7 +211,10 @@ impl<'t> Parser<'t> {
         let name = self.table_name()?;
         Ok(Statement::DropRoutine(DropRoutine {
             kind: Some(kind),
-            targets: vec![RoutineTarget { name, arguments: None }],
+            targets: vec![RoutineTarget {
+                name,
+                arguments: None,
+            }],
             if_exists,
             cascade: false,
         }))
@@ -216,7 +241,11 @@ pub(crate) fn mysql_program(definition: &RoutineDefinition) -> SqlResult<Program
 
 impl<'p, 't> Compiler<'p, 't> {
     fn new(parser: &'p mut Parser<'t>) -> Self {
-        Self { parser, labels: Vec::new(), generated_labels: 0 }
+        Self {
+            parser,
+            labels: Vec::new(),
+            generated_labels: 0,
+        }
     }
 
     fn position(&self) -> usize {
@@ -240,13 +269,24 @@ impl<'p, 't> Compiler<'p, 't> {
         let step = self.step(0)?;
         Ok(match step.kind {
             StepKind::Block(block) => block,
-            other => Block { label: None, declarations: Vec::new(), steps: vec![Step { kind: other, position }], handlers: Vec::new(), position },
+            other => Block {
+                label: None,
+                declarations: Vec::new(),
+                steps: vec![Step {
+                    kind: other,
+                    position,
+                }],
+                handlers: Vec::new(),
+                position,
+            },
         })
     }
 
     fn label_ahead(&self) -> bool {
-        matches!(self.parser.peek_kind(), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_))
-            && matches!(self.parser.peek_kind_at(1), TokenKind::Colon)
+        matches!(
+            self.parser.peek_kind(),
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+        ) && matches!(self.parser.peek_kind_at(1), TokenKind::Colon)
             && !self.is_word("begin")
     }
 
@@ -305,7 +345,10 @@ impl<'p, 't> Compiler<'p, 't> {
             return Err(self.parser.unexpected());
         }
         let start = self.parser.tokens[first].start;
-        Ok(Fragment { text: self.parser.slice(start, self.parser.previous_end()), position: start })
+        Ok(Fragment {
+            text: self.parser.slice(start, self.parser.previous_end()),
+            position: start,
+        })
     }
 
     fn end_statement(&mut self) -> SqlResult<()> {
@@ -330,7 +373,11 @@ impl<'p, 't> Compiler<'p, 't> {
     fn step(&mut self, depth: usize) -> SqlResult<Step> {
         let position = self.position();
         if depth > MAX_NESTING {
-            return Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "the stored program is nested too deeply").at(position));
+            return Err(SqlError::new(
+                SqlState::PROGRAM_LIMIT_EXCEEDED,
+                "the stored program is nested too deeply",
+            )
+            .at(position));
         }
         let label = if self.label_ahead() {
             let label = self.word_text().unwrap_or_default();
@@ -352,25 +399,48 @@ impl<'p, 't> Compiler<'p, 't> {
                 }
                 let target = self.word_text().ok_or_else(|| self.parser.unexpected())?;
                 if !self.labels.contains(&target) {
-                    return Err(SqlError::new(SqlState::SYNTAX_ERROR, format!("{} with no matching label: {target}", if leave { "LEAVE" } else { "ITERATE" })).at(position));
+                    return Err(SqlError::new(
+                        SqlState::SYNTAX_ERROR,
+                        format!(
+                            "{} with no matching label: {target}",
+                            if leave { "LEAVE" } else { "ITERATE" }
+                        ),
+                    )
+                    .at(position));
                 }
                 self.parser.at += 1;
                 if leave {
-                    StepKind::Exit { label: Some(target), condition: None }
+                    StepKind::Exit {
+                        label: Some(target),
+                        condition: None,
+                    }
                 } else {
-                    StepKind::Continue { label: Some(target), condition: None }
+                    StepKind::Continue {
+                        label: Some(target),
+                        condition: None,
+                    }
                 }
             }
             Some("return") => {
                 self.parser.at += 1;
                 StepKind::Return(Some(self.fragment(&[])?))
             }
-            Some("declare") => return Err(SqlError::syntax("DECLARE is only allowed at the start of a BEGIN ... END block", position)),
+            Some("declare") => {
+                return Err(SqlError::syntax(
+                    "DECLARE is only allowed at the start of a BEGIN ... END block",
+                    position,
+                ));
+            }
             Some("signal") | Some("resignal") => self.signal_step()?,
-            Some("open") | Some("fetch") | Some("close") => return Err(not_supported_yet("cursors", position)),
+            Some("open") | Some("fetch") | Some("close") => {
+                return Err(not_supported_yet("cursors", position));
+            }
             Some("set") if self.sets_locals() => self.set_step()?,
             Some("select") => self.select_step()?,
-            _ => StepKind::Sql { statement: self.fragment(&[])?, into: None },
+            _ => StepKind::Sql {
+                statement: self.fragment(&[])?,
+                into: None,
+            },
         };
         Ok(Step { kind, position })
     }
@@ -396,7 +466,13 @@ impl<'p, 't> Compiler<'p, 't> {
         let steps = steps?;
         self.expect_word("end")?;
         self.end_label(label.as_deref())?;
-        Ok(Block { label, declarations, steps, handlers: Vec::new(), position })
+        Ok(Block {
+            label,
+            declarations,
+            steps,
+            handlers: Vec::new(),
+            position,
+        })
     }
 
     fn declaration(&mut self) -> SqlResult<Vec<Declaration>> {
@@ -405,7 +481,11 @@ impl<'p, 't> Compiler<'p, 't> {
         if self.parser.is_word_at(1, "cursor") || self.parser.is_word_at(1, "condition") {
             return Err(not_supported_yet("cursors and named conditions", position));
         }
-        if ["continue", "exit", "undo"].iter().any(|word| self.is_word(word)) && self.parser.is_word_at(1, "handler") {
+        if ["continue", "exit", "undo"]
+            .iter()
+            .any(|word| self.is_word(word))
+            && self.parser.is_word_at(1, "handler")
+        {
             return Err(not_supported_yet("handlers", position));
         }
         let mut names = vec![(self.parser.name()?.text, position)];
@@ -414,14 +494,18 @@ impl<'p, 't> Compiler<'p, 't> {
             names.push((self.parser.name()?.text, at));
         }
         let sql_type = self.parser.mysql_type()?;
-        let default = if self.take_word("default") { Some(self.fragment(&[])?) } else { None };
+        let default = if self.take_word("default") {
+            Some(self.fragment(&[])?)
+        } else {
+            None
+        };
         Ok(names
             .into_iter()
             .map(|(name, position)| Declaration {
                 name: name.clone(),
                 position,
                 kind: DeclarationKind::Variable(VariableDeclaration {
-                    variable_type: VariableType::Sql(sql_type.clone()),
+                    variable_type: VariableType::Sql(sql_type),
                     constant: false,
                     not_null: false,
                     collation: None,
@@ -443,15 +527,26 @@ impl<'p, 't> Compiler<'p, 't> {
                 break;
             }
         }
-        let otherwise = if self.take_word("else") { Some(self.steps(depth + 1, &["end"])?) } else { None };
+        let otherwise = if self.take_word("else") {
+            Some(self.steps(depth + 1, &["end"])?)
+        } else {
+            None
+        };
         self.expect_word("end")?;
         self.expect_word("if")?;
-        Ok(StepKind::If { branches, otherwise })
+        Ok(StepKind::If {
+            branches,
+            otherwise,
+        })
     }
 
     fn case_step(&mut self, depth: usize) -> SqlResult<StepKind> {
         self.expect_word("case")?;
-        let subject = if self.is_word("when") { None } else { Some(self.fragment(&["when"])?) };
+        let subject = if self.is_word("when") {
+            None
+        } else {
+            Some(self.fragment(&["when"])?)
+        };
         let mut arms = Vec::new();
         let mut searched = Vec::new();
         while self.take_word("when") {
@@ -459,19 +554,36 @@ impl<'p, 't> Compiler<'p, 't> {
             self.expect_word("then")?;
             let steps = self.steps(depth + 1, &["when", "else", "end"])?;
             if subject.is_some() {
-                arms.push(CaseArm { values: vec![value], steps });
+                arms.push(CaseArm {
+                    values: vec![value],
+                    steps,
+                });
             } else {
-                searched.push(Branch { condition: value, steps });
+                searched.push(Branch {
+                    condition: value,
+                    steps,
+                });
             }
         }
-        let otherwise = if self.take_word("else") { Some(self.steps(depth + 1, &["end"])?) } else { None };
+        let otherwise = if self.take_word("else") {
+            Some(self.steps(depth + 1, &["end"])?)
+        } else {
+            None
+        };
         self.expect_word("end")?;
         self.expect_word("case")?;
         if subject.is_none() {
             let otherwise = otherwise.or_else(|| Some(vec![case_not_found(self.position())]));
-            return Ok(StepKind::If { branches: searched, otherwise });
+            return Ok(StepKind::If {
+                branches: searched,
+                otherwise,
+            });
         }
-        Ok(StepKind::Case { subject, arms, otherwise: otherwise.or_else(|| Some(vec![case_not_found(self.position())])) })
+        Ok(StepKind::Case {
+            subject,
+            arms,
+            otherwise: otherwise.or_else(|| Some(vec![case_not_found(self.position())])),
+        })
     }
 
     fn loop_step(&mut self, label: Option<String>, depth: usize) -> SqlResult<StepKind> {
@@ -482,7 +594,11 @@ impl<'p, 't> Compiler<'p, 't> {
         self.labels.pop();
         let (kind, body) = outcome?;
         self.end_label(written_label.as_deref())?;
-        Ok(StepKind::Loop(Loop { label: Some(label), kind, body }))
+        Ok(StepKind::Loop(Loop {
+            label: Some(label),
+            kind,
+            body,
+        }))
     }
 
     fn loop_contents(&mut self, label: &str, depth: usize) -> SqlResult<(LoopKind, Vec<Step>)> {
@@ -501,7 +617,13 @@ impl<'p, 't> Compiler<'p, 't> {
             let condition = self.fragment(&["end"])?;
             self.expect_word("end")?;
             self.expect_word("repeat")?;
-            body.push(Step { kind: StepKind::Exit { label: Some(label.to_owned()), condition: Some(condition) }, position });
+            body.push(Step {
+                kind: StepKind::Exit {
+                    label: Some(label.to_owned()),
+                    condition: Some(condition),
+                },
+                position,
+            });
             return Ok((LoopKind::Plain, body));
         }
         self.expect_word("loop")?;
@@ -513,9 +635,18 @@ impl<'p, 't> Compiler<'p, 't> {
 
     fn sets_locals(&self) -> bool {
         !matches!(self.parser.peek_kind_at(1), TokenKind::Variable(_))
-            && !["global", "session", "local", "persist", "names", "character", "transaction", "password"]
-                .iter()
-                .any(|word| self.parser.is_word_at(1, word))
+            && ![
+                "global",
+                "session",
+                "local",
+                "persist",
+                "names",
+                "character",
+                "transaction",
+                "password",
+            ]
+            .iter()
+            .any(|word| self.parser.is_word_at(1, word))
     }
 
     fn set_step(&mut self) -> SqlResult<StepKind> {
@@ -528,14 +659,30 @@ impl<'p, 't> Compiler<'p, 't> {
                 return Err(self.parser.unexpected());
             }
             let value = self.fragment(&[","])?;
-            assignments.push(Step { kind: StepKind::Assign { target: Target { name, path: Vec::new(), position }, value }, position });
+            assignments.push(Step {
+                kind: StepKind::Assign {
+                    target: Target {
+                        name,
+                        path: Vec::new(),
+                        position,
+                    },
+                    value,
+                },
+                position,
+            });
             if !self.parser.take(&TokenKind::Comma) {
                 break;
             }
         }
         Ok(match assignments.len() {
             1 => assignments.remove(0).kind,
-            _ => StepKind::Block(Block { label: None, declarations: Vec::new(), steps: assignments, handlers: Vec::new(), position: self.position() }),
+            _ => StepKind::Block(Block {
+                label: None,
+                declarations: Vec::new(),
+                steps: assignments,
+                handlers: Vec::new(),
+                position: self.position(),
+            }),
         })
     }
 
@@ -556,7 +703,11 @@ impl<'p, 't> Compiler<'p, 't> {
                     loop {
                         let position = self.position();
                         let name = self.parser.name()?.text;
-                        targets.push(Target { name, path: Vec::new(), position });
+                        targets.push(Target {
+                            name,
+                            path: Vec::new(),
+                            position,
+                        });
                         if !self.parser.take(&TokenKind::Comma) {
                             break;
                         }
@@ -571,12 +722,29 @@ impl<'p, 't> Compiler<'p, 't> {
         let start = self.parser.tokens[first].start;
         let end = self.parser.previous_end();
         let Some((into_start, into_end, targets)) = into else {
-            return Ok(StepKind::Sql { statement: Fragment { text: self.parser.slice(start, end), position: start }, into: None });
+            return Ok(StepKind::Sql {
+                statement: Fragment {
+                    text: self.parser.slice(start, end),
+                    position: start,
+                },
+                into: None,
+            });
         };
-        let text = format!("{} {}", self.parser.slice(start, into_start), self.parser.slice(into_end, end));
+        let text = format!(
+            "{} {}",
+            self.parser.slice(start, into_start),
+            self.parser.slice(into_end, end)
+        );
         Ok(StepKind::Sql {
-            statement: Fragment { text: text.trim().to_owned(), position: start },
-            into: Some(IntoTargets { strict: false, bulk: false, targets }),
+            statement: Fragment {
+                text: text.trim().to_owned(),
+                position: start,
+            },
+            into: Some(IntoTargets {
+                strict: false,
+                bulk: false,
+                targets,
+            }),
         })
     }
 
@@ -588,9 +756,12 @@ impl<'p, 't> Compiler<'p, 't> {
         let TokenKind::String(code) = self.parser.peek_kind() else {
             return Err(not_supported_yet("SIGNAL with a condition name", position));
         };
-        let state = SqlState::from_text(code).filter(|_| code.len() == 5 && !code.starts_with("00")).ok_or_else(|| {
-            SqlError::new(SqlState::SYNTAX_ERROR, format!("Bad SQLSTATE: '{code}'")).at(position)
-        })?;
+        let state = SqlState::from_text(code)
+            .filter(|_| code.len() == 5 && !code.starts_with("00"))
+            .ok_or_else(|| {
+                SqlError::new(SqlState::SYNTAX_ERROR, format!("Bad SQLSTATE: '{code}'"))
+                    .at(position)
+            })?;
         self.parser.at += 1;
         let mut options = Vec::new();
         if self.take_word("set") {
@@ -603,10 +774,19 @@ impl<'p, 't> Compiler<'p, 't> {
                 }
                 let value = self.fragment(&[","])?;
                 match item.as_str() {
-                    "message_text" => options.push(RaiseOption { item: RaiseItem::Message, value }),
-                    "mysql_errno" | "class_origin" | "subclass_origin" | "constraint_catalog" | "constraint_schema"
-                    | "constraint_name" | "catalog_name" | "schema_name" | "table_name" | "column_name" | "cursor_name" => {}
-                    _ => return Err(SqlError::syntax(format!("unknown SIGNAL item {item}"), item_position)),
+                    "message_text" => options.push(RaiseOption {
+                        item: RaiseItem::Message,
+                        value,
+                    }),
+                    "mysql_errno" | "class_origin" | "subclass_origin" | "constraint_catalog"
+                    | "constraint_schema" | "constraint_name" | "catalog_name" | "schema_name"
+                    | "table_name" | "column_name" | "cursor_name" => {}
+                    _ => {
+                        return Err(SqlError::syntax(
+                            format!("unknown SIGNAL item {item}"),
+                            item_position,
+                        ));
+                    }
                 }
                 if !self.parser.take(&TokenKind::Comma) {
                     break;
@@ -616,10 +796,19 @@ impl<'p, 't> Compiler<'p, 't> {
         if options.is_empty() {
             options.push(RaiseOption {
                 item: RaiseItem::Message,
-                value: Fragment { text: "'Unhandled user-defined exception condition'".to_owned(), position },
+                value: Fragment {
+                    text: "'Unhandled user-defined exception condition'".to_owned(),
+                    position,
+                },
             });
         }
-        Ok(StepKind::Raise(Raise { level: RaiseLevel::Exception, condition: Some(RaiseCondition::State(state)), format: None, arguments: Vec::new(), options }))
+        Ok(StepKind::Raise(Raise {
+            level: RaiseLevel::Exception,
+            condition: Some(RaiseCondition::State(state)),
+            format: None,
+            arguments: Vec::new(),
+            options,
+        }))
     }
 }
 
@@ -632,7 +821,10 @@ fn case_not_found(position: usize) -> Step {
             arguments: Vec::new(),
             options: vec![RaiseOption {
                 item: RaiseItem::Message,
-                value: Fragment { text: "'Case not found for CASE statement'".to_owned(), position },
+                value: Fragment {
+                    text: "'Case not found for CASE statement'".to_owned(),
+                    position,
+                },
             }],
         }),
         position,

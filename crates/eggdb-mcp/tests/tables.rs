@@ -43,10 +43,7 @@ fn limited<'o>(opener: &'o MapOpener, config: ServerConfig) -> Server<'o, MapOpe
 
 fn names(node: &Node) -> Vec<String> {
     match &node.value {
-        Json::Array(items) => items
-            .iter()
-            .map(|item| text_at(item, &["name"]))
-            .collect(),
+        Json::Array(items) => items.iter().map(|item| text_at(item, &["name"])).collect(),
         other => panic!("not an array: {other:?}"),
     }
 }
@@ -61,12 +58,13 @@ fn sql_error(server: &mut Server<'_, MapOpener>, id: u32, dialect: &str, sql: &s
 fn rows(server: &mut Server<'_, MapOpener>, id: u32, dialect: &str, sql: &str) -> Vec<String> {
     let arguments = format!(r#"{{"sql":{sql:?},"dialect":"{dialect}"}}"#);
     let answer = call(server, id, "run_sql", &arguments);
-    assert_eq!(text_at(&answer, &["result", "isError"]), "false", "{answer:?}");
+    assert_eq!(
+        text_at(&answer, &["result", "isError"]),
+        "false",
+        "{answer:?}"
+    );
     match &get(structured(&answer), &["rows"]).value {
-        Json::Array(rows) => rows
-            .iter()
-            .map(|row| text_at(row, &["0"]))
-            .collect(),
+        Json::Array(rows) => rows.iter().map(|row| text_at(row, &["0"])).collect(),
         other => panic!("not rows: {other:?}"),
     }
 }
@@ -85,7 +83,15 @@ fn only_the_listed_tables_and_views_exist_for_the_agent() {
     let hidden = call(&mut server, 2, "describe_table", r#"{"table":"salaries"}"#);
     let missing = call(&mut server, 3, "describe_table", r#"{"table":"nothing"}"#);
     assert_eq!(error_code(&hidden), error_code(&missing));
-    assert_eq!(error_code(&call(&mut server, 4, "sample_rows", r#"{"table":"salaries"}"#)), error_code(&missing));
+    assert_eq!(
+        error_code(&call(
+            &mut server,
+            4,
+            "sample_rows",
+            r#"{"table":"salaries"}"#
+        )),
+        error_code(&missing)
+    );
     assert_eq!(
         error_code(&call(&mut server, 5, "row_list", r#"{"table":"salaries"}"#)),
         error_code(&call(&mut server, 6, "row_list", r#"{"table":"nothing"}"#))
@@ -94,13 +100,28 @@ fn only_the_listed_tables_and_views_exist_for_the_agent() {
     let absent = sql_error(&mut server, 8, "postgresql", "SELECT amount FROM nothing");
     assert_eq!(direct.replace("salaries", "nothing"), absent);
     assert!(!sql_error(&mut server, 9, "postgresql", "SELECT * FROM pay").contains("100"));
-    sql_error(&mut server, 10, "postgresql", "EXPLAIN SELECT * FROM salaries");
+    sql_error(
+        &mut server,
+        10,
+        "postgresql",
+        "EXPLAIN SELECT * FROM salaries",
+    );
     sql_error(&mut server, 11, "mysql", "SELECT amount FROM salaries");
     sql_error(&mut server, 12, "sqlite", "SELECT amount FROM salaries");
-    sql_error(&mut server, 13, "sqlserver", "SELECT amount FROM dbo.salaries");
+    sql_error(
+        &mut server,
+        13,
+        "sqlserver",
+        "SELECT amount FROM dbo.salaries",
+    );
     sql_error(&mut server, 14, "oracle", "SELECT amount FROM salaries");
     assert_eq!(
-        rows(&mut server, 15, "postgresql", "SELECT name FROM names ORDER BY name"),
+        rows(
+            &mut server,
+            15,
+            "postgresql",
+            "SELECT name FROM names ORDER BY name"
+        ),
         vec!["Ada", "Grace"]
     );
     assert_eq!(
@@ -161,7 +182,10 @@ fn the_key_value_tools_are_withdrawn_and_refused() {
             .unwrap(),
     );
     let tools = names(get(&listed, &["result", "tools"]));
-    assert!(!tools.iter().any(|tool| tool.starts_with("kv_")), "{tools:?}");
+    assert!(
+        !tools.iter().any(|tool| tool.starts_with("kv_")),
+        "{tools:?}"
+    );
     assert!(tools.iter().any(|tool| tool == "run_sql"), "{tools:?}");
     for (id, tool, arguments) in [
         (2, "kv_get", r#"{"key":"session:1"}"#),

@@ -1,4 +1,7 @@
-use crate::codec::{Args, FRAME_BODY, FRAME_HEADER, FRAME_HEARTBEAT, FRAME_MAX, FRAME_METHOD, Frame, Out, Parsed, frame, take_frame};
+use crate::codec::{
+    Args, FRAME_BODY, FRAME_HEADER, FRAME_HEARTBEAT, FRAME_MAX, FRAME_METHOD, Frame, Out, Parsed,
+    frame, take_frame,
+};
 use eggdb_keyspace::Keyspace;
 use eggdb_queues::Queues;
 use std::collections::{BTreeMap, VecDeque};
@@ -36,7 +39,9 @@ pub struct ServerConfig {
 
 impl std::fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerConfig").field("user", &self.user).finish_non_exhaustive()
+        f.debug_struct("ServerConfig")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
     }
 }
 
@@ -63,17 +68,34 @@ pub(crate) struct Broker<'s> {
 impl<'s> Broker<'s> {
     pub(crate) fn new(keyspace: &'s (dyn Keyspace + Sync)) -> Self {
         let mut exchanges = BTreeMap::new();
-        for (name, kind) in [("amq.direct", Kind::Direct), ("amq.fanout", Kind::Fanout), ("amq.topic", Kind::Topic)] {
-            exchanges.insert(name.to_owned(), Exchange { kind, bindings: Vec::new() });
+        for (name, kind) in [
+            ("amq.direct", Kind::Direct),
+            ("amq.fanout", Kind::Fanout),
+            ("amq.topic", Kind::Topic),
+        ] {
+            exchanges.insert(
+                name.to_owned(),
+                Exchange {
+                    kind,
+                    bindings: Vec::new(),
+                },
+            );
         }
-        Self { queues: Queues::new(keyspace), exchanges: Mutex::new(exchanges), next_name: AtomicU64::new(1) }
+        Self {
+            queues: Queues::new(keyspace),
+            exchanges: Mutex::new(exchanges),
+            next_name: AtomicU64::new(1),
+        }
     }
 
     fn route(&self, exchange: &str, routing_key: &str) -> Option<Vec<String>> {
         if exchange.is_empty() {
             return Some(vec![routing_key.to_owned()]);
         }
-        let exchanges = self.exchanges.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let exchanges = self
+            .exchanges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let found = exchanges.get(exchange)?;
         let mut queues: Vec<String> = found
             .bindings
@@ -102,17 +124,27 @@ pub(crate) fn topic_matches(pattern: &str, key: &str) -> bool {
         }
     }
     let pattern: Vec<&str> = pattern.split('.').collect();
-    let key: Vec<&str> = if key.is_empty() { Vec::new() } else { key.split('.').collect() };
+    let key: Vec<&str> = if key.is_empty() {
+        Vec::new()
+    } else {
+        key.split('.').collect()
+    };
     pattern.len() <= 64 && matches(&pattern, &key)
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn encode_message(exchange: &str, routing_key: &str, properties: &[u8], body: &[u8]) -> Vec<u8> {
     let mut out = Out::default();
-    out.shortstr(exchange).shortstr(routing_key).longstr(properties);
+    out.shortstr(exchange)
+        .shortstr(routing_key)
+        .longstr(properties);
     out.bytes.extend_from_slice(body);
     out.bytes
 }
@@ -193,8 +225,13 @@ impl Connection<'_, '_> {
         self.send(channel, out);
         let mut header = Out::default();
         header.short(60).short(0).longlong(body.len() as u64);
-        header.bytes.extend_from_slice(if properties.is_empty() { &[0, 0] } else { &properties });
-        self.outgoing.push_back(frame(FRAME_HEADER, channel, &header.bytes));
+        header.bytes.extend_from_slice(if properties.is_empty() {
+            &[0, 0]
+        } else {
+            &properties
+        });
+        self.outgoing
+            .push_back(frame(FRAME_HEADER, channel, &header.bytes));
         for chunk in body.chunks((FRAME_MAX - 8) as usize) {
             self.outgoing.push_back(frame(FRAME_BODY, channel, chunk));
         }
@@ -205,19 +242,35 @@ impl Connection<'_, '_> {
         let channels: Vec<u16> = self.channels.keys().copied().collect();
         for channel in channels {
             let consumers: Vec<(String, String, bool)> = match self.channels.get(&channel) {
-                Some(state) => state.consumers.iter().map(|consumer| (consumer.tag.clone(), consumer.queue.clone(), consumer.no_ack)).collect(),
+                Some(state) => state
+                    .consumers
+                    .iter()
+                    .map(|consumer| {
+                        (
+                            consumer.tag.clone(),
+                            consumer.queue.clone(),
+                            consumer.no_ack,
+                        )
+                    })
+                    .collect(),
                 None => continue,
             };
             for (tag, queue, no_ack) in consumers {
                 let room = match self.channels.get(&channel) {
-                    Some(state) if state.prefetch > 0 => usize::from(state.prefetch).saturating_sub(state.unacked.len()),
+                    Some(state) if state.prefetch > 0 => {
+                        usize::from(state.prefetch).saturating_sub(state.unacked.len())
+                    }
                     Some(_) => 64,
                     None => 0,
                 };
                 if room == 0 {
                     continue;
                 }
-                let messages = self.broker.queues.receive(&queue, room, LEASE_MS, now_ms()).map_err(|error| error.to_string())?;
+                let messages = self
+                    .broker
+                    .queues
+                    .receive(&queue, room, LEASE_MS, now_ms())
+                    .map_err(|error| error.to_string())?;
                 for message in messages {
                     let Some(state) = self.channels.get_mut(&channel) else {
                         break;
@@ -227,11 +280,17 @@ impl Connection<'_, '_> {
                     if no_ack {
                         let _ = self.broker.queues.ack(&queue, message.id);
                     } else {
-                        state.unacked.insert(delivery_tag, (queue.clone(), message.id));
+                        state
+                            .unacked
+                            .insert(delivery_tag, (queue.clone(), message.id));
                     }
                     let (exchange, routing_key, _, _) = decode_message(&message.body)?;
                     let mut out = Out::method(60, 60);
-                    out.shortstr(&tag).longlong(delivery_tag).octet(u8::from(message.receive_count > 1)).shortstr(&exchange).shortstr(&routing_key);
+                    out.shortstr(&tag)
+                        .longlong(delivery_tag)
+                        .octet(u8::from(message.receive_count > 1))
+                        .shortstr(&exchange)
+                        .shortstr(&routing_key);
                     self.deliver_message(channel, out, &message.body)?;
                 }
             }
@@ -244,7 +303,11 @@ impl Connection<'_, '_> {
             return;
         };
         let tags: Vec<u64> = if multiple {
-            state.unacked.range(..=if tag == 0 { u64::MAX } else { tag }).map(|(known, _)| *known).collect()
+            state
+                .unacked
+                .range(..=if tag == 0 { u64::MAX } else { tag })
+                .map(|(known, _)| *known)
+                .collect()
         } else {
             vec![tag]
         };
@@ -270,21 +333,34 @@ impl Connection<'_, '_> {
         let Some((exchange, routing_key)) = state.publishing.take() else {
             return Ok(());
         };
-        let properties = state.header.take().map(|(_, properties)| properties).unwrap_or_default();
+        let properties = state
+            .header
+            .take()
+            .map(|(_, properties)| properties)
+            .unwrap_or_default();
         let body = std::mem::take(&mut state.body);
         let confirm = state.confirms.as_mut().map(|sequence| {
             *sequence += 1;
             *sequence
         });
         let Some(queues) = self.broker.route(&exchange, &routing_key) else {
-            self.close_channel(channel, NOT_FOUND, &format!("NOT_FOUND - no exchange '{exchange}'"), 60, 40);
+            self.close_channel(
+                channel,
+                NOT_FOUND,
+                &format!("NOT_FOUND - no exchange '{exchange}'"),
+                60,
+                40,
+            );
             return Ok(());
         };
         let stored = encode_message(&exchange, &routing_key, &properties, &body);
         let now = now_ms();
         for queue in queues {
             if self.broker.queues.exists(&queue).unwrap_or(false) {
-                self.broker.queues.send(&queue, &stored, 0, now).map_err(|error| error.to_string())?;
+                self.broker
+                    .queues
+                    .send(&queue, &stored, 0, now)
+                    .map_err(|error| error.to_string())?;
             }
         }
         if let Some(sequence) = confirm {
@@ -304,7 +380,12 @@ impl Connection<'_, '_> {
                 let _weight = args.short()?;
                 let size = args.longlong()?;
                 if size > MAX_BODY_BYTES {
-                    self.close_connection(FRAME_ERROR, "a message body is larger than 16 MiB", 60, 40);
+                    self.close_connection(
+                        FRAME_ERROR,
+                        "a message body is larger than 16 MiB",
+                        60,
+                        40,
+                    );
                     return Ok(false);
                 }
                 let properties = args.rest().to_vec();
@@ -322,7 +403,12 @@ impl Connection<'_, '_> {
                         state.body.extend_from_slice(&incoming.payload);
                         let expected = state.header.as_ref().map_or(0, |(size, _)| *size);
                         if state.body.len() as u64 > expected {
-                            self.close_connection(FRAME_ERROR, "a message body is longer than its header says", 60, 40);
+                            self.close_connection(
+                                FRAME_ERROR,
+                                "a message body is longer than its header says",
+                                60,
+                                40,
+                            );
                             return Ok(false);
                         }
                         state.body.len() as u64 == expected
@@ -350,13 +436,25 @@ impl Connection<'_, '_> {
                 let mechanism = args.shortstr()?;
                 let response = args.longstr()?;
                 let mut parts = response.split(|byte| *byte == 0);
-                let (_, user, password) = (parts.next(), parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+                let (_, user, password) = (
+                    parts.next(),
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default(),
+                );
                 let valid = mechanism == "PLAIN"
                     && user == self.config.user.as_bytes()
-                    && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(password), &self.config.password_sha256);
+                    && eggdb_crypto::constant_time_eq(
+                        &eggdb_crypto::sha256(password),
+                        &self.config.password_sha256,
+                    );
                 if !valid {
                     std::thread::sleep(Duration::from_millis(250));
-                    self.close_connection(ACCESS_REFUSED, "ACCESS_REFUSED - Login was refused using authentication mechanism PLAIN", 10, 11);
+                    self.close_connection(
+                        ACCESS_REFUSED,
+                        "ACCESS_REFUSED - Login was refused using authentication mechanism PLAIN",
+                        10,
+                        11,
+                    );
                     return Ok(false);
                 }
                 let mut out = Out::method(10, 30);
@@ -378,7 +476,12 @@ impl Connection<'_, '_> {
             (Stage::Open, 10, 51) => return Ok(false),
             (Stage::Open, 20, 10) => {
                 if channel == 0 || channel > MAX_CHANNELS || self.channels.contains_key(&channel) {
-                    self.close_connection(CHANNEL_ERROR, "CHANNEL_ERROR - channel already open or invalid", 20, 10);
+                    self.close_connection(
+                        CHANNEL_ERROR,
+                        "CHANNEL_ERROR - channel already open or invalid",
+                        20,
+                        10,
+                    );
                     return Ok(false);
                 }
                 self.channels.insert(channel, Channel::default());
@@ -392,7 +495,12 @@ impl Connection<'_, '_> {
             }
             (Stage::Open, 20, 41) => {}
             (Stage::Open, ..) if !self.channels.contains_key(&channel) => {
-                self.close_connection(CHANNEL_ERROR, "CHANNEL_ERROR - expected 'channel.open'", class, method_id);
+                self.close_connection(
+                    CHANNEL_ERROR,
+                    "CHANNEL_ERROR - expected 'channel.open'",
+                    class,
+                    method_id,
+                );
                 return Ok(false);
             }
             (Stage::Open, 40, 10) => {
@@ -409,18 +517,33 @@ impl Connection<'_, '_> {
                     "fanout" => Kind::Fanout,
                     "topic" => Kind::Topic,
                     other => {
-                        self.close_connection(NOT_IMPLEMENTED, &format!("NOT_IMPLEMENTED - exchange type '{other}'"), 40, 10);
+                        self.close_connection(
+                            NOT_IMPLEMENTED,
+                            &format!("NOT_IMPLEMENTED - exchange type '{other}'"),
+                            40,
+                            10,
+                        );
                         return Ok(false);
                     }
                 };
                 let outcome = {
-                    let mut exchanges = self.broker.exchanges.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut exchanges = self
+                        .broker
+                        .exchanges
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match exchanges.get(&name) {
                         Some(existing) if existing.kind != kind => Err(PRECONDITION_FAILED),
                         Some(_) => Ok(()),
                         None if passive => Err(NOT_FOUND),
                         None => {
-                            exchanges.insert(name.clone(), Exchange { kind, bindings: Vec::new() });
+                            exchanges.insert(
+                                name.clone(),
+                                Exchange {
+                                    kind,
+                                    bindings: Vec::new(),
+                                },
+                            );
                             Ok(())
                         }
                     }
@@ -428,7 +551,13 @@ impl Connection<'_, '_> {
                 match outcome {
                     Ok(()) if !no_wait => self.send(channel, Out::method(40, 11)),
                     Ok(()) => {}
-                    Err(code) => self.close_channel(channel, code, &format!("cannot declare exchange '{name}'"), 40, 10),
+                    Err(code) => self.close_channel(
+                        channel,
+                        code,
+                        &format!("cannot declare exchange '{name}'"),
+                        40,
+                        10,
+                    ),
                 }
             }
             (Stage::Open, 50, 10) => {
@@ -440,11 +569,24 @@ impl Connection<'_, '_> {
                 let _auto_delete = args.bit()?;
                 let no_wait = args.bit()?;
                 if name.is_empty() {
-                    name = format!("amq.gen-{}", self.broker.next_name.fetch_add(1, Ordering::Relaxed));
+                    name = format!(
+                        "amq.gen-{}",
+                        self.broker.next_name.fetch_add(1, Ordering::Relaxed)
+                    );
                 }
-                let exists = self.broker.queues.exists(&name).map_err(|error| error.to_string())?;
+                let exists = self
+                    .broker
+                    .queues
+                    .exists(&name)
+                    .map_err(|error| error.to_string())?;
                 if passive && !exists {
-                    self.close_channel(channel, NOT_FOUND, &format!("NOT_FOUND - no queue '{name}'"), 50, 10);
+                    self.close_channel(
+                        channel,
+                        NOT_FOUND,
+                        &format!("NOT_FOUND - no queue '{name}'"),
+                        50,
+                        10,
+                    );
                     return Ok(true);
                 }
                 if !exists && let Err(error) = self.broker.queues.declare(&name) {
@@ -452,7 +594,11 @@ impl Connection<'_, '_> {
                     return Ok(true);
                 }
                 if !no_wait {
-                    let depth = self.broker.queues.depth(&name, now_ms()).map_err(|error| error.to_string())?;
+                    let depth = self
+                        .broker
+                        .queues
+                        .depth(&name, now_ms())
+                        .map_err(|error| error.to_string())?;
                     let mut out = Out::method(50, 11);
                     out.shortstr(&name).long(depth.ready as u32).long(0);
                     self.send(channel, out);
@@ -465,10 +611,16 @@ impl Connection<'_, '_> {
                 let routing_key = args.shortstr()?;
                 let no_wait = method_id == 20 && args.bit()?;
                 let found = {
-                    let mut exchanges = self.broker.exchanges.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut exchanges = self
+                        .broker
+                        .exchanges
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match exchanges.get_mut(&exchange) {
                         Some(found) => {
-                            found.bindings.retain(|(key, bound)| !(key == &routing_key && bound == &queue));
+                            found
+                                .bindings
+                                .retain(|(key, bound)| !(key == &routing_key && bound == &queue));
                             if method_id == 20 {
                                 found.bindings.push((routing_key, queue));
                             }
@@ -478,7 +630,13 @@ impl Connection<'_, '_> {
                     }
                 };
                 if !found {
-                    self.close_channel(channel, NOT_FOUND, &format!("NOT_FOUND - no exchange '{exchange}'"), 50, method_id);
+                    self.close_channel(
+                        channel,
+                        NOT_FOUND,
+                        &format!("NOT_FOUND - no exchange '{exchange}'"),
+                        50,
+                        method_id,
+                    );
                 } else if !no_wait {
                     self.send(channel, Out::method(50, method_id + 1));
                 }
@@ -486,14 +644,24 @@ impl Connection<'_, '_> {
             (Stage::Open, 50, 30) | (Stage::Open, 50, 40) => {
                 let _reserved = args.short()?;
                 let queue = args.shortstr()?;
-                let outcome = if method_id == 30 { self.broker.queues.purge(&queue) } else { self.broker.queues.delete(&queue) };
+                let outcome = if method_id == 30 {
+                    self.broker.queues.purge(&queue)
+                } else {
+                    self.broker.queues.delete(&queue)
+                };
                 match outcome {
                     Ok(count) => {
                         let mut out = Out::method(50, method_id + 1);
                         out.long(count as u32);
                         self.send(channel, out);
                     }
-                    Err(_) => self.close_channel(channel, NOT_FOUND, &format!("NOT_FOUND - no queue '{queue}'"), 50, method_id),
+                    Err(_) => self.close_channel(
+                        channel,
+                        NOT_FOUND,
+                        &format!("NOT_FOUND - no queue '{queue}'"),
+                        50,
+                        method_id,
+                    ),
                 }
             }
             (Stage::Open, 60, 10) => {
@@ -512,15 +680,33 @@ impl Connection<'_, '_> {
                 let no_ack = args.bit()?;
                 let _exclusive = args.bit()?;
                 let no_wait = args.bit()?;
-                if !self.broker.queues.exists(&queue).map_err(|error| error.to_string())? {
-                    self.close_channel(channel, NOT_FOUND, &format!("NOT_FOUND - no queue '{queue}'"), 60, 20);
+                if !self
+                    .broker
+                    .queues
+                    .exists(&queue)
+                    .map_err(|error| error.to_string())?
+                {
+                    self.close_channel(
+                        channel,
+                        NOT_FOUND,
+                        &format!("NOT_FOUND - no queue '{queue}'"),
+                        60,
+                        20,
+                    );
                     return Ok(true);
                 }
                 if tag.is_empty() {
-                    tag = format!("amq.ctag-{}", self.broker.next_name.fetch_add(1, Ordering::Relaxed));
+                    tag = format!(
+                        "amq.ctag-{}",
+                        self.broker.next_name.fetch_add(1, Ordering::Relaxed)
+                    );
                 }
                 if let Some(state) = self.channels.get_mut(&channel) {
-                    state.consumers.push(Consumer { tag: tag.clone(), queue, no_ack });
+                    state.consumers.push(Consumer {
+                        tag: tag.clone(),
+                        queue,
+                        no_ack,
+                    });
                 }
                 if !no_wait {
                     let mut out = Out::method(60, 21);
@@ -557,7 +743,13 @@ impl Connection<'_, '_> {
                 let messages = match self.broker.queues.receive(&queue, 1, LEASE_MS, now_ms()) {
                     Ok(messages) => messages,
                     Err(_) => {
-                        self.close_channel(channel, NOT_FOUND, &format!("NOT_FOUND - no queue '{queue}'"), 60, 70);
+                        self.close_channel(
+                            channel,
+                            NOT_FOUND,
+                            &format!("NOT_FOUND - no queue '{queue}'"),
+                            60,
+                            70,
+                        );
                         return Ok(true);
                     }
                 };
@@ -568,7 +760,11 @@ impl Connection<'_, '_> {
                         self.send(channel, out);
                     }
                     Some(message) => {
-                        let remaining = self.broker.queues.depth(&queue, now_ms()).map_or(0, |depth| depth.ready);
+                        let remaining = self
+                            .broker
+                            .queues
+                            .depth(&queue, now_ms())
+                            .map_or(0, |depth| depth.ready);
                         let Some(state) = self.channels.get_mut(&channel) else {
                             return Ok(true);
                         };
@@ -577,11 +773,17 @@ impl Connection<'_, '_> {
                         if no_ack {
                             let _ = self.broker.queues.ack(&queue, message.id);
                         } else {
-                            state.unacked.insert(delivery_tag, (queue.clone(), message.id));
+                            state
+                                .unacked
+                                .insert(delivery_tag, (queue.clone(), message.id));
                         }
                         let (exchange, routing_key, _, _) = decode_message(&message.body)?;
                         let mut out = Out::method(60, 71);
-                        out.longlong(delivery_tag).octet(u8::from(message.receive_count > 1)).shortstr(&exchange).shortstr(&routing_key).long(remaining as u32);
+                        out.longlong(delivery_tag)
+                            .octet(u8::from(message.receive_count > 1))
+                            .shortstr(&exchange)
+                            .shortstr(&routing_key)
+                            .long(remaining as u32);
                         self.deliver_message(channel, out, &message.body)?;
                     }
                 }
@@ -616,10 +818,21 @@ impl Connection<'_, '_> {
                 }
             }
             (Stage::Open, 90, _) => {
-                self.close_channel(channel, NOT_IMPLEMENTED, "NOT_IMPLEMENTED - transactions are not supported yet", class, method_id);
+                self.close_channel(
+                    channel,
+                    NOT_IMPLEMENTED,
+                    "NOT_IMPLEMENTED - transactions are not supported yet",
+                    class,
+                    method_id,
+                );
             }
             _ => {
-                self.close_connection(COMMAND_INVALID, &format!("COMMAND_INVALID - unexpected method {class}.{method_id}"), class, method_id);
+                self.close_connection(
+                    COMMAND_INVALID,
+                    &format!("COMMAND_INVALID - unexpected method {class}.{method_id}"),
+                    class,
+                    method_id,
+                );
                 return Ok(false);
             }
         }
@@ -629,18 +842,37 @@ impl Connection<'_, '_> {
 
 fn start_frame() -> Vec<u8> {
     let mut out = Out::method(10, 10);
-    out.octet(0).octet(9).string_table(&[("product", "EggDB"), ("platform", "Rust"), ("information", "compatible with AMQP 0-9-1")]).longstr(b"PLAIN").longstr(b"en_US");
+    out.octet(0)
+        .octet(9)
+        .string_table(&[
+            ("product", "EggDB"),
+            ("platform", "Rust"),
+            ("information", "compatible with AMQP 0-9-1"),
+        ])
+        .longstr(b"PLAIN")
+        .longstr(b"en_US");
     method(&out, 0)
 }
 
-pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reader: impl Read, writer: &mut impl Write, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub(crate) fn serve_stream(
+    broker: &Broker<'_>,
+    config: &ServerConfig,
+    mut reader: impl Read,
+    writer: &mut impl Write,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     let mut header = [0u8; 8];
     let mut filled = 0;
     while filled < 8 {
         match reader.read(&mut header[filled..]) {
             Ok(0) => return Ok(()),
             Ok(read) => filled += read,
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
                 if stop() {
                     return Ok(());
                 }
@@ -660,7 +892,13 @@ pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reade
         return Ok(());
     }
     writer.write_all(&start_frame())?;
-    let mut connection = Connection { broker, config, stage: Stage::StartSent, channels: BTreeMap::new(), outgoing: VecDeque::new() };
+    let mut connection = Connection {
+        broker,
+        config,
+        stage: Stage::StartSent,
+        channels: BTreeMap::new(),
+        outgoing: VecDeque::new(),
+    };
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     let outcome = loop {
@@ -670,7 +908,11 @@ pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reade
         match reader.read(&mut chunk) {
             Ok(0) => break Ok(()),
             Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
             Err(error) => break Err(error),
         }
         let mut keep_going = true;
@@ -683,14 +925,24 @@ pub(crate) fn serve_stream(broker: &Broker<'_>, config: &ServerConfig, mut reade
                         break;
                     }
                     Err(message) => {
-                        connection.close_connection(FRAME_ERROR, &format!("FRAME_ERROR - {message}"), 0, 0);
+                        connection.close_connection(
+                            FRAME_ERROR,
+                            &format!("FRAME_ERROR - {message}"),
+                            0,
+                            0,
+                        );
                         keep_going = false;
                         break;
                     }
                 },
                 Ok(None) => break,
                 Err(message) => {
-                    connection.close_connection(FRAME_ERROR, &format!("FRAME_ERROR - {message}"), 0, 0);
+                    connection.close_connection(
+                        FRAME_ERROR,
+                        &format!("FRAME_ERROR - {message}"),
+                        0,
+                        0,
+                    );
                     keep_going = false;
                     break;
                 }
@@ -725,7 +977,12 @@ impl Read for Polled {
 
 /// Serves AMQP 0-9-1 clients on `listener` from the queues in `keyspace` until `stop` turns
 /// true.
-pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &ServerConfig, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub fn serve(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let broker = Broker::new(keyspace);
     let active = AtomicUsize::new(0);
@@ -738,7 +995,10 @@ pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &
                     continue;
                 }
             };
-            if stream.set_nonblocking(false).is_err() || stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
+            if stream.set_nonblocking(false).is_err()
+                || stream.set_read_timeout(Some(READ_POLL)).is_err()
+                || stream.set_nodelay(true).is_err()
+            {
                 continue;
             }
             if active.fetch_add(1, Ordering::AcqRel) >= config.max_connections {
@@ -746,12 +1006,14 @@ pub fn serve(keyspace: &(dyn Keyspace + Sync), listener: &TcpListener, config: &
                 continue;
             }
             let (broker, active) = (&broker, &active);
-            let spawned = std::thread::Builder::new().name("eggdb-amqp".to_owned()).spawn_scoped(scope, move || {
-                if let Ok(mut writer) = stream.try_clone() {
-                    let _ = serve_stream(broker, config, Polled { stream }, &mut writer, stop);
-                }
-                active.fetch_sub(1, Ordering::AcqRel);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("eggdb-amqp".to_owned())
+                .spawn_scoped(scope, move || {
+                    if let Ok(mut writer) = stream.try_clone() {
+                        let _ = serve_stream(broker, config, Polled { stream }, &mut writer, stop);
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                });
             if spawned.is_err() {
                 active.fetch_sub(1, Ordering::AcqRel);
             }

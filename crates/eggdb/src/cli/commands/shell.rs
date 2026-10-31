@@ -1,11 +1,11 @@
+use super::collection::collections_count;
+use super::compact::shell_holds_the_file;
 use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
 use super::sql::{error_lines, exit_for, result_text};
 use super::{Access, execute_on, session_for, uses_color};
 use crate::cli::args::{self, CommandName, Invocation, Request, ResultMode};
-use super::collection::collections_count;
-use super::compact::shell_holds_the_file;
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use crate::cli::{Console, Terminal, help, report};
@@ -44,7 +44,9 @@ const META_COMMANDS: [&str; 8] = [
 const KEY_SPACE_COMMANDS: [&str; 10] = [
     "put", "get", "del", "scan", "ttl", "expire", "persist", "incr", "decr", "cas",
 ];
-const ONE_KEY_COMMANDS: [&str; 8] = ["get", "del", "ttl", "expire", "persist", "incr", "decr", "cas"];
+const ONE_KEY_COMMANDS: [&str; 8] = [
+    "get", "del", "ttl", "expire", "persist", "incr", "decr", "cas",
+];
 const DEFAULT_KEY_SPACE: &str = "default key space";
 const LONGEST_PROMPT_COLLECTION: usize = 16;
 const STATEMENT_KEYWORDS: [&str; 15] = [
@@ -545,7 +547,12 @@ impl<'s> Shell<'s> {
             Some(true) if line.trim() != "/" => Some(Step::Continue(Exit::Done)),
             Some(true) => {
                 let end = self.buffer.len().saturating_sub(line.len());
-                let unit = self.buffer.get(..end).unwrap_or_default().trim_end().to_owned();
+                let unit = self
+                    .buffer
+                    .get(..end)
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_owned();
                 self.buffer.clear();
                 Some(self.run_sql(console, &unit))
             }
@@ -858,10 +865,7 @@ impl<'s> Shell<'s> {
             }
         };
         let marker = |shown: bool| if shown { "* " } else { "  " };
-        let mut text = format!(
-            "{}{DEFAULT_KEY_SPACE}\n",
-            marker(self.collection.is_none())
-        );
+        let mut text = format!("{}{DEFAULT_KEY_SPACE}\n", marker(self.collection.is_none()));
         for name in &names {
             let shown = self.collection.as_deref() == Some(name.as_str());
             text.push_str(&format!("{}{name}\n", marker(shown)));
@@ -883,11 +887,7 @@ impl<'s> Shell<'s> {
             return Step::Continue(Exit::Done);
         }
         if !args::is_collection_name(name) {
-            return self.fail(
-                console,
-                &args::bad_collection_name(None, name),
-                Exit::Usage,
-            );
+            return self.fail(console, &args::bad_collection_name(None, name), Exit::Usage);
         }
         let exists = self
             .db

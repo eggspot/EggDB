@@ -57,7 +57,10 @@ fn flyways_session_lock_excludes_a_second_session_until_it_is_unlocked() {
         last(&mut second, &try_lock),
         "pg_try_advisory_lock\nf\nSELECT 1"
     );
-    assert_eq!(last(&mut second, &unlock), "pg_advisory_unlock\nf\nSELECT 1");
+    assert_eq!(
+        last(&mut second, &unlock),
+        "pg_advisory_unlock\nf\nSELECT 1"
+    );
     assert_eq!(last(&mut first, &unlock), "pg_advisory_unlock\nt\nSELECT 1");
     assert_eq!(
         last(&mut second, &try_lock),
@@ -177,7 +180,10 @@ fn flyways_empty_schema_query_finds_nothing_in_a_new_database_and_tables_after()
         prepared(&mut session, query, &["public", "public", "public"]),
         "exists\nf\nSELECT 1"
     );
-    last(&mut session, "CREATE TABLE customers (id integer PRIMARY KEY)");
+    last(
+        &mut session,
+        "CREATE TABLE customers (id integer PRIMARY KEY)",
+    );
     assert_eq!(
         prepared(&mut session, query, &["public", "public", "public"]),
         "exists\nt\nSELECT 1"

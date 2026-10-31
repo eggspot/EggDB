@@ -25,8 +25,7 @@ pub use cursor::{
     shown_cursor, table_at, table_position,
 };
 pub use registry::{
-    COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES,
-    TOOLS,
+    COMMANDS, COMMON_OPTIONS, CORE_VERBS, ERROR_CODES, KEPT_NAMES, NOUNS, SHIPPED_TOOL_NAMES, TOOLS,
 };
 
 /// The most a use of a command or a call of a tool can do.
@@ -672,7 +671,10 @@ impl ToolDefinition {
 
     /// The names of its arguments, in order.
     pub fn argument_names(&self) -> Vec<&'static str> {
-        self.arguments.iter().map(|argument| argument.name).collect()
+        self.arguments
+            .iter()
+            .map(|argument| argument.name)
+            .collect()
     }
 }
 

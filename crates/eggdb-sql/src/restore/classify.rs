@@ -179,9 +179,12 @@ pub(crate) fn classify(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Ac
 
 fn updates_catalog(words: Words<'_>) -> bool {
     let head: Vec<Token> = words.take(3).collect();
-    head.first().is_some_and(|token| token.is_word("pg_catalog"))
+    head.first()
+        .is_some_and(|token| token.is_word("pg_catalog"))
         && head.get(1).is_some_and(|token| token.is_symbol(b'.'))
-        && head.get(2).is_some_and(|token| token.is_word("pg_database"))
+        && head
+            .get(2)
+            .is_some_and(|token| token.is_word("pg_database"))
 }
 
 fn drop_statement(tokens: &[Token]) -> Action {

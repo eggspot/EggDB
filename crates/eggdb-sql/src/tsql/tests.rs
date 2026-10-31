@@ -22,28 +22,41 @@ fn raiserror_substitutes_arguments_as_the_transact_sql_reference_documents() {
         "The level for job_id:3 should be between 1 and 10."
     );
     assert_eq!(
-        formatted("<<%*.*s>>", &[Value::Integer(7), Value::Integer(3), text("abcde")]),
+        formatted(
+            "<<%*.*s>>",
+            &[Value::Integer(7), Value::Integer(3), text("abcde")]
+        ),
         "<<    abc>>"
     );
     assert_eq!(formatted("<<%7.3s>>", &[text("abcde")]), "<<    abc>>");
     assert_eq!(formatted("<<%-7s>>", &[text("ab")]), "<<ab     >>");
-    assert_eq!(formatted("%5d|%-5d|%05d", &[
-        Value::Integer(42),
-        Value::Integer(42),
-        Value::Integer(42)
-    ]), "   42|42   |00042");
-    assert_eq!(formatted("%+d % d %i", &[
-        Value::Integer(5),
-        Value::Integer(5),
-        Value::SmallInt(-5)
-    ]), "+5  5 -5");
-    assert_eq!(formatted("%x %X %#x %o %#o", &[
-        Value::Integer(255),
-        Value::Integer(255),
-        Value::Integer(255),
-        Value::Integer(8),
-        Value::Integer(8)
-    ]), "ff FF 0xff 10 010");
+    assert_eq!(
+        formatted(
+            "%5d|%-5d|%05d",
+            &[Value::Integer(42), Value::Integer(42), Value::Integer(42)]
+        ),
+        "   42|42   |00042"
+    );
+    assert_eq!(
+        formatted(
+            "%+d % d %i",
+            &[Value::Integer(5), Value::Integer(5), Value::SmallInt(-5)]
+        ),
+        "+5  5 -5"
+    );
+    assert_eq!(
+        formatted(
+            "%x %X %#x %o %#o",
+            &[
+                Value::Integer(255),
+                Value::Integer(255),
+                Value::Integer(255),
+                Value::Integer(8),
+                Value::Integer(8)
+            ]
+        ),
+        "ff FF 0xff 10 010"
+    );
     assert_eq!(formatted("%u", &[Value::Integer(-1)]), "4294967295");
     assert_eq!(formatted("100%% done", &[]), "100% done");
     assert_eq!(formatted("%s and %d", &[]), "(null) and (null)");
@@ -58,21 +71,44 @@ fn raiserror_substitutes_arguments_as_the_transact_sql_reference_documents() {
 
 #[test]
 fn raiserror_checks_its_number_severity_and_state() {
-    let message = raised_message(&text("x %s"), &Value::Integer(10), &Value::Integer(4), &[text(
-        "y",
-    )])
+    let message = raised_message(
+        &text("x %s"),
+        &Value::Integer(10),
+        &Value::Integer(4),
+        &[text("y")],
+    )
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
-        (message.number, message.severity, message.state, message.text.as_str()),
+        (
+            message.number,
+            message.severity,
+            message.state,
+            message.text.as_str()
+        ),
         (50_000, 10, 4, "x y")
     );
     let negative = raised_message(&text("m"), &Value::Integer(-3), &Value::Integer(-1), &[])
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!((negative.severity, negative.state), (0, 1));
     let cases = [
-        (Value::Integer(50_000), Value::Integer(16), Value::Integer(1), 2732),
-        (Value::Integer(12_999), Value::Integer(16), Value::Integer(1), 2732),
-        (Value::Integer(60_000), Value::Integer(16), Value::Integer(1), 18054),
+        (
+            Value::Integer(50_000),
+            Value::Integer(16),
+            Value::Integer(1),
+            2732,
+        ),
+        (
+            Value::Integer(12_999),
+            Value::Integer(16),
+            Value::Integer(1),
+            2732,
+        ),
+        (
+            Value::Integer(60_000),
+            Value::Integer(16),
+            Value::Integer(1),
+            18054,
+        ),
         (text("m"), Value::Integer(19), Value::Integer(1), 2754),
     ];
     for (message, severity, state, code) in cases {
@@ -96,8 +132,12 @@ fn throw_takes_numbers_from_50000_and_states_up_to_255() {
     assert_eq!(error.severity(), Some(16));
     assert_eq!(error.ends_sqlserver_batch(), Some(true));
     assert_eq!(error.to_string(), "Msg 51000, Level 16, State 7: custom");
-    let wide = thrown(&Value::Integer(2_000_000_000), &text("wide"), &Value::Integer(0))
-        .unwrap_or_else(|error| panic!("{error}"));
+    let wide = thrown(
+        &Value::Integer(2_000_000_000),
+        &text("wide"),
+        &Value::Integer(0),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(wide.sqlserver_number(), Some(2_000_000_000));
     assert_eq!(wide.vendor_code(), None);
     let low = thrown(&Value::Integer(49_999), &text("x"), &Value::Integer(1)).expect_err("low");
@@ -118,7 +158,8 @@ fn lines_count_from_one() {
 #[test]
 fn batch_logic_is_found_by_its_words_and_variables() {
     let uses = |text: &str| {
-        let tokens = tokenize_in(text, Dialect::SqlServer).unwrap_or_else(|error| panic!("{error}"));
+        let tokens =
+            tokenize_in(text, Dialect::SqlServer).unwrap_or_else(|error| panic!("{error}"));
         uses_batch_logic(&tokens)
     };
     for text in [

@@ -87,12 +87,22 @@ fn restore_dry_run_reports_what_a_real_run_does_and_changes_nothing() {
     let real = eggdb(&["restore", &copy_path, &dump_path, "--json"]);
     let real_report = parse_document(succeeded(&real).trim_end()).unwrap();
 
-    assert_eq!(std::fs::read(file.path()).unwrap(), before, "the file is not touched");
-    assert!(!with_suffix(file.path(), ".restoring").exists(), "the scratch copy is removed");
+    assert_eq!(
+        std::fs::read(file.path()).unwrap(),
+        before,
+        "the file is not touched"
+    );
+    assert!(
+        !with_suffix(file.path(), ".restoring").exists(),
+        "the scratch copy is removed"
+    );
     let dry_names = names(&dry_report);
     let created_at = dry_names.iter().position(|name| name == "created").unwrap();
     assert_eq!(dry_names[created_at + 1], "dry_run");
-    assert!(!names(&real_report).contains(&"dry_run".to_owned()), "a real run's report is as shipped");
+    assert!(
+        !names(&real_report).contains(&"dry_run".to_owned()),
+        "a real run's report is as shipped"
+    );
     let left_out = ["file", "elapsed_ms", "dry_run", "verdict"];
     assert_eq!(
         members_without(&dry_report, &left_out),
@@ -133,12 +143,25 @@ fn restore_dry_run_with_create_leaves_no_file_and_a_failure_says_what_a_real_run
         "CREATE TABLE places (id integer PRIMARY KEY);\nINSERT INTO places VALUES (1);\n",
     )
     .unwrap();
-    let created = eggdb(&["restore", "--create", &path, &dump_path, "--dry-run", "--json"]);
+    let created = eggdb(&[
+        "restore",
+        "--create",
+        &path,
+        &dump_path,
+        "--dry-run",
+        "--json",
+    ]);
     let report = parse_document(succeeded(&created).trim_end()).unwrap();
     assert!(!file.path().exists() && !staging.exists());
     let facts = members_without(&report, &[]);
-    assert!(facts.contains(&("created".to_owned(), "Boolean(true)".to_owned())), "{facts:?}");
-    assert!(facts.contains(&("dry_run".to_owned(), "Boolean(true)".to_owned())), "{facts:?}");
+    assert!(
+        facts.contains(&("created".to_owned(), "Boolean(true)".to_owned())),
+        "{facts:?}"
+    );
+    assert!(
+        facts.contains(&("dry_run".to_owned(), "Boolean(true)".to_owned())),
+        "{facts:?}"
+    );
 
     let missing = eggdb(&["restore", &path, &dump_path, "--dry-run"]);
     assert_eq!(missing.status.code(), Some(3));
@@ -150,7 +173,13 @@ fn restore_dry_run_with_create_leaves_no_file_and_a_failure_says_what_a_real_run
         text(&missing.stderr)
     );
 
-    succeeded(&eggdb(&["sql", "--create", &path, "-c", "CREATE TABLE places (id integer PRIMARY KEY)"]));
+    succeeded(&eggdb(&[
+        "sql",
+        "--create",
+        &path,
+        "-c",
+        "CREATE TABLE places (id integer PRIMARY KEY)",
+    ]));
     let before = std::fs::read(file.path()).unwrap();
     std::fs::write(
         dump.path(),
@@ -161,7 +190,9 @@ fn restore_dry_run_with_create_leaves_no_file_and_a_failure_says_what_a_real_run
     assert_eq!(failed.status.code(), Some(3));
     let said = text(&failed.stderr);
     assert!(
-        said.contains(&format!("cannot restore {dump_path} into {path} (dry run): line 2: ")),
+        said.contains(&format!(
+            "cannot restore {dump_path} into {path} (dry run): line 2: "
+        )),
         "{said}"
     );
     assert!(
@@ -194,7 +225,14 @@ fn import_csv_dry_run_loads_into_a_copy_and_reports_the_rows() {
     let before = std::fs::read(file.path()).unwrap();
 
     let dry = eggdb(&[
-        "import", &path, "--csv", &csv_path, "--table", "people (name)", "--header", "--dry-run",
+        "import",
+        &path,
+        "--csv",
+        &csv_path,
+        "--table",
+        "people (name)",
+        "--header",
+        "--dry-run",
         "--json",
     ]);
     assert_eq!(
@@ -206,7 +244,14 @@ fn import_csv_dry_run_loads_into_a_copy_and_reports_the_rows() {
     assert_eq!(std::fs::read(file.path()).unwrap(), before);
     assert!(!staging.exists());
     let as_text = eggdb(&[
-        "import", &path, "--csv", &csv_path, "--table", "people (name)", "--header", "--dry-run",
+        "import",
+        &path,
+        "--csv",
+        &csv_path,
+        "--table",
+        "people (name)",
+        "--header",
+        "--dry-run",
     ]);
     assert_eq!(
         succeeded(&as_text),
@@ -215,7 +260,14 @@ fn import_csv_dry_run_loads_into_a_copy_and_reports_the_rows() {
 
     std::fs::write(csv.path(), "name\nGrace\nAda,extra\n").unwrap();
     let bad = eggdb(&[
-        "import", &path, "--csv", &csv_path, "--table", "people (name)", "--header", "--dry-run",
+        "import",
+        &path,
+        "--csv",
+        &csv_path,
+        "--table",
+        "people (name)",
+        "--header",
+        "--dry-run",
     ]);
     assert_eq!(bad.status.code(), Some(3));
     assert!(
@@ -231,10 +283,20 @@ fn import_csv_dry_run_loads_into_a_copy_and_reports_the_rows() {
         "-c",
         "INSERT INTO people (name) VALUES ('Linus') RETURNING id",
     ]));
-    assert!(next.contains(" 2\n"), "the dry runs moved no sequence: {next}");
+    assert!(
+        next.contains(" 2\n"),
+        "the dry runs moved no sequence: {next}"
+    );
 
     let refused = eggdb(&[
-        "import", &path, "--csv", &csv_path, "--table", "people", "--on-conflict", "skip",
+        "import",
+        &path,
+        "--csv",
+        &csv_path,
+        "--table",
+        "people",
+        "--on-conflict",
+        "skip",
     ]);
     assert_eq!(refused.status.code(), Some(2));
     assert!(text(&refused.stderr).starts_with(

@@ -25,7 +25,10 @@ mod tests {
     #[test]
     fn the_text_protocol_stores_reads_and_counts() {
         let keyspace = MemoryKeyspace::default();
-        let shared = Shared { keyspace: &keyspace, next_cas: AtomicU64::new(1) };
+        let shared = Shared {
+            keyspace: &keyspace,
+            next_cas: AtomicU64::new(1),
+        };
         let answer = converse(
             &shared,
             b"set k 5 0 5\r\nhello\r\nget k nope\r\nadd k 0 0 1\r\nx\r\nappend k 0 0 1\r\n!\r\ngets k\r\nincr n 1\r\nset n 0 0 2\r\n41\r\nincr n 1\r\ndecr n 100\r\ndelete k\r\ndelete k\r\nset q 0 0 1 noreply\r\nz\r\nget q\r\nbogus\r\nversion\r\nquit\r\nget q\r\n",
@@ -39,7 +42,10 @@ mod tests {
     #[test]
     fn cas_touch_and_the_meta_commands_follow_the_protocol() {
         let keyspace = MemoryKeyspace::default();
-        let shared = Shared { keyspace: &keyspace, next_cas: AtomicU64::new(100) };
+        let shared = Shared {
+            keyspace: &keyspace,
+            next_cas: AtomicU64::new(100),
+        };
         let answer = converse(
             &shared,
             b"set k 0 0 1\r\na\r\ncas k 0 0 1 999\r\nb\r\ncas k 0 0 1 100\r\nc\r\nget k\r\ntouch k 100\r\ntouch nope 1\r\nms m 2 F3\r\nhi\r\nmg m v f\r\nmg nope v\r\nmd m\r\nmn\r\n",

@@ -311,18 +311,38 @@ fn summary(totals: &AuditTotals, shown_calls: u64) -> String {
 
 impl Session<'_> {
     fn verify_audit(&mut self, path: &std::path::Path, shown: &str) -> Result<Exit, Failure> {
-        let report = eggdb_mcp::audit::verify_chain(path).map_err(|error| Failure::database(format!("cannot read {shown}: {error}"), Exit::DatabaseError))?;
+        let report = eggdb_mcp::audit::verify_chain(path).map_err(|error| {
+            Failure::database(format!("cannot read {shown}: {error}"), Exit::DatabaseError)
+        })?;
         if let Some(line) = report.first_break {
             return Err(Failure::coded(
                 "audit_changed",
-                format!("{shown} was changed at line {line}: that record does not link to the one before it"),
+                format!(
+                    "{shown} was changed at line {line}: that record does not link to the one before it"
+                ),
                 Exit::DatabaseError,
             ));
         }
-        let older = if report.unchained > 0 { format!(", after {} older records from before the chain", render::count(report.unchained)) } else { String::new() };
+        let older = if report.unchained > 0 {
+            format!(
+                ", after {} older records from before the chain",
+                render::count(report.unchained)
+            )
+        } else {
+            String::new()
+        };
         match self.format {
-            Format::Json => self.out.text(&render::JsonObject::new().number("chained", report.chained).number("unchained", report.unchained).boolean("intact", true).line()),
-            _ => self.out.text(&format!("{shown}: {} records, each linked to the one before{older}; intact\n", render::count(report.chained))),
+            Format::Json => self.out.text(
+                &render::JsonObject::new()
+                    .number("chained", report.chained)
+                    .number("unchained", report.unchained)
+                    .boolean("intact", true)
+                    .line(),
+            ),
+            _ => self.out.text(&format!(
+                "{shown}: {} records, each linked to the one before{older}; intact\n",
+                render::count(report.chained)
+            )),
         }
         Ok(Exit::Done)
     }

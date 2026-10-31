@@ -3,7 +3,7 @@ use crate::keyspace::Keyspace;
 use crate::protocol::{ProtocolError, Reply, RequestReader};
 use crate::pubsub::{Hub, Kind};
 use crate::transactions::execute_with_transactions;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -26,7 +26,9 @@ pub struct ServerConfig {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 struct StopAwareStream<'s> {
@@ -41,7 +43,11 @@ impl io::Read for StopAwareStream<'_> {
                 return Ok(0);
             }
             match self.stream.read(buffer) {
-                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
                 other => return other,
             }
         }
@@ -57,7 +63,10 @@ struct Connection<'s> {
 
 impl Connection<'_> {
     fn send(&self, bytes: &[u8]) -> io::Result<()> {
-        let mut writer = self.writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         writer.write_all(bytes)
     }
 
@@ -74,14 +83,17 @@ impl Connection<'_> {
             .spawn(move || {
                 for frame in receiver {
                     forwarded.fetch_sub(1, Ordering::AcqRel);
-                    let mut stream = writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut stream = writer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if stream.write_all(&frame).is_err() {
                         return;
                     }
                 }
             });
         if started.is_ok() {
-            self.hub.attach(self.id, resp3, sender.clone(), Arc::clone(&pending));
+            self.hub
+                .attach(self.id, resp3, sender.clone(), Arc::clone(&pending));
             self.outbox = Some((sender, pending));
         }
     }
@@ -93,14 +105,18 @@ impl Connection<'_> {
             "publish" => {
                 return Some(vec![match args {
                     [channel, message] => Reply::Integer(self.hub.publish(channel, message) as i64),
-                    _ => Reply::Error("ERR wrong number of arguments for 'publish' command".to_owned()),
+                    _ => Reply::Error(
+                        "ERR wrong number of arguments for 'publish' command".to_owned(),
+                    ),
                 }]);
             }
             _ => return None,
         };
         let subscribe = name.ends_with("subscribe") && !name.contains("unsub");
         if subscribe && args.is_empty() {
-            return Some(vec![Reply::Error(format!("ERR wrong number of arguments for '{name}' command"))]);
+            return Some(vec![Reply::Error(format!(
+                "ERR wrong number of arguments for '{name}' command"
+            ))]);
         }
         if client.queued.is_some() {
             return None;
@@ -137,7 +153,7 @@ fn serve_connection(
     };
     let mut out = Vec::new();
     loop {
-        let arguments = match reader.next() {
+        let arguments = match reader.next_request() {
             Ok(arguments) => arguments,
             Err(ProtocolError::Closed) => break,
             Err(ProtocolError::Invalid(message)) => {
@@ -151,13 +167,15 @@ fn serve_connection(
             .map(|first| String::from_utf8_lossy(first).to_ascii_lowercase())
             .unwrap_or_default();
         let subscribed = hub.held(id) > 0;
-        let replies = if !client.authenticated && name != "auth" && name != "hello" && name != "quit" {
+        let replies = if !client.authenticated
+            && name != "auth"
+            && name != "hello"
+            && name != "quit"
+        {
             vec![Reply::Error("NOAUTH Authentication required.".to_owned())]
         } else if let Some(replies) = connection.pubsub(&client, &name, &arguments[1..]) {
             replies
-        } else if subscribed
-            && !client.resp3
-            && !matches!(name.as_str(), "ping" | "quit" | "reset")
+        } else if subscribed && !client.resp3 && !matches!(name.as_str(), "ping" | "quit" | "reset")
         {
             vec![Reply::Error(format!(
                 "ERR Can't execute '{name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
@@ -219,7 +237,9 @@ pub fn serve(
             }
             if active.fetch_add(1, Ordering::AcqRel) >= config.max_connections {
                 active.fetch_sub(1, Ordering::AcqRel);
-                log(&format!("{peer}  connection refused: max number of clients reached"));
+                log(&format!(
+                    "{peer}  connection refused: max number of clients reached"
+                ));
                 let mut stream = stream;
                 let _ = stream.write_all(b"-ERR max number of clients reached\r\n");
                 continue;

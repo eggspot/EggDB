@@ -8,15 +8,14 @@ use eggdb_capi::{
     EGGDB_ERR_READ_TRANSACTION, EGGDB_ERR_SQL, EGGDB_INTEGER, EGGDB_NULL, EGGDB_OK,
     EGGDB_OPEN_NO_CREATE, EGGDB_REAL, EGGDB_SCAN_END_INCLUSIVE, EGGDB_SCAN_PREFIX,
     EGGDB_SCAN_REVERSE, EGGDB_TEXT, EggdbBackupReport, EggdbCompactReport, EggdbDb, EggdbEntry,
-    EggdbOptions, EggdbParameter, EggdbResult, EggdbScan, EggdbSql, EggdbTxn, EggdbValue, eggdb_backup,
-    eggdb_begin_read, eggdb_begin_write, eggdb_clear_expiry, eggdb_close,
-    eggdb_collection_names, eggdb_commit, eggdb_compact, eggdb_compact_file,
-    eggdb_compare_and_set, eggdb_create_collection, eggdb_delete, eggdb_drop_collection,
-    eggdb_free, eggdb_get, eggdb_increment, eggdb_last_error, eggdb_last_sqlstate, eggdb_open,
-    eggdb_put, eggdb_put_with_expiry, eggdb_rollback, eggdb_scan_free, eggdb_scan_next,
-    eggdb_scan_open, eggdb_set_expiry, eggdb_sql_close, eggdb_sql_execute,
-    eggdb_sql_execute_with_parameters, eggdb_sql_open,
-    eggdb_time_to_live,
+    EggdbOptions, EggdbParameter, EggdbResult, EggdbScan, EggdbSql, EggdbTxn, EggdbValue,
+    eggdb_backup, eggdb_begin_read, eggdb_begin_write, eggdb_clear_expiry, eggdb_close,
+    eggdb_collection_names, eggdb_commit, eggdb_compact, eggdb_compact_file, eggdb_compare_and_set,
+    eggdb_create_collection, eggdb_delete, eggdb_drop_collection, eggdb_free, eggdb_get,
+    eggdb_increment, eggdb_last_error, eggdb_last_sqlstate, eggdb_open, eggdb_put,
+    eggdb_put_with_expiry, eggdb_rollback, eggdb_scan_free, eggdb_scan_next, eggdb_scan_open,
+    eggdb_set_expiry, eggdb_sql_close, eggdb_sql_execute, eggdb_sql_execute_with_parameters,
+    eggdb_sql_open, eggdb_time_to_live,
 };
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::{Path, PathBuf};
@@ -211,7 +210,12 @@ fn next_batch(txn: *mut EggdbTxn, scan: *mut EggdbScan, max_entries: usize) -> E
     let batch = unsafe { std::slice::from_raw_parts(entries, count) };
     batch
         .iter()
-        .map(|entry| (lent(entry.key, entry.key_len), lent(entry.value, entry.value_len)))
+        .map(|entry| {
+            (
+                lent(entry.key, entry.key_len),
+                lent(entry.value, entry.value_len),
+            )
+        })
         .collect()
 }
 
@@ -331,7 +335,14 @@ fn a_scan_reads_in_batches_forward_backward_by_range_and_by_prefix() {
     let end = numbered(200);
     let half_open = scan_all(txn, None, Some(&start), Some(&end), 0, 33);
     assert_eq!(half_open.len(), 100);
-    let closed = scan_all(txn, None, Some(&start), Some(&end), EGGDB_SCAN_END_INCLUSIVE, 33);
+    let closed = scan_all(
+        txn,
+        None,
+        Some(&start),
+        Some(&end),
+        EGGDB_SCAN_END_INCLUSIVE,
+        33,
+    );
     assert_eq!(closed.len(), 101);
     assert_eq!(closed[100].0, end);
     let reversed = scan_all(
@@ -342,8 +353,14 @@ fn a_scan_reads_in_batches_forward_backward_by_range_and_by_prefix() {
         EGGDB_SCAN_REVERSE | EGGDB_SCAN_END_INCLUSIVE,
         10,
     );
-    assert_eq!(reversed.first().map(|entry| entry.0.clone()), Some(end.clone()));
-    assert_eq!(reversed.last().map(|entry| entry.0.clone()), Some(start.clone()));
+    assert_eq!(
+        reversed.first().map(|entry| entry.0.clone()),
+        Some(end.clone())
+    );
+    assert_eq!(
+        reversed.last().map(|entry| entry.0.clone()),
+        Some(start.clone())
+    );
     commit(txn);
     close(db);
 }
@@ -358,7 +375,10 @@ fn a_scan_continues_in_a_later_transaction_and_sees_its_writes() {
     }
     let (status, scan) = open_scan(txn, None, None, None, 0);
     ok(status);
-    assert_eq!(keys(&next_batch(txn, scan, 4)), ["k0000", "k0001", "k0002", "k0003"]);
+    assert_eq!(
+        keys(&next_batch(txn, scan, 4)),
+        ["k0000", "k0001", "k0002", "k0003"]
+    );
     put(txn, &numbered(2), b"behind");
     put(txn, b"k0005a", b"ahead");
     commit(txn);
@@ -394,9 +414,15 @@ fn collections_keep_their_own_keys() {
     commit(txn);
 
     let txn = begin_read(db);
-    assert_eq!(get_in(txn, Some(&users), b"ada").1, Some(b"Ada Lovelace".to_vec()));
+    assert_eq!(
+        get_in(txn, Some(&users), b"ada").1,
+        Some(b"Ada Lovelace".to_vec())
+    );
     assert_eq!(get(txn, b"ada"), Some(b"default".to_vec()));
-    assert_eq!(keys(&scan_all(txn, Some(&users), None, None, 0, 0)), ["ada"]);
+    assert_eq!(
+        keys(&scan_all(txn, Some(&users), None, None, 0, 0)),
+        ["ada"]
+    );
     assert_eq!(keys(&scan_all(txn, None, None, None, 0, 0)), ["ada"]);
 
     let mut names = ptr::null_mut();
@@ -410,7 +436,10 @@ fn collections_keep_their_own_keys() {
     unsafe { eggdb_free(names, names_len) };
 
     let missing = c_text("missing");
-    assert_eq!(get_in(txn, Some(&missing), b"ada").0, EGGDB_ERR_COLLECTION_NOT_FOUND);
+    assert_eq!(
+        get_in(txn, Some(&missing), b"ada").0,
+        EGGDB_ERR_COLLECTION_NOT_FOUND
+    );
     let (status, scan) = open_scan(txn, Some(&missing), None, None, 0);
     assert_eq!(status, EGGDB_ERR_COLLECTION_NOT_FOUND);
     assert!(scan.is_null());
@@ -423,7 +452,10 @@ fn collections_keep_their_own_keys() {
     assert_eq!(dropped, 1);
     commit(txn);
     let txn = begin_read(db);
-    assert_eq!(get_in(txn, Some(&users), b"ada").0, EGGDB_ERR_COLLECTION_NOT_FOUND);
+    assert_eq!(
+        get_in(txn, Some(&users), b"ada").0,
+        EGGDB_ERR_COLLECTION_NOT_FOUND
+    );
     assert_eq!(get(txn, b"ada"), Some(b"default".to_vec()));
     rollback(txn);
     close(db);
@@ -475,7 +507,17 @@ fn keys_expire_and_counters_count() {
     let db = open_at(&file.path);
     let txn = begin_write(db);
     // SAFETY: a live write transaction and the key's and value's bytes.
-    ok(unsafe { eggdb_put_with_expiry(txn, ptr::null(), b"session".as_ptr(), 7, b"alice".as_ptr(), 5, 60_000) });
+    ok(unsafe {
+        eggdb_put_with_expiry(
+            txn,
+            ptr::null(),
+            b"session".as_ptr(),
+            7,
+            b"alice".as_ptr(),
+            5,
+            60_000,
+        )
+    });
     put(txn, b"plain", b"v");
     commit(txn);
 
@@ -554,7 +596,9 @@ fn column_names(result: &EggdbResult) -> Vec<String> {
         .iter()
         .map(|&name| {
             // SAFETY: each name is a NUL-terminated string the session lends.
-            unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+            unsafe { CStr::from_ptr(name) }
+                .to_string_lossy()
+                .into_owned()
         })
         .collect()
 }
@@ -630,7 +674,10 @@ fn sql_runs_with_typed_values_in_every_dialect() {
     assert_eq!(tag(&results[1]), "INSERT 0 2");
 
     let sqlite = open_sql(db, "sqlite");
-    let (status, results) = execute(sqlite, "SELECT id, name, price, data FROM items ORDER BY id");
+    let (status, results) = execute(
+        sqlite,
+        "SELECT id, name, price, data FROM items ORDER BY id",
+    );
     ok(status);
     assert_eq!(results.len(), 1);
     let result = &results[0];
@@ -672,7 +719,11 @@ fn parameters_carry_values_without_quoting() {
     let file = TempPath::new("sql-parameters");
     let db = open_at(&file.path);
     let postgres = open_sql(db, "postgresql");
-    ok(execute(postgres, "CREATE TABLE people (id integer PRIMARY KEY, name text)").0);
+    ok(execute(
+        postgres,
+        "CREATE TABLE people (id integer PRIMARY KEY, name text)",
+    )
+    .0);
     let (status, results) = execute_with_parameters(
         postgres,
         "INSERT INTO people VALUES ($1, $2)",
@@ -680,7 +731,12 @@ fn parameters_carry_values_without_quoting() {
     );
     ok(status);
     assert_eq!(tag(&results[0]), "INSERT 0 1");
-    ok(execute_with_parameters(postgres, "INSERT INTO people VALUES ($1, $2)", &[Some("2"), None]).0);
+    ok(execute_with_parameters(
+        postgres,
+        "INSERT INTO people VALUES ($1, $2)",
+        &[Some("2"), None],
+    )
+    .0);
 
     let sqlite = open_sql(db, "sqlite");
     let (status, results) = execute_with_parameters(
@@ -690,8 +746,11 @@ fn parameters_carry_values_without_quoting() {
     );
     ok(status);
     assert_eq!(result_cells(&results[0])[0][0].1, 1);
-    let (status, results) =
-        execute_with_parameters(postgres, "SELECT name FROM people WHERE id = $1", &[Some("2")]);
+    let (status, results) = execute_with_parameters(
+        postgres,
+        "SELECT name FROM people WHERE id = $1",
+        &[Some("2")],
+    );
     ok(status);
     assert_eq!(results[0].row_count, 1);
     assert_eq!(result_cells(&results[0])[0][0].0, EGGDB_NULL);
@@ -758,7 +817,15 @@ fn a_backup_copies_one_commit_and_a_compaction_rewrites_the_file() {
     let txn = begin_write(db);
     for index in 10..2000 {
         // SAFETY: a live write transaction and the key's bytes; the outcome is not wanted.
-        ok(unsafe { eggdb_delete(txn, ptr::null(), numbered(index).as_ptr(), 5, ptr::null_mut()) });
+        ok(unsafe {
+            eggdb_delete(
+                txn,
+                ptr::null(),
+                numbered(index).as_ptr(),
+                5,
+                ptr::null_mut(),
+            )
+        });
     }
     commit(txn);
 
@@ -812,16 +879,31 @@ fn misuse_is_refused_with_a_status_not_a_crash() {
     let txn = begin_write(db);
     let mut db_out = ptr::null_mut();
     // SAFETY: NULL is refused before anything is read.
-    assert_eq!(unsafe { eggdb_open(ptr::null(), ptr::null(), &mut db_out) }, EGGDB_ERR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { eggdb_open(ptr::null(), ptr::null(), &mut db_out) },
+        EGGDB_ERR_INVALID_ARGUMENT
+    );
     let path = file.c_path();
     // SAFETY: a NULL place for the handle is refused before the file is opened.
-    assert_eq!(unsafe { eggdb_open(path.as_ptr(), ptr::null(), ptr::null_mut()) }, EGGDB_ERR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { eggdb_open(path.as_ptr(), ptr::null(), ptr::null_mut()) },
+        EGGDB_ERR_INVALID_ARGUMENT
+    );
     // SAFETY: a NULL key with a length is refused before it is read.
     let null_key = unsafe { eggdb_put(txn, ptr::null(), ptr::null(), 3, b"v".as_ptr(), 1) };
     assert_eq!(null_key, EGGDB_ERR_INVALID_ARGUMENT);
     let not_utf8: &[u8] = b"\xff\xfe\0";
     // SAFETY: a NUL-terminated collection name that is not UTF-8.
-    let bad_name = unsafe { eggdb_put(txn, not_utf8.as_ptr().cast(), b"k".as_ptr(), 1, b"v".as_ptr(), 1) };
+    let bad_name = unsafe {
+        eggdb_put(
+            txn,
+            not_utf8.as_ptr().cast(),
+            b"k".as_ptr(),
+            1,
+            b"v".as_ptr(),
+            1,
+        )
+    };
     assert_eq!(bad_name, EGGDB_ERR_INVALID_ARGUMENT);
     assert!(last_error().contains("UTF-8"));
     let (status, scan) = open_scan(txn, None, None, None, 0x100);
@@ -830,10 +912,16 @@ fn misuse_is_refused_with_a_status_not_a_crash() {
     let unknown = c_text("cobol");
     let mut sql = ptr::null_mut();
     // SAFETY: a live database handle, a dialect name and a place for the session.
-    assert_eq!(unsafe { eggdb_sql_open(db, unknown.as_ptr(), &mut sql) }, EGGDB_ERR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { eggdb_sql_open(db, unknown.as_ptr(), &mut sql) },
+        EGGDB_ERR_INVALID_ARGUMENT
+    );
     assert!(sql.is_null());
     // SAFETY: NULL is refused.
-    assert_eq!(unsafe { eggdb_commit(ptr::null_mut(), ptr::null_mut()) }, EGGDB_ERR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { eggdb_commit(ptr::null_mut(), ptr::null_mut()) },
+        EGGDB_ERR_INVALID_ARGUMENT
+    );
     // SAFETY: NULL does nothing.
     assert_eq!(unsafe { eggdb_rollback(ptr::null_mut()) }, EGGDB_OK);
     // SAFETY: NULL does nothing.

@@ -895,9 +895,8 @@ mod tests {
 
     #[test]
     fn datename_names_months_and_weekdays() {
-        let named = |part| {
-            call(Function::DateName(part), &[text("2020-07-04")]).unwrap_or(Value::Null)
-        };
+        let named =
+            |part| call(Function::DateName(part), &[text("2020-07-04")]).unwrap_or(Value::Null);
         assert_eq!(named(DatePart::Month), text("July"));
         assert_eq!(named(DatePart::Weekday), text("Saturday"));
         assert_eq!(named(DatePart::Day), text("4"));

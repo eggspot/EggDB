@@ -176,7 +176,12 @@ impl Poly1305 {
         ];
         let mut tag = [0u8; POLY1305_TAG_BYTES];
         let mut sum = 0u64;
-        for ((bytes, word), pad) in tag.as_chunks_mut::<4>().0.iter_mut().zip(words).zip(self.pad)
+        for ((bytes, word), pad) in tag
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(words)
+            .zip(self.pad)
         {
             sum = u64::from(word) + u64::from(pad) + (sum >> 32);
             *bytes = (sum as u32).to_le_bytes();

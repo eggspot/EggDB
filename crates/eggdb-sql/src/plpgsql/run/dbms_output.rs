@@ -22,7 +22,11 @@ impl<'t> OutputCall<'t> {
         let rest = text.get(4..)?;
         let open = rest.find('(')?;
         let close = rest.rfind(')')?;
-        let name = rest.get(..open)?.trim().replace('"', "").to_ascii_lowercase();
+        let name = rest
+            .get(..open)?
+            .trim()
+            .replace('"', "")
+            .to_ascii_lowercase();
         let parts: Vec<&str> = name.split('.').map(str::trim).collect();
         let member = match parts.as_slice() {
             [PACKAGE, member] | [OWNER, PACKAGE, member] => (*member).to_owned(),
@@ -87,8 +91,12 @@ impl Run<'_> {
     }
 
     fn get_output_line(&mut self, text: &str) -> SqlResult<()> {
-        let Statement::Call(call) =
-            parsed(text, self.settings, &RoutineFrame::default(), self.dialect())?
+        let Statement::Call(call) = parsed(
+            text,
+            self.settings,
+            &RoutineFrame::default(),
+            self.dialect(),
+        )?
         else {
             return Err(wrong_arguments("GET_LINE"));
         };
@@ -111,10 +119,7 @@ fn change_output(change: impl FnOnce(&mut ServerOutput) -> SqlResult<()>) -> Sql
 
 fn buffer_bytes(value: &Value) -> SqlResult<usize> {
     let text = value.to_text().unwrap_or_default();
-    let number: f64 = text
-        .trim()
-        .parse()
-        .map_err(|_| wrong_arguments("ENABLE"))?;
+    let number: f64 = text.trim().parse().map_err(|_| wrong_arguments("ENABLE"))?;
     if !number.is_finite() || number <= 0.0 {
         return Ok(0);
     }

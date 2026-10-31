@@ -53,7 +53,12 @@ impl EntryBatch {
         self.entries.clear();
     }
 
-    fn fill_from(&mut self, mut scan: Scan<'_>, reverse: bool, limit: usize) -> eggdb::Result<bool> {
+    fn fill_from(
+        &mut self,
+        mut scan: Scan<'_>,
+        reverse: bool,
+        limit: usize,
+    ) -> eggdb::Result<bool> {
         while self.spans.len() < limit {
             let entry = if reverse {
                 scan.next_back_entry()?
@@ -86,12 +91,13 @@ impl EntryBatch {
 
     fn publish(&mut self) -> (*const EggdbEntry, usize) {
         let base = self.bytes.as_ptr();
-        self.entries.extend(self.spans.iter().map(|span| EggdbEntry {
-            key: base.wrapping_add(span.start),
-            key_len: span.key_len,
-            value: base.wrapping_add(span.start + span.key_len),
-            value_len: span.value_len,
-        }));
+        self.entries
+            .extend(self.spans.iter().map(|span| EggdbEntry {
+                key: base.wrapping_add(span.start),
+                key_len: span.key_len,
+                value: base.wrapping_add(span.start + span.key_len),
+                value_len: span.value_len,
+            }));
         if self.entries.is_empty() {
             return (std::ptr::null(), 0);
         }
@@ -327,7 +333,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure:?}"));
         assert_eq!(scan.start, Bound::Included(b"a".to_vec()));
         assert_eq!(scan.end, Bound::Included(b"c".to_vec()));
-        let open = EggdbScan::new(None, None, None, 0).unwrap_or_else(|failure| panic!("{failure:?}"));
+        let open =
+            EggdbScan::new(None, None, None, 0).unwrap_or_else(|failure| panic!("{failure:?}"));
         assert_eq!(open.start, Bound::Unbounded);
         assert_eq!(open.end, Bound::Unbounded);
     }

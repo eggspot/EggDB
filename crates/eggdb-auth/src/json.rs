@@ -204,7 +204,8 @@ mod tests {
 
     #[test]
     fn documents_parse_and_hostile_ones_are_refused() {
-        let value = parse(br#"{"a": [1, -2.5e3, true, null], "b": "x\u00e9\ud83d\ude00"}"#).unwrap();
+        let value =
+            parse(br#"{"a": [1, -2.5e3, true, null], "b": "x\u00e9\ud83d\ude00"}"#).unwrap();
         assert_eq!(value.field("b").and_then(Json::text), Some("xé😀"));
         for hostile in [
             &b"{"[..],

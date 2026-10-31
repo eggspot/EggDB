@@ -42,7 +42,12 @@ impl Line<'_> {
             if stops.contains(&byte) {
                 break;
             }
-            if byte == b'\\' && self.bytes.get(self.at + 1).is_some_and(|next| stops.contains(next) || *next == b'\\' || *next == b'"') {
+            if byte == b'\\'
+                && self
+                    .bytes
+                    .get(self.at + 1)
+                    .is_some_and(|next| stops.contains(next) || *next == b'\\' || *next == b'"')
+            {
                 out.push(self.bytes[self.at + 1]);
                 self.at += 2;
                 continue;
@@ -61,7 +66,8 @@ impl Line<'_> {
                 None => return Err("a string field value is not closed".to_owned()),
                 Some(b'"') => {
                     self.at += 1;
-                    return String::from_utf8(out).map_err(|_| "a string field value is not UTF-8".to_owned());
+                    return String::from_utf8(out)
+                        .map_err(|_| "a string field value is not UTF-8".to_owned());
                 }
                 Some(b'\\') if matches!(self.bytes.get(self.at + 1), Some(b'"' | b'\\')) => {
                     out.push(self.bytes[self.at + 1]);
@@ -79,10 +85,16 @@ impl Line<'_> {
 fn field_value(text: &str) -> Result<FieldValue, String> {
     let invalid = || format!("invalid field value {text}");
     if let Some(number) = text.strip_suffix('i') {
-        return number.parse().map(FieldValue::Integer).map_err(|_| invalid());
+        return number
+            .parse()
+            .map(FieldValue::Integer)
+            .map_err(|_| invalid());
     }
     if let Some(number) = text.strip_suffix('u') {
-        return number.parse().map(FieldValue::Unsigned).map_err(|_| invalid());
+        return number
+            .parse()
+            .map(FieldValue::Unsigned)
+            .map_err(|_| invalid());
     }
     match text {
         "t" | "T" | "true" | "True" | "TRUE" => return Ok(FieldValue::Boolean(true)),
@@ -90,14 +102,21 @@ fn field_value(text: &str) -> Result<FieldValue, String> {
         _ => {}
     }
     let value: f64 = text.parse().map_err(|_| invalid())?;
-    if !value.is_finite() || text.bytes().any(|byte| byte.is_ascii_alphabetic() && !matches!(byte, b'e' | b'E')) {
+    if !value.is_finite()
+        || text
+            .bytes()
+            .any(|byte| byte.is_ascii_alphabetic() && !matches!(byte, b'e' | b'E'))
+    {
         return Err(invalid());
     }
     Ok(FieldValue::Float(value))
 }
 
 fn parse_line(text: &str, unit_ns: i64, default_ns: i64) -> Result<Point, String> {
-    let mut line = Line { bytes: text.as_bytes(), at: 0 };
+    let mut line = Line {
+        bytes: text.as_bytes(),
+        at: 0,
+    };
     let measurement = line.until(b", ")?;
     if measurement.is_empty() {
         return Err("missing measurement".to_owned());
@@ -126,7 +145,11 @@ fn parse_line(text: &str, unit_ns: i64, default_ns: i64) -> Result<Point, String
             return Err("missing fields".to_owned());
         }
         line.at += 1;
-        let value = if line.peek() == Some(b'"') { FieldValue::Text(line.quoted()?) } else { field_value(&line.until(b", ")?)? };
+        let value = if line.peek() == Some(b'"') {
+            FieldValue::Text(line.quoted()?)
+        } else {
+            field_value(&line.until(b", ")?)?
+        };
         fields.push((key, value));
         if line.peek() == Some(b',') {
             line.at += 1;
@@ -141,12 +164,25 @@ fn parse_line(text: &str, unit_ns: i64, default_ns: i64) -> Result<Point, String
     let time_ns = if rest.is_empty() {
         default_ns
     } else {
-        rest.parse::<i64>().ok().and_then(|stamp| stamp.checked_mul(unit_ns)).ok_or_else(|| format!("invalid timestamp {rest}"))?
+        rest.parse::<i64>()
+            .ok()
+            .and_then(|stamp| stamp.checked_mul(unit_ns))
+            .ok_or_else(|| format!("invalid timestamp {rest}"))?
     };
-    if tags.iter().map(|(key, _)| key).chain(fields.iter().map(|(key, _)| key)).any(|key| key == "time") {
+    if tags
+        .iter()
+        .map(|(key, _)| key)
+        .chain(fields.iter().map(|(key, _)| key))
+        .any(|key| key == "time")
+    {
         return Err("the key time is reserved".to_owned());
     }
-    Ok(Point { measurement, tags, fields, time_ns })
+    Ok(Point {
+        measurement,
+        tags,
+        fields,
+        time_ns,
+    })
 }
 
 /// The points of a line-protocol body, each timestamp in units of `unit_ns`, `now_ns` for a line
@@ -158,7 +194,10 @@ pub(crate) fn parse(body: &str, unit_ns: i64, now_ns: i64) -> Result<Vec<Point>,
         if text.is_empty() || text.starts_with('#') {
             continue;
         }
-        points.push(parse_line(text.trim_end_matches('\r'), unit_ns, now_ns).map_err(|message| format!("unable to parse line {}: {message}", number + 1))?);
+        points.push(
+            parse_line(text.trim_end_matches('\r'), unit_ns, now_ns)
+                .map_err(|message| format!("unable to parse line {}: {message}", number + 1))?,
+        );
     }
     Ok(points)
 }

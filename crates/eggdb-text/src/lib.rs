@@ -7,7 +7,10 @@
 mod tables;
 
 use std::cmp::Ordering;
-use tables::{CASE_FOLDING, CASE_FOLDING_DATA, COMBINING_CLASSES, COMPOSITIONS, DECOMPOSITION_DATA, DECOMPOSITIONS};
+use tables::{
+    CASE_FOLDING, CASE_FOLDING_DATA, COMBINING_CLASSES, COMPOSITIONS, DECOMPOSITION_DATA,
+    DECOMPOSITIONS,
+};
 
 /// The Unicode version the tables come from.
 pub const UNICODE_VERSION: &str = tables::UNICODE_VERSION;
@@ -51,7 +54,9 @@ impl Form {
 /// The canonical combining class of `character`, 0 for a starter.
 pub fn combining_class(character: char) -> u8 {
     let code = u32::from(character);
-    COMBINING_CLASSES.binary_search_by_key(&code, |(entry, _)| *entry).map_or(0, |at| COMBINING_CLASSES[at].1)
+    COMBINING_CLASSES
+        .binary_search_by_key(&code, |(entry, _)| *entry)
+        .map_or(0, |at| COMBINING_CLASSES[at].1)
 }
 
 fn decompose_into(code: u32, compatibility: bool, out: &mut Vec<u32>) {
@@ -68,7 +73,9 @@ fn decompose_into(code: u32, compatibility: bool, out: &mut Vec<u32>) {
     match DECOMPOSITIONS.binary_search_by_key(&code, |(entry, ..)| *entry) {
         Ok(at) if compatibility || !DECOMPOSITIONS[at].3 => {
             let (_, offset, length, _) = DECOMPOSITIONS[at];
-            for part in &DECOMPOSITION_DATA[usize::from(offset)..usize::from(offset) + usize::from(length)] {
+            for part in
+                &DECOMPOSITION_DATA[usize::from(offset)..usize::from(offset) + usize::from(length)]
+            {
                 decompose_into(*part, compatibility, out);
             }
         }
@@ -91,7 +98,11 @@ fn decompose(text: &str, compatibility: bool) -> Vec<u32> {
             start += 1;
             continue;
         }
-        let end = start + out[start..].iter().take_while(|code| class_of(**code) != 0).count();
+        let end = start
+            + out[start..]
+                .iter()
+                .take_while(|code| class_of(**code) != 0)
+                .count();
         out[start..end].sort_by_key(|code| class_of(*code));
         start = end;
     }
@@ -99,16 +110,25 @@ fn decompose(text: &str, compatibility: bool) -> Vec<u32> {
 }
 
 fn compose_pair(first: u32, second: u32) -> Option<u32> {
-    if (HANGUL_L_BASE..HANGUL_L_BASE + HANGUL_L_COUNT).contains(&first) && (HANGUL_V_BASE..HANGUL_V_BASE + HANGUL_V_COUNT).contains(&second) {
-        return Some(HANGUL_S_BASE + ((first - HANGUL_L_BASE) * HANGUL_V_COUNT + (second - HANGUL_V_BASE)) * HANGUL_T_COUNT);
+    if (HANGUL_L_BASE..HANGUL_L_BASE + HANGUL_L_COUNT).contains(&first)
+        && (HANGUL_V_BASE..HANGUL_V_BASE + HANGUL_V_COUNT).contains(&second)
+    {
+        return Some(
+            HANGUL_S_BASE
+                + ((first - HANGUL_L_BASE) * HANGUL_V_COUNT + (second - HANGUL_V_BASE))
+                    * HANGUL_T_COUNT,
+        );
     }
     if (HANGUL_S_BASE..HANGUL_S_BASE + HANGUL_S_COUNT).contains(&first)
-        && (first - HANGUL_S_BASE) % HANGUL_T_COUNT == 0
+        && (first - HANGUL_S_BASE).is_multiple_of(HANGUL_T_COUNT)
         && (HANGUL_T_BASE + 1..HANGUL_T_BASE + HANGUL_T_COUNT).contains(&second)
     {
         return Some(first + (second - HANGUL_T_BASE));
     }
-    COMPOSITIONS.binary_search_by_key(&(first, second), |(left, right, _)| (*left, *right)).ok().map(|at| COMPOSITIONS[at].2)
+    COMPOSITIONS
+        .binary_search_by_key(&(first, second), |(left, right, _)| (*left, *right))
+        .ok()
+        .map(|at| COMPOSITIONS[at].2)
 }
 
 fn compose(codes: &[u32]) -> Vec<u32> {
@@ -139,7 +159,10 @@ fn compose(codes: &[u32]) -> Vec<u32> {
 }
 
 fn to_string(codes: &[u32]) -> String {
-    codes.iter().filter_map(|code| char::from_u32(*code)).collect()
+    codes
+        .iter()
+        .filter_map(|code| char::from_u32(*code))
+        .collect()
 }
 
 /// `text` in normalization form `form`.
@@ -169,7 +192,12 @@ pub fn case_fold(text: &str) -> String {
         match CASE_FOLDING.binary_search_by_key(&code, |(entry, ..)| *entry) {
             Ok(at) => {
                 let (_, offset, length) = CASE_FOLDING[at];
-                out.extend(CASE_FOLDING_DATA[usize::from(offset)..usize::from(offset) + usize::from(length)].iter().filter_map(|code| char::from_u32(*code)));
+                out.extend(
+                    CASE_FOLDING_DATA
+                        [usize::from(offset)..usize::from(offset) + usize::from(length)]
+                        .iter()
+                        .filter_map(|code| char::from_u32(*code)),
+                );
             }
             Err(_) => out.push(character),
         }
@@ -180,7 +208,12 @@ pub fn case_fold(text: &str) -> String {
 /// The key two strings share when they differ only by case, accents and compatibility forms:
 /// case-folded, compatibility-decomposed, with combining marks removed.
 pub fn primary_key(text: &str) -> String {
-    to_string(&decompose(&case_fold(text), true).into_iter().filter(|code| class_of(*code) == 0 && !is_mark(*code)).collect::<Vec<_>>())
+    to_string(
+        &decompose(&case_fold(text), true)
+            .into_iter()
+            .filter(|code| class_of(*code) == 0 && !is_mark(*code))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn is_mark(code: u32) -> bool {
@@ -199,7 +232,9 @@ pub fn compare_case_insensitive(left: &str, right: &str) -> Ordering {
 /// Orders `left` and `right` by [`primary_key`] first, so `résumé`, `Resume` and `RESUME` sort
 /// together, then case-insensitively, then exactly.
 pub fn compare_accent_insensitive(left: &str, right: &str) -> Ordering {
-    primary_key(left).cmp(&primary_key(right)).then_with(|| compare_case_insensitive(left, right))
+    primary_key(left)
+        .cmp(&primary_key(right))
+        .then_with(|| compare_case_insensitive(left, right))
 }
 
 #[cfg(test)]

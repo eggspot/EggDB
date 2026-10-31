@@ -30,11 +30,17 @@ pub(crate) fn handshake<S: Read + Write>(
 ) -> Result<Established, TlsError> {
     let (message_type, message) = layer.read_handshake_message(None)?;
     if message_type != handshake_type::CLIENT_HELLO {
-        return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "the client did not start with a ClientHello"));
+        return Err(TlsError::protocol(
+            AlertDescription::UnexpectedMessage,
+            "the client did not start with a ClientHello",
+        ));
     }
     let hello = ClientHello::decode(message_body(&message))?;
     if !hello.compression_methods.contains(&0) {
-        return Err(TlsError::protocol(AlertDescription::IllegalParameter, "the client offers no null compression"));
+        return Err(TlsError::protocol(
+            AlertDescription::IllegalParameter,
+            "the client offers no null compression",
+        ));
     }
     let versions = hello.supported_versions()?;
     if versions.contains(&version::TLS13) && config.maximum_version == MaximumVersion::Tls13 {
@@ -48,7 +54,10 @@ pub(crate) fn handshake<S: Read + Write>(
     if config.minimum_version == MinimumVersion::Tls12 && offers_tls12 {
         return crate::server12::handshake(layer, config, message, hello, fill_random);
     }
-    Err(TlsError::protocol(AlertDescription::ProtocolVersion, "the client offers no TLS version EggDB accepts"))
+    Err(TlsError::protocol(
+        AlertDescription::ProtocolVersion,
+        "the client offers no TLS version EggDB accepts",
+    ))
 }
 
 pub(crate) fn choose_suite(offered: &[u16], tls13: bool) -> Option<CipherSuite> {
@@ -72,8 +81,10 @@ fn tls13<S: Read + Write>(
     first_hello: ClientHello,
     fill_random: FillRandom<'_>,
 ) -> Result<Established, TlsError> {
-    let suite = choose_suite(&first_hello.cipher_suites, true)
-        .ok_or(TlsError::protocol(AlertDescription::HandshakeFailure, "no TLS 1.3 cipher suite in common"))?;
+    let suite = choose_suite(&first_hello.cipher_suites, true).ok_or(TlsError::protocol(
+        AlertDescription::HandshakeFailure,
+        "no TLS 1.3 cipher suite in common",
+    ))?;
     let hash = suite.hash();
     let mut transcript = hash.transcript();
     let mut sent_change_cipher_spec = false;
@@ -84,7 +95,10 @@ fn tls13<S: Read + Write>(
             let group = SUPPORTED_GROUPS
                 .into_iter()
                 .find(|group| groups.contains(group))
-                .ok_or(TlsError::protocol(AlertDescription::HandshakeFailure, "no key exchange group in common"))?;
+                .ok_or(TlsError::protocol(
+                    AlertDescription::HandshakeFailure,
+                    "no key exchange group in common",
+                ))?;
             transcript.update(&message_hash_message(&hash.digest(&first_message)));
             let retry = ServerHello {
                 legacy_version: version::TLS12,
@@ -108,7 +122,10 @@ fn tls13<S: Read + Write>(
             layer.ignore_change_cipher_spec = true;
             let (message_type, second_message) = layer.read_handshake_message(None)?;
             if message_type != handshake_type::CLIENT_HELLO {
-                return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "expected a second ClientHello"));
+                return Err(TlsError::protocol(
+                    AlertDescription::UnexpectedMessage,
+                    "expected a second ClientHello",
+                ));
             }
             let second_hello = ClientHello::decode(message_body(&second_message))?;
             let shares = second_hello.key_shares()?;
@@ -118,7 +135,10 @@ fn tls13<S: Read + Write>(
                 && shares.len() == 1
                 && shares[0].group == group;
             if !consistent {
-                return Err(TlsError::protocol(AlertDescription::IllegalParameter, "the second ClientHello does not answer the retry"));
+                return Err(TlsError::protocol(
+                    AlertDescription::IllegalParameter,
+                    "the second ClientHello does not answer the retry",
+                ));
             }
             let share = shares[0].clone();
             (second_hello, second_message, share)
@@ -126,19 +146,38 @@ fn tls13<S: Read + Write>(
     };
     transcript.update(&hello_message);
 
-    let scheme = choose_signature_scheme(config.private_key(), &hello.signature_algorithms()?, true)
-        .ok_or(TlsError::protocol(AlertDescription::HandshakeFailure, "no signature scheme in common"))?;
-    let algorithm = scheme_algorithm(scheme, true)
-        .ok_or(TlsError::protocol(AlertDescription::InternalError, "the chosen signature scheme has no algorithm"))?;
-    let application_protocol = choose_application_protocol(&config.application_protocols, &hello.application_protocols()?)
-        .map_err(|_| TlsError::protocol(AlertDescription::NoApplicationProtocol, "no application protocol in common"))?;
+    let scheme =
+        choose_signature_scheme(config.private_key(), &hello.signature_algorithms()?, true).ok_or(
+            TlsError::protocol(
+                AlertDescription::HandshakeFailure,
+                "no signature scheme in common",
+            ),
+        )?;
+    let algorithm = scheme_algorithm(scheme, true).ok_or(TlsError::protocol(
+        AlertDescription::InternalError,
+        "the chosen signature scheme has no algorithm",
+    ))?;
+    let application_protocol = choose_application_protocol(
+        &config.application_protocols,
+        &hello.application_protocols()?,
+    )
+    .map_err(|_| {
+        TlsError::protocol(
+            AlertDescription::NoApplicationProtocol,
+            "no application protocol in common",
+        )
+    })?;
     let server_name = hello.server_name()?;
 
-    let ephemeral = EphemeralKey::generate(share.group, &mut *fill_random)?
-        .ok_or(TlsError::protocol(AlertDescription::InternalError, "unsupported group chosen"))?;
+    let ephemeral = EphemeralKey::generate(share.group, &mut *fill_random)?.ok_or(
+        TlsError::protocol(AlertDescription::InternalError, "unsupported group chosen"),
+    )?;
     let shared_secret = ephemeral
         .shared_secret(&share.key_exchange)
-        .ok_or(TlsError::protocol(AlertDescription::IllegalParameter, "the client's key share is not a valid public key"))?;
+        .ok_or(TlsError::protocol(
+            AlertDescription::IllegalParameter,
+            "the client's key share is not a valid public key",
+        ))?;
     let mut random = [0u8; 32];
     fill_random(&mut random)?;
     let server_hello = ServerHello {
@@ -149,7 +188,10 @@ fn tls13<S: Read + Write>(
         compression_method: 0,
         extensions: vec![
             Extension::server_supported_version(version::TLS13),
-            Extension::server_key_share(&KeyShareEntry { group: share.group, key_exchange: ephemeral.public_key() }),
+            Extension::server_key_share(&KeyShareEntry {
+                group: share.group,
+                key_exchange: ephemeral.public_key(),
+            }),
         ],
     }
     .encode();
@@ -164,7 +206,10 @@ fn tls13<S: Read + Write>(
     let protection = |secret: &[u8]| {
         Tls13RecordProtection::new(suite.aead(), &traffic_keys(hash, suite.aead(), secret))
             .map(Protection::Tls13)
-            .ok_or(TlsError::protocol(AlertDescription::InternalError, "traffic key of the wrong length"))
+            .ok_or(TlsError::protocol(
+                AlertDescription::InternalError,
+                "traffic key of the wrong length",
+            ))
     };
     layer.set_write_protection(protection(&handshake_secrets.server)?);
     layer.set_read_protection(protection(&handshake_secrets.client)?)?;
@@ -181,7 +226,11 @@ fn tls13<S: Read + Write>(
     transcript.update(&encrypted_extensions);
     layer.queue(content_type::HANDSHAKE, &encrypted_extensions)?;
 
-    let chain: Vec<&[u8]> = config.chain().iter().map(|certificate| certificate.der()).collect();
+    let chain: Vec<&[u8]> = config
+        .chain()
+        .iter()
+        .map(|certificate| certificate.der())
+        .collect();
     let certificate = CertificateMessage::from_chain(&chain).encode_tls13();
     transcript.update(&certificate);
     layer.queue(content_type::HANDSHAKE, &certificate)?;
@@ -190,26 +239,42 @@ fn tls13<S: Read + Write>(
     let signature = config
         .private_key()
         .sign(algorithm, &content, &mut *fill_random)
-        .map_err(|_| TlsError::protocol(AlertDescription::InternalError, "signing the handshake failed"))?;
+        .map_err(|_| {
+            TlsError::protocol(
+                AlertDescription::InternalError,
+                "signing the handshake failed",
+            )
+        })?;
     let certificate_verify = DigitallySigned { scheme, signature }.encode_certificate_verify();
     transcript.update(&certificate_verify);
     layer.queue(content_type::HANDSHAKE, &certificate_verify)?;
 
-    let finished = finished_message(&finished_verify_data(hash, &handshake_secrets.server, &transcript.current()));
+    let finished = finished_message(&finished_verify_data(
+        hash,
+        &handshake_secrets.server,
+        &transcript.current(),
+    ));
     transcript.update(&finished);
     layer.queue(content_type::HANDSHAKE, &finished)?;
     layer.flush()?;
 
-    let (application_secrets, exporter_master_secret) = schedule.enter_application(&transcript.current());
+    let (application_secrets, exporter_master_secret) =
+        schedule.enter_application(&transcript.current());
     layer.set_write_protection(protection(&application_secrets.server)?);
 
     let expected = finished_verify_data(hash, &handshake_secrets.client, &transcript.current());
     let (message_type, client_finished) = layer.read_handshake_message(None)?;
     if message_type != handshake_type::FINISHED {
-        return Err(TlsError::protocol(AlertDescription::UnexpectedMessage, "expected the client's Finished"));
+        return Err(TlsError::protocol(
+            AlertDescription::UnexpectedMessage,
+            "expected the client's Finished",
+        ));
     }
     if !constant_time_eq(message_body(&client_finished), &expected) {
-        return Err(TlsError::protocol(AlertDescription::DecryptError, "the client's Finished does not verify"));
+        return Err(TlsError::protocol(
+            AlertDescription::DecryptError,
+            "the client's Finished does not verify",
+        ));
     }
     layer.set_read_protection(protection(&application_secrets.client)?)?;
     layer.ignore_change_cipher_spec = false;

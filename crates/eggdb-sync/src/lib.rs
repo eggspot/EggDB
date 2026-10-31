@@ -7,7 +7,7 @@
 //! replicas that have exchanged all their changes hold the same rows whatever order they synced
 //! in. Changes travel as bytes ([`encode`], [`decode`]) for any transport.
 
-use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
+use eggdb_keyspace::{Entries as Rows, KeysRead, KeysWrite, Keyspace};
 
 const ROW: u8 = b'r';
 const LOG: u8 = b'l';
@@ -78,15 +78,25 @@ fn storage(message: String) -> SyncError {
 
 /// Appends `changes` to `out` as bytes: a count, then each change's stamp, key and value.
 pub fn encode(changes: &[Change], out: &mut Vec<u8>) {
-    out.extend_from_slice(&u32::try_from(changes.len()).unwrap_or(u32::MAX).to_be_bytes());
+    out.extend_from_slice(
+        &u32::try_from(changes.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     for change in changes {
         change.stamp.encode(out);
-        out.extend_from_slice(&u32::try_from(change.key.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(
+            &u32::try_from(change.key.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
         out.extend_from_slice(&change.key);
         match &change.value {
             Some(value) => {
                 out.push(1);
-                out.extend_from_slice(&u32::try_from(value.len()).unwrap_or(u32::MAX).to_be_bytes());
+                out.extend_from_slice(
+                    &u32::try_from(value.len()).unwrap_or(u32::MAX).to_be_bytes(),
+                );
                 out.extend_from_slice(value);
             }
             None => out.push(0),
@@ -101,7 +111,11 @@ struct Reader<'b> {
 
 impl<'b> Reader<'b> {
     fn take(&mut self, count: usize) -> Result<&'b [u8], SyncError> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or(SyncError::Malformed("cut short"))?;
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(SyncError::Malformed("cut short"))?;
         let taken = &self.bytes[self.at..end];
         self.at = end;
         Ok(taken)
@@ -109,7 +123,8 @@ impl<'b> Reader<'b> {
 
     fn length(&mut self) -> Result<usize, SyncError> {
         let raw = self.take(4)?;
-        usize::try_from(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]])).map_err(|_| SyncError::Malformed("a length does not fit"))
+        usize::try_from(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]))
+            .map_err(|_| SyncError::Malformed("a length does not fit"))
     }
 }
 
@@ -122,7 +137,8 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Change>, SyncError> {
     }
     let mut changes = Vec::with_capacity(count);
     for _ in 0..count {
-        let stamp = Stamp::decode(reader.take(20)?).ok_or(SyncError::Malformed("a stamp is cut short"))?;
+        let stamp =
+            Stamp::decode(reader.take(20)?).ok_or(SyncError::Malformed("a stamp is cut short"))?;
         let key_length = reader.length()?;
         let key = reader.take(key_length)?.to_vec();
         let value = match reader.take(1)?[0] {
@@ -166,13 +182,18 @@ fn row_value(change: &Change) -> Vec<u8> {
 }
 
 fn decode_row(key: &[u8], bytes: &[u8]) -> Result<Change, SyncError> {
-    let stamp = Stamp::decode(bytes).ok_or_else(|| storage("a stored row is damaged".to_owned()))?;
+    let stamp =
+        Stamp::decode(bytes).ok_or_else(|| storage("a stored row is damaged".to_owned()))?;
     let value = match bytes.get(20) {
         Some(1) => Some(bytes[21..].to_vec()),
         Some(0) => None,
         _ => return Err(storage("a stored row is damaged".to_owned())),
     };
-    Ok(Change { key: key.to_vec(), value, stamp })
+    Ok(Change {
+        key: key.to_vec(),
+        value,
+        stamp,
+    })
 }
 
 #[derive(Clone, Copy, Default)]
@@ -186,9 +207,18 @@ impl Meta {
         let Some(bytes) = keys.get(META).map_err(storage)? else {
             return Ok(Self::default());
         };
-        let clock = Stamp::decode(&bytes).ok_or_else(|| storage("the sync state is damaged".to_owned()))?;
-        let next_position = u64::from_be_bytes(bytes.get(20..28).and_then(|raw| raw.try_into().ok()).ok_or_else(|| storage("the sync state is damaged".to_owned()))?);
-        Ok(Self { clock, next_position })
+        let clock =
+            Stamp::decode(&bytes).ok_or_else(|| storage("the sync state is damaged".to_owned()))?;
+        let next_position = u64::from_be_bytes(
+            bytes
+                .get(20..28)
+                .and_then(|raw| raw.try_into().ok())
+                .ok_or_else(|| storage("the sync state is damaged".to_owned()))?,
+        );
+        Ok(Self {
+            clock,
+            next_position,
+        })
     }
 
     fn write(self, keys: &mut dyn KeysWrite) -> Result<(), SyncError> {
@@ -208,23 +238,35 @@ pub struct Replica<'k> {
 
 impl std::fmt::Debug for Replica<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Replica").field("id", &self.id).field("db", &self.db).finish_non_exhaustive()
+        f.debug_struct("Replica")
+            .field("id", &self.id)
+            .field("db", &self.db)
+            .finish_non_exhaustive()
     }
 }
 
-fn store_if_newer(keys: &mut dyn KeysWrite, meta: &mut Meta, change: &Change) -> Result<bool, SyncError> {
-    if let Some(held) = keys.get(&row_key(&change.key)).map_err(storage)? {
-        if decode_row(&change.key, &held)?.stamp >= change.stamp {
-            return Ok(false);
-        }
+fn store_if_newer(
+    keys: &mut dyn KeysWrite,
+    meta: &mut Meta,
+    change: &Change,
+) -> Result<bool, SyncError> {
+    if let Some(held) = keys.get(&row_key(&change.key)).map_err(storage)?
+        && decode_row(&change.key, &held)?.stamp >= change.stamp
+    {
+        return Ok(false);
     }
-    keys.put(&row_key(&change.key), &row_value(change)).map_err(storage)?;
+    keys.put(&row_key(&change.key), &row_value(change))
+        .map_err(storage)?;
     let mut entry = Vec::new();
     encode(std::slice::from_ref(change), &mut entry);
-    keys.put(&log_key(meta.next_position), &entry).map_err(storage)?;
+    keys.put(&log_key(meta.next_position), &entry)
+        .map_err(storage)?;
     meta.next_position += 1;
     if change.stamp > meta.clock {
-        meta.clock = Stamp { replica: meta.clock.replica, ..change.stamp };
+        meta.clock = Stamp {
+            replica: meta.clock.replica,
+            ..change.stamp
+        };
     }
     Ok(true)
 }
@@ -236,7 +278,10 @@ impl<'k> Replica<'k> {
         Self { keyspace, db, id }
     }
 
-    fn transact<T>(&self, body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, SyncError>) -> Result<T, SyncError> {
+    fn transact<T>(
+        &self,
+        body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, SyncError>,
+    ) -> Result<T, SyncError> {
         let mut body = Some(body);
         let mut out = None;
         let result = self.keyspace.write(self.db, &mut |keys| {
@@ -244,7 +289,11 @@ impl<'k> Replica<'k> {
             let outcome = body(keys);
             let failed = outcome.is_err();
             out = Some(outcome);
-            if failed { Err("the sync write was rolled back".to_owned()) } else { Ok(()) }
+            if failed {
+                Err("the sync write was rolled back".to_owned())
+            } else {
+                Ok(())
+            }
         });
         match (result, out) {
             (_, Some(Err(error))) => Err(error),
@@ -254,7 +303,10 @@ impl<'k> Replica<'k> {
         }
     }
 
-    fn read<T>(&self, body: impl FnOnce(&dyn KeysRead) -> Result<T, SyncError>) -> Result<T, SyncError> {
+    fn read<T>(
+        &self,
+        body: impl FnOnce(&dyn KeysRead) -> Result<T, SyncError>,
+    ) -> Result<T, SyncError> {
         let mut body = Some(body);
         let mut out = None;
         self.keyspace
@@ -274,12 +326,24 @@ impl<'k> Replica<'k> {
         self.transact(|keys| {
             let mut meta = Meta::read(&*keys)?;
             let stamp = if now_ms > meta.clock.millis {
-                Stamp { millis: now_ms, counter: 0, replica: id }
+                Stamp {
+                    millis: now_ms,
+                    counter: 0,
+                    replica: id,
+                }
             } else {
-                Stamp { millis: meta.clock.millis, counter: meta.clock.counter.saturating_add(1), replica: id }
+                Stamp {
+                    millis: meta.clock.millis,
+                    counter: meta.clock.counter.saturating_add(1),
+                    replica: id,
+                }
             };
             meta.clock = stamp;
-            let change = Change { key: key.to_vec(), value: value.map(<[u8]>::to_vec), stamp };
+            let change = Change {
+                key: key.to_vec(),
+                value: value.map(<[u8]>::to_vec),
+                stamp,
+            };
             store_if_newer(keys, &mut meta, &change)?;
             meta.write(keys)?;
             Ok(stamp)
@@ -295,7 +359,7 @@ impl<'k> Replica<'k> {
     }
 
     /// Every live key and value, in key order.
-    pub fn rows(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, SyncError> {
+    pub fn rows(&self) -> Result<Rows, SyncError> {
         self.read(|keys| {
             let mut rows = Vec::new();
             for (stored, bytes) in keys.scan(&[ROW]).map_err(storage)? {
@@ -308,13 +372,20 @@ impl<'k> Replica<'k> {
     }
 
     /// The changes logged at or after `cursor`, at most `limit`, and the cursor after them.
-    pub fn changes_after(&self, cursor: u64, limit: usize) -> Result<(Vec<Change>, u64), SyncError> {
+    pub fn changes_after(
+        &self,
+        cursor: u64,
+        limit: usize,
+    ) -> Result<(Vec<Change>, u64), SyncError> {
         self.read(|keys| {
             let meta = Meta::read(keys)?;
             let mut changes = Vec::new();
             let mut position = cursor;
             while position < meta.next_position && changes.len() < limit {
-                let entry = keys.get(&log_key(position)).map_err(storage)?.ok_or_else(|| storage("the change log has a gap".to_owned()))?;
+                let entry = keys
+                    .get(&log_key(position))
+                    .map_err(storage)?
+                    .ok_or_else(|| storage("the change log has a gap".to_owned()))?;
                 changes.extend(decode(&entry)?);
                 position += 1;
             }
@@ -350,7 +421,12 @@ pub struct Cursors {
 
 /// Exchanges changes both ways between `client` and `server`, at most `batch` per direction,
 /// moving `cursors` past what each side took in; returns how many rows changed on each side.
-pub fn sync(client: &Replica<'_>, server: &Replica<'_>, cursors: &mut Cursors, batch: usize) -> Result<(usize, usize), SyncError> {
+pub fn sync(
+    client: &Replica<'_>,
+    server: &Replica<'_>,
+    cursors: &mut Cursors,
+    batch: usize,
+) -> Result<(usize, usize), SyncError> {
     let (outgoing, sent) = client.changes_after(cursors.sent, batch)?;
     let mut wire = Vec::new();
     encode(&outgoing, &mut wire);

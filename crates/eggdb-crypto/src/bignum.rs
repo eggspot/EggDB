@@ -74,10 +74,9 @@ pub(crate) fn limbs_to_be_bytes(limbs: &[u64], length: usize) -> Vec<u8> {
 }
 
 fn bit_length(limbs: &[u64]) -> usize {
-    limbs
-        .iter()
-        .rposition(|&limb| limb != 0)
-        .map_or(0, |top| top * LIMB_BITS + (LIMB_BITS - limbs[top].leading_zeros() as usize))
+    limbs.iter().rposition(|&limb| limb != 0).map_or(0, |top| {
+        top * LIMB_BITS + (LIMB_BITS - limbs[top].leading_zeros() as usize)
+    })
 }
 
 /// An odd modulus prepared for Montgomery multiplication with R = 2^(64 * limbs). Values in
@@ -190,11 +189,11 @@ impl MontgomeryModulus {
         t
     }
 
-    pub(crate) fn to_montgomery(&self, value: &[u64]) -> Vec<u64> {
+    pub(crate) fn montgomery_form(&self, value: &[u64]) -> Vec<u64> {
         self.multiply(value, &self.r_squared)
     }
 
-    pub(crate) fn from_montgomery(&self, value: &[u64]) -> Vec<u64> {
+    pub(crate) fn standard_form(&self, value: &[u64]) -> Vec<u64> {
         let mut one = vec![0u64; self.limb_count()];
         one[0] = 1;
         self.multiply(value, &one)
@@ -203,7 +202,7 @@ impl MontgomeryModulus {
     fn montgomery_one(&self) -> Vec<u64> {
         let mut one = vec![0u64; self.limb_count()];
         one[0] = 1;
-        self.to_montgomery(&one)
+        self.montgomery_form(&one)
     }
 
     /// `base` (Montgomery form) to the power `exponent` (plain limbs), in Montgomery form, by a
@@ -285,15 +284,19 @@ mod tests {
     fn both_exponentiations_match_plain_arithmetic() {
         let modulus_value = 0xffff_ffff_ffff_ffc5u64;
         let modulus = modulus_of(modulus_value);
-        for (base, exponent) in [(2u64, 65_537u64), (0x1234_5678_9abc, 0xdead_beef_cafe), (7, 0)] {
+        for (base, exponent) in [
+            (2u64, 65_537u64),
+            (0x1234_5678_9abc, 0xdead_beef_cafe),
+            (7, 0),
+        ] {
             let base_limbs = modulus.read_below(&base.to_be_bytes()).unwrap();
-            let base_form = modulus.to_montgomery(&base_limbs);
+            let base_form = modulus.montgomery_form(&base_limbs);
             let expected = power_mod(base, exponent, modulus_value);
             for result in [
                 modulus.power_secret(&base_form, &[exponent]),
                 modulus.power_public(&base_form, &[exponent]),
             ] {
-                assert_eq!(modulus.from_montgomery(&result), vec![expected]);
+                assert_eq!(modulus.standard_form(&result), vec![expected]);
             }
         }
     }
@@ -305,8 +308,8 @@ mod tests {
         let modulus = MontgomeryModulus::new(&modulus_bytes).unwrap();
         let mut minus_one = modulus_bytes;
         minus_one[31] -= 1;
-        let value = modulus.to_montgomery(&modulus.read_below(&minus_one).unwrap());
-        let squared = modulus.from_montgomery(&modulus.multiply(&value, &value));
+        let value = modulus.montgomery_form(&modulus.read_below(&minus_one).unwrap());
+        let squared = modulus.standard_form(&modulus.multiply(&value, &value));
         assert_eq!(squared, vec![1, 0, 0, 0]);
     }
 
@@ -315,7 +318,11 @@ mod tests {
         let modulus = modulus_of(1_000_003);
         assert!(modulus.read_below(&1_000_003u64.to_be_bytes()).is_none());
         assert!(modulus.read_below(&[1; 9]).is_none());
-        assert!(modulus.read_below(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 5]).is_some());
+        assert!(
+            modulus
+                .read_below(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 5])
+                .is_some()
+        );
     }
 
     #[test]

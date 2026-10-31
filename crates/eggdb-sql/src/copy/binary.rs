@@ -162,10 +162,7 @@ impl<'a> BinaryReader<'a> {
             if self.start - tuple_start + length > self.max_tuple {
                 return Err(SqlError::new(
                     SqlState::PROGRAM_LIMIT_EXCEEDED,
-                    format!(
-                        "a row of COPY data is longer than {} bytes",
-                        self.max_tuple
-                    ),
+                    format!("a row of COPY data is longer than {} bytes", self.max_tuple),
                 )
                 .with_hint("Each row of COPY data must fit in 1 GiB, as in PostgreSQL."));
             }

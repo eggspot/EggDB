@@ -2,9 +2,7 @@
 //! example of RFC 8439 section 2 and its appendix A.3 (including the reduction edge cases) and
 //! A.5.
 
-use eggdb_crypto::{
-    AEAD_TAG_BYTES, AeadError, ChaCha20, ChaCha20Poly1305, Poly1305, poly1305,
-};
+use eggdb_crypto::{AEAD_TAG_BYTES, AeadError, ChaCha20, ChaCha20Poly1305, Poly1305, poly1305};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -183,7 +181,12 @@ fn poly1305_matches_rfc_8439_appendix_a_3_including_its_edge_cases() {
             for piece in message.chunks(split) {
                 pieces.update(piece);
             }
-            assert_eq!(hex(&pieces.finish()), tag, "case {} in pieces of {split}", index + 1);
+            assert_eq!(
+                hex(&pieces.finish()),
+                tag,
+                "case {} in pieces of {split}",
+                index + 1
+            );
         }
     }
 }
@@ -220,21 +223,21 @@ fn chacha20_poly1305_matches_rfc_8439_section_2_8_2() {
 
 #[test]
 fn chacha20_poly1305_opens_rfc_8439_appendix_a_5() {
-    let aead = ChaCha20Poly1305::new(&array("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"));
+    let aead = ChaCha20Poly1305::new(&array(
+        "1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0",
+    ));
     let nonce = array("000000000102030405060708");
     let associated_data = unhex("f33388860000000000004e91");
     let tag: [u8; AEAD_TAG_BYTES] = array("eead9d67890cbb22392336fea1851f38");
-    let mut buffer = unhex(
-        concat!(
-            "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43ee",
-            "a09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b9481",
-            "14ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0",
-            "f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523e",
-            "af4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa7699",
-            "1955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130",
-            "305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709b",
-        ),
-    );
+    let mut buffer = unhex(concat!(
+        "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43ee",
+        "a09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b9481",
+        "14ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0",
+        "f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523e",
+        "af4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa7699",
+        "1955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130",
+        "305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709b",
+    ));
     aead.open_in_place(&nonce, &associated_data, &mut buffer, &tag)
         .unwrap();
     assert_eq!(
@@ -283,8 +286,12 @@ fn chacha20_poly1305_refuses_any_altered_byte_and_leaves_the_ciphertext() {
     );
     let mut copy = sealed.clone();
     assert_eq!(
-        aead.open_in_place(&array("070000004041424344454648"), b"header", &mut copy, &tag),
+        aead.open_in_place(
+            &array("070000004041424344454648"),
+            b"header",
+            &mut copy,
+            &tag
+        ),
         Err(AeadError)
     );
 }
-

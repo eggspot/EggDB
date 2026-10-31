@@ -41,9 +41,10 @@ impl Session<'_> {
             Some(cursor) => {
                 let refused = |refusal| cursor_refused(CursorList::Tables, refusal, "", cursor);
                 let position = decode_cursor(CursorList::Tables, "", cursor).map_err(refused)?;
-                Some(table_at(&position).ok_or_else(|| {
-                    refused(eggdb_commands::CursorRefusal::Malformed)
-                })?)
+                Some(
+                    table_at(&position)
+                        .ok_or_else(|| refused(eggdb_commands::CursorRefusal::Malformed))?,
+                )
             }
             None => None,
         };
@@ -53,11 +54,17 @@ impl Session<'_> {
         let only = self.request.schema.clone();
         let listed: Vec<&Relation> = tables_then_views(&relations)
             .into_iter()
-            .filter(|relation| only.as_deref().is_none_or(|schema| relation.schema == schema))
+            .filter(|relation| {
+                only.as_deref()
+                    .is_none_or(|schema| relation.schema == schema)
+            })
             .filter(|relation| {
                 start.as_ref().is_none_or(|(is_view, schema, name)| {
-                    (is_a_view(relation), relation.schema.as_str(), relation.name.as_str())
-                        > (*is_view, schema.as_str(), name.as_str())
+                    (
+                        is_a_view(relation),
+                        relation.schema.as_str(),
+                        relation.name.as_str(),
+                    ) > (*is_view, schema.as_str(), name.as_str())
                 })
             })
             .collect();
@@ -194,7 +201,11 @@ impl Session<'_> {
         };
         Failure::coded(
             code,
-            format!("cannot read the tables of {}: {}", self.file, error.message()),
+            format!(
+                "cannot read the tables of {}: {}",
+                self.file,
+                error.message()
+            ),
             exit,
         )
     }
@@ -406,7 +417,12 @@ fn describe_text(out: &mut Output<'_>, relation: &Relation, rows: &RowCount) {
                 })
                 .collect();
             out.text(&aligned_lines(&columns, "    "));
-            label(out, "primary key", &list_or_none(&table.primary_key), Style::Bold);
+            label(
+                out,
+                "primary key",
+                &list_or_none(&table.primary_key),
+                Style::Bold,
+            );
             let indexes = if table.indexes.is_empty() {
                 "none".to_owned()
             } else {
@@ -435,7 +451,10 @@ fn describe_text(out: &mut Output<'_>, relation: &Relation, rows: &RowCount) {
                 .map(|column| {
                     vec![
                         render::text(column.name.as_bytes()),
-                        column.sql_type.map(|sql_type| sql_type.name()).unwrap_or_default(),
+                        column
+                            .sql_type
+                            .map(|sql_type| sql_type.name())
+                            .unwrap_or_default(),
                     ]
                 })
                 .collect();
@@ -443,7 +462,12 @@ fn describe_text(out: &mut Output<'_>, relation: &Relation, rows: &RowCount) {
         }
     }
     if let Some(comment) = relation.comment() {
-        label(out, "comment", &render::text(comment.as_bytes()), Style::Bold);
+        label(
+            out,
+            "comment",
+            &render::text(comment.as_bytes()),
+            Style::Bold,
+        );
     }
 }
 
@@ -497,9 +521,10 @@ fn description_json(relation: &Relation, rows: &RowCount) -> String {
                 .columns
                 .iter()
                 .map(|column| {
-                    let kind = column
-                        .sql_type
-                        .map_or_else(|| "null".to_owned(), |sql_type| json_string(&sql_type.name()));
+                    let kind = column.sql_type.map_or_else(
+                        || "null".to_owned(),
+                        |sql_type| json_string(&sql_type.name()),
+                    );
                     JsonObject::new()
                         .string("name", &column.name)
                         .raw("type", &kind)
@@ -527,14 +552,22 @@ mod tests {
     #[test]
     fn lines_are_padded_to_their_widest_cell_and_end_without_spaces() {
         let rows = vec![
-            vec!["public.orders".to_owned(), "table".to_owned(), "5 columns".to_owned()],
+            vec![
+                "public.orders".to_owned(),
+                "table".to_owned(),
+                "5 columns".to_owned(),
+            ],
             vec![
                 "public.users".to_owned(),
                 "table".to_owned(),
                 "4 columns".to_owned(),
                 "the people who sign in".to_owned(),
             ],
-            vec!["sales.totals".to_owned(), "view".to_owned(), "2 columns".to_owned()],
+            vec![
+                "sales.totals".to_owned(),
+                "view".to_owned(),
+                "2 columns".to_owned(),
+            ],
         ];
         assert_eq!(
             aligned_lines(&rows, ""),

@@ -1,4 +1,7 @@
-use crate::{Hnsw, HnswOptions, combine, cosine_distance, format, inner_product, l1_distance, l2_distance, l2_normalize, parse};
+use crate::{
+    Hnsw, HnswOptions, combine, cosine_distance, format, inner_product, l1_distance, l2_distance,
+    l2_normalize, parse,
+};
 
 #[test]
 fn text_round_trips_as_pgvector_writes_it() {
@@ -35,7 +38,9 @@ fn hnsw_finds_the_nearest_neighbours_with_high_recall() {
         state ^= state << 17;
         (state % 10_000) as f32 / 10_000.0
     };
-    let points: Vec<Vec<f32>> = (0..2_000).map(|_| (0..dimensions).map(|_| next()).collect()).collect();
+    let points: Vec<Vec<f32>> = (0..2_000)
+        .map(|_| (0..dimensions).map(|_| next()).collect())
+        .collect();
     let mut graph = Hnsw::new(dimensions, HnswOptions::default());
     for (id, point) in points.iter().enumerate() {
         graph.insert(id as u64, point.clone()).unwrap();
@@ -45,7 +50,11 @@ fn hnsw_finds_the_nearest_neighbours_with_high_recall() {
     let queries = 50;
     for _ in 0..queries {
         let query: Vec<f32> = (0..dimensions).map(|_| next()).collect();
-        let mut exact: Vec<(u64, f64)> = points.iter().enumerate().map(|(id, point)| (id as u64, l2_distance(&query, point).unwrap())).collect();
+        let mut exact: Vec<(u64, f64)> = points
+            .iter()
+            .enumerate()
+            .map(|(id, point)| (id as u64, l2_distance(&query, point).unwrap()))
+            .collect();
         exact.sort_by(|a, b| a.1.total_cmp(&b.1));
         let wanted: Vec<u64> = exact.iter().take(10).map(|(id, _)| *id).collect();
         let found = graph.search(&query, 10, 64);

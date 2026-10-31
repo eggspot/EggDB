@@ -93,7 +93,11 @@ struct Reader<'b> {
 
 impl<'b> Reader<'b> {
     fn take(&mut self, count: usize) -> Result<&'b [u8], String> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or("an AMQP value is cut short")?;
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or("an AMQP value is cut short")?;
         let taken = &self.bytes[self.at..end];
         self.at = end;
         Ok(taken)
@@ -106,7 +110,8 @@ impl<'b> Reader<'b> {
     fn size(&mut self, wide: bool) -> Result<usize, String> {
         if wide {
             let raw = self.take(4)?;
-            usize::try_from(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]])).map_err(|_| "an AMQP size does not fit".to_owned())
+            usize::try_from(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]))
+                .map_err(|_| "an AMQP size does not fit".to_owned())
         } else {
             Ok(usize::from(self.byte()?))
         }
@@ -126,7 +131,9 @@ impl<'b> Reader<'b> {
     }
 
     fn with_constructor(&mut self, constructor: u8, depth: usize) -> Result<Value, String> {
-        let text = |bytes: &[u8]| String::from_utf8(bytes.to_vec()).map_err(|_| "an AMQP string is not UTF-8".to_owned());
+        let text = |bytes: &[u8]| {
+            String::from_utf8(bytes.to_vec()).map_err(|_| "an AMQP string is not UTF-8".to_owned())
+        };
         Ok(match constructor {
             0x40 => Value::Null,
             0x41 => Value::Bool(true),
@@ -147,7 +154,10 @@ impl<'b> Reader<'b> {
             }
             0x80 => {
                 let raw = self.take(8)?;
-                Value::Ulong(u64::from_be_bytes(raw.try_into().map_err(|_| "an AMQP ulong is cut short".to_owned())?))
+                Value::Ulong(u64::from_be_bytes(
+                    raw.try_into()
+                        .map_err(|_| "an AMQP ulong is cut short".to_owned())?,
+                ))
             }
             0x51 => Value::Signed(i64::from(i8::from_be_bytes([self.byte()?]))),
             0x54 => Value::Signed(i64::from(i8::from_be_bytes([self.byte()?]))),
@@ -158,11 +168,16 @@ impl<'b> Reader<'b> {
             }
             0x71 => {
                 let raw = self.take(4)?;
-                Value::Signed(i64::from(i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]])))
+                Value::Signed(i64::from(i32::from_be_bytes([
+                    raw[0], raw[1], raw[2], raw[3],
+                ])))
             }
             0x81 => {
                 let raw = self.take(8)?;
-                Value::Signed(i64::from_be_bytes(raw.try_into().map_err(|_| "an AMQP long is cut short".to_owned())?))
+                Value::Signed(i64::from_be_bytes(
+                    raw.try_into()
+                        .map_err(|_| "an AMQP long is cut short".to_owned())?,
+                ))
             }
             0xa0 | 0xb0 => {
                 let size = self.size(constructor == 0xb0)?;
@@ -264,7 +279,11 @@ fn put_sized(out: &mut Vec<u8>, narrow: u8, wide: u8, bytes: &[u8]) {
 fn compound(out: &mut Vec<u8>, constructor: u8, count: usize, body: &[u8]) {
     out.push(constructor);
     let count = u32::try_from(count).unwrap_or(u32::MAX);
-    out.extend_from_slice(&u32::try_from(body.len() + 4).unwrap_or(u32::MAX).to_be_bytes());
+    out.extend_from_slice(
+        &u32::try_from(body.len() + 4)
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     out.extend_from_slice(&count.to_be_bytes());
     out.extend_from_slice(body);
 }

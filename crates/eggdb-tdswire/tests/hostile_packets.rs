@@ -12,10 +12,10 @@ use common::{
     errors, int_parameter, login7_body, prelogin_body, rows, rpc_body, text_parameter,
     transaction_body,
 };
+use eggdb_tdswire::bulk::parse_bulk_load;
 use eggdb_tdswire::messages::{
     parse_login7, parse_prelogin, parse_sql_batch, parse_transaction_manager_request,
 };
-use eggdb_tdswire::bulk::parse_bulk_load;
 use eggdb_tdswire::rpc::parse_rpc_request;
 use std::time::Duration;
 
@@ -120,8 +120,16 @@ fn bulk_load_body() -> Vec<u8> {
     let mut body = vec![0x81, 3, 0];
     for (name, type_info) in [
         ("id", &[0x26u8, 4][..]),
-        ("name", &[0xE7, 0xFF, 0xFF, 0x09, 0x04, 0x00, 0x22, 0x00][..]),
-        ("notes", &[0x63, 0, 0, 0, 0x7F, 0x09, 0x04, 0x00, 0x22, 0x00, 1, 0, b't', 0][..]),
+        (
+            "name",
+            &[0xE7, 0xFF, 0xFF, 0x09, 0x04, 0x00, 0x22, 0x00][..],
+        ),
+        (
+            "notes",
+            &[
+                0x63, 0, 0, 0, 0x7F, 0x09, 0x04, 0x00, 0x22, 0x00, 1, 0, b't', 0,
+            ][..],
+        ),
     ] {
         body.extend_from_slice(&[0, 0, 0, 0, 0x09, 0x00]);
         body.extend_from_slice(type_info);

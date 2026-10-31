@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// A transaction's identity.
 pub type TransactionId = u64;
 
+type Writes = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+
 /// A participant's vote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vote {
@@ -43,12 +45,16 @@ pub struct Conflict {
 pub struct Participant {
     data: BTreeMap<Vec<u8>, Vec<u8>>,
     locks: BTreeMap<Vec<u8>, TransactionId>,
-    prepared: BTreeMap<TransactionId, Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+    prepared: BTreeMap<TransactionId, Writes>,
 }
 
 impl Participant {
     /// The committed value of `key`, locking it for `transaction`.
-    pub fn read(&mut self, transaction: TransactionId, key: &[u8]) -> Result<Option<Vec<u8>>, Conflict> {
+    pub fn read(
+        &mut self,
+        transaction: TransactionId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Conflict> {
         self.lock(transaction, key)?;
         Ok(self.data.get(key).cloned())
     }
@@ -70,8 +76,16 @@ impl Participant {
 
     /// Prepares `writes` (a `None` value deletes): locks every key and keeps the writes until
     /// the decision.
-    pub fn prepare(&mut self, transaction: TransactionId, writes: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> Vote {
-        if writes.iter().any(|(key, _)| self.locks.get(key).is_some_and(|holder| *holder != transaction)) {
+    pub fn prepare(
+        &mut self,
+        transaction: TransactionId,
+        writes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    ) -> Vote {
+        if writes.iter().any(|(key, _)| {
+            self.locks
+                .get(key)
+                .is_some_and(|holder| *holder != transaction)
+        }) {
             self.release(transaction);
             return Vote::No;
         }
@@ -128,7 +142,11 @@ impl Coordinator {
     /// Records the decision from the votes, before anyone is told: commit only if every
     /// participant voted yes.
     pub fn decide(&mut self, transaction: TransactionId, votes: &[Vote]) -> Decision {
-        let decision = if votes.iter().all(|vote| *vote == Vote::Yes) { Decision::Commit } else { Decision::Abort };
+        let decision = if votes.iter().all(|vote| *vote == Vote::Yes) {
+            Decision::Commit
+        } else {
+            Decision::Abort
+        };
         self.decisions.insert(transaction, decision);
         decision
     }
@@ -136,7 +154,10 @@ impl Coordinator {
     /// The outcome of `transaction` for a participant in doubt: the recorded decision, or abort
     /// when none was recorded.
     pub fn outcome(&self, transaction: TransactionId) -> Decision {
-        self.decisions.get(&transaction).copied().unwrap_or(Decision::Abort)
+        self.decisions
+            .get(&transaction)
+            .copied()
+            .unwrap_or(Decision::Abort)
     }
 }
 

@@ -1,16 +1,18 @@
 use crate::cql::{Operator, Selection, Statement, Term, parse};
 use crate::frame::{
-    AUTH_RESPONSE, AUTH_SUCCESS, AUTHENTICATE, BATCH, Body, ERROR, EXECUTE, OPTIONS, Out, PREPARE, QUERY, READY, REGISTER, RESULT, Request, STARTUP, SUPPORTED, VERSION,
-    response, take_request,
+    AUTH_RESPONSE, AUTH_SUCCESS, AUTHENTICATE, BATCH, Body, ERROR, EXECUTE, OPTIONS, Out, PREPARE,
+    QUERY, READY, REGISTER, RESULT, Request, STARTUP, SUPPORTED, VERSION, response, take_request,
 };
 use crate::translate::{Catalog, Outcome, TableInfo, literal, translate};
 use crate::types::{CqlType, encode_value, parameter_text};
-use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, SqlError, Value};
+use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, SqlError};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+type TableRows = (Vec<(String, ColumnKind)>, Vec<Vec<Cell>>);
 
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -40,7 +42,9 @@ pub struct ServerConfig {
 
 impl std::fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerConfig").field("user", &self.user).finish_non_exhaustive()
+        f.debug_struct("ServerConfig")
+            .field("user", &self.user)
+            .finish_non_exhaustive()
     }
 }
 
@@ -51,7 +55,11 @@ struct Failure {
 }
 
 fn failure(code: i32, message: impl Into<String>) -> Failure {
-    Failure { code, message: message.into(), extra: Vec::new() }
+    Failure {
+        code,
+        message: message.into(),
+        extra: Vec::new(),
+    }
 }
 
 fn invalid(message: String) -> Failure {
@@ -63,8 +71,18 @@ fn from_sql(error: &SqlError, keyspace: &str, table: &str) -> Failure {
         "42601" => failure(SYNTAX_ERROR, error.message()),
         "42P06" | "42P07" => {
             let mut extra = Out::default();
-            extra.string(keyspace).string(if error.state().code() == "42P07" { table } else { "" });
-            Failure { code: ALREADY_EXISTS, message: error.message().to_owned(), extra: extra.bytes }
+            extra
+                .string(keyspace)
+                .string(if error.state().code() == "42P07" {
+                    table
+                } else {
+                    ""
+                });
+            Failure {
+                code: ALREADY_EXISTS,
+                message: error.message().to_owned(),
+                extra: extra.bytes,
+            }
         }
         _ => failure(INVALID, error.message()),
     }
@@ -93,9 +111,18 @@ fn write_kind(out: &mut Out, kind: ColumnKind) {
 
 type Cell = Option<Vec<u8>>;
 
-fn rows_result(keyspace: &str, table: &str, columns: &[(String, ColumnKind)], rows: &[Vec<Cell>]) -> Vec<u8> {
+fn rows_result(
+    keyspace: &str,
+    table: &str,
+    columns: &[(String, ColumnKind)],
+    rows: &[Vec<Cell>],
+) -> Vec<u8> {
     let mut out = Out::default();
-    out.int(2).int(1).int(i32::try_from(columns.len()).unwrap_or(i32::MAX)).string(keyspace).string(table);
+    out.int(2)
+        .int(1)
+        .int(i32::try_from(columns.len()).unwrap_or(i32::MAX))
+        .string(keyspace)
+        .string(table);
     for (name, kind) in columns {
         out.string(name);
         write_kind(&mut out, *kind);
@@ -154,19 +181,34 @@ struct Connection<'c, 's, S: KeyValueStore + 's> {
     tables: BTreeMap<(String, String), TableInfo>,
 }
 
-fn run_sql<S: KeyValueStore>(session: &mut Session<'_, S>, sql: &str) -> Result<Vec<QueryResult>, SqlError> {
+fn run_sql<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+    sql: &str,
+) -> Result<Vec<QueryResult>, SqlError> {
     let mut results = Vec::new();
     session.execute(sql, &mut |result| results.push(result))?;
     Ok(results)
 }
 
-fn text_rows<S: KeyValueStore>(session: &mut Session<'_, S>, sql: &str) -> Result<Vec<Vec<String>>, String> {
+fn text_rows<S: KeyValueStore>(
+    session: &mut Session<'_, S>,
+    sql: &str,
+) -> Result<Vec<Vec<String>>, String> {
     let results = run_sql(session, sql).map_err(|error| error.message().to_owned())?;
     Ok(results
         .into_iter()
-        .filter(|result| result.columns.is_some())
-        .last()
-        .map(|result| result.rows.iter().map(|row| row.iter().map(|value| value.to_text().unwrap_or_default()).collect()).collect())
+        .rfind(|result| result.columns.is_some())
+        .map(|result| {
+            result
+                .rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|value| value.to_text().unwrap_or_default())
+                        .collect()
+                })
+                .collect()
+        })
         .unwrap_or_default())
 }
 
@@ -176,7 +218,10 @@ struct SessionCatalog<'c, 's, S: KeyValueStore + 's> {
 }
 
 fn lines(text: &str) -> Vec<String> {
-    text.split('\n').filter(|line| !line.is_empty()).map(str::to_owned).collect()
+    text.split('\n')
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl<S: KeyValueStore> Catalog for SessionCatalog<'_, '_, S> {
@@ -188,12 +233,17 @@ impl<S: KeyValueStore> Catalog for SessionCatalog<'_, '_, S> {
         let (schema, name) = (literal(keyspace), literal(table));
         let columns = text_rows(
             self.session,
-            &format!("SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = {schema} AND table_name = {name} ORDER BY ordinal_position"),
+            &format!(
+                "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = {schema} AND table_name = {name} ORDER BY ordinal_position"
+            ),
         )?;
         if columns.is_empty() {
             return Err(format!("unconfigured table {table}"));
         }
-        let mut columns: Vec<(String, CqlType)> = columns.into_iter().filter_map(|row| Some((row.first()?.clone(), CqlType::from_data_type(row.get(1)?)))).collect();
+        let mut columns: Vec<(String, CqlType)> = columns
+            .into_iter()
+            .filter_map(|row| Some((row.first()?.clone(), CqlType::from_data_type(row.get(1)?))))
+            .collect();
         let keys: Vec<String> = text_rows(
             self.session,
             &format!(
@@ -218,12 +268,26 @@ impl<S: KeyValueStore> Catalog for SessionCatalog<'_, '_, S> {
                         found.1 = cql;
                     }
                 }
-                TableInfo { keyspace: keyspace.to_owned(), table: table.to_owned(), columns, partition: lines(&row[0]), clustering: lines(&row[1]), descending: lines(&row[2]) }
+                TableInfo {
+                    keyspace: keyspace.to_owned(),
+                    table: table.to_owned(),
+                    columns,
+                    partition: lines(&row[0]),
+                    clustering: lines(&row[1]),
+                    descending: lines(&row[2]),
+                }
             }
             _ => {
                 let partition = keys.first().cloned().into_iter().collect();
                 let clustering = keys.iter().skip(1).cloned().collect();
-                TableInfo { keyspace: keyspace.to_owned(), table: table.to_owned(), columns, partition, clustering, descending: Vec::new() }
+                TableInfo {
+                    keyspace: keyspace.to_owned(),
+                    table: table.to_owned(),
+                    columns,
+                    partition,
+                    clustering,
+                    descending: Vec::new(),
+                }
             }
         };
         self.tables.insert(key, info.clone());
@@ -242,7 +306,11 @@ fn query_parameters(body: &mut Body<'_>) -> Result<Vec<Cell>, String> {
     if flags & 0x40 != 0 {
         return Err("named bind values are not supported yet".to_owned());
     }
-    let values = if flags & 0x01 != 0 { read_values(body)? } else { Vec::new() };
+    let values = if flags & 0x01 != 0 {
+        read_values(body)?
+    } else {
+        Vec::new()
+    };
     if flags & 0x04 != 0 {
         body.int()?;
     }
@@ -259,7 +327,8 @@ fn query_parameters(body: &mut Body<'_>) -> Result<Vec<Cell>, String> {
 }
 
 fn prepared_id(keyspace: Option<&str>, text: &str) -> Vec<u8> {
-    eggdb_crypto::sha256(format!("{}\0{text}", keyspace.unwrap_or_default()).as_bytes())[..16].to_vec()
+    eggdb_crypto::sha256(format!("{}\0{text}", keyspace.unwrap_or_default()).as_bytes())[..16]
+        .to_vec()
 }
 
 fn system_target(statement: &Statement, current: Option<&str>) -> Option<(String, String)> {
@@ -267,12 +336,17 @@ fn system_target(statement: &Statement, current: Option<&str>) -> Option<(String
         return None;
     };
     let keyspace = table.keyspace.as_deref().or(current)?;
-    SYSTEM_KEYSPACES.contains(&keyspace).then(|| (keyspace.to_owned(), table.table.clone()))
+    SYSTEM_KEYSPACES
+        .contains(&keyspace)
+        .then(|| (keyspace.to_owned(), table.table.clone()))
 }
 
 impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
     fn catalog(&mut self) -> SessionCatalog<'_, 's, S> {
-        SessionCatalog { session: &mut self.session, tables: &mut self.tables }
+        SessionCatalog {
+            session: &mut self.session,
+            tables: &mut self.tables,
+        }
     }
 
     fn handshake(&mut self, request: &Request) -> Result<(u8, Vec<u8>), Failure> {
@@ -280,11 +354,17 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
         match request.opcode {
             OPTIONS => {
                 let mut out = Out::default();
-                out.string_multimap(&[("CQL_VERSION", &["3.4.5"]), ("COMPRESSION", &[]), ("PROTOCOL_VERSIONS", &["4/v4"])]);
+                out.string_multimap(&[
+                    ("CQL_VERSION", &["3.4.5"]),
+                    ("COMPRESSION", &[]),
+                    ("PROTOCOL_VERSIONS", &["4/v4"]),
+                ]);
                 Ok((SUPPORTED, out.bytes))
             }
             STARTUP => {
-                let options = body.string_map().map_err(|message| failure(PROTOCOL_ERROR, message))?;
+                let options = body
+                    .string_map()
+                    .map_err(|message| failure(PROTOCOL_ERROR, message))?;
                 if options.iter().any(|(name, _)| name == "COMPRESSION") {
                     return Err(failure(PROTOCOL_ERROR, "compression is not supported yet"));
                 }
@@ -294,20 +374,35 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
                 Ok((AUTHENTICATE, out.bytes))
             }
             AUTH_RESPONSE if self.started => {
-                let token = body.bytes().map_err(|message| failure(PROTOCOL_ERROR, message))?.unwrap_or_default();
+                let token = body
+                    .bytes()
+                    .map_err(|message| failure(PROTOCOL_ERROR, message))?
+                    .unwrap_or_default();
                 let mut parts = token.split(|&byte| byte == 0).skip(1);
-                let (user, password) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+                let (user, password) = (
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default(),
+                );
                 let authorized = eggdb_crypto::constant_time_eq(user, self.config.user.as_bytes())
-                    && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(password), &self.config.password_sha256);
+                    && eggdb_crypto::constant_time_eq(
+                        &eggdb_crypto::sha256(password),
+                        &self.config.password_sha256,
+                    );
                 if !authorized {
-                    return Err(failure(BAD_CREDENTIALS, "Provided username and/or password are incorrect"));
+                    return Err(failure(
+                        BAD_CREDENTIALS,
+                        "Provided username and/or password are incorrect",
+                    ));
                 }
                 self.authenticated = true;
                 let mut out = Out::default();
                 out.bytes(None);
                 Ok((AUTH_SUCCESS, out.bytes))
             }
-            _ => Err(failure(PROTOCOL_ERROR, "the connection must STARTUP and authenticate first")),
+            _ => Err(failure(
+                PROTOCOL_ERROR,
+                "the connection must STARTUP and authenticate first",
+            )),
         }
     }
 
@@ -336,7 +431,10 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
                 Ok((RESULT, self.run_text(&text, keyspace.as_deref(), &values)?))
             }
             BATCH => Ok((RESULT, self.batch(&mut body)?)),
-            other => Err(failure(PROTOCOL_ERROR, format!("opcode 0x{other:02x} is not a request"))),
+            other => Err(failure(
+                PROTOCOL_ERROR,
+                format!("opcode 0x{other:02x} is not a request"),
+            )),
         }
     }
 
@@ -346,7 +444,11 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
             None => {
                 let mut extra = Out::default();
                 extra.short_bytes(id);
-                Err(Failure { code: UNPREPARED, message: "Prepared query with ID not found".to_owned(), extra: extra.bytes })
+                Err(Failure {
+                    code: UNPREPARED,
+                    message: "Prepared query with ID not found".to_owned(),
+                    extra: extra.bytes,
+                })
             }
         }
     }
@@ -355,10 +457,20 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
         let (statement, count) = parse(text).map_err(|message| failure(SYNTAX_ERROR, message))?;
         let current = self.keyspace.clone();
         let (keyspace, table, markers) = match system_target(&statement, current.as_deref()) {
-            Some((keyspace, table)) => (keyspace, table, vec![(String::new(), CqlType::Varchar); count]),
+            Some((keyspace, table)) => (
+                keyspace,
+                table,
+                vec![(String::new(), CqlType::Varchar); count],
+            ),
             None => {
-                let translation = translate(&statement, count, current.as_deref(), &mut self.catalog()).map_err(invalid)?;
-                let markers = translation.markers.iter().map(|marker| (marker.name.clone(), marker.cql)).collect();
+                let translation =
+                    translate(&statement, count, current.as_deref(), &mut self.catalog())
+                        .map_err(invalid)?;
+                let markers = translation
+                    .markers
+                    .iter()
+                    .map(|marker| (marker.name.clone(), marker.cql))
+                    .collect();
                 (translation.keyspace, translation.table, markers)
             }
         };
@@ -366,9 +478,21 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
         if self.prepared.len() >= MAX_PREPARED {
             self.prepared.clear();
         }
-        self.prepared.insert(id.clone(), Prepared { text: text.to_owned(), keyspace: current });
+        self.prepared.insert(
+            id.clone(),
+            Prepared {
+                text: text.to_owned(),
+                keyspace: current,
+            },
+        );
         let mut out = Out::default();
-        out.int(4).short_bytes(&id).int(1).int(i32::try_from(markers.len()).unwrap_or(i32::MAX)).int(0).string(&keyspace).string(&table);
+        out.int(4)
+            .short_bytes(&id)
+            .int(1)
+            .int(i32::try_from(markers.len()).unwrap_or(i32::MAX))
+            .int(0)
+            .string(&keyspace)
+            .string(&table);
         for (name, cql) in &markers {
             out.string(name).short(cql.id());
         }
@@ -388,18 +512,33 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
                     let id = body.short_bytes().map_err(protocol)?;
                     self.prepared_text(&id)?
                 }
-                other => return Err(failure(PROTOCOL_ERROR, format!("batch statement kind {other} is unknown"))),
+                other => {
+                    return Err(failure(
+                        PROTOCOL_ERROR,
+                        format!("batch statement kind {other} is unknown"),
+                    ));
+                }
             };
             children.push((child, read_values(body).map_err(protocol)?));
         }
         run_sql(&mut self.session, "BEGIN").map_err(|error| from_sql(&error, "", ""))?;
         for ((text, keyspace), values) in children {
-            let outcome = parse(&text).map_err(|message| failure(SYNTAX_ERROR, message)).and_then(|(statement, markers)| {
-                if !matches!(statement, Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. }) {
-                    return Err(invalid("only INSERT, UPDATE and DELETE statements are allowed in a batch".to_owned()));
-                }
-                self.run(&statement, markers, keyspace.as_deref(), &values)
-            });
+            let outcome = parse(&text)
+                .map_err(|message| failure(SYNTAX_ERROR, message))
+                .and_then(|(statement, markers)| {
+                    if !matches!(
+                        statement,
+                        Statement::Insert { .. }
+                            | Statement::Update { .. }
+                            | Statement::Delete { .. }
+                    ) {
+                        return Err(invalid(
+                            "only INSERT, UPDATE and DELETE statements are allowed in a batch"
+                                .to_owned(),
+                        ));
+                    }
+                    self.run(&statement, markers, keyspace.as_deref(), &values)
+                });
             if let Err(error) = outcome {
                 let _ = run_sql(&mut self.session, "ROLLBACK");
                 return Err(error);
@@ -409,21 +548,43 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
         Ok(1i32.to_be_bytes().to_vec())
     }
 
-    fn run_text(&mut self, text: &str, current: Option<&str>, values: &[Cell]) -> Result<Vec<u8>, Failure> {
+    fn run_text(
+        &mut self,
+        text: &str,
+        current: Option<&str>,
+        values: &[Cell],
+    ) -> Result<Vec<u8>, Failure> {
         let (statement, markers) = parse(text).map_err(|message| failure(SYNTAX_ERROR, message))?;
         self.run(&statement, markers, current, values)
     }
 
-    fn run(&mut self, statement: &Statement, markers: usize, current: Option<&str>, values: &[Cell]) -> Result<Vec<u8>, Failure> {
+    fn run(
+        &mut self,
+        statement: &Statement,
+        markers: usize,
+        current: Option<&str>,
+        values: &[Cell],
+    ) -> Result<Vec<u8>, Failure> {
         if values.len() != markers {
-            return Err(invalid(format!("There were {markers} markers(?) in CQL but {} bound variables", values.len())));
+            return Err(invalid(format!(
+                "There were {markers} markers(?) in CQL but {} bound variables",
+                values.len()
+            )));
         }
         if let Some((keyspace, table)) = system_target(statement, current) {
             return self.system(&keyspace, &table, statement, values);
         }
         if let Statement::Use(keyspace) = statement {
             let known = SYSTEM_KEYSPACES.contains(&keyspace.as_str())
-                || !text_rows(&mut self.session, &format!("SELECT 1 FROM information_schema.schemata WHERE schema_name = {}", literal(keyspace))).map_err(invalid)?.is_empty();
+                || !text_rows(
+                    &mut self.session,
+                    &format!(
+                        "SELECT 1 FROM information_schema.schemata WHERE schema_name = {}",
+                        literal(keyspace)
+                    ),
+                )
+                .map_err(invalid)?
+                .is_empty();
             if !known {
                 return Err(invalid(format!("Keyspace '{keyspace}' does not exist")));
             }
@@ -432,7 +593,8 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
             out.int(3).string(keyspace);
             return Ok(out.bytes);
         }
-        let translation = translate(statement, markers, current, &mut self.catalog()).map_err(invalid)?;
+        let translation =
+            translate(statement, markers, current, &mut self.catalog()).map_err(invalid)?;
         let texts = values
             .iter()
             .zip(&translation.markers)
@@ -440,7 +602,11 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(invalid)?;
         let sql = translation.render(&texts);
-        let results = if translation.is_empty() { Ok(Vec::new()) } else { run_sql(&mut self.session, &sql) };
+        let results = if translation.is_empty() {
+            Ok(Vec::new())
+        } else {
+            run_sql(&mut self.session, &sql)
+        };
         if matches!(translation.outcome, Outcome::SchemaChange { .. }) {
             self.tables.clear();
         }
@@ -458,7 +624,12 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
             Outcome::SetKeyspace(keyspace) => {
                 out.int(3).string(&keyspace);
             }
-            Outcome::SchemaChange { change, target, keyspace, name } => {
+            Outcome::SchemaChange {
+                change,
+                target,
+                keyspace,
+                name,
+            } => {
                 out.int(5).string(change).string(target).string(&keyspace);
                 if let Some(name) = name {
                     out.string(&name);
@@ -466,37 +637,78 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
             }
             Outcome::Applied(keyspace, table) => {
                 let applied = results.iter().any(|result| !result.rows.is_empty());
-                return Ok(rows_result(&keyspace, &table, &[("[applied]".to_owned(), ColumnKind::Simple(CqlType::Boolean))], &[vec![Some(vec![u8::from(applied)])]]));
+                return Ok(rows_result(
+                    &keyspace,
+                    &table,
+                    &[("[applied]".to_owned(), ColumnKind::Simple(CqlType::Boolean))],
+                    &[vec![Some(vec![u8::from(applied)])]],
+                ));
             }
             Outcome::Rows(info) => {
-                let Some(result) = results.into_iter().rev().find(|result| result.columns.is_some()) else {
+                let Some(result) = results
+                    .into_iter()
+                    .rev()
+                    .find(|result| result.columns.is_some())
+                else {
                     return Err(failure(SERVER_ERROR, "the query returned no rows result"));
                 };
                 let columns = result.columns.unwrap_or_default();
                 let kinds: Vec<CqlType> = columns
                     .iter()
-                    .map(|column| if column.name == "count" && column.sql_type == Some(eggdb_sql::SqlType::BigInt) { CqlType::BigInt } else { info.column_type(&column.name).unwrap_or_else(|| CqlType::from_sql_type(column.sql_type.as_ref())) })
+                    .map(|column| {
+                        if column.name == "count"
+                            && column.sql_type == Some(eggdb_sql::SqlType::BigInt)
+                        {
+                            CqlType::BigInt
+                        } else {
+                            info.column_type(&column.name)
+                                .unwrap_or_else(|| CqlType::from_sql_type(column.sql_type.as_ref()))
+                        }
+                    })
                     .collect();
                 let mut rows = Vec::with_capacity(result.rows.len());
                 for row in &result.rows {
-                    let cells = row.iter().zip(&kinds).map(|(value, cql)| encode_value(value, *cql)).collect::<Result<Vec<_>, _>>().map_err(|message| failure(SERVER_ERROR, message))?;
+                    let cells = row
+                        .iter()
+                        .zip(&kinds)
+                        .map(|(value, cql)| encode_value(value, *cql))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|message| failure(SERVER_ERROR, message))?;
                     rows.push(cells);
                 }
-                let described: Vec<(String, ColumnKind)> = columns.iter().zip(&kinds).map(|(column, cql)| (column.name.clone(), ColumnKind::Simple(*cql))).collect();
+                let described: Vec<(String, ColumnKind)> = columns
+                    .iter()
+                    .zip(&kinds)
+                    .map(|(column, cql)| (column.name.clone(), ColumnKind::Simple(*cql)))
+                    .collect();
                 return Ok(rows_result(&info.keyspace, &info.table, &described, &rows));
             }
         }
         Ok(out.bytes)
     }
 
-    fn system(&mut self, keyspace: &str, table: &str, statement: &Statement, values: &[Cell]) -> Result<Vec<u8>, Failure> {
-        let Statement::Select { selection, relations, .. } = statement else {
+    fn system(
+        &mut self,
+        keyspace: &str,
+        table: &str,
+        statement: &Statement,
+        values: &[Cell],
+    ) -> Result<Vec<u8>, Failure> {
+        let Statement::Select {
+            selection,
+            relations,
+            ..
+        } = statement
+        else {
             return Err(invalid("only SELECT reads the system keyspaces".to_owned()));
         };
         let (columns, rows) = self.system_table(keyspace, table)?;
         let wanted = |row: &Vec<Cell>| {
             relations.iter().all(|relation| {
-                let Some(at) = columns.iter().position(|(name, _)| *name == relation.column) else {
+                let Some(at) = columns
+                    .iter()
+                    .position(|(name, _)| *name == relation.column)
+                else {
                     return false;
                 };
                 if !matches!(relation.operator, Operator::Equal | Operator::In) {
@@ -517,17 +729,28 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
             Selection::All => (columns, rows),
             Selection::Count => (
                 vec![("count".to_owned(), ColumnKind::Simple(CqlType::BigInt))],
-                vec![vec![Some(i64::try_from(rows.len()).unwrap_or(i64::MAX).to_be_bytes().to_vec())]],
+                vec![vec![Some(
+                    i64::try_from(rows.len())
+                        .unwrap_or(i64::MAX)
+                        .to_be_bytes()
+                        .to_vec(),
+                )]],
             ),
             Selection::Columns(chosen) => {
                 let mut picked = Vec::new();
                 let mut positions = Vec::new();
                 for (name, alias) in chosen {
-                    let at = columns.iter().position(|(column, _)| column == name).ok_or_else(|| invalid(format!("Undefined column name {name}")))?;
+                    let at = columns
+                        .iter()
+                        .position(|(column, _)| column == name)
+                        .ok_or_else(|| invalid(format!("Undefined column name {name}")))?;
                     picked.push((alias.clone().unwrap_or_else(|| name.clone()), columns[at].1));
                     positions.push(at);
                 }
-                let rows = rows.into_iter().map(|row| positions.iter().map(|at| row[*at].clone()).collect()).collect();
+                let rows = rows
+                    .into_iter()
+                    .map(|row| positions.iter().map(|at| row[*at].clone()).collect())
+                    .collect();
                 (picked, rows)
             }
         };
@@ -535,12 +758,17 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
     }
 
     fn user_keyspaces(&mut self) -> Result<Vec<String>, Failure> {
-        Ok(text_rows(&mut self.session, "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name")
-            .map_err(invalid)?
-            .into_iter()
-            .filter_map(|row| row.into_iter().next())
-            .filter(|name| !name.starts_with("pg_") && name != "information_schema" && name != "eggdb_cql")
-            .collect())
+        Ok(text_rows(
+            &mut self.session,
+            "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
+        )
+        .map_err(invalid)?
+        .into_iter()
+        .filter_map(|row| row.into_iter().next())
+        .filter(|name| {
+            !name.starts_with("pg_") && name != "information_schema" && name != "eggdb_cql"
+        })
+        .collect())
     }
 
     fn user_tables(&mut self) -> Result<Vec<(String, String)>, Failure> {
@@ -553,7 +781,7 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
             .collect())
     }
 
-    fn system_table(&mut self, keyspace: &str, table: &str) -> Result<(Vec<(String, ColumnKind)>, Vec<Vec<Cell>>), Failure> {
+    fn system_table(&mut self, keyspace: &str, table: &str) -> Result<TableRows, Failure> {
         let simple = |name: &str, cql: CqlType| (name.to_owned(), ColumnKind::Simple(cql));
         let address = self.address;
         Ok(match (keyspace, table) {
@@ -624,7 +852,14 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
                     })
                     .collect();
                 (
-                    vec![simple("keyspace_name", CqlType::Varchar), simple("durable_writes", CqlType::Boolean), ("replication".to_owned(), ColumnKind::Map(CqlType::Varchar, CqlType::Varchar))],
+                    vec![
+                        simple("keyspace_name", CqlType::Varchar),
+                        simple("durable_writes", CqlType::Boolean),
+                        (
+                            "replication".to_owned(),
+                            ColumnKind::Map(CqlType::Varchar, CqlType::Varchar),
+                        ),
+                    ],
                     rows,
                 )
             }
@@ -634,7 +869,15 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
                     .into_iter()
                     .map(|(keyspace, name)| {
                         let id = fixed_uuid(&format!("{keyspace}.{name}"));
-                        vec![text(&keyspace), text(&name), text(""), Some(0i32.to_be_bytes().to_vec()), collection(&[b"compound"]), Some(864_000i32.to_be_bytes().to_vec()), Some(id.to_vec())]
+                        vec![
+                            text(&keyspace),
+                            text(&name),
+                            text(""),
+                            Some(0i32.to_be_bytes().to_vec()),
+                            collection(&[b"compound"]),
+                            Some(864_000i32.to_be_bytes().to_vec()),
+                            Some(id.to_vec()),
+                        ]
                     })
                     .collect();
                 (
@@ -657,15 +900,35 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
                         continue;
                     };
                     for (column, cql) in &info.columns {
-                        let (kind, position, order) = if let Some(at) = info.partition.iter().position(|key| key == column) {
-                            ("partition_key", at, "none")
-                        } else if let Some(at) = info.clustering.iter().position(|key| key == column) {
-                            ("clustering", at, if info.descending.contains(column) { "desc" } else { "asc" })
-                        } else {
-                            ("regular", usize::MAX, "none")
-                        };
+                        let (kind, position, order) =
+                            if let Some(at) = info.partition.iter().position(|key| key == column) {
+                                ("partition_key", at, "none")
+                            } else if let Some(at) =
+                                info.clustering.iter().position(|key| key == column)
+                            {
+                                (
+                                    "clustering",
+                                    at,
+                                    if info.descending.contains(column) {
+                                        "desc"
+                                    } else {
+                                        "asc"
+                                    },
+                                )
+                            } else {
+                                ("regular", usize::MAX, "none")
+                            };
                         let position = i32::try_from(position).unwrap_or(-1);
-                        rows.push(vec![text(&keyspace), text(&name), text(column), text(order), Some(column.as_bytes().to_vec()), text(kind), Some(position.to_be_bytes().to_vec()), text(cql.name())]);
+                        rows.push(vec![
+                            text(&keyspace),
+                            text(&name),
+                            text(column),
+                            text(order),
+                            Some(column.as_bytes().to_vec()),
+                            text(kind),
+                            Some(position.to_be_bytes().to_vec()),
+                            text(cql.name()),
+                        ]);
                     }
                 }
                 (
@@ -682,7 +945,11 @@ impl<'s, S: KeyValueStore> Connection<'_, 's, S> {
                     rows,
                 )
             }
-            ("system_schema", "types" | "functions" | "aggregates" | "triggers" | "indexes" | "views" | "dropped_columns") => (vec![simple("keyspace_name", CqlType::Varchar)], Vec::new()),
+            (
+                "system_schema",
+                "types" | "functions" | "aggregates" | "triggers" | "indexes" | "views"
+                | "dropped_columns",
+            ) => (vec![simple("keyspace_name", CqlType::Varchar)], Vec::new()),
             _ => return Err(invalid(format!("unconfigured table {table}"))),
         })
     }
@@ -695,7 +962,14 @@ fn error_body(failure: &Failure) -> Vec<u8> {
     out.bytes
 }
 
-pub(crate) fn serve_stream<S: KeyValueStore>(store: &S, config: &ServerConfig, address: IpAddr, mut reader: impl Read, writer: &mut impl Write, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub(crate) fn serve_stream<S: KeyValueStore>(
+    store: &S,
+    config: &ServerConfig,
+    address: IpAddr,
+    mut reader: impl Read,
+    writer: &mut impl Write,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     session.identify(&config.user, &config.database);
     let mut connection = Connection {
@@ -716,9 +990,23 @@ pub(crate) fn serve_stream<S: KeyValueStore>(store: &S, config: &ServerConfig, a
                 Ok(Some(request)) => {
                     let version = request.version;
                     let (opcode, body) = if version != VERSION {
-                        (ERROR, error_body(&failure(PROTOCOL_ERROR, format!("Invalid or unsupported protocol version ({version}); supported versions are (4/v4)"))))
+                        (
+                            ERROR,
+                            error_body(&failure(
+                                PROTOCOL_ERROR,
+                                format!(
+                                    "Invalid or unsupported protocol version ({version}); supported versions are (4/v4)"
+                                ),
+                            )),
+                        )
                     } else if request.flags & 0x05 != 0 {
-                        (ERROR, error_body(&failure(PROTOCOL_ERROR, "compressed frames and custom payloads are not supported yet")))
+                        (
+                            ERROR,
+                            error_body(&failure(
+                                PROTOCOL_ERROR,
+                                "compressed frames and custom payloads are not supported yet",
+                            )),
+                        )
                     } else {
                         match connection.answer(&request) {
                             Ok(answer) => answer,
@@ -729,7 +1017,12 @@ pub(crate) fn serve_stream<S: KeyValueStore>(store: &S, config: &ServerConfig, a
                 }
                 Ok(None) => break,
                 Err(message) => {
-                    writer.write_all(&response(VERSION, 0, ERROR, &error_body(&failure(PROTOCOL_ERROR, message))))?;
+                    writer.write_all(&response(
+                        VERSION,
+                        0,
+                        ERROR,
+                        &error_body(&failure(PROTOCOL_ERROR, message)),
+                    ))?;
                     return Ok(());
                 }
             }
@@ -740,14 +1033,25 @@ pub(crate) fn serve_stream<S: KeyValueStore>(store: &S, config: &ServerConfig, a
         match reader.read(&mut chunk) {
             Ok(0) => return Ok(()),
             Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
             Err(error) => return Err(error),
         }
     }
 }
 
 /// Serves CQL clients on `listener` from the SQL tables in `store` until `stop` turns true.
-pub fn serve<S: KeyValueStore + Sync>(store: &S, listener: &TcpListener, config: &ServerConfig, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
+pub fn serve<S: KeyValueStore + Sync>(
+    store: &S,
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?.ip();
     let active = AtomicUsize::new(0);
@@ -760,7 +1064,10 @@ pub fn serve<S: KeyValueStore + Sync>(store: &S, listener: &TcpListener, config:
                     continue;
                 }
             };
-            if stream.set_nonblocking(false).is_err() || stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
+            if stream.set_nonblocking(false).is_err()
+                || stream.set_read_timeout(Some(READ_POLL)).is_err()
+                || stream.set_nodelay(true).is_err()
+            {
                 continue;
             }
             if active.fetch_add(1, Ordering::AcqRel) >= config.max_connections {
@@ -768,12 +1075,21 @@ pub fn serve<S: KeyValueStore + Sync>(store: &S, listener: &TcpListener, config:
                 continue;
             }
             let active = &active;
-            let spawned = std::thread::Builder::new().name("eggdb-cql".to_owned()).spawn_scoped(scope, move || {
-                if let Ok(mut writer) = stream.try_clone() {
-                    let _ = serve_stream(store, config, address, ReadHalf(stream), &mut writer, stop);
-                }
-                active.fetch_sub(1, Ordering::AcqRel);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("eggdb-cql".to_owned())
+                .spawn_scoped(scope, move || {
+                    if let Ok(mut writer) = stream.try_clone() {
+                        let _ = serve_stream(
+                            store,
+                            config,
+                            address,
+                            ReadHalf(stream),
+                            &mut writer,
+                            stop,
+                        );
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                });
             if spawned.is_err() {
                 active.fetch_sub(1, Ordering::AcqRel);
             }

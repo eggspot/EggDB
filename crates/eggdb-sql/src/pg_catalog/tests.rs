@@ -1112,7 +1112,10 @@ fn unique_indexes_are_not_constraints_and_identity_defaults_stay_put() {
         given.detail(),
         Some("Column \"id\" is an identity column defined as GENERATED ALWAYS.")
     );
-    assert_eq!(given.hint(), Some("Use OVERRIDING SYSTEM VALUE to override."));
+    assert_eq!(
+        given.hint(),
+        Some("Use OVERRIDING SYSTEM VALUE to override.")
+    );
     assert_eq!(
         rows_of(&last(
             &mut session,
@@ -1153,8 +1156,18 @@ fn unique_indexes_are_not_constraints_and_identity_defaults_stay_put() {
 fn administration_tools_find_their_statistics_views_extensions_and_functions() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    run(&mut session, "CREATE TABLE items (id integer PRIMARY KEY, name text)").unwrap();
-    assert!(last(&mut session, "SELECT count(*) FROM pg_stat_activity WHERE state = 'active'").contains('1'));
+    run(
+        &mut session,
+        "CREATE TABLE items (id integer PRIMARY KEY, name text)",
+    )
+    .unwrap();
+    assert!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM pg_stat_activity WHERE state = 'active'"
+        )
+        .contains('1')
+    );
     assert!(last(&mut session, "SELECT datname FROM pg_stat_database").contains("shapes"));
     assert!(last(&mut session, "SELECT extname, extversion FROM pg_extension").contains("plpgsql"));
     assert!(last(&mut session, "SELECT has_database_privilege(current_database(), 'CREATE'), has_table_privilege('items', 'SELECT'), has_schema_privilege('public', 'USAGE')").contains('t'));
@@ -1185,8 +1198,18 @@ fn administration_tools_find_their_statistics_views_extensions_and_functions() {
         "pg_conversion",
         "pg_opfamily",
     ] {
-        run(&mut session, &format!("SELECT * FROM pg_catalog.{relation}")).unwrap_or_else(|error| panic!("{relation}: {error:?}"));
+        run(
+            &mut session,
+            &format!("SELECT * FROM pg_catalog.{relation}"),
+        )
+        .unwrap_or_else(|error| panic!("{relation}: {error:?}"));
     }
     assert!(last(&mut session, "SELECT usename, usesuper FROM pg_user").contains('t'));
-    assert!(last(&mut session, "SELECT count(*) FROM pg_class WHERE relname = 'pg_stat_activity' AND relkind = 'v'").contains('1'));
+    assert!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM pg_class WHERE relname = 'pg_stat_activity' AND relkind = 'v'"
+        )
+        .contains('1')
+    );
 }

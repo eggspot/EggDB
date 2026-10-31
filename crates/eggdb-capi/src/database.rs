@@ -352,6 +352,9 @@ mod tests {
             durability: 7,
             ..EggdbOptions::default()
         };
-        assert_eq!(status_of(unknown_durability), Some(EGGDB_ERR_INVALID_ARGUMENT));
+        assert_eq!(
+            status_of(unknown_durability),
+            Some(EGGDB_ERR_INVALID_ARGUMENT)
+        );
     }
 }

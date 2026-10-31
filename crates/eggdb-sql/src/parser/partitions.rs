@@ -78,9 +78,7 @@ impl Parser<'_> {
             PartitionStrategy::Range
         } else if self.take_word("list") {
             PartitionStrategy::List
-        } else if self.take_word("hash") {
-            PartitionStrategy::Hash
-        } else if self.mysql() && self.take_word("key") {
+        } else if self.take_word("hash") || (self.mysql() && self.take_word("key")) {
             PartitionStrategy::Hash
         } else {
             return Err(self.unexpected());
@@ -130,7 +128,9 @@ impl Parser<'_> {
             if columns.len() >= MAX_PARTITION_KEY_COLUMNS {
                 return Err(SqlError::new(
                     SqlState::TOO_MANY_COLUMNS,
-                    format!("cannot use more than {MAX_PARTITION_KEY_COLUMNS} columns in partition key"),
+                    format!(
+                        "cannot use more than {MAX_PARTITION_KEY_COLUMNS} columns in partition key"
+                    ),
                 )
                 .at(self.position()));
             }

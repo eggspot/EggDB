@@ -62,7 +62,11 @@ fn collections_are_added_listed_used_and_deleted_from_the_command_line() {
     );
     let text = on_terminal(&["collection", "add", &file, "cache"]);
     assert_eq!(text.exit, 0);
-    assert!(stdout(&text).starts_with("added collection cache to "), "{}", stdout(&text));
+    assert!(
+        stdout(&text).starts_with("added collection cache to "),
+        "{}",
+        stdout(&text)
+    );
     let names = on_terminal(&["collection", "list", &file]);
     assert_eq!(stdout(&names), "cache\nsessions\n");
     assert_eq!(stderr(&names), "2 collections\n");
@@ -106,7 +110,10 @@ fn a_missing_collection_is_not_found_and_names_the_command_that_adds_it() {
         (vec!["del", f, "-C", "orders", "k"], "cannot delete k from"),
         (vec!["scan", f, "-C", "orders"], "cannot scan"),
         (vec!["export", f, "-C", "orders"], "cannot export"),
-        (vec!["put", f, "-C", "orders", "k", "v"], "cannot store k in"),
+        (
+            vec!["put", f, "-C", "orders", "k", "v"],
+            "cannot store k in",
+        ),
     ] {
         let ran = run(&args);
         assert_eq!(ran.exit, 1, "{args:?}: {}", stderr(&ran));
@@ -125,7 +132,11 @@ fn a_missing_collection_is_not_found_and_names_the_command_that_adds_it() {
         );
     }
     let put = run(&["put", &file, "-C", "orders", "k", "v"]);
-    assert!(stderr(&put).contains("or pass --create to put."), "{}", stderr(&put));
+    assert!(
+        stderr(&put).contains("or pass --create to put."),
+        "{}",
+        stderr(&put)
+    );
     ok(&["put", "--create", &file, "-C", "orders", "k", "v"]);
     assert_eq!(ok(&["get", &file, "-C", "orders", "k"]).stdout, b"v");
     let fresh = directory.file("fresh.db");
@@ -149,7 +160,15 @@ fn a_whole_file_export_carries_its_collections_into_an_import() {
     ok(&["create", &file]);
     ok(&["put", &file, "user:1", "Ada"]);
     ok(&["collection", "add", &file, "cache"]);
-    ok(&["put", "--create", &file, "-C", "sessions", "s:1", "{\"user\":1}"]);
+    ok(&[
+        "put",
+        "--create",
+        &file,
+        "-C",
+        "sessions",
+        "s:1",
+        "{\"user\":1}",
+    ]);
     ok(&["put", &file, "-C", "sessions", "0x00ff", "0xdead"]);
     let export = ok(&["export", &file]);
     let text = stdout(&export);
@@ -172,17 +191,37 @@ fn a_whole_file_export_carries_its_collections_into_an_import() {
         Terminal::default(),
     );
     assert_eq!(imported.exit, 0, "{}", stderr(&imported));
-    assert!(stdout(&imported).contains("\"collections_added\":2"), "{}", stdout(&imported));
+    assert!(
+        stdout(&imported).contains("\"collections_added\":2"),
+        "{}",
+        stdout(&imported)
+    );
     let names = ok(&["collection", "list", &copy]);
-    assert!(stdout(&names).contains("[\"cache\",\"sessions\"]"), "{}", stdout(&names));
-    assert_eq!(ok(&["get", &copy, "-C", "sessions", "s:1"]).stdout, b"{\"user\":1}");
+    assert!(
+        stdout(&names).contains("[\"cache\",\"sessions\"]"),
+        "{}",
+        stdout(&names)
+    );
+    assert_eq!(
+        ok(&["get", &copy, "-C", "sessions", "s:1"]).stdout,
+        b"{\"user\":1}"
+    );
     assert_eq!(ok(&["get", &copy, "user:1"]).stdout, b"Ada");
     let again = stdout(&ok(&["export", &copy]));
-    assert_eq!(again.lines().skip(1).collect::<Vec<_>>(), lines[1..].to_vec());
+    assert_eq!(
+        again.lines().skip(1).collect::<Vec<_>>(),
+        lines[1..].to_vec()
+    );
 
     let only = ok(&["export", &file, "-C", "sessions"]);
     let only_text = stdout(&only);
-    assert!(only_text.lines().next().unwrap_or_default().contains("\"version\":1"));
+    assert!(
+        only_text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .contains("\"version\":1")
+    );
     assert!(!only_text.contains("\"collection\""), "{only_text}");
     let archive = directory.file("archive.db");
     let flattened = run_with(
@@ -191,7 +230,11 @@ fn a_whole_file_export_carries_its_collections_into_an_import() {
         Terminal::default(),
     );
     assert_eq!(flattened.exit, 0, "{}", stderr(&flattened));
-    assert!(stdout(&flattened).contains("\"imported\":3"), "{}", stdout(&flattened));
+    assert!(
+        stdout(&flattened).contains("\"imported\":3"),
+        "{}",
+        stdout(&flattened)
+    );
     let in_archive = ok(&["scan", &archive, "-C", "archive", "-k"]);
     assert_eq!(
         stdout(&in_archive),
@@ -199,5 +242,9 @@ fn a_whole_file_export_carries_its_collections_into_an_import() {
     );
     assert_eq!(ok(&["scan", &archive, "-k"]).stdout, b"");
     let names = ok(&["collection", "list", &archive]);
-    assert!(stdout(&names).contains("[\"archive\"]"), "{}", stdout(&names));
+    assert!(
+        stdout(&names).contains("[\"archive\"]"),
+        "{}",
+        stdout(&names)
+    );
 }

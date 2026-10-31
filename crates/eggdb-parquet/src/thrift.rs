@@ -17,7 +17,10 @@ pub(crate) enum Thrift {
 impl Thrift {
     pub(crate) fn field(&self, id: i16) -> Option<&Thrift> {
         match self {
-            Thrift::Struct(fields) => fields.iter().find(|(known, _)| *known == id).map(|(_, value)| value),
+            Thrift::Struct(fields) => fields
+                .iter()
+                .find(|(known, _)| *known == id)
+                .map(|(_, value)| value),
             _ => None,
         }
     }
@@ -62,7 +65,10 @@ impl<'b> Reader<'b> {
     }
 
     fn byte(&mut self) -> Result<u8, ParquetError> {
-        let byte = *self.bytes.get(self.at).ok_or_else(|| damaged("Thrift data ends early"))?;
+        let byte = *self
+            .bytes
+            .get(self.at)
+            .ok_or_else(|| damaged("Thrift data ends early"))?;
         self.at += 1;
         Ok(byte)
     }
@@ -86,13 +92,21 @@ impl<'b> Reader<'b> {
             3 => Thrift::Int(i64::from(self.byte()? as i8)),
             4..=6 => Thrift::Int(self.zigzag()?),
             7 => {
-                let raw = self.bytes.get(self.at..self.at + 8).ok_or_else(|| damaged("Thrift data ends early"))?;
+                let raw = self
+                    .bytes
+                    .get(self.at..self.at + 8)
+                    .ok_or_else(|| damaged("Thrift data ends early"))?;
                 self.at += 8;
                 Thrift::Double(f64::from_le_bytes(raw.try_into().unwrap_or_default()))
             }
             8 => {
-                let length = usize::try_from(self.varint()?).map_err(|_| damaged("a Thrift string is too long"))?;
-                let end = self.at.checked_add(length).filter(|end| *end <= self.bytes.len()).ok_or_else(|| damaged("a Thrift string runs past its bytes"))?;
+                let length = usize::try_from(self.varint()?)
+                    .map_err(|_| damaged("a Thrift string is too long"))?;
+                let end = self
+                    .at
+                    .checked_add(length)
+                    .filter(|end| *end <= self.bytes.len())
+                    .ok_or_else(|| damaged("a Thrift string runs past its bytes"))?;
                 let bytes = self.bytes[self.at..end].to_vec();
                 self.at = end;
                 Thrift::Binary(bytes)
@@ -100,19 +114,29 @@ impl<'b> Reader<'b> {
             9 | 10 => {
                 let header = self.byte()?;
                 let element = header & 0x0f;
-                let size = if header >> 4 == 0x0f { usize::try_from(self.varint()?).map_err(|_| damaged("a Thrift list is too long"))? } else { usize::from(header >> 4) };
+                let size = if header >> 4 == 0x0f {
+                    usize::try_from(self.varint()?)
+                        .map_err(|_| damaged("a Thrift list is too long"))?
+                } else {
+                    usize::from(header >> 4)
+                };
                 if size > MAX_LIST || size > self.bytes.len() - self.at + 1 {
                     return Err(damaged("a Thrift list is longer than its bytes"));
                 }
                 let mut items = Vec::with_capacity(size);
                 for _ in 0..size {
-                    let value = if element == 1 || element == 2 { Thrift::Bool(self.byte()? == 1) } else { self.value(element, depth + 1)? };
+                    let value = if element == 1 || element == 2 {
+                        Thrift::Bool(self.byte()? == 1)
+                    } else {
+                        self.value(element, depth + 1)?
+                    };
                     items.push(value);
                 }
                 Thrift::List(items)
             }
             11 => {
-                let size = usize::try_from(self.varint()?).map_err(|_| damaged("a Thrift map is too long"))?;
+                let size = usize::try_from(self.varint()?)
+                    .map_err(|_| damaged("a Thrift map is too long"))?;
                 if size == 0 {
                     return Ok(Thrift::List(Vec::new()));
                 }
@@ -146,9 +170,11 @@ impl<'b> Reader<'b> {
             let kind = header & 0x0f;
             let delta = header >> 4;
             let id = if delta == 0 {
-                i16::try_from(self.zigzag()?).map_err(|_| damaged("a Thrift field id is out of range"))?
+                i16::try_from(self.zigzag()?)
+                    .map_err(|_| damaged("a Thrift field id is out of range"))?
             } else {
-                last.checked_add(i16::from(delta)).ok_or_else(|| damaged("a Thrift field id is out of range"))?
+                last.checked_add(i16::from(delta))
+                    .ok_or_else(|| damaged("a Thrift field id is out of range"))?
             };
             last = id;
             let value = self.value(kind, depth)?;

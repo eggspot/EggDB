@@ -1,7 +1,7 @@
 use crate::ast::{
-    ExpandedItem, ExpansionKey, Expr, ExprKind, FromClause, GeneratedTable, JoinCondition,
-    Literal, Name, OrderItem, Query, Select, SelectItem, SelectListExpansion, TableFunction,
-    TableReference, ValuesList,
+    ExpandedItem, ExpansionKey, Expr, ExprKind, FromClause, GeneratedTable, JoinCondition, Literal,
+    Name, OrderItem, Query, Select, SelectItem, SelectListExpansion, TableFunction, TableReference,
+    ValuesList,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, children, first_aggregate};
@@ -805,13 +805,12 @@ impl ExpansionBuilder {
                 let at = expr.position;
                 let field = selected_call(&expr).and_then(|(_, field)| field.map(str::to_owned));
                 let call = match (expr.kind, &field) {
-                    (ExprKind::Function { mut arguments, .. }, Some(_)) if !arguments.is_empty() => {
+                    (ExprKind::Function { mut arguments, .. }, Some(_))
+                        if !arguments.is_empty() =>
+                    {
                         arguments.swap_remove(0)
                     }
-                    (kind, _) => Expr {
-                        kind,
-                        position: at,
-                    },
+                    (kind, _) => Expr { kind, position: at },
                 };
                 let ExprKind::Function { name, arguments } = call.kind else {
                     return Ok(());
@@ -878,7 +877,8 @@ impl ExpansionBuilder {
             self.push_computed(&expr, String::new())?;
         } else {
             self.items.push(ExpandedItem::Columns(Some(1)));
-            self.inner_items.push(SelectItem::Expr { expr, alias: None });
+            self.inner_items
+                .push(SelectItem::Expr { expr, alias: None });
         }
         Ok(ExpansionKey::Output { item, offset: 0 })
     }
@@ -1415,7 +1415,10 @@ fn prepare_item(
             })?;
             let declared = span_types(columns, span);
             let sql_type = if declared.iter().all(Option::is_some) {
-                Some((found.result_type)(&declared).map_err(|error| error.at_if_unplaced(*position))?)
+                Some(
+                    (found.result_type)(&declared)
+                        .map_err(|error| error.at_if_unplaced(*position))?,
+                )
             } else {
                 None
             };
@@ -1489,23 +1492,24 @@ fn sorted_by_keys(
     let mut columns = Vec::with_capacity(expansion.order.len());
     let mut directions = Vec::with_capacity(expansion.order.len());
     for (key, direction) in &expansion.order {
-        let column = match *key {
-            ExpansionKey::Ordinal { number, position } => usize::try_from(number)
-                .ok()
-                .filter(|&number| number >= 1 && number <= visible)
-                .map(|number| number - 1)
-                .ok_or_else(|| {
-                    SqlError::new(
-                        SqlState::INVALID_COLUMN_REFERENCE,
-                        format!("ORDER BY position {number} is not in select list"),
-                    )
-                    .at(position)
-                })?,
-            ExpansionKey::Output { item, offset } => starts
-                .get(item)
-                .map(|start| start + offset)
-                .ok_or_else(|| lost_window(expansion.position))?,
-        };
+        let column =
+            match *key {
+                ExpansionKey::Ordinal { number, position } => usize::try_from(number)
+                    .ok()
+                    .filter(|&number| number >= 1 && number <= visible)
+                    .map(|number| number - 1)
+                    .ok_or_else(|| {
+                        SqlError::new(
+                            SqlState::INVALID_COLUMN_REFERENCE,
+                            format!("ORDER BY position {number} is not in select list"),
+                        )
+                        .at(position)
+                    })?,
+                ExpansionKey::Output { item, offset } => starts
+                    .get(item)
+                    .map(|start| start + offset)
+                    .ok_or_else(|| lost_window(expansion.position))?,
+            };
         columns.push(column);
         directions.push(*direction);
     }
@@ -1519,9 +1523,8 @@ fn sorted_by_keys(
             (keys, row)
         })
         .collect();
-    keyed.sort_by(|left, right| {
-        crate::types::compare_in_directions(&directions, &left.0, &right.0)
-    });
+    keyed
+        .sort_by(|left, right| crate::types::compare_in_directions(&directions, &left.0, &right.0));
     Ok(keyed.into_iter().map(|(_, row)| row).collect())
 }
 
@@ -1577,9 +1580,9 @@ pub(crate) fn expanded(
                 } => {
                     let mut local: Vec<Value> = values.get(..*inputs).unwrap_or(&[]).to_vec();
                     local.extend(
-                        results
-                            .iter()
-                            .map(|result| result.values.get(row_at).cloned().unwrap_or(Value::Null)),
+                        results.iter().map(|result| {
+                            result.values.get(row_at).cloned().unwrap_or(Value::Null)
+                        }),
                     );
                     let evaluator = Evaluator {
                         scope: Scope::empty(),

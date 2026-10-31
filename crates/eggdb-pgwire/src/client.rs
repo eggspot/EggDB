@@ -84,7 +84,10 @@ pub struct ConnectOptions {
 impl ConnectOptions {
     /// The URL without a password, for messages.
     pub fn shown(&self) -> String {
-        format!("postgres://{}@{}:{}/{}", self.user, self.host, self.port, self.database)
+        format!(
+            "postgres://{}@{}:{}/{}",
+            self.user, self.host, self.port, self.database
+        )
     }
 }
 
@@ -151,7 +154,11 @@ pub fn parse_postgres_url(url: &str) -> Result<ConnectOptions, String> {
         port.parse()
             .map_err(|_| format!("'{port}' is not a port number"))?
     };
-    let database = if database.is_empty() { user.clone() } else { percent_decoded(database)? };
+    let database = if database.is_empty() {
+        user.clone()
+    } else {
+        percent_decoded(database)?
+    };
     let mut options = ConnectOptions {
         host,
         port,
@@ -182,7 +189,9 @@ pub fn parse_postgres_url(url: &str) -> Result<ConnectOptions, String> {
             _ => return Err(format!("the URL parameter '{name}' is not supported")),
         }
     }
-    if matches!(options.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull) && options.ssl_root_cert.is_none() {
+    if matches!(options.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull)
+        && options.ssl_root_cert.is_none()
+    {
         return Err(format!(
             "sslmode={} needs sslrootcert, the certificate of the authority to trust",
             options.ssl_mode.name()
@@ -230,7 +239,10 @@ impl std::error::Error for ClientError {}
 
 impl From<io::Error> for ClientError {
     fn from(error: io::Error) -> Self {
-        if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ) {
             Self::TimedOut
         } else {
             Self::Io(error)
@@ -338,12 +350,15 @@ fn error_fields(body: &[u8]) -> (String, String) {
 
 fn tls_config(options: &ConnectOptions) -> Result<ClientConfig, ClientError> {
     let trust = || -> Result<TrustStore, ClientError> {
-        let path = options
-            .ssl_root_cert
-            .as_ref()
-            .ok_or_else(|| ClientError::Tls("sslrootcert is needed to check the certificate".to_owned()))?;
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| ClientError::Tls(format!("cannot read sslrootcert {}: {error}", path.display())))?;
+        let path = options.ssl_root_cert.as_ref().ok_or_else(|| {
+            ClientError::Tls("sslrootcert is needed to check the certificate".to_owned())
+        })?;
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            ClientError::Tls(format!(
+                "cannot read sslrootcert {}: {error}",
+                path.display()
+            ))
+        })?;
         TrustStore::from_pem(&text)
             .map_err(|error| ClientError::Tls(format!("sslrootcert {}: {error}", path.display())))
     };
@@ -365,12 +380,22 @@ impl PgClient {
         let address = (options.host.as_str(), options.port)
             .to_socket_addrs()?
             .next()
-            .ok_or_else(|| ClientError::Io(io::Error::new(io::ErrorKind::NotFound, "the host has no address")))?;
+            .ok_or_else(|| {
+                ClientError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "the host has no address",
+                ))
+            })?;
         let tcp = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(CONNECT_TIMEOUT))?;
         let transport = Self::start_tls(tcp, options)?;
-        let mut client = Self { transport, incoming: Vec::new(), server_version: String::new(), tls_version: None };
+        let mut client = Self {
+            transport,
+            incoming: Vec::new(),
+            server_version: String::new(),
+            tls_version: None,
+        };
         if let Transport::Tls(stream) = &client.transport {
             client.tls_version = Some(stream.info().version);
         }
@@ -405,7 +430,9 @@ impl PgClient {
                 "the server does not support TLS and the URL says sslmode={}",
                 options.ssl_mode.name()
             ))),
-            other => Err(ClientError::Protocol(format!("the server answered the SSL request with byte {other}"))),
+            other => Err(ClientError::Protocol(format!(
+                "the server answered the SSL request with byte {other}"
+            ))),
         }
     }
 
@@ -452,9 +479,16 @@ impl PgClient {
     /// The next backend message's tag and body. A timeout keeps what was read so far.
     pub fn read_message(&mut self) -> Result<(u8, Vec<u8>), ClientError> {
         self.fill(5)?;
-        let length = u32::from_be_bytes([self.incoming[1], self.incoming[2], self.incoming[3], self.incoming[4]]) as usize;
+        let length = u32::from_be_bytes([
+            self.incoming[1],
+            self.incoming[2],
+            self.incoming[3],
+            self.incoming[4],
+        ]) as usize;
         if !(4..=MAX_MESSAGE_BYTES).contains(&length) {
-            return Err(ClientError::Protocol(format!("a message claims {length} bytes")));
+            return Err(ClientError::Protocol(format!(
+                "a message claims {length} bytes"
+            )));
         }
         self.fill(1 + length)?;
         let message: Vec<u8> = self.incoming.drain(..1 + length).collect();
@@ -512,7 +546,7 @@ impl PgClient {
         }
     }
 
-    fn password<'o>(options: &'o ConnectOptions) -> Result<&'o str, ClientError> {
+    fn password(options: &ConnectOptions) -> Result<&str, ClientError> {
         options.password.as_deref().ok_or_else(|| {
             ClientError::Authentication(
                 "a password is needed and none was given (PGPASSWORD is unset)".to_owned(),
@@ -547,14 +581,19 @@ impl PgClient {
     }
 
     fn scram(&mut self, mechanisms: &[u8], options: &ConnectOptions) -> Result<(), ClientError> {
-        let offered: Vec<&[u8]> = mechanisms.split(|byte| *byte == 0).filter(|name| !name.is_empty()).collect();
+        let offered: Vec<&[u8]> = mechanisms
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .collect();
         let binding = match &self.transport {
             Transport::Tls(stream) => stream.info().tls_server_end_point(),
             Transport::Plain(_) => None,
         };
         let plus = binding.is_some() && offered.contains(&&b"SCRAM-SHA-256-PLUS"[..]);
         if !plus && !offered.contains(&&b"SCRAM-SHA-256"[..]) {
-            return Err(ClientError::Authentication("the server offers no SCRAM mechanism EggDB supports".to_owned()));
+            return Err(ClientError::Authentication(
+                "the server offers no SCRAM mechanism EggDB supports".to_owned(),
+            ));
         }
         let (mechanism, gs2_header) = if plus {
             ("SCRAM-SHA-256-PLUS", "p=tls-server-end-point,,")
@@ -581,19 +620,29 @@ impl PgClient {
             if let Some(value) = attribute.strip_prefix("r=") {
                 nonce = value;
             } else if let Some(value) = attribute.strip_prefix("s=") {
-                salt = base64_decode(value.as_bytes())
-                    .map_err(|_| ClientError::Authentication("the server's salt is not base64".to_owned()))?;
+                salt = base64_decode(value.as_bytes()).map_err(|_| {
+                    ClientError::Authentication("the server's salt is not base64".to_owned())
+                })?;
             } else if let Some(value) = attribute.strip_prefix("i=") {
-                iterations = value
-                    .parse()
-                    .map_err(|_| ClientError::Authentication("the server's iteration count is not a number".to_owned()))?;
+                iterations = value.parse().map_err(|_| {
+                    ClientError::Authentication(
+                        "the server's iteration count is not a number".to_owned(),
+                    )
+                })?;
             }
         }
         if !nonce.starts_with(&client_nonce) || iterations == 0 || salt.is_empty() {
-            return Err(ClientError::Authentication("the server's SCRAM message is malformed".to_owned()));
+            return Err(ClientError::Authentication(
+                "the server's SCRAM message is malformed".to_owned(),
+            ));
         }
         let mut salted = [0u8; SHA256_DIGEST_BYTES];
-        pbkdf2_hmac_sha256(Self::password(options)?.as_bytes(), &salt, iterations, &mut salted);
+        pbkdf2_hmac_sha256(
+            Self::password(options)?.as_bytes(),
+            &salt,
+            iterations,
+            &mut salted,
+        );
         let client_key = hmac_sha256(&salted, b"Client Key");
         let stored_key = sha256(&client_key);
         let mut channel = gs2_header.as_bytes().to_vec();
@@ -603,15 +652,24 @@ impl PgClient {
         let without_proof = format!("c={},r={nonce}", base64_encode(&channel));
         let auth_message = format!("{client_first_bare},{server_first},{without_proof}");
         let signature = hmac_sha256(&stored_key, auth_message.as_bytes());
-        let proof: Vec<u8> = client_key.iter().zip(signature).map(|(key, signed)| key ^ signed).collect();
+        let proof: Vec<u8> = client_key
+            .iter()
+            .zip(signature)
+            .map(|(key, signed)| key ^ signed)
+            .collect();
         let client_final = format!("{without_proof},p={}", base64_encode(&proof));
         self.send(&frontend_message(b'p', client_final.as_bytes()))?;
 
         let server_final = self.sasl_message(12)?;
         let server_key = hmac_sha256(&salted, b"Server Key");
-        let expected = format!("v={}", base64_encode(&hmac_sha256(&server_key, auth_message.as_bytes())));
+        let expected = format!(
+            "v={}",
+            base64_encode(&hmac_sha256(&server_key, auth_message.as_bytes()))
+        );
         if !constant_time_eq(server_final.as_bytes(), expected.as_bytes()) {
-            return Err(ClientError::Authentication("the server could not prove it knows the password".to_owned()));
+            return Err(ClientError::Authentication(
+                "the server could not prove it knows the password".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -622,11 +680,16 @@ impl PgClient {
             let (_, message) = error_fields(&body);
             return Err(ClientError::Authentication(message));
         }
-        let kind = body.first_chunk::<4>().map(|bytes| i32::from_be_bytes(*bytes));
+        let kind = body
+            .first_chunk::<4>()
+            .map(|bytes| i32::from_be_bytes(*bytes));
         if tag != b'R' || kind != Some(expected_kind) {
-            return Err(ClientError::Protocol("unexpected message during SCRAM".to_owned()));
+            return Err(ClientError::Protocol(
+                "unexpected message during SCRAM".to_owned(),
+            ));
         }
-        String::from_utf8(body[4..].to_vec()).map_err(|_| ClientError::Protocol("a SCRAM message is not UTF-8".to_owned()))
+        String::from_utf8(body[4..].to_vec())
+            .map_err(|_| ClientError::Protocol("a SCRAM message is not UTF-8".to_owned()))
     }
 
     /// Runs `sql` with the simple query protocol and returns each statement's rows.
@@ -641,7 +704,8 @@ impl PgClient {
                 b'T' => (current.columns, current.column_types) = row_description(&body)?,
                 b'D' => current.rows.push(data_row(&body)?),
                 b'C' => {
-                    current.tag = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body)).into_owned();
+                    current.tag = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body))
+                        .into_owned();
                     results.push(std::mem::take(&mut current));
                 }
                 b'E' => {
@@ -686,8 +750,9 @@ impl PgClient {
             match parameter {
                 None => bind.extend_from_slice(&(-1i32).to_be_bytes()),
                 Some(bytes) => {
-                    let length = i32::try_from(bytes.len())
-                        .map_err(|_| ClientError::Protocol("a parameter of 2 GiB or more".to_owned()))?;
+                    let length = i32::try_from(bytes.len()).map_err(|_| {
+                        ClientError::Protocol("a parameter of 2 GiB or more".to_owned())
+                    })?;
                     bind.extend_from_slice(&length.to_be_bytes());
                     bind.extend_from_slice(bytes);
                 }
@@ -714,7 +779,8 @@ impl PgClient {
                 b'T' => (current.columns, current.column_types) = row_description(&body)?,
                 b'D' => current.rows.push(data_row(&body)?),
                 b'C' => {
-                    current.tag = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body)).into_owned();
+                    current.tag = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body))
+                        .into_owned();
                     results.push(std::mem::take(&mut current));
                 }
                 b'E' => {
@@ -855,12 +921,17 @@ fn row_description_names(body: &[u8]) -> Result<Vec<String>, ClientError> {
 
 fn row_description(body: &[u8]) -> Result<(Vec<String>, Vec<u32>), ClientError> {
     let malformed = || ClientError::Protocol("a malformed row description".to_owned());
-    let count = usize::from(u16::from_be_bytes(*body.first_chunk::<2>().ok_or_else(malformed)?));
+    let count = usize::from(u16::from_be_bytes(
+        *body.first_chunk::<2>().ok_or_else(malformed)?,
+    ));
     let mut names = Vec::with_capacity(count.min(body.len()));
     let mut types = Vec::with_capacity(count.min(body.len()));
     let mut at = 2;
     for _ in 0..count {
-        let end = body.get(at..).and_then(|rest| rest.iter().position(|byte| *byte == 0)).ok_or_else(malformed)?;
+        let end = body
+            .get(at..)
+            .and_then(|rest| rest.iter().position(|byte| *byte == 0))
+            .ok_or_else(malformed)?;
         names.push(String::from_utf8_lossy(&body[at..at + end]).into_owned());
         at += end + 1;
         let oid = body.get(at + 6..at + 10).ok_or_else(malformed)?;
@@ -872,11 +943,18 @@ fn row_description(body: &[u8]) -> Result<(Vec<String>, Vec<u32>), ClientError> 
 
 fn data_row(body: &[u8]) -> Result<Vec<Option<String>>, ClientError> {
     let malformed = || ClientError::Protocol("a malformed data row".to_owned());
-    let count = usize::from(u16::from_be_bytes(*body.first_chunk::<2>().ok_or_else(malformed)?));
+    let count = usize::from(u16::from_be_bytes(
+        *body.first_chunk::<2>().ok_or_else(malformed)?,
+    ));
     let mut values = Vec::with_capacity(count);
     let mut at = 2;
     for _ in 0..count {
-        let length = i32::from_be_bytes(*body.get(at..).and_then(|rest| rest.first_chunk::<4>()).ok_or_else(malformed)?);
+        let length = i32::from_be_bytes(
+            *body
+                .get(at..)
+                .and_then(|rest| rest.first_chunk::<4>())
+                .ok_or_else(malformed)?,
+        );
         at += 4;
         if length < 0 {
             values.push(None);
@@ -896,7 +974,10 @@ mod tests {
 
     #[test]
     fn urls_read_like_libpq_and_refuse_passwords() {
-        let options = parse_postgres_url("postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem").unwrap();
+        let options = parse_postgres_url(
+            "postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem",
+        )
+        .unwrap();
         assert_eq!(options.host, "db.example.com");
         assert_eq!(options.port, 5432);
         assert_eq!(options.user, "ada");
@@ -904,11 +985,27 @@ mod tests {
         assert_eq!(options.ssl_mode, SslMode::VerifyFull);
         assert_eq!(options.ssl_root_cert, Some(PathBuf::from("ca.pem")));
         let ipv6 = parse_postgres_url("postgresql://b%40x@[::1]:6543").unwrap();
-        assert_eq!((ipv6.host.as_str(), ipv6.port, ipv6.user.as_str(), ipv6.database.as_str()), ("::1", 6543, "b@x", "b@x"));
-        assert!(parse_postgres_url("postgres://ada:secret@host/db").unwrap_err().contains("PGPASSWORD"));
+        assert_eq!(
+            (
+                ipv6.host.as_str(),
+                ipv6.port,
+                ipv6.user.as_str(),
+                ipv6.database.as_str()
+            ),
+            ("::1", 6543, "b@x", "b@x")
+        );
+        assert!(
+            parse_postgres_url("postgres://ada:secret@host/db")
+                .unwrap_err()
+                .contains("PGPASSWORD")
+        );
         assert!(parse_postgres_url("postgres://ada@host/db?password=x").is_err());
         assert!(parse_postgres_url("mysql://ada@host/db").is_err());
-        assert!(parse_postgres_url("postgres://ada@host/db?sslmode=verify-ca").unwrap_err().contains("sslrootcert"));
+        assert!(
+            parse_postgres_url("postgres://ada@host/db?sslmode=verify-ca")
+                .unwrap_err()
+                .contains("sslrootcert")
+        );
         assert!(parse_postgres_url("postgres://ada@host:port/db").is_err());
     }
 
@@ -925,7 +1022,10 @@ mod tests {
         let mut description = 1u16.to_be_bytes().to_vec();
         description.extend_from_slice(b"answer\0");
         description.extend_from_slice(&[0; 18]);
-        assert_eq!(row_description_names(&description).unwrap(), vec!["answer".to_owned()]);
+        assert_eq!(
+            row_description_names(&description).unwrap(),
+            vec!["answer".to_owned()]
+        );
         assert!(row_description_names(&description[..5]).is_err());
     }
 }

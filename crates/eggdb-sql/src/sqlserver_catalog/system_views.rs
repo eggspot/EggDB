@@ -2,14 +2,15 @@ use super::routines::{module_definition, parameter_facts, routine_definition, sc
 use super::types::{SYSTEM_TYPES, SqlServerTypeName};
 use super::{
     COLLATION, CatalogRow, DATABASE_ID, DBO_PRINCIPAL_ID, ObjectKind, ObjectSource,
-    SqlServerColumnType, SqlServerObject, SqlServerObjects, UNKNOWN_DATE, bit, column, foreign_key_facts, index_id_of,
-    int, optional_int, referential_action, relation_columns, small, text,
+    SqlServerColumnType, SqlServerObject, SqlServerObjects, UNKNOWN_DATE, bit, column,
+    foreign_key_facts, index_id_of, int, optional_int, referential_action, relation_columns, small,
+    text,
 };
+use crate::encoding::CommentKind;
 use crate::pg_catalog::{
     CatalogColumn, CatalogSnapshot, ConstraintSource, RelationSource, index_columns,
     index_is_unique, index_sort_options,
 };
-use crate::encoding::CommentKind;
 use crate::triggers::TriggerTiming;
 use crate::types::{SqlType, Value};
 
@@ -870,7 +871,10 @@ fn column_rows(
             if identity_only {
                 row = row
                     .set("seed_value", Value::BigInt(facts.identity_seed.seed))
-                    .set("increment_value", Value::BigInt(facts.identity_seed.increment))
+                    .set(
+                        "increment_value",
+                        Value::BigInt(facts.identity_seed.increment),
+                    )
                     .set("is_not_for_replication", bit(false));
             }
             rows.push(row.done());

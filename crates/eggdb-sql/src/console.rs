@@ -49,9 +49,17 @@ mod tests {
     fn diagram(session: &mut Session<'_, MemoryStore>, format: &str) -> String {
         let mut text = String::new();
         session
-            .execute(&format!("SELECT eggdb_console.er_diagram('public', '{format}')"), &mut |result| {
-                text = result.rows.first().and_then(|row| row.first()).and_then(Value::to_text).unwrap_or_default();
-            })
+            .execute(
+                &format!("SELECT eggdb_console.er_diagram('public', '{format}')"),
+                &mut |result| {
+                    text = result
+                        .rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(Value::to_text)
+                        .unwrap_or_default();
+                },
+            )
             .unwrap();
         text
     }
@@ -67,10 +75,30 @@ mod tests {
             )
             .unwrap();
         let mermaid = diagram(&mut session, "mermaid");
-        assert!(mermaid.starts_with("erDiagram\n    customers {\n        integer id PK\n        text name\n    }"), "{mermaid}");
-        assert!(mermaid.ends_with("    orders }o--|| customers : \"customer_id\""), "{mermaid}");
+        assert!(
+            mermaid.starts_with(
+                "erDiagram\n    customers {\n        integer id PK\n        text name\n    }"
+            ),
+            "{mermaid}"
+        );
+        assert!(
+            mermaid.ends_with("    orders }o--|| customers : \"customer_id\""),
+            "{mermaid}"
+        );
         let dot = diagram(&mut session, "dot");
-        assert!(dot.starts_with("digraph public {") && dot.contains("\"orders\" -> \"customers\" [label=\"customer_id\"];") && dot.ends_with('}'), "{dot}");
-        assert!(session.execute("SELECT eggdb_console.er_diagram('public', 'svg')", &mut |_| {}).is_err());
+        assert!(
+            dot.starts_with("digraph public {")
+                && dot.contains("\"orders\" -> \"customers\" [label=\"customer_id\"];")
+                && dot.ends_with('}'),
+            "{dot}"
+        );
+        assert!(
+            session
+                .execute(
+                    "SELECT eggdb_console.er_diagram('public', 'svg')",
+                    &mut |_| {}
+                )
+                .is_err()
+        );
     }
 }

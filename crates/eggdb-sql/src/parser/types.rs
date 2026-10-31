@@ -339,7 +339,10 @@ impl Parser<'_> {
                 AlterTypeAction::RenameTo(to) => AlterDomainAction::RenameTo(to),
                 _ => AlterDomainAction::Accepted,
             };
-            return Ok(Statement::AlterDomain(Box::new(AlterDomain { name, action })));
+            return Ok(Statement::AlterDomain(Box::new(AlterDomain {
+                name,
+                action,
+            })));
         }
         let action = if self.take_word("set") {
             if self.take_word("default") {
@@ -403,7 +406,10 @@ impl Parser<'_> {
         } else {
             return Err(self.unexpected());
         };
-        Ok(Statement::AlterDomain(Box::new(AlterDomain { name, action })))
+        Ok(Statement::AlterDomain(Box::new(AlterDomain {
+            name,
+            action,
+        })))
     }
 
     pub(super) fn set_constraints(&mut self) -> SqlResult<Statement> {

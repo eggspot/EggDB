@@ -58,7 +58,10 @@ fn simple_views_take_inserts_updates_and_deletes() {
         answer(&mut session, "UPDATE big SET n = 1 RETURNING id, twice"),
         "id|twice\n2|2\nUPDATE 1"
     );
-    assert_eq!(answer(&mut session, "SELECT count(*) FROM big"), "count\n0\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM big"),
+        "count\n0\nSELECT 1"
+    );
     assert_eq!(state(&mut session, "UPDATE big SET twice = 1"), "0A000");
     assert_eq!(
         state(&mut session, "INSERT INTO big VALUES (4, 30, 60)"),

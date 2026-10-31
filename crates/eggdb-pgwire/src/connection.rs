@@ -1,15 +1,15 @@
+use crate::backend_keys::SECRET_KEY_BYTES;
 use crate::messages::{
     ColumnDescription, Format, FrontendMessage, ReportField, StartupRequest, Target, TooLarge,
     parse_message, parse_sasl_initial_response, parse_startup,
 };
-use crate::backend_keys::SECRET_KEY_BYTES;
-use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::types::{
     TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,
     sql_type_of,
 };
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
+use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
 use eggdb_sql::{
     CancelSignal, CopyChannel, CopyFormat, CopyStart, KeyValueStore, OutputColumn, Parameter,
     QueryResult, Session, SqlError, SqlResult, SqlState, SqlType, TransactionStatus,
@@ -357,7 +357,9 @@ fn start_direct_tls(wire: &mut Wire<'_>, shared: &Shared<'_>) -> Option<bool> {
     if !start_tls(wire, shared, config) {
         return Some(false);
     }
-    let negotiated = wire.tls().and_then(|info| info.application_protocol.as_deref());
+    let negotiated = wire
+        .tls()
+        .and_then(|info| info.application_protocol.as_deref());
     if negotiated != Some(POSTGRESQL_APPLICATION_PROTOCOL) {
         (shared.log)(&format!(
             "{}  direct TLS connection refused: the client did not ask for the postgresql protocol with ALPN",
@@ -542,7 +544,12 @@ fn stored_role_verifier<S: KeyValueStore>(store: &S, user: &str) -> Option<Scram
     ScramVerifier::from_stored(&text)
 }
 
-fn refuse_login(wire: &mut Wire<'_>, shared: &Shared<'_>, user: &str, why: &str) -> AuthenticationOutcome {
+fn refuse_login(
+    wire: &mut Wire<'_>,
+    shared: &Shared<'_>,
+    user: &str,
+    why: &str,
+) -> AuthenticationOutcome {
     (shared.log)(&format!(
         "{}  authentication failed for user \"{}\": {why}",
         wire.peer(),
@@ -607,7 +614,9 @@ fn authenticate_externally<S: KeyValueStore>(
         eggdb_auth::AuthMethod::Jwt { keys, policy } => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+                .map_or(0, |since| {
+                    i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+                });
             match eggdb_auth::jwt::verify(&secret, keys, policy, now) {
                 Ok(named) if named == user => Ok(()),
                 Ok(named) => Err(format!("the token names user \"{}\"", printable(&named))),
@@ -622,7 +631,12 @@ fn authenticate_externally<S: KeyValueStore>(
         return refuse_login(wire, shared, user, &why);
     }
     if !may_log_in(store, user) {
-        return refuse_login(wire, shared, user, "no stored role with LOGIN has this name");
+        return refuse_login(
+            wire,
+            shared,
+            user,
+            "no stored role with LOGIN has this name",
+        );
     }
     wire.outbox.authentication_ok();
     AuthenticationOutcome::Authenticated
@@ -840,7 +854,10 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
             wire.peer(),
             printable(&startup.database)
         ));
-        let served: Vec<String> = databases.iter().map(|(name, _)| format!("\"{name}\"")).collect();
+        let served: Vec<String> = databases
+            .iter()
+            .map(|(name, _)| format!("\"{name}\""))
+            .collect();
         fatal(
             &mut wire,
             SqlState::INVALID_CATALOG_NAME,
@@ -853,7 +870,12 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         return;
     };
     let mut session = Session::new(store);
-    session.set_database_names(databases.iter().map(|(name, _)| (*name).to_owned()).collect());
+    session.set_database_names(
+        databases
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect(),
+    );
     if is_stored_role {
         if let Err(error) = session.identify_role(&startup.user, &startup.database) {
             fatal(&mut wire, error.state(), error.message());
@@ -907,8 +929,11 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let keyed = eggdb_platform::secure_random::fill(&mut secret_key).is_ok();
     wire.outbox
         .backend_key_data(process_id, i32::from_be_bytes(secret_key));
-    let _registration =
-        keyed.then(|| shared.backend_keys.register(process_id, secret_key, cancel.clone()));
+    let _registration = keyed.then(|| {
+        shared
+            .backend_keys
+            .register(process_id, secret_key, cancel.clone())
+    });
     let mut connection = Connection {
         wire,
         shared,

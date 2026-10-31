@@ -99,8 +99,7 @@ impl RsaPublicKey {
         if !(RSA_MIN_PUBLIC_MODULUS_BITS..=RSA_MAX_MODULUS_BITS).contains(&modulus.bits()) {
             return Err(RsaError::Modulus);
         }
-        let exponent =
-            limbs_from_be_bytes(public_exponent, 1).ok_or(RsaError::PublicExponent)?;
+        let exponent = limbs_from_be_bytes(public_exponent, 1).ok_or(RsaError::PublicExponent)?;
         let value = exponent.first().copied().unwrap_or(0);
         if value & 1 == 0 || value < 3 || value >> RSA_MAX_PUBLIC_EXPONENT_BITS != 0 {
             return Err(RsaError::PublicExponent);
@@ -137,9 +136,9 @@ impl RsaPublicKey {
         let value = self.modulus.read_below(signature)?;
         let power = self
             .modulus
-            .power_public(&self.modulus.to_montgomery(&value), &self.exponent);
+            .power_public(&self.modulus.montgomery_form(&value), &self.exponent);
         Some(limbs_to_be_bytes(
-            &self.modulus.from_montgomery(&power),
+            &self.modulus.standard_form(&power),
             self.signature_bytes(),
         ))
     }
@@ -157,7 +156,10 @@ impl std::fmt::Debug for RsaPublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RsaPublicKey")
             .field("modulus_bits", &self.modulus_bits())
-            .field("public_exponent", &self.exponent.first().copied().unwrap_or(0))
+            .field(
+                "public_exponent",
+                &self.exponent.first().copied().unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -215,9 +217,9 @@ impl RsaPrivateKey {
     fn private_operation(&self, message: &[u8]) -> Option<Vec<u8>> {
         let modulus = &self.public_key.modulus;
         let value = modulus.read_below(message)?;
-        let power = modulus.power_secret(&modulus.to_montgomery(&value), &self.private_exponent);
+        let power = modulus.power_secret(&modulus.montgomery_form(&value), &self.private_exponent);
         Some(limbs_to_be_bytes(
-            &modulus.from_montgomery(&power),
+            &modulus.standard_form(&power),
             self.public_key.signature_bytes(),
         ))
     }
@@ -355,10 +357,7 @@ fn pss_encoding_matches<H: HashFunction>(
         return false;
     }
     let salt = &data_block[padding_length + 1..];
-    constant_time_eq(
-        pss_message_hash::<H>(digest, salt).as_ref(),
-        message_hash,
-    )
+    constant_time_eq(pss_message_hash::<H>(digest, salt).as_ref(), message_hash)
 }
 
 fn pss_encoded_bits(public_key: &RsaPublicKey) -> usize {
@@ -428,11 +427,26 @@ mod tests {
         let salt = [7u8; 32];
         for encoded_bits in [2047usize, 2048, 2041] {
             let encoded = pss_encode::<Sha256>(&digest, &salt, encoded_bits).unwrap();
-            assert!(pss_encoding_matches::<Sha256>(&digest, &encoded, encoded_bits, 32));
-            assert!(!pss_encoding_matches::<Sha256>(&digest, &encoded, encoded_bits, 31));
+            assert!(pss_encoding_matches::<Sha256>(
+                &digest,
+                &encoded,
+                encoded_bits,
+                32
+            ));
+            assert!(!pss_encoding_matches::<Sha256>(
+                &digest,
+                &encoded,
+                encoded_bits,
+                31
+            ));
             let mut changed = encoded.clone();
             changed[10] ^= 1;
-            assert!(!pss_encoding_matches::<Sha256>(&digest, &changed, encoded_bits, 32));
+            assert!(!pss_encoding_matches::<Sha256>(
+                &digest,
+                &changed,
+                encoded_bits,
+                32
+            ));
         }
     }
 
@@ -443,15 +457,27 @@ mod tests {
             RsaPublicKey::new(&modulus, &[0x01, 0x00, 0x01]).map(|key| key.modulus_bits()),
             Ok(2048)
         );
-        assert_eq!(RsaPublicKey::new(&modulus, &[2]).unwrap_err(), RsaError::PublicExponent);
-        assert_eq!(RsaPublicKey::new(&modulus, &[1]).unwrap_err(), RsaError::PublicExponent);
+        assert_eq!(
+            RsaPublicKey::new(&modulus, &[2]).unwrap_err(),
+            RsaError::PublicExponent
+        );
+        assert_eq!(
+            RsaPublicKey::new(&modulus, &[1]).unwrap_err(),
+            RsaError::PublicExponent
+        );
         assert_eq!(
             RsaPublicKey::new(&modulus, &[0x03, 0, 0, 0, 1]).unwrap_err(),
             RsaError::PublicExponent
         );
-        assert_eq!(RsaPublicKey::new(&modulus[..64], &[3]).unwrap_err(), RsaError::Modulus);
+        assert_eq!(
+            RsaPublicKey::new(&modulus[..64], &[3]).unwrap_err(),
+            RsaError::Modulus
+        );
         modulus[255] = 0xfe;
-        assert_eq!(RsaPublicKey::new(&modulus, &[3]).unwrap_err(), RsaError::Modulus);
+        assert_eq!(
+            RsaPublicKey::new(&modulus, &[3]).unwrap_err(),
+            RsaError::Modulus
+        );
         assert_eq!(RsaPublicKey::new(&[], &[3]).unwrap_err(), RsaError::Modulus);
     }
 }

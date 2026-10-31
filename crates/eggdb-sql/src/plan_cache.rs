@@ -9,6 +9,7 @@ const MOST_ENTRIES: usize = 64;
 const LONGEST_STATEMENT: usize = 4096;
 const NOT_A_LITERAL: u8 = 0;
 
+#[derive(Default)]
 pub(crate) struct PlanCache {
     entries: Vec<CachedPlan>,
     next_replaced: usize,
@@ -37,19 +38,9 @@ impl StatementShape {
 }
 
 pub(crate) enum CachedStatement {
-    Parsed(Statement),
+    Parsed(Box<Statement>),
     NeverCached,
     Unknown,
-}
-
-impl Default for PlanCache {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            next_replaced: 0,
-            key: Vec::new(),
-        }
-    }
 }
 
 fn caches_dialect(dialect: Dialect) -> bool {
@@ -85,14 +76,14 @@ fn starts_a_select(token: Option<&Token<'_>>) -> bool {
 
 fn hash_of(key: &[u8]) -> u64 {
     let mut hash = 0x9E37_79B9_7F4A_7C15_u64 ^ key.len() as u64;
-    let mut chunks = key.chunks_exact(8);
-    for chunk in &mut chunks {
-        let word = u64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+    let (chunks, rest) = key.as_chunks::<8>();
+    for chunk in chunks {
+        let word = u64::from_le_bytes(*chunk);
         hash = (hash ^ word)
             .wrapping_mul(0x0000_0100_0000_01B3)
             .rotate_left(29);
     }
-    for &byte in chunks.remainder() {
+    for &byte in rest {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3);
     }
     hash
@@ -269,7 +260,7 @@ impl PlanCache {
         {
             None => CachedStatement::NeverCached,
             Some(template) => match with_literals_of(template, tokens, shape) {
-                Some(select) => CachedStatement::Parsed(Statement::Select(select)),
+                Some(select) => CachedStatement::Parsed(Box::new(Statement::Select(select))),
                 None => CachedStatement::Unknown,
             },
         }
@@ -380,10 +371,7 @@ mod tests {
         else {
             panic!("the second statement was not cached");
         };
-        assert_eq!(
-            statement,
-            parsed(second, Dialect::PostgreSql, &settings).0
-        );
+        assert_eq!(*statement, parsed(second, Dialect::PostgreSql, &settings).0);
         assert_eq!(
             literals(&statement),
             vec![Literal::Integer(97), Literal::String("cd".to_owned())]
@@ -404,7 +392,7 @@ mod tests {
                 if let CachedStatement::Parsed(statement) =
                     cached(&mut cache, text, dialect, &settings)
                 {
-                    assert_eq!(statement, parsed(text, dialect, &settings).0, "{text}");
+                    assert_eq!(*statement, parsed(text, dialect, &settings).0, "{text}");
                 }
             }
         }
@@ -482,7 +470,11 @@ mod tests {
                 .is_none()
         );
         let tokens = tokenize_in("SELECT 1", Dialect::Oracle).expect("tokens");
-        assert!(cache.shape("SELECT 1", &tokens, 0, Dialect::Oracle).is_none());
+        assert!(
+            cache
+                .shape("SELECT 1", &tokens, 0, Dialect::Oracle)
+                .is_none()
+        );
     }
 
     #[test]

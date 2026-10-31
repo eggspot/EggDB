@@ -2418,22 +2418,35 @@ fn sqlite_functions_stay_inside_the_sqlite_dialect() {
 fn full_text_search_matches_and_ranks_rows() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    run(&mut session, "CREATE TABLE docs (id integer PRIMARY KEY, body text)").unwrap();
+    run(
+        &mut session,
+        "CREATE TABLE docs (id integer PRIMARY KEY, body text)",
+    )
+    .unwrap();
     run(
         &mut session,
         "INSERT INTO docs VALUES (1, 'The fat cats ate fat rats'), (2, 'A rat ran'), (3, 'Dogs bark')",
     )
     .unwrap();
     assert_eq!(
-        last(&mut session, "SELECT id FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('english', 'rats') ORDER BY ts_rank(to_tsvector(body), to_tsquery('rat')) DESC, id"),
+        last(
+            &mut session,
+            "SELECT id FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('english', 'rats') ORDER BY ts_rank(to_tsvector(body), to_tsquery('rat')) DESC, id"
+        ),
         "id\n1\n2\nSELECT 2"
     );
     assert_eq!(
-        last(&mut session, "SELECT to_tsvector('english', 'The fat cats') AS v, plainto_tsquery('english', 'fat rats') AS q"),
+        last(
+            &mut session,
+            "SELECT to_tsvector('english', 'The fat cats') AS v, plainto_tsquery('english', 'fat rats') AS q"
+        ),
         "v|q\n'cat':3 'fat':2|'fat' & 'rat'\nSELECT 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT count(*) FROM docs WHERE body @@ 'dogs'"),
+        last(
+            &mut session,
+            "SELECT count(*) FROM docs WHERE body @@ 'dogs'"
+        ),
         "count\n1\nSELECT 1"
     );
 }
@@ -2442,17 +2455,39 @@ fn full_text_search_matches_and_ranks_rows() {
 fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    run(&mut session, "CREATE TABLE t (id integer PRIMARY KEY, n integer)").unwrap();
+    run(
+        &mut session,
+        "CREATE TABLE t (id integer PRIMARY KEY, n integer)",
+    )
+    .unwrap();
     run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
     let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t WHERE n > 1");
     let lines: Vec<&str> = plan.lines().collect();
     assert!(lines[1].ends_with("(actual rows=2 loops=1)"), "{plan}");
-    assert!(lines[lines.len() - 3].starts_with("Planning Time: "), "{plan}");
-    assert!(lines[lines.len() - 2].starts_with("Execution Time: "), "{plan}");
+    assert!(
+        lines[lines.len() - 3].starts_with("Planning Time: "),
+        "{plan}"
+    );
+    assert!(
+        lines[lines.len() - 2].starts_with("Execution Time: "),
+        "{plan}"
+    );
     assert_eq!(lines[lines.len() - 1], "EXPLAIN");
-    let plan = last(&mut session, "EXPLAIN (ANALYZE, COSTS OFF) DELETE FROM t WHERE id = 3");
-    assert!(plan.lines().nth(1).unwrap().ends_with("(actual rows=1 loops=1)"), "{plan}");
-    assert_eq!(last(&mut session, "SELECT count(*) FROM t"), "count\n2\nSELECT 1");
+    let plan = last(
+        &mut session,
+        "EXPLAIN (ANALYZE, COSTS OFF) DELETE FROM t WHERE id = 3",
+    );
+    assert!(
+        plan.lines()
+            .nth(1)
+            .unwrap()
+            .ends_with("(actual rows=1 loops=1)"),
+        "{plan}"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM t"),
+        "count\n2\nSELECT 1"
+    );
     assert_eq!(
         fails(&mut session, "EXPLAIN (FORMAT JSON) SELECT 1").state(),
         crate::SqlState::FEATURE_NOT_SUPPORTED
@@ -2467,10 +2502,16 @@ fn statement_timeout_stops_a_long_statement_with_57014() {
     let started = std::time::Instant::now();
     let error = fails(&mut session, "SELECT pg_sleep(5)");
     assert_eq!(error.state(), crate::SqlState::QUERY_CANCELED);
-    assert_eq!(error.message(), "canceling statement due to statement timeout");
+    assert_eq!(
+        error.message(),
+        "canceling statement due to statement timeout"
+    );
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
     run(&mut session, "SET statement_timeout = 0").unwrap();
-    assert_eq!(last(&mut session, "SELECT pg_sleep(0.01)"), "pg_sleep\n\nSELECT 1");
+    assert_eq!(
+        last(&mut session, "SELECT pg_sleep(0.01)"),
+        "pg_sleep\n\nSELECT 1"
+    );
 }
 
 #[test]
@@ -2478,8 +2519,17 @@ fn the_slow_statement_threshold_follows_log_min_duration_statement() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     assert_eq!(session.slow_statement_threshold(), None);
-    for (value, millis) in [("250", Some(250)), ("'2s'", Some(2000)), ("0", Some(0)), ("-1", None)] {
-        run(&mut session, &format!("SET log_min_duration_statement = {value}")).unwrap();
+    for (value, millis) in [
+        ("250", Some(250)),
+        ("'2s'", Some(2000)),
+        ("0", Some(0)),
+        ("-1", None),
+    ] {
+        run(
+            &mut session,
+            &format!("SET log_min_duration_statement = {value}"),
+        )
+        .unwrap();
         assert_eq!(
             session.slow_statement_threshold(),
             millis.map(std::time::Duration::from_millis),
@@ -2501,11 +2551,17 @@ fn sqlite_date_and_time_functions_follow_their_modifiers() {
         "d|t|f|u\n2023-03-03|2004-08-19 18:51:06|2024/065|1072924496\nSELECT 1"
     );
     assert_eq!(
-        last(&mut sqlite, "SELECT date('nonsense') IS NULL AS invalid, length(date('now')) AS n"),
+        last(
+            &mut sqlite,
+            "SELECT date('nonsense') IS NULL AS invalid, length(date('now')) AS n"
+        ),
         "invalid|n\n1|10\nSELECT 1"
     );
     assert_eq!(
-        last(&mut sqlite, "SELECT unicode('Ä') AS u, char(72, 105) AS c, sign(-3) AS s"),
+        last(
+            &mut sqlite,
+            "SELECT unicode('Ä') AS u, char(72, 105) AS c, sign(-3) AS s"
+        ),
         "u|c|s\n196|Hi|-1\nSELECT 1"
     );
 }
@@ -3659,7 +3715,21 @@ fn mysql_and_oracle_read_strings_given_to_binary_columns_by_their_own_rules() {
 fn normalize_and_is_normalized_follow_unicode() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    assert_eq!(last(&mut session, "SELECT normalize(E'e\\u0301') = 'é' AS same, is_normalized(E'e\\u0301') AS nfc, is_normalized(E'e\\u0301', 'NFD') AS nfd"), "same|nfc|nfd\nt|f|t\nSELECT 1");
-    assert_eq!(last(&mut session, "SELECT normalize('ﬁ', 'nfkc') AS folded"), "folded\nfi\nSELECT 1");
-    assert_eq!(fails(&mut session, "SELECT normalize('a', 'NFX')").state().code(), "22023");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT normalize(E'e\\u0301') = 'é' AS same, is_normalized(E'e\\u0301') AS nfc, is_normalized(E'e\\u0301', 'NFD') AS nfd"
+        ),
+        "same|nfc|nfd\nt|f|t\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT normalize('ﬁ', 'nfkc') AS folded"),
+        "folded\nfi\nSELECT 1"
+    );
+    assert_eq!(
+        fails(&mut session, "SELECT normalize('a', 'NFX')")
+            .state()
+            .code(),
+        "22023"
+    );
 }

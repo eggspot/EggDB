@@ -16,7 +16,8 @@ enum Token {
 }
 
 const SYMBOLS: [&str; 26] = [
-    "..", "<=", ">=", "<>", "=~", "+=", "(", ")", "[", "]", "{", "}", ",", ":", ".", "|", "*", "+", "-", "/", "%", "^", "=", "<", ">", ";",
+    "..", "<=", ">=", "<>", "=~", "+=", "(", ")", "[", "]", "{", "}", ",", ":", ".", "|", "*", "+",
+    "-", "/", "%", "^", "=", "<", ">", ";",
 ];
 
 fn syntax(message: impl Into<String>) -> GraphError {
@@ -38,13 +39,18 @@ fn tokenize(text: &str) -> GraphResult<Vec<(Token, usize)>> {
             continue;
         }
         if text[at..].starts_with("/*") {
-            at = text[at + 2..].find("*/").map(|end| at + 2 + end + 2).ok_or_else(|| syntax("an unterminated comment"))?;
+            at = text[at + 2..]
+                .find("*/")
+                .map(|end| at + 2 + end + 2)
+                .ok_or_else(|| syntax("an unterminated comment"))?;
             continue;
         }
         let start = at;
         if byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80 {
             let rest = &text[at..];
-            let length = rest.find(|character: char| !(character.is_alphanumeric() || character == '_')).unwrap_or(rest.len());
+            let length = rest
+                .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .unwrap_or(rest.len());
             if length == 0 {
                 return Err(syntax(format!("unexpected character at position {at}")));
             }
@@ -54,16 +60,24 @@ fn tokenize(text: &str) -> GraphResult<Vec<(Token, usize)>> {
         }
         if byte.is_ascii_digit() {
             let rest = &text[at..];
-            let mut length = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
+            let mut length = rest
+                .find(|character: char| !character.is_ascii_digit())
+                .unwrap_or(rest.len());
             let mut float = false;
-            if rest[length..].starts_with('.') && rest[length + 1..].starts_with(|character: char| character.is_ascii_digit()) {
+            if rest[length..].starts_with('.')
+                && rest[length + 1..].starts_with(|character: char| character.is_ascii_digit())
+            {
                 float = true;
-                length += 1 + rest[length + 1..].find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len() - length - 1);
+                length += 1 + rest[length + 1..]
+                    .find(|character: char| !character.is_ascii_digit())
+                    .unwrap_or(rest.len() - length - 1);
             }
             if rest[length..].starts_with(['e', 'E']) {
                 let exponent = &rest[length + 1..];
                 let sign = usize::from(exponent.starts_with(['+', '-']));
-                let digits = exponent[sign..].find(|character: char| !character.is_ascii_digit()).unwrap_or(exponent.len() - sign);
+                let digits = exponent[sign..]
+                    .find(|character: char| !character.is_ascii_digit())
+                    .unwrap_or(exponent.len() - sign);
                 if digits > 0 {
                     float = true;
                     length += 1 + sign + digits;
@@ -71,9 +85,17 @@ fn tokenize(text: &str) -> GraphResult<Vec<(Token, usize)>> {
             }
             let number = &rest[..length];
             let token = if float {
-                Token::Float(number.parse().map_err(|_| syntax(format!("invalid number {number}")))?)
+                Token::Float(
+                    number
+                        .parse()
+                        .map_err(|_| syntax(format!("invalid number {number}")))?,
+                )
             } else {
-                Token::Integer(number.parse().map_err(|_| syntax(format!("integer is too large: {number}")))?)
+                Token::Integer(
+                    number
+                        .parse()
+                        .map_err(|_| syntax(format!("integer is too large: {number}")))?,
+                )
             };
             tokens.push((token, start));
             at += length;
@@ -110,13 +132,22 @@ fn tokenize(text: &str) -> GraphResult<Vec<(Token, usize)>> {
             let Some(offset) = closed else {
                 return Err(syntax("an unterminated string or name"));
             };
-            tokens.push((if byte == b'`' { Token::Quoted(out) } else { Token::Text(out) }, start));
+            tokens.push((
+                if byte == b'`' {
+                    Token::Quoted(out)
+                } else {
+                    Token::Text(out)
+                },
+                start,
+            ));
             at += offset + 2;
             continue;
         }
         if byte == b'$' {
             let rest = &text[at + 1..];
-            let length = rest.find(|character: char| !(character.is_alphanumeric() || character == '_')).unwrap_or(rest.len());
+            let length = rest
+                .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .unwrap_or(rest.len());
             if length == 0 {
                 return Err(syntax("a parameter needs a name"));
             }
@@ -124,7 +155,10 @@ fn tokenize(text: &str) -> GraphResult<Vec<(Token, usize)>> {
             at += 1 + length;
             continue;
         }
-        let Some(symbol) = SYMBOLS.iter().find(|symbol| text[at..].starts_with(**symbol)) else {
+        let Some(symbol) = SYMBOLS
+            .iter()
+            .find(|symbol| text[at..].starts_with(**symbol))
+        else {
             return Err(syntax(format!("unexpected character at position {at}")));
         };
         tokens.push((Token::Symbol(symbol), start));
@@ -171,8 +205,17 @@ pub(crate) enum Expr {
     Not(Box<Expr>),
     Negate(Box<Expr>),
     IsNull(Box<Expr>, bool),
-    Call { name: String, distinct: bool, arguments: Vec<Expr>, star: bool },
-    Case { subject: Option<Box<Expr>>, arms: Vec<(Expr, Expr)>, otherwise: Option<Box<Expr>> },
+    Call {
+        name: String,
+        distinct: bool,
+        arguments: Vec<Expr>,
+        star: bool,
+    },
+    Case {
+        subject: Option<Box<Expr>>,
+        arms: Vec<(Expr, Expr)>,
+        otherwise: Option<Box<Expr>>,
+    },
 }
 
 /// The direction a relationship pattern follows.
@@ -231,21 +274,39 @@ pub(crate) enum SetItem {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Clause {
-    Match { optional: bool, patterns: Vec<Pattern>, filter: Option<Expr> },
+    Match {
+        optional: bool,
+        patterns: Vec<Pattern>,
+        filter: Option<Expr>,
+    },
     Create(Vec<Pattern>),
     Merge(Pattern),
     Set(Vec<SetItem>),
     Remove(Vec<SetItem>),
-    Delete { detach: bool, targets: Vec<Expr> },
+    Delete {
+        detach: bool,
+        targets: Vec<Expr>,
+    },
     Unwind(Expr, String),
-    Call { procedure: String, arguments: Vec<Expr>, yields: Vec<(String, String)> },
+    Call {
+        procedure: String,
+        arguments: Vec<Expr>,
+        yields: Vec<(String, String)>,
+    },
     With(Projecting),
     Return(Projecting),
 }
 
 impl Clause {
     pub(crate) fn writes(&self) -> bool {
-        matches!(self, Clause::Create(_) | Clause::Merge(_) | Clause::Set(_) | Clause::Remove(_) | Clause::Delete { .. })
+        matches!(
+            self,
+            Clause::Create(_)
+                | Clause::Merge(_)
+                | Clause::Set(_)
+                | Clause::Remove(_)
+                | Clause::Delete { .. }
+        )
     }
 }
 
@@ -266,12 +327,17 @@ impl Parser<'_> {
     }
 
     fn offset(&self) -> usize {
-        self.tokens.get(self.at).map_or(self.text.len(), |(_, offset)| *offset)
+        self.tokens
+            .get(self.at)
+            .map_or(self.text.len(), |(_, offset)| *offset)
     }
 
     fn unexpected(&self) -> GraphError {
         match self.peek() {
-            Some(token) => syntax(format!("Invalid input {token:?} at position {}", self.offset())),
+            Some(token) => syntax(format!(
+                "Invalid input {token:?} at position {}",
+                self.offset()
+            )),
             None => syntax("Unexpected end of input"),
         }
     }
@@ -293,7 +359,11 @@ impl Parser<'_> {
     }
 
     fn expect_keyword(&mut self, word: &str) -> GraphResult<()> {
-        if self.take_keyword(word) { Ok(()) } else { Err(self.unexpected()) }
+        if self.take_keyword(word) {
+            Ok(())
+        } else {
+            Err(self.unexpected())
+        }
     }
 
     fn is_symbol(&self, symbol: &str) -> bool {
@@ -309,7 +379,11 @@ impl Parser<'_> {
     }
 
     fn expect_symbol(&mut self, symbol: &str) -> GraphResult<()> {
-        if self.take_symbol(symbol) { Ok(()) } else { Err(self.unexpected()) }
+        if self.take_symbol(symbol) {
+            Ok(())
+        } else {
+            Err(self.unexpected())
+        }
     }
 
     fn name(&mut self) -> GraphResult<String> {
@@ -360,13 +434,22 @@ impl Parser<'_> {
         while self.take_symbol(":") {
             labels.push(self.name()?);
         }
-        let properties = if self.is_symbol("{") { self.map_literal()? } else { Vec::new() };
+        let properties = if self.is_symbol("{") {
+            self.map_literal()?
+        } else {
+            Vec::new()
+        };
         self.expect_symbol(")")?;
-        Ok(NodePattern { variable, labels, properties })
+        Ok(NodePattern {
+            variable,
+            labels,
+            properties,
+        })
     }
 
     fn relationship_pattern(&mut self) -> GraphResult<Option<RelationshipPattern>> {
-        let incoming = if self.is_symbol("<") && matches!(self.peek_at(1), Some(Token::Symbol("-"))) {
+        let incoming = if self.is_symbol("<") && matches!(self.peek_at(1), Some(Token::Symbol("-")))
+        {
             self.at += 2;
             true
         } else if self.take_symbol("-") {
@@ -374,7 +457,13 @@ impl Parser<'_> {
         } else {
             return Ok(None);
         };
-        let mut pattern = RelationshipPattern { variable: None, kinds: Vec::new(), properties: Vec::new(), direction: Direction::Either, hops: None };
+        let mut pattern = RelationshipPattern {
+            variable: None,
+            kinds: Vec::new(),
+            properties: Vec::new(),
+            direction: Direction::Either,
+            hops: None,
+        };
         if self.take_symbol("[") {
             if matches!(self.peek(), Some(Token::Word(_) | Token::Quoted(_))) {
                 pattern.variable = Some(self.name()?);
@@ -387,9 +476,17 @@ impl Parser<'_> {
                 }
             }
             if self.take_symbol("*") {
-                let low = if matches!(self.peek(), Some(Token::Integer(_))) { Some(self.integer()?) } else { None };
+                let low = if matches!(self.peek(), Some(Token::Integer(_))) {
+                    Some(self.integer()?)
+                } else {
+                    None
+                };
                 let (min, max) = if self.take_symbol("..") {
-                    let high = if matches!(self.peek(), Some(Token::Integer(_))) { Some(self.integer()?) } else { None };
+                    let high = if matches!(self.peek(), Some(Token::Integer(_))) {
+                        Some(self.integer()?)
+                    } else {
+                        None
+                    };
                     (low.unwrap_or(1), high.unwrap_or(MAX_HOPS))
                 } else {
                     match low {
@@ -398,7 +495,9 @@ impl Parser<'_> {
                     }
                 };
                 if max > MAX_HOPS || min > max {
-                    return Err(syntax(format!("variable-length relationships go at most {MAX_HOPS} hops")));
+                    return Err(syntax(format!(
+                        "variable-length relationships go at most {MAX_HOPS} hops"
+                    )));
                 }
                 pattern.hops = Some((min, max));
             }
@@ -419,7 +518,9 @@ impl Parser<'_> {
     }
 
     fn pattern(&mut self) -> GraphResult<Pattern> {
-        if matches!(self.peek(), Some(Token::Word(_))) && matches!(self.peek_at(1), Some(Token::Symbol("="))) {
+        if matches!(self.peek(), Some(Token::Word(_)))
+            && matches!(self.peek_at(1), Some(Token::Symbol("=")))
+        {
             return Err(GraphError::not_supported("named paths"));
         }
         let start = self.node_pattern()?;
@@ -448,8 +549,17 @@ impl Parser<'_> {
         parsed
     }
 
-    fn binary(&mut self, operator: Operator, left: Expr, next: fn(&mut Self) -> GraphResult<Expr>) -> GraphResult<Expr> {
-        Ok(Expr::Binary(operator, Box::new(left), Box::new(next(self)?)))
+    fn binary(
+        &mut self,
+        operator: Operator,
+        left: Expr,
+        next: fn(&mut Self) -> GraphResult<Expr>,
+    ) -> GraphResult<Expr> {
+        Ok(Expr::Binary(
+            operator,
+            Box::new(left),
+            Box::new(next(self)?),
+        ))
     }
 
     fn or(&mut self) -> GraphResult<Expr> {
@@ -500,9 +610,19 @@ impl Parser<'_> {
                 Some(Token::Symbol(">")) => Operator::Greater,
                 Some(Token::Symbol(">=")) => Operator::GreaterOrEqual,
                 Some(Token::Word(word)) if word.eq_ignore_ascii_case("in") => Operator::In,
-                Some(Token::Word(word)) if word.eq_ignore_ascii_case("contains") => Operator::Contains,
-                Some(Token::Word(word)) if word.eq_ignore_ascii_case("starts") && self.is_keyword_at(1, "with") => Operator::StartsWith,
-                Some(Token::Word(word)) if word.eq_ignore_ascii_case("ends") && self.is_keyword_at(1, "with") => Operator::EndsWith,
+                Some(Token::Word(word)) if word.eq_ignore_ascii_case("contains") => {
+                    Operator::Contains
+                }
+                Some(Token::Word(word))
+                    if word.eq_ignore_ascii_case("starts") && self.is_keyword_at(1, "with") =>
+                {
+                    Operator::StartsWith
+                }
+                Some(Token::Word(word))
+                    if word.eq_ignore_ascii_case("ends") && self.is_keyword_at(1, "with") =>
+                {
+                    Operator::EndsWith
+                }
                 Some(Token::Word(word)) if word.eq_ignore_ascii_case("is") => {
                     self.at += 1;
                     let negated = self.take_keyword("not");
@@ -512,7 +632,11 @@ impl Parser<'_> {
                 }
                 _ => return Ok(left),
             };
-            self.at += if matches!(operator, Operator::StartsWith | Operator::EndsWith) { 2 } else { 1 };
+            self.at += if matches!(operator, Operator::StartsWith | Operator::EndsWith) {
+                2
+            } else {
+                1
+            };
             left = self.binary(operator, left, Self::additive)?;
         }
     }
@@ -656,23 +780,40 @@ impl Parser<'_> {
 
     fn case(&mut self) -> GraphResult<Expr> {
         self.expect_keyword("case")?;
-        let subject = if self.is_keyword("when") { None } else { Some(Box::new(self.expression()?)) };
+        let subject = if self.is_keyword("when") {
+            None
+        } else {
+            Some(Box::new(self.expression()?))
+        };
         let mut arms = Vec::new();
         while self.take_keyword("when") {
             let when = self.expression()?;
             self.expect_keyword("then")?;
             arms.push((when, self.expression()?));
         }
-        let otherwise = if self.take_keyword("else") { Some(Box::new(self.expression()?)) } else { None };
+        let otherwise = if self.take_keyword("else") {
+            Some(Box::new(self.expression()?))
+        } else {
+            None
+        };
         self.expect_keyword("end")?;
-        Ok(Expr::Case { subject, arms, otherwise })
+        Ok(Expr::Case {
+            subject,
+            arms,
+            otherwise,
+        })
     }
 
     fn call(&mut self, mut name: String) -> GraphResult<Expr> {
         self.at += 2;
         if self.take_symbol("*") {
             self.expect_symbol(")")?;
-            return Ok(Expr::Call { name, distinct: false, arguments: Vec::new(), star: true });
+            return Ok(Expr::Call {
+                name,
+                distinct: false,
+                arguments: Vec::new(),
+                star: true,
+            });
         }
         let distinct = self.take_keyword("distinct");
         let mut arguments = Vec::new();
@@ -686,7 +827,12 @@ impl Parser<'_> {
             self.expect_symbol(")")?;
         }
         name.make_ascii_lowercase();
-        Ok(Expr::Call { name, distinct, arguments, star: false })
+        Ok(Expr::Call {
+            name,
+            distinct,
+            arguments,
+            star: false,
+        })
     }
 
     fn projecting(&mut self, returning: bool) -> GraphResult<Projecting> {
@@ -699,13 +845,18 @@ impl Parser<'_> {
             loop {
                 let start = self.offset();
                 let expr = self.expression()?;
-                let end = self.tokens.get(self.at).map_or(self.text.len(), |(_, offset)| *offset);
+                let end = self
+                    .tokens
+                    .get(self.at)
+                    .map_or(self.text.len(), |(_, offset)| *offset);
                 let name = if self.take_keyword("as") {
                     self.name()?
                 } else {
                     match &expr {
                         Expr::Variable(name) => name.clone(),
-                        _ if !returning => return Err(syntax("Expression in WITH must be aliased (use AS)")),
+                        _ if !returning => {
+                            return Err(syntax("Expression in WITH must be aliased (use AS)"));
+                        }
                         _ => self.text[start..end].trim().to_owned(),
                     }
                 };
@@ -730,10 +881,30 @@ impl Parser<'_> {
                 }
             }
         }
-        let skip = if self.take_keyword("skip") { Some(self.expression()?) } else { None };
-        let limit = if self.take_keyword("limit") { Some(self.expression()?) } else { None };
-        let filter = if !returning && self.take_keyword("where") { Some(self.expression()?) } else { None };
-        Ok(Projecting { distinct, star, items, order, skip, limit, filter })
+        let skip = if self.take_keyword("skip") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        let limit = if self.take_keyword("limit") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        let filter = if !returning && self.take_keyword("where") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        Ok(Projecting {
+            distinct,
+            star,
+            items,
+            order,
+            skip,
+            limit,
+            filter,
+        })
     }
 
     fn set_items(&mut self, removing: bool) -> GraphResult<Vec<SetItem>> {
@@ -783,7 +954,9 @@ impl Parser<'_> {
         if self.take_keyword("merge") {
             let pattern = self.pattern()?;
             if self.is_keyword("on") {
-                return Err(GraphError::not_supported("MERGE ... ON CREATE and ON MATCH"));
+                return Err(GraphError::not_supported(
+                    "MERGE ... ON CREATE and ON MATCH",
+                ));
             }
             return Ok(Clause::Merge(pattern));
         }
@@ -845,27 +1018,48 @@ impl Parser<'_> {
         if self.take_keyword("yield") {
             loop {
                 let column = self.name()?;
-                let alias = if self.take_keyword("as") { self.name()? } else { column.clone() };
+                let alias = if self.take_keyword("as") {
+                    self.name()?
+                } else {
+                    column.clone()
+                };
                 yields.push((column, alias));
                 if !self.take_symbol(",") {
                     break;
                 }
             }
         }
-        Ok(Clause::Call { procedure, arguments, yields })
+        Ok(Clause::Call {
+            procedure,
+            arguments,
+            yields,
+        })
     }
 
     fn match_rest(&mut self, optional: bool) -> GraphResult<Clause> {
         let patterns = self.patterns()?;
-        let filter = if self.take_keyword("where") { Some(self.expression()?) } else { None };
-        Ok(Clause::Match { optional, patterns, filter })
+        let filter = if self.take_keyword("where") {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        Ok(Clause::Match {
+            optional,
+            patterns,
+            filter,
+        })
     }
 }
 
 /// Parses a query into its clauses.
 pub(crate) fn parse(text: &str) -> GraphResult<Vec<Clause>> {
     let tokens = tokenize(text)?;
-    let mut parser = Parser { text, tokens, at: 0, depth: 0 };
+    let mut parser = Parser {
+        text,
+        tokens,
+        at: 0,
+        depth: 0,
+    };
     let mut clauses = Vec::new();
     while parser.peek().is_some() && !parser.is_symbol(";") {
         clauses.push(parser.clause()?);
@@ -878,10 +1072,19 @@ pub(crate) fn parse(text: &str) -> GraphResult<Vec<Clause>> {
         return Err(syntax("an empty query"));
     }
     let last = clauses.last();
-    if !matches!(last, Some(Clause::Return(_) | Clause::Call { .. })) && !clauses.iter().any(Clause::writes) {
-        return Err(syntax("Query cannot conclude with MATCH, WITH or UNWIND (must be a RETURN clause or an update clause)"));
+    if !matches!(last, Some(Clause::Return(_) | Clause::Call { .. }))
+        && !clauses.iter().any(Clause::writes)
+    {
+        return Err(syntax(
+            "Query cannot conclude with MATCH, WITH or UNWIND (must be a RETURN clause or an update clause)",
+        ));
     }
-    if clauses.iter().rev().skip(1).any(|clause| matches!(clause, Clause::Return(_))) {
+    if clauses
+        .iter()
+        .rev()
+        .skip(1)
+        .any(|clause| matches!(clause, Clause::Return(_)))
+    {
         return Err(syntax("RETURN can only be used at the end of the query"));
     }
     Ok(clauses)

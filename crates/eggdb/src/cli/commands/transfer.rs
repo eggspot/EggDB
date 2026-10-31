@@ -304,9 +304,7 @@ fn write_export(
     };
     match only {
         Some(name) => {
-            let collection = transaction
-                .collection(name)
-                .map_err(ExportFailure::Read)?;
+            let collection = transaction.collection(name).map_err(ExportFailure::Read)?;
             jsonl::write_header(written.out, header).map_err(ExportFailure::Write)?;
             written.all(None, collection.scan(..))?;
         }
@@ -321,9 +319,7 @@ fn write_export(
             jsonl::write_header(written.out, &header).map_err(ExportFailure::Write)?;
             written.all(None, transaction.scan(..))?;
             for name in &names {
-                let collection = transaction
-                    .collection(name)
-                    .map_err(ExportFailure::Read)?;
+                let collection = transaction.collection(name).map_err(ExportFailure::Read)?;
                 written.exported.collections += 1;
                 if !written.all(Some(name), collection.scan(..))? {
                     jsonl::write_collection_line(written.out, name)
@@ -992,7 +988,9 @@ impl Import<'_, '_> {
         order: &mut KeyOrder,
         exists: impl FnOnce() -> Result<bool, Error>,
     ) -> Result<Decision, Failure> {
-        let EntryAt { line, source, key, .. } = entry;
+        let EntryAt {
+            line, source, key, ..
+        } = entry;
         let max_key = match entry.target {
             Some(_) => max_key.saturating_sub(COLLECTION_KEY_PREFIX_BYTES),
             None => max_key,

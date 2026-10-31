@@ -203,7 +203,9 @@ impl ServerView {
     }
 
     pub(crate) fn named(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|view| view.name().eq_ignore_ascii_case(name))
+        Self::ALL
+            .into_iter()
+            .find(|view| view.name().eq_ignore_ascii_case(name))
     }
 
     pub(crate) fn columns(self) -> &'static [CatalogColumn] {
@@ -215,9 +217,11 @@ impl ServerView {
             Self::DatabaseFiles | Self::MasterFiles => FILES,
             Self::Partitions => PARTITIONS,
             Self::Stats => STATS,
-            Self::ComputedColumns | Self::XmlIndexes | Self::FulltextIndexes | Self::Periods | Self::Synonyms => {
-                NAMED_OBJECT_COLUMNS
-            }
+            Self::ComputedColumns
+            | Self::XmlIndexes
+            | Self::FulltextIndexes
+            | Self::Periods
+            | Self::Synonyms => NAMED_OBJECT_COLUMNS,
             Self::ChangeTrackingTables => CHANGE_TRACKING_TABLES,
             Self::ChangeTrackingDatabases => CHANGE_TRACKING_DATABASES,
             Self::AssemblyTypes | Self::TableTypes => TYPE_COLUMNS,
@@ -225,7 +229,15 @@ impl ServerView {
     }
 }
 
-fn principal(columns: &'static [CatalogColumn], name: &str, id: i64, kind: &str, kind_desc: &str, fixed_role: bool, database: &str) -> Vec<Value> {
+fn principal(
+    columns: &'static [CatalogColumn],
+    name: &str,
+    id: i64,
+    kind: &str,
+    kind_desc: &str,
+    fixed_role: bool,
+    database: &str,
+) -> Vec<Value> {
     CatalogRow::new(columns)
         .set("name", text(name))
         .set("principal_id", int(id))
@@ -238,14 +250,29 @@ fn principal(columns: &'static [CatalogColumn], name: &str, id: i64, kind: &str,
         .done()
 }
 
-fn file(columns: &'static [CatalogColumn], snapshot: &CatalogSnapshot, file_id: i64, log: bool) -> Vec<Value> {
+fn file(
+    columns: &'static [CatalogColumn],
+    snapshot: &CatalogSnapshot,
+    file_id: i64,
+    log: bool,
+) -> Vec<Value> {
     CatalogRow::new(columns)
         .set("database_id", int(DATABASE_ID))
         .set("file_id", int(file_id))
         .set("type", Value::SmallInt(i16::from(log)))
         .set("type_desc", text(if log { "LOG" } else { "ROWS" }))
-        .set("data_space_id", int(if log { 0 } else { PRIMARY_FILEGROUP }))
-        .set("name", text(&format!("{}{}", snapshot.database, if log { "_log" } else { "" })))
+        .set(
+            "data_space_id",
+            int(if log { 0 } else { PRIMARY_FILEGROUP }),
+        )
+        .set(
+            "name",
+            text(&format!(
+                "{}{}",
+                snapshot.database,
+                if log { "_log" } else { "" }
+            )),
+        )
         .set("physical_name", text(&format!("{}.egg", snapshot.database)))
         .set("state", Value::SmallInt(0))
         .set("state_desc", text("ONLINE"))
@@ -262,12 +289,54 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, view: ServerView) -> Vec<Vec<Valu
     let user = crate::pg_catalog::session_user().unwrap_or_else(|| "eggdb".to_owned());
     match view {
         ServerView::Configurations => [
-            (1544, "max server memory (MB)", 2_147_483_647, "Maximum size of server memory (MB)", true, true),
-            (1543, "min server memory (MB)", 0, "Minimum size of server memory (MB)", true, true),
-            (518, "show advanced options", 0, "show advanced options", true, false),
-            (1539, "max degree of parallelism", 0, "maximum degree of parallelism", true, true),
-            (16_387, "xp_cmdshell", 0, "Enable or disable command shell", true, true),
-            (1568, "default trace enabled", 0, "Enable or disable the default trace", true, true),
+            (
+                1544,
+                "max server memory (MB)",
+                2_147_483_647,
+                "Maximum size of server memory (MB)",
+                true,
+                true,
+            ),
+            (
+                1543,
+                "min server memory (MB)",
+                0,
+                "Minimum size of server memory (MB)",
+                true,
+                true,
+            ),
+            (
+                518,
+                "show advanced options",
+                0,
+                "show advanced options",
+                true,
+                false,
+            ),
+            (
+                1539,
+                "max degree of parallelism",
+                0,
+                "maximum degree of parallelism",
+                true,
+                true,
+            ),
+            (
+                16_387,
+                "xp_cmdshell",
+                0,
+                "Enable or disable command shell",
+                true,
+                true,
+            ),
+            (
+                1568,
+                "default trace enabled",
+                0,
+                "Enable or disable the default trace",
+                true,
+                true,
+            ),
         ]
         .into_iter()
         .map(|(id, name, value, description, dynamic, advanced)| {
@@ -296,14 +365,46 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, view: ServerView) -> Vec<Vec<Valu
                 .done(),
         ],
         ServerView::ServerPrincipals => vec![
-            principal(columns, &user, 1, "S", "SQL_LOGIN", false, &snapshot.database),
+            principal(
+                columns,
+                &user,
+                1,
+                "S",
+                "SQL_LOGIN",
+                false,
+                &snapshot.database,
+            ),
             principal(columns, "sysadmin", 3, "R", "SERVER_ROLE", true, "master"),
             principal(columns, "public", 2, "R", "SERVER_ROLE", true, "master"),
         ],
         ServerView::DatabasePrincipals => vec![
-            principal(columns, "dbo", 1, "S", "SQL_USER", false, &snapshot.database),
-            principal(columns, "public", 0, "R", "DATABASE_ROLE", false, &snapshot.database),
-            principal(columns, "db_owner", 16_384, "R", "DATABASE_ROLE", true, &snapshot.database),
+            principal(
+                columns,
+                "dbo",
+                1,
+                "S",
+                "SQL_USER",
+                false,
+                &snapshot.database,
+            ),
+            principal(
+                columns,
+                "public",
+                0,
+                "R",
+                "DATABASE_ROLE",
+                false,
+                &snapshot.database,
+            ),
+            principal(
+                columns,
+                "db_owner",
+                16_384,
+                "R",
+                "DATABASE_ROLE",
+                true,
+                &snapshot.database,
+            ),
         ],
         ServerView::Filegroups | ServerView::DataSpaces => vec![
             CatalogRow::new(columns)
@@ -317,7 +418,10 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, view: ServerView) -> Vec<Vec<Valu
                 .done(),
         ],
         ServerView::DatabaseFiles | ServerView::MasterFiles => {
-            vec![file(columns, snapshot, 1, false), file(columns, snapshot, 2, true)]
+            vec![
+                file(columns, snapshot, 1, false),
+                file(columns, snapshot, 2, true),
+            ]
         }
         ServerView::ChangeTrackingDatabases
         | ServerView::ChangeTrackingTables

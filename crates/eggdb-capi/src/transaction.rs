@@ -8,7 +8,7 @@ use std::time::Duration;
 
 pub(crate) enum Transaction {
     Read(ReadTransaction<'static>),
-    Write(WriteTransaction<'static>),
+    Write(Box<WriteTransaction<'static>>),
 }
 
 /// A transaction (`eggdb_txn` in `eggdb.h`), from [`eggdb_begin_read`] or
@@ -111,7 +111,9 @@ pub unsafe extern "C" fn eggdb_begin_write(db: *mut EggdbDb, txn: *mut *mut Eggd
     // SAFETY: the caller's promises for `db` and `txn` are the ones `begin` needs.
     unsafe {
         begin(db, txn, |database| {
-            database.begin_write().map(Transaction::Write)
+            database
+                .begin_write()
+                .map(|transaction| Transaction::Write(Box::new(transaction)))
         })
     }
 }

@@ -171,9 +171,9 @@ fn large_piece(
 }
 
 fn one_large_statement(text: &str, line: u64) -> ScriptStatement {
-    let data = Words::sqlserver(text)
-        .next()
-        .is_some_and(|token| token.is_word("insert") || token.is_word("update") || token.is_word("delete"));
+    let data = Words::sqlserver(text).next().is_some_and(|token| {
+        token.is_word("insert") || token.is_word("update") || token.is_word("delete")
+    });
     let mut statement = ScriptStatement::plain(text.trim_end().to_owned(), line, line);
     if !data {
         statement.refused = Some(
@@ -310,7 +310,9 @@ fn is_name_byte(byte: u8) -> bool {
 
 fn is_block_word_start(bytes: &[u8], at: usize) -> bool {
     bytes.get(at).is_some_and(|&byte| is_name_byte(byte))
-        && at.checked_sub(1).is_none_or(|before| !is_name_byte(bytes[before]))
+        && at
+            .checked_sub(1)
+            .is_none_or(|before| !is_name_byte(bytes[before]))
 }
 
 fn word_end(bytes: &[u8], mut at: usize) -> usize {
@@ -326,9 +328,15 @@ fn begins_a_transaction(text: &str, after: usize) -> bool {
         .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .unwrap_or(rest.len());
     let word = rest.get(..end).unwrap_or("");
-    ["tran", "transaction", "distributed", "dialog", "conversation"]
-        .iter()
-        .any(|known| word.eq_ignore_ascii_case(known))
+    [
+        "tran",
+        "transaction",
+        "distributed",
+        "dialog",
+        "conversation",
+    ]
+    .iter()
+    .any(|known| word.eq_ignore_ascii_case(known))
 }
 
 struct LineCounter<'t> {

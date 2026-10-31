@@ -43,8 +43,7 @@ fn prepared<'s>(store: &'s MemoryStore, statements: &[&str]) -> Session<'s, Memo
 }
 
 const ITEMS: &str = "CREATE TABLE items (id integer PRIMARY KEY, name text, price integer)";
-const AUDIT: &str =
-    "CREATE TABLE audit (seq serial PRIMARY KEY, op text, tbl text, detail text)";
+const AUDIT: &str = "CREATE TABLE audit (seq serial PRIMARY KEY, op text, tbl text, detail text)";
 
 #[test]
 fn a_before_row_trigger_function_changes_the_new_row() {
@@ -64,8 +63,14 @@ END $$",
             "CREATE TRIGGER items_tidy BEFORE INSERT OR UPDATE ON items FOR EACH ROW EXECUTE FUNCTION tidy()",
         ],
     );
-    answer(&mut session, "INSERT INTO items (id, name) VALUES (1, 'pen')");
-    answer(&mut session, "UPDATE items SET name = 'ink', price = 3 WHERE id = 1");
+    answer(
+        &mut session,
+        "INSERT INTO items (id, name) VALUES (1, 'pen')",
+    );
+    answer(
+        &mut session,
+        "UPDATE items SET name = 'ink', price = 3 WHERE id = 1",
+    );
     assert_eq!(
         rows(&mut session, "SELECT id, name, price FROM items"),
         vec!["1|INK|3"]
@@ -137,7 +142,10 @@ END $$",
     answer(&mut session, "UPDATE items SET name = 'ink'");
     answer(&mut session, "DELETE FROM items");
     assert_eq!(
-        rows(&mut session, "SELECT op, tbl, detail FROM audit ORDER BY seq"),
+        rows(
+            &mut session,
+            "SELECT op, tbl, detail FROM audit ORDER BY seq"
+        ),
         vec![
             "INSERT|public.items|AFTER ROW items_log tag 1 pen",
             "UPDATE|public.items|AFTER ROW items_log tag 1 ink",
@@ -189,7 +197,10 @@ END $$",
             "CREATE TRIGGER items_after AFTER INSERT OR TRUNCATE ON items FOR EACH STATEMENT EXECUTE FUNCTION count_items()",
         ],
     );
-    answer(&mut session, "INSERT INTO items VALUES (1, 'pen', 2), (2, 'cup', 7)");
+    answer(
+        &mut session,
+        "INSERT INTO items VALUES (1, 'pen', 2), (2, 'cup', 7)",
+    );
     answer(&mut session, "TRUNCATE items");
     assert_eq!(
         rows(&mut session, "SELECT op, detail FROM audit ORDER BY seq"),
@@ -225,7 +236,10 @@ END $$",
         "INSERT INTO items VALUES (1, 'pen', 2), (2, 'cup', -1)",
     );
     assert_eq!(error.state().code(), "23514");
-    assert!(error.message().contains("negative price -1 for cup"), "{error}");
+    assert!(
+        error.message().contains("negative price -1 for cup"),
+        "{error}"
+    );
     assert!(rows(&mut session, "SELECT id FROM items").is_empty());
 }
 

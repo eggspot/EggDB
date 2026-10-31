@@ -11,17 +11,27 @@ fn invalid(message: &str) -> ContentError {
 }
 
 fn u16_at(data: &[u8], at: usize) -> Result<u16, ContentError> {
-    data.get(at..at + 2).map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]])).ok_or_else(|| invalid("a header ends early"))
+    data.get(at..at + 2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .ok_or_else(|| invalid("a header ends early"))
 }
 
 fn u32_at(data: &[u8], at: usize) -> Result<u32, ContentError> {
-    data.get(at..at + 4).map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])).ok_or_else(|| invalid("a header ends early"))
+    data.get(at..at + 4)
+        .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .ok_or_else(|| invalid("a header ends early"))
 }
 
 /// The CRC-32 (ISO 3309, as ZIP uses it) of `bytes`.
 pub fn crc32(bytes: &[u8]) -> u32 {
     !bytes.iter().fold(!0u32, |crc, byte| {
-        (0..8).fold(crc ^ u32::from(*byte), |crc, _| if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 })
+        (0..8).fold(crc ^ u32::from(*byte), |crc, _| {
+            if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            }
+        })
     })
 }
 
@@ -71,7 +81,9 @@ impl<'a> ZipArchive<'a> {
             let name_length = usize::from(u16_at(data, at + 28)?);
             let extra_length = usize::from(u16_at(data, at + 30)?);
             let comment_length = usize::from(u16_at(data, at + 32)?);
-            let name = data.get(at + 46..at + 46 + name_length).ok_or_else(|| invalid("a name ends early"))?;
+            let name = data
+                .get(at + 46..at + 46 + name_length)
+                .ok_or_else(|| invalid("a name ends early"))?;
             entries.push(ZipEntry {
                 name: String::from_utf8_lossy(name).into_owned(),
                 flags: u16_at(data, at + 8)?,
@@ -102,12 +114,22 @@ impl<'a> ZipArchive<'a> {
         if u32_at(self.data, local)? != LOCAL_SIGNATURE {
             return Err(invalid(&format!("{name}'s local header is missing")));
         }
-        let start = local + 30 + usize::from(u16_at(self.data, local + 26)?) + usize::from(u16_at(self.data, local + 28)?);
-        let compressed = self.data.get(start..start.saturating_add(entry.compressed_size)).ok_or_else(|| invalid(&format!("{name}'s data ends early")))?;
+        let start = local
+            + 30
+            + usize::from(u16_at(self.data, local + 26)?)
+            + usize::from(u16_at(self.data, local + 28)?);
+        let compressed = self
+            .data
+            .get(start..start.saturating_add(entry.compressed_size))
+            .ok_or_else(|| invalid(&format!("{name}'s data ends early")))?;
         let contents = match entry.method {
             0 => compressed.to_vec(),
             8 => inflate(compressed, limit)?,
-            method => return Err(invalid(&format!("{name} uses compression method {method}, not stored or deflate"))),
+            method => {
+                return Err(invalid(&format!(
+                    "{name} uses compression method {method}, not stored or deflate"
+                )));
+            }
         };
         if contents.len() != entry.size || crc32(&contents) != entry.crc {
             return Err(invalid(&format!("{name} fails its CRC-32 or size check")));

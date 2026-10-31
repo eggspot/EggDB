@@ -24,10 +24,16 @@ pub enum LocalBindError {
 impl std::fmt::Display for LocalBindError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingDirectory(directory) => write!(formatter, "directory {} does not exist", directory.display()),
+            Self::MissingDirectory(directory) => write!(
+                formatter,
+                "directory {} does not exist",
+                directory.display()
+            ),
             Self::InUse => formatter.write_str("a server is already accepting connections there"),
             Self::NotASocket => formatter.write_str("the path is not a socket"),
-            Self::Unsupported => formatter.write_str("Unix sockets are not available on this OS yet"),
+            Self::Unsupported => {
+                formatter.write_str("Unix sockets are not available on this OS yet")
+            }
             Self::Io(error) => write!(formatter, "{error}"),
         }
     }
@@ -47,12 +53,17 @@ mod imp {
     pub type LocalStream = std::os::unix::net::UnixStream;
 
     pub(super) fn bind(path: &Path) -> Result<LocalListener, LocalBindError> {
-        let directory = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         if !directory.is_dir() {
             return Err(LocalBindError::MissingDirectory(directory.to_path_buf()));
         }
         match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.file_type().is_socket() => return Err(LocalBindError::NotASocket),
+            Ok(metadata) if !metadata.file_type().is_socket() => {
+                return Err(LocalBindError::NotASocket);
+            }
             Ok(_) => match LocalStream::connect(path) {
                 Ok(_) => return Err(LocalBindError::InUse),
                 Err(_) => std::fs::remove_file(path).map_err(LocalBindError::Io)?,
@@ -61,7 +72,8 @@ mod imp {
             Err(error) => return Err(LocalBindError::Io(error)),
         }
         let listener = LocalListener::bind(path).map_err(LocalBindError::Io)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(LocalBindError::Io)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(LocalBindError::Io)?;
         Ok(listener)
     }
 }
@@ -162,7 +174,8 @@ mod tests {
     use std::io::{Read, Write};
 
     fn scratch(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("eggdb-local-socket-{name}-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-local-socket-{name}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&directory);
         directory
     }
@@ -187,7 +200,10 @@ mod tests {
     #[test]
     fn missing_directories_and_plain_files_are_refused() {
         let missing = scratch("missing").join("absent").join(".s.PGSQL.1");
-        assert!(matches!(bind_local(&missing), Err(LocalBindError::MissingDirectory(_))));
+        assert!(matches!(
+            bind_local(&missing),
+            Err(LocalBindError::MissingDirectory(_))
+        ));
         let directory = scratch("file");
         let path = directory.join("plain");
         std::fs::write(&path, b"x").unwrap();

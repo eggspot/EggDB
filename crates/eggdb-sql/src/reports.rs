@@ -49,18 +49,38 @@ $$;
 /// Hands at most `limit` queued report messages, oldest first, to `deliver` as the target URL
 /// and the JSON body, and removes those it accepted, stopping at the first it refuses so none is
 /// skipped. Returns how many were delivered.
-pub fn deliver_reports<S: KeyValueStore>(store: &S, limit: u64, deliver: &mut dyn FnMut(&str, &str) -> bool) -> SqlResult<u64> {
+pub fn deliver_reports<S: KeyValueStore>(
+    store: &S,
+    limit: u64,
+    deliver: &mut dyn FnMut(&str, &str) -> bool,
+) -> SqlResult<u64> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     let mut rows = Vec::new();
-    let listed = session.execute(&format!("SELECT id, target, body::text FROM eggdb_bi.deliveries ORDER BY id LIMIT {limit}"), &mut |result| rows = result.rows);
+    let listed = session.execute(
+        &format!(
+            "SELECT id, target, body::text FROM eggdb_bi.deliveries ORDER BY id LIMIT {limit}"
+        ),
+        &mut |result| rows = result.rows,
+    );
     if let Err(error) = listed {
         let _ = session.close();
-        return if matches!(error.state(), SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME) { Ok(0) } else { Err(error) };
+        return if matches!(
+            error.state(),
+            SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME
+        ) {
+            Ok(0)
+        } else {
+            Err(error)
+        };
     }
     let mut last = None;
     let mut delivered = 0;
     for row in &rows {
-        let (Some(Value::BigInt(id)), Some(target), Some(body)) = (row.first(), row.get(1).and_then(Value::to_text), row.get(2).and_then(Value::to_text)) else {
+        let (Some(Value::BigInt(id)), Some(target), Some(body)) = (
+            row.first(),
+            row.get(1).and_then(Value::to_text),
+            row.get(2).and_then(Value::to_text),
+        ) else {
             continue;
         };
         if !deliver(&target, &body) {
@@ -70,7 +90,10 @@ pub fn deliver_reports<S: KeyValueStore>(store: &S, limit: u64, deliver: &mut dy
         delivered += 1;
     }
     if let Some(last) = last {
-        session.execute(&format!("DELETE FROM eggdb_bi.deliveries WHERE id <= {last}"), &mut |_| {})?;
+        session.execute(
+            &format!("DELETE FROM eggdb_bi.deliveries WHERE id <= {last}"),
+            &mut |_| {},
+        )?;
     }
     session.close()?;
     Ok(delivered)
@@ -107,11 +130,21 @@ mod tests {
             2
         );
         assert_eq!(seen[0].0, "http://hooks.local/levels");
-        assert!(seen[0].1.contains("\"count\": 2") && seen[0].1.contains("milk"), "{}", seen[0].1);
-        assert!(seen[1].1.contains("eggs") && !seen[1].1.contains("milk"), "{}", seen[1].1);
+        assert!(
+            seen[0].1.contains("\"count\": 2") && seen[0].1.contains("milk"),
+            "{}",
+            seen[0].1
+        );
+        assert!(
+            seen[1].1.contains("eggs") && !seen[1].1.contains("milk"),
+            "{}",
+            seen[1].1
+        );
         assert_eq!(deliver_reports(&store, 10, &mut |_, _| true).unwrap(), 0);
         let mut retry = Session::new(&store);
-        retry.execute("SELECT eggdb_bi.run_report('low')", &mut |_| {}).unwrap();
+        retry
+            .execute("SELECT eggdb_bi.run_report('low')", &mut |_| {})
+            .unwrap();
         retry.close().unwrap();
         assert_eq!(deliver_reports(&store, 10, &mut |_, _| false).unwrap(), 0);
         assert_eq!(deliver_reports(&store, 10, &mut |_, _| true).unwrap(), 1);

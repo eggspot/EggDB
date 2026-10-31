@@ -167,15 +167,19 @@ fn decode_directory_string(string_tag: u8, bytes: &[u8]) -> Option<String> {
             String::from_utf8(bytes.to_vec()).ok()
         }
         tag::TELETEX_STRING => Some(bytes.iter().map(|&byte| char::from(byte)).collect()),
-        tag::BMP_STRING if bytes.len() % 2 == 0 => char::decode_utf16(
+        tag::BMP_STRING if bytes.len().is_multiple_of(2) => char::decode_utf16(
             bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_be_bytes([pair[0], pair[1]])),
         )
         .collect::<Result<String, _>>()
         .ok(),
-        tag::UNIVERSAL_STRING if bytes.len() % 4 == 0 => bytes
-            .chunks_exact(4)
+        tag::UNIVERSAL_STRING if bytes.len().is_multiple_of(4) => bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|quad| char::from_u32(u32::from_be_bytes([quad[0], quad[1], quad[2], quad[3]])))
             .collect(),
         _ => None,

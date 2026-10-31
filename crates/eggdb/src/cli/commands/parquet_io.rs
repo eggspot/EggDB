@@ -10,6 +10,8 @@ use eggdb_sql::{QueryResult, SqlType, Value};
 use std::cell::Cell as Flag;
 use std::path::Path;
 
+type TableColumns = Result<(String, Vec<Column>, u64), Exit>;
+
 const DAYS_FROM_1970_TO_2000: i64 = 10_957;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 const MAX_PARQUET_BYTES: u64 = 4 << 30;
@@ -22,11 +24,16 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_index = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
     (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
@@ -74,7 +81,11 @@ fn sql_type_of(column_type: ColumnType) -> String {
         ColumnType::Date => "date".to_owned(),
         ColumnType::Timestamp { utc: true } => "timestamptz".to_owned(),
         ColumnType::Timestamp { utc: false } => "timestamp".to_owned(),
-        ColumnType::Decimal { precision, scale } => format!("numeric({}, {})", precision.max(1), scale.min(precision.max(1))),
+        ColumnType::Decimal { precision, scale } => format!(
+            "numeric({}, {})",
+            precision.max(1),
+            scale.min(precision.max(1))
+        ),
     }
 }
 
@@ -93,7 +104,11 @@ fn csv_field(out: &mut String, column_type: ColumnType, cell: &Cell) {
             _ => out.push_str(&value.to_string()),
         },
         Cell::Float(value) if value.is_nan() => out.push_str("NaN"),
-        Cell::Float(value) if value.is_infinite() => out.push_str(if *value > 0.0 { "Infinity" } else { "-Infinity" }),
+        Cell::Float(value) if value.is_infinite() => out.push_str(if *value > 0.0 {
+            "Infinity"
+        } else {
+            "-Infinity"
+        }),
         Cell::Float(value) => out.push_str(&value.to_string()),
         Cell::Decimal(unscaled) => {
             let scale = match column_type {
@@ -150,15 +165,23 @@ fn column_of(name: &str, sql_type: Option<SqlType>, values: Vec<Value>) -> Colum
             (_, Value::BigInt(number)) => Cell::Int(number),
             (_, Value::Real(number)) => Cell::Float(f64::from(number)),
             (_, Value::Double(number)) => Cell::Float(number),
-            (ColumnType::Date, Value::Date(days)) => Cell::Int(i64::from(days) + DAYS_FROM_1970_TO_2000),
-            (ColumnType::Timestamp { .. }, Value::Timestamp(micros) | Value::TimestampTz(micros)) => {
-                Cell::Int(micros.saturating_add(DAYS_FROM_1970_TO_2000 * MICROS_PER_DAY))
+            (ColumnType::Date, Value::Date(days)) => {
+                Cell::Int(i64::from(days) + DAYS_FROM_1970_TO_2000)
             }
+            (
+                ColumnType::Timestamp { .. },
+                Value::Timestamp(micros) | Value::TimestampTz(micros),
+            ) => Cell::Int(micros.saturating_add(DAYS_FROM_1970_TO_2000 * MICROS_PER_DAY)),
             (ColumnType::Binary, Value::Bytea(bytes)) => Cell::Bytes(bytes),
             (_, other) => Cell::Bytes(other.to_text().unwrap_or_default().into_bytes()),
         })
         .collect();
-    Column { name: name.to_owned(), column_type, nullable: true, cells }
+    Column {
+        name: name.to_owned(),
+        column_type,
+        nullable: true,
+        cells,
+    }
 }
 
 impl Session<'_> {
@@ -166,31 +189,67 @@ impl Session<'_> {
         let usage = |message: String| Failure::usage(message, Some(CommandName::Import));
         let shown = render::text(source.display().to_string().as_bytes());
         let table = self.request.csv.table.clone().unwrap_or_default();
-        let size = std::fs::metadata(source).map_err(|error| usage(format!("cannot read {shown}: {error}")))?.len();
+        let size = std::fs::metadata(source)
+            .map_err(|error| usage(format!("cannot read {shown}: {error}")))?
+            .len();
         if size > MAX_PARQUET_BYTES {
-            return Err(usage(format!("{shown} is larger than 4 GiB, the most eggdb import --parquet reads at once")));
+            return Err(usage(format!(
+                "{shown} is larger than 4 GiB, the most eggdb import --parquet reads at once"
+            )));
         }
-        let bytes = std::fs::read(source).map_err(|error| usage(format!("cannot read {shown}: {error}")))?;
-        let columns = eggdb_parquet::read(&bytes)
-            .map_err(|error| Failure::database(format!("cannot import {shown}: {error}"), Exit::DatabaseError))?;
+        let bytes = std::fs::read(source)
+            .map_err(|error| usage(format!("cannot read {shown}: {error}")))?;
+        let columns = eggdb_parquet::read(&bytes).map_err(|error| {
+            Failure::database(
+                format!("cannot import {shown}: {error}"),
+                Exit::DatabaseError,
+            )
+        })?;
         let rows = columns.first().map_or(0, |column| column.cells.len()) as u64;
         let definitions: Vec<String> = columns
             .iter()
-            .map(|column| format!("{} {}", quoted_name(&column.name), sql_type_of(column.column_type)))
+            .map(|column| {
+                format!(
+                    "{} {}",
+                    quoted_name(&column.name),
+                    sql_type_of(column.column_type)
+                )
+            })
             .collect();
-        let names: Vec<String> = columns.iter().map(|column| quoted_name(&column.name)).collect();
-        let create = format!("CREATE TABLE IF NOT EXISTS {table} ({})", definitions.join(", "));
-        let copy = format!("COPY {table} ({}) FROM STDIN (FORMAT csv)", names.join(", "));
+        let names: Vec<String> = columns
+            .iter()
+            .map(|column| quoted_name(&column.name))
+            .collect();
+        let create = format!(
+            "CREATE TABLE IF NOT EXISTS {table} ({})",
+            definitions.join(", ")
+        );
+        let copy = format!(
+            "COPY {table} ({}) FROM STDIN (FORMAT csv)",
+            names.join(", ")
+        );
         let csv = csv_of(&columns);
-        let db = self.open(Access::Write { create: self.request.create }, None)?;
+        let db = self.open(
+            Access::Write {
+                create: self.request.create,
+            },
+            None,
+        )?;
         let store = DatabaseStore(&db);
         let mut session = eggdb_sql::Session::new(&store);
         let copied_out = Flag::new(false);
         let mut input = csv.as_bytes();
-        let outcome = session.execute("BEGIN", &mut |_| {}).and_then(|()| session.execute(&create, &mut |_| {})).and_then(|()| {
-            let mut channel = StreamCopy { input: Some(&mut input), output: None, copied_out: &copied_out };
-            session.execute_with_copy(&copy, &mut |_: QueryResult| true, &mut channel)
-        });
+        let outcome = session
+            .execute("BEGIN", &mut |_| {})
+            .and_then(|()| session.execute(&create, &mut |_| {}))
+            .and_then(|()| {
+                let mut channel = StreamCopy {
+                    input: Some(&mut input),
+                    output: None,
+                    copied_out: &copied_out,
+                };
+                session.execute_with_copy(&copy, &mut |_: QueryResult| true, &mut channel)
+            });
         let outcome = match outcome {
             Ok(()) => session.execute("COMMIT", &mut |_| {}),
             Err(error) => {
@@ -203,7 +262,8 @@ impl Session<'_> {
             Ok(()) => Exit::Done,
             Err(error) => {
                 print_error(&mut self.messages, &error, &copy);
-                self.messages.text("Nothing was imported: the rows load in one transaction.\n");
+                self.messages
+                    .text("Nothing was imported: the rows load in one transaction.\n");
                 exit_for(&error)
             }
         };
@@ -213,14 +273,23 @@ impl Session<'_> {
         }
         match self.format {
             Format::Json => self.out.text(
-                &JsonObject::new().string("file", &self.file_display).string("from", &shown).string("table", &table).number("rows", rows).line(),
+                &JsonObject::new()
+                    .string("file", &self.file_display)
+                    .string("from", &shown)
+                    .string("table", &table)
+                    .number("rows", rows)
+                    .line(),
             ),
-            _ => self.out.text(&format!("imported {} rows from {shown} into {table} in {}\n", render::count(rows), self.file)),
+            _ => self.out.text(&format!(
+                "imported {} rows from {shown} into {table} in {}\n",
+                render::count(rows),
+                self.file
+            )),
         }
         Ok(Exit::Done)
     }
 
-    fn table_columns(&mut self) -> Result<Result<(String, Vec<Column>, u64), Exit>, Failure> {
+    fn table_columns(&mut self) -> Result<TableColumns, Failure> {
         let table = self.request.csv.table.clone().unwrap_or_default();
         let query = format!("SELECT * FROM {table}");
         let db = self.open(Access::ReadOnly, None)?;
@@ -235,24 +304,43 @@ impl Session<'_> {
             return Ok(Err(exit_for(&error)));
         }
         self.close(db)?;
-        let (described, found_rows) = found.map_or((None, Vec::new()), |result: QueryResult| (result.columns, result.rows));
-        let names: Vec<(String, Option<SqlType>)> =
-            described.unwrap_or_default().into_iter().map(|column| (column.name, column.sql_type)).collect();
+        let (described, found_rows) = found.map_or((None, Vec::new()), |result: QueryResult| {
+            (result.columns, result.rows)
+        });
+        let names: Vec<(String, Option<SqlType>)> = described
+            .unwrap_or_default()
+            .into_iter()
+            .map(|column| (column.name, column.sql_type))
+            .collect();
         let rows = found_rows.len() as u64;
-        let mut by_column: Vec<Vec<Value>> = vec![Vec::with_capacity(found_rows.len()); names.len()];
+        let mut by_column: Vec<Vec<Value>> =
+            vec![Vec::with_capacity(found_rows.len()); names.len()];
         for row in found_rows {
             for (slot, value) in by_column.iter_mut().zip(row) {
                 slot.push(value);
             }
         }
-        let columns: Vec<Column> = names.iter().zip(by_column).map(|((name, sql_type), values)| column_of(name, *sql_type, values)).collect();
+        let columns: Vec<Column> = names
+            .iter()
+            .zip(by_column)
+            .map(|((name, sql_type), values)| column_of(name, *sql_type, values))
+            .collect();
         Ok(Ok((table, columns, rows)))
     }
 
     fn written(&mut self, table: &str, shown: &str, rows: u64) -> Exit {
         match self.format {
-            Format::Json => self.out.text(&JsonObject::new().string("table", table).string("to", shown).number("rows", rows).line()),
-            _ => self.out.text(&format!("exported {} rows of {table} to {shown}\n", render::count(rows))),
+            Format::Json => self.out.text(
+                &JsonObject::new()
+                    .string("table", table)
+                    .string("to", shown)
+                    .number("rows", rows)
+                    .line(),
+            ),
+            _ => self.out.text(&format!(
+                "exported {} rows of {table} to {shown}\n",
+                render::count(rows)
+            )),
         }
         Exit::Done
     }
@@ -263,10 +351,18 @@ impl Session<'_> {
             Ok(found) => found,
             Err(exit) => return Ok(exit),
         };
-        let bytes = eggdb_parquet::write(&columns)
-            .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
-        std::fs::write(target, bytes)
-            .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
+        let bytes = eggdb_parquet::write(&columns).map_err(|error| {
+            Failure::database(
+                format!("cannot write {shown}: {error}"),
+                Exit::DatabaseError,
+            )
+        })?;
+        std::fs::write(target, bytes).map_err(|error| {
+            Failure::database(
+                format!("cannot write {shown}: {error}"),
+                Exit::DatabaseError,
+            )
+        })?;
         Ok(self.written(&table, &shown, rows))
     }
 
@@ -276,27 +372,19 @@ impl Session<'_> {
             Ok(found) => found,
             Err(exit) => return Ok(exit),
         };
-        let bytes = eggdb_arrow::write_stream(&columns)
-            .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
-        std::fs::write(target, bytes)
-            .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
+        let bytes = eggdb_arrow::write_stream(&columns).map_err(|error| {
+            Failure::database(
+                format!("cannot write {shown}: {error}"),
+                Exit::DatabaseError,
+            )
+        })?;
+        std::fs::write(target, bytes).map_err(|error| {
+            Failure::database(
+                format!("cannot write {shown}: {error}"),
+                Exit::DatabaseError,
+            )
+        })?;
         Ok(self.written(&table, &shown, rows))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{date_text, decimal_text, timestamp_text};
-
-    #[test]
-    fn values_render_as_postgresql_reads_them() {
-        assert_eq!(date_text(0), "1970-01-01");
-        assert_eq!(date_text(19_783), "2024-03-01");
-        assert_eq!(date_text(-1), "1969-12-31");
-        assert_eq!(timestamp_text(1_000_001, true), "1970-01-01 00:00:01.000001+00");
-        assert_eq!(decimal_text(12_345, 2), "123.45");
-        assert_eq!(decimal_text(-5, 3), "-0.005");
-        assert_eq!(decimal_text(7, 0), "7");
     }
 }
 
@@ -311,7 +399,10 @@ impl Session<'_> {
         {
             return Err(Failure::coded(
                 "already_exists",
-                format!("{} exists; eggdb export never replaces a file", render::text(path.display().to_string().as_bytes())),
+                format!(
+                    "{} exists; eggdb export never replaces a file",
+                    render::text(path.display().to_string().as_bytes())
+                ),
                 Exit::DatabaseError,
             ));
         }
@@ -330,8 +421,12 @@ impl Session<'_> {
             }
         };
         match &target {
-            Some(path) => std::fs::write(path, &written)
-                .map_err(|error| Failure::database(format!("cannot write the dump: {error}"), Exit::DatabaseError))?,
+            Some(path) => std::fs::write(path, &written).map_err(|error| {
+                Failure::database(
+                    format!("cannot write the dump: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?,
             None => self.out.bytes(&written),
         }
         let summary = format!(
@@ -339,7 +434,11 @@ impl Session<'_> {
             render::count(report.tables),
             render::count(report.rows),
             dialect.name(),
-            if report.views_skipped > 0 { format!("; {} views were not written yet", report.views_skipped) } else { String::new() }
+            if report.views_skipped > 0 {
+                format!("; {} views were not written yet", report.views_skipped)
+            } else {
+                String::new()
+            }
         );
         if target.is_some() {
             match self.format {
@@ -357,5 +456,24 @@ impl Session<'_> {
             self.messages.text(&summary);
         }
         Ok(Exit::Done)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{date_text, decimal_text, timestamp_text};
+
+    #[test]
+    fn values_render_as_postgresql_reads_them() {
+        assert_eq!(date_text(0), "1970-01-01");
+        assert_eq!(date_text(19_783), "2024-03-01");
+        assert_eq!(date_text(-1), "1969-12-31");
+        assert_eq!(
+            timestamp_text(1_000_001, true),
+            "1970-01-01 00:00:01.000001+00"
+        );
+        assert_eq!(decimal_text(12_345, 2), "123.45");
+        assert_eq!(decimal_text(-5, 3), "-0.005");
+        assert_eq!(decimal_text(7, 0), "7");
     }
 }

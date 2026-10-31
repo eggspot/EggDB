@@ -485,9 +485,11 @@ pub(crate) fn parse_timestamp(text: &str, with_zone: bool) -> SqlResult<i64> {
         match parsed.offset_seconds {
             Some(offset) => local - i128::from(offset) * i128::from(MICROS_PER_SECOND),
             None => {
-                let clamped = i64::try_from(local).unwrap_or(if local < 0 { i64::MIN } else { i64::MAX });
-                local - i128::from(session_zone().offset_of_local(clamped))
-                    * i128::from(MICROS_PER_SECOND)
+                let clamped =
+                    i64::try_from(local).unwrap_or(if local < 0 { i64::MIN } else { i64::MAX });
+                local
+                    - i128::from(session_zone().offset_of_local(clamped))
+                        * i128::from(MICROS_PER_SECOND)
             }
         }
     } else {
@@ -600,8 +602,7 @@ fn mysql_fraction(digits: &str) -> Option<i64> {
 }
 
 fn small_number(text: &str, longest: usize) -> Option<i64> {
-    if text.is_empty() || text.len() > longest || !text.bytes().all(|byte| byte.is_ascii_digit())
-    {
+    if text.is_empty() || text.len() > longest || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     text.parse().ok()

@@ -4,9 +4,21 @@ pub(crate) const MAX_PAYLOAD: usize = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Frame {
     Connect(String),
-    Publish { subject: String, reply: Option<String>, headers: Vec<u8>, payload: Vec<u8> },
-    Subscribe { subject: String, queue: Option<String>, sid: String },
-    Unsubscribe { sid: String, max: Option<u64> },
+    Publish {
+        subject: String,
+        reply: Option<String>,
+        headers: Vec<u8>,
+        payload: Vec<u8>,
+    },
+    Subscribe {
+        subject: String,
+        queue: Option<String>,
+        sid: String,
+    },
+    Unsubscribe {
+        sid: String,
+        max: Option<u64>,
+    },
     Ping,
     Pong,
 }
@@ -21,7 +33,11 @@ fn size(text: &str) -> Result<usize, &'static str> {
 
 fn line_end(buffer: &[u8]) -> Option<(usize, usize)> {
     let newline = buffer.iter().position(|&byte| byte == b'\n')?;
-    let end = if newline > 0 && buffer[newline - 1] == b'\r' { newline - 1 } else { newline };
+    let end = if newline > 0 && buffer[newline - 1] == b'\r' {
+        newline - 1
+    } else {
+        newline
+    };
     Some((end, newline + 1))
 }
 
@@ -29,7 +45,11 @@ fn line_end(buffer: &[u8]) -> Option<(usize, usize)> {
 /// bytes are needed, or the `-ERR` text when the input breaks the protocol.
 pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'static str> {
     let Some((end, after)) = line_end(buffer) else {
-        return if buffer.len() > MAX_CONTROL_LINE { Err(CONTROL_LINE_TOO_LONG) } else { Ok(None) };
+        return if buffer.len() > MAX_CONTROL_LINE {
+            Err(CONTROL_LINE_TOO_LONG)
+        } else {
+            Ok(None)
+        };
     };
     if end > MAX_CONTROL_LINE {
         return Err(CONTROL_LINE_TOO_LONG);
@@ -37,7 +57,10 @@ pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'stat
     let line = std::str::from_utf8(&buffer[..end]).map_err(|_| UNKNOWN_OPERATION)?;
     let trimmed = line.trim_start();
     let (operation, rest) = trimmed.split_once([' ', '\t']).unwrap_or((trimmed, ""));
-    let arguments: Vec<&str> = rest.split([' ', '\t']).filter(|argument| !argument.is_empty()).collect();
+    let arguments: Vec<&str> = rest
+        .split([' ', '\t'])
+        .filter(|argument| !argument.is_empty())
+        .collect();
     let owned = |text: &str| text.to_owned();
     match operation.to_ascii_uppercase().as_str() {
         "PING" => Ok(Some((Frame::Ping, after))),
@@ -45,16 +68,30 @@ pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'stat
         "CONNECT" => Ok(Some((Frame::Connect(rest.trim().to_owned()), after))),
         "SUB" => {
             let frame = match arguments.as_slice() {
-                [subject, sid] => Frame::Subscribe { subject: owned(subject), queue: None, sid: owned(sid) },
-                [subject, queue, sid] => Frame::Subscribe { subject: owned(subject), queue: Some(owned(queue)), sid: owned(sid) },
+                [subject, sid] => Frame::Subscribe {
+                    subject: owned(subject),
+                    queue: None,
+                    sid: owned(sid),
+                },
+                [subject, queue, sid] => Frame::Subscribe {
+                    subject: owned(subject),
+                    queue: Some(owned(queue)),
+                    sid: owned(sid),
+                },
                 _ => return Err(UNKNOWN_OPERATION),
             };
             Ok(Some((frame, after)))
         }
         "UNSUB" => {
             let frame = match arguments.as_slice() {
-                [sid] => Frame::Unsubscribe { sid: owned(sid), max: None },
-                [sid, max] => Frame::Unsubscribe { sid: owned(sid), max: Some(max.parse().map_err(|_| UNKNOWN_OPERATION)?) },
+                [sid] => Frame::Unsubscribe {
+                    sid: owned(sid),
+                    max: None,
+                },
+                [sid, max] => Frame::Unsubscribe {
+                    sid: owned(sid),
+                    max: Some(max.parse().map_err(|_| UNKNOWN_OPERATION)?),
+                },
                 _ => return Err(UNKNOWN_OPERATION),
             };
             Ok(Some((frame, after)))
@@ -70,7 +107,9 @@ pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'stat
         "HPUB" => {
             let (subject, reply, header_size, total) = match arguments.as_slice() {
                 [subject, header_size, total] => (*subject, None, size(header_size)?, size(total)?),
-                [subject, reply, header_size, total] => (*subject, Some(*reply), size(header_size)?, size(total)?),
+                [subject, reply, header_size, total] => {
+                    (*subject, Some(*reply), size(header_size)?, size(total)?)
+                }
                 _ => return Err(UNKNOWN_OPERATION),
             };
             if header_size > total {
@@ -82,7 +121,14 @@ pub(crate) fn next_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, &'stat
     }
 }
 
-fn body(buffer: &[u8], start: usize, subject: &str, reply: Option<&str>, header_size: usize, total: usize) -> Result<Option<(Frame, usize)>, &'static str> {
+fn body(
+    buffer: &[u8],
+    start: usize,
+    subject: &str,
+    reply: Option<&str>,
+    header_size: usize,
+    total: usize,
+) -> Result<Option<(Frame, usize)>, &'static str> {
     if total > MAX_PAYLOAD {
         return Err(PAYLOAD_TOO_LARGE);
     }
@@ -117,7 +163,9 @@ pub(crate) fn valid_subject(subject: &str, wildcards: bool) -> bool {
     let count = subject.split('.').count();
     subject.split('.').enumerate().all(|(at, token)| {
         !token.is_empty()
-            && !token.bytes().any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+            && !token
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
             && match token {
                 "*" => wildcards,
                 ">" => wildcards && at + 1 == count,
@@ -141,10 +189,22 @@ pub(crate) fn subject_matches(filter: &str, subject: &str) -> bool {
 }
 
 /// A delivered message: `HMSG` when it has headers and the subscriber asked for them, else `MSG`.
-pub(crate) fn message(subject: &str, sid: &str, reply: Option<&str>, headers: &[u8], payload: &[u8], with_headers: bool) -> Vec<u8> {
+pub(crate) fn message(
+    subject: &str,
+    sid: &str,
+    reply: Option<&str>,
+    headers: &[u8],
+    payload: &[u8],
+    with_headers: bool,
+) -> Vec<u8> {
     let reply = reply.map(|reply| format!(" {reply}")).unwrap_or_default();
     let mut out = if with_headers && !headers.is_empty() {
-        let mut out = format!("HMSG {subject} {sid}{reply} {} {}\r\n", headers.len(), headers.len() + payload.len()).into_bytes();
+        let mut out = format!(
+            "HMSG {subject} {sid}{reply} {} {}\r\n",
+            headers.len(),
+            headers.len() + payload.len()
+        )
+        .into_bytes();
         out.extend_from_slice(headers);
         out
     } else {

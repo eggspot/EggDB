@@ -179,7 +179,9 @@ impl<'t> Parser<'t> {
         };
         let statement = match word.as_ref() {
             "create" if self.creates_mysql_routine() => self.mysql_create_routine()?,
-            "drop" if self.is_word_at(1, "procedure") || self.is_word_at(1, "function") => self.mysql_drop_routine()?,
+            "drop" if self.is_word_at(1, "procedure") || self.is_word_at(1, "function") => {
+                self.mysql_drop_routine()?
+            }
             "call" => self.call_routine()?,
             "show" => self.mysql_show()?,
             "describe" | "desc" => {
@@ -299,12 +301,19 @@ impl<'t> Parser<'t> {
             MySqlStatement::ShowTriggers {
                 like: self.like_pattern()?,
             }
-        } else if self.take_word("engines") || (self.is_word("storage") && self.is_word_at(1, "engines")) {
+        } else if self.take_word("engines")
+            || (self.is_word("storage") && self.is_word_at(1, "engines"))
+        {
             if self.take_word("storage") {
                 self.expect_word("engines")?;
             }
-            MySqlStatement::ShowServerFacts { view: crate::mysql_catalog::MySqlRelation::Engines, like: None }
-        } else if self.take_word("charset") || (self.is_word("character") && self.is_word_at(1, "set")) {
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::Engines,
+                like: None,
+            }
+        } else if self.take_word("charset")
+            || (self.is_word("character") && self.is_word_at(1, "set"))
+        {
             if self.take_word("character") {
                 self.expect_word("set")?;
             }
@@ -318,9 +327,15 @@ impl<'t> Parser<'t> {
                 like: self.like_pattern()?,
             }
         } else if self.take_word("plugins") {
-            MySqlStatement::ShowServerFacts { view: crate::mysql_catalog::MySqlRelation::Plugins, like: None }
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::Plugins,
+                like: None,
+            }
         } else if self.take_word("processlist") {
-            MySqlStatement::ShowServerFacts { view: crate::mysql_catalog::MySqlRelation::ProcessList, like: None }
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::ProcessList,
+                like: None,
+            }
         } else if self.take_word("warnings") || self.take_word("errors") {
             let errors_only = self.tokens[self.at - 1].kind == TokenKind::Word("errors".into());
             if self.take_word("limit") {
@@ -344,7 +359,8 @@ impl<'t> Parser<'t> {
             };
             MySqlStatement::ShowCount { errors_only }
         } else {
-            let _ = self.take_word("session") || self.take_word("local") || self.take_word("global");
+            let _ =
+                self.take_word("session") || self.take_word("local") || self.take_word("global");
             if self.take_word("variables") {
                 MySqlStatement::ShowVariables {
                     like: self.like_pattern()?,

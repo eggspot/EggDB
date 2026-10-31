@@ -86,7 +86,9 @@ impl<'t> Parser<'t> {
             let column = self.plsql_constant()?;
             self.expect(&TokenKind::RightParen)?;
             let listed = match column {
-                Value::Text(column) => updated.iter().any(|known| known.eq_ignore_ascii_case(&column)),
+                Value::Text(column) => updated
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(&column)),
                 _ => false,
             };
             return Ok(Some(constant(Value::Boolean(listed), position)));
@@ -267,9 +269,7 @@ impl<'t> Parser<'t> {
 
     fn element_fields(&mut self, element: Value, position: usize) -> SqlResult<Expr> {
         let mut current = element;
-        while self.peek_kind() == &TokenKind::Dot
-            && self.peek_kind_at(2) != &TokenKind::LeftParen
-        {
+        while self.peek_kind() == &TokenKind::Dot && self.peek_kind_at(2) != &TokenKind::LeftParen {
             let field: &'t str = match self.peek_kind_at(1) {
                 TokenKind::Word(field) => field.as_ref(),
                 TokenKind::QuotedIdentifier(field) => field.as_str(),

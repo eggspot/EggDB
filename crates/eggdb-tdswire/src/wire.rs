@@ -388,7 +388,11 @@ impl<'a> Wire<'a> {
         stream
             .set_read_timeout(Some(timeout))
             .map_err(|error| error.to_string())?;
-        let prefix = if framed { Vec::new() } else { vec![TLS_HANDSHAKE] };
+        let prefix = if framed {
+            Vec::new()
+        } else {
+            vec![TLS_HANDSHAKE]
+        };
         let mut tls = TlsStream::accept(TdsTransport::new(stream, prefix, framed), config)
             .map_err(|error| error.to_string())?;
         tls.get_mut().framed = false;

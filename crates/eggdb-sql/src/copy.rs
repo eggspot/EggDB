@@ -341,10 +341,8 @@ fn binary_value(bytes: &[u8], column: &Column) -> SqlResult<Value> {
             crate::eval::string_constant(format::utf8_text(bytes)?, Some(column.sql_type))?
         }
         other => {
-            let text = crate::pg_binary::decode_pg_binary_text(
-                bytes,
-                crate::pg_catalog::type_oid(other),
-            )?;
+            let text =
+                crate::pg_binary::decode_pg_binary_text(bytes, crate::pg_catalog::type_oid(other))?;
             crate::eval::string_constant(&text, Some(other))?
         }
     };
@@ -980,10 +978,8 @@ impl RowsOut {
                 channel.write_copy_data(writer.line(texts))
             }
             Self::Binary(writer) => {
-                let values: Vec<&Value> = targets
-                    .iter()
-                    .filter_map(|&index| row.get(index))
-                    .collect();
+                let values: Vec<&Value> =
+                    targets.iter().filter_map(|&index| row.get(index)).collect();
                 channel.write_copy_data(writer.row(&values)?)
             }
         }
@@ -1003,7 +999,8 @@ fn send_header(
     names: &[&str],
 ) -> SqlResult<()> {
     if copy.options.header != CopyHeader::Absent {
-        let names: Vec<Option<String>> = names.iter().map(|name| Some((*name).to_owned())).collect();
+        let names: Vec<Option<String>> =
+            names.iter().map(|name| Some((*name).to_owned())).collect();
         let mut plain = RowWriter::new(Layout::of(&copy.options), Vec::new());
         channel.write_copy_data(plain.line(&names))?;
     }

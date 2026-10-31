@@ -111,7 +111,10 @@ fn full_joins_with_using_merge_the_joined_columns() {
          CREATE TABLE r (k integer, y text); INSERT INTO r VALUES (2, 'c'), (3, 'd')",
     );
     assert_eq!(
-        answer(&mut session, "SELECT * FROM l FULL JOIN r USING (k) ORDER BY k"),
+        answer(
+            &mut session,
+            "SELECT * FROM l FULL JOIN r USING (k) ORDER BY k"
+        ),
         "k|x|y\n1|a|NULL\n2|b|c\n3|NULL|d\nSELECT 3"
     );
     assert_eq!(

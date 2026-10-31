@@ -18,27 +18,44 @@ fn physical(column_type: ColumnType) -> i64 {
 }
 
 fn value_bytes(column: &Column, out: &mut Vec<u8>) -> Result<(), ParquetError> {
-    let mismatch = || ParquetError(format!("column {} holds a value that does not fit its type", column.name));
+    let mismatch = || {
+        ParquetError(format!(
+            "column {} holds a value that does not fit its type",
+            column.name
+        ))
+    };
     let mut bits = Vec::new();
     for cell in &column.cells {
         match (column.column_type, cell) {
             (_, Cell::Null) => {}
             (ColumnType::Boolean, Cell::Boolean(flag)) => bits.push(u64::from(*flag)),
             (ColumnType::Int32 | ColumnType::Date, Cell::Int(value)) => {
-                out.extend_from_slice(&i32::try_from(*value).map_err(|_| mismatch())?.to_le_bytes());
+                out.extend_from_slice(
+                    &i32::try_from(*value).map_err(|_| mismatch())?.to_le_bytes(),
+                );
             }
-            (ColumnType::Int64 | ColumnType::Timestamp { .. }, Cell::Int(value)) => out.extend_from_slice(&value.to_le_bytes()),
+            (ColumnType::Int64 | ColumnType::Timestamp { .. }, Cell::Int(value)) => {
+                out.extend_from_slice(&value.to_le_bytes())
+            }
             (ColumnType::Decimal { precision, .. }, Cell::Decimal(value)) if precision <= 18 => {
-                out.extend_from_slice(&i64::try_from(*value).map_err(|_| mismatch())?.to_le_bytes());
+                out.extend_from_slice(
+                    &i64::try_from(*value).map_err(|_| mismatch())?.to_le_bytes(),
+                );
             }
             (ColumnType::Decimal { .. }, Cell::Decimal(value)) => {
                 out.extend_from_slice(&16u32.to_le_bytes());
                 out.extend_from_slice(&value.to_be_bytes());
             }
-            (ColumnType::Float, Cell::Float(value)) => out.extend_from_slice(&(*value as f32).to_le_bytes()),
+            (ColumnType::Float, Cell::Float(value)) => {
+                out.extend_from_slice(&(*value as f32).to_le_bytes())
+            }
             (ColumnType::Double, Cell::Float(value)) => out.extend_from_slice(&value.to_le_bytes()),
             (ColumnType::Text | ColumnType::Binary, Cell::Bytes(bytes)) => {
-                out.extend_from_slice(&u32::try_from(bytes.len()).map_err(|_| mismatch())?.to_le_bytes());
+                out.extend_from_slice(
+                    &u32::try_from(bytes.len())
+                        .map_err(|_| mismatch())?
+                        .to_le_bytes(),
+                );
                 out.extend_from_slice(bytes);
             }
             _ => return Err(mismatch()),
@@ -53,13 +70,24 @@ fn value_bytes(column: &Column, out: &mut Vec<u8>) -> Result<(), ParquetError> {
 fn page(column: &Column) -> Result<Vec<u8>, ParquetError> {
     let mut data = Vec::new();
     if column.nullable {
-        let defined: Vec<u64> = column.cells.iter().map(|cell| u64::from(*cell != Cell::Null)).collect();
+        let defined: Vec<u64> = column
+            .cells
+            .iter()
+            .map(|cell| u64::from(*cell != Cell::Null))
+            .collect();
         let mut levels = Vec::new();
         eggdb_columnar::encode_hybrid(&defined, 1, &mut levels);
-        data.extend_from_slice(&u32::try_from(levels.len()).map_err(|_| ParquetError("a column is too large".to_owned()))?.to_le_bytes());
+        data.extend_from_slice(
+            &u32::try_from(levels.len())
+                .map_err(|_| ParquetError("a column is too large".to_owned()))?
+                .to_le_bytes(),
+        );
         data.extend_from_slice(&levels);
     } else if column.cells.contains(&Cell::Null) {
-        return Err(ParquetError(format!("column {} is not nullable but holds a null", column.name)));
+        return Err(ParquetError(format!(
+            "column {} is not nullable but holds a null",
+            column.name
+        )));
     }
     value_bytes(column, &mut data)?;
     Ok(data)
@@ -114,13 +142,16 @@ fn schema_element(thrift: &mut Writer, column: &Column) {
 pub fn write(columns: &[Column]) -> Result<Vec<u8>, ParquetError> {
     let rows = columns.first().map_or(0, |column| column.cells.len());
     if columns.iter().any(|column| column.cells.len() != rows) {
-        return Err(ParquetError("every column must hold the same number of values".to_owned()));
+        return Err(ParquetError(
+            "every column must hold the same number of values".to_owned(),
+        ));
     }
     let mut file = MAGIC.to_vec();
     let mut chunks = Vec::with_capacity(columns.len());
     for column in columns {
         let data = page(column)?;
-        let size = i64::try_from(data.len()).map_err(|_| ParquetError("a column is too large".to_owned()))?;
+        let size = i64::try_from(data.len())
+            .map_err(|_| ParquetError("a column is too large".to_owned()))?;
         let mut header = Writer::default();
         header.begin();
         header.int(1, false, 0);
@@ -179,7 +210,11 @@ pub fn write(columns: &[Column]) -> Result<Vec<u8>, ParquetError> {
     meta.end();
     let footer = meta.out;
     file.extend_from_slice(&footer);
-    file.extend_from_slice(&u32::try_from(footer.len()).map_err(|_| ParquetError("the footer is too large".to_owned()))?.to_le_bytes());
+    file.extend_from_slice(
+        &u32::try_from(footer.len())
+            .map_err(|_| ParquetError("the footer is too large".to_owned()))?
+            .to_le_bytes(),
+    );
     file.extend_from_slice(MAGIC);
     Ok(file)
 }

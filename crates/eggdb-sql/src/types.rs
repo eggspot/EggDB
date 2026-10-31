@@ -737,8 +737,7 @@ fn storage_class_rank(value: &Value) -> Option<u8> {
 
 fn different_storage_classes(left: &Value, right: &Value) -> Option<Ordering> {
     let (left_rank, right_rank) = (storage_class_rank(left)?, storage_class_rank(right)?);
-    (left_rank != right_rank
-        && crate::constraints::current_dialect() == crate::Dialect::Sqlite)
+    (left_rank != right_rank && crate::constraints::current_dialect() == crate::Dialect::Sqlite)
         .then(|| left_rank.cmp(&right_rank))
 }
 
@@ -1238,7 +1237,9 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
 
 fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
     match (left, right) {
-        (DefinedValue::Enum(a), DefinedValue::Enum(b)) => compare_floats(a.sort_order, b.sort_order),
+        (DefinedValue::Enum(a), DefinedValue::Enum(b)) => {
+            compare_floats(a.sort_order, b.sort_order)
+        }
         (DefinedValue::Record(a), DefinedValue::Record(b)) => crate::records::compare(a, b),
         (DefinedValue::Range(a), DefinedValue::Range(b)) => crate::ranges::compare(a, b),
         (DefinedValue::Enum(_), _) => Ordering::Less,

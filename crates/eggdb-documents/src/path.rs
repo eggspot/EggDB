@@ -80,12 +80,20 @@ pub(crate) enum Slot<'d> {
 /// The slot `path` names, creating embedded documents on the way when `create` is set.
 /// Fails with a message when a part goes through a value that is neither a document nor an
 /// array.
-pub(crate) fn slot<'d>(document: &'d mut Document, path: &str, create: bool) -> Result<Option<Slot<'d>>, String> {
+pub(crate) fn slot<'d>(
+    document: &'d mut Document,
+    path: &str,
+    create: bool,
+) -> Result<Option<Slot<'d>>, String> {
     let parts: Vec<&str> = path.split('.').collect();
     if parts.iter().any(|part| part.is_empty()) {
-        return Err(format!("The update path '{path}' contains an empty field name, which is not allowed."));
+        return Err(format!(
+            "The update path '{path}' contains an empty field name, which is not allowed."
+        ));
     }
-    let (last, middle) = parts.split_last().ok_or_else(|| "an empty path".to_owned())?;
+    let (last, middle) = parts
+        .split_last()
+        .ok_or_else(|| "an empty path".to_owned())?;
     let mut container = ContainerMut::Document(document);
     for part in middle {
         container = match container {
@@ -100,7 +108,10 @@ pub(crate) fn slot<'d>(document: &'d mut Document, path: &str, create: bool) -> 
                     Some(Bson::Document(next)) => ContainerMut::Document(next),
                     Some(Bson::Array(next)) => ContainerMut::Array(next),
                     Some(other) if create => {
-                        return Err(format!("Cannot create field '{part}' in element {{{part}: {}}}", other.type_name()));
+                        return Err(format!(
+                            "Cannot create field '{part}' in element {{{part}: {}}}",
+                            other.type_name()
+                        ));
                     }
                     _ => return Ok(None),
                 }
@@ -126,7 +137,10 @@ pub(crate) fn slot<'d>(document: &'d mut Document, path: &str, create: bool) -> 
                     Bson::Document(next) => ContainerMut::Document(next),
                     Bson::Array(next) => ContainerMut::Array(next),
                     other if create => {
-                        return Err(format!("Cannot create field '{part}' in element {{{part}: {}}}", other.type_name()));
+                        return Err(format!(
+                            "Cannot create field '{part}' in element {{{part}: {}}}",
+                            other.type_name()
+                        ));
                     }
                     _ => return Ok(None),
                 }
@@ -177,7 +191,9 @@ impl Slot<'_> {
     pub(crate) fn remove(self) -> Option<Bson> {
         match self {
             Slot::Field(document, name) => document.remove(&name),
-            Slot::Element(items, at) => items.get_mut(at).map(|item| std::mem::replace(item, Bson::Null)),
+            Slot::Element(items, at) => items
+                .get_mut(at)
+                .map(|item| std::mem::replace(item, Bson::Null)),
         }
     }
 }

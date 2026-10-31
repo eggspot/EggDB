@@ -902,12 +902,9 @@ impl Evaluator<'_> {
             }
             BinaryOperator::Divide => {
                 let (left_value, right_value) = self.pair(left, right)?;
-                if let Some(divided) = self.sqlserver_decimal_division(
-                    left,
-                    right,
-                    &left_value,
-                    &right_value,
-                ) {
+                if let Some(divided) =
+                    self.sqlserver_decimal_division(left, right, &left_value, &right_value)
+                {
                     return divided;
                 }
                 arithmetic(operator, &left_value, &right_value)
@@ -975,8 +972,9 @@ impl Evaluator<'_> {
             );
         }
         let jsonb_pair = match (&left_operand.value, &right_operand.value) {
-            (Value::Jsonb(_), Value::Jsonb(_) | Value::Null)
-            | (Value::Null, Value::Jsonb(_)) => true,
+            (Value::Jsonb(_), Value::Jsonb(_) | Value::Null) | (Value::Null, Value::Jsonb(_)) => {
+                true
+            }
             (Value::Jsonb(_), Value::Text(_)) => is_unknown_literal(right),
             (Value::Text(_), Value::Jsonb(_)) => is_unknown_literal(left),
             _ => false,
@@ -1331,8 +1329,13 @@ impl Evaluator<'_> {
             "array_any" => return crate::arrays::quantified(self, arguments, false),
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
-            "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery"
-            | "websearch_to_tsquery" | "ts_rank" | "ts_rank_cd" => {
+            "to_tsvector"
+            | "to_tsquery"
+            | "plainto_tsquery"
+            | "phraseto_tsquery"
+            | "websearch_to_tsquery"
+            | "ts_rank"
+            | "ts_rank_cd" => {
                 return crate::text_search::function(name, &self.arguments(arguments)?);
             }
             name if crate::geo_functions::FUNCTIONS.contains(&name) => {
@@ -1605,7 +1608,10 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "overlay" => &[TEXT, TEXT, INTEGER, INTEGER],
         "substr" => &[None, INTEGER, INTEGER],
         "format" => &[TEXT],
-        "regexp_like" | "regexp_match" | "regexp_split_to_array" | "similar_to_escape"
+        "regexp_like"
+        | "regexp_match"
+        | "regexp_split_to_array"
+        | "similar_to_escape"
         | "similar_substring_pattern" => &[TEXT, TEXT, TEXT],
         "regexp_replace" => &[TEXT, TEXT, TEXT],
         "regexp_count" => &[TEXT, TEXT, INTEGER, TEXT],
@@ -1628,8 +1634,8 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "jsonb_extract_path" | "jsonb_extract_path_text" => &[JSONB],
         "row_to_json" => &[None, BOOLEAN],
         "concat" | "concat_ws" | "json_build_object" | "jsonb_build_object"
-        | "json_build_array" | "jsonb_build_array" | "to_json" | "to_jsonb"
-        | "quote_nullable" | "isfinite" => &[],
+        | "json_build_array" | "jsonb_build_array" | "to_json" | "to_jsonb" | "quote_nullable"
+        | "isfinite" => &[],
         _ => return None,
     })
 }

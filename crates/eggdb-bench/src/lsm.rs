@@ -23,8 +23,8 @@ fn failed(what: &str) -> impl Fn(StorageError) -> String + '_ {
 fn new_store(fs: &SimFileSystem, path: &str) -> Result<Store<SimFile>, String> {
     let file =
         PageFile::create(fs, Path::new(path), CreateOptions::new()).map_err(failed("create"))?;
-    let cache =
-        PageCache::new(file, &OsMemory::new(), CacheSize::Pages(FRAMES)).map_err(failed("cache"))?;
+    let cache = PageCache::new(file, &OsMemory::new(), CacheSize::Pages(FRAMES))
+        .map_err(failed("cache"))?;
     Ok(Store::new(cache, Arc::new(SystemClock::new())))
 }
 
@@ -71,7 +71,12 @@ fn put(
     .map_err(failed("put"))
 }
 
-fn commits(store: &Store<SimFile>, tree: &Tree, iterations: u64, start: &mut u64) -> Result<(), String> {
+fn commits(
+    store: &Store<SimFile>,
+    tree: &Tree,
+    iterations: u64,
+    start: &mut u64,
+) -> Result<(), String> {
     for _ in 0..iterations {
         let mut write = store.begin_write().map_err(failed("begin write"))?;
         for _ in 0..PUTS_PER_COMMIT {
@@ -96,6 +101,10 @@ pub(crate) fn random_put(_allocator: &CountingAllocator) -> Result<Vec<Metric>, 
     Ok(vec![
         Metric::reported(RANDOM_PUT, "lsm_to_btree", measured.ratio),
         Metric::reported(RANDOM_PUT, "lsm_ns_per_commit_of_100", measured.subject_ns),
-        Metric::reported(RANDOM_PUT, "btree_ns_per_commit_of_100", measured.reference_ns),
+        Metric::reported(
+            RANDOM_PUT,
+            "btree_ns_per_commit_of_100",
+            measured.reference_ns,
+        ),
     ])
 }

@@ -151,7 +151,13 @@ pub(crate) fn quotient_type(dividend: DecimalType, divisor: DecimalType) -> Deci
 }
 
 pub(crate) fn quotient_sql_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> Option<SqlType> {
-    Some(quotient_type(declared_decimal(left, scope)?, declared_decimal(right, scope)?).sql_type())
+    Some(
+        quotient_type(
+            declared_decimal(left, scope)?,
+            declared_decimal(right, scope)?,
+        )
+        .sql_type(),
+    )
 }
 
 fn fits(number: &Numeric, decimal: DecimalType) -> bool {
@@ -183,7 +189,10 @@ pub(crate) fn divide(
     )
 }
 
-pub(crate) fn aggregate_type(function: AggregateFunction, input: Option<SqlType>) -> Option<SqlType> {
+pub(crate) fn aggregate_type(
+    function: AggregateFunction,
+    input: Option<SqlType>,
+) -> Option<SqlType> {
     let input = input?;
     match (function, input) {
         (AggregateFunction::Sum | AggregateFunction::Avg, SqlType::SmallInt | SqlType::Integer) => {
@@ -280,13 +289,10 @@ fn integer_argument(value: &Value, argument: usize, function: &str) -> SqlResult
             }
             Some(number as i64)
         }
-        Value::Text(_) | Value::Bpchar(_) => crate::sqlserver_conversion::convert(
-            value.clone(),
-            SqlServerType::Int,
-            None,
-            None,
-        )?
-        .as_integer(),
+        Value::Text(_) | Value::Bpchar(_) => {
+            crate::sqlserver_conversion::convert(value.clone(), SqlServerType::Int, None, None)?
+                .as_integer()
+        }
         other => match other.as_integer() {
             Some(number) => Some(number),
             None => return Err(argument_type_invalid(other, argument, function)),
@@ -386,14 +392,22 @@ fn round(arguments: &[Value], declared: Option<SqlType>) -> SqlResult<Value> {
     }
 }
 
-fn to_whole(function: NumberFunction, value: &Value, declared: Option<SqlType>) -> SqlResult<Value> {
+fn to_whole(
+    function: NumberFunction,
+    value: &Value,
+    declared: Option<SqlType>,
+) -> SqlResult<Value> {
     let up = function == NumberFunction::Ceiling;
     match value {
         Value::Null => Ok(Value::Null),
         Value::Boolean(_) => Err(argument_type_invalid(value, 1, function.name())),
         Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) => Ok(value.clone()),
         Value::Numeric(number) => {
-            let whole = if up { number.ceiling()? } else { number.floor()? };
+            let whole = if up {
+                number.ceiling()?
+            } else {
+                number.floor()?
+            };
             match declared {
                 Some(SqlType::Numeric(Some(modifier))) => whole
                     .with_modifier(i64::from(modifier.precision), 0)
@@ -405,7 +419,11 @@ fn to_whole(function: NumberFunction, value: &Value, declared: Option<SqlType>) 
         Value::Real(number) => Ok(Value::Real(if up { number.ceil() } else { number.floor() })),
         other => {
             let number = as_float_argument(other, function.name())?;
-            Ok(Value::Double(if up { number.ceil() } else { number.floor() }))
+            Ok(Value::Double(if up {
+                number.ceil()
+            } else {
+                number.floor()
+            }))
         }
     }
 }
@@ -417,9 +435,11 @@ pub(crate) fn call(
 ) -> SqlResult<Value> {
     match function {
         NumberFunction::Round => round(arguments, declared),
-        NumberFunction::Ceiling | NumberFunction::Floor => {
-            to_whole(function, arguments.first().unwrap_or(&Value::Null), declared)
-        }
+        NumberFunction::Ceiling | NumberFunction::Floor => to_whole(
+            function,
+            arguments.first().unwrap_or(&Value::Null),
+            declared,
+        ),
     }
 }
 
@@ -458,10 +478,19 @@ mod tests {
 
     #[test]
     fn division_follows_the_precision_and_scale_table() {
-        assert_eq!(quotient_type(decimal(3, 1), decimal(10, 0)), decimal(14, 12));
+        assert_eq!(
+            quotient_type(decimal(3, 1), decimal(10, 0)),
+            decimal(14, 12)
+        );
         assert_eq!(quotient_type(decimal(10, 0), decimal(2, 1)), decimal(17, 6));
-        assert_eq!(quotient_type(decimal(38, 10), decimal(38, 10)), decimal(38, 6));
-        assert_eq!(quotient_type(decimal(18, 2), decimal(18, 2)), decimal(38, 20));
+        assert_eq!(
+            quotient_type(decimal(38, 10), decimal(38, 10)),
+            decimal(38, 6)
+        );
+        assert_eq!(
+            quotient_type(decimal(18, 2), decimal(18, 2)),
+            decimal(38, 20)
+        );
         let quotient = divide(
             &Value::Integer(2),
             &number("3.0"),
@@ -469,7 +498,12 @@ mod tests {
             decimal(2, 1),
         );
         assert_eq!(quotient.map(shown).as_deref(), Some("0.666666"));
-        let by_zero = divide(&number("1.0"), &Value::Integer(0), decimal(2, 1), decimal(10, 0));
+        let by_zero = divide(
+            &number("1.0"),
+            &Value::Integer(0),
+            decimal(2, 1),
+            decimal(10, 0),
+        );
         assert!(matches!(by_zero, Some(Err(_))));
     }
 
@@ -561,8 +595,11 @@ mod tests {
             Value::BigInt(3_000_000_000),
         );
         assert_eq!(shown(int_sum), "error 8115");
-        let int_average =
-            aggregate_value(AggregateFunction::Avg, Some(SqlType::Integer), number("1.5"));
+        let int_average = aggregate_value(
+            AggregateFunction::Avg,
+            Some(SqlType::Integer),
+            number("1.5"),
+        );
         assert_eq!(int_average.ok(), Some(Value::Integer(1)));
         let decimal_input = Some(SqlType::Numeric(Some(NumericModifier {
             precision: 10,

@@ -4,9 +4,8 @@ use super::{
 };
 use crate::arrays::ArrayValue;
 use crate::ast::{
-    CallRoutine, Delete, Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource,
-    Literal, Name, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
-    ValuesList,
+    CallRoutine, Delete, Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource, Literal,
+    Name, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update, ValuesList,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -22,6 +21,8 @@ use crate::settings::Settings;
 use crate::store::{KeyValueRead, KeyValueWrite};
 use crate::types::{Conversion, DefinedValue, SqlType, Value, convert};
 use std::sync::Arc;
+
+type BestMatch<'a> = Option<(usize, &'a Arc<RoutineDefinition>, Vec<Option<Value>>)>;
 
 pub(crate) const ROUTINE_CALL: &str = "*routine_call*";
 pub(crate) const DEFAULT_ARGUMENT: &str = "*default*";
@@ -108,7 +109,8 @@ pub(crate) fn query_calls_marked_routine(query: &Query) -> bool {
 }
 
 pub(crate) fn insert_calls_marked_routine(insert: &mut Insert) -> bool {
-    let in_query = matches!(&insert.source, InsertSource::Query(query) if query_calls_marked_routine(query));
+    let in_query =
+        matches!(&insert.source, InsertSource::Query(query) if query_calls_marked_routine(query));
     in_query || exprs_call_marked_routine(crate::execute::insert_exprs(insert))
 }
 
@@ -121,7 +123,8 @@ fn body_calls_marked_routine(body: &SetExpr) -> bool {
         SetExpr::Select(select) => select_calls_marked_routine(select),
         SetExpr::Query(query) => query_calls_marked_routine(query),
         SetExpr::Operation(operation) => {
-            body_calls_marked_routine(&operation.left) || body_calls_marked_routine(&operation.right)
+            body_calls_marked_routine(&operation.left)
+                || body_calls_marked_routine(&operation.right)
         }
     }
 }
@@ -226,9 +229,9 @@ fn output_sources(definition: &RoutineDefinition, names: &[Option<String>]) -> V
             if at < positional {
                 return Some(at);
             }
-            names.iter().position(|name| {
-                name.is_some() && name.as_deref() == parameter.name.as_deref()
-            })
+            names
+                .iter()
+                .position(|name| name.is_some() && name.as_deref() == parameter.name.as_deref())
         })
         .collect()
 }
@@ -703,13 +706,14 @@ fn choose(
         .find(|routine| routine.language == RoutineLanguage::Tsql)
     {
         let definition = Arc::clone(routine);
-        let arguments = crate::tsql::function_arguments(reader, tables, &definition, names, values)?;
+        let arguments =
+            crate::tsql::function_arguments(reader, tables, &definition, names, values)?;
         return Ok(Chosen {
             definition,
             arguments,
         });
     }
-    let mut best: Option<(usize, &Arc<RoutineDefinition>, Vec<Option<Value>>)> = None;
+    let mut best: BestMatch<'_> = None;
     let mut tied = false;
     for routine in routines.iter().filter(|routine| routine.kind == kind) {
         let Some((score, slots)) = matched(routine, names, &values) else {
@@ -982,7 +986,10 @@ fn output_columns(
     if let RoutineReturns::Table(columns) = &definition.returns {
         return (
             columns.iter().map(|(name, _)| name.clone()).collect(),
-            columns.iter().map(|(_, sql_type)| Some(*sql_type)).collect(),
+            columns
+                .iter()
+                .map(|(_, sql_type)| Some(*sql_type))
+                .collect(),
         );
     }
     let outputs: Vec<&RoutineParameter> = definition

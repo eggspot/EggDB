@@ -1,6 +1,6 @@
 use crate::ast::{
     ColumnDefinition, ConstraintKind, ConstraintSpec, CreateTable, IndexSpec, Name,
-    NamedPartitionBound, PartitionBoundSpec, PartitionBy, PartitionBoundValue,
+    NamedPartitionBound, PartitionBoundSpec, PartitionBoundValue, PartitionBy,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -33,10 +33,17 @@ fn unsupported(what: &str, position: usize) -> SqlError {
     SqlError::not_supported(what).at(position)
 }
 
-fn copied_column(table: &TableDefinition, index: usize, position: usize) -> SqlResult<ColumnDefinition> {
+fn copied_column(
+    table: &TableDefinition,
+    index: usize,
+    position: usize,
+) -> SqlResult<ColumnDefinition> {
     let column = &table.columns[index];
     let dialect = table.default_dialect(index);
-    let default = match (&column.default, execute::default_expression(column, dialect)?) {
+    let default = match (
+        &column.default,
+        execute::default_expression(column, dialect)?,
+    ) {
         (Some(text), Some(expr)) => Some((expr, text.clone())),
         _ => None,
     };
@@ -311,7 +318,11 @@ fn create_named_partitions(
     Ok(())
 }
 
-fn same_columns(parent: &TableDefinition, child: &TableDefinition, position: usize) -> SqlResult<()> {
+fn same_columns(
+    parent: &TableDefinition,
+    child: &TableDefinition,
+    position: usize,
+) -> SqlResult<()> {
     for column in &child.columns {
         match parent.column_index(&column.name) {
             Some(index) if parent.columns[index].sql_type == column.sql_type => {}
@@ -348,10 +359,7 @@ fn same_columns(parent: &TableDefinition, child: &TableDefinition, position: usi
     {
         return Err(SqlError::new(
             SqlState::DATATYPE_MISMATCH,
-            format!(
-                "child table is missing column \"{}\"",
-                missing.name
-            ),
+            format!("child table is missing column \"{}\"", missing.name),
         )
         .at(position));
     }
@@ -403,7 +411,14 @@ pub(crate) fn attach(
     same_columns(parent, &child, position)?;
     let types = key_types(parent, &key)?;
     let bound = crate::partitions::bound_of(bound, &key, &types, position)?;
-    crate::partitions::check_no_overlap(&catalog, &parent.name, &child.name, &bound, &types, position)?;
+    crate::partitions::check_no_overlap(
+        &catalog,
+        &parent.name,
+        &child.name,
+        &bound,
+        &types,
+        position,
+    )?;
     let mut record = crate::partitions::stored(writer, &child.name)?;
     record.parent = Some((parent.name.clone(), bound));
     crate::partitions::save(writer, &child.name, &record)?;

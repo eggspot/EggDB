@@ -44,7 +44,10 @@ impl EvictionPolicy {
     }
 
     fn volatile_only(self) -> bool {
-        matches!(self, Self::VolatileLru | Self::VolatileLfu | Self::VolatileRandom | Self::VolatileTtl)
+        matches!(
+            self,
+            Self::VolatileLru | Self::VolatileLfu | Self::VolatileRandom | Self::VolatileTtl
+        )
     }
 }
 
@@ -145,7 +148,11 @@ impl KeysWrite for Tracked<'_, '_> {
 
 impl<'k> EvictingKeyspace<'k> {
     /// Wraps `inner` with a limit of `limit` bytes and `policy`, counting what it holds now.
-    pub fn new(inner: &'k (dyn Keyspace + Sync), limit: u64, policy: EvictionPolicy) -> Result<Self, String> {
+    pub fn new(
+        inner: &'k (dyn Keyspace + Sync),
+        limit: u64,
+        policy: EvictionPolicy,
+    ) -> Result<Self, String> {
         let keyspace = Self {
             inner,
             limit,
@@ -179,7 +186,10 @@ impl<'k> EvictingKeyspace<'k> {
 
     fn touch(&self, db: u32, key: &[u8]) {
         let now = self.tick();
-        let mut usage = self.usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut usage = self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = usage.get_mut(&(db, key.to_vec())) {
             entry.last_access = now;
             entry.uses = entry.uses.saturating_add(1);
@@ -188,7 +198,10 @@ impl<'k> EvictingKeyspace<'k> {
 
     fn record(&self, db: u32, key: &[u8], value: Option<&[u8]>) {
         let now = self.tick();
-        let mut usage = self.usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut usage = self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let slot = (db, key.to_vec());
         if let Some(old) = usage.remove(&slot) {
             self.total.fetch_sub(old.bytes, Ordering::AcqRel);
@@ -196,7 +209,15 @@ impl<'k> EvictingKeyspace<'k> {
         if let Some(value) = value {
             let bytes = (key.len() + value.len()) as u64;
             self.total.fetch_add(bytes, Ordering::AcqRel);
-            usage.insert(slot, Usage { bytes, last_access: now, uses: 1, expires_at_ms: expiry_of(value) });
+            usage.insert(
+                slot,
+                Usage {
+                    bytes,
+                    last_access: now,
+                    uses: 1,
+                    expires_at_ms: expiry_of(value),
+                },
+            );
         }
     }
 
@@ -210,7 +231,10 @@ impl<'k> EvictingKeyspace<'k> {
     }
 
     fn victim(&self) -> Option<(u32, Vec<u8>)> {
-        let usage = self.usage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let usage = self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let candidates = usage
             .iter()
             .filter(|(_, entry)| !self.policy.volatile_only() || entry.expires_at_ms.is_some());
@@ -247,15 +271,35 @@ impl<'k> EvictingKeyspace<'k> {
 }
 
 impl Keyspace for EvictingKeyspace<'_> {
-    fn read(&self, db: u32, body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>) -> Result<(), String> {
-        self.inner.read(db, &mut |keys| body(&TrackedRead { inner: keys, owner: self, db }))
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.inner.read(db, &mut |keys| {
+            body(&TrackedRead {
+                inner: keys,
+                owner: self,
+                db,
+            })
+        })
     }
 
-    fn write(&self, db: u32, body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>) -> Result<(), String> {
+    fn write(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String> {
         if self.policy == EvictionPolicy::NoEviction && self.used_bytes() > self.limit {
             return Err(OUT_OF_MEMORY.to_owned());
         }
-        self.inner.write(db, &mut |keys| body(&mut Tracked { inner: keys, owner: self, db }))?;
+        self.inner.write(db, &mut |keys| {
+            body(&mut Tracked {
+                inner: keys,
+                owner: self,
+                db,
+            })
+        })?;
         self.evict()
     }
 }
@@ -267,29 +311,56 @@ mod tests {
     use crate::keyspace::MemoryKeyspace;
 
     fn run(keyspace: &dyn Keyspace, client: &mut Client, line: &str) -> crate::protocol::Reply {
-        let arguments: Vec<Vec<u8>> = line.split(' ').map(|word| word.as_bytes().to_vec()).collect();
-        execute(&Context { keyspace, password_sha256: None, now_ms: 1000 }, client, &arguments)
+        let arguments: Vec<Vec<u8>> = line
+            .split(' ')
+            .map(|word| word.as_bytes().to_vec())
+            .collect();
+        execute(
+            &Context {
+                keyspace,
+                password_sha256: None,
+                now_ms: 1000,
+            },
+            client,
+            &arguments,
+        )
     }
 
     #[test]
     fn the_least_recently_used_key_goes_first_and_the_limit_holds() {
         let memory = MemoryKeyspace::default();
         let keyspace = EvictingKeyspace::new(&memory, 200, EvictionPolicy::AllKeysLru).unwrap();
-        let mut client = Client { authenticated: true, ..Client::default() };
+        let mut client = Client {
+            authenticated: true,
+            ..Client::default()
+        };
         for key in ["a", "b", "c", "d"] {
-            run(&keyspace, &mut client, &format!("SET {key} {}", "x".repeat(40)));
+            run(
+                &keyspace,
+                &mut client,
+                &format!("SET {key} {}", "x".repeat(40)),
+            );
             run(&keyspace, &mut client, "GET a");
         }
         assert!(keyspace.used_bytes() <= 200);
-        assert_eq!(run(&keyspace, &mut client, "EXISTS a"), crate::protocol::Reply::Integer(1));
-        assert_eq!(run(&keyspace, &mut client, "EXISTS b"), crate::protocol::Reply::Integer(0));
+        assert_eq!(
+            run(&keyspace, &mut client, "EXISTS a"),
+            crate::protocol::Reply::Integer(1)
+        );
+        assert_eq!(
+            run(&keyspace, &mut client, "EXISTS b"),
+            crate::protocol::Reply::Integer(0)
+        );
     }
 
     #[test]
     fn noeviction_refuses_writes_past_the_limit_and_volatile_policies_spare_persistent_keys() {
         let memory = MemoryKeyspace::default();
         let keyspace = EvictingKeyspace::new(&memory, 60, EvictionPolicy::NoEviction).unwrap();
-        let mut client = Client { authenticated: true, ..Client::default() };
+        let mut client = Client {
+            authenticated: true,
+            ..Client::default()
+        };
         run(&keyspace, &mut client, &format!("SET a {}", "x".repeat(80)));
         assert_eq!(
             run(&keyspace, &mut client, "SET b y"),
@@ -297,11 +368,32 @@ mod tests {
         );
         let memory = MemoryKeyspace::default();
         let keyspace = EvictingKeyspace::new(&memory, 100, EvictionPolicy::VolatileTtl).unwrap();
-        run(&keyspace, &mut client, &format!("SET keep {}", "x".repeat(30)));
-        run(&keyspace, &mut client, &format!("SET soon {} EX 10", "x".repeat(30)));
-        run(&keyspace, &mut client, &format!("SET later {} EX 100", "x".repeat(30)));
-        assert_eq!(run(&keyspace, &mut client, "EXISTS keep later"), crate::protocol::Reply::Integer(2));
-        assert_eq!(run(&keyspace, &mut client, "EXISTS soon"), crate::protocol::Reply::Integer(0));
-        assert_eq!(EvictionPolicy::named("allkeys-lfu"), Some(EvictionPolicy::AllKeysLfu));
+        run(
+            &keyspace,
+            &mut client,
+            &format!("SET keep {}", "x".repeat(30)),
+        );
+        run(
+            &keyspace,
+            &mut client,
+            &format!("SET soon {} EX 10", "x".repeat(30)),
+        );
+        run(
+            &keyspace,
+            &mut client,
+            &format!("SET later {} EX 100", "x".repeat(30)),
+        );
+        assert_eq!(
+            run(&keyspace, &mut client, "EXISTS keep later"),
+            crate::protocol::Reply::Integer(2)
+        );
+        assert_eq!(
+            run(&keyspace, &mut client, "EXISTS soon"),
+            crate::protocol::Reply::Integer(0)
+        );
+        assert_eq!(
+            EvictionPolicy::named("allkeys-lfu"),
+            Some(EvictionPolicy::AllKeysLfu)
+        );
     }
 }

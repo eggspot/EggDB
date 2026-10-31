@@ -55,7 +55,11 @@ fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
 }
 
 fn handshake_packet(connection_id: u32, nonce: &[u8; NONCE_BYTES], tls: bool) -> Vec<u8> {
-    let capabilities = if tls { SERVER_CAPABILITIES | CLIENT_SSL } else { SERVER_CAPABILITIES };
+    let capabilities = if tls {
+        SERVER_CAPABILITIES | CLIENT_SSL
+    } else {
+        SERVER_CAPABILITIES
+    };
     let mut payload = Payload::new();
     payload
         .u8(10)
@@ -270,7 +274,11 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     };
     wire.sequence = 0;
     let tls_config = shared.config.tls.as_deref().filter(|_| !wire.is_local());
-    wire.send(&handshake_packet(connection_id, &nonce, tls_config.is_some()));
+    wire.send(&handshake_packet(
+        connection_id,
+        &nonce,
+        tls_config.is_some(),
+    ));
     if wire.flush().is_err() {
         return;
     }

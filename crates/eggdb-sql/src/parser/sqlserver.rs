@@ -242,18 +242,8 @@ const STATEMENT_WORDS: [&str; 29] = [
 ];
 
 const NOT_SUPPORTED_STATEMENTS: [&str; 12] = [
-    "goto",
-    "waitfor",
-    "grant",
-    "revoke",
-    "deny",
-    "backup",
-    "restore",
-    "dbcc",
-    "kill",
-    "open",
-    "fetch",
-    "bulk",
+    "goto", "waitfor", "grant", "revoke", "deny", "backup", "restore", "dbcc", "kill", "open",
+    "fetch", "bulk",
 ];
 
 const BATCH_LOGIC_STATEMENTS: [&str; 5] = ["if", "while", "break", "continue", "return"];
@@ -601,9 +591,9 @@ fn reads_alone_as_expression(text: &str) -> bool {
     let Ok(tokens) = tokenize_in(text, Dialect::SqlServer) else {
         return false;
     };
-    let names_a_local_variable = tokens.iter().any(
-        |token| matches!(&token.kind, TokenKind::Variable(name) if !name.starts_with("@@")),
-    );
+    let names_a_local_variable = tokens
+        .iter()
+        .any(|token| matches!(&token.kind, TokenKind::Variable(name) if !name.starts_with("@@")));
     if names_a_local_variable {
         return false;
     }
@@ -706,7 +696,9 @@ impl<'t> Parser<'t> {
             "select" if self.select_assigns_variables() => self.sqlserver_select_assignment()?,
             "insert" if self.at_insert_into_variable() => self.sqlserver_insert_variable()?,
             "update" if self.at_variable(1) => self.sqlserver_update_variable()?,
-            "delete" if self.at_variable(1) || (self.is_word_at(1, "from") && self.at_variable(2)) => {
+            "delete"
+                if self.at_variable(1) || (self.is_word_at(1, "from") && self.at_variable(2)) =>
+            {
                 self.sqlserver_delete_variable()?
             }
             word if self.first_in_batch()
@@ -720,7 +712,9 @@ impl<'t> Parser<'t> {
             {
                 self.sqlserver_view()?
             }
-            "create" | "alter" | "drop" if self.at_sqlserver_routine() => self.sqlserver_routine()?,
+            "create" | "alter" | "drop" if self.at_sqlserver_routine() => {
+                self.sqlserver_routine()?
+            }
             "create" if self.is_word_at(1, "sequence") => {
                 self.at += 1;
                 self.sqlserver_create_sequence()?
@@ -1322,7 +1316,8 @@ impl<'t> Parser<'t> {
             );
         };
         if let Some((seed, increment)) = arguments {
-            let fits = |value: Option<i64>| value.filter(|value| (lowest..=highest).contains(value));
+            let fits =
+                |value: Option<i64>| value.filter(|value| (lowest..=highest).contains(value));
             let invalid = |rule: &str| {
                 invalid_identity_argument(&column.name.text, column.sql_type, rule, position)
             };
@@ -1758,9 +1753,8 @@ impl<'t> Parser<'t> {
                     self.at += 3;
                     let sequence = self.table_name()?;
                     if self.is_word("over") {
-                        return Err(
-                            not_supported("NEXT VALUE FOR ... OVER (ORDER BY ...)").at(self.position())
-                        );
+                        return Err(not_supported("NEXT VALUE FOR ... OVER (ORDER BY ...)")
+                            .at(self.position()));
                     }
                     Expr {
                         kind: ExprKind::Function {
@@ -1911,7 +1905,9 @@ impl<'t> Parser<'t> {
         if schema.text == "dbo" {
             return Ok(object);
         }
-        if schema.text.contains(crate::schemas::QUALIFIER) || object.text.contains(crate::schemas::QUALIFIER) {
+        if schema.text.contains(crate::schemas::QUALIFIER)
+            || object.text.contains(crate::schemas::QUALIFIER)
+        {
             return Err(SqlError::new(
                 SqlState::INVALID_NAME,
                 format!("invalid name \"{}\"", object.text.escape_default()),
@@ -1994,35 +1990,11 @@ fn unknown_option(shown: &str, position: usize) -> SqlError {
     .at(position)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{RESERVED, STATEMENT_WORDS, is_reserved};
-
-    #[test]
-    fn the_reserved_words_are_sorted_and_hold_every_word_that_starts_a_statement() {
-        assert!(RESERVED.windows(2).all(|pair| pair[0] < pair[1]));
-        for word in STATEMENT_WORDS {
-            assert!(
-                is_reserved(word) || ["go", "throw"].contains(&word),
-                "{word}"
-            );
-        }
-    }
-}
-
 fn sequence_type(declared: SqlServerType) -> Option<(SqlType, i64, i64)> {
     Some(match declared {
         SqlServerType::TinyInt => (SqlType::SmallInt, 0, i64::from(u8::MAX)),
-        SqlServerType::SmallInt => (
-            SqlType::SmallInt,
-            i64::from(i16::MIN),
-            i64::from(i16::MAX),
-        ),
-        SqlServerType::Int => (
-            SqlType::Integer,
-            i64::from(i32::MIN),
-            i64::from(i32::MAX),
-        ),
+        SqlServerType::SmallInt => (SqlType::SmallInt, i64::from(i16::MIN), i64::from(i16::MAX)),
+        SqlServerType::Int => (SqlType::Integer, i64::from(i32::MIN), i64::from(i32::MAX)),
         SqlServerType::BigInt => (SqlType::BigInt, i64::MIN, i64::MAX),
         SqlServerType::Decimal {
             precision,
@@ -2067,8 +2039,16 @@ pub(super) fn extended_property_comment(
             None => None,
         };
     }
-    let [name, value, level0_type, level0_name, level1_type, level1_name, level2_type, level2_name] =
-        values;
+    let [
+        name,
+        value,
+        level0_type,
+        level0_name,
+        level1_type,
+        level1_name,
+        level2_type,
+        level2_name,
+    ] = values;
     if !name
         .as_deref()
         .is_some_and(|name| name.eq_ignore_ascii_case(DESCRIPTION_PROPERTY))
@@ -2104,10 +2084,11 @@ pub(super) fn extended_property_comment(
             return Err(not_supported("An extended property of the database").at(position));
         }
         Some(other) => {
-            return Err(
-                not_supported(&format!("An extended property on a {}", other.to_ascii_uppercase()))
-                    .at(position),
-            );
+            return Err(not_supported(&format!(
+                "An extended property on a {}",
+                other.to_ascii_uppercase()
+            ))
+            .at(position));
         }
     }
     let schema = named(level0_name, "@level0name")?;
@@ -2131,10 +2112,11 @@ pub(super) fn extended_property_comment(
         Some("table") => RelationKind::Table,
         Some("view") => RelationKind::View,
         Some(other) => {
-            return Err(
-                not_supported(&format!("An extended property on a {}", other.to_ascii_uppercase()))
-                    .at(position),
-            );
+            return Err(not_supported(&format!(
+                "An extended property on a {}",
+                other.to_ascii_uppercase()
+            ))
+            .at(position));
         }
     };
     let object = named(level1_name, "@level1name")?;
@@ -2172,10 +2154,11 @@ pub(super) fn extended_property_comment(
             })
         }
         Some(other) => {
-            return Err(
-                not_supported(&format!("An extended property on a {}", other.to_ascii_uppercase()))
-                    .at(position),
-            );
+            return Err(not_supported(&format!(
+                "An extended property on a {}",
+                other.to_ascii_uppercase()
+            ))
+            .at(position));
         }
     };
     Ok(described(target, value, dropping))
@@ -2195,5 +2178,25 @@ fn property_text(expr: &Expr) -> SqlResult<Option<String>> {
         correlation: None,
     };
     let value = evaluator.eval(expr, None)?;
-    Ok(if value.is_null() { None } else { value.to_text() })
+    Ok(if value.is_null() {
+        None
+    } else {
+        value.to_text()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RESERVED, STATEMENT_WORDS, is_reserved};
+
+    #[test]
+    fn the_reserved_words_are_sorted_and_hold_every_word_that_starts_a_statement() {
+        assert!(RESERVED.windows(2).all(|pair| pair[0] < pair[1]));
+        for word in STATEMENT_WORDS {
+            assert!(
+                is_reserved(word) || ["go", "throw"].contains(&word),
+                "{word}"
+            );
+        }
+    }
 }

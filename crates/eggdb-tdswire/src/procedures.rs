@@ -950,7 +950,10 @@ mod tests {
                 "EXEC {STATUS_PARAMETER} = [dbo].[get orders] @customer = @customer, @total = @total OUTPUT"
             )
         );
-        let names: Vec<&str> = bound.iter().map(|parameter| parameter.name.as_str()).collect();
+        let names: Vec<&str> = bound
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect();
         assert_eq!(names, [STATUS_PARAMETER, "@customer", "@total"]);
         assert_eq!(bound[1].declared_type, Some(SqlType::Integer));
         assert_eq!(bound[2].declared_type, Some(SqlType::BigInt));

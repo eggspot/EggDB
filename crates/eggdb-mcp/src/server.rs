@@ -414,7 +414,10 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             .string(&self.config.server_version)
             .end_object()
             .key("instructions")
-            .string(&instructions(self.config.allow_write, self.config.tables.is_some()))
+            .string(&instructions(
+                self.config.allow_write,
+                self.config.tables.is_some(),
+            ))
             .end_object();
         result_line(id, &out.finish())
     }
@@ -910,7 +913,10 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
 }
 
 pub(crate) fn instructions(allow_write: bool, limited_to_tables: bool) -> String {
-    let categories: Vec<&str> = Category::ALL.iter().map(|category| category.name()).collect();
+    let categories: Vec<&str> = Category::ALL
+        .iter()
+        .map(|category| category.name())
+        .collect();
     let errors = format!(
         "Errors carry code, category, message and fix: do what fix says; fix_command, when present, is a command for the user. Categories: {}.",
         categories.join(", ")

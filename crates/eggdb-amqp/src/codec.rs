@@ -30,7 +30,11 @@ pub(crate) fn take_frame(buffer: &mut Vec<u8>) -> Result<Option<Frame>, String> 
     if buffer[total - 1] != FRAME_END {
         return Err("a frame does not end with the frame-end octet".to_owned());
     }
-    let frame = Frame { kind: buffer[0], channel: u16::from_be_bytes([buffer[1], buffer[2]]), payload: buffer[7..total - 1].to_vec() };
+    let frame = Frame {
+        kind: buffer[0],
+        channel: u16::from_be_bytes([buffer[1], buffer[2]]),
+        payload: buffer[7..total - 1].to_vec(),
+    };
     buffer.drain(..total);
     Ok(Some(frame))
 }
@@ -55,12 +59,20 @@ pub(crate) type Parsed<T> = Result<T, String>;
 
 impl<'b> Args<'b> {
     pub(crate) fn new(bytes: &'b [u8]) -> Self {
-        Self { bytes, at: 0, bits: None }
+        Self {
+            bytes,
+            at: 0,
+            bits: None,
+        }
     }
 
     fn take(&mut self, count: usize) -> Parsed<&'b [u8]> {
         self.bits = None;
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or("a method's arguments end early")?;
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or("a method's arguments end early")?;
         let slice = &self.bytes[self.at..end];
         self.at = end;
         Ok(slice)
@@ -71,20 +83,27 @@ impl<'b> Args<'b> {
     }
 
     pub(crate) fn short(&mut self) -> Parsed<u16> {
-        Ok(u16::from_be_bytes(self.take(2)?.try_into().map_err(|_| "short")?))
+        Ok(u16::from_be_bytes(
+            self.take(2)?.try_into().map_err(|_| "short")?,
+        ))
     }
 
     pub(crate) fn long(&mut self) -> Parsed<u32> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().map_err(|_| "short")?))
+        Ok(u32::from_be_bytes(
+            self.take(4)?.try_into().map_err(|_| "short")?,
+        ))
     }
 
     pub(crate) fn longlong(&mut self) -> Parsed<u64> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().map_err(|_| "short")?))
+        Ok(u64::from_be_bytes(
+            self.take(8)?.try_into().map_err(|_| "short")?,
+        ))
     }
 
     pub(crate) fn shortstr(&mut self) -> Parsed<String> {
         let length = usize::from(self.octet()?);
-        String::from_utf8(self.take(length)?.to_vec()).map_err(|_| "a short string is not UTF-8".to_owned())
+        String::from_utf8(self.take(length)?.to_vec())
+            .map_err(|_| "a short string is not UTF-8".to_owned())
     }
 
     pub(crate) fn longstr(&mut self) -> Parsed<&'b [u8]> {
@@ -155,6 +174,7 @@ impl Out {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn empty_table(&mut self) -> &mut Self {
         self.long(0)
     }

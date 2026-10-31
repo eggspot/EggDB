@@ -45,16 +45,14 @@ fn is_page_size(bytes: u64) -> bool {
 }
 
 pub(crate) fn write_header(out: &mut dyn Write, header: &Header) -> io::Result<()> {
-    let mut object = JsonObject::new()
-        .string("format", FORMAT_NAME)
-        .number(
-            "version",
-            if header.collections {
-                COLLECTIONS_VERSION
-            } else {
-                FORMAT_VERSION
-            },
-        );
+    let mut object = JsonObject::new().string("format", FORMAT_NAME).number(
+        "version",
+        if header.collections {
+            COLLECTIONS_VERSION
+        } else {
+            FORMAT_VERSION
+        },
+    );
     if let Some(eggdb) = &header.eggdb {
         object = object.string("eggdb", eggdb);
     }
@@ -67,6 +65,7 @@ pub(crate) fn write_header(out: &mut dyn Write, header: &Header) -> io::Result<(
     out.write_all(object.line().as_bytes())
 }
 
+#[cfg(test)]
 pub(crate) fn write_entry(out: &mut dyn Write, key: &[u8], value: &[u8]) -> io::Result<()> {
     write_entry_in(out, None, key, value)
 }
@@ -150,6 +149,7 @@ fn write_hex(out: &mut dyn Write, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) type Entry<'e> = (&'e [u8], &'e [u8]);
 
 #[derive(Debug)]
@@ -404,6 +404,7 @@ impl<'r> ExportReader<'r> {
         Ok(header)
     }
 
+    #[cfg(test)]
     pub(crate) fn read_entry(&mut self) -> Result<bool, ReadError> {
         loop {
             match self.read_item()? {
@@ -414,6 +415,7 @@ impl<'r> ExportReader<'r> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn next_entry(&mut self) -> Result<Option<Entry<'_>>, ReadError> {
         if self.read_entry()? {
             Ok(Some((&self.key, &self.value)))

@@ -278,7 +278,7 @@ impl<'a> Resolver<'a> {
                 .iter()
                 .map(|column| crate::encoding::ViewColumn {
                     name: column.name.clone(),
-                    sql_type: Some(column.sql_type.clone()),
+                    sql_type: Some(column.sql_type),
                     source: String::new(),
                 })
                 .collect(),
@@ -1024,7 +1024,8 @@ impl Binding<'_> {
         tables: &'r mut TableCache,
     ) -> SqlResult<Resolver<'r>> {
         crate::pg_catalog::load_if_wanted(reader)?;
-        let mut resolver = Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)?;
+        let mut resolver =
+            Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)?;
         resolver.target_privilege = self.target_privilege;
         Ok(resolver)
     }
@@ -1114,10 +1115,14 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut update.table)?;
-        if let Some(condition) = resolver
-            .row_security_filter(&update.table.name.text, crate::row_security::PolicyCommand::Update)?
-        {
-            update.filter = Some(crate::row_security::restricted(update.filter.take(), condition));
+        if let Some(condition) = resolver.row_security_filter(
+            &update.table.name.text,
+            crate::row_security::PolicyCommand::Update,
+        )? {
+            update.filter = Some(crate::row_security::restricted(
+                update.filter.take(),
+                condition,
+            ));
         }
         if !self.walk_expressions {
             return Ok(());
@@ -1145,7 +1150,10 @@ impl Binding<'_> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut merge.target)?;
         if resolver
-            .row_security_filter(&merge.target.name.text, crate::row_security::PolicyCommand::Update)?
+            .row_security_filter(
+                &merge.target.name.text,
+                crate::row_security::PolicyCommand::Update,
+            )?
             .is_some()
         {
             return Err(SqlError::not_supported(
@@ -1177,10 +1185,14 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut delete.table)?;
-        if let Some(condition) = resolver
-            .row_security_filter(&delete.table.name.text, crate::row_security::PolicyCommand::Delete)?
-        {
-            delete.filter = Some(crate::row_security::restricted(delete.filter.take(), condition));
+        if let Some(condition) = resolver.row_security_filter(
+            &delete.table.name.text,
+            crate::row_security::PolicyCommand::Delete,
+        )? {
+            delete.filter = Some(crate::row_security::restricted(
+                delete.filter.take(),
+                condition,
+            ));
         }
         if !self.walk_expressions {
             return Ok(());

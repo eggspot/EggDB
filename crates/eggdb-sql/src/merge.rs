@@ -343,8 +343,13 @@ pub(crate) fn merge(
         let mut changes: Vec<execute::RowUpdate> = Vec::with_capacity(pairs.len());
         let mut old_rows = Vec::with_capacity(pairs.len());
         let mut updated_pairs = Vec::with_capacity(pairs.len());
-        let mut firing =
-            Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Update, &updated_columns)?;
+        let mut firing = Firing::for_table(
+            &mut *writer,
+            tables,
+            &table,
+            TriggerEvent::Update,
+            &updated_columns,
+        )?;
         for &(target_index, source_index) in &pairs {
             let (old_key, old_row) = &target_rows[target_index];
             let row = joined.row(old_row, &source.rows[source_index]);
@@ -357,8 +362,12 @@ pub(crate) fn merge(
             }
             if let Some(firing) = firing.as_mut()
                 && firing.has_before()
-                && firing.before_row(writer, tables, Some(old_row.as_slice()), Some(&mut new_row))?
-                    == RowOutcome::Skip
+                && firing.before_row(
+                    writer,
+                    tables,
+                    Some(old_row.as_slice()),
+                    Some(&mut new_row),
+                )? == RowOutcome::Skip
             {
                 continue;
             }
@@ -380,7 +389,12 @@ pub(crate) fn merge(
         execute::write_updated_rows(writer, tables, &table, &changes, &old_rows, &mut |_| Ok(()))?;
         if let Some(mut firing) = firing {
             for ((_, _, new_row), old_row) in changes.iter().zip(&old_rows) {
-                firing.after_row(writer, tables, Some(old_row.as_slice()), Some(new_row.as_slice()))?;
+                firing.after_row(
+                    writer,
+                    tables,
+                    Some(old_row.as_slice()),
+                    Some(new_row.as_slice()),
+                )?;
             }
             firing.finish();
         }
@@ -509,8 +523,14 @@ pub(crate) fn merge(
     let tag = format!("MERGE {affected}");
     match &merge.output {
         Some(items) => {
-            let (columns, rows) =
-                output_rows(items, &table, &source_table, &source_label, &source.rows, outputs)?;
+            let (columns, rows) = output_rows(
+                items,
+                &table,
+                &source_table,
+                &source_label,
+                &source.rows,
+                outputs,
+            )?;
             Ok(QueryResult::rows(tag, columns, rows))
         }
         None => Ok(QueryResult::command(tag)),

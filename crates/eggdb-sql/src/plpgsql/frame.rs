@@ -71,8 +71,8 @@ impl FrameVariable {
                 Ok((Value::Null, Some(*sql_type)))
             }
             (slot, value) => {
-                let found = records::field(value, field)
-                    .map_err(|_| missing_field(&self.name, field))?;
+                let found =
+                    records::field(value, field).map_err(|_| missing_field(&self.name, field))?;
                 let declared = match slot {
                     Slot::Row(columns) => columns
                         .iter()
@@ -188,7 +188,11 @@ impl RoutineFrame {
 
     pub(crate) fn variable_expr(&self, name: &str, position: usize) -> Option<Expr> {
         let variable = &self.variables[self.index_of(name)?];
-        Some(constant(variable.value.clone(), variable.sql_type(), position))
+        Some(constant(
+            variable.value.clone(),
+            variable.sql_type(),
+            position,
+        ))
     }
 
     pub(crate) fn positional_expr(&self, digits: &str, position: usize) -> Option<Expr> {
@@ -198,7 +202,11 @@ impl RoutineFrame {
     pub(crate) fn numbered_expr(&self, number: usize, position: usize) -> Option<Expr> {
         let index = self.positional_index(number)?;
         let variable = &self.variables[index];
-        Some(constant(variable.value.clone(), variable.sql_type(), position))
+        Some(constant(
+            variable.value.clone(),
+            variable.sql_type(),
+            position,
+        ))
     }
 
     pub(crate) fn qualified_expr(
@@ -210,7 +218,9 @@ impl RoutineFrame {
         if let Some(index) = self.index_of(qualifier)
             && self.variables[index].is_composite()
         {
-            let (value, sql_type) = self.variables[index].field(name).map_err(|error| error.at(position))?;
+            let (value, sql_type) = self.variables[index]
+                .field(name)
+                .map_err(|error| error.at(position))?;
             return Ok(Some(constant(value, sql_type, position)));
         }
         let Some(index) = self.labelled_index(qualifier, name) else {

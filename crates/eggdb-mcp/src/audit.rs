@@ -88,10 +88,14 @@ impl AuditLog {
         }
         let previous = last_line_digest(&self.path, size).map_err(failure)?;
         let chained = match record.strip_prefix('{') {
-            Some(rest) if rest.trim_start().starts_with('}') => format!("{{\"prev\":\"{previous}\"}}"),
+            Some(rest) if rest.trim_start().starts_with('}') => {
+                format!("{{\"prev\":\"{previous}\"}}")
+            }
             Some(rest) => format!("{{\"prev\":\"{previous}\",{rest}"),
             None => {
-                return Err(AuditFailure { reason: "an audit record must be a JSON object".to_owned() });
+                return Err(AuditFailure {
+                    reason: "an audit record must be a JSON object".to_owned(),
+                });
             }
         };
         let mut line = Vec::with_capacity(chained.len() + 1);
@@ -122,7 +126,12 @@ fn last_line_digest(path: &Path, size: u64) -> io::Result<String> {
     let line = match body.iter().rposition(|&byte| byte == b'\n') {
         Some(at) => &body[at + 1..],
         None if start == 0 => body,
-        None => return Err(io::Error::new(io::ErrorKind::InvalidData, "the audit file's last line is longer than 1 MiB")),
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the audit file's last line is longer than 1 MiB",
+            ));
+        }
     };
     Ok(hex(&eggdb_crypto::sha256(line)))
 }
@@ -142,7 +151,8 @@ pub struct ChainReport {
 fn prev_of(line: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(line).ok()?;
     let rest = text.strip_prefix("{\"prev\":\"")?;
-    rest.get(..64).filter(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    rest.get(..64)
+        .filter(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// Checks that every record of the audit file at `path` links to the line before it by its
@@ -1066,17 +1076,22 @@ mod chain_tests {
 
     #[test]
     fn records_link_to_the_line_before_and_an_edit_breaks_the_chain() {
-        let directory = std::env::temp_dir().join(format!("eggdb-audit-chain-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-audit-chain-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("app.eggdb.mcp-audit.jsonl");
         std::fs::write(&path, "{\"event\":\"older\"}\n").unwrap();
         let log = AuditLog::new(path.clone());
         for index in 0..3 {
-            log.append(&format!("{{\"event\":\"call\",\"n\":{index}}}")).unwrap();
+            log.append(&format!("{{\"event\":\"call\",\"n\":{index}}}"))
+                .unwrap();
         }
         log.append("{}").unwrap();
         let report = verify_chain(&path).unwrap();
-        assert_eq!((report.chained, report.unchained, report.first_break), (4, 1, None));
+        assert_eq!(
+            (report.chained, report.unchained, report.first_break),
+            (4, 1, None)
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.lines().nth(1).unwrap().starts_with("{\"prev\":\""));
         std::fs::write(&path, text.replace("\"n\":1", "\"n\":9")).unwrap();

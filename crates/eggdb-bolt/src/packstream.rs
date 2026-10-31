@@ -19,7 +19,10 @@ pub(crate) enum Packed {
 impl Packed {
     pub(crate) fn get(&self, key: &str) -> Option<&Packed> {
         match self {
-            Packed::Map(entries) => entries.iter().find(|(name, _)| name == key).map(|(_, value)| value),
+            Packed::Map(entries) => entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
             _ => None,
         }
     }
@@ -38,10 +41,24 @@ impl Packed {
             Packed::Integer(number) => Value::Integer(*number),
             Packed::Float(number) => Value::Float(*number),
             Packed::String(text) => Value::String(text.clone()),
-            Packed::List(items) => Value::List(items.iter().map(Packed::to_value).collect::<Result<_, _>>()?),
-            Packed::Map(entries) => Value::Map(entries.iter().map(|(name, value)| Ok((name.clone(), value.to_value()?))).collect::<Result<_, String>>()?),
-            Packed::Bytes(_) => return Err("byte array parameters are not supported yet".to_owned()),
-            Packed::Struct(..) => return Err("temporal and spatial parameters are not supported yet".to_owned()),
+            Packed::List(items) => Value::List(
+                items
+                    .iter()
+                    .map(Packed::to_value)
+                    .collect::<Result<_, _>>()?,
+            ),
+            Packed::Map(entries) => Value::Map(
+                entries
+                    .iter()
+                    .map(|(name, value)| Ok((name.clone(), value.to_value()?)))
+                    .collect::<Result<_, String>>()?,
+            ),
+            Packed::Bytes(_) => {
+                return Err("byte array parameters are not supported yet".to_owned());
+            }
+            Packed::Struct(..) => {
+                return Err("temporal and spatial parameters are not supported yet".to_owned());
+            }
         })
     }
 }
@@ -61,7 +78,11 @@ impl<'b> Reader<'b> {
     }
 
     fn take(&mut self, count: usize) -> Result<&'b [u8], String> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or("a PackStream value runs past its message")?;
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or("a PackStream value runs past its message")?;
         let slice = &self.bytes[self.at..end];
         self.at = end;
         Ok(slice)
@@ -70,7 +91,9 @@ impl<'b> Reader<'b> {
     fn length(&mut self, marker: u8, base: u8) -> Result<usize, String> {
         Ok(match marker - base {
             0 => usize::from(self.take(1)?[0]),
-            1 => usize::from(u16::from_be_bytes(self.take(2)?.try_into().unwrap_or_default())),
+            1 => usize::from(u16::from_be_bytes(
+                self.take(2)?.try_into().unwrap_or_default(),
+            )),
             _ => u32::from_be_bytes(self.take(4)?.try_into().unwrap_or_default()) as usize,
         })
     }
@@ -107,25 +130,48 @@ impl<'b> Reader<'b> {
             0xc0 => Packed::Null,
             0xc2 => Packed::Boolean(false),
             0xc3 => Packed::Boolean(true),
-            0xc1 => Packed::Float(f64::from_be_bytes(self.take(8)?.try_into().unwrap_or_default())),
+            0xc1 => Packed::Float(f64::from_be_bytes(
+                self.take(8)?.try_into().unwrap_or_default(),
+            )),
             0xc8 => Packed::Integer(i64::from(self.take(1)?[0] as i8)),
-            0xc9 => Packed::Integer(i64::from(i16::from_be_bytes(self.take(2)?.try_into().unwrap_or_default()))),
-            0xca => Packed::Integer(i64::from(i32::from_be_bytes(self.take(4)?.try_into().unwrap_or_default()))),
-            0xcb => Packed::Integer(i64::from_be_bytes(self.take(8)?.try_into().unwrap_or_default())),
+            0xc9 => Packed::Integer(i64::from(i16::from_be_bytes(
+                self.take(2)?.try_into().unwrap_or_default(),
+            ))),
+            0xca => Packed::Integer(i64::from(i32::from_be_bytes(
+                self.take(4)?.try_into().unwrap_or_default(),
+            ))),
+            0xcb => Packed::Integer(i64::from_be_bytes(
+                self.take(8)?.try_into().unwrap_or_default(),
+            )),
             0xcc..=0xce => {
                 let length = self.length(marker, 0xcc)?;
                 Packed::Bytes(self.take(length)?.to_vec())
             }
             0x80..=0x8f | 0xd0..=0xd2 => {
-                let length = if marker <= 0x8f { usize::from(marker & 0x0f) } else { self.length(marker, 0xd0)? };
-                Packed::String(String::from_utf8(self.take(length)?.to_vec()).map_err(|_| "a PackStream string is not UTF-8")?)
+                let length = if marker <= 0x8f {
+                    usize::from(marker & 0x0f)
+                } else {
+                    self.length(marker, 0xd0)?
+                };
+                Packed::String(
+                    String::from_utf8(self.take(length)?.to_vec())
+                        .map_err(|_| "a PackStream string is not UTF-8")?,
+                )
             }
             0x90..=0x9f | 0xd4..=0xd6 => {
-                let length = if marker <= 0x9f { usize::from(marker & 0x0f) } else { self.length(marker, 0xd4)? };
+                let length = if marker <= 0x9f {
+                    usize::from(marker & 0x0f)
+                } else {
+                    self.length(marker, 0xd4)?
+                };
                 Packed::List(self.items(length, depth)?)
             }
             0xa0..=0xaf | 0xd8..=0xda => {
-                let length = if marker <= 0xaf { usize::from(marker & 0x0f) } else { self.length(marker, 0xd8)? };
+                let length = if marker <= 0xaf {
+                    usize::from(marker & 0x0f)
+                } else {
+                    self.length(marker, 0xd8)?
+                };
                 Packed::Map(self.entries(length, depth)?)
             }
             0xb0..=0xbf => {

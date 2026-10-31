@@ -26,8 +26,14 @@ const CONTINUATION: [u8; 4] = [0xff; 4];
 fn type_of(builder: &mut Builder, column_type: ColumnType) -> (u8, Offset) {
     match column_type {
         ColumnType::Boolean => (TYPE_BOOL, builder.table(&[])),
-        ColumnType::Int32 => (TYPE_INT, builder.table(&[Some(Field::I32(32)), Some(Field::Bool(true))])),
-        ColumnType::Int64 => (TYPE_INT, builder.table(&[Some(Field::I32(64)), Some(Field::Bool(true))])),
+        ColumnType::Int32 => (
+            TYPE_INT,
+            builder.table(&[Some(Field::I32(32)), Some(Field::Bool(true))]),
+        ),
+        ColumnType::Int64 => (
+            TYPE_INT,
+            builder.table(&[Some(Field::I32(64)), Some(Field::Bool(true))]),
+        ),
         ColumnType::Float => (TYPE_FLOATING_POINT, builder.table(&[Some(Field::I16(1))])),
         ColumnType::Double => (TYPE_FLOATING_POINT, builder.table(&[Some(Field::I16(2))])),
         ColumnType::Text => (TYPE_UTF8, builder.table(&[])),
@@ -35,18 +41,30 @@ fn type_of(builder: &mut Builder, column_type: ColumnType) -> (u8, Offset) {
         ColumnType::Date => (TYPE_DATE, builder.table(&[Some(Field::I16(0))])),
         ColumnType::Timestamp { utc } => {
             let zone = utc.then(|| builder.string("UTC"));
-            (TYPE_TIMESTAMP, builder.table(&[Some(Field::I16(2)), zone.map(Field::Offset)]))
+            (
+                TYPE_TIMESTAMP,
+                builder.table(&[Some(Field::I16(2)), zone.map(Field::Offset)]),
+            )
         }
         ColumnType::Decimal { precision, scale } => (
             TYPE_DECIMAL,
-            builder.table(&[Some(Field::I32(i32::try_from(precision).unwrap_or(38))), Some(Field::I32(i32::try_from(scale).unwrap_or(0))), Some(Field::I32(128))]),
+            builder.table(&[
+                Some(Field::I32(i32::try_from(precision).unwrap_or(38))),
+                Some(Field::I32(i32::try_from(scale).unwrap_or(0))),
+                Some(Field::I32(128)),
+            ]),
         ),
     }
 }
 
 fn message(builder: Builder, header_type: u8, header: Offset, body_length: i64) -> Vec<u8> {
     let mut builder = builder;
-    let root = builder.table(&[Some(Field::I16(METADATA_VERSION_V5)), Some(Field::U8(header_type)), Some(Field::Offset(header)), Some(Field::I64(body_length))]);
+    let root = builder.table(&[
+        Some(Field::I16(METADATA_VERSION_V5)),
+        Some(Field::U8(header_type)),
+        Some(Field::Offset(header)),
+        Some(Field::I64(body_length)),
+    ]);
     builder.finish(root)
 }
 
@@ -106,13 +124,25 @@ fn bitmap(bits: impl Iterator<Item = bool>, length: usize) -> Vec<u8> {
 
 fn column_buffers(column: &Column, body: &mut Body) -> Result<i64, String> {
     let length = column.cells.len();
-    let nulls = column.cells.iter().filter(|cell| matches!(cell, Cell::Null)).count();
+    let nulls = column
+        .cells
+        .iter()
+        .filter(|cell| matches!(cell, Cell::Null))
+        .count();
     if nulls == 0 {
         body.push(&[]);
     } else {
-        body.push(&bitmap(column.cells.iter().map(|cell| !matches!(cell, Cell::Null)), length));
+        body.push(&bitmap(
+            column.cells.iter().map(|cell| !matches!(cell, Cell::Null)),
+            length,
+        ));
     }
-    let wrong = |cell: &Cell| format!("column {} holds {cell:?}, which is not its type", column.name);
+    let wrong = |cell: &Cell| {
+        format!(
+            "column {} holds {cell:?}, which is not its type",
+            column.name
+        )
+    };
     match column.column_type {
         ColumnType::Boolean => {
             let mut values = Vec::with_capacity(length);
@@ -188,7 +218,8 @@ fn column_buffers(column: &Column, body: &mut Body) -> Result<i64, String> {
                     Cell::Null => {}
                     other => return Err(wrong(other)),
                 }
-                let end = i32::try_from(data.len()).map_err(|_| format!("column {} holds more than 2 GiB of text", column.name))?;
+                let end = i32::try_from(data.len())
+                    .map_err(|_| format!("column {} holds more than 2 GiB of text", column.name))?;
                 offsets.extend_from_slice(&end.to_le_bytes());
             }
             body.push(&offsets);
@@ -207,7 +238,10 @@ pub fn write_stream(columns: &[Column]) -> Result<Vec<u8>, String> {
     }
     let mut out = Vec::new();
     frame(&schema_message(columns), &[], &mut out);
-    let mut body = Body { bytes: Vec::new(), buffers: Vec::new() };
+    let mut body = Body {
+        bytes: Vec::new(),
+        buffers: Vec::new(),
+    };
     let mut nodes = Vec::with_capacity(columns.len());
     for column in columns {
         let nulls = column_buffers(column, &mut body)?;
@@ -216,8 +250,17 @@ pub fn write_stream(columns: &[Column]) -> Result<Vec<u8>, String> {
     let mut builder = Builder::new();
     let buffers = builder.structs(&body.buffers);
     let node_vector = builder.structs(&nodes);
-    let batch = builder.table(&[Some(Field::I64(i64::try_from(rows).unwrap_or(i64::MAX))), Some(Field::Offset(node_vector)), Some(Field::Offset(buffers))]);
-    let metadata = message(builder, HEADER_RECORD_BATCH, batch, i64::try_from(body.bytes.len()).unwrap_or(i64::MAX));
+    let batch = builder.table(&[
+        Some(Field::I64(i64::try_from(rows).unwrap_or(i64::MAX))),
+        Some(Field::Offset(node_vector)),
+        Some(Field::Offset(buffers)),
+    ]);
+    let metadata = message(
+        builder,
+        HEADER_RECORD_BATCH,
+        batch,
+        i64::try_from(body.bytes.len()).unwrap_or(i64::MAX),
+    );
     frame(&metadata, &body.bytes, &mut out);
     out.extend_from_slice(&CONTINUATION);
     out.extend_from_slice(&[0, 0, 0, 0]);

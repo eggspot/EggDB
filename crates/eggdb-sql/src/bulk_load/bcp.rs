@@ -314,10 +314,7 @@ mod tests {
                 vec![text("3"), text("pie"), Value::Null],
             ]
         );
-        assert_eq!(
-            rows(b"a\tb\nc\td\n", BcpTerminators::default(), 2).len(),
-            2
-        );
+        assert_eq!(rows(b"a\tb\nc\td\n", BcpTerminators::default(), 2).len(), 2);
         assert!(rows(b"", BcpTerminators::default(), 2).is_empty());
     }
 
@@ -346,8 +343,7 @@ mod tests {
         let mut row = Vec::new();
         assert!(reader.next_row(3, &mut row).is_err());
         let mut input: &[u8] = b"id\tname\n7\tseven\n";
-        let mut reader =
-            BcpCharacterReader::new(&mut input, BcpTerminators::default()).skipping(1);
+        let mut reader = BcpCharacterReader::new(&mut input, BcpTerminators::default()).skipping(1);
         assert!(reader.next_row(2, &mut row).unwrap());
         assert_eq!(row, vec![text("7"), text("seven")]);
         assert!(!reader.next_row(2, &mut row).unwrap());

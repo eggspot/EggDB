@@ -3,7 +3,10 @@ use crate::{Dialect, QueryResult, Session, SqlError};
 
 fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
-    run(&mut session, "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))");
+    run(
+        &mut session,
+        "CREATE TABLE log (n NUMBER, msg VARCHAR2(200))",
+    );
     session
 }
 
@@ -22,16 +25,19 @@ fn failure(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
 fn logged(session: &mut Session<'_, MemoryStore>) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     session
-        .execute("SELECT n, msg FROM log ORDER BY n", &mut |result: QueryResult| {
-            for row in result.rows {
-                let text = |at: usize| {
-                    row.get(at)
-                        .and_then(|value| value.to_text())
-                        .unwrap_or_else(|| "NULL".to_owned())
-                };
-                rows.push((text(0), text(1)));
-            }
-        })
+        .execute(
+            "SELECT n, msg FROM log ORDER BY n",
+            &mut |result: QueryResult| {
+                for row in result.rows {
+                    let text = |at: usize| {
+                        row.get(at)
+                            .and_then(|value| value.to_text())
+                            .unwrap_or_else(|| "NULL".to_owned())
+                    };
+                    rows.push((text(0), text(1)));
+                }
+            },
+        )
         .unwrap();
     rows
 }
@@ -48,7 +54,10 @@ fn a_predefined_exception_is_caught_by_its_name_with_sqlerrm() {
         &mut session,
         "DECLARE\n  v NUMBER;\nBEGIN\n  SELECT n INTO v FROM log WHERE n = 99;\nEXCEPTION\n  WHEN NO_DATA_FOUND THEN\n    INSERT INTO log VALUES (SQLCODE, SQLERRM);\nEND;",
     );
-    assert_eq!(logged(&mut session), [pair("100", "ORA-01403: no data found")]);
+    assert_eq!(
+        logged(&mut session),
+        [pair("100", "ORA-01403: no data found")]
+    );
 }
 
 #[test]

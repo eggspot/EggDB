@@ -126,9 +126,18 @@ static NAMED: &[(&str, OracleRelation)] = &[
     ("user_col_comments", user(DictionaryView::ColComments)),
     ("all_col_comments", all(DictionaryView::ColComments)),
     ("dba_col_comments", dba(DictionaryView::ColComments)),
-    ("user_tab_identity_cols", user(DictionaryView::TabIdentityCols)),
-    ("all_tab_identity_cols", all(DictionaryView::TabIdentityCols)),
-    ("dba_tab_identity_cols", dba(DictionaryView::TabIdentityCols)),
+    (
+        "user_tab_identity_cols",
+        user(DictionaryView::TabIdentityCols),
+    ),
+    (
+        "all_tab_identity_cols",
+        all(DictionaryView::TabIdentityCols),
+    ),
+    (
+        "dba_tab_identity_cols",
+        dba(DictionaryView::TabIdentityCols),
+    ),
     ("user_users", user(DictionaryView::Users)),
     ("all_users", all(DictionaryView::Users)),
     ("dba_users", dba(DictionaryView::Users)),
@@ -153,8 +162,14 @@ static NAMED: &[(&str, OracleRelation)] = &[
     ("seq", user(DictionaryView::Sequences)),
     ("obj", user(DictionaryView::Objects)),
     ("v$version", OracleRelation::Version),
-    ("nls_session_parameters", OracleRelation::NlsSessionParameters),
-    ("nls_database_parameters", OracleRelation::NlsDatabaseParameters),
+    (
+        "nls_session_parameters",
+        OracleRelation::NlsSessionParameters,
+    ),
+    (
+        "nls_database_parameters",
+        OracleRelation::NlsDatabaseParameters,
+    ),
 ];
 
 impl OracleRelation {
@@ -567,10 +582,7 @@ static VERSION_COLUMNS: &[CatalogColumn] = &[
     column("con_id", NUMBER),
 ];
 
-static NLS_COLUMNS: &[CatalogColumn] = &[
-    column("parameter", VARCHAR2),
-    column("value", VARCHAR2),
-];
+static NLS_COLUMNS: &[CatalogColumn] = &[column("parameter", VARCHAR2), column("value", VARCHAR2)];
 
 /// The dictionary relation `name` names in the Oracle dialect: an unqualified dictionary name
 /// that no table or view of the session's schemas takes (a user's own object comes first, as
@@ -811,9 +823,9 @@ fn relation_columns(entry: &RelationEntry) -> Vec<ColumnFacts<'_>> {
                 identity: false,
             })
             .collect(),
-        RelationSource::Sequence(_)
-        | RelationSource::Index { .. }
-        | RelationSource::Catalog(_) => Vec::new(),
+        RelationSource::Sequence(_) | RelationSource::Index { .. } | RelationSource::Catalog(_) => {
+            Vec::new()
+        }
     }
 }
 
@@ -1052,8 +1064,7 @@ fn constraint_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
         let Some(table) = entry.table() else {
             continue;
         };
-        if !dictionary.includes(&entry.schema) || HIDDEN_SCHEMAS.contains(&entry.schema.as_str())
-        {
+        if !dictionary.includes(&entry.schema) || HIDDEN_SCHEMAS.contains(&entry.schema.as_str()) {
             continue;
         }
         let mut row = dictionary
@@ -1123,8 +1134,7 @@ fn constraint_column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
         let Some(table) = entry.table() else {
             continue;
         };
-        if !dictionary.includes(&entry.schema) || HIDDEN_SCHEMAS.contains(&entry.schema.as_str())
-        {
+        if !dictionary.includes(&entry.schema) || HIDDEN_SCHEMAS.contains(&entry.schema.as_str()) {
             continue;
         }
         let (columns, positioned): (Vec<usize>, bool) = match constraint.source {
@@ -1635,11 +1645,28 @@ pub(crate) fn userenv(parameter: &str, facts: &SessionFacts<'_>) -> SqlResult<Op
         "NLS_SORT" => Some("BINARY".to_owned()),
         "NLS_DATE_LANGUAGE" => Some("AMERICAN".to_owned()),
         "NLS_DATE_FORMAT" => nls_session_parameter("NLS_DATE_FORMAT"),
-        "DB_DOMAIN" | "HOST" | "OS_USER" | "TERMINAL" | "IP_ADDRESS" | "MODULE" | "ACTION"
-        | "CLIENT_INFO" | "CLIENT_IDENTIFIER" | "CLIENT_PROGRAM_NAME" | "SERVER_HOST"
-        | "GLOBAL_CONTEXT_MEMORY" | "BG_JOB_ID" | "FG_JOB_ID" | "ENTRYID" | "STATEMENTID"
-        | "NETWORK_PROTOCOL" | "POLICY_INVOKER" | "PROXY_USER" | "PROXY_USERID"
-        | "ENTERPRISE_IDENTITY" | "CURRENT_SQL" => None,
+        "DB_DOMAIN"
+        | "HOST"
+        | "OS_USER"
+        | "TERMINAL"
+        | "IP_ADDRESS"
+        | "MODULE"
+        | "ACTION"
+        | "CLIENT_INFO"
+        | "CLIENT_IDENTIFIER"
+        | "CLIENT_PROGRAM_NAME"
+        | "SERVER_HOST"
+        | "GLOBAL_CONTEXT_MEMORY"
+        | "BG_JOB_ID"
+        | "FG_JOB_ID"
+        | "ENTRYID"
+        | "STATEMENTID"
+        | "NETWORK_PROTOCOL"
+        | "POLICY_INVOKER"
+        | "PROXY_USER"
+        | "PROXY_USERID"
+        | "ENTERPRISE_IDENTITY"
+        | "CURRENT_SQL" => None,
         _ => return Err(invalid_userenv_parameter()),
     };
     Ok(value)

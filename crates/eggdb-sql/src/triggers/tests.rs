@@ -130,7 +130,10 @@ fn sqlite_after_insert_trigger_logs_new_rows() {
            INSERT INTO log VALUES ('added', NEW.id, NEW.n);
          END",
     );
-    answer(&mut session, "INSERT INTO t VALUES (1, 10, 'a'), (2, 20, 'b')");
+    answer(
+        &mut session,
+        "INSERT INTO t VALUES (1, 10, 'a'), (2, 20, 'b')",
+    );
     assert_eq!(
         rows(&mut session, "SELECT what, id, n FROM log ORDER BY id"),
         vec!["added|1|10", "added|2|20"]
@@ -141,7 +144,10 @@ fn sqlite_after_insert_trigger_logs_new_rows() {
 fn sqlite_update_of_column_and_when_choose_the_rows() {
     let store = MemoryStore::default();
     let mut session = sqlite_session(&store);
-    answer(&mut session, "INSERT INTO t VALUES (1, 10, 'a'), (2, 20, 'b')");
+    answer(
+        &mut session,
+        "INSERT INTO t VALUES (1, 10, 'a'), (2, 20, 'b')",
+    );
     answer(
         &mut session,
         "CREATE TRIGGER n_grew AFTER UPDATE OF n ON t WHEN NEW.n > OLD.n BEGIN
@@ -172,7 +178,10 @@ fn sqlite_raise_abort_stops_the_statement_and_ignore_skips_the_row() {
     );
     let error = refusal(&mut session, "INSERT INTO t VALUES (1, -1, 'a')");
     assert_eq!(error.message(), "n must not be negative");
-    answer(&mut session, "INSERT INTO t VALUES (2, 0, 'b'), (3, 3, 'c')");
+    answer(
+        &mut session,
+        "INSERT INTO t VALUES (2, 0, 'b'), (3, 3, 'c')",
+    );
     assert_eq!(rows(&mut session, "SELECT id FROM t"), vec!["3"]);
 }
 
@@ -220,7 +229,10 @@ fn sqlite_dropping_the_table_drops_its_triggers() {
         "CREATE TRIGGER t_added AFTER INSERT ON t BEGIN INSERT INTO log VALUES ('x', 1, 1); END",
     );
     answer(&mut session, "DROP TABLE t");
-    answer(&mut session, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, label TEXT)");
+    answer(
+        &mut session,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, label TEXT)",
+    );
     answer(&mut session, "INSERT INTO t VALUES (1, 1, 'a')");
     assert!(rows(&mut session, "SELECT what FROM log").is_empty());
     let error = refusal(&mut session, "DROP TRIGGER t_added");
@@ -258,7 +270,10 @@ fn mysql_before_insert_sets_new_values() {
         "CREATE TRIGGER ins_sum BEFORE INSERT ON account
          FOR EACH ROW SET NEW.amount = NEW.amount * 2",
     );
-    answer(&mut session, "INSERT INTO account VALUES (1, 14.98), (2, 1937.50)");
+    answer(
+        &mut session,
+        "INSERT INTO account VALUES (1, 14.98), (2, 1937.50)",
+    );
     assert_eq!(
         rows(&mut session, "SELECT amount FROM account ORDER BY id"),
         vec!["29.96", "3875.00"]
@@ -284,7 +299,10 @@ fn mysql_compound_body_checks_and_signals() {
     );
     answer(&mut session, "INSERT INTO account VALUES (1, 10)");
     answer(&mut session, "UPDATE account SET amount = -5 WHERE id = 1");
-    assert_eq!(rows(&mut session, "SELECT amount FROM account"), vec!["0.00"]);
+    assert_eq!(
+        rows(&mut session, "SELECT amount FROM account"),
+        vec!["0.00"]
+    );
     let error = refusal(&mut session, "UPDATE account SET amount = 500 WHERE id = 1");
     assert_eq!(error.state().code(), "45000");
     assert_eq!(error.message(), "amount too large");
@@ -374,8 +392,14 @@ fn sqlserver_after_trigger_reads_inserted_and_deleted() {
              SELECT 'old', id, qty FROM deleted;
          END",
     );
-    batch(&mut session, "INSERT INTO dbo.orders VALUES (1, 5, N'open'), (2, 7, N'open')");
-    batch(&mut session, "UPDATE dbo.orders SET qty = qty + 1 WHERE id = 1");
+    batch(
+        &mut session,
+        "INSERT INTO dbo.orders VALUES (1, 5, N'open'), (2, 7, N'open')",
+    );
+    batch(
+        &mut session,
+        "UPDATE dbo.orders SET qty = qty + 1 WHERE id = 1",
+    );
     batch(&mut session, "DELETE FROM dbo.orders WHERE id = 2");
     assert_eq!(
         rows(
@@ -396,7 +420,10 @@ fn sqlserver_update_function_names_the_changed_columns() {
          IF UPDATE(qty)
            INSERT INTO dbo.audit (action, id, qty) SELECT 'qty', id, qty FROM inserted;",
     );
-    batch(&mut session, "INSERT INTO dbo.orders VALUES (1, 5, N'open')");
+    batch(
+        &mut session,
+        "INSERT INTO dbo.orders VALUES (1, 5, N'open')",
+    );
     batch(&mut session, "UPDATE dbo.orders SET status = N'shipped'");
     batch(&mut session, "UPDATE dbo.orders SET qty = 9");
     assert_eq!(
@@ -415,7 +442,10 @@ fn sqlserver_instead_of_delete_replaces_the_delete() {
            UPDATE dbo.orders SET status = N'cancelled'
            WHERE id IN (SELECT id FROM deleted);",
     );
-    batch(&mut session, "INSERT INTO dbo.orders VALUES (1, 5, N'open')");
+    batch(
+        &mut session,
+        "INSERT INTO dbo.orders VALUES (1, 5, N'open')",
+    );
     batch(&mut session, "DELETE FROM dbo.orders WHERE id = 1");
     assert_eq!(
         rows(&mut session, "SELECT id, status FROM dbo.orders"),
@@ -433,9 +463,15 @@ fn sqlserver_disabled_triggers_do_not_fire() {
            INSERT INTO dbo.audit (action, id, qty) SELECT 'added', id, qty FROM inserted;",
     );
     batch(&mut session, "DISABLE TRIGGER added ON dbo.orders");
-    batch(&mut session, "INSERT INTO dbo.orders VALUES (1, 5, N'open')");
+    batch(
+        &mut session,
+        "INSERT INTO dbo.orders VALUES (1, 5, N'open')",
+    );
     batch(&mut session, "ENABLE TRIGGER added ON dbo.orders");
-    batch(&mut session, "INSERT INTO dbo.orders VALUES (2, 6, N'open')");
+    batch(
+        &mut session,
+        "INSERT INTO dbo.orders VALUES (2, 6, N'open')",
+    );
     assert_eq!(
         rows(&mut session, "SELECT action, id FROM dbo.audit"),
         vec!["added|2"]
@@ -550,7 +586,8 @@ fn postgresql_catalogs_show_triggers_of_every_dialect() {
 fn mysql_show_triggers_and_show_create_trigger() {
     let store = MemoryStore::default();
     let mut session = mysql_session(&store);
-    let create = "CREATE TRIGGER ins_sum BEFORE INSERT ON account FOR EACH ROW SET NEW.amount = NEW.amount";
+    let create =
+        "CREATE TRIGGER ins_sum BEFORE INSERT ON account FOR EACH ROW SET NEW.amount = NEW.amount";
     answer(&mut session, create);
     assert_eq!(
         rows(&mut session, "SHOW TRIGGERS LIKE 'acc%'")

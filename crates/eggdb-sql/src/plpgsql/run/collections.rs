@@ -159,9 +159,7 @@ fn put_path(
     }
     let element = match shape.element(collection, key) {
         Ok(element) => element,
-        Err(error)
-            if shape.is_associative() && error.vendor_code() == Some(NO_DATA_FOUND_CODE) =>
-        {
+        Err(error) if shape.is_associative() && error.vendor_code() == Some(NO_DATA_FOUND_CODE) => {
             Value::Null
         }
         Err(error) => return Err(error),
@@ -410,7 +408,9 @@ impl Run<'_> {
                 if let Some((lower, upper)) = between {
                     let lower = self.integer(lower, "lower bound of FORALL cannot be null")?;
                     let upper = self.integer(upper, "upper bound of FORALL cannot be null")?;
-                    keys.retain(|key| key_number(key).is_some_and(|key| (lower..=upper).contains(&key)));
+                    keys.retain(|key| {
+                        key_number(key).is_some_and(|key| (lower..=upper).contains(&key))
+                    });
                 }
                 ForallIndexes::Listed(keys)
             }
@@ -450,8 +450,10 @@ impl Run<'_> {
         };
         outcome?;
         if failed {
-            return Err(SqlError::new(SqlState::RAISE_EXCEPTION, "error(s) in array DML")
-                .with_oracle_code(ARRAY_DML_ERRORS_CODE));
+            return Err(
+                SqlError::new(SqlState::RAISE_EXCEPTION, "error(s) in array DML")
+                    .with_oracle_code(ARRAY_DML_ERRORS_CODE),
+            );
         }
         Ok(Flow::Next)
     }

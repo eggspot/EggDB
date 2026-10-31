@@ -42,7 +42,10 @@ impl CaughtError {
 }
 
 pub(crate) fn line_of(text: &str, offset: usize) -> u32 {
-    let before = text.as_bytes().get(..offset.min(text.len())).unwrap_or_default();
+    let before = text
+        .as_bytes()
+        .get(..offset.min(text.len()))
+        .unwrap_or_default();
     let breaks = before.iter().filter(|&&byte| byte == b'\n').count();
     u32::try_from(breaks + 1).unwrap_or(u32::MAX)
 }
@@ -59,8 +62,8 @@ fn integer_argument(value: &Value, what: &str) -> SqlResult<Option<i64>> {
     if value.is_null() {
         return Ok(None);
     }
-    let converted = crate::sqlserver_conversion::implicit(value.clone(), SqlType::BigInt)
-        .map_err(|_| {
+    let converted =
+        crate::sqlserver_conversion::implicit(value.clone(), SqlType::BigInt).map_err(|_| {
             SqlError::new(
                 SqlState::DATATYPE_MISMATCH,
                 format!("The {what} must be an integer."),
@@ -227,7 +230,10 @@ fn digits_with_precision(digits: String, precision: Option<usize>) -> String {
 fn integer_of(value: Option<&Value>, argument: usize) -> SqlResult<Option<i64>> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value.as_integer().map(Some).ok_or_else(|| mismatched(argument)),
+        Some(value) => value
+            .as_integer()
+            .map(Some)
+            .ok_or_else(|| mismatched(argument)),
     }
 }
 
@@ -240,7 +246,12 @@ fn rendered(
     Ok(Some(match kind {
         'd' | 'i' => {
             let Some(number) = integer_of(value, argument)? else {
-                return Ok(Some(padded(NULL_ARGUMENT.to_owned(), "", specification, false)));
+                return Ok(Some(padded(
+                    NULL_ARGUMENT.to_owned(),
+                    "",
+                    specification,
+                    false,
+                )));
             };
             let sign = if number < 0 {
                 "-"
@@ -251,12 +262,18 @@ fn rendered(
             } else {
                 ""
             };
-            let digits = digits_with_precision(number.unsigned_abs().to_string(), specification.precision);
+            let digits =
+                digits_with_precision(number.unsigned_abs().to_string(), specification.precision);
             padded(digits, sign, specification, true)
         }
         'u' | 'o' | 'x' | 'X' => {
             let Some(number) = integer_of(value, argument)? else {
-                return Ok(Some(padded(NULL_ARGUMENT.to_owned(), "", specification, false)));
+                return Ok(Some(padded(
+                    NULL_ARGUMENT.to_owned(),
+                    "",
+                    specification,
+                    false,
+                )));
             };
             let unsigned = if (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&number) {
                 u64::from(number as i32 as u32)
@@ -354,8 +371,9 @@ pub(crate) fn formatted_message(template: &str, arguments: &[Value]) -> SqlResul
             if characters.get(at) == Some(&'*') {
                 at += 1;
                 let (value, argument) = take_argument(arguments, &mut next_argument);
-                specification.precision =
-                    Some(integer_of(value, argument)?.map_or(0, |precision| precision.max(0) as usize));
+                specification.precision = Some(
+                    integer_of(value, argument)?.map_or(0, |precision| precision.max(0) as usize),
+                );
             } else {
                 specification.precision = Some(number_in(&characters, &mut at).unwrap_or(0));
             }

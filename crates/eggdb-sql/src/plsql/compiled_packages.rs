@@ -188,10 +188,11 @@ impl CompiledPackage {
     }
 
     pub(crate) fn exception_code(&self, name: &str) -> Option<u16> {
-        self.declarations(true).find_map(|declaration| match &declaration.kind {
-            DeclarationKind::Exception { code } if declaration.name == name => *code,
-            _ => None,
-        })
+        self.declarations(true)
+            .find_map(|declaration| match &declaration.kind {
+                DeclarationKind::Exception { code } if declaration.name == name => *code,
+                _ => None,
+            })
     }
 
     pub(crate) fn initialization_definition(&self) -> RoutineDefinition {
@@ -283,7 +284,13 @@ pub(crate) fn member_program(
     definition: &Arc<RoutineDefinition>,
 ) -> Option<Arc<Program>> {
     let package = definition.plsql.as_ref()?.package.as_deref()?;
-    let compiled = tables.routines.packages.entries.get(package)?.compiled.as_ref()?;
+    let compiled = tables
+        .routines
+        .packages
+        .entries
+        .get(package)?
+        .compiled
+        .as_ref()?;
     compiled
         .members
         .iter()

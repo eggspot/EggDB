@@ -40,7 +40,10 @@ fn arguments(argument: &Bson) -> Vec<&Bson> {
 fn exact_count<'a>(name: &str, argument: &'a Bson, count: usize) -> DocumentResult<Vec<&'a Bson>> {
     let items = arguments(argument);
     if items.len() != count {
-        return Err(DocumentError::bad_value(format!("Expression {name} takes exactly {count} arguments. {} were passed in.", items.len())));
+        return Err(DocumentError::bad_value(format!(
+            "Expression {name} takes exactly {count} arguments. {} were passed in.",
+            items.len()
+        )));
     }
     Ok(items)
 }
@@ -59,40 +62,72 @@ fn arithmetic(name: &str, values: &[Bson]) -> DocumentResult<Bson> {
     if values.iter().any(|value| matches!(value, Bson::Null)) {
         return Ok(Bson::Null);
     }
-    let all_integers = values.iter().all(|value| matches!(value, Bson::Int32(_) | Bson::Int64(_)));
+    let all_integers = values
+        .iter()
+        .all(|value| matches!(value, Bson::Int32(_) | Bson::Int64(_)));
     let any_long = values.iter().any(|value| matches!(value, Bson::Int64(_)));
     let mut date = None;
     let mut numbers = Vec::with_capacity(values.len());
     for value in values {
         match value {
-            Bson::DateTime(milliseconds) if name == "$add" && date.is_none() => date = Some(*milliseconds),
-            Bson::DateTime(milliseconds) if name == "$subtract" => numbers.push(*milliseconds as f64),
+            Bson::DateTime(milliseconds) if name == "$add" && date.is_none() => {
+                date = Some(*milliseconds)
+            }
+            Bson::DateTime(milliseconds) if name == "$subtract" => {
+                numbers.push(*milliseconds as f64)
+            }
             other if other.is_number() => numbers.push(other.as_f64().unwrap_or(0.0)),
             other => {
-                return Err(DocumentError::type_mismatch(format!("{name} only supports numeric types, not {}", other.type_name())));
+                return Err(DocumentError::type_mismatch(format!(
+                    "{name} only supports numeric types, not {}",
+                    other.type_name()
+                )));
             }
         }
     }
     let integers: Vec<i64> = values.iter().filter_map(Bson::as_i64).collect();
     let (float, integer) = match name {
-        "$add" => (numbers.iter().sum::<f64>(), integers.iter().try_fold(0i64, |sum, value| sum.checked_add(*value))),
-        "$multiply" => (numbers.iter().product::<f64>(), integers.iter().try_fold(1i64, |product, value| product.checked_mul(*value))),
+        "$add" => (
+            numbers.iter().sum::<f64>(),
+            integers
+                .iter()
+                .try_fold(0i64, |sum, value| sum.checked_add(*value)),
+        ),
+        "$multiply" => (
+            numbers.iter().product::<f64>(),
+            integers
+                .iter()
+                .try_fold(1i64, |product, value| product.checked_mul(*value)),
+        ),
         "$subtract" => {
             if numbers.len() != 2 {
-                return Err(DocumentError::bad_value("Expression $subtract takes exactly 2 arguments."));
+                return Err(DocumentError::bad_value(
+                    "Expression $subtract takes exactly 2 arguments.",
+                ));
             }
             let difference = numbers[0] - numbers[1];
-            if matches!((&values[0], &values[1]), (Bson::DateTime(_), Bson::DateTime(_))) {
+            if matches!(
+                (&values[0], &values[1]),
+                (Bson::DateTime(_), Bson::DateTime(_))
+            ) {
                 return Ok(Bson::Int64(difference as i64));
             }
             if matches!(values[0], Bson::DateTime(_)) {
                 return Ok(Bson::DateTime(difference as i64));
             }
-            (difference, integers.first().zip(integers.get(1)).and_then(|(a, b)| a.checked_sub(*b)))
+            (
+                difference,
+                integers
+                    .first()
+                    .zip(integers.get(1))
+                    .and_then(|(a, b)| a.checked_sub(*b)),
+            )
         }
         "$divide" => {
             if numbers.len() != 2 {
-                return Err(DocumentError::bad_value("Expression $divide takes exactly 2 arguments."));
+                return Err(DocumentError::bad_value(
+                    "Expression $divide takes exactly 2 arguments.",
+                ));
             }
             if numbers[1] == 0.0 {
                 return Err(DocumentError::bad_value("can't $divide by zero"));
@@ -101,14 +136,26 @@ fn arithmetic(name: &str, values: &[Bson]) -> DocumentResult<Bson> {
         }
         "$mod" => {
             if numbers.len() != 2 {
-                return Err(DocumentError::bad_value("Expression $mod takes exactly 2 arguments."));
+                return Err(DocumentError::bad_value(
+                    "Expression $mod takes exactly 2 arguments.",
+                ));
             }
             if numbers[1] == 0.0 {
                 return Err(DocumentError::bad_value("can't $mod by zero"));
             }
-            (numbers[0] % numbers[1], integers.first().zip(integers.get(1)).and_then(|(a, b)| a.checked_rem(*b)))
+            (
+                numbers[0] % numbers[1],
+                integers
+                    .first()
+                    .zip(integers.get(1))
+                    .and_then(|(a, b)| a.checked_rem(*b)),
+            )
         }
-        _ => return Err(DocumentError::bad_value(format!("Unrecognized expression '{name}'"))),
+        _ => {
+            return Err(DocumentError::bad_value(format!(
+                "Unrecognized expression '{name}'"
+            )));
+        }
     };
     if let Some(milliseconds) = date {
         return Ok(Bson::DateTime(milliseconds + float as i64));
@@ -150,33 +197,46 @@ fn value_of(expression: &Bson, root: &Document, depth: usize) -> DocumentResult<
 
 fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResult<Option<Bson>> {
     if depth > MAX_DEPTH {
-        return Err(DocumentError::bad_value("the expression is nested too deeply"));
+        return Err(DocumentError::bad_value(
+            "the expression is nested too deeply",
+        ));
     }
     match expression {
         Bson::String(text) if text.starts_with("$$") => {
-            let (variable, rest) = text[2..].split_once('.').map_or((&text[2..], None), |(name, rest)| (name, Some(rest)));
+            let (variable, rest) = text[2..]
+                .split_once('.')
+                .map_or((&text[2..], None), |(name, rest)| (name, Some(rest)));
             match variable {
                 "ROOT" | "CURRENT" => Ok(match rest {
                     None => Some(Bson::Document(root.clone())),
                     Some(path) => field_value(root, path),
                 }),
                 "REMOVE" => Ok(None),
-                other => Err(DocumentError::bad_value(format!("Use of undefined variable: {other}"))),
+                other => Err(DocumentError::bad_value(format!(
+                    "Use of undefined variable: {other}"
+                ))),
             }
         }
         Bson::String(text) if text.starts_with('$') => {
             if text.len() == 1 {
-                return Err(DocumentError::bad_value("'$' by itself is not a valid FieldPath"));
+                return Err(DocumentError::bad_value(
+                    "'$' by itself is not a valid FieldPath",
+                ));
             }
             Ok(field_value(root, &text[1..]))
         }
         Bson::Array(items) => Ok(Some(Bson::Array(
-            items.iter().map(|item| value_of(item, root, depth + 1)).collect::<DocumentResult<_>>()?,
+            items
+                .iter()
+                .map(|item| value_of(item, root, depth + 1))
+                .collect::<DocumentResult<_>>()?,
         ))),
         Bson::Document(inner) => match inner.first() {
             Some((name, argument)) if name.starts_with('$') => {
                 if inner.len() != 1 {
-                    return Err(DocumentError::bad_value("an expression specification must contain exactly one field"));
+                    return Err(DocumentError::bad_value(
+                        "an expression specification must contain exactly one field",
+                    ));
                 }
                 operator(name, argument, root, depth + 1)
             }
@@ -194,24 +254,43 @@ fn evaluate_at(expression: &Bson, root: &Document, depth: usize) -> DocumentResu
     }
 }
 
-fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> DocumentResult<Option<Bson>> {
+fn operator(
+    name: &str,
+    argument: &Bson,
+    root: &Document,
+    depth: usize,
+) -> DocumentResult<Option<Bson>> {
     let all = |argument: &Bson| -> DocumentResult<Vec<Bson>> {
-        arguments(argument).into_iter().map(|item| value_of(item, root, depth)).collect()
+        arguments(argument)
+            .into_iter()
+            .map(|item| value_of(item, root, depth))
+            .collect()
     };
     Ok(Some(match name {
         "$literal" => argument.clone(),
-        "$add" | "$subtract" | "$multiply" | "$divide" | "$mod" => arithmetic(name, &all(argument)?)?,
+        "$add" | "$subtract" | "$multiply" | "$divide" | "$mod" => {
+            arithmetic(name, &all(argument)?)?
+        }
         "$abs" | "$ceil" | "$floor" | "$sqrt" => {
             let value = value_of(exact_count(name, argument, 1)?[0], root, depth)?;
             if matches!(value, Bson::Null) {
                 return Ok(Some(Bson::Null));
             }
             let Some(number) = value.as_f64() else {
-                return Err(DocumentError::type_mismatch(format!("{name} only supports numeric types, not {}", value.type_name())));
+                return Err(DocumentError::type_mismatch(format!(
+                    "{name} only supports numeric types, not {}",
+                    value.type_name()
+                )));
             };
             match (name, &value) {
-                ("$abs", Bson::Int32(whole)) => whole.checked_abs().map_or(Bson::Int64(i64::from(*whole).abs()), Bson::Int32),
-                ("$abs", Bson::Int64(whole)) => Bson::Int64(whole.checked_abs().ok_or_else(|| DocumentError::bad_value("can't take $abs of long long min"))?),
+                ("$abs", Bson::Int32(whole)) => whole
+                    .checked_abs()
+                    .map_or(Bson::Int64(i64::from(*whole).abs()), Bson::Int32),
+                ("$abs", Bson::Int64(whole)) => {
+                    Bson::Int64(whole.checked_abs().ok_or_else(|| {
+                        DocumentError::bad_value("can't take $abs of long long min")
+                    })?)
+                }
                 ("$abs", _) => Bson::Double(number.abs()),
                 (_, Bson::Int32(_) | Bson::Int64(_)) if name != "$sqrt" => value.clone(),
                 ("$ceil", _) => Bson::Double(number.ceil()),
@@ -225,7 +304,12 @@ fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> Docum
                 match value {
                     Bson::String(text) => out.push_str(&text),
                     Bson::Null => return Ok(Some(Bson::Null)),
-                    other => return Err(DocumentError::type_mismatch(format!("$concat only supports strings, not {}", other.type_name()))),
+                    other => {
+                        return Err(DocumentError::type_mismatch(format!(
+                            "$concat only supports strings, not {}",
+                            other.type_name()
+                        )));
+                    }
                 }
             }
             Bson::String(out)
@@ -233,8 +317,19 @@ fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> Docum
         "$toUpper" | "$toLower" | "$toString" => {
             let value = value_of(exact_count(name, argument, 1)?[0], root, depth)?;
             let text = match &value {
-                Bson::Null => return Ok(Some(if name == "$toString" { Bson::Null } else { Bson::String(String::new()) })),
-                other => string_of(other).ok_or_else(|| DocumentError::type_mismatch(format!("{name} can't convert from {}", other.type_name())))?,
+                Bson::Null => {
+                    return Ok(Some(if name == "$toString" {
+                        Bson::Null
+                    } else {
+                        Bson::String(String::new())
+                    }));
+                }
+                other => string_of(other).ok_or_else(|| {
+                    DocumentError::type_mismatch(format!(
+                        "{name} can't convert from {}",
+                        other.type_name()
+                    ))
+                })?,
             };
             Bson::String(match name {
                 "$toUpper" => text.to_uppercase(),
@@ -244,7 +339,12 @@ fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> Docum
         }
         "$strLenCP" => match value_of(exact_count(name, argument, 1)?[0], root, depth)? {
             Bson::String(text) => Bson::Int32(text.chars().count() as i32),
-            other => return Err(DocumentError::type_mismatch(format!("$strLenCP requires a string argument, found: {}", other.type_name()))),
+            other => {
+                return Err(DocumentError::type_mismatch(format!(
+                    "$strLenCP requires a string argument, found: {}",
+                    other.type_name()
+                )));
+            }
         },
         "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" | "$cmp" => {
             let values = exact_count(name, argument, 2)?;
@@ -267,23 +367,39 @@ fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> Docum
         }
         "$and" => Bson::Boolean(all(argument)?.iter().all(Bson::is_truthy)),
         "$or" => Bson::Boolean(all(argument)?.iter().any(Bson::is_truthy)),
-        "$not" => Bson::Boolean(!value_of(exact_count(name, argument, 1)?[0], root, depth)?.is_truthy()),
+        "$not" => {
+            Bson::Boolean(!value_of(exact_count(name, argument, 1)?[0], root, depth)?.is_truthy())
+        }
         "$cond" => {
             let (condition, then, otherwise) = match argument {
                 Bson::Array(items) if items.len() == 3 => (&items[0], &items[1], &items[2]),
-                Bson::Document(parts) => match (parts.get("if"), parts.get("then"), parts.get("else")) {
-                    (Some(condition), Some(then), Some(otherwise)) => (condition, then, otherwise),
-                    _ => return Err(DocumentError::bad_value("$cond needs if, then and else")),
-                },
-                _ => return Err(DocumentError::bad_value("Expression $cond takes exactly 3 arguments.")),
+                Bson::Document(parts) => {
+                    match (parts.get("if"), parts.get("then"), parts.get("else")) {
+                        (Some(condition), Some(then), Some(otherwise)) => {
+                            (condition, then, otherwise)
+                        }
+                        _ => return Err(DocumentError::bad_value("$cond needs if, then and else")),
+                    }
+                }
+                _ => {
+                    return Err(DocumentError::bad_value(
+                        "Expression $cond takes exactly 3 arguments.",
+                    ));
+                }
             };
-            let chosen = if value_of(condition, root, depth)?.is_truthy() { then } else { otherwise };
+            let chosen = if value_of(condition, root, depth)?.is_truthy() {
+                then
+            } else {
+                otherwise
+            };
             return evaluate_at(chosen, root, depth);
         }
         "$ifNull" => {
             let items = arguments(argument);
             if items.len() < 2 {
-                return Err(DocumentError::bad_value("$ifNull needs at least two arguments"));
+                return Err(DocumentError::bad_value(
+                    "$ifNull needs at least two arguments",
+                ));
             }
             for item in &items[..items.len() - 1] {
                 match evaluate_at(item, root, depth)? {
@@ -295,7 +411,12 @@ fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> Docum
         }
         "$size" => match value_of(exact_count(name, argument, 1)?[0], root, depth)? {
             Bson::Array(items) => Bson::Int32(items.len() as i32),
-            other => return Err(DocumentError::bad_value(format!("The argument to $size must be an array. Type of argument: {}", other.type_name()))),
+            other => {
+                return Err(DocumentError::bad_value(format!(
+                    "The argument to $size must be an array. Type of argument: {}",
+                    other.type_name()
+                )));
+            }
         },
         "$arrayElemAt" => {
             let values = exact_count(name, argument, 2)?;
@@ -310,15 +431,27 @@ fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> Docum
                         None => return Ok(None),
                     }
                 }
-                _ => return Err(DocumentError::bad_value("$arrayElemAt's first argument must be an array and its second a number")),
+                _ => {
+                    return Err(DocumentError::bad_value(
+                        "$arrayElemAt's first argument must be an array and its second a number",
+                    ));
+                }
             }
         }
         "$in" => {
             let values = exact_count(name, argument, 2)?;
             let needle = value_of(values[0], root, depth)?;
             match value_of(values[1], root, depth)? {
-                Bson::Array(items) => Bson::Boolean(items.iter().any(|item| compare(item, &needle) == Ordering::Equal)),
-                _ => return Err(DocumentError::bad_value("$in requires an array as a second argument")),
+                Bson::Array(items) => Bson::Boolean(
+                    items
+                        .iter()
+                        .any(|item| compare(item, &needle) == Ordering::Equal),
+                ),
+                _ => {
+                    return Err(DocumentError::bad_value(
+                        "$in requires an array as a second argument",
+                    ));
+                }
             }
         }
         "$type" => match evaluate_at(exact_count(name, argument, 1)?[0], root, depth)? {
@@ -327,10 +460,18 @@ fn operator(name: &str, argument: &Bson, root: &Document, depth: usize) -> Docum
         },
         "$sum" | "$avg" | "$max" | "$min" => {
             let values = all(argument)?;
-            let values: Vec<Bson> = if let [Bson::Array(items)] = values.as_slice() { items.clone() } else { values };
+            let values: Vec<Bson> = if let [Bson::Array(items)] = values.as_slice() {
+                items.clone()
+            } else {
+                values
+            };
             accumulate_values(name, &values)
         }
-        other => return Err(DocumentError::bad_value(format!("Unrecognized expression '{other}'"))),
+        other => {
+            return Err(DocumentError::bad_value(format!(
+                "Unrecognized expression '{other}'"
+            )));
+        }
     }))
 }
 
@@ -344,11 +485,21 @@ pub(crate) fn accumulate_values(name: &str, values: &[Bson]) -> Bson {
                 if numbers.is_empty() {
                     return Bson::Null;
                 }
-                return Bson::Double(numbers.iter().filter_map(|value| value.as_f64()).sum::<f64>() / numbers.len() as f64);
+                return Bson::Double(
+                    numbers
+                        .iter()
+                        .filter_map(|value| value.as_f64())
+                        .sum::<f64>()
+                        / numbers.len() as f64,
+                );
             }
-            let all_integers = numbers.iter().all(|value| matches!(value, Bson::Int32(_) | Bson::Int64(_)));
+            let all_integers = numbers
+                .iter()
+                .all(|value| matches!(value, Bson::Int32(_) | Bson::Int64(_)));
             let any_long = numbers.iter().any(|value| matches!(value, Bson::Int64(_)));
-            let integer = numbers.iter().try_fold(0i64, |sum, value| value.as_i64().and_then(|number| sum.checked_add(number)));
+            let integer = numbers.iter().try_fold(0i64, |sum, value| {
+                value.as_i64().and_then(|number| sum.checked_add(number))
+            });
             match (all_integers, integer) {
                 (true, Some(total)) if any_long => Bson::Int64(total),
                 (true, Some(total)) => number_result(total as f64, Some(total)),
@@ -356,8 +507,14 @@ pub(crate) fn accumulate_values(name: &str, values: &[Bson]) -> Bson {
             }
         }
         _ => {
-            let present = values.iter().filter(|value| !matches!(value, Bson::Null | Bson::Undefined));
-            let chosen = if name == "$max" { present.max_by(|a, b| compare(a, b)) } else { present.min_by(|a, b| compare(a, b)) };
+            let present = values
+                .iter()
+                .filter(|value| !matches!(value, Bson::Null | Bson::Undefined));
+            let chosen = if name == "$max" {
+                present.max_by(|a, b| compare(a, b))
+            } else {
+                present.min_by(|a, b| compare(a, b))
+            };
             chosen.cloned().unwrap_or(Bson::Null)
         }
     }

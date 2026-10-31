@@ -51,7 +51,11 @@ pub(crate) fn take_packet(buffer: &mut Vec<u8>) -> Result<Option<Packet>, String
     if buffer.len() < at + length {
         return Ok(None);
     }
-    let packet = Packet { kind: first >> 4, flags: first & 0x0f, body: buffer[at..at + length].to_vec() };
+    let packet = Packet {
+        kind: first >> 4,
+        flags: first & 0x0f,
+        body: buffer[at..at + length].to_vec(),
+    };
     buffer.drain(..at + length);
     Ok(Some(packet))
 }
@@ -98,7 +102,10 @@ impl<'b> Fields<'b> {
 
     pub(crate) fn binary(&mut self) -> Parsed<&'b [u8]> {
         let length = usize::from(self.short()?);
-        let slice = self.bytes.get(self.at..self.at + length).ok_or("a packet ends early")?;
+        let slice = self
+            .bytes
+            .get(self.at..self.at + length)
+            .ok_or("a packet ends early")?;
         self.at += length;
         Ok(slice)
     }
@@ -114,7 +121,11 @@ impl<'b> Fields<'b> {
             let byte = self.byte()?;
             length += usize::from(byte & 0x7f) * multiplier;
             if byte & 0x80 == 0 {
-                let end = self.at.checked_add(length).filter(|end| *end <= self.bytes.len()).ok_or("properties run past the packet")?;
+                let end = self
+                    .at
+                    .checked_add(length)
+                    .filter(|end| *end <= self.bytes.len())
+                    .ok_or("properties run past the packet")?;
                 self.at = end;
                 return Ok(());
             }

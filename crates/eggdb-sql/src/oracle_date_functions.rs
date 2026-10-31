@@ -276,7 +276,9 @@ pub(crate) fn zone_offset_text(zone: &Value) -> SqlResult<Value> {
         return Ok(Value::Null);
     };
     let zone = zone_named(&zone)?;
-    Ok(Value::Text(zone_text(zone.offset_at(datetime::statement_now()))))
+    Ok(Value::Text(zone_text(
+        zone.offset_at(datetime::statement_now()),
+    )))
 }
 
 pub(crate) fn session_time_zone(value: &str) -> SqlResult<TimeZone> {
@@ -301,7 +303,11 @@ pub(crate) fn time_zone_setting(zone: TimeZone) -> String {
     }
     let west = if offset > 0 { '-' } else { '+' };
     let magnitude = offset.unsigned_abs();
-    format!("UTC{west}{:02}:{:02}", magnitude / 3600, magnitude / 60 % 60)
+    format!(
+        "UTC{west}{:02}:{:02}",
+        magnitude / 3600,
+        magnitude / 60 % 60
+    )
 }
 
 #[cfg(test)]
@@ -335,13 +341,19 @@ mod tests {
 
     #[test]
     fn round_follows_the_rounding_table_of_the_date_functions() {
-        assert_eq!(rounded(at(2024, 6, 30, 23, 0), "YEAR"), at(2024, 1, 1, 0, 0));
+        assert_eq!(
+            rounded(at(2024, 6, 30, 23, 0), "YEAR"),
+            at(2024, 1, 1, 0, 0)
+        );
         assert_eq!(rounded(at(2024, 7, 1, 0, 0), "YYYY"), at(2025, 1, 1, 0, 0));
         assert_eq!(rounded(at(2024, 5, 15, 0, 0), "Q"), at(2024, 4, 1, 0, 0));
         assert_eq!(rounded(at(2024, 5, 16, 0, 0), "Q"), at(2024, 7, 1, 0, 0));
         assert_eq!(rounded(at(2024, 12, 1, 0, 0), "Q"), at(2025, 1, 1, 0, 0));
         assert_eq!(rounded(at(2024, 1, 15, 23, 0), "MM"), at(2024, 1, 1, 0, 0));
-        assert_eq!(rounded(at(2024, 1, 16, 0, 0), "MONTH"), at(2024, 2, 1, 0, 0));
+        assert_eq!(
+            rounded(at(2024, 1, 16, 0, 0), "MONTH"),
+            at(2024, 2, 1, 0, 0)
+        );
         assert_eq!(rounded(at(2024, 1, 1, 11, 59), "DD"), at(2024, 1, 1, 0, 0));
         assert_eq!(rounded(at(2024, 1, 1, 12, 0), "J"), at(2024, 1, 2, 0, 0));
         assert_eq!(rounded(at(2024, 1, 1, 10, 30), "HH"), at(2024, 1, 1, 11, 0));
@@ -362,15 +374,39 @@ mod tests {
 
     #[test]
     fn trunc_takes_every_unit_of_the_table() {
-        assert_eq!(truncated(at(1992, 10, 27, 13, 45), "YEAR"), at(1992, 1, 1, 0, 0));
-        assert_eq!(truncated(at(2024, 5, 17, 13, 45), "Q"), at(2024, 4, 1, 0, 0));
-        assert_eq!(truncated(at(2024, 5, 17, 13, 45), "HH"), at(2024, 5, 17, 13, 0));
-        assert_eq!(truncated(at(2024, 5, 17, 13, 45), "CC"), at(2001, 1, 1, 0, 0));
-        assert_eq!(truncated(at(2021, 1, 1, 0, 0), "IYYY"), at(2019, 12, 30, 0, 0));
-        assert_eq!(truncated(at(2024, 5, 17, 0, 0), "DAY"), at(2024, 5, 12, 0, 0));
-        assert_eq!(truncated(at(2024, 5, 17, 0, 0), "IW"), at(2024, 5, 13, 0, 0));
+        assert_eq!(
+            truncated(at(1992, 10, 27, 13, 45), "YEAR"),
+            at(1992, 1, 1, 0, 0)
+        );
+        assert_eq!(
+            truncated(at(2024, 5, 17, 13, 45), "Q"),
+            at(2024, 4, 1, 0, 0)
+        );
+        assert_eq!(
+            truncated(at(2024, 5, 17, 13, 45), "HH"),
+            at(2024, 5, 17, 13, 0)
+        );
+        assert_eq!(
+            truncated(at(2024, 5, 17, 13, 45), "CC"),
+            at(2001, 1, 1, 0, 0)
+        );
+        assert_eq!(
+            truncated(at(2021, 1, 1, 0, 0), "IYYY"),
+            at(2019, 12, 30, 0, 0)
+        );
+        assert_eq!(
+            truncated(at(2024, 5, 17, 0, 0), "DAY"),
+            at(2024, 5, 12, 0, 0)
+        );
+        assert_eq!(
+            truncated(at(2024, 5, 17, 0, 0), "IW"),
+            at(2024, 5, 13, 0, 0)
+        );
         assert_eq!(truncated(at(2024, 5, 17, 0, 0), "W"), at(2024, 5, 15, 0, 0));
-        assert_eq!(truncated(at(2024, 5, 17, 0, 0), "WW"), at(2024, 5, 13, 0, 0));
+        assert_eq!(
+            truncated(at(2024, 5, 17, 0, 0), "WW"),
+            at(2024, 5, 13, 0, 0)
+        );
     }
 
     #[test]
@@ -401,8 +437,14 @@ mod tests {
     #[test]
     fn next_day_takes_full_names_or_abbreviations() {
         let next = |date: Value, name: &str| next_day(&date, &unit(name));
-        assert_eq!(next(at(2009, 10, 15, 9, 0), "TUESDAY").ok(), Some(at(2009, 10, 20, 9, 0)));
-        assert_eq!(next(at(2009, 10, 20, 9, 0), "tue").ok(), Some(at(2009, 10, 27, 9, 0)));
+        assert_eq!(
+            next(at(2009, 10, 15, 9, 0), "TUESDAY").ok(),
+            Some(at(2009, 10, 20, 9, 0))
+        );
+        assert_eq!(
+            next(at(2009, 10, 20, 9, 0), "tue").ok(),
+            Some(at(2009, 10, 27, 9, 0))
+        );
         assert_eq!(
             next(at(2009, 10, 15, 0, 0), "Funday")
                 .err()
@@ -419,13 +461,20 @@ mod tests {
 
     #[test]
     fn session_time_zones_become_settings_the_clock_reads() {
-        let offset = |text: &str| session_time_zone(text).ok().and_then(TimeZone::fixed_offset);
+        let offset = |text: &str| {
+            session_time_zone(text)
+                .ok()
+                .and_then(TimeZone::fixed_offset)
+        };
         assert_eq!(offset("'-08:00'"), Some(-8 * 3600));
         assert_eq!(offset("local"), Some(0));
         assert_eq!(offset("'UTC'"), Some(0));
         let paris = session_time_zone("'Europe/Paris'").ok();
         assert_eq!(paris.and_then(TimeZone::region_name), Some("Europe/Paris"));
-        assert_eq!(paris.map(time_zone_setting).as_deref(), Some("Europe/Paris"));
+        assert_eq!(
+            paris.map(time_zone_setting).as_deref(),
+            Some("Europe/Paris")
+        );
         assert_eq!(
             session_time_zone("'Mars/Olympus'")
                 .err()

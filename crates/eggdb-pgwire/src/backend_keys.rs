@@ -43,7 +43,8 @@ impl BackendKeys {
         secret_key: [u8; SECRET_KEY_BYTES],
         signal: CancelSignal,
     ) -> Registration<'_> {
-        self.lock().insert(process_id, Registered { secret_key, signal });
+        self.lock()
+            .insert(process_id, Registered { secret_key, signal });
         Registration {
             keys: self,
             process_id,

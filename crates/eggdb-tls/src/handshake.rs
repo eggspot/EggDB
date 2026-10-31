@@ -142,7 +142,10 @@ impl Extension {
     fn build(extension_type: u16, contents: impl FnOnce(&mut Writer)) -> Self {
         let mut writer = Writer::new();
         contents(&mut writer);
-        Self { extension_type, data: writer.into_bytes() }
+        Self {
+            extension_type,
+            data: writer.into_bytes(),
+        }
     }
 
     /// `server_name` with one host name.
@@ -158,19 +161,26 @@ impl Extension {
     /// An empty extension, such as a server's `server_name` acknowledgement or
     /// `extended_master_secret`.
     pub fn empty(extension_type: u16) -> Self {
-        Self { extension_type, data: Vec::new() }
+        Self {
+            extension_type,
+            data: Vec::new(),
+        }
     }
 
     /// A client's `supported_versions`.
     pub fn client_supported_versions(versions: &[u16]) -> Self {
         Self::build(extension_type::SUPPORTED_VERSIONS, |writer| {
-            writer.write_vector_u8(|list| versions.iter().for_each(|version| list.write_u16(*version)));
+            writer.write_vector_u8(|list| {
+                versions.iter().for_each(|version| list.write_u16(*version))
+            });
         })
     }
 
     /// A server's `supported_versions`: the one version it selected.
     pub fn server_supported_version(version: u16) -> Self {
-        Self::build(extension_type::SUPPORTED_VERSIONS, |writer| writer.write_u16(version))
+        Self::build(extension_type::SUPPORTED_VERSIONS, |writer| {
+            writer.write_u16(version)
+        })
     }
 
     /// `supported_groups`.
@@ -183,7 +193,8 @@ impl Extension {
     /// `signature_algorithms`.
     pub fn signature_algorithms(schemes: &[u16]) -> Self {
         Self::build(extension_type::SIGNATURE_ALGORITHMS, |writer| {
-            writer.write_vector_u16(|list| schemes.iter().for_each(|scheme| list.write_u16(*scheme)));
+            writer
+                .write_vector_u16(|list| schemes.iter().for_each(|scheme| list.write_u16(*scheme)));
         })
     }
 
@@ -206,13 +217,16 @@ impl Extension {
 
     /// `application_layer_protocol_negotiation` with `protocols` (a server sends exactly one).
     pub fn application_protocols(protocols: &[&[u8]]) -> Self {
-        Self::build(extension_type::APPLICATION_LAYER_PROTOCOL_NEGOTIATION, |writer| {
-            writer.write_vector_u16(|list| {
-                for protocol in protocols {
-                    list.write_vector_u8(|name| name.write_bytes(protocol));
-                }
-            });
-        })
+        Self::build(
+            extension_type::APPLICATION_LAYER_PROTOCOL_NEGOTIATION,
+            |writer| {
+                writer.write_vector_u16(|list| {
+                    for protocol in protocols {
+                        list.write_vector_u8(|name| name.write_bytes(protocol));
+                    }
+                });
+            },
+        )
     }
 
     /// `psk_key_exchange_modes`.
@@ -231,7 +245,9 @@ impl Extension {
 
     /// An empty `renegotiation_info`, which says renegotiation is never done (RFC 5746).
     pub fn empty_renegotiation_info() -> Self {
-        Self::build(extension_type::RENEGOTIATION_INFO, |writer| writer.write_vector_u8(|_| {}))
+        Self::build(extension_type::RENEGOTIATION_INFO, |writer| {
+            writer.write_vector_u8(|_| {})
+        })
     }
 }
 
@@ -241,10 +257,16 @@ fn read_extensions(reader: &mut Reader<'_>) -> Result<Vec<Extension>, CodecError
     while !list.is_empty() {
         let extension_type = list.read_u16()?;
         let data = list.read_vector_u16(0..=VECTOR_U16_MAX)?.to_vec();
-        if extensions.iter().any(|seen| seen.extension_type == extension_type) {
+        if extensions
+            .iter()
+            .any(|seen| seen.extension_type == extension_type)
+        {
             return Err(CodecError::IllegalValue);
         }
-        extensions.push(Extension { extension_type, data });
+        extensions.push(Extension {
+            extension_type,
+            data,
+        });
     }
     Ok(extensions)
 }
@@ -265,7 +287,11 @@ fn find_extension(extensions: &[Extension], extension_type: u16) -> Option<&[u8]
         .map(|extension| extension.data.as_slice())
 }
 
-fn read_u16_list(data: &[u8], prefix_bounds: std::ops::RangeInclusive<usize>, u8_prefix: bool) -> Result<Vec<u16>, CodecError> {
+fn read_u16_list(
+    data: &[u8],
+    prefix_bounds: std::ops::RangeInclusive<usize>,
+    u8_prefix: bool,
+) -> Result<Vec<u16>, CodecError> {
     let mut reader = Reader::new(data);
     let bytes = if u8_prefix {
         reader.read_vector_u8(prefix_bounds)?
@@ -276,7 +302,12 @@ fn read_u16_list(data: &[u8], prefix_bounds: std::ops::RangeInclusive<usize>, u8
     if bytes.len() % 2 != 0 {
         return Err(CodecError::LengthOutOfRange);
     }
-    Ok(bytes.chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]])).collect())
+    Ok(bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect())
 }
 
 fn read_alpn_list(data: &[u8]) -> Result<Vec<Vec<u8>>, CodecError> {
@@ -303,7 +334,10 @@ impl KeyShareEntry {
     fn read(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         let group = reader.read_u16()?;
         let key_exchange = reader.read_vector_u16(1..=VECTOR_U16_MAX)?.to_vec();
-        Ok(Self { group, key_exchange })
+        Ok(Self {
+            group,
+            key_exchange,
+        })
     }
 
     fn write(&self, writer: &mut Writer) {
@@ -340,11 +374,27 @@ impl ClientHello {
         if suites.len() % 2 != 0 {
             return Err(CodecError::LengthOutOfRange);
         }
-        let cipher_suites = suites.chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]])).collect();
+        let cipher_suites = suites
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
         let compression_methods = reader.read_vector_u8(1..=255)?.to_vec();
-        let extensions = if reader.is_empty() { Vec::new() } else { read_extensions(&mut reader)? };
+        let extensions = if reader.is_empty() {
+            Vec::new()
+        } else {
+            read_extensions(&mut reader)?
+        };
         reader.finish()?;
-        Ok(Self { legacy_version, random, legacy_session_id, cipher_suites, compression_methods, extensions })
+        Ok(Self {
+            legacy_version,
+            random,
+            legacy_session_id,
+            cipher_suites,
+            compression_methods,
+            extensions,
+        })
     }
 
     /// The whole ClientHello message, header included.
@@ -353,7 +403,11 @@ impl ClientHello {
         writer.write_u16(self.legacy_version);
         writer.write_bytes(&self.random);
         writer.write_vector_u8(|id| id.write_bytes(&self.legacy_session_id));
-        writer.write_vector_u16(|list| self.cipher_suites.iter().for_each(|suite| list.write_u16(*suite)));
+        writer.write_vector_u16(|list| {
+            self.cipher_suites
+                .iter()
+                .for_each(|suite| list.write_u16(*suite))
+        });
         writer.write_vector_u8(|list| list.write_bytes(&self.compression_methods));
         write_extensions(&mut writer, &self.extensions);
         handshake_message(handshake_type::CLIENT_HELLO, &writer.into_bytes())
@@ -479,9 +533,20 @@ impl ServerHello {
         let legacy_session_id_echo = reader.read_vector_u8(0..=MAX_SESSION_ID_BYTES)?.to_vec();
         let cipher_suite = reader.read_u16()?;
         let compression_method = reader.read_u8()?;
-        let extensions = if reader.is_empty() { Vec::new() } else { read_extensions(&mut reader)? };
+        let extensions = if reader.is_empty() {
+            Vec::new()
+        } else {
+            read_extensions(&mut reader)?
+        };
         reader.finish()?;
-        Ok(Self { legacy_version, random, legacy_session_id_echo, cipher_suite, compression_method, extensions })
+        Ok(Self {
+            legacy_version,
+            random,
+            legacy_session_id_echo,
+            cipher_suite,
+            compression_method,
+            extensions,
+        })
     }
 
     /// The whole ServerHello message, header included.
@@ -546,7 +611,10 @@ impl ServerHello {
 }
 
 fn selected_application_protocol(extensions: &[Extension]) -> Result<Option<Vec<u8>>, CodecError> {
-    let Some(data) = find_extension(extensions, extension_type::APPLICATION_LAYER_PROTOCOL_NEGOTIATION) else {
+    let Some(data) = find_extension(
+        extensions,
+        extension_type::APPLICATION_LAYER_PROTOCOL_NEGOTIATION,
+    ) else {
         return Ok(None);
     };
     let mut protocols = read_alpn_list(data)?;
@@ -610,7 +678,10 @@ impl CertificateMessage {
             request_context: Vec::new(),
             entries: chain
                 .iter()
-                .map(|certificate| CertificateEntry { certificate: certificate.to_vec(), extensions: Vec::new() })
+                .map(|certificate| CertificateEntry {
+                    certificate: certificate.to_vec(),
+                    extensions: Vec::new(),
+                })
                 .collect(),
         }
     }
@@ -625,9 +696,15 @@ impl CertificateMessage {
         while !list.is_empty() {
             let certificate = list.read_vector_u24(1..=VECTOR_U24_MAX)?.to_vec();
             let extensions = read_extensions(&mut list)?;
-            entries.push(CertificateEntry { certificate, extensions });
+            entries.push(CertificateEntry {
+                certificate,
+                extensions,
+            });
         }
-        Ok(Self { request_context, entries })
+        Ok(Self {
+            request_context,
+            entries,
+        })
     }
 
     /// Parses a TLS 1.2 Certificate body.
@@ -638,9 +715,15 @@ impl CertificateMessage {
         let mut entries = Vec::new();
         while !list.is_empty() {
             let certificate = list.read_vector_u24(1..=VECTOR_U24_MAX)?.to_vec();
-            entries.push(CertificateEntry { certificate, extensions: Vec::new() });
+            entries.push(CertificateEntry {
+                certificate,
+                extensions: Vec::new(),
+            });
         }
-        Ok(Self { request_context: Vec::new(), entries })
+        Ok(Self {
+            request_context: Vec::new(),
+            entries,
+        })
     }
 
     /// The whole TLS 1.3 message, header included.
@@ -751,7 +834,13 @@ impl NewSessionTicket {
         let ticket = reader.read_vector_u16(1..=VECTOR_U16_MAX)?.to_vec();
         let extensions = read_extensions(&mut reader)?;
         reader.finish()?;
-        Ok(Self { lifetime_seconds, age_add, nonce, ticket, extensions })
+        Ok(Self {
+            lifetime_seconds,
+            age_add,
+            nonce,
+            ticket,
+            extensions,
+        })
     }
 
     /// The whole message, header included.
@@ -802,7 +891,10 @@ impl CertificateRequest {
         if find_extension(&extensions, extension_type::SIGNATURE_ALGORITHMS).is_none() {
             return Err(CodecError::IllegalValue);
         }
-        Ok(Self { request_context, extensions })
+        Ok(Self {
+            request_context,
+            extensions,
+        })
     }
 
     /// The whole message, header included.
@@ -855,7 +947,11 @@ impl EcdheServerKeyExchange {
         let public_key = reader.read_vector_u8(1..=255)?.to_vec();
         let signed = DigitallySigned::read(&mut reader)?;
         reader.finish()?;
-        Ok(Self { group, public_key, signed })
+        Ok(Self {
+            group,
+            public_key,
+            signed,
+        })
     }
 
     /// The whole message, header included.
@@ -910,7 +1006,9 @@ impl HandshakeBuffer {
     pub fn push(&mut self, fragment: &[u8]) -> Result<(), CodecError> {
         self.pending.extend_from_slice(fragment);
         match self.declared_length() {
-            Some(length) if length > MAX_HANDSHAKE_MESSAGE_BYTES => Err(CodecError::LengthOutOfRange),
+            Some(length) if length > MAX_HANDSHAKE_MESSAGE_BYTES => {
+                Err(CodecError::LengthOutOfRange)
+            }
             _ => Ok(()),
         }
     }
@@ -958,7 +1056,10 @@ mod tests {
                 Extension::client_supported_versions(&[0x0304, 0x0303]),
                 Extension::supported_groups(&[named_group::X25519, named_group::SECP256R1]),
                 Extension::signature_algorithms(&[signature_scheme::ECDSA_SECP256R1_SHA256]),
-                Extension::client_key_shares(&[KeyShareEntry { group: named_group::X25519, key_exchange: vec![9; 32] }]),
+                Extension::client_key_shares(&[KeyShareEntry {
+                    group: named_group::X25519,
+                    key_exchange: vec![9; 32],
+                }]),
                 Extension::application_protocols(&[b"postgresql"]),
                 Extension::psk_key_exchange_modes(&[1]),
             ],
@@ -976,17 +1077,28 @@ mod tests {
         assert_eq!(decoded.supported_versions(), Ok(vec![0x0304, 0x0303]));
         assert_eq!(decoded.supported_groups(), Ok(vec![0x001d, 0x0017]));
         assert_eq!(decoded.key_shares().map(|shares| shares.len()), Ok(1));
-        assert_eq!(decoded.application_protocols(), Ok(vec![b"postgresql".to_vec()]));
+        assert_eq!(
+            decoded.application_protocols(),
+            Ok(vec![b"postgresql".to_vec()])
+        );
         assert_eq!(decoded.psk_key_exchange_modes(), Ok(vec![1]));
     }
 
     #[test]
     fn duplicate_extensions_and_key_shares_are_refused() {
         let mut hello = sample_client_hello();
-        hello.extensions.push(Extension::server_name("again.example.com"));
-        assert_eq!(ClientHello::decode(message_body(&hello.encode())), Err(CodecError::IllegalValue));
+        hello
+            .extensions
+            .push(Extension::server_name("again.example.com"));
+        assert_eq!(
+            ClientHello::decode(message_body(&hello.encode())),
+            Err(CodecError::IllegalValue)
+        );
         let mut hello = sample_client_hello();
-        let share = KeyShareEntry { group: named_group::X25519, key_exchange: vec![1; 32] };
+        let share = KeyShareEntry {
+            group: named_group::X25519,
+            key_exchange: vec![1; 32],
+        };
         hello.extensions[4] = Extension::client_key_shares(&[share.clone(), share]);
         assert_eq!(hello.key_shares(), Err(CodecError::IllegalValue));
     }
@@ -1019,7 +1131,10 @@ mod tests {
             legacy_session_id_echo: vec![1; 32],
             cipher_suite: 0x1301,
             compression_method: 0,
-            extensions: vec![Extension::server_supported_version(0x0304), Extension::retry_key_share(named_group::SECP256R1)],
+            extensions: vec![
+                Extension::server_supported_version(0x0304),
+                Extension::retry_key_share(named_group::SECP256R1),
+            ],
         };
         let decoded = ServerHello::decode(message_body(&hello.encode())).unwrap();
         assert!(decoded.is_hello_retry_request());
@@ -1032,9 +1147,15 @@ mod tests {
         let chain: [&[u8]; 2] = [b"leaf", b"intermediate"];
         let message = CertificateMessage::from_chain(&chain);
         let tls13 = message.encode_tls13();
-        assert_eq!(CertificateMessage::decode_tls13(message_body(&tls13)), Ok(message.clone()));
+        assert_eq!(
+            CertificateMessage::decode_tls13(message_body(&tls13)),
+            Ok(message.clone())
+        );
         let tls12 = message.encode_tls12();
-        assert_eq!(CertificateMessage::decode_tls12(message_body(&tls12)), Ok(message));
+        assert_eq!(
+            CertificateMessage::decode_tls12(message_body(&tls12)),
+            Ok(message)
+        );
     }
 
     #[test]
@@ -1049,7 +1170,10 @@ mod tests {
         }
         assert_eq!(buffer.next_message(), None);
         buffer.push(&stream[10..]).unwrap();
-        assert_eq!(buffer.next_message(), Some((handshake_type::FINISHED, first)));
+        assert_eq!(
+            buffer.next_message(),
+            Some((handshake_type::FINISHED, first))
+        );
         let (message_type, message) = buffer.next_message().unwrap();
         assert_eq!(message_type, handshake_type::KEY_UPDATE);
         assert_eq!(decode_key_update(message_body(&message)), Ok(true));
@@ -1059,7 +1183,10 @@ mod tests {
     #[test]
     fn an_oversized_handshake_message_is_refused_from_its_header() {
         let mut buffer = HandshakeBuffer::new();
-        assert_eq!(buffer.push(&[11, 0xff, 0xff, 0xff]), Err(CodecError::LengthOutOfRange));
+        assert_eq!(
+            buffer.push(&[11, 0xff, 0xff, 0xff]),
+            Err(CodecError::LengthOutOfRange)
+        );
     }
 
     #[test]
@@ -1067,11 +1194,20 @@ mod tests {
         let exchange = EcdheServerKeyExchange {
             group: named_group::X25519,
             public_key: vec![4; 32],
-            signed: DigitallySigned { scheme: signature_scheme::RSA_PSS_RSAE_SHA256, signature: vec![5; 256] },
+            signed: DigitallySigned {
+                scheme: signature_scheme::RSA_PSS_RSAE_SHA256,
+                signature: vec![5; 256],
+            },
         };
         let message = exchange.encode();
-        assert_eq!(EcdheServerKeyExchange::decode(message_body(&message)), Ok(exchange));
+        assert_eq!(
+            EcdheServerKeyExchange::decode(message_body(&message)),
+            Ok(exchange)
+        );
         let client = ecdhe_client_key_exchange_message(&[6; 65]);
-        assert_eq!(decode_ecdhe_client_key_exchange(message_body(&client)), Ok(vec![6; 65]));
+        assert_eq!(
+            decode_ecdhe_client_key_exchange(message_body(&client)),
+            Ok(vec![6; 65])
+        );
     }
 }

@@ -86,12 +86,18 @@ mod tests {
     fn quality_rules_count_the_rows_that_break_them() {
         let store = catalog();
         let mut session = Session::new(&store);
-        for sql in [
-            "INSERT INTO eggdb_catalog.quality_rules (rule_name, schema_name, table_name, row_condition) VALUES ('email present', 'public', 'customers', 'email IS NOT NULL'), ('known country', 'public', 'customers', 'country IN (''VN'', ''SE'')'), ('ids positive', 'public', 'customers', 'id > 0')",
-        ] {
+        {
+            let sql = "INSERT INTO eggdb_catalog.quality_rules (rule_name, schema_name, table_name, row_condition) VALUES ('email present', 'public', 'customers', 'email IS NOT NULL'), ('known country', 'public', 'customers', 'country IN (''VN'', ''SE'')'), ('ids positive', 'public', 'customers', 'id > 0')";
             run(&mut session, sql).unwrap();
         }
-        assert_eq!(run(&mut session, "SELECT eggdb_catalog.check_quality() AS broken").unwrap(), "broken\n2\nSELECT 1");
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_catalog.check_quality() AS broken"
+            )
+            .unwrap(),
+            "broken\n2\nSELECT 1"
+        );
         assert_eq!(
             run(&mut session, "SELECT rule_name, checked_rows, failed_rows FROM eggdb_catalog.quality_results ORDER BY rule_name").unwrap(),
             "rule_name|checked_rows|failed_rows\nemail present|3|1\nids positive|3|0\nknown country|3|1\nSELECT 3"
@@ -111,13 +117,23 @@ mod tests {
         }
         assert!(run(&mut session, "INSERT INTO eggdb_catalog.tags VALUES ('public', 'customers', 'country', 'missing')").is_err());
         assert_eq!(
-            run(&mut session, "SELECT * FROM eggdb_catalog.upstream('mart.revenue')").unwrap(),
+            run(
+                &mut session,
+                "SELECT * FROM eggdb_catalog.upstream('mart.revenue')"
+            )
+            .unwrap(),
             "upstream_asset|hops\npublic.customers|1\npublic.orders|1\ncrm.contacts|2\nSELECT 3"
         );
         assert_eq!(
             run(&mut session, "SELECT e -> 'inputs' AS inputs, e -> 'job' ->> 'name' AS job, e ->> 'eventType' AS type FROM eggdb_catalog.openlineage_event('build_mart', 'COMPLETE') AS e").unwrap(),
             "inputs|job|type\n[{\"name\": \"public.customers\", \"namespace\": \"eggdb\"}, {\"name\": \"public.orders\", \"namespace\": \"eggdb\"}]|build_mart|COMPLETE\nSELECT 1"
         );
-        assert!(run(&mut session, "SELECT eggdb_catalog.openlineage_event('build_mart', 'DONE')").is_err());
+        assert!(
+            run(
+                &mut session,
+                "SELECT eggdb_catalog.openlineage_event('build_mart', 'DONE')"
+            )
+            .is_err()
+        );
     }
 }

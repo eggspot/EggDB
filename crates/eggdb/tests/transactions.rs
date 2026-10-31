@@ -417,7 +417,10 @@ fn key_value_writes_and_sql_share_one_commit_or_one_rollback() {
     tx.sql(Dialect::PostgreSql, "INSERT INTO orders VALUES (1, 50)")
         .unwrap();
     let error = tx
-        .sql(Dialect::PostgreSql, "INSERT INTO orders VALUES (2, 10), (1, 99)")
+        .sql(
+            Dialect::PostgreSql,
+            "INSERT INTO orders VALUES (2, 10), (1, 99)",
+        )
         .unwrap_err();
     assert_eq!(error.state().code(), "23505");
     let counted = tx
