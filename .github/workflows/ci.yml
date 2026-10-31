@@ -1251,8 +1251,31 @@ jobs:
           az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
           shellcheck deploy/gcp/deploy.sh scripts/apple/xcframework.sh
 
+  footprint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-footprint-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Measure each build profile against its budget (D6, D34)
+        run: scripts/footprint.sh
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

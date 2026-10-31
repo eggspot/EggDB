@@ -151,3 +151,10 @@ all of its time.
 The binary is unchanged by this measurement; its growth since v0.1.0 (302,448 bytes on macOS,
 when it only printed its version) is the storage engine, the command-line tool, `eggdb ui` and
 `export`/`import`, each stated with its reason when it landed (D90 to D93).
+
+## Footprint per build profile
+`scripts/footprint.sh` builds the `embedded` artifacts (the C API library, and the WebAssembly
+module when it has been built) and the `full` binary in release, strips them, and checks each
+size against `benchmarks/footprint.txt` (D6, D34, D230). CI runs it on Linux and macOS; a size
+over its budget fails until the budget is raised with a stated reason, and `--update` rewrites
+the current system's lines.
