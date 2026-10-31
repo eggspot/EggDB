@@ -589,6 +589,10 @@ jobs:
           for target in $TARGETS; do
             cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-tls -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-commands -p eggdb-mcp -p eggdb-tdswire -p eggdb-capi -p eggdb --all-targets --target "$target" -- -D warnings
           done
+      - name: Build the file format without the standard library for a Cortex-M microcontroller
+        run: |
+          rustup target add thumbv7em-none-eabihf
+          cargo clippy -p eggdb-format --no-default-features --target thumbv7em-none-eabihf -- -D warnings
 
   bench:
     runs-on: ubuntu-latest

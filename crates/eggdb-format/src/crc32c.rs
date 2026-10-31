@@ -67,7 +67,7 @@ fn update_with_tables(mut crc: u32, bytes: &[u8]) -> u32 {
     crc
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod hardware {
     use std::arch::x86_64::{_mm_crc32_u8, _mm_crc32_u64};
 
@@ -95,7 +95,7 @@ mod hardware {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "std", target_arch = "aarch64"))]
 mod hardware {
     use std::arch::aarch64::{__crc32cb, __crc32cd};
 
@@ -121,7 +121,7 @@ mod hardware {
     }
 }
 
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64"))))]
 mod hardware {
     pub(super) fn update(_crc: u32, _bytes: &[u8]) -> Option<u32> {
         None

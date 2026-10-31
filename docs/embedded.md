@@ -620,6 +620,16 @@ back as text (`null` for NULL). `reset()` deletes the database's files. The modu
 small C ABI (`eggdb_wasm_open`, `eggdb_wasm_execute`, and the buffers they read and write, in
 `crates/eggdb-wasm`), so any WASI runtime can host it the same way.
 
+## On microcontrollers (`no_std`)
+
+The file format's building blocks are their own crate, `eggdb-format`, which builds without the
+standard library (`default-features = false`, needing only an allocator): CRC-32C, the header
+slots, page headers and their checksums (D223). Its `FlashPages` keeps EggDB pages directly on
+raw flash through a small `Flash` trait your board's driver implements (read, erase a sector,
+program), with no file system and no allocation, and refuses a damaged, torn or misplaced page
+as the engine does in a file. CI builds it for a Cortex-M4F (`thumbv7em-none-eabihf`). The B-tree,
+transactions and SQL do not run there yet.
+
 ## Limits in this release
 - **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
   with 64 KiB pages (`db.max_key_bytes()`).

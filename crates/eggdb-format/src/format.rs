@@ -1,6 +1,8 @@
 use crate::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::crc32c::{crc32c, crc32c_append};
 use crate::error::FormatError;
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// The first eight bytes of every EggDB database file. The `\r\n`, `\x1A` and `\n` catch a file
 /// mangled by a text-mode transfer, as PNG's signature does.
@@ -217,6 +219,7 @@ pub struct FileId(pub [u8; 16]);
 impl FileId {
     /// A new identity drawn from the operating system's randomness, through the seeds of the
     /// standard library's hash maps.
+    #[cfg(feature = "std")]
     pub fn random() -> Self {
         use std::hash::{BuildHasher, RandomState};
         let mut bytes = [0u8; 16];
@@ -445,7 +448,7 @@ impl Superblock {
             });
         }
         let in_a_log_segment = |page: u64| {
-            std::iter::once(self.log_head_page)
+            core::iter::once(self.log_head_page)
                 .chain(self.recycled_segments)
                 .filter(|&first| first != NO_PAGE)
                 .any(|first| (first..segment_end(first)).contains(&page))
@@ -492,9 +495,9 @@ impl Superblock {
         let has_magic = |slot: &[u8]| slot.get(..8) == Some(&MAGIC[..]);
         let newest = match intact {
             (true, true) => match read_u64(slot1, 16).cmp(&read_u64(slot0, 16)) {
-                std::cmp::Ordering::Greater => 1,
-                std::cmp::Ordering::Less => 0,
-                std::cmp::Ordering::Equal => {
+                core::cmp::Ordering::Greater => 1,
+                core::cmp::Ordering::Less => 0,
+                core::cmp::Ordering::Equal => {
                     return Err(FormatError::InvalidField {
                         field: "generation",
                     });

@@ -34,7 +34,6 @@ mod btree;
 mod btree_delete_tests;
 #[cfg(test)]
 mod btree_tests;
-mod bytes;
 mod cells;
 mod compression;
 #[cfg(test)]
@@ -43,10 +42,9 @@ mod checkpoint_tests;
 mod encryption_tests;
 #[cfg(test)]
 mod crash_sweep_tests;
-mod crc32c;
 mod cursor;
 mod error;
-mod format;
+use eggdb_format::{bytes, crc32c, format};
 mod frames;
 mod hybrid_clock;
 mod log;
