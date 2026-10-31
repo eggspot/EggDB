@@ -954,3 +954,18 @@ fn catalog_procedures_describe_procedures_and_functions() {
         ]
     );
 }
+
+#[test]
+fn management_studio_reads_server_views_three_part_names_and_permissions() {
+    let store = MemoryStore::default();
+    let mut session = shop(&store);
+    assert!(!rows(&mut session, "SELECT name FROM master.sys.databases").is_empty());
+    assert!(!rows(&mut session, "SELECT name FROM [shop].[sys].[tables]").is_empty());
+    assert!(!rows(&mut session, "SELECT name, value_in_use FROM sys.configurations").is_empty());
+    assert_eq!(rows(&mut session, "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process = 1"), vec![vec![Value::Integer(1)]]);
+    assert!(!rows(&mut session, "SELECT name FROM sys.server_principals WHERE type = 'S'").is_empty());
+    assert!(!rows(&mut session, "SELECT name FROM sys.database_files").is_empty());
+    assert!(rows(&mut session, "SELECT * FROM sys.change_tracking_databases").is_empty());
+    assert_eq!(rows(&mut session, "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')"), vec![vec![Value::Integer(1)]]);
+    assert!(error_code(&mut session, "SELECT name FROM elsewhere.sys.tables").is_some());
+}

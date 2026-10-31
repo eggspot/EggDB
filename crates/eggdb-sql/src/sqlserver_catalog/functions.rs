@@ -57,10 +57,12 @@ pub(crate) enum MetadataFunction {
     IsServerRoleMember,
     IsMember,
     HasDatabaseAccess,
+    HasPermissionsByName,
+    Permissions,
 }
 
 impl MetadataFunction {
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::ServerProperty,
         Self::DatabasePropertyEx,
         Self::DbName,
@@ -80,6 +82,8 @@ impl MetadataFunction {
         Self::ColLength,
         Self::IsServerRoleMember,
         Self::IsMember,
+        Self::HasPermissionsByName,
+        Self::Permissions,
         Self::HasDatabaseAccess,
     ];
 
@@ -104,6 +108,8 @@ impl MetadataFunction {
             Self::ColLength => "col_length",
             Self::IsServerRoleMember => "is_srvrolemember",
             Self::IsMember => "is_member",
+            Self::HasPermissionsByName => "has_perms_by_name",
+            Self::Permissions => "permissions",
             Self::HasDatabaseAccess => "has_dbaccess",
         }
     }
@@ -125,6 +131,8 @@ impl MetadataFunction {
             | Self::HasDatabaseAccess => 1..=1,
             Self::ObjectId | Self::ObjectName | Self::IsServerRoleMember => 1..=2,
             Self::IsMember => 1..=1,
+            Self::HasPermissionsByName => 3..=5,
+            Self::Permissions => 0..=2,
             Self::DatabasePropertyEx
             | Self::ObjectProperty
             | Self::ObjectPropertyEx
@@ -175,6 +183,8 @@ impl MetadataFunction {
             | Self::ObjectProperty
             | Self::IsServerRoleMember
             | Self::IsMember
+            | Self::HasPermissionsByName
+            | Self::Permissions
             | Self::HasDatabaseAccess => SqlType::Integer,
             Self::ServerProperty | Self::DatabasePropertyEx | Self::ObjectPropertyEx => {
                 return None;
@@ -354,6 +364,8 @@ pub(crate) fn call(function: MetadataFunction, arguments: &[Value]) -> SqlResult
                 }
             })
         }
+        MetadataFunction::HasPermissionsByName => Value::Integer(1),
+        MetadataFunction::Permissions => Value::Integer(0x7FFF_FFFF),
         MetadataFunction::IsMember => text_argument(arguments, 0).map_or(Value::Null, |role| {
             if FIXED_DATABASE_ROLES.contains(&role.to_ascii_lowercase().as_str()) {
                 Value::Integer(1)

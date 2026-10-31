@@ -1893,11 +1893,53 @@ impl<'t> Parser<'t> {
         })
     }
 
-    pub(super) fn sqlserver_qualified_name(&mut self, schema: Name) -> SqlResult<Name> {
-        if schema.text == "dbo" {
+    pub(super) fn sqlserver_qualified_name(&mut self, first: Name) -> SqlResult<Name> {
+        if self.take(&TokenKind::Dot) {
+            self.check_sqlserver_database(&first)?;
             return self.name();
         }
-        self.qualified_part(&schema)
+        let second = self.name()?;
+        if self.take(&TokenKind::Dot) {
+            self.check_sqlserver_database(&first)?;
+            let object = self.name()?;
+            return self.sqlserver_schema_object(second, object);
+        }
+        self.sqlserver_schema_object(first, second)
+    }
+
+    fn sqlserver_schema_object(&self, schema: Name, object: Name) -> SqlResult<Name> {
+        if schema.text == "dbo" {
+            return Ok(object);
+        }
+        if schema.text.contains(crate::schemas::QUALIFIER) || object.text.contains(crate::schemas::QUALIFIER) {
+            return Err(SqlError::new(
+                SqlState::INVALID_NAME,
+                format!("invalid name \"{}\"", object.text.escape_default()),
+            )
+            .at(object.position));
+        }
+        Ok(Name {
+            text: crate::schemas::written_qualified(&schema.text, &object.text),
+            position: schema.position,
+        })
+    }
+
+    fn check_sqlserver_database(&self, database: &Name) -> SqlResult<()> {
+        let current = self.settings_or_default(|settings| settings.database.clone());
+        let system = ["master", "tempdb", "msdb", "model"]
+            .iter()
+            .any(|name| database.text.eq_ignore_ascii_case(name));
+        if system || database.text.eq_ignore_ascii_case(&current) {
+            return Ok(());
+        }
+        Err(SqlError::new(
+            SqlState::INVALID_CATALOG_NAME,
+            format!(
+                "Database '{}' does not exist. Make sure that the name is entered correctly.",
+                database.text
+            ),
+        )
+        .at(database.position))
     }
 }
 

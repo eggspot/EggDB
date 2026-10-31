@@ -120,7 +120,7 @@ fn variable_name(name: &str) -> &str {
 }
 
 impl<'t> Parser<'t> {
-    fn settings_or_default<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
+    pub(super) fn settings_or_default<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
         match self.settings {
             Some(settings) => read(settings),
             None => read(&Settings::default()),

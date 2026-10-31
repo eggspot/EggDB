@@ -725,6 +725,15 @@ impl<'t> Parser<'t> {
         if self.mysql() && self.peek_kind() == &TokenKind::Dot {
             self.at += 1;
             let table = self.name()?;
+            if name.text.eq_ignore_ascii_case(crate::schemas::INFORMATION_SCHEMA) {
+                return Ok(Name {
+                    text: crate::schemas::written_qualified(
+                        crate::schemas::INFORMATION_SCHEMA,
+                        &table.text.to_ascii_lowercase(),
+                    ),
+                    position: name.position,
+                });
+            }
             self.check_database(&name)?;
             return Ok(table);
         }

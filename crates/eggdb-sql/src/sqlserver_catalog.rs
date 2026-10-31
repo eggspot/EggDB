@@ -2,6 +2,7 @@ mod functions;
 mod information_schema;
 mod procedures;
 mod routines;
+mod server_views;
 mod system_views;
 mod types;
 
@@ -50,6 +51,7 @@ const fn column(name: &'static str, sql_type: crate::types::SqlType) -> CatalogC
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SqlServerRelation {
     System(SystemView),
+    Server(server_views::ServerView),
     Information(SqlServerInformation),
 }
 
@@ -57,7 +59,9 @@ impl SqlServerRelation {
     pub(crate) fn referenced(name: &str) -> Option<Self> {
         let (schema, base) = name.split_once(crate::schemas::QUALIFIER)?;
         match schema {
-            SYS_SCHEMA => SystemView::named(base).map(Self::System),
+            SYS_SCHEMA => SystemView::named(base)
+                .map(Self::System)
+                .or_else(|| server_views::ServerView::named(base).map(Self::Server)),
             crate::schemas::INFORMATION_SCHEMA => {
                 SqlServerInformation::named(base).map(Self::Information)
             }
@@ -68,13 +72,14 @@ impl SqlServerRelation {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::System(view) => view.name(),
+            Self::Server(view) => view.name(),
             Self::Information(view) => view.name(),
         }
     }
 
     pub(crate) fn schema(self) -> &'static str {
         match self {
-            Self::System(_) => SYS_SCHEMA,
+            Self::System(_) | Self::Server(_) => SYS_SCHEMA,
             Self::Information(_) => crate::schemas::INFORMATION_SCHEMA,
         }
     }
@@ -82,6 +87,7 @@ impl SqlServerRelation {
     pub(crate) fn columns(self) -> &'static [CatalogColumn] {
         match self {
             Self::System(view) => view.columns(),
+            Self::Server(view) => view.columns(),
             Self::Information(view) => view.columns(),
         }
     }
@@ -90,6 +96,7 @@ impl SqlServerRelation {
 pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: SqlServerRelation) -> Vec<Vec<Value>> {
     match relation {
         SqlServerRelation::System(view) => system_views::rows(snapshot, view),
+        SqlServerRelation::Server(view) => server_views::rows(snapshot, view),
         SqlServerRelation::Information(view) => information_schema::rows(snapshot, view),
     }
 }
