@@ -288,6 +288,8 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::RenameConstraint { .. }
             | AlterAction::AlterIdentity { .. }
             | AlterAction::DropIdentity { .. }
+            | AlterAction::AttachPartition { .. }
+            | AlterAction::DetachPartition(_)
             | AlterAction::Accepted => continue,
         };
         match &mut found {

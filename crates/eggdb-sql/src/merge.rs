@@ -338,7 +338,7 @@ pub(crate) fn merge(
     let mut affected = 0usize;
     let mut outputs: Vec<OutputRow> = Vec::new();
     if let Some(update) = &merge.update {
-        let checks = PreparedChecks::of(&table)?;
+        let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
         let rule = execute::assignment_rule(crate::constraints::current_dialect());
         let mut changes: Vec<execute::RowUpdate> = Vec::with_capacity(pairs.len());
         let mut old_rows = Vec::with_capacity(pairs.len());

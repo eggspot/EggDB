@@ -140,7 +140,7 @@ pub(crate) fn decode_partitioning(table: &str, bytes: &[u8]) -> SqlResult<Partit
         for _ in 0..count {
             columns.push(reader.name()?);
         }
-        if strategy != PartitionStrategy::Range && count != 1 {
+        if strategy == PartitionStrategy::List && count != 1 {
             return Err(reader.damaged());
         }
         Some(PartitionKey { strategy, columns })

@@ -67,6 +67,8 @@ mod oracle_nls;
 mod oracle_number_model;
 mod oracle_numerals;
 mod parser;
+mod partition_ddl;
+mod partition_dml;
 mod partitions;
 mod pg_binary;
 mod pg_catalog;

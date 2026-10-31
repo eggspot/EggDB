@@ -166,6 +166,16 @@ fn apply(
             *name = target.text;
             Ok(None)
         }
+        AlterAction::AttachPartition { partition, bound } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_ddl::attach(writer, tables, &parent, partition, bound)?;
+            Ok(None)
+        }
+        AlterAction::DetachPartition(partition) => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_ddl::detach(writer, tables, &parent, partition)?;
+            Ok(None)
+        }
         AlterAction::SetSchema(schema) => {
             if crate::temporary::is_temporary_name(name) || schema.text == crate::temporary::SCHEMA
             {
@@ -1096,6 +1106,7 @@ fn rename_table(
     crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
     crate::comments::move_owner(writer, &old_name, &to.text)?;
     crate::triggers::move_table_triggers(writer, &old_name, &to.text)?;
+    crate::partitions::rename(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)
 }
 

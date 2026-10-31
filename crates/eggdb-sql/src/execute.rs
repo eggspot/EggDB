@@ -235,6 +235,9 @@ pub(crate) fn create_table(
     create: &CreateTable,
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
+    if crate::partition_ddl::wants(create) {
+        return crate::partition_ddl::create_table(writer, tables, create, dialect);
+    }
     if create.columns.len() > MAX_COLUMNS {
         return Err(SqlError::new(
             SqlState::TOO_MANY_COLUMNS,
@@ -539,6 +542,8 @@ pub(crate) fn drop_tables(
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     let mut result = QueryResult::command("DROP TABLE");
+    let with_partitions = crate::partitions::with_descendants(writer, tables, names)?;
+    let names = with_partitions.as_deref().unwrap_or(names);
     for name in names {
         let Some(dropped) = tables.table(writer, &name.text)? else {
             continue;
@@ -620,6 +625,7 @@ pub(crate) fn drop_tables(
         crate::sequences::drop_owned_by(writer, tables, &table.name, None)?;
         crate::comments::forget_owner(writer, &table.name)?;
         crate::triggers::remove_table_triggers(writer, &table.name)?;
+        crate::partitions::forget(writer, &table.name)?;
         writer.delete(&table_key(&table.name))?;
     }
     Ok(result)
@@ -744,7 +750,7 @@ fn row_identifiers_used(table: &TableDefinition) -> SqlError {
     )
 }
 
-fn default_expression(column: &Column, dialect: Dialect) -> SqlResult<Option<Expr>> {
+pub(crate) fn default_expression(column: &Column, dialect: Dialect) -> SqlResult<Option<Expr>> {
     let Some(text) = &column.default else {
         return Ok(None);
     };
@@ -1156,10 +1162,13 @@ pub(crate) fn insert(
     };
     let insert = prepared.as_ref().unwrap_or(insert);
     let table = tables.require_target(writer, &insert.table.name, "insert into")?;
+    if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
+        return crate::partition_dml::insert(writer, tables, insert, &table, &partitioned);
+    }
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
-    let checks = PreparedChecks::of(&table)?;
+    let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
     let scope = scope_of(&table, &insert.table);
     let dialect = crate::constraints::current_dialect();
     let sqlserver = dialect == Dialect::SqlServer;
@@ -1925,6 +1934,49 @@ fn literal_value(literal: &LiteralToken<'_>, column: &Column, position: usize) -
     assign(value, column).map_err(|error| error.at_if_unplaced(position))
 }
 
+fn insert_literals_routed(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &LiteralRows<'_>,
+    table: &TableDefinition,
+) -> SqlResult<QueryResult> {
+    let mut rows = Vec::with_capacity(insert.rows);
+    let mut literals = Vec::with_capacity(insert.width);
+    let mut at = insert.first_row();
+    for _ in 0..insert.rows {
+        insert.next_row(&mut at, &mut literals);
+        let mut row = Vec::with_capacity(insert.width);
+        for (index, (position, literal)) in literals.iter().enumerate() {
+            let value = literal_value(literal, &table.columns[index], *position)?;
+            row.push(InsertValue::Expr(Expr {
+                kind: ExprKind::Constant {
+                    sql_type: value.sql_type(),
+                    value,
+                },
+                position: *position,
+            }));
+        }
+        rows.push(row);
+    }
+    let columns = table.columns[..insert.width]
+        .iter()
+        .map(|column| Name {
+            text: column.name.clone(),
+            position: insert.table.name.position,
+        })
+        .collect();
+    let statement = Insert {
+        table: insert.table.clone(),
+        columns: Some(columns),
+        source: InsertSource::Values(rows),
+        returning: None,
+        on_duplicate: OnDuplicate::Fail,
+        rollback_on_conflict: false,
+        overriding: None,
+    };
+    self::insert(writer, tables, &statement)
+}
+
 pub(crate) fn insert_literals(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -1942,10 +1994,13 @@ pub(crate) fn insert_literals(
     {
         return Err(generated_always_given(&table, column));
     }
+    if crate::partitions::partitioned(writer, tables, &table)?.is_some() {
+        return insert_literals_routed(writer, tables, insert, &table);
+    }
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
-    let checks = PreparedChecks::of(&table)?;
+    let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
     let mut firing = Firing::for_table(&mut *writer, tables, &table, TriggerEvent::Insert, &[])?;
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
@@ -3448,10 +3503,13 @@ pub(crate) fn update(
     };
     let update = prepared.as_ref().unwrap_or(update);
     let table = tables.require_target(writer, &update.table.name, "update")?;
+    if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
+        return crate::partition_dml::update(writer, tables, update, &partitioned);
+    }
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }
-    let checks = PreparedChecks::of(&table)?;
+    let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
     let rule = assignment_rule(constraints::current_dialect());
     let referenced = constraints::is_referenced(&table);
     let keep_old = !table.indexes.is_empty() || referenced || !table.foreign_keys.is_empty();
@@ -3696,6 +3754,20 @@ pub(crate) fn truncate(
     table: &TableReference,
 ) -> SqlResult<QueryResult> {
     let definition = tables.require_target(writer, &table.name, "truncate")?;
+    if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &definition)? {
+        let children: Vec<String> = partitioned.children().map(str::to_owned).collect();
+        for child in children {
+            let reference = TableReference::named(
+                Name {
+                    text: child,
+                    position: table.name.position,
+                },
+                None,
+            );
+            truncate(writer, tables, &reference)?;
+        }
+        return Ok(QueryResult::command("TRUNCATE TABLE".to_owned()));
+    }
     if constraints::is_referenced(&definition) {
         for child in constraints::referencing_tables(writer, &definition.name)? {
             if child != definition.name {
@@ -3758,6 +3830,9 @@ fn delete_matching(
     };
     let delete = prepared.as_ref().unwrap_or(delete);
     let table = tables.require_target(writer, &delete.table.name, "delete from")?;
+    if let Some(partitioned) = crate::partitions::partitioned(writer, tables, &table)? {
+        return crate::partition_dml::delete(writer, tables, delete, &partitioned);
+    }
     let scope = scope_of(&table, &delete.table);
     if let Some(filter) = &delete.filter {
         reject_aggregates(filter, "WHERE")?;

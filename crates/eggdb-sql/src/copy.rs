@@ -781,7 +781,8 @@ fn load(
     condition: Option<&Expr>,
 ) -> SqlResult<u64> {
     let table = loader.table;
-    let checks = crate::constraints::PreparedChecks::of(table)?;
+    let checks =
+        crate::constraints::PreparedChecks::of(table)?.with_partitions(writer, tables, table)?;
     let mut stored = StoredRows::checked(table, &checks);
     let mut children = ChildRows::new(table);
     let deferred_parents = table
@@ -790,6 +791,8 @@ fn load(
         .any(|key| key.parent == table.name);
     let mut row = Vec::with_capacity(table.columns.len());
     let mut count = 0u64;
+    let routing = RoutedRows::of(writer, tables, table)?;
+    let mut routed = Vec::new();
     while let Some((line, read)) = rows.next_row(loader, &mut row)? {
         if read == RowRead::Skipped {
             continue;
@@ -798,6 +801,18 @@ fn load(
         if let Some(condition) = condition
             && !kept_by(condition, table, &row).map_err(|error| with_context(error, context))?
         {
+            continue;
+        }
+        if let Some(routing) = &routing
+            && routing.takes(&row)
+        {
+            routed.push(row.clone());
+            count += 1;
+            if routed.len() >= ROUTED_BATCH_ROWS {
+                routing
+                    .flush(writer, tables, table, &mut routed)
+                    .map_err(|error| with_context(error, context))?;
+            }
             continue;
         }
         stored
@@ -811,8 +826,105 @@ fn load(
             children.check_and_forget(writer, tables)?;
         }
     }
+    if let Some(routing) = &routing {
+        routing.flush(writer, tables, table, &mut routed)?;
+    }
     children.check(writer, tables)?;
     Ok(count)
+}
+
+const ROUTED_BATCH_ROWS: usize = 1024;
+
+enum RoutedRows {
+    Every,
+    OutsideOwnHashPartition {
+        root: String,
+        constraint: std::sync::Arc<crate::partitions::PartitionConstraint>,
+    },
+}
+
+impl RoutedRows {
+    fn of(
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        table: &TableDefinition,
+    ) -> SqlResult<Option<Self>> {
+        if crate::partitions::partitioned(writer, tables, table)?.is_some() {
+            return Ok(Some(Self::Every));
+        }
+        let Some(constraint) = crate::partitions::constraint_of(writer, tables, table)? else {
+            return Ok(None);
+        };
+        let Some(root) = constraint.root().map(str::to_owned) else {
+            return Ok(None);
+        };
+        Ok(constraint
+            .uses_hash()
+            .then_some(Self::OutsideOwnHashPartition { root, constraint }))
+    }
+
+    fn takes(&self, row: &[Value]) -> bool {
+        match self {
+            Self::Every => true,
+            Self::OutsideOwnHashPartition { constraint, .. } => !constraint.holds(row),
+        }
+    }
+
+    fn flush(
+        &self,
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        table: &TableDefinition,
+        rows: &mut Vec<Vec<Value>>,
+    ) -> SqlResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let target = match self {
+            Self::Every => table.name.clone(),
+            Self::OutsideOwnHashPartition { root, .. } => root.clone(),
+        };
+        let values = rows
+            .drain(..)
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| {
+                        crate::ast::InsertValue::Expr(crate::ast::Expr {
+                            kind: crate::ast::ExprKind::Constant {
+                                sql_type: value.sql_type(),
+                                value,
+                            },
+                            position: 0,
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let columns = table
+            .columns
+            .iter()
+            .map(|column| crate::ast::Name {
+                text: column.name.clone(),
+                position: 0,
+            })
+            .collect();
+        let insert = crate::ast::Insert {
+            table: crate::ast::TableReference::named(
+                crate::ast::Name {
+                    text: target,
+                    position: 0,
+                },
+                None,
+            ),
+            columns: Some(columns),
+            source: crate::ast::InsertSource::Values(values),
+            returning: None,
+            on_duplicate: crate::ast::OnDuplicate::Fail,
+            rollback_on_conflict: false,
+            overriding: Some(crate::ast::Overriding::SystemValue),
+        };
+        crate::execute::insert(writer, tables, &insert).map(|_| ())
+    }
 }
 
 fn texts_of(row: &[Value], targets: &[usize], texts: &mut Vec<Option<String>>) {

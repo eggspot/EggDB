@@ -325,6 +325,8 @@ fn table_scope(table: &TableDefinition) -> Scope<'_> {
 pub(crate) struct PreparedChecks {
     checks: Vec<(usize, Expr)>,
     domains: Option<crate::user_types::DomainChecks>,
+    partition: Option<std::sync::Arc<crate::partitions::PartitionConstraint>>,
+    partitioned: Option<crate::partitions::Partitioned>,
 }
 
 impl PreparedChecks {
@@ -339,14 +341,38 @@ impl PreparedChecks {
         Ok(Self {
             checks,
             domains: crate::user_types::DomainChecks::of(table)?,
+            partition: None,
+            partitioned: None,
         })
     }
 
+    pub(crate) fn with_partitions(
+        mut self,
+        reader: &dyn KeyValueRead,
+        tables: &mut crate::execute::TableCache,
+        table: &TableDefinition,
+    ) -> SqlResult<Self> {
+        self.partition = crate::partitions::constraint_of(reader, tables, table)?;
+        self.partitioned = crate::partitions::partitioned(reader, tables, table)?;
+        Ok(self)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
-        self.checks.is_empty() && self.domains.is_none()
+        self.checks.is_empty()
+            && self.domains.is_none()
+            && self.partition.is_none()
+            && self.partitioned.is_none()
     }
 
     pub(crate) fn check(&self, table: &TableDefinition, row: &[Value]) -> SqlResult<()> {
+        if let Some(partitioned) = &self.partitioned {
+            return Err(partitioned.no_partition(row));
+        }
+        if let Some(partition) = &self.partition
+            && !partition.holds(row)
+        {
+            return Err(partition.violation(&table.name, row));
+        }
         if let Some(domains) = &self.domains {
             domains.check(row)?;
         }

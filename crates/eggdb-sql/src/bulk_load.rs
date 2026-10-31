@@ -91,7 +91,7 @@ pub(crate) fn load(
         }
     }
     let defaults = ColumnDefaults::of(&table)?;
-    let checks = PreparedChecks::of(&table)?;
+    let checks = PreparedChecks::of(&table)?.with_partitions(writer, tables, &table)?;
     let mut stored = StoredRows::checked(&table, &checks);
     stored.set_identity_insert(
         !bulk.columns.is_empty()

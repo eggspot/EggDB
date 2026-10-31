@@ -743,6 +743,16 @@ impl PartitionConstraint {
     pub(crate) fn parent(&self) -> Option<&str> {
         self.levels.first().map(|level| level.parent.as_str())
     }
+
+    pub(crate) fn root(&self) -> Option<&str> {
+        self.levels.last().map(|level| level.parent.as_str())
+    }
+
+    pub(crate) fn uses_hash(&self) -> bool {
+        self.levels
+            .iter()
+            .any(|level| matches!(level.bound, TypedBound::Hash { .. }))
+    }
 }
 
 pub(crate) fn no_partition_error(table: &str, key_names: &[String], key: &[Value]) -> SqlError {
@@ -1119,4 +1129,53 @@ pub(crate) fn numeric_key_columns(table: &TableDefinition, key: &PartitionKey) -
                 .is_some_and(|index| table.columns[index].sql_type.is_numeric())
         })
         .collect()
+}
+
+pub(crate) fn forget(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
+    writer.delete(&partition_key(table))
+}
+
+pub(crate) fn rename(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> SqlResult<()> {
+    let catalog = load(writer)?;
+    if catalog.is_empty() {
+        return Ok(());
+    }
+    if let Some(record) = catalog.record(from) {
+        forget(writer, from)?;
+        save(writer, to, record)?;
+    }
+    for (child, record) in catalog.every() {
+        if let Some((parent, bound)) = &record.parent
+            && parent == from
+        {
+            let mut moved = record.clone();
+            moved.parent = Some((to.to_owned(), bound.clone()));
+            save(writer, child, &moved)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn with_descendants(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    names: &[crate::ast::Name],
+) -> SqlResult<Option<Vec<crate::ast::Name>>> {
+    let catalog = catalog(reader, tables)?;
+    if catalog.is_empty() {
+        return Ok(None);
+    }
+    let mut expanded: Vec<crate::ast::Name> = Vec::with_capacity(names.len());
+    for name in names {
+        for descendant in catalog.descendants_of(&name.text).into_iter().rev() {
+            if !expanded.iter().chain(names).any(|known| known.text == descendant) {
+                expanded.push(crate::ast::Name {
+                    text: descendant,
+                    position: name.position,
+                });
+            }
+        }
+        expanded.push(name.clone());
+    }
+    Ok(Some(expanded))
 }
