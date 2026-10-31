@@ -33,3 +33,18 @@ fn nearest_neighbours_order_by_distance() {
         run(&mut session, "SELECT 3 AS id UNION ALL SELECT 2")
     );
 }
+
+#[test]
+fn local_embeddings_and_rank_fusion_support_hybrid_search() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE docs (id int, body text)");
+    run(&mut session, "INSERT INTO docs VALUES (1, 'cats sleep on the sofa'), (2, 'quarterly revenue report'), (3, 'a sleeping cat')");
+    assert_eq!(
+        run(&mut session, "SELECT id FROM docs ORDER BY eggdb_embed(body) <=> eggdb_embed('sleepy cats') LIMIT 2"),
+        run(&mut session, "SELECT 3 AS id UNION ALL SELECT 1")
+    );
+    assert_eq!(run(&mut session, "SELECT vector_dims(eggdb_embed('hello', 8))"), run(&mut session, "SELECT 8"));
+    assert_eq!(run(&mut session, "SELECT rrf_score(1, 0)"), run(&mut session, "SELECT 1::double precision"));
+    assert!(session.execute("SELECT rrf_score(0)", &mut |_| {}).is_err());
+}

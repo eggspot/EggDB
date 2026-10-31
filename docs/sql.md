@@ -2262,6 +2262,20 @@ vector text and on numeric arrays:
 SELECT id FROM items ORDER BY embedding <-> '[3,1,2]' LIMIT 5;
 ```
 
+For search without an external model, `eggdb_embed(text [, dimensions])` gives a local
+embedding (D205): stemmed English words and word pairs hashed into a unit vector of 256
+dimensions by default, the same every time, nothing downloaded and nothing sent anywhere. It
+finds texts that share words, not synonyms. `rrf_score(rank [, k])` is one list's term of
+reciprocal rank fusion (`1 / (k + rank)`, k 60): add it across a vector ranking and a full-text
+ranking for hybrid search.
+
+```sql
+WITH semantic AS (SELECT id, row_number() OVER (ORDER BY eggdb_embed(body) <=> eggdb_embed('sleepy cats')) AS rank FROM docs),
+     lexical AS (SELECT id, row_number() OVER (ORDER BY ts_rank(to_tsvector(body), plainto_tsquery('sleepy cats')) DESC) AS rank FROM docs)
+SELECT id, rrf_score(semantic.rank) + rrf_score(lexical.rank) AS score
+FROM semantic JOIN lexical USING (id) ORDER BY score DESC LIMIT 10;
+```
+
 Nearest-neighbour queries are exact for now: they read every row. Not yet: `vector(n)` as its
 own stored type (it is text, and its dimensions are not checked on insert), HNSW and IVFFlat
 indexes in SQL (the HNSW graph is written, in `eggdb-vector`), `halfvec`, `sparsevec`,

@@ -1,0 +1,14 @@
+[package]
+name = "eggdb-ai"
+description = "AI helpers inside EggDB that need no model download and no network: local hashed text embeddings, reciprocal rank fusion for hybrid search, and text chunking for retrieval."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-search = { path = "../eggdb-search" }
+eggdb-vector = { path = "../eggdb-vector" }

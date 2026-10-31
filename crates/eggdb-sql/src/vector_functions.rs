@@ -80,3 +80,36 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
         _ => Err(wrong_count()),
     }
 }
+
+/// `eggdb_embed(text [, dimensions])`, the local hashed embedding as vector text, and
+/// `rrf_score(rank [, k])`, one list's reciprocal rank fusion term (sum them across lists).
+pub(crate) fn ai_function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
+    let bad = |message: &str| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message.to_owned());
+    match (name, arguments) {
+        (_, [Value::Null, ..]) => Ok(Value::Null),
+        ("eggdb_embed", [text]) | ("eggdb_embed", [text, _]) => {
+            let dimensions = match arguments.get(1) {
+                None => eggdb_ai::DEFAULT_DIMENSIONS,
+                Some(value) => value
+                    .as_integer()
+                    .and_then(|dimensions| usize::try_from(dimensions).ok())
+                    .filter(|dimensions| (1..=eggdb_vector::MAX_DIMENSIONS).contains(dimensions))
+                    .ok_or_else(|| bad("dimensions must be between 1 and 16000"))?,
+            };
+            let text = match text {
+                Value::Text(text) | Value::Bpchar(text) => text.clone(),
+                other => other.to_text().unwrap_or_default(),
+            };
+            Ok(Value::Text(eggdb_vector::format(&eggdb_ai::embed(&text, dimensions))))
+        }
+        ("rrf_score", [rank]) | ("rrf_score", [rank, _]) => {
+            let rank = rank.as_integer().filter(|rank| *rank >= 1).ok_or_else(|| bad("a rank starts at 1"))?;
+            let k = match arguments.get(1) {
+                None => eggdb_ai::DEFAULT_RRF_K,
+                Some(value) => value.as_float().filter(|k| *k >= 0.0).ok_or_else(|| bad("k must not be negative"))?,
+            };
+            Ok(Value::Double(eggdb_ai::reciprocal_rank_fusion(&[Some(rank as u64)], k)))
+        }
+        _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("function {name} takes one or two arguments"))),
+    }
+}

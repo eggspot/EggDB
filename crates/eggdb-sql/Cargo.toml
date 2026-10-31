@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-ai = { path = "../eggdb-ai" }
 eggdb-geo = { path = "../eggdb-geo" }
 eggdb-search = { path = "../eggdb-search" }
 eggdb-vector = { path = "../eggdb-vector" }
