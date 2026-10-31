@@ -735,10 +735,11 @@ impl<'a> Session<'a> {
         access: Access,
         cache_for_command: Option<usize>,
     ) -> Result<Database, Error> {
-        Database::open_with(
-            &self.request.file,
-            self.database_options(access, cache_for_command),
-        )
+        let options = self.database_options(access, cache_for_command);
+        if self.request.file.as_os_str() == IN_MEMORY_FILE {
+            return Database::in_memory_with(options.read_only(false));
+        }
+        Database::open_with(&self.request.file, options)
     }
 
     fn database_options(&self, access: Access, cache_for_command: Option<usize>) -> Options {
@@ -859,6 +860,7 @@ fn mcp_may_hold(file: &str) -> String {
 }
 
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+pub(crate) const IN_MEMORY_FILE: &str = ":memory:";
 
 fn cache_for_value(value_bytes: usize) -> usize {
     let needed = value_bytes

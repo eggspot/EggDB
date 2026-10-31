@@ -958,3 +958,15 @@ fn transact_sql_scripts_run_batch_by_batch_at_their_go_lines() {
         text(&sqlcmd.stderr)
     );
 }
+
+#[test]
+fn memory_runs_a_whole_database_without_a_file() {
+    let output = eggdb_sql(
+        Path::new(":memory:"),
+        &[],
+        b"CREATE TABLE t (v integer); INSERT INTO t VALUES (1), (2); SELECT sum(v) FROM t;",
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(text(&output.stdout).contains('3'), "{}", text(&output.stdout));
+    assert!(!Path::new(":memory:").exists());
+}

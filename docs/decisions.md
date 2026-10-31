@@ -199,3 +199,4 @@ its full title with its status.
 - [D172](decisions/D172.md) Concurrent writers as optimistic transactions over the single-writer engine (`begin_concurrent`): serializable by read and range validation, snapshot isolation by write validation, `ErrorKind::Conflict`
 - [D173](decisions/D173.md) Savepoints by an undo log of previous values in every dialect; row and table lock clauses accepted over the one writer; isolation levels accepted, blocks serializable
 - [D174](decisions/D174.md) SQL inside an embedded write transaction (`WriteTransaction::sql`) through a store that borrows it, with each statement's writes undone when it fails
+- [D175](decisions/D175.md) Databases in memory (`Database::in_memory`, `:memory:`) on the platform layer's memory file through `DatabaseFile`; `PageFile::create_in`/`open_in`

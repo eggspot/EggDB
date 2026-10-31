@@ -694,6 +694,10 @@ eggdb cas app.db lock worker-7 --delete
 
 ## `eggdb sql`
 
+The file name `:memory:` runs on a database in memory, as SQLite's does: `eggdb sql :memory:`
+starts empty, writes nothing to disk, and is gone when the command ends. Every command that
+opens a database takes it.
+
 `eggdb sql` runs SQL statements on the file: from `-c "<sql>"`, from a script file, or from
 stdin (a script of `-`, or none at all when stdin is not a terminal). This release runs the
 first parts of the PostgreSQL dialect: tables with a primary key, `INSERT`, `SELECT` with

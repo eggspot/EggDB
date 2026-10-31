@@ -3,7 +3,7 @@ use crate::expiry::Moment;
 use crate::options::Options;
 use crate::transaction::{ReadTransaction, WriteTransaction};
 use crate::writer_slot::WriterSlot;
-use eggdb_platform::{Clock, FileSystem, OsFile, OsFileSystem, OsMemory};
+use eggdb_platform::{Clock, DatabaseFile, FileSystem, OpenMode, OsFileSystem, OsMemory};
 use eggdb_storage::{
     Access, BTree, CacheSize, CommitStamp, CopyDestination, CopyFailure, CreateOptions, Features,
     FileId, NO_PAGE, PageCache, PageFile, PageSize, StorageError, Store,
@@ -67,7 +67,7 @@ const COMPACTION_STAGING_SUFFIX: &str = ".compacting";
 /// ```
 #[derive(Debug)]
 pub struct Database {
-    store: Store<OsFile>,
+    store: Store<DatabaseFile>,
     tree: OnceLock<BTree>,
     writer: WriterSlot,
     path: PathBuf,
@@ -239,11 +239,61 @@ impl Database {
         Self::open_file(path, &options).map_err(|error| error.opening(path))
     }
 
+    /// Creates a database that lives in memory and is gone once it is dropped: nothing is
+    /// written to disk. [`Database::backup_to`] still writes a copy to a file.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = eggdb::Database::in_memory()?;
+    /// db.put("k", "v")?;
+    /// assert_eq!(db.get("k")?, Some(b"v".to_vec()));
+    /// # Ok(()) }
+    /// ```
+    pub fn in_memory() -> Result<Self> {
+        Self::in_memory_with(Options::new())
+    }
+
+    /// Creates a database in memory with `options` (see [`Database::in_memory`]). A read-only
+    /// database in memory would stay empty, so [`Options::read_only`] is refused.
+    pub fn in_memory_with(options: Options) -> Result<Self> {
+        if options.read_only {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "a database in memory starts empty, so it can't be opened read-only",
+            ));
+        }
+        let page_size = options.new_file_page_size()?;
+        options.check_cache_holds(page_size)?;
+        let file = DatabaseFile::memory().map_err(|error| Error::storage(error.into()))?;
+        let created = PageFile::create_in(
+            file,
+            CreateOptions {
+                page_size,
+                file_id: FileId::random(),
+            },
+        )
+        .map_err(Error::storage)?;
+        Self::with_page_file(created, Path::new(MEMORY_NAME), &options)
+    }
+
+    /// Whether the database lives in memory (see [`Database::in_memory`]).
+    pub fn is_in_memory(&self) -> bool {
+        self.path == Path::new(MEMORY_NAME)
+    }
+
     fn open_file(path: &Path, options: &Options) -> Result<Self> {
         let new_file_page_size = options.new_file_page_size()?;
         options.check_cache_holds(new_file_page_size)?;
         let file = open_or_create(path, options, new_file_page_size)
             .map_err(|error| explain_open_error(error, options))?;
+        Self::with_page_file(file, path, options)
+    }
+
+    fn with_page_file(
+        file: PageFile<DatabaseFile>,
+        path: &Path,
+        options: &Options,
+    ) -> Result<Self> {
         let page_size = file.page_size();
         options.check_cache_holds(page_size)?;
         let mut cache = PageCache::new(
@@ -595,6 +645,12 @@ impl Database {
     /// # Ok(()) }
     /// ```
     pub fn compact(self) -> Result<CompactReport> {
+        if self.is_in_memory() {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "a database in memory has no file to compact",
+            ));
+        }
         let staging = staging_path(&self.path, COMPACTION_STAGING_SUFFIX);
         let before = self.store.superblock().map_err(Error::storage)?;
         let checked = self
@@ -731,7 +787,7 @@ impl Database {
         BTree::MAX_VALUE_BYTES
     }
 
-    pub(crate) fn store(&self) -> &Store<OsFile> {
+    pub(crate) fn store(&self) -> &Store<DatabaseFile> {
         &self.store
     }
 
@@ -778,30 +834,49 @@ fn open_or_create(
     path: &Path,
     options: &Options,
     page_size: PageSize,
-) -> std::result::Result<PageFile<OsFile>, StorageError> {
+) -> std::result::Result<PageFile<DatabaseFile>, StorageError> {
     let fs = OsFileSystem::new();
     let access = if options.read_only {
         Access::ReadOnly
     } else {
         Access::ReadWrite
     };
-    let opened = PageFile::open(&fs, path, access);
+    let open = || -> std::result::Result<PageFile<DatabaseFile>, StorageError> {
+        let mode = match access {
+            Access::ReadOnly => OpenMode::Read,
+            Access::ReadWrite => OpenMode::ReadWrite,
+        };
+        PageFile::open_in(DatabaseFile::Os(fs.open(path, mode)?), access)
+    };
+    let opened = open();
     if !(options.creates_if_missing() && is_kind(&opened, eggdb_platform::ErrorKind::NotFound)) {
         return opened;
     }
-    let created = PageFile::create(
-        &fs,
-        path,
-        CreateOptions {
-            page_size,
-            file_id: FileId::random(),
-        },
-    );
+    let created = fs
+        .open(path, OpenMode::CreateNew)
+        .map_err(StorageError::from)
+        .and_then(|file| {
+            PageFile::create_in(
+                DatabaseFile::Os(file),
+                CreateOptions {
+                    page_size,
+                    file_id: FileId::random(),
+                },
+            )
+        });
     if is_kind(&created, eggdb_platform::ErrorKind::AlreadyExists) {
-        return PageFile::open(&fs, path, access);
+        return open();
     }
-    created
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let created = created?;
+    fs.sync_dir(directory)?;
+    Ok(created)
 }
+
+const MEMORY_NAME: &str = ":memory:";
 
 fn explain_open_error(error: StorageError, options: &Options) -> Error {
     let missing =

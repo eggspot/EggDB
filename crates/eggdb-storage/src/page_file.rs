@@ -104,6 +104,15 @@ impl<F: File> PageFile<F> {
         options: CreateOptions,
     ) -> Result<Self, StorageError> {
         let file = fs.open(path, OpenMode::CreateNew)?;
+        let created = Self::create_in(file, options)?;
+        fs.sync_dir(parent_directory(path))?;
+        Ok(created)
+    }
+
+    /// Makes `file`, a new empty file opened for writing, a database file, as
+    /// [`PageFile::create`] does for a path, and makes it durable. A file that lives in memory
+    /// is created this way.
+    pub fn create_in(file: F, options: CreateOptions) -> Result<Self, StorageError> {
         lock(&file, FileLock::Exclusive)?;
         let page_size = options.page_size;
         let superblock = Superblock {
@@ -127,7 +136,6 @@ impl<F: File> PageFile<F> {
         file.set_size(file_bytes)?;
         file.write_all_at(&superblock.encode()?, 0)?;
         file.sync_all()?;
-        fs.sync_dir(parent_directory(path))?;
         Ok(Self::from_parts(
             file,
             Access::ReadWrite,
@@ -153,11 +161,20 @@ impl<F: File> PageFile<F> {
         path: &Path,
         access: Access,
     ) -> Result<Self, StorageError> {
-        let (mode, lock_kind) = match access {
-            Access::ReadOnly => (OpenMode::Read, FileLock::Shared),
-            Access::ReadWrite => (OpenMode::ReadWrite, FileLock::Exclusive),
+        let mode = match access {
+            Access::ReadOnly => OpenMode::Read,
+            Access::ReadWrite => OpenMode::ReadWrite,
         };
         let file = fs.open(path, mode)?;
+        Self::open_in(file, access)
+    }
+
+    /// Opens `file`, already opened for `access`, as [`PageFile::open`] does for a path.
+    pub fn open_in(file: F, access: Access) -> Result<Self, StorageError> {
+        let lock_kind = match access {
+            Access::ReadOnly => FileLock::Shared,
+            Access::ReadWrite => FileLock::Exclusive,
+        };
         lock(&file, lock_kind)?;
         let mut slots = vec![0u8; 2 * HEADER_SLOT_SIZE];
         let read = read_up_to(&file, &mut slots)?;

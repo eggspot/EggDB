@@ -1,7 +1,7 @@
 use crate::collection;
 use crate::error::{Error, Result};
 use crate::expiry::{self, Moment};
-use eggdb_platform::OsFile;
+use eggdb_platform::DatabaseFile;
 use eggdb_storage::{BTree, Cursor, ScanOrder, StorageError};
 use std::iter::FusedIterator;
 use std::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
@@ -106,8 +106,8 @@ impl<'a> Lent<'a> {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Reader<'t> {
-    Snapshot(&'t eggdb_storage::ReadTransaction<'t, OsFile>),
-    Writer(&'t eggdb_storage::WriteTransaction<'t, OsFile>),
+    Snapshot(&'t eggdb_storage::ReadTransaction<'t, DatabaseFile>),
+    Writer(&'t eggdb_storage::WriteTransaction<'t, DatabaseFile>),
 }
 
 impl Reader<'_> {

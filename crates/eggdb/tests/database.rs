@@ -372,3 +372,27 @@ fn a_database_can_keep_its_page_cache_locked_in_memory() {
         Err(error) => assert!(error.to_string().contains("lock"), "{error}"),
     }
 }
+
+#[test]
+fn a_database_in_memory_works_and_leaves_no_file() {
+    let db = eggdb::Database::in_memory().unwrap();
+    assert!(db.is_in_memory());
+    let mut tx = db.begin_write().unwrap();
+    for index in 0..2000u32 {
+        tx.put(index.to_be_bytes(), vec![7u8; 300]).unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(db.get(5u32.to_be_bytes()).unwrap(), Some(vec![7u8; 300]));
+    assert_eq!(db.check().unwrap().leaked_pages, 0);
+    let copy = common::TempPath::new("memory-backup");
+    db.backup_to(copy.path()).unwrap();
+    let restored = eggdb::Database::open(copy.path()).unwrap();
+    assert_eq!(restored.get(1999u32.to_be_bytes()).unwrap(), Some(vec![7u8; 300]));
+    assert_eq!(
+        eggdb::Database::in_memory_with(eggdb::Options::new().read_only(true))
+            .unwrap_err()
+            .kind(),
+        eggdb::ErrorKind::InvalidOption
+    );
+    assert_eq!(db.compact().unwrap_err().kind(), eggdb::ErrorKind::InvalidOption);
+}

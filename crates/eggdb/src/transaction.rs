@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::expiry::{self, Moment};
 use crate::scan::{KeyRange, Reader, Scan};
 use crate::writer_slot::WriterTurn;
-use eggdb_platform::OsFile;
+use eggdb_platform::DatabaseFile;
 use eggdb_storage::{BTree, CommitStamp, Features};
 
 /// A consistent, read-only view of a [`Database`]: the last commit before
@@ -32,7 +32,7 @@ use eggdb_storage::{BTree, CommitStamp, Features};
 /// # Ok(()) }
 /// ```
 pub struct ReadTransaction<'db> {
-    inner: eggdb_storage::ReadTransaction<'db, OsFile>,
+    inner: eggdb_storage::ReadTransaction<'db, DatabaseFile>,
     tree: Option<BTree>,
     expiry_now: Option<Moment>,
 }
@@ -225,7 +225,7 @@ impl std::fmt::Debug for ReadTransaction<'_> {
 /// ```
 pub struct WriteTransaction<'db> {
     database: &'db Database,
-    inner: eggdb_storage::WriteTransaction<'db, OsFile>,
+    inner: eggdb_storage::WriteTransaction<'db, DatabaseFile>,
     tree: Option<BTree>,
     created_tree: bool,
     now: Moment,
@@ -542,7 +542,7 @@ impl std::fmt::Debug for WriteTransaction<'_> {
 /// [`std::io::Read`], so it can be copied to a file or a socket with [`std::io::copy`].
 #[derive(Debug)]
 pub struct ValueReader<'t> {
-    inner: eggdb_storage::ValueReader<'t, 't, OsFile>,
+    inner: eggdb_storage::ValueReader<'t, 't, DatabaseFile>,
 }
 
 impl ValueReader<'_> {

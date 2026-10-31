@@ -32,6 +32,9 @@ fn main() -> eggdb::Result<()> {
 
 ## Opening
 - `Database::open(path)` opens the file, or creates an empty database there if there is none.
+- `Database::in_memory()` (and `in_memory_with(options)`) creates a database that lives in
+  memory: nothing touches the disk, it is gone when dropped, and `backup_to(path)` still writes a
+  copy to a file. `compact` is refused, and so is `read_only`.
 - `Database::open_with(path, options)` takes `Options`, a builder:
 
 | Option | Default | What it does |
