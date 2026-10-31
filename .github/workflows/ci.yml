@@ -142,6 +142,50 @@ jobs:
       - name: Test against musl, as the default Linux release is built
         run: cargo test --workspace --target x86_64-unknown-linux-musl
 
+  kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain and the musl target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-linux-musl
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-musl-release-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build the static binary and the image
+        run: |
+          cargo build --release -p eggdb --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/eggdb deploy/eggdb
+          docker build -t eggdb:local deploy
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: eggdb
+      - name: Install the chart and query the database through it
+        run: |
+          kind load docker-image eggdb:local --name eggdb
+          helm lint deploy/helm/eggdb --set password=ci-password
+          helm install db deploy/helm/eggdb --set password=ci-password --wait --timeout 5m
+          kubectl rollout status statefulset/db --timeout=3m
+          kubectl port-forward service/db 15432:5432 19187:9187 &
+          sleep 3
+          PGPASSWORD=ci-password psql "host=127.0.0.1 port=15432 user=eggdb dbname=eggdb sslmode=require" \
+            -c "CREATE TABLE t (n integer)" -c "INSERT INTO t VALUES (1)" -c "SELECT count(*) FROM t"
+          curl -fsS http://127.0.0.1:19187/metrics | grep -q '^eggdb_up 1'
+          kubectl delete pod db-0 --wait
+          kubectl rollout status statefulset/db --timeout=3m
+          kubectl port-forward service/db 15433:5432 &
+          sleep 3
+          PGPASSWORD=ci-password psql "host=127.0.0.1 port=15433 user=eggdb dbname=eggdb sslmode=require" \
+            -tAc "SELECT count(*) FROM t" | grep -qx 1
+
   redis-compare:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -782,7 +826,7 @@ jobs:
             cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
 
   check:
-    needs: [lint-and-test, platforms, musl, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
+    needs: [lint-and-test, platforms, musl, kubernetes, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
