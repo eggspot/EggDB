@@ -630,6 +630,15 @@ program), with no file system and no allocation, and refuses a damaged, torn or 
 as the engine does in a file. CI builds it for a Cortex-M4F (`thumbv7em-none-eabihf`). The B-tree,
 transactions and SQL do not run there yet.
 
+## Offline-first sync
+
+`eggdb-sync` lets an embedded database take writes while it is offline and exchange them with a
+server later (D228). A `Replica` keeps synced keys and a change log in any EggDB key-value store;
+`sync(client, server, &mut cursors, batch)` sends what the server lacks and takes in what the
+client lacks, and the newest write of each key (by a hybrid-clock stamp) wins everywhere. The
+network transport is the next step; until then the two replicas must be reachable from one
+program, or their changes carried as bytes with `encode` and `decode`.
+
 ## Limits in this release
 - **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
   with 64 KiB pages (`db.max_key_bytes()`).
