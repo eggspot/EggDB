@@ -1366,23 +1366,7 @@ jobs:
           EGGDB_PASSWORD: ci-compatibility
         run: |
           cargo build -p eggdb
-          target/debug/eggdb serve "$RUNNER_TEMP/compat.eggdb" --create --listen 127.0.0.1:55432 &
-          sleep 2
-          PGPASSWORD="$EGGDB_PASSWORD" psql "host=127.0.0.1 port=55432 user=eggdb dbname=eggdb sslmode=disable" \
-            -c "CREATE TABLE orders (id integer PRIMARY KEY, placed_on date NOT NULL, total numeric NOT NULL)" \
-            -c "INSERT INTO orders VALUES (1, '2026-10-30', 12.5), (2, '2026-10-30', 3), (3, '2026-10-31', 8)" || true
-          report() { echo "| $1 | $2 |" >> "$GITHUB_STEP_SUMMARY"; }
-          echo "| Tool | Result |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          cd crates/eggdb/tests/clients/dbt
-          for step in debug run test; do
-            if "$RUNNER_TEMP/tools/bin/dbt" "$step" --profiles-dir . > "$RUNNER_TEMP/dbt-$step.log" 2>&1; then
-              report "dbt-postgres 1.8.2: dbt $step" "passes"
-            else
-              report "dbt-postgres 1.8.2: dbt $step" "fails"
-              tail -n 30 "$RUNNER_TEMP/dbt-$step.log"
-            fi
-          done
+          scripts/compatibility.sh target/debug/eggdb "$RUNNER_TEMP/tools" "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP"
 
   arrow:
     runs-on: ubuntu-latest

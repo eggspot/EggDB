@@ -197,7 +197,8 @@ From the second gap review (D37–D45):
 - **Embedded detail (D41)** runs from M4.
 - **The console and notebooks (D42)** run with the client track. Started: ER diagrams in Mermaid and DOT from SQL (D237).
 - **Legal checks (D43)** come before each release.
-- **Public proof (D44)** runs from the first benchmarks.
+- **Public proof (D44)** runs from the first benchmarks. Started: a reproduction script with
+  energy where measurable, and a weekly compatibility farm (D252).
 
 More tracks (D46), and any further missing capability is added here without asking the owner:
 - **Business intelligence:** our own dashboards, reports, semantic layer, scheduling, sharing and

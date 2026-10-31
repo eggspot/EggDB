@@ -22,6 +22,20 @@ and `--results <path>` to write one line per metric. In CI, the `bench` job runs
 and the `compare` job on Linux and macOS (D155), on every pull request and push to `main`; they add the table to the job summary and
 upload the results files as artifacts.
 
+## Reproducing them on your machine (D252)
+
+```sh
+scripts/reproduce-benchmarks.sh results/my-laptop
+```
+
+The script writes everything someone else needs to compare with your numbers into the
+directory: `hardware.txt` (commit, operating system, CPU, cores, memory and Rust toolchain),
+`eggdb.txt` and `sqlite-compare.txt` (one line per metric, as `--results` writes them) with the
+tables the two harnesses print, and `energy.txt`. On Linux machines that expose Intel's RAPL
+counter (`/sys/class/powercap/intel-rapl:0/energy_uj`, readable by your user), `energy.txt`
+gives the processor package's energy while `eggdb-bench` ran; elsewhere it says the energy was
+not measured. Energy is reported only: it is gated once a repeatable method is fixed (D44).
+
 ## What blocks a pull request (D101)
 Benchmarks report on pull requests; they block only when something is more than twice as slow as
 its line. Each metric gets a verdict in the table:

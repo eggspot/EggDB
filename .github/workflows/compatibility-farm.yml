@@ -1,0 +1,49 @@
+name: Compatibility farm
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: compatibility-farm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-compatibility-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Install dbt-postgres (test tool only, never shipped)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet dbt-postgres==1.8.2
+      - name: Run every tool against eggdb serve and write the matrix (D44, D252)
+        env:
+          EGGDB_PASSWORD: compatibility-farm
+        run: |
+          cargo build -p eggdb
+          mkdir -p "$RUNNER_TEMP/matrix"
+          scripts/compatibility.sh target/debug/eggdb "$RUNNER_TEMP/tools" "$RUNNER_TEMP/matrix/compatibility.md" "$RUNNER_TEMP"
+          cat "$RUNNER_TEMP/matrix/compatibility.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: compatibility-matrix-${{ github.run_number }}
+          path: ${{ runner.temp }}/matrix/compatibility.md
+          retention-days: 90
