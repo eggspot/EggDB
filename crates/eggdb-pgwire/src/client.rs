@@ -130,6 +130,8 @@ enum UrlPassword {
     Taken,
 }
 
+const MOST_SCRAM_ITERATIONS: u32 = 1_000_000;
+
 const PASSWORD_IN_URL: &str = "the password is in the URL, where every user's ps shows it; set PGPASSWORD or pass --password-file";
 
 fn parse_url(url: &str, passwords: UrlPassword) -> Result<ConnectOptions, String> {
@@ -645,7 +647,11 @@ impl PgClient {
                 })?;
             }
         }
-        if !nonce.starts_with(&client_nonce) || iterations == 0 || salt.is_empty() {
+        if !nonce.starts_with(&client_nonce)
+            || iterations == 0
+            || iterations > MOST_SCRAM_ITERATIONS
+            || salt.is_empty()
+        {
             return Err(ClientError::Authentication(
                 "the server's SCRAM message is malformed".to_owned(),
             ));

@@ -16,8 +16,11 @@ pub(crate) enum StoreError {
     BucketNotEmpty,
     InvalidPart(u32),
     InvalidPartOrder,
+    TooLarge,
     Storage(String),
 }
+
+const MOST_OBJECT_BYTES: u64 = 1 << 30;
 
 type Result<T> = std::result::Result<T, StoreError>;
 
@@ -207,7 +210,13 @@ fn read_chunks(
     range: (u64, u64),
 ) -> Result<Vec<u8>> {
     let (start, end) = range;
-    let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(start)).unwrap_or(0));
+    let wanted = end.min(size).saturating_sub(start);
+    if wanted > MOST_OBJECT_BYTES {
+        return Err(StoreError::TooLarge);
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(usize::try_from(wanted).map_err(|_| StoreError::TooLarge)?)
+        .map_err(|_| StoreError::TooLarge)?;
     if start >= end || start >= size {
         return Ok(out);
     }
@@ -524,6 +533,22 @@ impl<'k> Store<'k> {
             let (owner_bucket, owner_key, mut info) = Self::upload(&*keys, upload)?;
             if owner_bucket != bucket || owner_key != key {
                 return Err(StoreError::NoSuchUpload);
+            }
+            let mut total = 0u64;
+            for (number, _) in parts {
+                let stored = keys
+                    .get(&part_key(upload, *number))
+                    .map_err(storage)?
+                    .ok_or(StoreError::InvalidPart(*number))?;
+                let size = stored
+                    .get(..8)
+                    .and_then(|raw| raw.try_into().ok())
+                    .map(u64::from_be_bytes)
+                    .ok_or(StoreError::InvalidPart(*number))?;
+                total = total.saturating_add(size);
+            }
+            if total > MOST_OBJECT_BYTES {
+                return Err(StoreError::TooLarge);
             }
             let mut body = Vec::new();
             let mut digests = Vec::new();

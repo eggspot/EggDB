@@ -17,6 +17,7 @@ const READ_POLL: Duration = Duration::from_millis(50);
 const LEASE_MS: u64 = 30 * 60 * 1000;
 const MAX_CHANNELS: u16 = 2047;
 const MAX_BODY_BYTES: u64 = 16 << 20;
+const MOST_BUFFERED_BYTES: usize = 64 << 20;
 
 const NOT_FOUND: u16 = 404;
 const ACCESS_REFUSED: u16 = 403;
@@ -417,6 +418,16 @@ impl Connection<'_, '_> {
                 return Ok(true);
             }
             FRAME_BODY => {
+                let buffered: usize = self.channels.values().map(|state| state.body.len()).sum();
+                if buffered.saturating_add(incoming.payload.len()) > MOST_BUFFERED_BYTES {
+                    self.close_connection(
+                        FRAME_ERROR,
+                        "the connection holds more than 64 MiB of unfinished message bodies",
+                        60,
+                        40,
+                    );
+                    return Ok(false);
+                }
                 let complete = match self.channels.get_mut(&incoming.channel) {
                     Some(state) => {
                         state.body.extend_from_slice(&incoming.payload);

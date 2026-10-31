@@ -17,6 +17,7 @@ const PREFETCH: usize = 100;
 const MAX_SUBSCRIPTIONS: usize = 1_000;
 const MAX_TRANSACTIONS: usize = 100;
 const MAX_STAGED: usize = 10_000;
+const MOST_STAGED_BYTES: usize = 64 << 20;
 const VERSIONS: [&str; 3] = ["1.2", "1.1", "1.0"];
 
 /// How the STOMP server runs.
@@ -396,6 +397,19 @@ impl Session<'_, '_> {
     }
 
     fn stage(&mut self, transaction: &str, staged: Staged) -> Result<(), String> {
+        let held: usize = self.transactions.values().map(Vec::len).sum();
+        let held_bytes: usize = self
+            .transactions
+            .values()
+            .flatten()
+            .map(|step| match step {
+                Staged::Send { body, .. } => body.len(),
+                Staged::Ack(_) | Staged::Nack(_) => 0,
+            })
+            .sum();
+        if held >= MAX_STAGED || held_bytes >= MOST_STAGED_BYTES {
+            return Err("the session's transactions hold too many frames".to_owned());
+        }
         let steps = self
             .transactions
             .get_mut(transaction)

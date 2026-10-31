@@ -156,14 +156,27 @@ fn tables_items_queries_and_scans_work() {
 #[test]
 fn numbers_sort_numerically_and_unsigned_requests_are_refused() {
     let mut keys = Vec::new();
-    for number in [-5.0, -0.5, 0.0, 2.0, 10.0] {
+    for number in [
+        "-1e5", "-5", "-1.23", "-1.2", "-0.5", "0", "0.000", "2", "10", "10.5",
+        "9007199254740992", "9007199254740993", "1e10",
+    ] {
+        let decimal = crate::keys::Decimal::parse(number).unwrap();
         let mut out = Vec::new();
-        crate::keys::encode(&crate::keys::KeyValue::N(number), &mut out);
+        crate::keys::encode(&crate::keys::KeyValue::N(decimal), &mut out);
         keys.push(out);
     }
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted);
+    assert_eq!(keys[5], keys[6], "0 and 0.000 are one key");
+    assert_ne!(keys[10], keys[11], "integers past 2^53 stay apart");
+    assert_eq!(
+        crate::keys::Decimal::parse("1.50"),
+        crate::keys::Decimal::parse("15e-1")
+    );
+    for refused in ["", ".", "1e", "abc", "1.2.3", "1e999", &"9".repeat(39)] {
+        assert!(crate::keys::Decimal::parse(refused).is_none(), "{refused}");
+    }
     let keyspace = MemoryKeyspace::default();
     let endpoint = Endpoint::new(&keyspace, "eggdb", "secret");
     let unsigned = Request {

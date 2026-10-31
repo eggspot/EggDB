@@ -2441,7 +2441,8 @@ SELECT edifact_parse(raw) -> 1 -> 'elements' FROM invoices;
 - `edifact_parse` honours a `UNA` service string advice and the release character, and gives
   each segment its tag and elements, an element with components becoming an array.
 
-A malformed message fails with SQLSTATE `22P02` and says what is wrong; nothing is guessed.
+A malformed message fails with SQLSTATE `22P02` and says what is wrong; nothing is guessed. A
+message is at most 4 MiB (`54000`).
 
 ## Schema diagrams (eggdb_console)
 

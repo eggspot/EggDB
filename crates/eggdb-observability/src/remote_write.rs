@@ -1,6 +1,8 @@
 use crate::line_protocol::{FieldValue, Point};
 
 const MAX_DECOMPRESSED: usize = 64 << 20;
+const MOST_POINTS: usize = 1 << 20;
+const MOST_EXPANDED_BYTES: usize = 256 << 20;
 
 struct Reader<'b> {
     bytes: &'b [u8],
@@ -71,6 +73,7 @@ pub(crate) fn decode(compressed: &[u8]) -> Result<Vec<Point>, String> {
         at: 0,
     };
     let mut points = Vec::new();
+    let mut expanded_bytes = 0usize;
     while let Some((number, field)) = request.next()? {
         let (1, Field::Bytes(series)) = (number, field) else {
             continue;
@@ -122,7 +125,18 @@ pub(crate) fn decode(compressed: &[u8]) -> Result<Vec<Point>, String> {
             }
         }
         let name = name.ok_or("a time series has no __name__ label")?;
+        let per_point = name.len()
+            + tags
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum::<usize>();
         for (value, time_ms) in samples {
+            expanded_bytes = expanded_bytes.saturating_add(per_point.max(1));
+            if points.len() >= MOST_POINTS || expanded_bytes > MOST_EXPANDED_BYTES {
+                return Err(format!(
+                    "a write may hold at most {MOST_POINTS} samples and {MOST_EXPANDED_BYTES} bytes of their labels"
+                ));
+            }
             if value.is_finite() {
                 points.push(Point {
                     measurement: name.clone(),

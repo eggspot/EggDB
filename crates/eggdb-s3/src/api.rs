@@ -140,6 +140,12 @@ fn store_failure(error: &StoreError, resource: &str) -> Response {
             &format!("Part {number} could not be found or its ETag does not match."),
             resource,
         ),
+        StoreError::TooLarge => failure(
+            400,
+            "EntityTooLarge",
+            "Your proposed upload exceeds the maximum allowed size.",
+            resource,
+        ),
         StoreError::InvalidPartOrder => failure(
             400,
             "InvalidPartOrder",

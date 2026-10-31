@@ -10,6 +10,7 @@ pub(crate) const FUNCTIONS: [&str; 5] = [
 ];
 
 const MAX_EXTRACTED_BYTES: usize = 64 << 20;
+const MOST_MESSAGE_BYTES: usize = 4 << 20;
 
 fn invalid(standard: &str, message: impl std::fmt::Display) -> SqlError {
     SqlError::new(
@@ -395,6 +396,12 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             )));
         }
     };
+    if text.len() > MOST_MESSAGE_BYTES {
+        return Some(Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!("{name} reads messages of at most {MOST_MESSAGE_BYTES} bytes"),
+        )));
+    }
     Some(match (name, values) {
         ("fix_parse", [_]) => fix_parse(text),
         ("fix_field", [_, tag]) => fix_field(text, tag),

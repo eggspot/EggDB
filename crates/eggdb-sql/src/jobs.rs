@@ -187,7 +187,10 @@ fn parse_field(text: &str, field: usize) -> Option<u64> {
         let mut value = start;
         while value <= end {
             bits |= 1 << value;
-            value += step;
+            let Some(next) = value.checked_add(step) else {
+                break;
+            };
+            value = next;
         }
     }
     if field == 4 && bits & (1 << 7) != 0 {

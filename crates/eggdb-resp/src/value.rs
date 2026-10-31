@@ -232,7 +232,7 @@ impl Entry {
             }
             2 => {
                 let count = cursor.count()?;
-                let mut list = VecDeque::with_capacity(count);
+                let mut list = VecDeque::with_capacity(count.min(1024));
                 for _ in 0..count {
                     list.push_back(cursor.bytes()?);
                 }

@@ -488,28 +488,38 @@ impl<'k> Endpoint<'k> {
         let key = Self::key_of(&schema, &table, item_node)?;
         let condition = text(body, "ConditionExpression").map(tokens);
         let rendered = render(&item);
-        let previous = self.stored(&key)?;
-        if let Some(condition) = condition {
-            match condition.as_slice() {
-                [function, open, _, close]
-                    if function == "attribute_not_exists" && open == "(" && close == ")" =>
-                {
-                    if previous.is_some() {
-                        return Err(failure(
-                            "ConditionalCheckFailedException",
-                            "The conditional request failed",
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(invalid(
-                        "only attribute_not_exists(...) conditions are supported yet",
-                    ));
-                }
+        let only_if_absent = match condition.as_deref() {
+            None => false,
+            Some([function, open, _, close])
+                if function == "attribute_not_exists" && open == "(" && close == ")" =>
+            {
+                true
             }
+            Some(_) => {
+                return Err(invalid(
+                    "only attribute_not_exists(...) conditions are supported yet",
+                ));
+            }
+        };
+        let mut previous = None;
+        let mut refused = false;
+        self.write(&mut |keys| {
+            previous = keys
+                .get(&key)?
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            refused = only_if_absent && previous.is_some();
+            if refused {
+                return Ok(());
+            }
+            keys.put(&key, rendered.as_bytes())
+        })
+        .map_err(|message| failure("InternalServerError", &message))?;
+        if refused {
+            return Err(failure(
+                "ConditionalCheckFailedException",
+                "The conditional request failed",
+            ));
         }
-        self.write(&mut |keys| keys.put(&key, rendered.as_bytes()))
-            .map_err(|message| failure("InternalServerError", &message))?;
         let returned = (text(body, "ReturnValues") == Some("ALL_OLD"))
             .then_some(previous)
             .flatten();

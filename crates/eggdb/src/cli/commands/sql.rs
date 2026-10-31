@@ -46,6 +46,12 @@ impl Session<'_> {
             ));
         }
         let mut text = self.sql_text()?;
+        if self.request.kql && self.request.dialect != eggdb_sql::Dialect::PostgreSql {
+            return Err(Failure::usage(
+                "--kql translates into PostgreSQL's SQL: give it without --dialect".to_owned(),
+                Some(CommandName::Sql),
+            ));
+        }
         if self.request.kql {
             text = eggdb_kql::translate(&text).map_err(|error| {
                 Failure::usage(
