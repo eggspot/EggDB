@@ -177,6 +177,8 @@ const POSTGRESQL_ONLY_FUNCTIONS: [&str; 40] = [
     "encode",
     "decode",
     "get_byte",
+    "sha256",
+    "sha512",
     "substring",
     "now",
     "transaction_timestamp",

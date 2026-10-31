@@ -455,6 +455,11 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("upper", [Value::Bpchar(text)]) => {
             Ok(Value::Text(without_trailing_spaces(text).to_uppercase()))
         }
+        ("sha256" | "sha512", [Value::Null]) => Ok(Value::Null),
+        ("sha256", [Value::Bytea(bytes)]) => Ok(Value::Bytea(eggdb_crypto::sha256(bytes).to_vec())),
+        ("sha512", [Value::Bytea(bytes)]) => Ok(Value::Bytea(eggdb_crypto::sha512(bytes).to_vec())),
+        ("sha256", [text]) => Ok(Value::Bytea(eggdb_crypto::sha256(character(text)?.as_bytes()).to_vec())),
+        ("sha512", [text]) => Ok(Value::Bytea(eggdb_crypto::sha512(character(text)?.as_bytes()).to_vec())),
         ("encode" | "decode" | "get_byte", [Value::Null, _] | [_, Value::Null]) => Ok(Value::Null),
         ("encode", [Value::Bytea(bytes), format]) => {
             encode(bytes, character(format)?).map(Value::Text)

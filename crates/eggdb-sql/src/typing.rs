@@ -271,6 +271,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         ("localtime" | "mysql_curtime", []) => Some(SqlType::Time(None)),
         ("gen_random_uuid", []) => Some(SqlType::Uuid),
         ("encode", [_, _]) => Some(SqlType::Text),
+        ("sha256" | "sha512", [_]) => Some(SqlType::Bytea),
         ("decode", [_, _]) => Some(SqlType::Bytea),
         ("get_byte", [_, _]) | ("octet_length", [_]) => Some(SqlType::Integer),
         ("substring", [argument, ..]) => match static_type(argument, scope)? {

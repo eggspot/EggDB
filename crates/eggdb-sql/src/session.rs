@@ -2058,6 +2058,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let (schema, script) = match name {
             "pg_cron" => ("cron", crate::jobs::PG_CRON_SCRIPT),
             "eggdb_tenancy" => ("eggdb_tenancy", crate::tenancy::TENANCY_SCRIPT),
+            "eggdb_ledger" => ("eggdb_ledger", crate::ledger::LEDGER_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

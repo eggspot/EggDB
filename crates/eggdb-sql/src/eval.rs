@@ -1548,6 +1548,7 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);
     Some(match name {
         "encode" => &[Some(SqlType::Bytea), Some(SqlType::Text)],
+        "sha256" | "sha512" => &[None],
         "decode" => &[Some(SqlType::Text), Some(SqlType::Text)],
         "get_byte" => &[Some(SqlType::Bytea), Some(SqlType::Integer)],
         "substring" => &[None, Some(SqlType::Integer), Some(SqlType::Integer)],
