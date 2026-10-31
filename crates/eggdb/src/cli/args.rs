@@ -207,7 +207,11 @@ impl CommandName {
             | OptionName::User
             | OptionName::PasswordFile
             | OptionName::Database
-            | OptionName::MaxConnections => self == Self::Serve,
+            | OptionName::MaxConnections
+            | OptionName::TlsCertificate
+            | OptionName::TlsKey
+            | OptionName::TlsSelfSigned
+            | OptionName::TlsMinVersion => self == Self::Serve,
             OptionName::Command => matches!(self, Self::Sql | Self::Shell | Self::Explain),
             OptionName::Dialect => matches!(
                 self,
@@ -338,6 +342,10 @@ enum OptionName {
     PasswordFile,
     Database,
     MaxConnections,
+    TlsCertificate,
+    TlsKey,
+    TlsSelfSigned,
+    TlsMinVersion,
     KeepGoing,
     Mode,
     Csv,
@@ -393,6 +401,10 @@ impl OptionName {
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
+            b"tls-certificate" => Self::TlsCertificate,
+            b"tls-key" => Self::TlsKey,
+            b"tls-self-signed" => Self::TlsSelfSigned,
+            b"tls-min-version" => Self::TlsMinVersion,
             b"keep-going" => Self::KeepGoing,
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
@@ -451,6 +463,7 @@ impl OptionName {
                 | Self::KeepNulls
                 | Self::AllowWrite
                 | Self::LogBatches
+                | Self::TlsSelfSigned
                 | Self::IfAbsent
                 | Self::Delete
         )
@@ -576,6 +589,10 @@ pub(crate) struct ServeOptions {
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
     pub(crate) max_connections: Option<usize>,
+    pub(crate) tls_certificate: Option<PathBuf>,
+    pub(crate) tls_key: Option<PathBuf>,
+    pub(crate) tls_self_signed: bool,
+    pub(crate) tls_min_version: Option<eggdb_tls::MinimumVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -912,6 +929,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::ReadOnly => request.read_only = true,
             OptionName::AllowWrite => request.allow_write = true,
             OptionName::LogBatches => request.serve.log_batches = true,
+            OptionName::TlsSelfSigned => request.serve.tls_self_signed = true,
             OptionName::OnConflict => {
                 request.on_conflict = parse_on_conflict(value).map_err(usage)?
             }
@@ -988,6 +1006,21 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.database = Some(parse_name(&option.spelled, value).map_err(usage)?);
             }
             OptionName::PasswordFile => request.serve.password_file = Some(export_file(value)),
+            OptionName::TlsCertificate => request.serve.tls_certificate = Some(PathBuf::from(value)),
+            OptionName::TlsKey => request.serve.tls_key = Some(PathBuf::from(value)),
+            OptionName::TlsMinVersion => {
+                request.serve.tls_min_version = Some(match value.as_encoded_bytes() {
+                    b"1.2" => eggdb_tls::MinimumVersion::Tls12,
+                    b"1.3" => eggdb_tls::MinimumVersion::Tls13,
+                    _ => {
+                        return Err(usage(format!(
+                            "{} needs 1.2 or 1.3, not {}",
+                            option.spelled,
+                            shown(value)
+                        )));
+                    }
+                });
+            }
             OptionName::MaxConnections => {
                 let count = parse_whole_number(value.as_encoded_bytes())
                     .filter(|&count| count >= 1)

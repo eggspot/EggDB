@@ -9,8 +9,10 @@ use eggdb_pgwire::{
 };
 use eggdb_platform::{secure_random, stop_signals};
 use std::io::BufRead;
+use super::serve_tls::{CertificateSource, TlsSetup, tls_setup};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
 
 const DEFAULT_USER: &str = "eggdb";
 const DEFAULT_PORT: u16 = 5432;
@@ -57,11 +59,18 @@ impl Session<'_> {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             DEFAULT_PORT,
         ));
+        let listen_hosts: Vec<IpAddr> = [Some(address), options.mysql_listen, options.tds_listen]
+            .into_iter()
+            .flatten()
+            .map(|listen| listen.ip())
+            .collect();
+        let tls = tls_setup(&options, &listen_hosts)?;
+        let with_tls = tls.is_some();
         let listener = self.listener(
             "--listen",
             "PostgreSQL",
             address,
-            eggdb_pgwire::listen_on_loopback(address).map_err(|error| match error {
+            eggdb_pgwire::listen(address, with_tls).map_err(|error| match error {
                 ListenError::NotLoopback(_) => None,
                 ListenError::Io(error) => Some(error),
             }),
@@ -71,7 +80,7 @@ impl Session<'_> {
                 "--tds-listen",
                 "SQL Server",
                 address,
-                eggdb_tdswire::listen_on_loopback(address).map_err(|error| match error {
+                eggdb_tdswire::listen(address, with_tls).map_err(|error| match error {
                     eggdb_tdswire::ListenError::NotLoopback(_) => None,
                     eggdb_tdswire::ListenError::Io(error) => Some(error),
                 }),
@@ -83,7 +92,7 @@ impl Session<'_> {
                 "--mysql-listen",
                 "MySQL",
                 address,
-                eggdb_mysqlwire::listen_on_loopback(address).map_err(|error| match error {
+                eggdb_mysqlwire::listen(address, with_tls).map_err(|error| match error {
                     eggdb_mysqlwire::ListenError::NotLoopback(_) => None,
                     eggdb_mysqlwire::ListenError::Io(error) => Some(error),
                 }),
@@ -149,6 +158,7 @@ impl Session<'_> {
                 .unwrap_or_else(|| database_name_of(&self.request.file)),
             max_connections: options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
+            tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
         };
         let mysql_config = mysql_credentials.map(|credentials| eggdb_mysqlwire::ServerConfig {
             user: config.user.clone(),
@@ -156,6 +166,7 @@ impl Session<'_> {
             database: config.database.clone(),
             max_connections: config.max_connections,
             authentication_timeout: eggdb_mysqlwire::DEFAULT_AUTHENTICATION_TIMEOUT,
+            tls: tls.as_ref().map(|setup| Arc::clone(&setup.mysql)),
         });
         let tds_config = tds_credentials.map(|credentials| eggdb_tdswire::ServerConfig {
             user: config.user.clone(),
@@ -164,8 +175,9 @@ impl Session<'_> {
             max_connections: config.max_connections,
             authentication_timeout: eggdb_tdswire::DEFAULT_AUTHENTICATION_TIMEOUT,
             log_batches: options.log_batches,
+            tls: tls.as_ref().map(|setup| Arc::clone(&setup.tds)),
         });
-        self.print_listening(bound, mysql_bound, tds_bound, &config, read_only);
+        self.print_listening(bound, mysql_bound, tds_bound, &config, read_only, tls.as_ref());
         self.out.finish()?;
         let _ = stop_signals::watch();
         let store = DatabaseStore(&db);
@@ -257,7 +269,7 @@ impl Session<'_> {
             Ok(listener) => Ok(listener),
             Err(None) => Err(Failure::Database {
                 message: format!(
-                    "cannot listen on {address}: it is not a loopback address. Until EggDB speaks TLS, serve listens only on this machine (127.0.0.1, ::1 or another 127.x address), so no password crosses a network in the clear."
+                    "cannot listen on {address}: it is not a loopback address. Without TLS, serve listens only on this machine (127.0.0.1, ::1 or another 127.x address), so no password crosses a network in the clear. Pass --tls-certificate <file> --tls-key <file>, or --tls-self-signed"
                 ),
                 try_command: Some(format!(
                     "eggdb serve {} {option} 127.0.0.1:{}",
@@ -298,6 +310,7 @@ impl Session<'_> {
         tds_bound: Option<SocketAddr>,
         config: &ServerConfig,
         read_only: bool,
+        tls: Option<&TlsSetup>,
     ) {
         let host = bound.ip().to_string();
         let url_host = match bound.ip() {
@@ -305,22 +318,34 @@ impl Session<'_> {
             IpAddr::V4(_) => host.clone(),
         };
         let mysql_line = mysql_bound.map_or_else(String::new, |mysql| {
-            let mysql_host = mysql.ip().to_string();
             format!(
-                "  mysql        listening on {mysql} (MySQL protocol): mysql -h {mysql_host} -P {} -u {} -p {}\n",
+                "  mysql        listening on {mysql} (MySQL protocol): mysql -h {} -P {} -u {} -p {}{}\n",
+                client_host(mysql.ip(), tls),
                 mysql.port(),
                 config.user,
+                mysql_ssl_mode(tls),
                 config.database
             )
         });
         let tds_line = tds_bound.map_or_else(String::new, |tds| {
-            format!(
-                "  sqlcmd       listening on {tds} (SQL Server's TDS protocol, no encryption): sqlcmd -S {},{} -U {} -d {} (password in SQLCMDPASSWORD or -P; go-sqlcmd's default encryption or -N disable)\n",
-                tds.ip(),
-                tds.port(),
-                config.user,
-                config.database
-            )
+            match tls {
+                None => format!(
+                    "  sqlcmd       listening on {tds} (SQL Server's TDS protocol, no encryption): sqlcmd -S {},{} -U {} -d {} (password in SQLCMDPASSWORD or -P; go-sqlcmd's default encryption or -N disable)\n",
+                    tds.ip(),
+                    tds.port(),
+                    config.user,
+                    config.database
+                ),
+                Some(setup) => format!(
+                    "  sqlcmd       listening on {tds} (SQL Server's TDS protocol, encrypted): sqlcmd -S {},{} -U {} -d {}{} (password in SQLCMDPASSWORD or -P{})\n",
+                    client_host(tds.ip(), tls),
+                    tds.port(),
+                    config.user,
+                    config.database,
+                    if matches!(setup.source, CertificateSource::SelfSigned) { " -C" } else { "" },
+                    if matches!(setup.source, CertificateSource::SelfSigned) { "; -C trusts this certificate" } else { "" },
+                ),
+            }
         });
         match self.format {
             Format::Json => {
@@ -338,27 +363,97 @@ impl Session<'_> {
                         .string("tds_listening", &tds.to_string())
                         .number("tds_port", u64::from(tds.port()));
                 }
-                self.out.text(
-                    &object
+                object = object
                     .string("file", &self.file_display)
                     .string("database", &config.database)
                     .string("user", &config.user)
                     .number("max_connections", config.max_connections as u64)
                     .boolean("read_only", read_only)
-                    .line(),
+                    .boolean("tls", tls.is_some())
+                    .boolean("loopback_only", tls.is_none());
+                if let Some(setup) = tls {
+                    let certificate = match &setup.source {
+                        CertificateSource::Files { certificate, .. } => certificate.as_str(),
+                        CertificateSource::SelfSigned => "self-signed",
+                    };
+                    object = object
+                        .string("tls_certificate", certificate)
+                        .string("tls_fingerprint_sha256", &setup.fingerprint_hex())
+                        .raw("tls_names", &json_list(&setup.names))
+                        .string("tls_not_after", &setup.not_after_rfc3339())
+                        .string("tls_min_version", setup.minimum_version_number());
+                    if let CertificateSource::Files { key, .. } = &setup.source {
+                        object = object.string("tls_key", key);
+                    }
+                }
+                self.out.text(&object.line(),
                 );
             }
-            _ => self.out.text(&format!(
-                "listening on {bound} (PostgreSQL protocol; loopback only until EggDB has TLS)\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n  connect      psql postgresql://{}@{url_host}:{}/{}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
-                config.database,
-                self.file,
-                if read_only { "read-only" } else { "for writing" },
-                config.user,
-                config.max_connections,
-                config.user,
-                bound.port(),
-                config.database,
-            )),
+            _ => {
+                let (transport, tls_lines, connect) = match tls {
+                    None => (
+                        "loopback only without TLS: see --tls-certificate".to_owned(),
+                        String::new(),
+                        format!(
+                            "psql postgresql://{}@{url_host}:{}/{}",
+                            config.user,
+                            bound.port(),
+                            config.database
+                        ),
+                    ),
+                    Some(setup) => {
+                        let required = if bound.ip().is_loopback() {
+                            "optional on loopback"
+                        } else {
+                            "required from other machines"
+                        };
+                        let (certificate_line, fingerprint_note, ssl_mode) = match &setup.source {
+                            CertificateSource::Files { certificate, key } => (
+                                format!(
+                                    "{certificate} (chain of {}, {}, expires {}) with {key}, for {}",
+                                    setup.chain_length,
+                                    setup.key_kind,
+                                    setup.not_after_date(),
+                                    setup.names.join(", ")
+                                ),
+                                "the server certificate",
+                                "verify-full",
+                            ),
+                            CertificateSource::SelfSigned => (
+                                format!(
+                                    "self-signed {} for {}, made at this start (new one each start)",
+                                    setup.key_kind,
+                                    setup.names.join(" and ")
+                                ),
+                                "pin it: clients cannot verify a self-signed certificate by name",
+                                "require",
+                            ),
+                        };
+                        (
+                            format!("{}, {required}", setup.version_text()),
+                            format!(
+                                "  tls          {certificate_line}\n  fingerprint  SHA256 {} ({fingerprint_note})\n",
+                                setup.fingerprint_colons()
+                            ),
+                            format!(
+                                "psql \"postgresql://{}@{}:{}/{}?sslmode={ssl_mode}\"",
+                                config.user,
+                                client_host(bound.ip(), tls),
+                                bound.port(),
+                                config.database
+                            ),
+                        )
+                    }
+                };
+                self.out.text(&format!(
+                    "listening on {bound} (PostgreSQL protocol; {transport})\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n{tls_lines}  connect      {connect}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
+                    config.database,
+                    self.file,
+                    if read_only { "read-only" } else { "for writing" },
+                    config.user,
+                    config.max_connections,
+                ));
+            }
         }
     }
 
@@ -408,5 +503,31 @@ impl Session<'_> {
                 ))),
             },
         }
+    }
+}
+
+fn client_host(address: IpAddr, tls: Option<&TlsSetup>) -> String {
+    let host = if address.is_unspecified() {
+        tls.and_then(TlsSetup::first_dns_name)
+            .map_or_else(|| "localhost".to_owned(), str::to_owned)
+    } else {
+        address.to_string()
+    };
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("[{host}]"),
+        _ => host,
+    }
+}
+
+fn json_list(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|item| render::json_string(item)).collect();
+    format!("[{}]", quoted.join(","))
+}
+
+fn mysql_ssl_mode(tls: Option<&TlsSetup>) -> &'static str {
+    match tls.map(|setup| &setup.source) {
+        None => "",
+        Some(CertificateSource::Files { .. }) => " --ssl-mode=VERIFY_IDENTITY",
+        Some(CertificateSource::SelfSigned) => " --ssl-mode=REQUIRED",
     }
 }

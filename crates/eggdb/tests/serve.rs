@@ -188,3 +188,84 @@ fn stop(server: &mut std::process::Child) {
 fn stop(server: &mut std::process::Child) {
     let _ = server.kill();
 }
+
+#[test]
+fn tls_options_must_come_in_pairs_and_not_together() {
+    let file = TempPath::new("serve-tls-options");
+    let path = file.path().to_str().unwrap().to_owned();
+    for (args, expected) in [
+        (vec!["--tls-key", "key.pem"], "--tls-key needs --tls-certificate"),
+        (vec!["--tls-certificate", "cert.pem"], "--tls-certificate needs --tls-key"),
+        (
+            vec!["--tls-self-signed", "--tls-certificate", "cert.pem", "--tls-key", "key.pem"],
+            "--tls-self-signed and --tls-certificate exclude each other",
+        ),
+        (vec!["--tls-min-version", "1.3"], "--tls-min-version needs TLS"),
+        (vec!["--tls-self-signed", "--tls-min-version", "1.1"], "--tls-min-version needs 1.2 or 1.3"),
+        (
+            vec!["--tls-certificate", "missing-cert.pem", "--tls-key", "missing-key.pem"],
+            "cannot read --tls-certificate missing-cert.pem",
+        ),
+    ] {
+        let mut full = vec!["serve", path.as_str(), "--create", "--listen", "127.0.0.1:0"];
+        full.extend(args);
+        let refused = eggdb(&full, Some("secret"));
+        assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+        assert!(stderr(&refused).contains(expected), "{}", stderr(&refused));
+    }
+}
+
+#[test]
+fn serve_with_a_self_signed_certificate_listens_beyond_loopback_and_answers_ssl_requests() {
+    let file = TempPath::new("serve-tls-run");
+    let path = file.path().to_str().unwrap().to_owned();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+        .args(["serve", &path, "--create", "--listen", "0.0.0.0:0", "--tls-self-signed", "--format", "json"])
+        .env("EGGDB_PASSWORD", "s3cret")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(server.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    assert!(first.contains("\"tls\":true"), "{first}");
+    assert!(first.contains("\"loopback_only\":false"), "{first}");
+    assert!(first.contains("\"tls_certificate\":\"self-signed\""), "{first}");
+    let fingerprint = first
+        .split("\"tls_fingerprint_sha256\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .to_owned();
+    assert_eq!(fingerprint.len(), 64);
+    let port: u16 = first
+        .split("\"port\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|port| port.parse().ok())
+        .unwrap();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    client.write_all(&[0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]).unwrap();
+    let mut answer = [0u8; 1];
+    client.read_exact(&mut answer).unwrap();
+    assert_eq!(answer[0], b'S');
+    let config = eggdb_tls::ClientConfig::new(eggdb_tls::ServerVerification::EncryptionOnly, "localhost");
+    let tls = eggdb_tls::TlsStream::connect(client, &config).expect("TLS handshake with eggdb serve");
+    let served: String = tls
+        .info()
+        .server_certificate
+        .as_ref()
+        .map(|certificate| {
+            eggdb_tls::signature::SignatureHash::Sha256
+                .digest(certificate.der())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(served, fingerprint, "the printed fingerprint is the served certificate's");
+    stop(&mut server);
+    assert!(server.wait().unwrap().success());
+}

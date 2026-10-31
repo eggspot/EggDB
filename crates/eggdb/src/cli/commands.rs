@@ -23,6 +23,7 @@ mod mcp;
 mod restore;
 mod row;
 mod serve;
+mod serve_tls;
 mod shell;
 mod shell_copy;
 pub(super) mod sql;

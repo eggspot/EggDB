@@ -13,6 +13,14 @@ const SERVE_FIELDS: &[FieldDefinition] = &[
     field("tds_port", FieldType::Integer),
     field("read_only", FieldType::Boolean),
     field("max_connections", FieldType::Integer),
+    field("tls", FieldType::Boolean),
+    field("loopback_only", FieldType::Boolean),
+    field("tls_certificate", FieldType::Text),
+    field("tls_key", FieldType::Text),
+    field("tls_fingerprint_sha256", FieldType::Text),
+    field("tls_names", FieldType::Array),
+    field("tls_not_after", FieldType::Time),
+    field("tls_min_version", FieldType::Text),
     field("stopped", FieldType::Boolean),
     field("connections_closed", FieldType::Integer),
 ];
@@ -129,13 +137,14 @@ pub(super) const SERVE: CommandDefinition = CommandDefinition {
     aliases: &[],
     synopsis: "<file>",
     summary: "serve the file to PostgreSQL and MySQL clients; see --listen",
-    description: "Serves the file to PostgreSQL clients, and with options to MySQL and SQL Server (TDS) clients, on this machine's loopback address until stopped; clients log in with a password and may run any statement. The first line says where it listens.",
-    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--read-only] [--create]",
+    description: "Serves the file to PostgreSQL clients, and with options to MySQL and SQL Server (TDS) clients, until stopped: on this machine's loopback address without TLS, and on any address with TLS, which other machines must then use; clients log in with a password and may run any statement. The first line says where it listens.",
+    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
     help: "\
 Serves the file to PostgreSQL clients: psql and PostgreSQL drivers connect to it unchanged and
 run the SQL of eggdb sql. Clients log in as one user with a password (SCRAM-SHA-256), which
-comes from EGGDB_PASSWORD or --password-file, never from the command line. Until EggDB speaks
-TLS the server listens only on this machine, on a loopback address. The first line printed says
+comes from EGGDB_PASSWORD or --password-file, never from the command line. Without TLS it
+listens only on this machine; with TLS (two PEM files or --tls-self-signed) it may listen on any
+address, and other machines must connect over TLS. The first line printed says
 where it listens; in a pipe it is one JSON line, so a script can read the port. While it runs
 the file is open for writing, so other eggdb commands on it exit 5. Ctrl-C or SIGTERM finishes
 the running statements, rolls back open transactions and stops with exit 0.
@@ -145,9 +154,9 @@ the running statements, rolls back open transactions and stops with exit 0.
       --mysql-listen <address>    also serve MySQL's protocol there, to the mysql client and
                                   MySQL drivers (MySQL's SQL; port 3306 is MySQL's)
       --tds-listen <address>      also serve SQL Server's TDS protocol there, to sqlcmd
-                                  (go-sqlcmd), Microsoft.Data.SqlClient and mssql-jdbc,
-                                  without encryption: connect with sqlcmd's default, -N
-                                  disable or Encrypt=false (Transact-SQL; port 1433 is SQL
+                                  (go-sqlcmd), Microsoft.Data.SqlClient and mssql-jdbc;
+                                  encrypted with TLS, otherwise connect with sqlcmd's default,
+                                  -N disable or Encrypt=false (Transact-SQL; port 1433 is SQL
                                   Server's)
       --log-batches               log the first 200 characters of each TDS batch and RPC
                                   call, to see what a client sends (never the login or its
@@ -157,6 +166,13 @@ the running statements, rolls back open transactions and stops with exit 0.
       --database <name>           the name clients connect to (default: the file name
                                   without its extension, so app.db is app)
       --max-connections <count>   connections open at once, one thread each (default 64)
+      --tls-certificate <file>    PEM certificate chain, server's first; with --tls-key, clients
+                                  on other machines may connect (over TLS; loopback may skip it)
+      --tls-key <file>            PEM private key for --tls-certificate: PKCS#8, SEC1 or PKCS#1,
+                                  P-256 or RSA; never on the command line, read once at start
+      --tls-self-signed           make a P-256 certificate at start, in memory, for the listen
+                                  host and localhost; its fingerprint is printed so clients pin it
+      --tls-min-version <1.2|1.3> the oldest TLS version accepted (default 1.2)
       --read-only                 no writes, and it works beside other readers
       --create                    create the database file if it is missing
 
@@ -168,6 +184,8 @@ Examples:
   eggdb serve app.db --password-file pw.txt --mysql-listen 127.0.0.1:3306
   eggdb serve app.db --password-file pw.txt --tds-listen 127.0.0.1:1433
   SQLCMDPASSWORD=secret sqlcmd -S 127.0.0.1,1433 -U eggdb -d app -Q \"SELECT @@VERSION\"
+  eggdb serve app.db --password-file pw.txt --listen 0.0.0.0:5432 --tls-certificate cert.pem --tls-key key.pem
+  eggdb serve app.db --password-file pw.txt --listen 0.0.0.0:5432 --tls-self-signed
 ",
     options: &[
         OptionDefinition {
@@ -186,7 +204,7 @@ Examples:
         valued(
             "tds-listen",
             "address",
-            "also serve SQL Server's TDS protocol there, without encryption",
+            "also serve SQL Server's TDS protocol there, encrypted with TLS when it is set up",
         ),
         flag(
             "log-batches",
@@ -213,6 +231,24 @@ Examples:
                 "count",
                 "connections open at once, one thread each",
             )
+        },
+        valued(
+            "tls-certificate",
+            "file",
+            "PEM certificate chain, server's first; with --tls-key, other machines may connect over TLS",
+        ),
+        valued(
+            "tls-key",
+            "file",
+            "PEM private key for --tls-certificate: PKCS#8, SEC1 or PKCS#1, P-256 or RSA",
+        ),
+        flag(
+            "tls-self-signed",
+            "make a P-256 certificate at start, in memory, for the listen host and localhost",
+        ),
+        OptionDefinition {
+            default: Some("1.2"),
+            ..valued("tls-min-version", "1.2|1.3", "the oldest TLS version accepted")
         },
         flag(
             "read-only",
