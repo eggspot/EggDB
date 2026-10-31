@@ -30,6 +30,7 @@ pub(crate) enum CommandName {
     Serve,
     Shell,
     Restore,
+    Follow,
     Mcp,
     Audit,
     Collection,
@@ -95,6 +96,7 @@ impl CommandName {
         Self::Serve,
         Self::Shell,
         Self::Restore,
+        Self::Follow,
         Self::Collection,
         Self::Mcp,
         Self::Audit,
@@ -122,6 +124,7 @@ impl CommandName {
             b"serve" => Self::Serve,
             b"shell" => Self::Shell,
             b"restore" => Self::Restore,
+            b"follow" => Self::Follow,
             b"mcp" => Self::Mcp,
             b"audit" => Self::Audit,
             b"collection" => Self::Collection,
@@ -156,6 +159,7 @@ impl CommandName {
             Self::Serve => "serve",
             Self::Shell => "shell",
             Self::Restore => "restore",
+            Self::Follow => "follow",
             Self::Mcp => "mcp",
             Self::Audit => "audit",
             Self::Collection => "collection",
@@ -198,6 +202,7 @@ impl CommandName {
                         | Self::Serve
                         | Self::Shell
                         | Self::Restore
+                        | Self::Follow
                 )
             }
             OptionName::Listen
@@ -205,13 +210,14 @@ impl CommandName {
             | OptionName::TdsListen
             | OptionName::LogBatches
             | OptionName::User
-            | OptionName::PasswordFile
             | OptionName::Database
             | OptionName::MaxConnections
             | OptionName::TlsCertificate
             | OptionName::TlsKey
             | OptionName::TlsSelfSigned
             | OptionName::TlsMinVersion => self == Self::Serve,
+            OptionName::PasswordFile => matches!(self, Self::Serve | Self::Follow),
+            OptionName::Publication | OptionName::Poll | OptionName::Until => self == Self::Follow,
             OptionName::Command => matches!(self, Self::Sql | Self::Shell | Self::Explain),
             OptionName::Dialect => matches!(
                 self,
@@ -232,7 +238,7 @@ impl CommandName {
             | OptionName::KeepNulls => self == Self::Import,
             OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table | Self::Row),
             OptionName::After => matches!(self, Self::Table | Self::Row),
-            OptionName::Schema => self == Self::Table,
+            OptionName::Schema => matches!(self, Self::Table | Self::Follow),
             OptionName::Collection => matches!(
                 self,
                 Self::Get
@@ -346,6 +352,9 @@ enum OptionName {
     TlsKey,
     TlsSelfSigned,
     TlsMinVersion,
+    Publication,
+    Poll,
+    Until,
     KeepGoing,
     Mode,
     Csv,
@@ -405,6 +414,9 @@ impl OptionName {
             b"tls-key" => Self::TlsKey,
             b"tls-self-signed" => Self::TlsSelfSigned,
             b"tls-min-version" => Self::TlsMinVersion,
+            b"publication" => Self::Publication,
+            b"poll" => Self::Poll,
+            b"until" => Self::Until,
             b"keep-going" => Self::KeepGoing,
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
@@ -504,6 +516,7 @@ pub(crate) struct Request {
     pub(crate) shell: ShellOptions,
     pub(crate) csv: CsvOptions,
     pub(crate) restore: RestoreOptions,
+    pub(crate) follow: FollowOptions,
     pub(crate) time_limit: Option<u64>,
     pub(crate) allow_write: bool,
     pub(crate) tables: Vec<String>,
@@ -533,6 +546,15 @@ pub(crate) struct RestoreOptions {
     pub(crate) report: Option<PathBuf>,
     pub(crate) keep_going: bool,
     pub(crate) defines: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FollowOptions {
+    pub(crate) source: String,
+    pub(crate) schemas: Vec<String>,
+    pub(crate) publication: Option<String>,
+    pub(crate) poll_seconds: Option<u64>,
+    pub(crate) until_caught_up: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -871,6 +893,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         shell: ShellOptions::default(),
         csv: CsvOptions::default(),
         restore: RestoreOptions::default(),
+        follow: FollowOptions::default(),
         time_limit: None,
         allow_write: false,
         tables: Vec::new(),
@@ -1092,8 +1115,46 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Ttl => {
                 request.ttl = Some(parse_ttl_option(&option.spelled, value).map_err(usage)?);
             }
+            OptionName::Schema if command == CommandName::Follow => {
+                for name in value.to_str().unwrap_or_default().split(',') {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        return Err(usage(format!(
+                            "{} needs schema names separated by commas, not {}",
+                            option.spelled,
+                            shown(value)
+                        )));
+                    }
+                    request.follow.schemas.push(name.to_owned());
+                }
+            }
             OptionName::Schema => {
                 request.schema = Some(parse_name(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::Publication => {
+                request.follow.publication = Some(parse_name(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::Poll => {
+                let seconds = parse_whole_number(value.as_encoded_bytes())
+                    .filter(|&seconds| seconds >= 1)
+                    .ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of seconds, at least 1, not {}",
+                            option.spelled,
+                            shown(value)
+                        ))
+                    })?;
+                request.follow.poll_seconds = Some(seconds);
+            }
+            OptionName::Until => {
+                if value.as_encoded_bytes() != b"caught-up" {
+                    return Err(usage(format!(
+                        "{} takes caught-up, not {}",
+                        option.spelled,
+                        shown(value)
+                    )));
+                }
+                request.follow.until_caught_up = true;
             }
             OptionName::IfAbsent => request.swap.if_absent = true,
             OptionName::Delete => request.swap.delete = true,
@@ -1149,7 +1210,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         CommandName::Get | CommandName::Del | CommandName::Ttl | CommandName::Persist => (2, 2),
         CommandName::Put | CommandName::Incr | CommandName::Decr => (2, 3),
         CommandName::Expire => (3, 3),
-        CommandName::Backup => (2, 2),
+        CommandName::Backup | CommandName::Follow => (2, 2),
         CommandName::Cas => (swap_arguments, swap_arguments),
     };
     if arguments.len() < least {
@@ -1203,6 +1264,18 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         if !request.restore.defines.is_empty() && request.dialect != eggdb_sql::Dialect::Oracle {
             return Err(usage(DEFINE_NEEDS_ORACLE.to_owned()));
         }
+        return Ok(request);
+    }
+    if command == CommandName::Follow {
+        if arguments[0].as_encoded_bytes() == b"-" {
+            return Err(usage(
+                "follow writes into a database file, and stdin is not one. Give a path.".to_owned(),
+            ));
+        }
+        request.follow.source = arguments[1]
+            .to_str()
+            .ok_or_else(|| usage("the source URL must be UTF-8 text".to_owned()))?
+            .to_owned();
         return Ok(request);
     }
     if command == CommandName::Backup {
@@ -1657,6 +1730,8 @@ fn missing_arguments(command: CommandName, given: usize) -> String {
             | CommandName::Decr,
             _,
         ) => "a key",
+        (CommandName::Follow, 0) => "a file and the source, such as postgres://user@host/database",
+        (CommandName::Follow, _) => "the source, such as postgres://user@host/database",
         (CommandName::Backup, 0) => "a file and the path of the copy",
         (CommandName::Backup, _) => "the path of the copy",
         (CommandName::Expire, 0) => "a file, a key and a time such as 30s",

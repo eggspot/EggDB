@@ -127,6 +127,11 @@ pub const ERROR_CODES: &[ErrorCode] = &[
         "a file is already where a new one would go, and it is never replaced",
     ),
     code(
+        "source_failed",
+        Category::Failed,
+        "follow could not connect to, read from or keep in step with the source database",
+    ),
+    code(
         "database_busy",
         Category::Busy,
         "another program has the file open in a way that excludes this use",
@@ -561,6 +566,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     programs::SERVE,
     programs::SHELL,
     files::RESTORE,
+    programs::FOLLOW,
     keys::COLLECTION_LIST,
     keys::COLLECTION_ADD,
     keys::COLLECTION_DELETE,

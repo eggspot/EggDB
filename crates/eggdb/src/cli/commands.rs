@@ -22,6 +22,8 @@ mod explain;
 mod mcp;
 mod restore;
 mod row;
+mod follow;
+mod follow_sql_server;
 mod serve;
 mod serve_tls;
 mod shell;
@@ -153,6 +155,7 @@ fn execute_on(
         CommandName::Sql => session.sql(),
         CommandName::Serve => session.serve(),
         CommandName::Restore => session.restore(),
+        CommandName::Follow => session.follow(),
         CommandName::Shell => Err(Failure::usage(
             "eggdb shell does not run inside itself",
             Some(CommandName::Shell),

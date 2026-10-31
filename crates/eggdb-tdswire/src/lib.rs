@@ -15,6 +15,8 @@
 //!   available, so a client asking for it ends the connection itself.
 //! - Every connection logs in with a SQL login checked against [`TdsCredentials`]; there is no
 //!   unauthenticated mode, and integrated (SSPI) and federated logins are refused.
+//! - [`client`] connects to a running SQL Server (PRELOGIN encryption, TDS 8 strict, SQL
+//!   logins, batches whose results are cast to text), for `eggdb follow` (D162).
 //! - [`messages`] reads every client message (PRELOGIN, LOGIN7, SQL batches, transaction
 //!   manager requests) and [`rpc`] reads remote procedure calls, refusing truncated, oversized
 //!   or inconsistent input with an error, never a panic.
@@ -37,6 +39,7 @@
 
 mod auth;
 pub mod bulk;
+pub mod client;
 mod connection;
 pub mod messages;
 mod procedures;

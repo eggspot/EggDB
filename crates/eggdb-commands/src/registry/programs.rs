@@ -556,3 +556,132 @@ pub(super) const VERSION: CommandDefinition = CommandDefinition {
     examples: &["eggdb version", "eggdb version --json"],
     surfaces: "none yet: the GUI client (D15) shows it in its About box",
 };
+
+const FOLLOW_FIELDS: &[FieldDefinition] = &[
+    field("event", FieldType::Text),
+    field("source", FieldType::Text),
+    field("server", FieldType::Text),
+    field("tls", FieldType::Text),
+    field("file", FieldType::Text),
+    field("created", FieldType::Boolean),
+    field("name", FieldType::Text),
+    field("snapshot_lsn", FieldType::Text),
+    field("schemas", FieldType::Array),
+    field("tables", FieldType::Integer),
+    field("sequences", FieldType::Integer),
+    field("table", FieldType::Text),
+    field("rows", FieldType::Integer),
+    field("elapsed_ms", FieldType::Integer),
+    field("lag_bytes", FieldType::Integer),
+    field("transactions", FieldType::Integer),
+    field("inserts", FieldType::Integer),
+    field("updates", FieldType::Integer),
+    field("deletes", FieldType::Integer),
+    field("truncates", FieldType::Integer),
+    field("lsn", FieldType::Text),
+    field("change_version", FieldType::Integer),
+    field("polls", FieldType::Integer),
+    field("reason", FieldType::Text),
+    field("ok", FieldType::Boolean),
+    field("verdict", FieldType::Text),
+];
+
+const FOLLOW_ERRORS: &[CommandError] = &[
+    OPENING_ERRORS[0],
+    OPENING_ERRORS[1],
+    OPENING_ERRORS[2],
+    OPENING_ERRORS[3],
+    OPENING_ERRORS[4],
+    OPENING_ERRORS[5],
+    OPENING_ERRORS[6],
+    OPENING_ERRORS[7],
+    OPENING_ERRORS[8],
+    command_error("already_exists", 3),
+    command_error("source_failed", 3),
+];
+
+pub(super) const FOLLOW: CommandDefinition = CommandDefinition {
+    words: &["follow"],
+    aliases: &[],
+    synopsis: "<file> <source-url>",
+    summary: "copy a running PostgreSQL or SQL Server database into the file and keep it in step",
+    description: "Copies a running PostgreSQL database (logical replication) or SQL Server database (change tracking or CDC) into the file, then applies every change the source commits, one source transaction as one transaction here, until stopped or caught up, so applications can switch over with no downtime.",
+    usage: "eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--until caught-up]",
+    help: "\
+Copies a running database into the file and keeps the file in step with it. From PostgreSQL
+(wal_level=logical) it creates a temporary replication slot, copies the schema and every
+table's rows from the slot's snapshot, then applies the logical stream: inserts, updates,
+deletes and truncates, each source transaction as one transaction here. From SQL Server it
+copies the tables, then polls change tracking or CDC. Ctrl-C or SIGTERM finishes the
+transaction being applied, copies sequence values, prints a summary and exits 0. The password
+comes from PGPASSWORD or SQLCMDPASSWORD, or --password-file, never from the URL.
+
+      --create                  create the file if it is missing (it must not already hold
+                                the source's tables)
+      --schema <list>           schemas to copy, comma-separated (default: every non-system
+                                schema)
+      --publication <name>      PostgreSQL: use this publication; default: create
+                                eggdb_follow FOR ALL TABLES (needs the owner or a superuser),
+                                dropped again at stop
+      --password-file <path>    read the source password from this file (default: PGPASSWORD
+                                or SQLCMDPASSWORD)
+      --poll <seconds>          SQL Server: how often to ask for changes (default 5)
+      --until caught-up         stop by itself, exit 0, once every source change so far is
+                                in the file
+
+Examples:
+  eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'
+  eggdb follow --create app.db postgres://ada@127.0.0.1/app --until caught-up && eggdb serve app.db
+  eggdb follow --create shop.db 'sqlserver://sa@sql.example.com/Shop?encrypt=strict' --poll 2
+",
+    options: &[
+        flag("create", "create the file if it is missing"),
+        valued("schema", "list", "schemas to copy, comma-separated (default: every non-system schema)"),
+        valued(
+            "publication",
+            "name",
+            "PostgreSQL: use this publication instead of creating eggdb_follow",
+        ),
+        valued(
+            "password-file",
+            "path",
+            "read the source password from this file",
+        ),
+        OptionDefinition {
+            default: Some("5"),
+            ..valued("poll", "seconds", "SQL Server: how often to ask for changes")
+        },
+        valued(
+            "until",
+            "caught-up",
+            "stop by itself once every source change so far is in the file",
+        ),
+    ],
+    operands: &[
+        FILE,
+        OperandDefinition {
+            name: "source-url",
+            kind: OperandType::Text,
+            count: Count::One,
+            standard_stream: false,
+        },
+    ],
+    outputs: &[
+        OutputDefinition {
+            format: Format::Text,
+            kind: OutputKind::Records(FOLLOW_FIELDS),
+        },
+        OutputDefinition {
+            format: Format::Json,
+            kind: OutputKind::Records(FOLLOW_FIELDS),
+        },
+    ],
+    max_effect: Effect::Change,
+    errors: FOLLOW_ERRORS,
+    examples: &[
+        "eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'",
+        "eggdb follow --create app.db postgres://ada@127.0.0.1/app --until caught-up",
+        "eggdb follow --create shop.db 'sqlserver://sa@sql.example.com/Shop?encrypt=strict' --poll 2",
+    ],
+    surfaces: "none yet: the GUI client (D15) brings a live-copy dialog",
+};
