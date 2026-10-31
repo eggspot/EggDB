@@ -30,6 +30,7 @@ eggdb-esrest = { path = "../eggdb-esrest" }
 eggdb-kafka = { path = "../eggdb-kafka" }
 eggdb-documents = { path = "../eggdb-documents" }
 eggdb-mongowire = { path = "../eggdb-mongowire" }
+eggdb-mqtt = { path = "../eggdb-mqtt" }
 eggdb-parquet = { path = "../eggdb-parquet" }
 eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }

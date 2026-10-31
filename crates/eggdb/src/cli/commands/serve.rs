@@ -236,6 +236,27 @@ impl Session<'_> {
             }
             None => None,
         };
+        let mqtt_listener = match options.mqtt_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--mqtt-listen {address}: the MQTT listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for MQTT clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let mqtt_config = eggdb_mqtt::ServerConfig {
+            user: config.user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections: config.max_connections,
+        };
         let amqp_config = eggdb_amqp::ServerConfig {
             user: config.user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
@@ -494,6 +515,14 @@ impl Session<'_> {
                 db: &db,
                 prefix: super::serve_resp::QUEUE_COLLECTIONS,
             };
+            let mqtt_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::MQTT_COLLECTIONS,
+            };
+            let mqtt_server = scope.spawn(|| match &mqtt_listener {
+                Some(listener) => eggdb_mqtt::serve(&mqtt_database, listener, &mqtt_config, &stop_signals::requested),
+                None => Ok(()),
+            });
             let amqp_server = scope.spawn(|| match &amqp_listener {
                 Some(listener) => eggdb_amqp::serve(&queue_database, listener, &amqp_config, &stop_signals::requested),
                 None => Ok(()),
@@ -573,6 +602,7 @@ impl Session<'_> {
             let _ = bolt_server.join();
             let _ = kafka_server.join();
             let _ = amqp_server.join();
+            let _ = mqtt_server.join();
             let _ = job_scheduler.join();
             let _ = cdc_delivery.join();
             postgresql
