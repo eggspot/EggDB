@@ -366,6 +366,7 @@ pub(crate) fn formatted_message(template: &str, arguments: &[Value]) -> SqlResul
         } else {
             specification.width = number_in(&characters, &mut at);
         }
+        specification.width = specification.width.map(within_message);
         if characters.get(at) == Some(&'.') {
             at += 1;
             if characters.get(at) == Some(&'*') {
@@ -377,6 +378,7 @@ pub(crate) fn formatted_message(template: &str, arguments: &[Value]) -> SqlResul
             } else {
                 specification.precision = Some(number_in(&characters, &mut at).unwrap_or(0));
             }
+            specification.precision = specification.precision.map(within_message);
         }
         if matches!(characters.get(at), Some('h' | 'l')) {
             at += 1;
@@ -395,6 +397,15 @@ pub(crate) fn formatted_message(template: &str, arguments: &[Value]) -> SqlResul
             Some(text) => out.push_str(&text),
             None => out.extend(characters.get(start..at).unwrap_or_default()),
         }
+        if out.len() > MAX_FORMATTED_BYTES {
+            break;
+        }
     }
     Ok(out)
+}
+
+const MAX_FORMATTED_BYTES: usize = 4 * MAX_RAISED_MESSAGE_CHARACTERS;
+
+fn within_message(count: usize) -> usize {
+    count.min(MAX_RAISED_MESSAGE_CHARACTERS)
 }

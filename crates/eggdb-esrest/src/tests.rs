@@ -297,3 +297,26 @@ fn hostile_bodies_return_errors() {
         }
     }
 }
+
+#[test]
+fn ids_in_urls_are_percent_decoded_and_bulk_checks_index_names() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace);
+    let stored = api.answer(&request("PUT", "/users/_doc/user%3A1%20a", "{\"name\":\"Ada\"}"));
+    assert_eq!(stored.status, 201, "{}", body(&stored));
+    assert!(body(&stored).contains("\"_id\":\"user:1 a\""), "{}", body(&stored));
+    let bulk = "{\"index\":{\"_index\":\"users\",\"_id\":\"user:1 a\"}}\n{\"name\":\"Grace\"}\n";
+    assert_eq!(api.answer(&request("POST", "/_bulk", bulk)).status, 200);
+    let counted = api.answer(&request("GET", "/users/_count", ""));
+    assert!(body(&counted).contains("\"count\":1"), "{}", body(&counted));
+    assert_eq!(api.answer(&request("GET", "/users/_doc/bad%zz", "")).status, 400);
+    let hostile = "{\"index\":{\"_index\":\"users\\u0000b\",\"_id\":\"1\"}}\n{\"x\":1}\n\
+                   {\"index\":{\"_index\":\"Upper\",\"_id\":\"1\"}}\n{\"x\":1}\n";
+    let answer = body(&api.answer(&request("POST", "/_bulk", hostile)));
+    assert!(answer.contains("\"errors\":true"), "{answer}");
+    assert_eq!(answer.matches("invalid_index_name_exception").count(), 2, "{answer}");
+    assert_eq!(answer.matches("\"status\":400").count(), 2, "{answer}");
+    let counted = api.answer(&request("GET", "/users/_count", ""));
+    assert!(body(&counted).contains("\"count\":1"), "{}", body(&counted));
+    assert_eq!(api.answer(&request("PUT", "/_private", "")).status, 400);
+}

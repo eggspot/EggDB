@@ -277,6 +277,7 @@ const IN_SUBQUERY_QUERY: &str = "SELECT count(*), sum(amount) FROM orders WHERE 
 const CORRELATED_EXISTS_QUERY: &str = "SELECT count(*) FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person_id = p.id AND o.amount > 900)";
 const CORRELATED_IN_QUERY: &str = "SELECT count(*) FROM people p WHERE 990 IN (SELECT o.amount FROM orders o WHERE o.person_id = p.id)";
 const SCALAR_AGGREGATE_QUERY: &str = "SELECT count(*) FROM people p WHERE (SELECT sum(o.amount) FROM orders o WHERE o.person_id = p.id) > 900";
+const ORDERS_PERSON_INDEX: &str = "CREATE INDEX orders_person ON orders (person_id)";
 const UNION_QUERY: &str =
     "SELECT count(*) FROM (SELECT person_id FROM orders UNION SELECT id + 5000 FROM people) u";
 
@@ -310,6 +311,15 @@ fn repeated(
     benchmark: &'static str,
     expected_rows: usize,
 ) -> Result<Vec<Metric>, String> {
+    repeated_after(query, benchmark, expected_rows, None)
+}
+
+fn repeated_after(
+    query: &'static str,
+    benchmark: &'static str,
+    expected_rows: usize,
+    extra_setup: Option<&str>,
+) -> Result<Vec<Metric>, String> {
     let stores = Stores::open(
         benchmark.trim_start_matches("sqlite_compare."),
         Durability::Normal,
@@ -326,6 +336,10 @@ fn repeated(
     let script = orders_script();
     eggdb_run(&mut session, &script)?;
     sqlite_run(&stores.sqlite, &script)?;
+    if let Some(setup) = extra_setup {
+        eggdb_run(&mut session, setup)?;
+        sqlite_run(&stores.sqlite, setup)?;
+    }
     if eggdb_run(&mut session, query)? != expected_rows
         || sqlite_rows(&stores.sqlite, query)? != expected_rows
     {
@@ -374,11 +388,21 @@ pub(crate) fn union() -> Result<Vec<Metric>, String> {
 }
 
 pub(crate) fn correlated_in() -> Result<Vec<Metric>, String> {
-    repeated(CORRELATED_IN_QUERY, CORRELATED_IN, 1)
+    repeated_after(
+        CORRELATED_IN_QUERY,
+        CORRELATED_IN,
+        1,
+        Some(ORDERS_PERSON_INDEX),
+    )
 }
 
 pub(crate) fn scalar_aggregate() -> Result<Vec<Metric>, String> {
-    repeated(SCALAR_AGGREGATE_QUERY, SCALAR_AGGREGATE, 1)
+    repeated_after(
+        SCALAR_AGGREGATE_QUERY,
+        SCALAR_AGGREGATE,
+        1,
+        Some(ORDERS_PERSON_INDEX),
+    )
 }
 
 #[cfg(test)]

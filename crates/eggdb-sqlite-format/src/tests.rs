@@ -141,6 +141,17 @@ fn a_hand_built_database_reads_its_schema_and_rows() {
 }
 
 #[test]
+fn a_page_whose_cells_repeat_one_offset_is_refused_instead_of_read_many_times() {
+    let mut bytes = sample_database();
+    let leaf = PAGE;
+    let first_pointer = [bytes[leaf + 8], bytes[leaf + 9]];
+    bytes[leaf + 10..leaf + 12].copy_from_slice(&first_pointer);
+    let file = SqliteFile::from_bytes(bytes, &[]).unwrap();
+    let refused = file.rows(2).unwrap_err().to_string();
+    assert!(refused.contains("same place"), "{refused}");
+}
+
+#[test]
 fn varints_and_serial_types_follow_the_format() {
     for value in [
         0u64,

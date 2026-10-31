@@ -210,7 +210,9 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
                 Some(slot) => {
                     let started = std::thread::Builder::new()
                         .name(format!("eggdb-mysql-{connection_id}"))
+                        .stack_size(eggdb_sql::SESSION_STACK_BYTES)
                         .spawn_scoped(scope, move || {
+                            eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
                             let _slot = slot;
                             run_connection(stream, shared, store, connection_id);
                         });

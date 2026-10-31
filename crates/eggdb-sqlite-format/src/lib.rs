@@ -104,6 +104,13 @@ pub struct SqliteFile {
     wal_pages: HashMap<u32, Vec<u8>>,
 }
 
+struct TableWalk {
+    visited: HashSet<u32>,
+    overflow_pages: HashSet<u32>,
+    bytes_left: usize,
+    rows: Vec<SqliteRow>,
+}
+
 /// Whether `bytes` start with SQLite's header.
 pub fn is_sqlite(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
@@ -324,20 +331,19 @@ impl SqliteFile {
 
     /// Every row of the table whose b-tree's root is `root_page`, in rowid order.
     pub fn rows(&self, root_page: u32) -> Result<Vec<SqliteRow>> {
-        let mut rows = Vec::new();
-        let mut visited = HashSet::new();
-        self.walk_table(root_page, 0, &mut visited, &mut rows)?;
-        Ok(rows)
+        let file_bytes = (self.page_count as usize).saturating_mul(self.page_size);
+        let mut walk = TableWalk {
+            visited: HashSet::new(),
+            overflow_pages: HashSet::new(),
+            bytes_left: file_bytes.saturating_mul(2).saturating_add(1 << 20),
+            rows: Vec::new(),
+        };
+        self.walk_table(root_page, 0, &mut walk)?;
+        Ok(walk.rows)
     }
 
-    fn walk_table(
-        &self,
-        number: u32,
-        depth: usize,
-        visited: &mut HashSet<u32>,
-        rows: &mut Vec<SqliteRow>,
-    ) -> Result<()> {
-        if depth > MOST_DEPTH || !visited.insert(number) {
+    fn walk_table(&self, number: u32, depth: usize, walk: &mut TableWalk) -> Result<()> {
+        if depth > MOST_DEPTH || !walk.visited.insert(number) {
             return Err(damaged("a b-tree loops or is too deep"));
         }
         let page = self.page(number)?;
@@ -358,26 +364,31 @@ impl SqliteFile {
                 )));
             }
         };
+        let mut offsets = HashSet::with_capacity(cells);
         for cell in 0..cells {
             let offset = usize::from(u16_at(page, start + header + cell * 2)?);
             if offset >= self.usable {
                 return Err(damaged("a cell pointer lies past the usable page"));
             }
+            if !offsets.insert(offset) {
+                return Err(damaged("two cells of a page start at the same place"));
+            }
             if interior {
                 let child = u32_at(page, offset)?;
-                self.walk_table(child, depth + 1, visited, rows)?;
+                self.walk_table(child, depth + 1, walk)?;
             } else {
-                rows.push(self.table_leaf_cell(page, offset)?);
+                let row = self.table_leaf_cell(page, offset, walk)?;
+                walk.rows.push(row);
             }
         }
         if interior {
             let right = u32_at(page, start + 8)?;
-            self.walk_table(right, depth + 1, visited, rows)?;
+            self.walk_table(right, depth + 1, walk)?;
         }
         Ok(())
     }
 
-    fn table_leaf_cell(&self, page: &[u8], offset: usize) -> Result<SqliteRow> {
+    fn table_leaf_cell(&self, page: &[u8], offset: usize, walk: &mut TableWalk) -> Result<SqliteRow> {
         let mut at = offset;
         let payload_bytes = varint(page, &mut at)?;
         let rowid = varint(page, &mut at)? as i64;
@@ -385,14 +396,24 @@ impl SqliteFile {
             .ok()
             .filter(|bytes| *bytes <= (1 << 30) + 1024)
             .ok_or_else(|| damaged("a record is larger than any SQLite record can be"))?;
-        let payload = self.payload(page, at, payload_bytes)?;
+        walk.bytes_left = walk
+            .bytes_left
+            .checked_sub(payload_bytes)
+            .ok_or_else(|| damaged("the records hold more bytes than the file"))?;
+        let payload = self.payload(page, at, payload_bytes, &mut walk.overflow_pages)?;
         Ok(SqliteRow {
             rowid,
             values: record(&payload)?,
         })
     }
 
-    fn payload(&self, page: &[u8], at: usize, total: usize) -> Result<Vec<u8>> {
+    fn payload(
+        &self,
+        page: &[u8],
+        at: usize,
+        total: usize,
+        overflow_pages: &mut HashSet<u32>,
+    ) -> Result<Vec<u8>> {
         let usable = self.usable;
         let inline_most = usable - 35;
         let local = if total <= inline_most {
@@ -415,10 +436,11 @@ impl SqliteFile {
             return Ok(payload);
         }
         let mut next = u32_at(page, at + local)?;
-        let mut seen = HashSet::new();
         while payload.len() < total {
-            if !seen.insert(next) {
-                return Err(damaged("an overflow chain loops"));
+            if !overflow_pages.insert(next) {
+                return Err(damaged(
+                    "an overflow page loops or belongs to more than one record",
+                ));
             }
             let overflow = self.page(next)?;
             let take = (total - payload.len()).min(usable - 4);

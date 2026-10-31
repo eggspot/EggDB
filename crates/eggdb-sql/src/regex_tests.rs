@@ -444,3 +444,44 @@ fn collating_elements_take_posix_names_for_the_portable_characters() {
         assert_eq!(matches(text, pattern), expected, "{text:?} ~ {pattern}");
     }
 }
+
+fn first_refusal_over_every_match(finder: &mut crate::regex::Finder<'_, '_>) -> String {
+    let mut at = 0;
+    loop {
+        match finder.find(at) {
+            Ok(Some(spans)) => {
+                let end = spans.first().copied().flatten().map_or(at, |(_, end)| end);
+                at = end.max(at + 1);
+            }
+            Ok(None) => panic!("every match fitted the budget"),
+            Err(error) => return error.state().code().to_owned(),
+        }
+    }
+}
+
+#[test]
+fn every_match_of_one_call_shares_one_step_budget() {
+    let regex = Regex::compile("(a*b)|a", CaseSensitivity::Sensitive).unwrap();
+    let text: Vec<char> = "a".repeat(400).chars().collect();
+    assert!(
+        regex
+            .finder(&text)
+            .with_steps(20_000)
+            .find(0)
+            .unwrap()
+            .is_some()
+    );
+    let mut finder = regex.finder(&text).with_steps(20_000);
+    assert_eq!(first_refusal_over_every_match(&mut finder), "54000");
+}
+
+#[test]
+fn a_raised_cancel_signal_stops_a_long_running_match() {
+    let signal = crate::CancelSignal::default();
+    signal.cancel();
+    let _entered = crate::cancel::enter(&signal);
+    let regex = Regex::compile("(a*b)|a", CaseSensitivity::Sensitive).unwrap();
+    let text: Vec<char> = "a".repeat(2_000).chars().collect();
+    let mut finder = regex.finder(&text);
+    assert_eq!(first_refusal_over_every_match(&mut finder), "57014");
+}

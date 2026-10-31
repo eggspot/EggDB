@@ -32,6 +32,10 @@ fn name_in(dialect: Dialect, name: &str) -> String {
     match dialect {
         Dialect::MySql => format!("`{}`", name.replace('`', "``")),
         Dialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
+        Dialect::Oracle => format!(
+            "\"{}\"",
+            crate::lexer::swap_uniform_case(name).replace('"', "\"\"")
+        ),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }

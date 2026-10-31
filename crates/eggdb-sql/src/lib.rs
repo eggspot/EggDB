@@ -123,6 +123,7 @@ mod sqlserver_functions;
 mod sqlserver_numbers;
 mod sqlserver_strings;
 mod sqlserver_types;
+mod stack_depth;
 mod standards;
 mod statistics;
 mod store;
@@ -218,6 +219,7 @@ mod with_statement_tests;
 pub use arrays::{ArrayElement, ArrayValue};
 pub use bulk_load::{BcpCharacterReader, BcpTerminators, BulkRows};
 pub use cancel::CancelSignal;
+pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{
     DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,

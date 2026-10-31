@@ -9,7 +9,7 @@ use crate::schemas::base_name;
 use crate::session::sqlserver::BatchStep;
 use crate::session::{QueryResult, Session};
 use crate::tsql::{
-    MAX_DYNAMIC_NESTING, ProcedureRun, Program, ProgramEnd, ScalarVariable, TsqlReturns,
+    ProcedureRun, Program, ProgramEnd, ScalarVariable, TsqlReturns,
 };
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
@@ -334,9 +334,10 @@ impl<'s> Session<'s> {
         in_try: bool,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<DynamicEnd> {
-        if self.dynamic_depth >= MAX_DYNAMIC_NESTING {
-            return Ok(DynamicEnd::Failed(crate::tsql::nesting_too_deep()));
-        }
+        let _level = match crate::tsql::enter_nesting() {
+            Ok(level) => level,
+            Err(error) => return Ok(DynamicEnd::Failed(error)),
+        };
         let ProcedureRun {
             definition,
             arguments,

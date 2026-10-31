@@ -14,7 +14,7 @@ use crate::parser::{Parameters, Parser};
 use crate::table_variables::{TableVariable, TableVariableRules, TableVariables};
 use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
-    BatchContext, CaughtError, DynamicBatch, Instruction, MAX_DYNAMIC_NESTING, MatchingRow,
+    BatchContext, CaughtError, DynamicBatch, Instruction, MatchingRow,
     ProcedureRun, Program, ProgramEnd, ScalarVariable, columns_mismatch, combined, declare,
     scalar_select, undeclared,
 };
@@ -484,9 +484,10 @@ impl<'s> Session<'s> {
         in_try: bool,
         on_step: &mut dyn FnMut(BatchStep) -> bool,
     ) -> SqlResult<DynamicEnd> {
-        if self.dynamic_depth >= MAX_DYNAMIC_NESTING {
-            return Ok(DynamicEnd::Failed(crate::tsql::nesting_too_deep()));
-        }
+        let _level = match crate::tsql::enter_nesting() {
+            Ok(level) => level,
+            Err(error) => return Ok(DynamicEnd::Failed(error)),
+        };
         let DynamicBatch {
             text,
             parameters: given,
@@ -591,6 +592,7 @@ impl<'s> Session<'s> {
             return Ok(());
         };
         let _active = crate::triggers::enter_active(&call.table, &call.trigger)?;
+        let _level = crate::tsql::enter_nesting()?;
         let tokens = tokenize_in(text, Dialect::SqlServer)?;
         let outer = self.leave_statement_for_trigger();
         let outcome = self.in_trigger_dialect(Dialect::SqlServer, |session| {

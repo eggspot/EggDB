@@ -135,6 +135,30 @@ fn head_end(bytes: &[u8]) -> Option<usize> {
         .map(|at| at + 4)
 }
 
+/// Decodes `%XX` escapes in one URL path segment or query value; `None` when an escape is not
+/// two hex digits or the decoded bytes are not UTF-8. A `+` stays a `+`.
+pub fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        if byte != b'%' {
+            decoded.push(byte);
+            at += 1;
+            continue;
+        }
+        let high = bytes.get(at + 1).copied().and_then(hex_digit)?;
+        let low = bytes.get(at + 2).copied().and_then(hex_digit)?;
+        decoded.push(high << 4 | low);
+        at += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    char::from(byte).to_digit(16).and_then(|digit| u8::try_from(digit).ok())
+}
+
 /// Reads a request from `stream`: its head, at most 16 KiB, and a body of at most 1 MiB given
 /// by `Content-Length` (chunked bodies are refused).
 pub fn read_request(stream: &mut impl Read) -> Result<Request, HttpError> {

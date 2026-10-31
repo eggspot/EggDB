@@ -87,3 +87,49 @@ fn other_dialects_write_their_own_syntax() {
         run(&mut target, "SELECT 2 AS \"count(*)\"")
     );
 }
+
+#[test]
+fn a_dump_in_each_dialect_restores_in_that_dialect_to_the_same_rows() {
+    let store = source();
+    let mut session = Session::new(&store);
+    let expected = run(&mut session, "SELECT id, name FROM people ORDER BY id");
+    for dialect in [
+        Dialect::Oracle,
+        Dialect::MySql,
+        Dialect::SqlServer,
+        Dialect::Sqlite,
+    ] {
+        let mut dump = Vec::new();
+        dump_sql(&mut session, dialect, &mut dump).unwrap();
+        let restored = MemoryStore::default();
+        let mut target = Session::with_dialect(&restored, dialect);
+        if matches!(dialect, Dialect::Oracle | Dialect::SqlServer) {
+            let mut input = dump.as_slice();
+            let outcome = restore_dump(
+                &mut target,
+                &mut input,
+                RestoreOptions::default(),
+                &mut |_| {},
+            );
+            assert!(
+                outcome.error.is_none(),
+                "{dialect:?}: {:?}\n{}",
+                outcome.error,
+                String::from_utf8_lossy(&dump)
+            );
+        } else {
+            let script = String::from_utf8(dump.clone()).unwrap();
+            target
+                .execute(&script, &mut |_| {})
+                .unwrap_or_else(|error| panic!("{dialect:?}: {error}\n{script}"));
+        }
+        let _ = target.close();
+        let mut reader = Session::new(&restored);
+        assert_eq!(
+            run(&mut reader, "SELECT id, name FROM people ORDER BY id"),
+            expected,
+            "{dialect:?}\n{}",
+            String::from_utf8_lossy(&dump)
+        );
+    }
+}

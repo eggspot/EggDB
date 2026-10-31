@@ -2,6 +2,7 @@ use crate::value::Value;
 use crate::{GraphError, GraphResult};
 
 const MAX_DEPTH: usize = 64;
+const MOST_OPERATORS: usize = 1024;
 const MAX_HOPS: u32 = 15;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -315,9 +316,20 @@ struct Parser<'t> {
     tokens: Vec<(Token, usize)>,
     at: usize,
     depth: usize,
+    operators: usize,
 }
 
 impl Parser<'_> {
+    fn count_operator(&mut self) -> GraphResult<()> {
+        self.operators += 1;
+        if self.operators > MOST_OPERATORS {
+            return Err(syntax(
+                "the statement has too many operators; a statement may have at most 1024",
+            ));
+        }
+        Ok(())
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at).map(|(token, _)| token)
     }
@@ -555,6 +567,7 @@ impl Parser<'_> {
         left: Expr,
         next: fn(&mut Self) -> GraphResult<Expr>,
     ) -> GraphResult<Expr> {
+        self.count_operator()?;
         Ok(Expr::Binary(
             operator,
             Box::new(left),
@@ -627,6 +640,7 @@ impl Parser<'_> {
                     self.at += 1;
                     let negated = self.take_keyword("not");
                     self.expect_keyword("null")?;
+                    self.count_operator()?;
                     left = Expr::IsNull(Box::new(left), negated);
                     continue;
                 }
@@ -698,8 +712,10 @@ impl Parser<'_> {
         let mut expr = self.primary()?;
         loop {
             if self.take_symbol(".") {
+                self.count_operator()?;
                 expr = Expr::Property(Box::new(expr), self.name()?);
             } else if self.take_symbol("[") {
+                self.count_operator()?;
                 let index = self.expression()?;
                 self.expect_symbol("]")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
@@ -1059,6 +1075,7 @@ pub(crate) fn parse(text: &str) -> GraphResult<Vec<Clause>> {
         tokens,
         at: 0,
         depth: 0,
+        operators: 0,
     };
     let mut clauses = Vec::new();
     while parser.peek().is_some() && !parser.is_symbol(";") {

@@ -72,6 +72,8 @@ pub(crate) fn get_exact<'d>(document: &'d Document, path: &str) -> Option<&'d Bs
 }
 
 /// Where a path to change ends: the container and the last part.
+const MAX_PATH_PARTS: usize = 100;
+
 pub(crate) enum Slot<'d> {
     Field(&'d mut Document, String),
     Element(&'d mut Vec<Bson>, usize),
@@ -86,6 +88,12 @@ pub(crate) fn slot<'d>(
     create: bool,
 ) -> Result<Option<Slot<'d>>, String> {
     let parts: Vec<&str> = path.split('.').collect();
+    if parts.len() > MAX_PATH_PARTS {
+        return Err(format!(
+            "The update path has {} parts; a path may have at most {MAX_PATH_PARTS}.",
+            parts.len()
+        ));
+    }
     if parts.iter().any(|part| part.is_empty()) {
         return Err(format!(
             "The update path '{path}' contains an empty field name, which is not allowed."

@@ -1064,8 +1064,8 @@ SELECT id, name FROM dbo.in_stock(5)
   `PARAMETERS`, `OBJECT_ID`, `OBJECT_DEFINITION`, `OBJECTPROPERTY` and `sp_helptext`, and in
   `sp_stored_procedures`, `sp_sproc_columns` and `sp_help`. `ALTER` keeps the text as a `CREATE`
   statement, as SQL Server shows it.
-- **Limits**: procedures and functions nest at most 32 levels (Msg 217), with the dynamic SQL
-  they run counted in.
+- **Limits**: procedures, functions, triggers and the dynamic SQL they run share one nesting
+  count of at most 32 levels (Msg 217), as SQL Server's `@@NESTLEVEL` does.
 
 Not yet: a table-valued function after the first `FROM` item (joins and `CROSS APPLY`), a
 procedure called by its name alone as the first statement of a batch (write `EXEC`), `EXEC
@@ -2676,7 +2676,10 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
 - Bodies are checked at `CREATE` (unless `check_function_bodies` is off, as `pg_dump` sets it),
   with PostgreSQL's messages; the SQL statements inside run when they are reached.
 
-Limits (D45): calls nest at most 32 deep (`54001`), every loop and statement can be cancelled,
+Limits (D45): calls nest at most 32 deep (`54001`), and fewer when the session's thread runs
+out of stack first (`54001`, "stack depth limit exceeded": the servers give each session 16 MiB,
+an embedding program that runs deep routines gives its thread `eggdb_sql::SESSION_STACK_BYTES`
+and calls `eggdb_sql::set_thread_stack_size`), every loop and statement can be cancelled,
 a body nests at most 64 levels and holds at most 100,000 statements, a routine's text is at most
 1 MiB, and a routine holds at most 1000 open cursors. Not yet: `COMMIT` and `ROLLBACK` in
 procedures (`0A000`), refcursors returned to the caller, polymorphic types (`anyelement`),

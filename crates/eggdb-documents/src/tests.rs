@@ -644,3 +644,43 @@ fn a_mongodump_collection_restores_with_its_indexes() {
         .is_err()
     );
 }
+
+fn nested(levels: usize) -> Bson {
+    (0..levels).fold(Bson::Int32(1), |inner, _| {
+        Bson::Document(doc(vec![("a", inner)]))
+    })
+}
+
+#[test]
+fn updates_that_would_nest_too_deeply_are_refused_and_change_nothing() {
+    let keyspace = MemoryKeyspace::default();
+    let store = store(&keyspace);
+    store
+        .insert("app", "deep", vec![doc(vec![("_id", Bson::Int32(1))])], true)
+        .unwrap();
+    let everyone = parse_filter(&Document::new()).unwrap();
+    let long_path = vec!["a"; 20_000].join(".");
+    let by_path = parse_update(&doc(vec![(
+        "$set",
+        Bson::Document(doc(vec![(long_path.as_str(), Bson::Int32(1))])),
+    )]))
+    .unwrap();
+    assert!(
+        store
+            .update("app", "deep", &everyone, &by_path, UpdateOptions::default())
+            .is_err()
+    );
+    let by_value = parse_update(&doc(vec![(
+        "$set",
+        Bson::Document(doc(vec![("w.x.y.z", nested(97))])),
+    )]))
+    .unwrap();
+    let refused = store
+        .update("app", "deep", &everyone, &by_value, UpdateOptions::default())
+        .unwrap_err();
+    assert!(refused.message.contains("nesting depth"), "{refused:?}");
+    let found = store
+        .find("app", "deep", &everyone, &SortSpec::default())
+        .unwrap();
+    assert_eq!(found, vec![doc(vec![("_id", Bson::Int32(1))])]);
+}

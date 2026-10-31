@@ -148,6 +148,15 @@ fn parameters_errors_and_read_only_mode() {
     assert!(run(&keyspace, "RETURN 1 / 0", &[], false).is_err());
     let deep = format!("RETURN {}1{}", "(".repeat(200), ")".repeat(200));
     assert!(run(&keyspace, &deep, &[], false).is_err());
+    let long_sum = format!("RETURN 1{}", "+1".repeat(100_000));
+    assert!(run(&keyspace, &long_sum, &[], false).is_err());
+    let long_path = format!("WITH {{a: 1}} AS m RETURN m{}", ".a".repeat(100_000));
+    assert!(run(&keyspace, &long_path, &[], false).is_err());
+    let fine_sum = format!("RETURN 1{}", "+1".repeat(500));
+    assert_eq!(
+        query(&keyspace, &fine_sum).rows,
+        vec![vec![Value::Integer(501)]]
+    );
     for hostile in [
         "MATCH (n",
         "RETURN 'open",

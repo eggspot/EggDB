@@ -2,10 +2,9 @@
 //! database that lasts only as long as it is open.
 
 use crate::error::Result;
-use crate::fs::{File, FileLock, FileSystem, OpenMode};
+use crate::fs::{File, FileLock};
+use crate::memory_file::MemoryFile;
 use crate::os_fs::OsFile;
-use crate::sim_fs::{SimFile, SimFileSystem};
-use std::path::Path;
 
 /// A database's file: a file of the operating system's, or a file in memory.
 #[derive(Debug)]
@@ -13,15 +12,13 @@ pub enum DatabaseFile {
     /// A file on disk.
     Os(OsFile),
     /// A file held in memory, gone once its last handle is dropped.
-    Memory(SimFile),
+    Memory(MemoryFile),
 }
 
 impl DatabaseFile {
     /// A new, empty file in memory, opened for writing.
     pub fn memory() -> Result<Self> {
-        SimFileSystem::new()
-            .open(Path::new("memory"), OpenMode::CreateNew)
-            .map(Self::Memory)
+        Ok(Self::Memory(MemoryFile::new()))
     }
 
     /// Whether the file lives in memory.

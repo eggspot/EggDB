@@ -32,24 +32,25 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 thread_local! {
-    static FUNCTION_DEPTH: Cell<u8> = const { Cell::new(0) };
+    static NESTING_LEVEL: Cell<u8> = const { Cell::new(0) };
 }
 
-struct FunctionDepth;
+pub(crate) struct NestingLevel;
 
-impl Drop for FunctionDepth {
+impl Drop for NestingLevel {
     fn drop(&mut self) {
-        FUNCTION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        NESTING_LEVEL.with(|level| level.set(level.get().saturating_sub(1)));
     }
 }
 
-fn enter_function() -> SqlResult<FunctionDepth> {
-    FUNCTION_DEPTH.with(|depth| {
-        if depth.get() >= MAX_DYNAMIC_NESTING {
+pub(crate) fn enter_nesting() -> SqlResult<NestingLevel> {
+    crate::stack_depth::check()?;
+    NESTING_LEVEL.with(|level| {
+        if level.get() >= MAX_DYNAMIC_NESTING {
             return Err(nesting_too_deep());
         }
-        depth.set(depth.get() + 1);
-        Ok(FunctionDepth)
+        level.set(level.get() + 1);
+        Ok(NestingLevel)
     })
 }
 
@@ -239,7 +240,7 @@ pub(crate) fn invoke_function(
         Some(tsql) if definition.kind == RoutineKind::Function => tsql.returns.clone(),
         _ => return Err(not_a_function(definition)),
     };
-    let _depth = enter_function()?;
+    let _level = enter_nesting()?;
     crate::cancel::check()?;
     let arguments = converted_arguments(definition, arguments)?;
     if definition.strict

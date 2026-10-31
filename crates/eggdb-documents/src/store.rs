@@ -7,6 +7,7 @@ use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const COLLECTION_RECORD: u8 = 1;
+const MAX_NESTING_DEPTH: usize = 100;
 const DOCUMENT_RECORD: u8 = 2;
 const ROLLED_BACK: &str = "the document operation was rolled back";
 
@@ -178,6 +179,11 @@ fn check_document(document: &Document) -> DocumentResult<Vec<u8>> {
         }
         _ => {}
     }
+    if nests_deeper_than(document, MAX_NESTING_DEPTH) {
+        return Err(DocumentError::bad_value(format!(
+            "Document exceeds maximum nesting depth of {MAX_NESTING_DEPTH}"
+        )));
+    }
     let bytes = document.to_bytes();
     if bytes.len() > MAX_DOCUMENT_BYTES {
         return Err(DocumentError::bad_value(format!(
@@ -186,6 +192,22 @@ fn check_document(document: &Document) -> DocumentResult<Vec<u8>> {
         )));
     }
     Ok(bytes)
+}
+
+fn nests_deeper_than(document: &Document, most: usize) -> bool {
+    let mut pending: Vec<(&Bson, usize)> = document.iter().map(|(_, value)| (value, 1)).collect();
+    while let Some((value, depth)) = pending.pop() {
+        let inner: Vec<&Bson> = match value {
+            Bson::Document(inner) => inner.iter().map(|(_, value)| value).collect(),
+            Bson::Array(items) => items.iter().collect(),
+            _ => continue,
+        };
+        if depth >= most {
+            return true;
+        }
+        pending.extend(inner.into_iter().map(|value| (value, depth + 1)));
+    }
+    false
 }
 
 fn duplicate(database: &str, collection: &str, id: &Bson) -> DocumentError {

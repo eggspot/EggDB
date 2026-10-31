@@ -80,17 +80,30 @@ impl Options {
     }
 }
 
+const STEPS_BETWEEN_CANCEL_CHECKS: u64 = 1 << 16;
+
 #[derive(Debug)]
 pub(crate) struct StepBudget {
     left: u64,
+    until_cancel_check: u64,
 }
 
 impl StepBudget {
     pub(crate) fn new(steps: u64) -> Self {
-        Self { left: steps }
+        Self {
+            left: steps,
+            until_cancel_check: STEPS_BETWEEN_CANCEL_CHECKS,
+        }
     }
 
     fn spend(&mut self, steps: u64) -> SqlResult<()> {
+        match self.until_cancel_check.checked_sub(steps) {
+            Some(until) => self.until_cancel_check = until,
+            None => {
+                self.until_cancel_check = STEPS_BETWEEN_CANCEL_CHECKS;
+                crate::cancel::check()?;
+            }
+        }
         match self.left.checked_sub(steps) {
             Some(left) => {
                 self.left = left;
@@ -103,7 +116,7 @@ impl StepBudget {
                     "regular expression match is too complex",
                 )
                 .with_hint(format!(
-                    "One match may take at most {MATCH_STEPS} regular expression steps; simplify the pattern or match a shorter text."
+                    "One call may take at most {MATCH_STEPS} regular expression steps over all its matches; simplify the pattern or match a shorter text."
                 )))
             }
         }

@@ -178,6 +178,34 @@ fn a_function_reads_tables_with_select_assignment() {
 }
 
 #[test]
+fn endless_recursion_on_a_default_sized_thread_fails_with_217_instead_of_crashing() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    succeeds(
+        &mut session,
+        "CREATE FUNCTION dbo.forever(@n int) RETURNS int AS BEGIN RETURN dbo.forever(@n + 1) END",
+    );
+    fails_with(&mut session, "SELECT dbo.forever(1)", 217);
+}
+
+#[test]
+fn procedures_triggers_and_functions_share_one_nesting_limit() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    for text in [
+        "CREATE TABLE dbo.pings (id int IDENTITY(1,1) PRIMARY KEY, note nvarchar(10))",
+        "CREATE TABLE dbo.pongs (id int IDENTITY(1,1) PRIMARY KEY, note nvarchar(10))",
+        "CREATE PROCEDURE dbo.ping AS INSERT INTO dbo.pings (note) VALUES (N'x')",
+        "CREATE PROCEDURE dbo.pong AS INSERT INTO dbo.pongs (note) VALUES (N'y')",
+        "CREATE TRIGGER dbo.after_ping ON dbo.pings AFTER INSERT AS EXEC dbo.pong",
+        "CREATE TRIGGER dbo.after_pong ON dbo.pongs AFTER INSERT AS EXEC dbo.ping",
+    ] {
+        succeeds(&mut session, text);
+    }
+    fails_with(&mut session, "EXEC dbo.ping", 217);
+}
+
+#[test]
 fn a_function_calls_itself_and_too_deep_recursion_fails_with_217() {
     let deep = std::thread::Builder::new()
         .stack_size(256 << 20)

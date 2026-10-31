@@ -878,6 +878,7 @@ impl Drop for ActiveScope {
 }
 
 pub(crate) fn enter_active(table: &str, trigger: &TriggerDefinition) -> SqlResult<ActiveScope> {
+    crate::stack_depth::check()?;
     STATE.with(|state| {
         let mut state = state
             .try_borrow_mut()

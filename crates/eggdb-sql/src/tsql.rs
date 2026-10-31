@@ -11,7 +11,8 @@ pub(crate) use control::{
 };
 pub(crate) use errors::{CaughtError, line_of, nesting_too_deep, raised_message, thrown};
 pub(crate) use functions::{
-    function_arguments, inline_table_columns, invoke_function, refused_in_function, side_effecting,
+    enter_nesting, function_arguments, inline_table_columns, invoke_function, refused_in_function,
+    side_effecting,
 };
 pub(crate) use routines::{ProcedureRun, TsqlReturns, TsqlRoutine};
 pub(crate) use statements::{

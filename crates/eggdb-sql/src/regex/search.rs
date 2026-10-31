@@ -283,6 +283,7 @@ pub(crate) struct Finder<'r, 't> {
     text: &'t [char],
     visited: Option<Visited>,
     looks: HashMap<(u32, usize), bool>,
+    budget: StepBudget,
 }
 
 fn is_word(character: Option<char>) -> bool {
@@ -323,11 +324,28 @@ impl<'r, 't> Finder<'r, 't> {
             text,
             visited,
             looks: HashMap::new(),
+            budget: StepBudget::new(MATCH_STEPS),
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_steps(mut self, steps: u64) -> Self {
+        self.budget = StepBudget::new(steps);
+        self
+    }
+
     pub(crate) fn find(&mut self, from: usize) -> SqlResult<Option<Vec<Option<Span>>>> {
-        let mut budget = StepBudget::new(MATCH_STEPS);
+        let mut budget = std::mem::replace(&mut self.budget, StepBudget::new(0));
+        let found = self.find_within(from, &mut budget);
+        self.budget = budget;
+        found
+    }
+
+    fn find_within(
+        &mut self,
+        from: usize,
+        budget: &mut StepBudget,
+    ) -> SqlResult<Option<Vec<Option<Span>>>> {
         let goal = if self.program.longest {
             Goal::Longest
         } else {
@@ -339,7 +357,7 @@ impl<'r, 't> Finder<'r, 't> {
         let mut slots = vec![None; self.program.slots];
         for start in from..=self.text.len() {
             slots.fill(None);
-            if let Some(end) = self.run(0, start, goal, &mut slots, true, &mut budget)? {
+            if let Some(end) = self.run(0, start, goal, &mut slots, true, budget)? {
                 let mut spans = Vec::with_capacity(self.program.groups + 1);
                 spans.push(Some((start, end)));
                 for group in 1..=self.program.groups {

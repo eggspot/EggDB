@@ -131,7 +131,10 @@ fn valid_index(name: &str) -> bool {
 fn query_flag(request: &Request, name: &str) -> Option<String> {
     request.query.as_deref()?.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (key == name).then(|| value.to_owned())
+        (key == name).then(|| {
+            let spaced = value.replace('+', " ");
+            eggdb_http::percent_decoded(&spaced).unwrap_or(spaced)
+        })
     })
 }
 
@@ -259,11 +262,20 @@ impl<'k> Api<'k> {
             )
             .with_header("WWW-Authenticate", "Basic realm=\"eggdb\"");
         }
-        let parts: Vec<&str> = request
+        let Some(decoded) = request
             .path
             .split('/')
             .filter(|part| !part.is_empty())
-            .collect();
+            .map(eggdb_http::percent_decoded)
+            .collect::<Option<Vec<String>>>()
+        else {
+            return error(
+                400,
+                "illegal_argument_exception",
+                "the request path has an escape that is not two hex digits or not UTF-8",
+            );
+        };
+        let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
         let method = request.method.as_str();
         let outcome = match (method, parts.as_slice()) {
             ("GET" | "HEAD", []) => Ok(self.root()),
@@ -273,7 +285,7 @@ impl<'k> Api<'k> {
             ("GET" | "POST", ["_search"]) => self.search(None, request, false),
             ("GET" | "POST", ["_count"]) => self.search(None, request, true),
             ("POST", ["_refresh"]) => Ok(refreshed()),
-            (_, [index, ..]) if !index.starts_with('_') && !valid_index(index) => {
+            (_, [index, ..]) if !valid_index(index) => {
                 Ok(error(400, "invalid_index_name_exception", &format!("Invalid index name [{index}]")))
             }
             ("PUT", [index]) => self.create_index(index, request),
@@ -485,7 +497,7 @@ impl<'k> Api<'k> {
                     "{{\"_index\":{},\"_id\":{},\"_version\":{version},\"_seq_no\":{},\"_primary_term\":1,\"found\":true,\"_source\":{source}}}",
                     escaped(index),
                     escaped(id),
-                    version - 1
+                    version.saturating_sub(1)
                 ),
             ),
             None => json(
@@ -615,6 +627,11 @@ impl<'k> Api<'k> {
                 body: document.unwrap_or_default().as_bytes().to_vec(),
             };
             let response = match kind.as_str() {
+                "index" | "create" | "update" | "delete" if !valid_index(&index) => error(
+                    400,
+                    "invalid_index_name_exception",
+                    &format!("Invalid index name [{index}]"),
+                ),
                 "index" => self.index_document(&index, &id, &fake, false)?,
                 "create" => self.index_document(&index, &id, &fake, true)?,
                 "update" => self.update_document(&index, &id, &fake)?,
@@ -628,14 +645,14 @@ impl<'k> Api<'k> {
                 }
             };
             failed |= response.status >= 300 && !(kind == "delete" && response.status == 404);
-            items.push(format!(
-                "{{{}:{}}}",
-                escaped(&kind),
-                String::from_utf8_lossy(&response.body)
-                    .trim_end_matches('}')
-                    .to_owned()
+            let body = String::from_utf8_lossy(&response.body).into_owned();
+            let item = if response.status >= 300 {
+                body
+            } else {
+                body.strip_suffix('}').unwrap_or(&body).to_owned()
                     + &format!(",\"status\":{}}}", response.status)
-            ));
+            };
+            items.push(format!("{{{}:{item}}}", escaped(&kind)));
         }
         Ok(json(
             200,
@@ -671,7 +688,7 @@ impl<'k> Api<'k> {
             None => match query_flag(request, "q") {
                 Some(text) => crate::query::Query::Match {
                     fields: vec!["*".to_owned()],
-                    terms: crate::query::analyze(&text.replace('+', " ")),
+                    terms: crate::query::analyze(&text),
                     all: false,
                 },
                 None => crate::query::Query::MatchAll,

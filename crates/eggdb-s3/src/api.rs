@@ -79,22 +79,6 @@ fn http_time(ms: u64) -> String {
     )
 }
 
-fn percent_decode(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'%' {
-            out.push(u8::from_str_radix(text.get(at + 1..at + 3)?, 16).ok()?);
-            at += 3;
-        } else {
-            out.push(bytes[at]);
-            at += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
 fn xml(status: u16, body: String) -> Response {
     Response {
         status,
@@ -293,7 +277,7 @@ impl<'k> Endpoint<'k> {
             };
             return failure(status, code, &error.to_string(), &request.path);
         }
-        let Some(path) = percent_decode(&request.path) else {
+        let Some(path) = eggdb_http::percent_decoded(&request.path) else {
             return failure(
                 400,
                 "InvalidURI",
@@ -312,8 +296,8 @@ impl<'k> Endpoint<'k> {
             .filter_map(|pair| {
                 let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
                 Some((
-                    percent_decode(name)?,
-                    percent_decode(&value.replace('+', "%20"))?,
+                    eggdb_http::percent_decoded(name)?,
+                    eggdb_http::percent_decoded(&value.replace('+', "%20"))?,
                 ))
             })
             .filter(|(name, _)| !name.starts_with("X-Amz-") && name != "x-id")
@@ -687,7 +671,7 @@ impl<'k> Endpoint<'k> {
 
     fn copy_object(&self, call: &Call<'_>, source: &str) -> Response {
         let source = source.split_once('?').map_or(source, |(path, _)| path);
-        let Some(decoded) = percent_decode(source) else {
+        let Some(decoded) = eggdb_http::percent_decoded(source) else {
             return failure(
                 400,
                 "InvalidArgument",

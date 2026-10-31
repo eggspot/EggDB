@@ -60,6 +60,7 @@ impl Drop for Depth {
 }
 
 fn enter_routine() -> SqlResult<Depth> {
+    crate::stack_depth::check()?;
     DEPTH.with(|depth| {
         if depth.get() >= MAX_ROUTINE_DEPTH {
             return Err(SqlError::new(
