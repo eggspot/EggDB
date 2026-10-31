@@ -587,7 +587,7 @@ jobs:
       - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers, the command registry and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-tls -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-commands -p eggdb-mcp -p eggdb-tdswire -p eggdb --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-tls -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-commands -p eggdb-mcp -p eggdb-tdswire -p eggdb-capi -p eggdb --all-targets --target "$target" -- -D warnings
           done
 
   bench:
@@ -1139,8 +1139,56 @@ jobs:
           cat "$RUNNER_TEMP/dom.html"
           grep -q "eggdb-browser-test: passed" "$RUNNER_TEMP/dom.html"
 
+  mobile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-mobile-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Check the Kotlin binding (JNI over the C API) on the JVM
+        run: |
+          command -v kotlinc || { echo "::error::kotlinc is not installed on this runner"; exit 1; }
+          cargo build -p eggdb-capi
+          mkdir -p "$RUNNER_TEMP/kotlin"
+          gcc -shared -fPIC -Wall -Werror -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" -Icrates/eggdb-capi/include drivers/kotlin/jni/eggdb_jni.c -Ltarget/debug -leggdb_capi -Wl,-rpath,"$PWD/target/debug" -o "$RUNNER_TEMP/kotlin/libeggdb_jni.so"
+          kotlinc drivers/kotlin/src drivers/kotlin/check/Check.kt -include-runtime -d "$RUNNER_TEMP/kotlin/check.jar"
+          java -Djava.library.path="$RUNNER_TEMP/kotlin" -jar "$RUNNER_TEMP/kotlin/check.jar"
+
+  apple-mobile:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-apple-mobile-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build the C API as an XCFramework for iOS, the iOS simulator and macOS
+        run: scripts/apple/xcframework.sh "$RUNNER_TEMP/EggDB.xcframework"
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

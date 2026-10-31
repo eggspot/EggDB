@@ -303,6 +303,34 @@ It finds the library in `target/release` or `target/debug`, or takes `--library 
 D16) comes later and will be faster, reading batches through the buffer protocol instead of
 `ctypes` objects (D17).
 
+## On Android and iOS
+
+**Android (Kotlin).** `drivers/kotlin` is a Kotlin class, `app.eggspot.eggdb.EggDB`, over a small
+JNI layer in C (`drivers/kotlin/jni/eggdb_jni.c`) that calls this C API (D222). Build the C API for
+the app's ABIs with the Android NDK's linker (`cargo build --release -p eggdb-capi --target
+aarch64-linux-android`, and `armv7-linux-androideabi`, `x86_64-linux-android` as needed), build
+`eggdb_jni.c` against it in the app's `CMakeLists.txt`, and put both `.so` files in `jniLibs`:
+
+```kotlin
+EggDB(File(context.filesDir, "app.eggdb").path).use { db ->
+    db.execute("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)")
+    val rows = db.execute("SELECT body FROM notes").single().rows
+}
+```
+
+Text crosses JNI as UTF-8 bytes, never as Java's modified UTF-8, so every character survives;
+values come back as `Value.Integer`, `Real`, `Text`, `Blob` or `Null`. The same class runs on any
+JVM, which is how CI checks it.
+
+**iOS (Swift).** `scripts/apple/xcframework.sh` builds the C API for iOS devices, the iOS
+simulator and macOS into `EggDB.xcframework` with a `CEggDB` module map; add it to an Xcode
+project and use it from Swift directly, or through `drivers/swift`.
+
+Mobile systems stop apps in the background (Android's Doze, iOS's suspension) and may kill them
+without warning. EggDB needs nothing special for that: a committed transaction is on disk when
+`eggdb_commit` or the statement returns (with the default durability), and an interrupted one
+is rolled back when the file opens next. Keep the database in the app's own files directory.
+
 ## How it is tested
 - `crates/eggdb-capi/tests/api.rs` calls every function as a C program would: commits and
   rollbacks, scans in batches in every direction and across transactions, collections, times
