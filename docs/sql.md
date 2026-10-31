@@ -1810,7 +1810,10 @@ PostgreSQL does; an `UPDATE` or `DELETE` under it changes the data. Setting
 `log_min_duration_statement` (milliseconds, or with `ms`, `s` or `min`; `-1` turns it off) makes
 `eggdb serve` log every simple query that takes at least that long, with the client's address,
 the duration and the statement, in PostgreSQL's `duration: ... ms  statement: ...` form.
-Statement statistics per normalized query (`pg_stat_statements`) are not kept yet.
+`statement_timeout` (same units; `0`, the default, turns it off) stops any statement
+that runs longer with `57014 canceling statement due to statement timeout`, checked between
+rows and while `pg_sleep` waits. Statement statistics per normalized query
+(`pg_stat_statements`), `lock_timeout` and limits per role are not there yet.
 
 ## LISTEN and NOTIFY
 

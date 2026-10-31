@@ -2436,6 +2436,20 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
 }
 
 #[test]
+fn statement_timeout_stops_a_long_statement_with_57014() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "SET statement_timeout = 50").unwrap();
+    let started = std::time::Instant::now();
+    let error = fails(&mut session, "SELECT pg_sleep(5)");
+    assert_eq!(error.state(), crate::SqlState::QUERY_CANCELED);
+    assert_eq!(error.message(), "canceling statement due to statement timeout");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    run(&mut session, "SET statement_timeout = 0").unwrap();
+    assert_eq!(last(&mut session, "SELECT pg_sleep(0.01)"), "pg_sleep\n\nSELECT 1");
+}
+
+#[test]
 fn the_slow_statement_threshold_follows_log_min_duration_statement() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

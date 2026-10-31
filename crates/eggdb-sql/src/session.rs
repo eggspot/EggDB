@@ -1452,6 +1452,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             let settings = Arc::clone(&self.settings);
             let context = Arc::clone(&self.batch_context);
             let _cancel = crate::cancel::enter(&self.cancel);
+            let _deadline = crate::cancel::enter_deadline(self.statement_timeout());
             let _advisory = crate::advisory_locks::enter(
                 &self.advisory_locks,
                 !matches!(self.block, Block::None) || self.implicit_transaction,
@@ -2067,22 +2068,13 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     /// The `log_min_duration_statement` threshold: statements that take at least this long are
     /// worth logging, or `None` when it is off (`-1`, the default).
     pub fn slow_statement_threshold(&self) -> Option<std::time::Duration> {
-        let value = self.settings.get("log_min_duration_statement").ok()?;
-        let value = value.trim();
-        let (number, unit) = value
-            .find(|character: char| !character.is_ascii_digit() && character != '-')
-            .map_or((value, "ms"), |split| (&value[..split], value[split..].trim()));
-        let number: i64 = number.parse().ok()?;
-        if number < 0 {
-            return None;
-        }
-        let millis = match unit {
-            "ms" => number,
-            "s" => number.checked_mul(1000)?,
-            "min" => number.checked_mul(60_000)?,
-            _ => return None,
-        };
+        let millis = milliseconds_setting(&self.settings.get("log_min_duration_statement").ok()?)?;
         Some(std::time::Duration::from_millis(u64::try_from(millis).ok()?))
+    }
+
+    fn statement_timeout(&self) -> Option<std::time::Duration> {
+        let millis = milliseconds_setting(&self.settings.get("statement_timeout").ok()?)?;
+        (millis > 0).then(|| std::time::Duration::from_millis(millis.unsigned_abs()))
     }
 
     fn run(
@@ -3050,6 +3042,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Ok(QueryResult::command("ROLLBACK").with_notice(NO_TRANSACTION_WARNING.into()))
             }
         }
+    }
+}
+
+fn milliseconds_setting(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (number, unit) = value
+        .find(|character: char| !character.is_ascii_digit() && character != '-')
+        .map_or((value, "ms"), |split| (&value[..split], value[split..].trim()));
+    let number: i64 = number.parse().ok()?;
+    if number < 0 {
+        return None;
+    }
+    match unit {
+        "ms" => Some(number),
+        "s" => number.checked_mul(1000),
+        "min" => number.checked_mul(60_000),
+        "h" => number.checked_mul(3_600_000),
+        _ => None,
     }
 }
 

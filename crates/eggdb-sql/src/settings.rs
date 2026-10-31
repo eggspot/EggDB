@@ -254,7 +254,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("0"),
         change: Change::Free,
         reported: false,
-        description: "Remembered, not applied yet.",
+        description: "Sets the maximum allowed duration of any statement.",
     },
     Known {
         name: "synchronize_seqscans",

@@ -1,5 +1,5 @@
 use crate::error::{SqlError, SqlResult, SqlState};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -33,8 +33,50 @@ impl CancelSignal {
     }
 }
 
+const CLOCK_EVERY: u32 = 256;
+
 thread_local! {
     static ACTIVE: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static CHECKS: Cell<u32> = const { Cell::new(0) };
+}
+
+pub(crate) struct EnteredDeadline {
+    previous: Option<Instant>,
+}
+
+impl Drop for EnteredDeadline {
+    fn drop(&mut self) {
+        DEADLINE.with(|deadline| deadline.set(self.previous));
+    }
+}
+
+/// Stops the statement with `57014` once `timeout` has passed, as `statement_timeout` does.
+pub(crate) fn enter_deadline(timeout: Option<Duration>) -> EnteredDeadline {
+    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+    CHECKS.with(|checks| checks.set(0));
+    EnteredDeadline {
+        previous: DEADLINE.with(|current| current.replace(deadline)),
+    }
+}
+
+fn past_deadline(every_call: bool) -> bool {
+    let Some(deadline) = DEADLINE.with(Cell::get) else {
+        return false;
+    };
+    let due = CHECKS.with(|checks| {
+        let count = checks.get().wrapping_add(1);
+        checks.set(count);
+        every_call || count.is_multiple_of(CLOCK_EVERY)
+    });
+    due && Instant::now() >= deadline
+}
+
+fn timed_out() -> SqlError {
+    SqlError::new(
+        SqlState::QUERY_CANCELED,
+        "canceling statement due to statement timeout",
+    )
 }
 
 pub(crate) struct EnteredSignal {
@@ -66,6 +108,9 @@ pub(crate) fn check() -> SqlResult<()> {
             "canceling statement due to user request",
         ));
     }
+    if past_deadline(false) {
+        return Err(timed_out());
+    }
     Ok(())
 }
 
@@ -87,6 +132,9 @@ pub(crate) fn sleep(seconds: f64) -> SqlResult<()> {
         };
         std::thread::sleep(slice);
         check()?;
+        if past_deadline(true) {
+            return Err(timed_out());
+        }
     }
 }
 
