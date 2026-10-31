@@ -21,15 +21,15 @@ research, recorded in docs/decisions/ (indexed in docs/decisions.md).
 | M6e | The first GUI client screens on the desktop and in the browser, designed by Claude Fable (D15) | |
 | M6f | The official drivers over the network and their main ORMs (D16, D17) | |
 | M7 | Caching: in-memory tables with expiry and eviction, pub/sub, streams; Redis RESP | |
-| M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | |
-| M9 | Documents and JSON; the MongoDB wire protocol | |
-| M10 | The other SQL dialects, each as itself (D10): MySQL/MariaDB, Microsoft SQL Server (T-SQL, TDS) and Oracle (SQL, PL/SQL) | |
-| M11 | Columnar storage and analytics; time series | |
-| M12 | Vectors (approximate nearest neighbours) and geospatial | |
-| M13 | Graphs | |
-| M14 | Backup, point-in-time recovery and verified restores (D24); replication and high availability: read replicas (synchronous, asynchronous, cascading), failover, consistency per request (D18) | |
-| M15 | Sharding (hash, range, time, region) with online resharding, distributed SQL with consensus and serializable distributed transactions, multi-region clusters (D4, D18) | |
-| M16 | Messaging and queues (D33), in order: Kafka, AMQP 0-9-1 (RabbitMQ), MQTT, SQS, NATS, AMQP 1.0, STOMP, with transactional outbox and inbox; wide-column (CQL), objects (S3), InfluxDB line protocol | |
+| M8 | Full-text search: analyzers, inverted indexes, BM25 ranking; Elasticsearch/OpenSearch REST | **started**: an Elasticsearch/OpenSearch-compatible REST API on the key-value store (`eggdb serve --es-listen`, D196) |
+| M9 | Documents and JSON; the MongoDB wire protocol | **started**: BSON, a document store with MongoDB's query and update operators and aggregation pipeline, the MongoDB wire protocol (`eggdb serve --mongo-listen`) and `mongodump` restores (D197) |
+| M10 | The other SQL dialects, each as itself (D10): MySQL/MariaDB, Microsoft SQL Server (T-SQL, TDS) and Oracle (SQL, PL/SQL) | **started**: restoring `mysqldump` output (D198), MySQL stored procedures and functions (D199), `pg_cron` jobs run by `eggdb serve` (D200) |
+| M11 | Columnar storage and analytics; time series | **started**: columnar encodings and integer chunks (D201), `time_bucket`, Parquet import and export (D202) |
+| M12 | Vectors (approximate nearest neighbours) and geospatial | **started**: HNSW vector indexes with pgvector-style types and operators (D203), geometry functions (D204), built-in embeddings and hybrid ranking (D205) |
+| M13 | Graphs | **started**: property graphs with Cypher and graph algorithms (D206), the Bolt protocol (`eggdb serve --bolt-listen`, D207) |
+| M14 | Backup, point-in-time recovery and verified restores (D24); replication and high availability: read replicas (synchronous, asynchronous, cascading), failover, consistency per request (D18) | **started**: continuous archiving and point-in-time restore (D208), dumps in every dialect's plain SQL (`eggdb export --sql`), read replicas and failover (D209), change streams through a transactional outbox to webhooks and queues (D210, D217), materialized views |
+| M15 | Sharding (hash, range, time, region) with online resharding, distributed SQL with consensus and serializable distributed transactions, multi-region clusters (D4, D18) | **started**: Raft consensus checked by deterministic simulation (D211), shard maps with online moves and two-phase commit across shards (D212) |
+| M16 | Messaging and queues (D33), in order: Kafka, AMQP 0-9-1 (RabbitMQ), MQTT, SQS, NATS, AMQP 1.0, STOMP, with transactional outbox and inbox; wide-column (CQL), objects (S3), InfluxDB line protocol | **started**: Kafka (D213), AMQP 0-9-1 and 1.0 on durable queues (D214, D217), MQTT (D215), SQS and NATS (D216), STOMP and the outbox relay (D217), Cassandra CQL on SQL tables (D218), S3-compatible objects (D219), InfluxDB line protocol and Prometheus remote write with PromQL (D220) |
 | M17 | Every platform: Windows, macOS, BSDs, Android, iOS, EggOS, WebAssembly, `no_std` (D8); packages and cloud deployments | |
 | M18 | The other ways of scaling (D18): multi-primary, leaderless quorums, storage separated from compute, serverless, tiered storage, edge copies, offline-first sync, federation | |
 
