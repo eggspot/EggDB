@@ -70,6 +70,7 @@ pub(crate) enum Effect {
     AnonymousBlock {
         statements: Vec<std::ops::Range<usize>>,
     },
+    PlsqlBlock,
     ToggleConstraint {
         table: String,
         target: ToggledConstraint,

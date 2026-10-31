@@ -740,6 +740,20 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             Action::Skip(skip) => self.skip(&statement, skip),
             Action::Run(Effect::User(name)) => self.create_user(&statement, &name),
             Action::Run(effect) => {
+                if statement.unresolved.is_some() && effect == Effect::PlsqlBlock {
+                    let name = shortened(&statement.text);
+                    return self.skip(
+                        &statement,
+                        Skip {
+                            kind: "PL/SQL block",
+                            name,
+                            reason: classify_oracle::PROMPTED_BLOCK,
+                            detail: None,
+                            is_table: false,
+                            names_an_object: false,
+                        },
+                    );
+                }
                 if let Some(error) = statement.unresolved.clone() {
                     return self.genuine_error(RestoreError {
                         line: statement.line,
@@ -1451,6 +1465,7 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             | Effect::SessionSetting { .. }
             | Effect::User(_)
             | Effect::AnonymousBlock { .. }
+            | Effect::PlsqlBlock
             | Effect::ToggleConstraint { .. }
             | Effect::DisabledConstraint { .. }
             | Effect::Routine { .. }
@@ -1580,6 +1595,12 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             }
             return Flow::Continue;
         }
+        if self.rules.oracle
+            && let Effect::Routine { kind, name } = effect
+            && crate::plsql::is_compilation_error(&error)
+        {
+            return self.not_compiled(statement, kind, name, &error);
+        }
         if not_supported && effect.is_ddl() {
             self.remember_identity_sequences(effect);
             let (kind, name) = effect
@@ -1612,6 +1633,31 @@ impl<'a, 's, S: KeyValueStore> Restore<'a, 's, S> {
             error,
             statements_before: self.report.statements.saturating_sub(1),
         })
+    }
+
+    fn not_compiled(
+        &mut self,
+        statement: &ScriptStatement,
+        kind: &str,
+        name: &str,
+        error: &SqlError,
+    ) -> Flow {
+        self.remember_skipped(kind, name);
+        let name = if name.contains('.') || self.default_schema == "public" {
+            name.to_owned()
+        } else {
+            format!("{}.{name}", self.default_schema)
+        };
+        self.list_skipped(SkippedObject {
+            line: statement.line,
+            script: statement.script,
+            kind: kind.to_owned(),
+            name,
+            reason: error.message().to_owned(),
+            detail: Some(classify_oracle::NOT_COMPILED.to_owned()),
+            rows: None,
+        });
+        Flow::Continue
     }
 
     fn genuine_error(&mut self, error: RestoreError) -> Flow {

@@ -30,3 +30,6 @@ UNION ALL
 SELECT 'jobs' AS "Table", 19 AS "provided", count(1) AS "actual" FROM hr.jobs
 UNION ALL
 SELECT 'job_history' AS "Table", 10 AS "provided", count(1) AS "actual" FROM hr.job_history;
+SELECT object_name, object_type FROM user_objects WHERE object_type IN ('PROCEDURE', 'TRIGGER') ORDER BY object_type, object_name;
+SELECT trigger_name, status FROM user_triggers ORDER BY trigger_name;
+SELECT SUBSTR(text, 1, 25) FROM user_source WHERE name = 'ADD_JOB_HISTORY' AND line = 1;

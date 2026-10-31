@@ -909,6 +909,22 @@ impl<'r> Run<'r> {
                 .iter()
                 .map(|column| (column.name.clone(), column.sql_type.unwrap_or(SqlType::Text)))
                 .collect()),
+            None => self.dictionary_columns(name),
+        }
+    }
+
+    fn dictionary_columns(&self, name: &str) -> SqlResult<Vec<(String, SqlType)>> {
+        let dictionary = if self.oracle {
+            crate::oracle_dictionary::reference(&*self.writer, name)?
+        } else {
+            None
+        };
+        match dictionary {
+            Some(relation) => Ok(relation
+                .columns()
+                .iter()
+                .map(|column| (column.name.to_owned(), column.sql_type))
+                .collect()),
             None => Err(SqlError::new(
                 SqlState::UNDEFINED_TABLE,
                 format!("relation \"{}\" does not exist", display(name)),

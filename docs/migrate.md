@@ -357,12 +357,19 @@ SESSION SET CURRENT_SCHEMA = HR`, or in PostgreSQL SQL as `hr.employees`.
 
 ### 3. Read the report
 
-The report is the SQL Server one, in Oracle's words. **Skipped** lists stored PL/SQL (procedures,
-functions, packages, triggers, types, Java), PL/SQL blocks that are not plain SQL, synonyms,
+The report is the SQL Server one, in Oracle's words. PL/SQL runs: procedures, functions,
+packages and their bodies and triggers are created (HR's `hr_code.sql` makes `SECURE_DML`,
+`ADD_JOB_HISTORY` and their two triggers), `ALTER TRIGGER ... ENABLE|DISABLE` and `ALTER TABLE ...
+ENABLE|DISABLE ALL TRIGGERS` take effect, `DROP PROCEDURE` and the like drop, and anonymous blocks
+run. **Skipped** lists a unit that does not compile (with Oracle's `ORA-06550`/`PLS-` message:
+Oracle keeps it invalid, EggDB does not create it), a block that uses a substitution variable
+with no value (HR's installer checks its prompted password and tablespace that way; `--define`
+gives them values), a block that calls an Oracle-supplied package EggDB does not have
+(`DBMS_LOGREP_IMP` in Data Pump's files; `DBMS_OUTPUT` is there), object types, Java, synonyms,
 database links, materialized views and the like, each with its script and line. **Ignored**
 counts `GRANT`, users (*schema created, login not*), `COMMIT`, queries, storage settings
-(`ALTER INDEX ... NOPARALLEL` and the like), PL/SQL settings (`ALTER TRIGGER ... DISABLE`,
-`ALTER PROCEDURE ... COMPILE`) and the `ALTER SESSION` parameters EggDB does not have
+(`ALTER INDEX ... NOPARALLEL` and the like), PL/SQL settings (`ALTER PROCEDURE ... COMPILE`:
+EggDB compiles a unit when it is created) and the `ALTER SESSION` parameters EggDB does not have
 (`EVENTS`). SQL*Plus commands are listed as client commands; a script included with `@@` shows
 as `hr_populate.sql line 61`.
 
@@ -391,8 +398,9 @@ known differences (restored, but not as the source had it)
 ### Limits
 
 - **Never read:** Data Pump `.dmp` and legacy `exp` files, RMAN backups (above).
-- **Not run:** stored PL/SQL and PL/SQL blocks other than plain SQL ones (PL/SQL comes after
-  v0.2.0); synonyms, database links, materialized views, directories, tablespaces, roles,
+- **Not run:** PL/SQL units that do not compile, blocks with substitution variables that have
+  no value or calls to Oracle-supplied packages EggDB does not have (above); object types,
+  synonyms, database links, materialized views, directories, tablespaces, roles,
   profiles and the other objects EggDB does not have; logins, passwords and grants; queries in
   scripts.
 - **Not kept:** storage clauses, `ORGANIZATION INDEX`, LOB storage and other physical properties

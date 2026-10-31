@@ -20,7 +20,7 @@ use crate::constraints::ConstraintClauseKind;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::memory_store::MemoryStore;
-use crate::session::Session;
+use crate::session::{QueryResult, Session};
 use std::collections::HashMap;
 use std::io::BufRead;
 
@@ -537,9 +537,10 @@ fn the_classifier_names_oracle_kinds() {
     );
     assert_eq!(ignored("SELECT 1 FROM dual"), QUERIES);
     assert_eq!(
-        ignored("ALTER TRIGGER secure_employees DISABLE"),
-        PLSQL_SETTINGS
+        run("ALTER TRIGGER secure_employees DISABLE"),
+        Effect::OtherDdl
     );
+    assert_eq!(ignored("ALTER TRIGGER secure_employees COMPILE"), PLSQL_SETTINGS);
     assert_eq!(ignored("ALTER PROCEDURE p COMPILE"), PLSQL_SETTINGS);
     assert_eq!(
         ignored("ALTER INDEX \"HR\".\"X\" NOPARALLEL"),
@@ -550,13 +551,12 @@ fn the_classifier_names_oracle_kinds() {
         ignored("ALTER TABLE t ENABLE ROW MOVEMENT"),
         STORAGE_SETTINGS
     );
-    assert_eq!(
-        ignored("ALTER TABLE t DISABLE ALL TRIGGERS"),
-        PLSQL_SETTINGS
-    );
+    assert_eq!(run("ALTER TABLE t DISABLE ALL TRIGGERS"), Effect::OtherDdl);
     assert_eq!(ignored("ALTER USER hr DEFAULT ROLE ALL"), USERS);
+    assert_eq!(run("DROP PROCEDURE p"), Effect::Drop);
+    assert_eq!(run("DROP PACKAGE BODY pk"), Effect::Drop);
     assert_eq!(
-        ignored("DROP PROCEDURE p"),
+        ignored("DROP TYPE t"),
         super::classify_oracle::NOTHING_TO_DROP
     );
     assert_eq!(ignored("COMMIT"), "COMMIT");
@@ -576,6 +576,19 @@ fn the_classifier_names_oracle_kinds() {
             "hr.t1",
         ),
         ("CREATE PACKAGE BODY pk AS", "package body", "pk"),
+        ("CREATE OR REPLACE PACKAGE pk IS", "package", "pk"),
+        ("CREATE FUNCTION f RETURN NUMBER IS", "function", "f"),
+    ] {
+        assert_eq!(
+            run(text),
+            Effect::Routine {
+                kind,
+                name: name.to_owned()
+            },
+            "{text}"
+        );
+    }
+    for (text, kind, name) in [
         ("CREATE TYPE t AS OBJECT (a NUMBER)", "type", "t"),
         ("CREATE PUBLIC SYNONYM s FOR t", "synonym", "s"),
         (
@@ -594,11 +607,27 @@ fn the_classifier_names_oracle_kinds() {
         assert_eq!((skip.kind, skip.name.as_str()), (kind, name), "{text}");
     }
     assert_eq!(
-        skip_of("DECLARE x NUMBER; BEGIN NULL; END;").kind,
-        "PL/SQL block"
+        run("DECLARE x NUMBER; BEGIN NULL; END;"),
+        Effect::PlsqlBlock
+    );
+    assert_eq!(run("<<outer>> BEGIN NULL; END;"), Effect::PlsqlBlock);
+    assert_eq!(run("BEGIN x := 1; END;"), Effect::PlsqlBlock);
+    let supplied = skip_of(
+        "BEGIN sys.dbms_logrep_imp.instantiate_schema(schema_name => 'HR'); COMMIT; END;",
+    );
+    assert_eq!(
+        (supplied.kind, supplied.reason),
+        (
+            "PL/SQL block",
+            "it calls an Oracle-supplied package EggDB does not have"
+        )
+    );
+    assert_eq!(
+        run("BEGIN DBMS_OUTPUT.PUT_LINE('x'); END;"),
+        Effect::PlsqlBlock
     );
     assert_eq!(skip_of("EXECUTE p(1)").kind, "PL/SQL call");
-    assert_eq!(skip_of("CALL p(1)").kind, "PL/SQL call");
+    assert_eq!(run("CALL p(1)"), Effect::Data);
 }
 
 #[test]
@@ -873,7 +902,7 @@ fn restore(store: &MemoryStore, script: &str, keep_going: bool) -> RestoreReport
 }
 
 #[test]
-fn a_trigger_setting_after_a_skipped_trigger_is_a_plsql_setting_not_a_consequence() {
+fn a_restored_trigger_is_created_and_its_disable_after_it_runs() {
     let store = MemoryStore::default();
     let report = restore(
         &store,
@@ -882,8 +911,67 @@ fn a_trigger_setting_after_a_skipped_trigger_is_a_plsql_setting_not_a_consequenc
     );
     assert!(report.succeeded(), "{report:?}");
     assert!(report.consequences.is_empty());
-    assert_eq!(report.ignored.other, vec![(PLSQL_SETTINGS.to_owned(), 1)]);
-    assert_eq!(report.skipped[0].kind, "trigger");
+    assert!(report.ignored.other.is_empty(), "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    let mut statuses = Vec::new();
+    session
+        .execute(
+            "SELECT trigger_name, status FROM user_triggers",
+            &mut |result: QueryResult| {
+                for row in result.rows {
+                    statuses.push(
+                        row.iter()
+                            .filter_map(|value| value.to_text())
+                            .collect::<Vec<_>>()
+                            .join("|"),
+                    );
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(statuses, vec!["X|DISABLED".to_owned()]);
+}
+
+#[test]
+fn restored_plsql_runs_and_a_unit_that_does_not_compile_is_listed_without_stopping() {
+    let store = MemoryStore::default();
+    let report = restore(
+        &store,
+        "CREATE TABLE t (a NUMBER);\n\
+         CREATE OR REPLACE PROCEDURE add_one(p NUMBER) IS\nBEGIN\n  INSERT INTO t VALUES (p + 1);\nEND;\n/\n\
+         CREATE OR REPLACE PROCEDURE broken IS\nBEGIN\n  missing_variable := 1;\nEND;\n/\n\
+         DECLARE\n  n NUMBER := 41;\nBEGIN\n  add_one(n);\nEND;\n/\n\
+         BEGIN\n  IF '&never_defined' IS NULL THEN\n    NULL;\n  END IF;\nEND;\n/\n",
+        false,
+    );
+    assert!(report.succeeded(), "{report:?}");
+    let kinds: Vec<(&str, &str)> = report
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.kind.as_str(), skipped.reason.as_str()))
+        .collect();
+    assert_eq!(kinds.len(), 2, "{report:?}");
+    assert_eq!(report.skipped[0].kind, "procedure");
+    assert_eq!(report.skipped[0].name, "broken");
+    assert_eq!(
+        report.skipped[0].detail.as_deref(),
+        Some(super::classify_oracle::NOT_COMPILED)
+    );
+    assert_eq!(
+        kinds[1],
+        ("PL/SQL block", super::classify_oracle::PROMPTED_BLOCK)
+    );
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    let mut values = Vec::new();
+    session
+        .execute("SELECT a FROM t", &mut |result: QueryResult| {
+            for row in result.rows {
+                values.extend(row.iter().filter_map(|value| value.to_text()));
+            }
+        })
+        .unwrap();
+    assert_eq!(values, vec!["42".to_owned()]);
 }
 
 #[test]

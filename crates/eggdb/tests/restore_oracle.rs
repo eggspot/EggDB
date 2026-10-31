@@ -221,15 +221,10 @@ fn the_hr_installer_restores_unchanged_from_another_directory() {
         "{\"table\":\"hr.jobs\",\"rows\":19}",
         "{\"table\":\"hr.job_history\",\"rows\":10}",
         "{\"table\":\"hr.regions\",\"rows\":5}",
-        "\"kind\":\"procedure\",\"name\":\"hr.secure_dml\",\"reason\":\"PL/SQL comes after v0.2.0\",\"script\":3",
-        "\"kind\":\"trigger\",\"name\":\"hr.secure_employees\",\"reason\":\"PL/SQL comes after v0.2.0\",\"script\":3",
-        "\"kind\":\"procedure\",\"name\":\"hr.add_job_history\",\"reason\":\"PL/SQL comes after v0.2.0\",\"script\":3",
-        "\"kind\":\"trigger\",\"name\":\"hr.update_job_history\",\"reason\":\"PL/SQL comes after v0.2.0\",\"script\":3",
         "\"grant\":1",
         "{\"kind\":\"users (schema created, login not)\",\"statements\":1}",
         "{\"kind\":\"COMMIT\",\"statements\":2}",
         "{\"kind\":\"queries\",\"statements\":4}",
-        "{\"kind\":\"PL/SQL settings\",\"statements\":1}",
         "\"command\":\"@@hr_create.sql\",\"reason\":\"followed\"",
         "\"command\":\"@@hr_code.sql\",\"reason\":\"followed\"",
         "\"command\":\"EXIT\",\"reason\":\"the script ends here\"",
@@ -241,9 +236,19 @@ fn the_hr_installer_restores_unchanged_from_another_directory() {
     ] {
         assert!(report.contains(part), "{part:?} in\n{report}");
     }
+    for absent in ["PL/SQL settings", "\"kind\":\"procedure\"", "\"kind\":\"trigger\""] {
+        assert!(!report.contains(absent), "{absent:?} in\n{report}");
+    }
     assert_eq!(
         report.matches("\"kind\":\"PL/SQL block\"").count(),
-        3,
+        2,
+        "{report}"
+    );
+    assert_eq!(
+        report
+            .matches("it uses a substitution variable with no value")
+            .count(),
+        2,
         "{report}"
     );
     let db = Database::open(&target).unwrap();
@@ -295,6 +300,42 @@ fn the_hr_installer_restores_unchanged_from_another_directory() {
         assert_eq!(fields.len(), 3, "{row}");
         assert_eq!(fields[1], fields[2], "{row}");
     }
+    assert_eq!(
+        query(
+            &db,
+            Dialect::Oracle,
+            "SELECT object_name, object_type, status FROM all_objects WHERE owner = 'HR' AND object_type IN ('PROCEDURE', 'TRIGGER') ORDER BY object_type, object_name"
+        ),
+        "ADD_JOB_HISTORY|PROCEDURE|VALID\nSECURE_DML|PROCEDURE|VALID\nSECURE_EMPLOYEES|TRIGGER|VALID\nUPDATE_JOB_HISTORY|TRIGGER|VALID\n"
+    );
+    assert_eq!(
+        query(
+            &db,
+            Dialect::Oracle,
+            "SELECT trigger_name, status FROM all_triggers WHERE owner = 'HR' ORDER BY trigger_name"
+        ),
+        "SECURE_EMPLOYEES|DISABLED\nUPDATE_JOB_HISTORY|ENABLED\n"
+    );
+    assert_eq!(
+        query(
+            &db,
+            Dialect::Oracle,
+            "SELECT line, text FROM all_source WHERE owner = 'HR' AND name = 'SECURE_DML' AND line = 1"
+        ),
+        "1|PROCEDURE secure_dml\n\n"
+    );
+    assert_eq!(
+        hr("SELECT COUNT(*) FROM job_history WHERE employee_id = 101"),
+        "2\n"
+    );
+    assert_eq!(
+        hr("UPDATE employees SET department_id = 110 WHERE employee_id = 101"),
+        ""
+    );
+    assert_eq!(
+        hr("SELECT COUNT(*) FROM job_history WHERE employee_id = 101"),
+        "3\n"
+    );
     db.close().unwrap();
 }
 
@@ -323,11 +364,19 @@ fn the_hr_sub_scripts_restore_one_by_one_into_the_default_schema() {
         oracle_error(&db, "INSERT INTO departments VALUES (999, 'X', 999, 1700)"),
         Some(2291)
     );
+    assert_eq!(
+        query(
+            &db,
+            Dialect::Oracle,
+            "SELECT COUNT(*) FROM user_objects WHERE object_type IN ('PROCEDURE', 'TRIGGER')"
+        ),
+        "4\n"
+    );
     db.close().unwrap();
 }
 
 #[test]
-fn a_sql_developer_export_restores_with_its_storage_clauses_and_plsql_listed() {
+fn a_sql_developer_export_restores_with_its_storage_clauses_and_plsql() {
     let directory = TempDirectory::new("sqldeveloper");
     let target = directory.join("hr.db");
     let output = restore(
@@ -351,10 +400,6 @@ fn a_sql_developer_export_restores_with_its_storage_clauses_and_plsql_listed() {
         "\"sequences\":3",
         "\"indexes\":18",
         "\"constraints\":20",
-        "\"kind\":\"procedure\",\"name\":\"hr.add_job_history\"",
-        "\"kind\":\"procedure\",\"name\":\"hr.secure_dml\"",
-        "\"kind\":\"trigger\",\"name\":\"hr.secure_employees\"",
-        "\"kind\":\"trigger\",\"name\":\"hr.update_job_history\"",
         "\"command\":\"SET DEFINE\",\"reason\":\"used for substitution variables\"",
         "\"differences\":[]",
     ] {
@@ -362,6 +407,15 @@ fn a_sql_developer_export_restores_with_its_storage_clauses_and_plsql_listed() {
     }
     let db = Database::open(&target).unwrap();
     assert_hr_counts(&db, "HR");
+    assert!(!report.contains("\"kind\":\"trigger\""), "{report}");
+    assert_eq!(
+        query(
+            &db,
+            Dialect::Oracle,
+            "SELECT trigger_name, status FROM all_triggers WHERE owner = 'HR' ORDER BY trigger_name"
+        ),
+        "SECURE_EMPLOYEES|DISABLED\nUPDATE_JOB_HISTORY|ENABLED\n"
+    );
     let hr = |sql: &str| {
         query(
             &db,
@@ -414,10 +468,10 @@ fn impdp_ddl_sqlcl_csv_and_the_reference_constraints_restore_in_three_steps() {
         "\"indexes\":18",
         "\"set\":[\"EVENTS\"]",
         "{\"kind\":\"users (schema created, login not)\",\"statements\":2}",
-        "{\"kind\":\"PL/SQL settings\",\"statements\":3}",
+        "{\"kind\":\"PL/SQL settings\",\"statements\":1}",
         "{\"kind\":\"storage settings\",\"statements\":18}",
         "\"kind\":\"PL/SQL block\"",
-        "\"kind\":\"procedure\",\"name\":\"hr.add_job_history\"",
+        "it calls an Oracle-supplied package EggDB does not have",
     ] {
         assert!(report.contains(part), "{part:?} in\n{report}");
     }

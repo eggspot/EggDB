@@ -5,7 +5,14 @@ use crate::error::SqlError;
 use std::ops::Range;
 
 const HEAD_TOKENS: usize = 96;
-const PLSQL_LATER: &str = "PL/SQL comes after v0.2.0";
+const OBJECT_TYPES_LATER: &str = "Oracle object types come later";
+const SUPPLIED_PACKAGE: &str = "it calls an Oracle-supplied package EggDB does not have";
+const SUPPLIED_PACKAGE_PREFIXES: [&str; 3] = ["dbms_", "utl_", "owa_"];
+const SUPPLIED_PACKAGES_IN_EGGDB: [&str; 1] = ["dbms_output"];
+pub(crate) const PROMPTED_BLOCK: &str =
+    "it uses a substitution variable with no value: SQL*Plus would prompt for it, --define gives it one";
+pub(crate) const NOT_COMPILED: &str =
+    "did not compile; Oracle would keep it invalid, EggDB does not create it";
 const NOT_SUPPORTED_YET: &str = "not supported yet";
 const NOT_IN_EGGDB: &str = "not in EggDB yet";
 pub(crate) const MAX_BLOCK_STATEMENTS: usize = 1_000_000;
@@ -125,7 +132,7 @@ fn ignore(kind: &'static str) -> Action {
 
 pub(crate) fn classify_oracle(text: &str, _known_parameter: &dyn Fn(&str) -> bool) -> Action {
     if text.trim_start().starts_with("<<") {
-        return skip_statement("PL/SQL block", text, PLSQL_LATER);
+        return plsql_block(text);
     }
     let tokens = head(text);
     let Some(first) = word_at(&tokens, 0) else {
@@ -142,9 +149,6 @@ pub(crate) fn classify_oracle(text: &str, _known_parameter: &dyn Fn(&str) -> boo
         "rollback" => ignore("ROLLBACK"),
         "set" => ignore("SET TRANSACTION, ROLE and CONSTRAINTS"),
         "select" => ignore(QUERIES),
-        "with" if matches!(word_at(&tokens, 1), Some("function" | "procedure")) => {
-            skip_statement("PL/SQL block", text, PLSQL_LATER)
-        }
         "with" => ignore(QUERIES),
         "insert" => {
             if is(&tokens, 1, "all") || is(&tokens, 1, "first") {
@@ -170,14 +174,41 @@ pub(crate) fn classify_oracle(text: &str, _known_parameter: &dyn Fn(&str) -> boo
         "purge" => ignore("PURGE"),
         "lock" => ignore("LOCK TABLE"),
         "explain" => ignore(QUERIES),
-        "declare" => skip_statement("PL/SQL block", text, PLSQL_LATER),
+        "declare" => plsql_block(text),
         "begin" => match anonymous_block_statements(text) {
             Some(statements) => Action::Run(Effect::AnonymousBlock { statements }),
-            None => skip_statement("PL/SQL block", text, PLSQL_LATER),
+            None => plsql_block(text),
         },
-        "exec" | "execute" | "call" => skip_statement("PL/SQL call", text, PLSQL_LATER),
+        "call" => Action::Run(Effect::Data),
+        "exec" | "execute" => skip_statement("PL/SQL call", text, NOT_SUPPORTED_YET),
         _ => skip_statement("statement", text, NOT_SUPPORTED_YET),
     }
+}
+
+fn calls_supplied_package(text: &str) -> bool {
+    Words::oracle(text).any(|token| match &token {
+        Token::Word(word) => {
+            SUPPLIED_PACKAGE_PREFIXES
+                .iter()
+                .any(|prefix| word.starts_with(prefix))
+                && !SUPPLIED_PACKAGES_IN_EGGDB.contains(&word.as_str())
+        }
+        _ => false,
+    })
+}
+
+fn plsql_block(text: &str) -> Action {
+    if calls_supplied_package(text) {
+        return skip_statement("PL/SQL block", text, SUPPLIED_PACKAGE);
+    }
+    Action::Run(Effect::PlsqlBlock)
+}
+
+fn routine(kind: &'static str, tokens: &[Token], mut at: usize) -> Action {
+    Action::Run(Effect::Routine {
+        kind,
+        name: name_at(tokens, &mut at),
+    })
 }
 
 fn kind_after_create(tokens: &[Token]) -> usize {
@@ -234,20 +265,17 @@ fn create(tokens: &[Token], text: &str) -> Action {
         "index" => Action::Run(Effect::Index(name_at(tokens, &mut at))),
         "sequence" => Action::Run(Effect::Sequence(name_at(tokens, &mut at))),
         "user" => Action::Run(Effect::User(name_at(tokens, &mut at))),
-        "procedure" => skip("procedure", name_at(tokens, &mut at), PLSQL_LATER),
-        "function" => skip("function", name_at(tokens, &mut at), PLSQL_LATER),
-        "package" if is(tokens, at, "body") => {
-            at += 1;
-            skip("package body", name_at(tokens, &mut at), PLSQL_LATER)
-        }
-        "package" => skip("package", name_at(tokens, &mut at), PLSQL_LATER),
-        "trigger" => skip("trigger", name_at(tokens, &mut at), PLSQL_LATER),
+        "procedure" => routine("procedure", tokens, at),
+        "function" => routine("function", tokens, at),
+        "package" if is(tokens, at, "body") => routine("package body", tokens, at + 1),
+        "package" => routine("package", tokens, at),
+        "trigger" => routine("trigger", tokens, at),
         "type" if is(tokens, at, "body") => {
             at += 1;
-            skip("type body", name_at(tokens, &mut at), PLSQL_LATER)
+            skip("type body", name_at(tokens, &mut at), OBJECT_TYPES_LATER)
         }
-        "type" => skip("type", name_at(tokens, &mut at), PLSQL_LATER),
-        "library" => skip("library", name_at(tokens, &mut at), PLSQL_LATER),
+        "type" => skip("type", name_at(tokens, &mut at), OBJECT_TYPES_LATER),
+        "library" => skip("library", name_at(tokens, &mut at), NOT_IN_EGGDB),
         "java" => {
             while matches!(
                 word_at(tokens, at),
@@ -255,7 +283,7 @@ fn create(tokens: &[Token], text: &str) -> Action {
             ) {
                 at += 1;
             }
-            skip("java source", name_at(tokens, &mut at), PLSQL_LATER)
+            skip("java source", name_at(tokens, &mut at), NOT_IN_EGGDB)
         }
         "public" if is(tokens, at, "synonym") => {
             at += 1;
@@ -354,13 +382,15 @@ fn table_constraints(text: &str) -> u64 {
 
 fn drop(tokens: &[Token]) -> Action {
     match word_at(tokens, 1) {
-        Some("table" | "view" | "sequence" | "index") => Action::Run(Effect::Drop),
+        Some(
+            "table" | "view" | "sequence" | "index" | "procedure" | "function" | "package"
+            | "trigger",
+        ) => Action::Run(Effect::Drop),
         Some("user") => ignore(USERS),
         Some(
-            "materialized" | "public" | "synonym" | "database" | "directory" | "procedure"
-            | "function" | "package" | "trigger" | "type" | "library" | "java" | "role" | "profile"
-            | "context" | "tablespace" | "cluster" | "dimension" | "operator" | "indextype"
-            | "edition" | "audit",
+            "materialized" | "public" | "synonym" | "database" | "directory" | "type" | "library"
+            | "java" | "role" | "profile" | "context" | "tablespace" | "cluster" | "dimension"
+            | "operator" | "indextype" | "edition" | "audit",
         ) => ignore(NOTHING_TO_DROP),
         _ => Action::Run(Effect::OtherDdl),
     }
@@ -381,6 +411,13 @@ fn alter(tokens: &[Token], text: &str) -> Action {
             } else {
                 ignore(STORAGE_SETTINGS)
             }
+        }
+        Some("trigger")
+            if tokens.iter().any(|token| {
+                token.is_word("enable") || token.is_word("disable") || token.is_word("rename")
+            }) =>
+        {
+            Action::Run(Effect::OtherDdl)
         }
         Some(
             "trigger" | "procedure" | "function" | "package" | "type" | "library" | "java" | "view",
@@ -458,7 +495,7 @@ fn alter_table(tokens: &[Token], text: &str) -> Action {
             let enable = action == "enable";
             let target_at = after_validation(tokens, at + 1);
             if is(tokens, target_at, "all") && is(tokens, target_at + 1, "triggers") {
-                return ignore(PLSQL_SETTINGS);
+                return Action::Run(Effect::OtherDdl);
             }
             if matches!(word_at(tokens, target_at), Some("row" | "table")) {
                 return ignore(STORAGE_SETTINGS);
