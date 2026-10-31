@@ -19,6 +19,7 @@ egg-allocator = []
 
 [dependencies]
 eggdb-auth = { path = "../eggdb-auth" }
+eggdb-bolt = { path = "../eggdb-bolt" }
 eggdb-commands = { path = "../eggdb-commands" }
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }

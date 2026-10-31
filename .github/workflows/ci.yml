@@ -202,16 +202,16 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install redis-cli, redis-py, pymemcache, opensearch-py and pymongo (test tools only, never shipped)
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo and the neo4j driver (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           python3 -m venv "$RUNNER_TEMP/resp"
-          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0
       - name: Serve a database over RESP and talk to it with redis-cli and redis-py
         run: |
           cargo build -p eggdb
           export EGGDB_PASSWORD=ci-resp-password
-          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 &
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 &
           for attempt in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
           cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
           test "$(cli SET greeting hello)" = OK
@@ -293,6 +293,19 @@ jobs:
           assert sorted(db.list_collection_names()) == ["people"]
           db.drop_collection("people")
           print("pymongo: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from neo4j import GraphDatabase
+          driver = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=("eggdb", "ci-resp-password"))
+          with driver.session() as session:
+              session.run("CREATE (a:Person {name: 'Ada'})-[:KNOWS]->(g:Person {name: 'Grace'})").consume()
+              names = [record["name"] for record in session.run("MATCH (:Person {name: $name})-[:KNOWS]->(p) RETURN p.name AS name", name="Ada")]
+              assert names == ["Grace"], names
+              node = session.run("MATCH (p:Person {name: 'Ada'}) RETURN p").single()["p"]
+              assert "Person" in node.labels and node["name"] == "Ada"
+              assert session.run("MATCH (p:Person) RETURN count(p) AS people").single()["people"] == 2
+          driver.close()
+          print("neo4j driver over Bolt: passed")
           PY
 
   redis-compare:

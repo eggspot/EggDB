@@ -214,6 +214,7 @@ impl CommandName {
             | OptionName::MemcachedListen
             | OptionName::EsListen
             | OptionName::MongoListen
+            | OptionName::BoltListen
             | OptionName::RespMaxMemory
             | OptionName::RespEviction
             | OptionName::McpTokenFile
@@ -361,6 +362,7 @@ enum OptionName {
     MemcachedListen,
     EsListen,
     MongoListen,
+    BoltListen,
     RespMaxMemory,
     RespEviction,
     McpTokenFile,
@@ -437,6 +439,7 @@ impl OptionName {
             b"memcached-listen" => Self::MemcachedListen,
             b"es-listen" => Self::EsListen,
             b"mongo-listen" => Self::MongoListen,
+            b"bolt-listen" => Self::BoltListen,
             b"resp-max-memory" => Self::RespMaxMemory,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
@@ -680,6 +683,7 @@ pub(crate) struct ServeOptions {
     pub(crate) memcached_listen: Option<SocketAddr>,
     pub(crate) es_listen: Option<SocketAddr>,
     pub(crate) mongo_listen: Option<SocketAddr>,
+    pub(crate) bolt_listen: Option<SocketAddr>,
     pub(crate) resp_max_memory: Option<u64>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
@@ -1119,6 +1123,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::MemcachedListen => {
                 request.serve.memcached_listen =
                     Some(parse_listen(&option.spelled, value, 11211).map_err(usage)?);
+            }
+            OptionName::BoltListen => {
+                request.serve.bolt_listen =
+                    Some(parse_listen(&option.spelled, value, 7687).map_err(usage)?);
             }
             OptionName::MongoListen => {
                 request.serve.mongo_listen =

@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-bolt"
+description = "EggDB's server for the Bolt protocol (versions 4.4 and 5.0, from the public protocol documentation) and PackStream, answering Cypher from EggDB's property graph."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-graph = { path = "../eggdb-graph" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }

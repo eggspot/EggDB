@@ -231,3 +231,4 @@ its full title with its status.
 - [D204](decisions/D204.md) Geometry in our own `eggdb-geo` (WKT/EWKT, WKB/EWKB, GeoJSON, planar measures and predicates); PostGIS's `ST_` functions over EWKT text; stored type and R-tree index come together later
 - [D205](decisions/D205.md) AI starts local and model-free: `eggdb-ai` hashed embeddings (`eggdb_embed`), reciprocal rank fusion (`rrf_score`) and chunking; ONNX models and opt-in remote providers come later
 - [D206](decisions/D206.md) Property graphs in our own `eggdb-graph` on the shared keyspace (`graph0`), a Cypher subset from openCypher with Neo4j status codes, algorithms as a library; SQL/PGQ and graph views over tables next
+- [D207](decisions/D207.md) Bolt 5.0 and 4.4 in our own `eggdb-bolt` (`eggdb serve --bolt-listen`); statements commit one at a time, so ROLLBACK after a write is refused; routing refused, loopback only

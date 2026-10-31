@@ -184,6 +184,27 @@ impl Session<'_> {
             }
             None => None,
         };
+        let bolt_listener = match options.bolt_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--bolt-listen {address}: the Bolt listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for Bolt on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let bolt_config = eggdb_bolt::ServerConfig {
+            user: config.user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections: config.max_connections,
+        };
         let mongo_config = match &mongo_listener {
             Some(_) => Some(super::serve_mongo::config(&config.user, &password, config.max_connections).map_err(|error| {
                 Failure::database(format!("cannot prepare the MongoDB-compatible listener: {error}"), Exit::DatabaseError)
@@ -416,6 +437,14 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let graph_database = super::serve_resp::DatabaseKeyspace {
+                db: &db,
+                prefix: super::serve_resp::GRAPH_COLLECTIONS,
+            };
+            let bolt_server = scope.spawn(|| match &bolt_listener {
+                Some(listener) => eggdb_bolt::serve(&graph_database, listener, &bolt_config, &stop_signals::requested),
+                None => Ok(()),
+            });
             let mongo_database = super::serve_resp::DatabaseKeyspace {
                 db: &db,
                 prefix: super::serve_resp::MONGO_COLLECTIONS,
@@ -480,6 +509,7 @@ impl Session<'_> {
             let _ = memcached_server.join();
             let _ = es_server.join();
             let _ = mongo_server.join();
+            let _ = bolt_server.join();
             let _ = job_scheduler.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))

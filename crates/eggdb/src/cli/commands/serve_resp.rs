@@ -10,6 +10,7 @@ pub(super) const RESP_COLLECTIONS: &str = "resp";
 pub(super) const MEMCACHED_COLLECTIONS: &str = "memcached";
 pub(super) const ES_COLLECTIONS: &str = "es";
 pub(super) const MONGO_COLLECTIONS: &str = "mongo";
+pub(super) const GRAPH_COLLECTIONS: &str = "graph";
 
 fn failed(error: &eggdb::Error) -> String {
     format!("ERR {error}")
