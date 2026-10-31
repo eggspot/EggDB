@@ -2385,6 +2385,22 @@ the hash of the row before it and its own SHA-256, and updates and deletes fail 
 Protect a table before adding rows to it. `sha256(x)` and `sha512(x)` return a digest as
 `bytea`, of `bytea` or of text's UTF-8 bytes.
 
+## Text from documents: extract_text
+
+`extract_text(file bytea)` returns the text of a Word, Excel or PowerPoint file (`.docx`,
+`.xlsx`, `.pptx`) or an OpenDocument file (`.odt`, `.ods`, `.odp`), one paragraph per line, so
+uploaded documents can be searched with the full-text functions (D249):
+
+```sql
+SELECT id FROM uploads WHERE to_tsvector(extract_text(body)) @@ to_tsquery('invoice & overdue');
+```
+
+Word documents give their paragraphs with tabs and line breaks, spreadsheets their shared
+strings, presentations each slide in order with a blank line between slides, and OpenDocument
+files their headings and paragraphs. Files are read with EggDB's own ZIP and DEFLATE code, each
+part checked against its CRC-32 and limited to 64 MiB once decompressed; anything else (an
+encrypted, damaged or unsupported file) fails with SQLSTATE `22023`.
+
 ## Industry messages: FIX, HL7 v2 and EDIFACT
 
 Messages from trading, healthcare and supply-chain systems parse into `jsonb` with plain

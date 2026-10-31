@@ -1,7 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 4] = ["fix_parse", "fix_field", "hl7_parse", "edifact_parse"];
+pub(crate) const FUNCTIONS: [&str; 5] = ["fix_parse", "fix_field", "hl7_parse", "edifact_parse", "extract_text"];
+
+const MAX_EXTRACTED_BYTES: usize = 64 << 20;
 
 fn invalid(standard: &str, message: impl std::fmt::Display) -> SqlError {
     SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, format!("invalid {standard} message: {message}"))
@@ -266,6 +268,14 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));
     }
+    if name == "extract_text" {
+        return Some(match values {
+            [Value::Bytea(file)] => eggdb_content::extract_text(file, MAX_EXTRACTED_BYTES)
+                .map(Value::Text)
+                .map_err(|error| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("extract_text: {error}"))),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "extract_text takes the file as bytea")),
+        });
+    }
     let text = match values.first() {
         Some(Value::Text(text) | Value::Bpchar(text)) => text.as_str(),
         _ => return Some(Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes the message as text")))),
@@ -280,7 +290,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 }
 
 pub(crate) fn result_type(name: &str) -> crate::types::SqlType {
-    if name == "fix_field" { crate::types::SqlType::Text } else { crate::types::SqlType::Jsonb }
+    if matches!(name, "fix_field" | "extract_text") { crate::types::SqlType::Text } else { crate::types::SqlType::Jsonb }
 }
 
 #[cfg(test)]

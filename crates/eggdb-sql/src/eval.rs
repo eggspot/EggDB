@@ -1597,6 +1597,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "normalize" | "is_normalized" => &[TEXT, TEXT],
         "fix_parse" | "hl7_parse" | "edifact_parse" => &[TEXT],
         "fix_field" => &[TEXT, INTEGER],
+        "extract_text" => &[Some(SqlType::Bytea)],
         "laplace_noise" => &[DOUBLE, DOUBLE],
         "chr" => &[INTEGER],
         "pg_sleep" => &[DOUBLE],

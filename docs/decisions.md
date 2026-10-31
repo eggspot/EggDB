@@ -273,3 +273,4 @@ its full title with its status.
 - [D246](decisions/D246.md) `CREATE EXTENSION eggdb_retention`: write-once retention per table, legal holds, and erasure requests that wait for them, enforced by a trigger; engine-level WORM, row holds, residency and eDiscovery left
 - [D247](decisions/D247.md) `CREATE EXTENSION eggdb_coordination`: leases with growing fencing tokens and leader election, and OpenFeature-style flag evaluation; etcd, ZooKeeper, secrets, LDAP and SCIM left
 - [D248](decisions/D248.md) Cypher `CALL ... YIELD` runs the graph algorithms as `eggdb.` procedures, adding label propagation, triangle counts and Jaccard similarity; streaming SQL, MATCH_RECOGNIZE and more algorithms left
+- [D249](decisions/D249.md) `eggdb-content`: our own DEFLATE and ZIP readers, bounded and CRC-checked, and `extract_text(bytea)` for docx, xlsx, pptx and OpenDocument files; PDF, PST, OCR, mail and DAV stores left

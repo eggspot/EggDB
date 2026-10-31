@@ -69,3 +69,14 @@ fn the_parsers_are_sql_functions_that_return_jsonb() {
         .unwrap();
     assert_eq!(outputs.pop().unwrap(), "symbol|empty|tag\nEGG|t|UNH\nSELECT 1");
 }
+
+#[test]
+fn extract_text_reads_documents_stored_as_bytea() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let mut outputs = Vec::new();
+    let refused = session.execute("SELECT extract_text('\\x00'::bytea)", &mut |_| {});
+    assert!(refused.is_err());
+    session.execute("SELECT extract_text(NULL::bytea) IS NULL AS empty", &mut |result| outputs.push(render(&result))).unwrap();
+    assert_eq!(outputs.pop().unwrap(), "empty\nt\nSELECT 1");
+}
