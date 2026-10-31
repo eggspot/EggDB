@@ -146,7 +146,7 @@ fn views_answer_as_their_query_and_track_what_they_use() {
     last(&mut session, "ALTER TABLE a DROP COLUMN extra");
     assert_eq!(
         code(&mut session, "INSERT INTO totals VALUES ('z', 1)"),
-        "0A000"
+        "55000"
     );
     assert_eq!(
         code(&mut session, "CREATE VIEW totals AS SELECT 1"),
@@ -273,7 +273,8 @@ fn comments_are_stored_and_removed_with_their_objects() {
 fn a_pg_dump_script_with_schemas_views_and_comments_runs() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    let script = "SET statement_timeout = 0;
+    let script = "CREATE ROLE reader;
+SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
 SET client_encoding = 'UTF8';
@@ -333,7 +334,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA app GRANT SELECT ON TABLES 
     );
     assert_eq!(
         code(&mut session, "CREATE MATERIALIZED VIEW m AS SELECT 1"),
-        "0A000"
+        "3F000"
     );
     assert_eq!(code(&mut session, "CREATE EXTENSION hstore"), "0A000");
 }

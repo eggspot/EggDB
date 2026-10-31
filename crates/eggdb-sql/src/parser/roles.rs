@@ -151,7 +151,40 @@ impl Parser<'_> {
         Ok(options)
     }
 
+    fn privileges_target(&self) -> Option<String> {
+        let mut at = self.at;
+        loop {
+            match &self.tokens.get(at)?.kind {
+                TokenKind::Semicolon | TokenKind::End => return None,
+                TokenKind::Word(word) if word.as_ref() == "on" => {
+                    return match &self.tokens.get(at + 1)?.kind {
+                        TokenKind::Word(target) => Some(target.as_ref().to_owned()),
+                        _ => None,
+                    };
+                }
+                _ => at += 1,
+            }
+        }
+    }
+
     pub(super) fn grant_or_revoke_privileges(&mut self, granting: bool) -> SqlResult<Statement> {
+        if let Some(target) = self.privileges_target().filter(|target| {
+            matches!(
+                target.as_str(),
+                "schema" | "database" | "sequence" | "function" | "procedure" | "routine"
+                    | "language" | "type" | "domain" | "tablespace" | "foreign" | "large"
+                    | "all"
+            )
+        }) {
+            let tag = if granting { "GRANT" } else { "REVOKE" };
+            self.skip_statement();
+            return Ok(Statement::Ignored {
+                tag,
+                notice: Some(format!(
+                    "WARNING:  {tag} on a {target} was accepted and ignored: EggDB checks privileges on tables only so far"
+                )),
+            });
+        }
         self.at += 1;
         if !granting {
             self.take_word("grant");

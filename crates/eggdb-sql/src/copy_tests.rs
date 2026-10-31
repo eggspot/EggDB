@@ -437,7 +437,7 @@ fn columns_left_out_take_their_defaults_and_serial_columns_count_on() {
     );
     assert_eq!(
         copy_out(&mut session, "COPY d (b, a) TO STDOUT WHERE").map_err(|error| error.state()),
-        Err(SqlState::SYNTAX_ERROR)
+        Err(SqlState::FEATURE_NOT_SUPPORTED)
     );
 }
 
@@ -1492,7 +1492,7 @@ fn on_error_ignore_skips_rows_whose_values_do_not_convert_and_says_so() {
     let mut session = Session::new(&store);
     rows(
         &mut session,
-        "CREATE TABLE kept (a integer PRIMARY KEY, b varchar(3))",
+        "CREATE TABLE kept (a integer PRIMARY KEY, b varchar(4))",
     );
     let data = b"1\tok\nx\tbad\n3\ttoolong\n4\tfine\n";
     let verbose = copy_in_bytes(

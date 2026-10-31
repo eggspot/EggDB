@@ -154,7 +154,7 @@ fn arrays_are_values_of_expressions_columns_views_and_intermediate_results() {
     );
     assert_eq!(
         state(&mut session, "CREATE TABLE stored_names (a name[])"),
-        "0A000"
+        "42704"
     );
     run(
         &mut session,

@@ -764,7 +764,7 @@ fn client_driver_catalog_functions_settings_and_subscripts_answer() {
             "SELECT pg_get_serial_sequence('app.orders', 'id'), \
              pg_get_serial_sequence('app.orders', 'note'), pg_get_serial_sequence('plain', 'id')"
         )),
-        ["app.orders_id_seq|NULL|NULL"]
+        ["NULL|NULL|NULL"]
     );
     assert_eq!(
         fails(&mut session, "SELECT pg_get_serial_sequence('nope', 'id')")

@@ -3717,7 +3717,7 @@ fn normalize_and_is_normalized_follow_unicode() {
     assert_eq!(
         last(
             &mut session,
-            "SELECT normalize(E'e\\u0301') = 'é' AS same, is_normalized(E'e\\u0301') AS nfc, is_normalized(E'e\\u0301', 'NFD') AS nfd"
+            "SELECT normalize('e\u{301}') = 'é' AS same, is_normalized('e\u{301}') AS nfc, is_normalized('e\u{301}', 'NFD') AS nfd"
         ),
         "same|nfc|nfd\nt|f|t\nSELECT 1"
     );

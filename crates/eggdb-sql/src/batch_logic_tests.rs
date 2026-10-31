@@ -92,7 +92,7 @@ fn compile_errors_of_batch_logic_run_nothing() {
         ("RETURN 1", 178),
         ("THROW", 10704),
         ("BEGIN SELECT 1", 102),
-        ("BEGIN END", 102),
+        ("BEGIN END", 156),
         ("BEGIN TRY SELECT 1 END TRY", 102),
         ("GOTO done", 40517),
         ("DECLARE @a int = 1, @b int = @a", 40517),

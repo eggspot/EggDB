@@ -49,6 +49,13 @@ fn query_of(value: &str) -> TsQuery {
 /// `vector @@ query`: a text-search vector (or text, read with the default configuration)
 /// against a query (or text, read as `plainto_tsquery` reads it).
 pub(crate) fn matches(left: &Value, right: &Value) -> SqlResult<Value> {
+    let textual = |value: &Value| matches!(value, Value::Null | Value::Text(_) | Value::Bpchar(_));
+    if !textual(left) || !textual(right) {
+        return Err(SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            "operator does not exist: @@ matches a tsvector or text with a tsquery or text",
+        ));
+    }
     let (Some(left), Some(right)) = (text(left), text(right)) else {
         return Ok(Value::Null);
     };

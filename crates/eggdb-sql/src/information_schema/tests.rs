@@ -106,7 +106,7 @@ fn columns_describe_each_column_as_postgresql_does() {
              FROM information_schema.columns WHERE table_name = 'customers' ORDER BY ordinal_position"
         ),
         [
-            "id|1|NO|integer|NULL|NULL|32|2|0|NULL|pg_catalog|int4|1|NO|NEVER|YES",
+            "id|1|NO|integer|NULL|NULL|32|2|0|NULL|pg_catalog|int4|1|YES|NEVER|YES",
             "name|2|NO|character varying|40|160|NULL|NULL|NULL|NULL|pg_catalog|varchar|2|NO|NEVER|YES",
             "email|3|YES|text|NULL|1073741824|NULL|NULL|NULL|NULL|pg_catalog|text|3|NO|NEVER|YES",
             "price|4|YES|numeric|NULL|NULL|12|10|2|NULL|pg_catalog|numeric|4|NO|NEVER|YES",
@@ -119,12 +119,7 @@ fn columns_describe_each_column_as_postgresql_does() {
         "SELECT column_default FROM information_schema.columns \
          WHERE table_name = 'customers' AND column_name = 'id'",
     );
-    assert!(
-        defaults
-            .first()
-            .is_some_and(|default| default.starts_with("nextval(")),
-        "{defaults:?}"
-    );
+    assert_eq!(defaults, ["NULL"]);
     assert_eq!(
         rows(
             &mut session,

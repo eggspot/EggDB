@@ -190,6 +190,10 @@ impl Parser<'_> {
         let expr = self.expression()?;
         let style = if self.take(&TokenKind::Comma) {
             let style_position = self.position();
+            let mut parentheses = 0;
+            while self.take(&TokenKind::LeftParen) {
+                parentheses += 1;
+            }
             let TokenKind::Integer(digits) = self.peek_kind() else {
                 return Err(
                     not_supported("A CONVERT style other than an integer constant")
@@ -205,6 +209,9 @@ impl Parser<'_> {
                 .at(style_position)
             })?;
             self.at += 1;
+            for _ in 0..parentheses {
+                self.expect(&TokenKind::RightParen)?;
+            }
             Some(style)
         } else {
             None

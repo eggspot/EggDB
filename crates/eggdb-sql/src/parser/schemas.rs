@@ -471,7 +471,7 @@ impl<'t> Parser<'t> {
         Ok(Statement::Ignored {
             tag,
             notice: Some(format!(
-                "WARNING:  {tag} was accepted and ignored: EggDB has no roles or privileges yet"
+                "WARNING:  {tag} was accepted and ignored: EggDB does not apply default privileges yet"
             )),
         })
     }

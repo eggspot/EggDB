@@ -475,6 +475,11 @@ pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: 
         ),
         "0A000" => (40517, not_supported(&message)),
         "55P03" => (1222, "Lock request time out period exceeded.".to_owned()),
+        "54001" => (
+            217,
+            "Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32)."
+                .to_owned(),
+        ),
         "54000" => (
             7119,
             format!("Attempting to grow LOB beyond maximum allowed size: {message}"),
