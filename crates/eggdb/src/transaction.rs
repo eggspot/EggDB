@@ -69,6 +69,40 @@ impl<'db> ReadTransaction<'db> {
         self.reader().get(tree, key)
     }
 
+    /// A reader of the value stored under `key` in the default key space, or `None` when the
+    /// key is absent or has expired. A value on overflow pages is read a page at a time as the
+    /// reader is read, so a value of any size is streamed without being held whole in memory.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-get-reader-{}.db", std::process::id()));
+    /// use std::io::Read;
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.put("big", vec![7u8; 100_000])?;
+    /// let tx = db.begin_read()?;
+    /// let mut reader = tx.get_reader("big")?.expect("stored above");
+    /// assert_eq!(reader.len(), 100_000);
+    /// let mut first = [0u8; 10];
+    /// reader.read_exact(&mut first)?;
+    /// assert_eq!(first, [7u8; 10]);
+    /// # drop(reader);
+    /// # drop(tx);
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn get_reader(&self, key: impl AsRef<[u8]>) -> Result<Option<ValueReader<'_>>> {
+        let key = key.as_ref();
+        let Some(tree) = &self.tree else {
+            return Ok(None);
+        };
+        if collection::is_reserved(key) || self.has_expired(key)? {
+            return Ok(None);
+        }
+        let reader = self.inner.value_reader(tree, key).map_err(Error::storage)?;
+        Ok(reader.map(|inner| ValueReader { inner }))
+    }
+
     pub(crate) fn get_live(&self, stored: &[u8]) -> Result<Option<Vec<u8>>> {
         let value = self.get_raw(stored)?;
         if value.is_some() && self.has_expired(stored)? {
@@ -236,6 +270,72 @@ impl<'db> WriteTransaction<'db> {
 
     pub(crate) fn reader(&self) -> Reader<'_> {
         Reader::Writer(&self.inner)
+    }
+
+    /// A reader of the value stored under `key` in the default key space, this transaction's
+    /// changes included, or `None` when the key is absent or has expired (see
+    /// [`ReadTransaction::get_reader`]).
+    pub fn get_reader(&self, key: impl AsRef<[u8]>) -> Result<Option<ValueReader<'_>>> {
+        let key = key.as_ref();
+        let Some(tree) = &self.tree else {
+            return Ok(None);
+        };
+        if collection::is_reserved(key) || self.get_live_with(key, |_| ())?.is_none() {
+            return Ok(None);
+        }
+        let reader = self.inner.value_reader(tree, key).map_err(Error::storage)?;
+        Ok(reader.map(|inner| ValueReader { inner }))
+    }
+
+    /// Stores the `len` bytes read from `source` under `key` in the default key space, as
+    /// [`put`](Self::put) stores a value in hand, without holding the value whole in memory: a
+    /// value too large for its leaf is written to overflow pages a page at a time as it is
+    /// read. Limits are those of [`put`](Self::put), checked before anything is read. A source
+    /// that fails, ends before `len` bytes or holds more rolls the transaction back.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-put-reader-{}.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// let mut tx = db.begin_write()?;
+    /// let value = vec![3u8; 50_000];
+    /// tx.put_reader("big", value.len() as u64, &mut value.as_slice())?;
+    /// tx.commit()?;
+    /// assert_eq!(db.get("big")?, Some(value));
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn put_reader(
+        &mut self,
+        key: impl AsRef<[u8]>,
+        len: u64,
+        source: &mut impl std::io::Read,
+    ) -> Result<()> {
+        let key = key.as_ref();
+        collection::refuse_reserved(key)?;
+        self.put_live_from_reader(key, len, source)
+    }
+
+    pub(crate) fn put_raw_from_reader(
+        &mut self,
+        key: &[u8],
+        len: u64,
+        source: &mut dyn std::io::Read,
+    ) -> Result<()> {
+        let tree = match self.tree {
+            Some(tree) => tree,
+            None => {
+                let length = usize::try_from(len).unwrap_or(usize::MAX);
+                self.inner
+                    .check_fits_len(key, length)
+                    .map_err(Error::storage)?;
+                self.create_tree()?
+            }
+        };
+        self.inner
+            .put_from_reader(&tree, key, len, source)
+            .map_err(Error::storage)
     }
 
     pub(crate) fn tree(&self) -> Option<BTree> {
@@ -435,5 +535,37 @@ impl std::fmt::Debug for WriteTransaction<'_> {
         f.debug_struct("WriteTransaction")
             .field("began_after", &self.inner.began_after())
             .finish_non_exhaustive()
+    }
+}
+
+/// A value read a piece at a time (see [`ReadTransaction::get_reader`]). It implements
+/// [`std::io::Read`], so it can be copied to a file or a socket with [`std::io::copy`].
+#[derive(Debug)]
+pub struct ValueReader<'t> {
+    inner: eggdb_storage::ValueReader<'t, 't, OsFile>,
+}
+
+impl ValueReader<'_> {
+    /// The value's length in bytes.
+    pub fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    /// Whether the value is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// The bytes not read yet.
+    pub fn remaining(&self) -> u64 {
+        self.inner.remaining()
+    }
+}
+
+impl std::io::Read for ValueReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.inner
+            .read_into(out)
+            .map_err(|error| std::io::Error::other(Error::storage(error)))
     }
 }

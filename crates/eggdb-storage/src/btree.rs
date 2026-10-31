@@ -1,7 +1,7 @@
 use crate::cursor::{Cursor, ScanOrder};
 use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PageSize};
-use crate::overflow;
+use crate::overflow::{self, OverflowReference};
 use crate::page_cache::{PageCache, PageMut, PageSource, TreePage};
 use crate::page_set::PageSet;
 use crate::tree_page::{
@@ -148,6 +148,16 @@ impl BTree {
         key: &[u8],
         value: &[u8],
     ) -> Result<(), StorageError> {
+        Self::check_fits_len(cache, key, value.len())
+    }
+
+    /// Checks that a value of `value_bytes` bytes would fit under `key`, as
+    /// [`BTree::check_fits`] does for a value in hand, for a value that is streamed in.
+    pub fn check_fits_len<F: File>(
+        cache: &PageCache<F>,
+        key: &[u8],
+        value_bytes: usize,
+    ) -> Result<(), StorageError> {
         let page_size = cache.page_size();
         let max_key = Self::max_key_bytes(page_size);
         if key.len() > max_key {
@@ -156,20 +166,20 @@ impl BTree {
                 max: max_key,
             });
         }
-        if value.len() > Self::MAX_VALUE_BYTES {
+        if value_bytes > Self::MAX_VALUE_BYTES {
             return Err(StorageError::ValueTooLarge {
-                bytes: value.len(),
+                bytes: value_bytes,
                 max: Self::MAX_VALUE_BYTES,
             });
         }
-        if fits_inline(page_size, key, value) {
+        if fits_inline(page_size, key.len(), value_bytes) {
             return Ok(());
         }
-        let pages = overflow::pages_for(value.len() as u64, page_size) + 1;
+        let pages = overflow::pages_for(value_bytes as u64, page_size) + 1;
         let frames = cache.frame_count();
         if pages > frames as u64 {
             return Err(StorageError::ValueExceedsCache {
-                bytes: value.len(),
+                bytes: value_bytes,
                 pages,
                 frames,
             });
@@ -205,6 +215,35 @@ impl BTree {
         key: &[u8],
         read: impl FnOnce(FoundValue<'_>) -> R,
     ) -> Result<Option<R>, StorageError> {
+        self.find_in(pages, key, |pages, shape, cell| {
+            if !cell.overflow {
+                return Ok(read(FoundValue::Borrowed(cell.payload)));
+            }
+            let value = assembled_value(pages, shape, cell)?;
+            Ok(read(FoundValue::Assembled(value)))
+        })
+    }
+
+    pub(crate) fn stored_value_in(
+        &self,
+        pages: &impl PageSource,
+        key: &[u8],
+    ) -> Result<Option<StoredValue>, StorageError> {
+        self.find_in(pages, key, |_, shape, cell| {
+            Ok(match shape.overflow_reference(cell)? {
+                Some(reference) => StoredValue::Overflow(reference),
+                None => StoredValue::Inline(cell.payload.to_vec()),
+            })
+        })
+    }
+
+    #[inline(always)]
+    fn find_in<P: PageSource, R>(
+        &self,
+        pages: &P,
+        key: &[u8],
+        found: impl FnOnce(&P, &Shape, &CellRef<'_>) -> Result<R, StorageError>,
+    ) -> Result<Option<R>, StorageError> {
         let mut page_id = self.root;
         let mut level = None;
         loop {
@@ -217,11 +256,7 @@ impl BTree {
                     return Ok(None);
                 };
                 let cell = shape.cell_at(&page, index)?;
-                if !cell.overflow {
-                    return Ok(Some(read(FoundValue::Borrowed(cell.payload))));
-                }
-                let value = assembled_value(pages, &shape, &cell)?;
-                return Ok(Some(read(FoundValue::Assembled(value))));
+                return found(pages, &shape, &cell).map(Some);
             }
             page_id = shape.child_for(&page, suffix)?;
             level = Some(shape.level - 1);
@@ -285,6 +320,17 @@ impl BTree {
             .map(|_| ())
     }
 
+    pub(crate) fn put_written_hinted<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        written: OverflowReference,
+        hint: &mut AppendHint,
+    ) -> Result<(), StorageError> {
+        self.store_in(cache, key, EntryValue::Written(written), Existing::Replace, hint)
+            .map(|_| ())
+    }
+
     pub(crate) fn put_if_absent_hinted<F: File>(
         &self,
         cache: &PageCache<F>,
@@ -304,7 +350,21 @@ impl BTree {
         hint: &mut AppendHint,
     ) -> Result<bool, StorageError> {
         Self::check_fits(cache, key, value)?;
-        let inline = fits_inline(cache.page_size(), key, value);
+        self.store_in(cache, key, EntryValue::Bytes(value), existing, hint)
+    }
+
+    fn store_in<F: File>(
+        &self,
+        cache: &PageCache<F>,
+        key: &[u8],
+        value: EntryValue<'_>,
+        existing: Existing,
+        hint: &mut AppendHint,
+    ) -> Result<bool, StorageError> {
+        let inline = match value {
+            EntryValue::Bytes(bytes) => fits_inline(cache.page_size(), key.len(), bytes.len()),
+            EntryValue::Written(_) => false,
+        };
         if let Some((path, depth)) = hint.take(self.root) {
             let page = cache.write_keeping_check(path[depth])?;
             let shape = shape_of_mut(&page)?;
@@ -320,7 +380,7 @@ impl BTree {
                     page,
                     shape,
                     index,
-                    Entry { key, value, inline },
+                    Entry { key, value },
                     hint,
                 )
                 .map(|()| true);
@@ -352,8 +412,12 @@ impl BTree {
             Ok(index) => {
                 let cell = shape.cell_at(&page, index)?;
                 let replaced = shape.overflow_reference(&cell)?;
-                if inline && replaced.is_none() && cell.payload.len() == value.len() {
-                    shape.overwrite_value(&mut page, index, value)?;
+                if let EntryValue::Bytes(bytes) = value
+                    && inline
+                    && replaced.is_none()
+                    && cell.payload.len() == bytes.len()
+                {
+                    shape.overwrite_value(&mut page, index, bytes)?;
                     return Ok(true);
                 }
                 if let Some(reference) = replaced {
@@ -370,7 +434,7 @@ impl BTree {
             page,
             shape,
             index,
-            Entry { key, value, inline },
+            Entry { key, value },
             hint,
         )?;
         Ok(true)
@@ -515,8 +579,8 @@ fn assembled_value(
     Ok(value)
 }
 
-fn fits_inline(page_size: PageSize, key: &[u8], value: &[u8]) -> bool {
-    key.len() + value.len() <= BTree::max_inline_entry_bytes(page_size)
+fn fits_inline(page_size: PageSize, key_bytes: usize, value_bytes: usize) -> bool {
+    key_bytes + value_bytes <= BTree::max_inline_entry_bytes(page_size)
 }
 
 struct Bounds {
@@ -809,8 +873,13 @@ impl AppendHint {
 
 struct Entry<'e> {
     key: &'e [u8],
-    value: &'e [u8],
-    inline: bool,
+    value: EntryValue<'e>,
+}
+
+#[derive(Clone, Copy)]
+enum EntryValue<'e> {
+    Bytes(&'e [u8]),
+    Written(OverflowReference),
 }
 
 fn insert_at<F: File>(
@@ -822,19 +891,21 @@ fn insert_at<F: File>(
     entry: Entry<'_>,
     hint: &mut AppendHint,
 ) -> Result<(), StorageError> {
-    let Entry { key, value, inline } = entry;
+    let Entry { key, value } = entry;
     let suffix = shape.key_suffix(&page, key)?;
-    let written = if inline {
-        None
-    } else {
-        Some(overflow::write_value(cache, key, value)?)
+    let (inline_bytes, written) = match value {
+        EntryValue::Bytes(bytes) if fits_inline(cache.page_size(), key.len(), bytes.len()) => {
+            (bytes, None)
+        }
+        EntryValue::Bytes(bytes) => (&[][..], Some(overflow::write_value(cache, key, bytes)?)),
+        EntryValue::Written(reference) => (&[][..], Some(reference)),
     };
     let stored = match &written {
-        None => LeafValue::Inline(value),
+        None => LeafValue::Inline(inline_bytes),
         Some(reference) => LeafValue::Overflow(reference.encode()),
     };
     let stored_value = || match written {
-        None => StoredValue::Inline(value.to_vec()),
+        None => StoredValue::Inline(inline_bytes.to_vec()),
         Some(reference) => StoredValue::Overflow(reference),
     };
     let appended = index == shape.count && !shape.has_high_fence();

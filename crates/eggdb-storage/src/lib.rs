@@ -63,6 +63,8 @@ mod snapshot_copy;
 mod snapshot_copy_tests;
 mod store;
 #[cfg(test)]
+mod stream_tests;
+#[cfg(test)]
 mod store_tests;
 #[cfg(test)]
 mod test_rng;
@@ -82,4 +84,4 @@ pub use log::{Durability, LogStats};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
 pub use page_file::{CreateOptions, PageFile};
 pub use snapshot_copy::{CopyDestination, CopyFailure, CopyReport};
-pub use store::{FileReport, ReadTransaction, Store, WriteTransaction};
+pub use store::{FileReport, ReadTransaction, Store, ValueReader, WriteTransaction};

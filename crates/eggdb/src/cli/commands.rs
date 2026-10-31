@@ -225,12 +225,19 @@ impl<'a> Session<'a> {
             }
             None => ByteArgument::Stdin,
         };
+        if let ByteArgument::File(path) = &value
+            && self.request.collection.is_none()
+            && self.request.ttl.is_none()
+        {
+            let path = path.clone();
+            return self.put_streamed(&key, &path);
+        }
         let value = self.resolve(Some(value))?;
         if self.request.create
             && self.request.collection.is_none()
             && std::fs::symlink_metadata(&self.request.file).is_err()
         {
-            self.refuse_what_a_new_file_cannot_store(&key, &value, self.request.ttl.is_some())?;
+            self.refuse_what_a_new_file_cannot_store(&key, value.len(), self.request.ttl.is_some())?;
         }
         let cache = cache_for_value(value.len());
         let db = self.open(
@@ -274,10 +281,44 @@ impl<'a> Session<'a> {
         Ok(Exit::Done)
     }
 
+    fn put_streamed(&mut self, key: &[u8], path: &std::path::Path) -> Result<Exit, Failure> {
+        let unreadable =
+            |error: std::io::Error| Failure::usage(format!("cannot read @{}: {error}", path.display()), Some(CommandName::Put));
+        let mut source = std::fs::File::open(path).map_err(unreadable)?;
+        let len = source.metadata().map_err(unreadable)?.len();
+        let value_bytes = usize::try_from(len).unwrap_or(usize::MAX);
+        if self.request.create && std::fs::symlink_metadata(&self.request.file).is_err() {
+            self.refuse_what_a_new_file_cannot_store(key, value_bytes, false)?;
+        }
+        let db = self.open(
+            Access::Write {
+                create: self.request.create,
+            },
+            Some(cache_for_value(value_bytes)),
+        )?;
+        db.write(|transaction| transaction.put_reader(key, len, &mut source))
+            .map_err(|error| {
+                self.key_space_failure(
+                    &error,
+                    &format!("cannot store {} in {}", render::text(key), self.file),
+                )
+            })?;
+        self.close(db)?;
+        if self.format == Format::Json {
+            self.out.text(
+                &JsonObject::new()
+                    .bytes("key", key)
+                    .boolean("stored", true)
+                    .line(),
+            );
+        }
+        Ok(Exit::Done)
+    }
+
     fn refuse_what_a_new_file_cannot_store(
         &self,
         key: &[u8],
-        value: &[u8],
+        value_bytes: usize,
         expires: bool,
     ) -> Result<(), Failure> {
         let deadline_bytes = if expires { EXPIRY_KEY_OVERHEAD_BYTES } else { 0 };
@@ -287,9 +328,9 @@ impl<'a> Session<'a> {
                 bytes: key.len(),
                 max: max_key,
             }
-        } else if value.len() > BTree::MAX_VALUE_BYTES {
+        } else if value_bytes > BTree::MAX_VALUE_BYTES {
             StorageError::ValueTooLarge {
-                bytes: value.len(),
+                bytes: value_bytes,
                 max: BTree::MAX_VALUE_BYTES,
             }
         } else {
@@ -308,6 +349,9 @@ impl<'a> Session<'a> {
     fn get(&mut self) -> Result<Exit, Failure> {
         let key = self.resolve(self.request.key.clone())?;
         let db = self.open(Access::ReadOnly, None)?;
+        if self.format == Format::Raw && self.request.collection.is_none() {
+            return self.get_streamed(&db, &key);
+        }
         let found = match &self.request.collection {
             Some(name) => db.collection(name).get(&key),
             None => db.get(&key),
@@ -342,6 +386,36 @@ impl<'a> Session<'a> {
                 self.out.text("\n");
             }
             Format::Raw => self.out.write_through(&value)?,
+        }
+        Ok(Exit::Done)
+    }
+
+    fn get_streamed(&mut self, db: &Database, key: &[u8]) -> Result<Exit, Failure> {
+        let context = format!("cannot read {} from {}", render::text(key), self.file);
+        let transaction = db
+            .begin_read()
+            .map_err(|error| self.key_space_failure(&error, &context))?;
+        let found = transaction
+            .get_reader(key)
+            .map_err(|error| self.key_space_failure(&error, &context))?;
+        let Some(mut reader) = found else {
+            self.error_message(&format!("key not found: {}", render::text(key)));
+            return Ok(Exit::NotFound);
+        };
+        let mut buffer = vec![0u8; STREAM_CHUNK_BYTES];
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => {
+                    let failure = match error.into_inner().map(|inner| inner.downcast::<Error>()) {
+                        Some(Ok(error)) => self.key_space_failure(&error, &context),
+                        _ => Failure::database(context, Exit::DatabaseError),
+                    };
+                    return Err(failure);
+                }
+            };
+            self.out.write_through(&buffer[..read])?;
         }
         Ok(Exit::Done)
     }
@@ -783,6 +857,8 @@ fn mcp_may_hold(file: &str) -> String {
         "  it may be an AI agent's call through eggdb mcp, which holds the file for up to its time limit; run the command again, or see `eggdb audit {file}`."
     )
 }
+
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
 fn cache_for_value(value_bytes: usize) -> usize {
     let needed = value_bytes

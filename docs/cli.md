@@ -113,7 +113,8 @@ is an error, never an empty value. Stdin can be read once per command.
 
 `--format text|json|hex|raw` (short `-F`), and `--json`, the same as `--format json` (the last
 of them given wins). By default a terminal gets `text`, and a pipe or a file gets `json`, except
-`get`, which gets `raw` so that `eggdb get app.db photo > photo.jpg` gives back the bytes, and
+`get`, which gets `raw` so that `eggdb get app.db photo > photo.jpg` gives back the bytes,
+streamed a page at a time, and
 `sql`, `help` and `version`, which keep their text in a pipe. `ui`, `shell` and `mcp` take no
 `--format`. `hex` and `raw` are for `get` and `scan`, the
 commands that print data.
@@ -347,7 +348,8 @@ edit is not committed).
   the guard is seeing the question and 300 ms of quiet, not an absolute guarantee. `Ctrl-C` is
   handled first and never confirms a change: it quits at once, or, with an unsaved edit, asks
   first and quits on a second `Ctrl-C`. No transaction is open while an editor is. The editor
-  takes values up to 4 MiB of text; store larger ones with `eggdb put <file> <key> @file`.
+  takes values up to 4 MiB of text; store larger ones with `eggdb put <file> <key> @file`,
+  which streams the file into the database a page at a time.
 - **When a change fails**, nothing is committed and the editor keeps its text. Errors read
   `Error (<Kind>): <message>` with the engine's kind and message: `TooLarge` (one commit's
   pages must fit in the page cache, so a larger `--cache` helps), `WriterActive` (`r` waits up

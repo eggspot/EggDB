@@ -478,6 +478,34 @@ in the snapshot memory. When that memory runs out, the oldest snapshots expire w
 `SnapshotTooOld`, so a forgotten reader never blocks the writer. Keep read transactions short,
 or give them more `snapshot_memory_bytes`.
 
+## Large values, streamed
+`get_reader` on a read or write transaction gives a value as a `std::io::Read`, reading its
+overflow pages one at a time, so a value of any size goes to a file or a socket without being
+held whole in memory. `put_reader` stores a value of a given length from any reader the same
+way:
+
+```rust,no_run
+use std::fs::File;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = eggdb::Database::open("app.db")?;
+    let mut photo = File::open("photo.jpg")?;
+    let len = photo.metadata()?.len();
+    db.write(|tx| tx.put_reader("photo", len, &mut photo))?;
+    let tx = db.begin_read()?;
+    if let Some(mut reader) = tx.get_reader("photo")? {
+        std::io::copy(&mut reader, &mut File::create("copy.jpg")?)?;
+    }
+    Ok(())
+}
+```
+
+A reader keeps its transaction's snapshot: a commit that replaces the value while it is being
+read does not change what it reads. A source that fails, ends before the length given or holds
+more rolls the transaction back. Written pages stay in the page cache until the commit, like
+every page a write transaction changes, so a value still needs about its size in cache
+(`Options::cache_bytes`).
+
 ## EggDB's memory allocator
 A program can hand all of its memory, EggDB's included, to EggDB's own allocator. It keeps a
 cache of free blocks per thread for each size up to 32 KiB, so most allocations and frees take
@@ -521,8 +549,10 @@ fn main() -> eggdb::Result<()> {
 ## Limits in this release
 - **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
   with 64 KiB pages (`db.max_key_bytes()`).
-- **Size of values:** at most 1 GiB (`db.max_value_bytes()`). A value is read and written
-  whole, so it takes its size in memory while it is used; a streaming read comes later.
+- **Size of values:** at most 1 GiB (`db.max_value_bytes()`). `get` and `put` take the value
+  whole; `get_reader` and `put_reader` stream it a page at a time (see
+  [Large values, streamed](#large-values-streamed)). A value being written still needs about its
+  size in page cache until the commit.
   - A key and value of up to `3 × page_size / 16 − 18` bytes together (750 bytes with 4 KiB
     pages, 12,270 with 64 KiB pages) sit in a B+tree leaf.
   - A longer value goes to overflow pages of its own, about one page per 4,056 bytes with 4

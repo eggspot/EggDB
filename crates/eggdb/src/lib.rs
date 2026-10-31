@@ -81,7 +81,7 @@ pub use eggdb_storage::CommitStamp;
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};
 pub use scan::{KeyRange, Scan};
-pub use transaction::{ReadTransaction, WriteTransaction};
+pub use transaction::{ReadTransaction, ValueReader, WriteTransaction};
 
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/embedded.md")]

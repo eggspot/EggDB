@@ -228,6 +228,17 @@ impl WriteTransaction<'_> {
         Ok(())
     }
 
+    pub(crate) fn put_live_from_reader(
+        &mut self,
+        stored: &[u8],
+        len: u64,
+        source: &mut dyn std::io::Read,
+    ) -> Result<()> {
+        self.put_raw_from_reader(stored, len, source)?;
+        self.clear_deadline(stored)?;
+        Ok(())
+    }
+
     pub(crate) fn put_if_absent_live(&mut self, stored: &[u8], value: &[u8]) -> Result<bool> {
         if self.is_expired(stored)? {
             self.remove_stored(stored)?;

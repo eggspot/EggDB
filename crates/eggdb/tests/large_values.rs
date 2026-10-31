@@ -148,3 +148,40 @@ fn a_value_larger_than_the_cache_is_refused_and_the_write_continues() {
     assert_eq!(db.get("fits").unwrap(), Some(vec![1; 512 << 10]));
     assert_eq!(db.get("big").unwrap(), None);
 }
+
+#[test]
+fn values_stream_in_and_out_a_piece_at_a_time() {
+    use std::io::Read;
+    let file = TempPath::new("streamed-values");
+    let db = Database::open(file.path()).unwrap();
+    let big = patterned(3 << 20, 7);
+    let small = patterned(100, 9);
+    let mut tx = db.begin_write().unwrap();
+    tx.put_reader("big", big.len() as u64, &mut big.as_slice())
+        .unwrap();
+    tx.put_reader("small", small.len() as u64, &mut small.as_slice())
+        .unwrap();
+    let mut inside = tx.get_reader("big").unwrap().unwrap();
+    let mut first = vec![0; 5000];
+    inside.read_exact(&mut first).unwrap();
+    assert_eq!(first, big[..5000]);
+    drop(inside);
+    tx.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    for (key, value) in [("big", &big), ("small", &small)] {
+        let mut reader = read.get_reader(key).unwrap().unwrap();
+        assert_eq!(reader.len(), value.len() as u64);
+        let mut copied = Vec::new();
+        std::io::copy(&mut reader, &mut copied).unwrap();
+        assert_eq!(&copied, value);
+        assert_eq!(reader.remaining(), 0);
+    }
+    assert!(read.get_reader("absent").unwrap().is_none());
+    drop(read);
+    let short = patterned(10, 1);
+    let mut tx = db.begin_write().unwrap();
+    assert!(tx.put_reader("short", 20, &mut short.as_slice()).is_err());
+    drop(tx);
+    assert_eq!(db.get("short").unwrap(), None);
+    assert_eq!(db.check().unwrap().overflow_values, 1);
+}

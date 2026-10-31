@@ -829,3 +829,17 @@ fn import_reads_dev_stdin_given_as_a_path_once() {
     let copy = dir.eggdb(&["scan", "copy.db", "-F", "hex"]);
     assert_eq!(copy.stdout, source.stdout);
 }
+
+#[test]
+fn put_from_a_file_and_raw_get_stream_large_values() {
+    let dir = TempDirectory::new("streamed-cli");
+    let value: Vec<u8> = (0..3_000_000_u32).map(|index| (index % 253) as u8).collect();
+    std::fs::write(dir.path().join("value.bin"), &value).unwrap();
+    assert_exit(&dir.eggdb(&["put", "--create", "app.db", "big", "@value.bin"]), 0);
+    let raw = dir.eggdb(&["get", "app.db", "big", "-F", "raw"]);
+    assert_exit(&raw, 0);
+    assert!(raw.stdout == value);
+    let missing = dir.eggdb(&["put", "app.db", "other", "@absent.bin"]);
+    assert_exit(&missing, 2);
+    assert!(stderr(&missing).starts_with("eggdb: cannot read @absent.bin: "));
+}
