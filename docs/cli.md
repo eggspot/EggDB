@@ -1019,7 +1019,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]
+eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1050,6 +1050,7 @@ eggdb serve --create app.db
 | `--log-batches` | log the first 200 characters of each TDS batch and RPC call (`sp_executesql` and the prepared-statement procedures) and each transaction manager request to stderr, to see what a client sends; never the login or its password. Off by default |
 | `--user <name>` | the one user clients log in as, with SCRAM-SHA-256 (and MySQL's methods on `--mysql-listen`). Default `eggdb` |
 | `--password-file <file>` | the password is the file's first line; `-` reads it from stdin. Without it, `EGGDB_PASSWORD`. Never on the command line. ASCII only in this release (SASLprep is not implemented). Prefer the file: `EGGDB_PASSWORD` stays in the server's environment for as long as it runs, where the same user (and on some systems an administrator) can read it, for example through `/proc/<pid>/environ` on Linux |
+| `--auth-rules <file>` | how users other than `--user` log in: per user, their stored password (SCRAM-SHA-256, the default), an LDAP simple bind, an OpenID Connect token, or never; LDAP and tokens only over TLS or the local socket ([sql.md](sql.md#roles-and-privileges), D185) |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
 | `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, so slow or failing logins cannot take every slot; a 17th gets `53300` too |
 | `--socket-dir <directory>` | also accept PostgreSQL connections on a Unix socket in that directory, named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory> -p <port>` connects; the socket is readable and writable by its owner only, a stale socket file is replaced, and it is removed at stop. Not on Windows yet |
