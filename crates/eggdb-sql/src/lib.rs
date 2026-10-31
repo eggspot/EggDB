@@ -106,6 +106,7 @@ mod notifications;
 mod roles;
 mod row_security;
 mod sqlite_datetime;
+mod tenancy;
 mod text_search;
 mod sqlite_functions;
 mod sqlserver_catalog;

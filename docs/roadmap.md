@@ -184,7 +184,8 @@ More tracks that run alongside the milestones, each starting where its dependenc
   Unicode's own data, with `normalize()` in SQL (D233).
 - **AI (D31):** after vectors (M12) and the MCP server (M6).
 - **Relational completeness and multi-tenancy (D32):** across the SQL milestones, tracked as a
-  conformance list.
+  conformance list. Started: tenants isolated by row with quotas, through `eggdb_tenancy`
+  (D234).
 
 From the second gap review (D37–D45):
 - **M6 is split** into M6a to M6f (table above), with security in the first piece (D45).

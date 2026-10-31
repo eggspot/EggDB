@@ -2350,6 +2350,23 @@ COMMIT;
 When the `INSERT` inserts no row, the message was handled before: roll back instead of
 committing, and acknowledge the message.
 
+## Tenants (eggdb_tenancy)
+
+`CREATE EXTENSION eggdb_tenancy` isolates tenants that share tables (D234):
+
+```sql
+CREATE EXTENSION eggdb_tenancy;
+CREATE TABLE notes (id serial PRIMARY KEY, tenant text NOT NULL, body text);
+SELECT eggdb_tenancy.isolate('public', 'notes', 'tenant');
+INSERT INTO eggdb_tenancy.tenants (tenant, max_rows) VALUES ('acme', 10000);
+SET eggdb.tenant = 'acme';
+```
+
+After `isolate`, a session sees and writes only the rows whose tenant column equals its
+`eggdb.tenant` setting, and a session that has set none gets an error instead of any rows. This
+holds for roles that do not bypass row security, so connect the application as such a role. A
+tenant with `max_rows` gets SQLSTATE `53400` once it holds that many rows in a table.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form

@@ -480,7 +480,7 @@ impl<'t> Parser<'t> {
         self.expect_word("extension")?;
         let if_not_exists = self.if_not_exists()?;
         let name = self.name()?;
-        if let Some(bundled) = ["pg_cron", "eggdb_cdc"].into_iter().find(|bundled| *bundled == name.text) {
+        if let Some(bundled) = ["pg_cron", "eggdb_cdc", "eggdb_tenancy"].into_iter().find(|bundled| *bundled == name.text) {
             self.skip_statement();
             return Ok(Statement::InstallExtension { name: bundled, if_not_exists });
         }
@@ -489,7 +489,7 @@ impl<'t> Parser<'t> {
                 "extension \"{}\" is not supported",
                 name.text
             ))
-            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron, eggdb_cdc, vector and postgis only; other extensions are not available yet.")
+            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron, eggdb_cdc, eggdb_tenancy, vector and postgis only; other extensions are not available yet.")
             .at(name.position));
         }
         self.skip_statement();

@@ -2057,6 +2057,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     fn install_extension(&mut self, name: &str, if_not_exists: bool) -> SqlResult<QueryResult> {
         let (schema, script) = match name {
             "pg_cron" => ("cron", crate::jobs::PG_CRON_SCRIPT),
+            "eggdb_tenancy" => ("eggdb_tenancy", crate::tenancy::TENANCY_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;
