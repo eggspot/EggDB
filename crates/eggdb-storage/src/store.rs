@@ -271,6 +271,12 @@ impl<'s, F: File> ReadTransaction<'s, F> {
         self.page_size
     }
 
+    /// The cipher the file's pages are encrypted with, which a copy of an encrypted file
+    /// keeps (D187).
+    pub fn page_cipher(&self) -> Result<Option<crate::page_cipher::PageCipher>, StorageError> {
+        Ok(self.store.lock()?.cache.page_cipher())
+    }
+
     /// Opens the tree whose root is page `root` as of the snapshot (see [`BTree::open`]).
     pub fn open_tree(&self, root: u64) -> Result<BTree, StorageError> {
         let state = self.store.lock()?;

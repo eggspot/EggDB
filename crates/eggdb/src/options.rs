@@ -74,6 +74,16 @@ pub struct Options {
     pub(crate) clock: ClockChoice,
     pub(crate) lock_cache: bool,
     pub(crate) compress_values: bool,
+    pub(crate) encryption_key: Option<EncryptionKey>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EncryptionKey(pub(crate) [u8; eggdb_storage::PAGE_KEY_BYTES]);
+
+impl std::fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EncryptionKey(..)")
+    }
 }
 
 #[derive(Clone, Default)]
@@ -124,6 +134,7 @@ impl Options {
             clock: ClockChoice::default(),
             lock_cache: false,
             compress_values: false,
+            encryption_key: None,
         }
     }
 
@@ -178,6 +189,16 @@ impl Options {
     /// refuses to open it rather than misread it; reading needs no option.
     pub fn compress_values(mut self, compress: bool) -> Self {
         self.compress_values = compress;
+        self
+    }
+
+    /// Encrypts the database's pages with `key` (D187): a new file is created encrypted, and an
+    /// encrypted file opens only with the key it was created with. Every page that holds keys
+    /// or values, in place and in the write-ahead log, is encrypted with AES-256 in counter
+    /// mode under a key derived from this one. A file created without a key cannot take one
+    /// yet. Keep the key safe: without it the data cannot be read.
+    pub fn encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.encryption_key = Some(EncryptionKey(key));
         self
     }
 

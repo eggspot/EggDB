@@ -178,6 +178,11 @@ impl<F: File> PageCache<F> {
         self.file.borrow().page_size()
     }
 
+    /// The cipher the file's pages are encrypted with, once its key was given (D187).
+    pub fn page_cipher(&self) -> Option<crate::page_cipher::PageCipher> {
+        self.file.borrow().page_cipher().cloned()
+    }
+
     /// The superblock of the last commit.
     pub fn superblock(&self) -> Superblock {
         *self.file.borrow().superblock()

@@ -176,11 +176,16 @@ impl<F: File> ReadTransaction<'_, F> {
             page_size: self.page_size(),
             file_id: FileId::random(),
         };
-        let file = PageFile::create(fs, destination.staging, options).inspect_err(|error| {
+        let mut file = PageFile::create(fs, destination.staging, options).inspect_err(|error| {
             if !is_already_exists(error) {
                 let _ = fs.remove_file(destination.staging);
             }
         })?;
+        if let Some(cipher) = self.page_cipher()? {
+            file.adopt_cipher(cipher).inspect_err(|_| {
+                let _ = fs.remove_file(destination.staging);
+            })?;
+        }
         self.fill(file, memory, clock, source, survey)
             .inspect_err(|_| {
                 let _ = fs.remove_file(destination.staging);

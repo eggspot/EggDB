@@ -40,6 +40,8 @@ mod compression;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
+mod encryption_tests;
+#[cfg(test)]
 mod crash_sweep_tests;
 mod crc32c;
 mod cursor;
@@ -59,6 +61,7 @@ mod overflow_mutation_tests;
 #[cfg(test)]
 mod overflow_tests;
 mod page_cache;
+mod page_cipher;
 mod page_file;
 mod page_set;
 mod page_table;
@@ -81,13 +84,14 @@ pub use cursor::{Cursor, ScanOrder};
 pub use error::{FormatError, StorageError};
 pub use format::{
     Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC,
-    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
+    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
     PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
 pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};
 pub use lsm::{LsmCursor, LsmReport, LsmTree};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
+pub use page_cipher::{PAGE_KEY_BYTES, PageCipher};
 pub use page_file::{CreateOptions, PageFile};
 pub use snapshot_copy::{CopyDestination, CopyFailure, CopyReport};
 pub use store::{FileReport, ReadTransaction, Store, ValueReader, WriteTransaction};

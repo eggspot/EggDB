@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-platform = { path = "../eggdb-platform" }
 
 [lints]

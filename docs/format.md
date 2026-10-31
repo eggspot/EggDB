@@ -75,7 +75,8 @@ slot 1. A superblock found in the other slot is refused.
 | 136 | 56 | `recycled_segments` | seven first pages of log segments emptied by checkpoints, kept for reuse before the file grows. 0 marks an unused entry. |
 | 192 | 8 | `log_sequence_reserved` | the highest log segment sequence number a writer may have used (see "Segment sequences") |
 | 200 | 32 | reserved for the consensus hard state (term and vote, M15) | written as zero |
-| 232 | 280 | reserved | written as zero |
+| 232 | 16 | `page_key_check` | for a file with `ENCRYPTED_PAGES`, the first 16 bytes of HMAC-SHA256(derived key, "EggDB page key check"); zero otherwise (D187) |
+| 248 | 264 | reserved | written as zero |
 
 Every page pointer (`free_list_head`, `catalog_root`, `log_head_page` and the recycled
 segments) must be 0 or lie between `first_data_page` and `page_count − 1`. A log segment
@@ -126,6 +127,7 @@ other than 0, compression and encryption. The bits defined so far:
 |-----|----:|------|--------|
 | read-only compatible | 0 | `EXPIRING_KEYS` | the first commit that gives a key a time to live (D140). A release without expiring keys would show expired keys and could write a key without removing its deadline, so it may only read the file. The bit stays set. |
 | incompatible | 0 | `COMPRESSED_VALUES` | the first commit that writes a value compressed on overflow pages of layout 2 (D171). A release without them would refuse those pages as damaged, so it refuses the file at open instead. The bit stays set. |
+| incompatible | 1 | `ENCRYPTED_PAGES` | the data pages are encrypted with AES-256-CTR under a key derived from the user's (D187); the file opens only with that key, checked against `page_key_check` |
 
 ## Pages
 Every page except the header slots starts with a 16-byte header:
@@ -135,7 +137,7 @@ Every page except the header slots starts with a 16-byte header:
 | 0 | 4 | `checksum` | see below |
 | 4 | 1 | `page_type` | see the table below. 0 is never valid, so a page that was never written is refused. |
 | 5 | 1 | `layout` | the layout version of this page type |
-| 6 | 2 | `flags` | reserved for per-page compression and encryption. 0 in version 1, and a reader refuses anything else. |
+| 6 | 2 | `flags` | bit 0 (`PAGE_ENCRYPTED`): the bytes after the header are encrypted (D187). A reader refuses any other bit. |
 | 8 | 8 | `lsn` | the log position of the last change to the page |
 
 **The checksum** is CRC-32C, computed as

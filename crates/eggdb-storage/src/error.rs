@@ -293,6 +293,12 @@ pub enum StorageError {
     /// Every commit stamp has been handed out: the hybrid clock's high-water mark is at the
     /// largest stamp there is.
     ClockExhausted,
+    /// The file's pages are encrypted (D187) and no key was given to open it.
+    NeedsKey,
+    /// The key given does not open this file, or is not [`crate::PAGE_KEY_BYTES`] long.
+    WrongKey,
+    /// A key was given for a file whose pages are not encrypted.
+    NotEncrypted,
     /// A copy of a snapshot, checked after it was written, does not hold what the snapshot
     /// held, or holds pages nothing uses (see
     /// [`ReadTransaction::copy_to`](crate::ReadTransaction::copy_to)); the copy is not kept.
@@ -400,6 +406,13 @@ impl fmt::Display for StorageError {
             ),
             Self::ClockExhausted => f.write_str(
                 "every commit stamp has been handed out: the file's clock high-water mark is at its largest value",
+            ),
+            Self::NeedsKey => f.write_str(
+                "the database is encrypted; open it with its key (--key-file, or Options::encryption_key)",
+            ),
+            Self::WrongKey => f.write_str("the key does not open this database"),
+            Self::NotEncrypted => f.write_str(
+                "the database was created without encryption; a key cannot be added to it yet",
             ),
             Self::CopyIncomplete {
                 expected,

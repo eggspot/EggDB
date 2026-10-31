@@ -188,6 +188,8 @@ fn kind_of(error: &StorageError) -> ErrorKind {
         StorageError::WriterActive | StorageError::UncommittedChanges => ErrorKind::WriterActive,
         StorageError::TransactionFailed => ErrorKind::TransactionFailed,
         StorageError::SnapshotTooOld => ErrorKind::SnapshotTooOld,
+        StorageError::NeedsKey | StorageError::WrongKey => ErrorKind::PermissionDenied,
+        StorageError::NotEncrypted => ErrorKind::InvalidOption,
         _ => ErrorKind::Other,
     }
 }

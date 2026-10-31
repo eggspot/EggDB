@@ -396,3 +396,22 @@ fn a_database_in_memory_works_and_leaves_no_file() {
     );
     assert_eq!(db.compact().unwrap_err().kind(), eggdb::ErrorKind::InvalidOption);
 }
+
+#[test]
+fn an_encrypted_database_opens_only_with_its_key_and_keeps_no_plaintext() {
+    let file = TempPath::new("encrypted");
+    let key = [0x42u8; 32];
+    let db = Database::open_with(file.path(), Options::new().encryption_key(key)).unwrap();
+    db.put("card", "4111 1111 1111 1111").unwrap();
+    db.close().unwrap();
+    let raw = std::fs::read(file.path()).unwrap();
+    assert!(!raw.windows(19).any(|window| window == b"4111 1111 1111 1111"));
+    let error = Database::open(file.path()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    let error =
+        Database::open_with(file.path(), Options::new().encryption_key([7; 32])).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    let db = Database::open_with(file.path(), Options::new().encryption_key(key)).unwrap();
+    assert_eq!(db.get("card").unwrap(), Some(b"4111 1111 1111 1111".to_vec()));
+    assert_eq!(db.check().unwrap().entries, 1);
+}

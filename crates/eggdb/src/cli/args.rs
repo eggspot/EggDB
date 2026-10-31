@@ -185,7 +185,7 @@ impl CommandName {
 
     fn takes(self, option: OptionName) -> bool {
         match option {
-            OptionName::Cache | OptionName::Help | OptionName::Version => true,
+            OptionName::Cache | OptionName::KeyFile | OptionName::Help | OptionName::Version => true,
             OptionName::Color => true,
             OptionName::Format | OptionName::Json => {
                 !matches!(self, Self::Ui | Self::Shell | Self::Mcp)
@@ -326,6 +326,7 @@ enum OptionName {
     Json,
     Color,
     Cache,
+    KeyFile,
     Help,
     Version,
     PageSize,
@@ -391,6 +392,7 @@ impl OptionName {
             b"json" => Self::Json,
             b"color" => Self::Color,
             b"cache" => Self::Cache,
+            b"key-file" => Self::KeyFile,
             b"help" => Self::Help,
             b"version" => Self::Version,
             b"page-size" => Self::PageSize,
@@ -501,6 +503,31 @@ pub(crate) enum Invocation {
     Run(Box<Request>),
 }
 
+/// A database key read from `--key-file`: 64 hexadecimal digits, 32 bytes (D187).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EncryptionKey(pub(crate) [u8; 32]);
+
+impl std::fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EncryptionKey(..)")
+    }
+}
+
+fn read_key_file(path: &str) -> Result<EncryptionKey, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read --key-file {path}: {error}"))?;
+    let digits = text.trim();
+    let wrong = || format!("--key-file {path} must hold 64 hexadecimal digits (32 bytes), such as from: openssl rand -hex 32");
+    if digits.len() != 64 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(wrong());
+    }
+    let mut key = [0u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&digits[2 * index..2 * index + 2], 16).map_err(|_| wrong())?;
+    }
+    Ok(EncryptionKey(key))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Request {
     pub(crate) command: CommandName,
@@ -510,6 +537,7 @@ pub(crate) struct Request {
     pub(crate) format: Option<Format>,
     pub(crate) color: ColorChoice,
     pub(crate) cache_bytes: Option<usize>,
+    pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) page_size: Option<usize>,
     pub(crate) create: bool,
     pub(crate) scan: ScanOptions,
@@ -890,6 +918,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         format: None,
         color: ColorChoice::Auto,
         cache_bytes: None,
+        encryption_key: None,
         page_size: None,
         create: false,
         scan: ScanOptions::default(),
@@ -944,6 +973,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Color => request.color = parse_color(value).map_err(usage)?,
             OptionName::Cache => {
                 request.cache_bytes = Some(parse_size(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::KeyFile => {
+                request.encryption_key = Some(read_key_file(value).map_err(usage)?);
             }
             OptionName::PageSize => {
                 request.page_size = Some(parse_page_size(&option.spelled, value).map_err(usage)?);

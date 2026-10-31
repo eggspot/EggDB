@@ -290,10 +290,17 @@ impl Database {
     }
 
     fn with_page_file(
-        file: PageFile<DatabaseFile>,
+        mut file: PageFile<DatabaseFile>,
         path: &Path,
         options: &Options,
     ) -> Result<Self> {
+        match &options.encryption_key {
+            Some(key) => file.use_page_key(&key.0).map_err(Error::storage)?,
+            None if file.is_encrypted() => {
+                return Err(Error::storage(eggdb_storage::StorageError::NeedsKey));
+            }
+            None => {}
+        }
         let page_size = file.page_size();
         options.check_cache_holds(page_size)?;
         let mut cache = PageCache::new(

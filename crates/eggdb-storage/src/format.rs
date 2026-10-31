@@ -28,6 +28,9 @@ pub const RECYCLED_SEGMENTS: usize = 7;
 /// The page number that means "no page", used for empty lists and absent roots. Page 0 always
 /// holds the first header slot, so it never names a data page.
 pub const NO_PAGE: u64 = 0;
+/// The page flag of a page whose body (after its 16-byte header) is encrypted (D187).
+pub const PAGE_ENCRYPTED: u16 = 1;
+const PAGE_KEY_CHECK_AT: usize = 232;
 
 /// The longest a log segment may be, in bytes: 64 MiB.
 pub const MAX_LOG_SEGMENT_BYTES: u64 = 64 << 20;
@@ -132,8 +135,7 @@ pub struct PageHeader {
     /// The layout version of this page type, so one type can change its layout behind a
     /// feature flag without a new type byte.
     pub layout: u8,
-    /// Bits reserved for per-page compression and encryption; zero in this format, and refused
-    /// otherwise.
+    /// Per-page flags: [`PAGE_ENCRYPTED`] or zero; other bits are refused.
     pub flags: u16,
     /// The position in the write-ahead log of the last change to this page.
     pub lsn: u64,
@@ -173,8 +175,12 @@ impl Features {
     /// The incompatible bit of a file that holds values compressed on overflow pages of
     /// layout 2 (D171): a release that does not know it would refuse those pages as damaged.
     pub const COMPRESSED_VALUES: u64 = 1 << 0;
-    /// The incompatible features this release knows: [`Features::COMPRESSED_VALUES`].
-    pub const KNOWN_INCOMPATIBLE: u64 = Self::COMPRESSED_VALUES;
+    /// The incompatible bit of a file whose data pages are encrypted (D187): it opens only with
+    /// its key, and a release that does not know it would read ciphertext as damaged pages.
+    pub const ENCRYPTED_PAGES: u64 = 1 << 1;
+    /// The incompatible features this release knows: [`Features::COMPRESSED_VALUES`] and
+    /// [`Features::ENCRYPTED_PAGES`].
+    pub const KNOWN_INCOMPATIBLE: u64 = Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES;
 
     /// Whether this release may open a file with these features for `access`. Unknown
     /// compatible bits are ignored, unknown read-only-compatible bits refuse a write, and
@@ -263,6 +269,8 @@ pub struct Superblock {
     /// file starts above it, and writes the header again before it uses a higher one, so no
     /// sequence number is ever used twice.
     pub log_sequence_reserved: u64,
+    /// The check value of the key an encrypted file's pages are encrypted with, zero otherwise.
+    pub page_key_check: [u8; 16],
 }
 
 impl Superblock {
@@ -315,6 +323,7 @@ impl Superblock {
             LOG_SEQUENCE_RESERVED_AT,
             self.log_sequence_reserved,
         );
+        slot[PAGE_KEY_CHECK_AT..PAGE_KEY_CHECK_AT + 16].copy_from_slice(&self.page_key_check);
         let checksum = superblock_checksum(&slot);
         write_u32(&mut slot, SUPERBLOCK_CHECKSUM_AT, checksum);
         slot
@@ -359,6 +368,9 @@ impl Superblock {
             log_segment_pages: read_u32(slot, 128),
             recycled_segments,
             log_sequence_reserved: read_u64(slot, LOG_SEQUENCE_RESERVED_AT),
+            page_key_check: slot[PAGE_KEY_CHECK_AT..PAGE_KEY_CHECK_AT + 16]
+                .try_into()
+                .unwrap_or_default(),
         };
         if superblock.slot() != slot_index {
             return Err(FormatError::InvalidField {
@@ -579,7 +591,7 @@ impl PageChecksum {
     ) -> Result<(), FormatError> {
         self.check_length(page)?;
         self.check_page_id(page_id)?;
-        if header.flags != 0 {
+        if header.flags & !PAGE_ENCRYPTED != 0 {
             return Err(FormatError::InvalidField { field: "flags" });
         }
         page[4] = header.page_type.to_byte();
@@ -604,7 +616,7 @@ impl PageChecksum {
             found: page[4],
         })?;
         let flags = read_u16(page, 6);
-        if flags != 0 {
+        if flags & !PAGE_ENCRYPTED != 0 {
             return Err(FormatError::InvalidField { field: "flags" });
         }
         Ok(PageHeader {
@@ -671,6 +683,7 @@ mod tests {
             log_segment_pages: 16,
             recycled_segments: [40, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE],
             log_sequence_reserved: generation + 9,
+            page_key_check: [0; 16],
         }
     }
 
@@ -996,16 +1009,22 @@ mod tests {
     }
 
     #[test]
-    fn page_flags_other_than_zero_are_refused() {
+    fn page_flags_other_than_encrypted_are_refused() {
         let mut rng = TestRng::new(4);
         let mut page = written_page(&mut rng, 3, 1);
+        let encrypted = PageHeader {
+            flags: super::PAGE_ENCRYPTED,
+            ..leaf(1)
+        };
+        assert!(checksums().write(&mut page, 3, &encrypted).is_ok());
+        assert_eq!(checksums().verify(&page, 3), Ok(encrypted));
         let flagged = PageHeader {
-            flags: 1,
+            flags: 2,
             ..leaf(1)
         };
         let field = FormatError::InvalidField { field: "flags" };
         assert_eq!(checksums().write(&mut page, 3, &flagged), Err(field));
-        page[6] = 1;
+        page[6] = 2;
         let checksum = checksums().checksum(&page, 3);
         page[..4].copy_from_slice(&checksum.to_le_bytes());
         assert_eq!(checksums().verify(&page, 3), Err(field));
