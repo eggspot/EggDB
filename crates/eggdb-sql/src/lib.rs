@@ -32,6 +32,7 @@ mod constraints;
 mod copy;
 mod datetime;
 mod deferred_checks;
+mod dump;
 mod destructive;
 mod dialect;
 mod encoding;
@@ -208,6 +209,7 @@ pub use destructive::{
     DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,
 };
 pub use dialect::Dialect;
+pub use dump::{DumpReport, dump_sql};
 pub use error::{SqlError, SqlResult, SqlState};
 pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};

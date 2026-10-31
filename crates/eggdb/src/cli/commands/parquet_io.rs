@@ -274,3 +274,63 @@ mod tests {
         assert_eq!(decimal_text(7, 0), "7");
     }
 }
+
+impl Session<'_> {
+    pub(super) fn export_sql(&mut self, dialect: eggdb_sql::Dialect) -> Result<Exit, Failure> {
+        let target = match self.request.export_file.clone() {
+            Some(crate::cli::args::ExportFile::Path(path)) => Some(path),
+            _ => None,
+        };
+        if let Some(path) = &target
+            && std::fs::symlink_metadata(path).is_ok()
+        {
+            return Err(Failure::coded(
+                "already_exists",
+                format!("{} exists; eggdb export never replaces a file", render::text(path.display().to_string().as_bytes())),
+                Exit::DatabaseError,
+            ));
+        }
+        let db = self.open(Access::ReadOnly, None)?;
+        let store = DatabaseStore(&db);
+        let mut session = eggdb_sql::Session::new(&store);
+        let mut written = Vec::new();
+        let outcome = eggdb_sql::dump_sql(&mut session, dialect, &mut written);
+        let _ = session.close();
+        self.close(db)?;
+        let report = match outcome {
+            Ok(report) => report,
+            Err(error) => {
+                print_error(&mut self.messages, &error, "export --sql");
+                return Ok(exit_for(&error));
+            }
+        };
+        match &target {
+            Some(path) => std::fs::write(path, &written)
+                .map_err(|error| Failure::database(format!("cannot write the dump: {error}"), Exit::DatabaseError))?,
+            None => self.out.bytes(&written),
+        }
+        let summary = format!(
+            "exported {} tables and {} rows as {} SQL{}\n",
+            render::count(report.tables),
+            render::count(report.rows),
+            dialect.name(),
+            if report.views_skipped > 0 { format!("; {} views were not written yet", report.views_skipped) } else { String::new() }
+        );
+        if target.is_some() {
+            match self.format {
+                Format::Json => self.out.text(
+                    &JsonObject::new()
+                        .number("tables", report.tables)
+                        .number("rows", report.rows)
+                        .number("indexes", report.indexes)
+                        .number("views_skipped", report.views_skipped)
+                        .line(),
+                ),
+                _ => self.out.text(&summary),
+            }
+        } else {
+            self.messages.text(&summary);
+        }
+        Ok(Exit::Done)
+    }
+}

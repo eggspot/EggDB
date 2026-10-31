@@ -242,6 +242,7 @@ impl CommandName {
             OptionName::Mode => self == Self::Shell,
             OptionName::DryRun => matches!(self, Self::Import | Self::Restore),
             OptionName::Table | OptionName::Parquet => matches!(self, Self::Import | Self::Export),
+            OptionName::SqlDump => self == Self::Export,
             OptionName::OnConflict
             | OptionName::Csv
             | OptionName::Header
@@ -386,6 +387,7 @@ enum OptionName {
     Mode,
     Csv,
     Parquet,
+    SqlDump,
     Table,
     Header,
     Delimiter,
@@ -464,6 +466,7 @@ impl OptionName {
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
             b"parquet" => Self::Parquet,
+            b"sql" => Self::SqlDump,
             b"table" => Self::Table,
             b"header" => Self::Header,
             b"delimiter" => Self::Delimiter,
@@ -639,6 +642,7 @@ pub(crate) struct CsvOptions {
     pub(crate) row_terminator: Option<String>,
     pub(crate) keep_nulls: bool,
     pub(crate) parquet: Option<PathBuf>,
+    pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1205,6 +1209,22 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
+            OptionName::SqlDump => {
+                request.csv.sql_dump = Some(match value.to_str().unwrap_or_default() {
+                    "postgresql" | "postgres" => eggdb_sql::Dialect::PostgreSql,
+                    "mysql" | "mariadb" => eggdb_sql::Dialect::MySql,
+                    "sqlserver" | "mssql" | "tsql" => eggdb_sql::Dialect::SqlServer,
+                    "oracle" => eggdb_sql::Dialect::Oracle,
+                    "sqlite" | "sqlite3" => eggdb_sql::Dialect::Sqlite,
+                    _ => {
+                        return Err(usage(format!(
+                            "{} takes postgresql, mysql, sqlserver, oracle or sqlite, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        )));
+                    }
+                });
+            }
             OptionName::Header => request.csv.header = true,
             OptionName::KeepNulls => request.csv.keep_nulls = true,
             OptionName::Table
@@ -1727,6 +1747,12 @@ fn parse_collection_name(option: Option<&str>, value: &OsStr) -> Result<String, 
 
 fn check_csv_options(request: &Request) -> Result<(), String> {
     let csv = &request.csv;
+    if csv.sql_dump.is_some() {
+        if csv.parquet.is_some() || csv.table.is_some() {
+            return Err("--sql writes every table; it does not go with --parquet or --table".to_owned());
+        }
+        return Ok(());
+    }
     if csv.parquet.is_some() {
         if csv.source.is_some() {
             return Err("give --csv or --parquet, not both".to_owned());
