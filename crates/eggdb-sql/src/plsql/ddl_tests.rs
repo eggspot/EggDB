@@ -303,7 +303,6 @@ fn hostile_plsql_ddl_is_refused_without_panicking() {
         "ALTER PROCEDURE p RECOMPILE",
         "CALL",
         "CALL p",
-        "BEGIN",
         "DECLARE",
         "<<",
         "<< x >> SELECT 1 FROM dual",

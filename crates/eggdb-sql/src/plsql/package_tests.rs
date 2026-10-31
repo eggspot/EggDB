@@ -135,12 +135,14 @@ fn the_initialization_part_runs_once_per_session() {
     let mut first = stats_session(&store);
     run(&mut first, "BEGIN stats.add_amount(1); END;");
     run(&mut first, "BEGIN stats.add_amount(2); END;");
+    run(&mut first, "COMMIT");
     let mut second = Session::with_dialect(&store, Dialect::Oracle);
     run(&mut second, "CALL stats.add_amount(0)");
     assert_eq!(
         single(&mut second, "SELECT stats.current_total() FROM dual"),
         "0"
     );
+    run(&mut second, "COMMIT");
     assert_eq!(
         single(&mut first, "SELECT stats.current_total() FROM dual"),
         "3"

@@ -840,6 +840,14 @@ fn fit(value: &Value, target: SqlType) -> Option<usize> {
     match value.sql_type() {
         None => Some(1),
         Some(source) if source.without_modifier() == target.without_modifier() => Some(3),
+        Some(source)
+            if (source.is_numeric() && target.is_numeric())
+                || (source.is_character() && target.is_character()) =>
+        {
+            convert(value.clone(), target, Conversion::Assignment)
+                .ok()
+                .map(|_| 2)
+        }
         Some(_) => convert(value.clone(), target, Conversion::Assignment)
             .ok()
             .or_else(|| {
