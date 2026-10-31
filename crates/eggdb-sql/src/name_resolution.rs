@@ -282,7 +282,7 @@ impl<'a> Resolver<'a> {
                     source: String::new(),
                 })
                 .collect(),
-            search_path: Vec::new(),
+            search_path: vec!["public".to_owned()],
             references: vec![table.name.clone()],
             expands_wildcard: false,
             has_column_list: false,

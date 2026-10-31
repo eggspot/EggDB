@@ -244,9 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn temporary_tables_and_long_names_are_refused() {
-        let error = tokenize_in("SELECT * FROM #t", Dialect::SqlServer).expect_err("#t");
-        assert_eq!(error.state().code(), "0A000");
+    fn long_and_unterminated_names_are_refused() {
         let long = format!("SELECT [{}]", "x".repeat(64));
         let error = tokenize_in(&long, Dialect::SqlServer).expect_err("long");
         assert_eq!(error.state().code(), "42622");

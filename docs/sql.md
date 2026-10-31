@@ -2367,8 +2367,9 @@ SET eggdb.tenant = 'acme';
 ```
 
 After `isolate`, a session sees and writes only the rows whose tenant column equals its
-`eggdb.tenant` setting, and a session that has set none gets an error instead of any rows. This
-holds for roles that do not bypass row security, so connect the application as such a role. A
+`eggdb.tenant` setting; a session that has set none sees no rows and cannot add any, and a
+new row for another tenant fails with SQLSTATE `42501`. This holds for roles that are not
+superusers, so connect the application as such a role. A
 tenant with `max_rows` gets SQLSTATE `53400` once it holds that many rows in a table.
 
 ## Ledger tables (eggdb_ledger)

@@ -139,7 +139,7 @@ fn pg_cron_jobs_run_when_due_and_record_their_runs() {
             &mut session,
             "SELECT count(*) FROM cron.job_run_details WHERE status = 'succeeded'"
         ),
-        run(&mut session, "SELECT 3::bigint")
+        run(&mut session, "SELECT 3::bigint AS count")
     );
     run(&mut session, "SELECT cron.unschedule('nightly')");
     assert!(
@@ -155,6 +155,6 @@ fn pg_cron_jobs_run_when_due_and_record_their_runs() {
             &mut session,
             "SELECT count(*) FROM cron.job_run_details WHERE status = 'failed'"
         ),
-        run(&mut session, "SELECT 1::bigint")
+        run(&mut session, "SELECT 1::bigint AS count")
     );
 }

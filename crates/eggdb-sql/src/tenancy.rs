@@ -20,6 +20,10 @@ DECLARE
 BEGIN
     SELECT i.tenant_column INTO column_name FROM eggdb_tenancy.isolated i WHERE i.table_schema = TG_TABLE_SCHEMA AND i.table_name = TG_TABLE_NAME;
     tenant_value := to_jsonb(NEW) ->> column_name;
+    IF NOT coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false)
+        AND tenant_value IS DISTINCT FROM current_setting('eggdb.tenant', true) THEN
+        RAISE EXCEPTION 'new row violates row-level security policy for table %', TG_TABLE_NAME USING ERRCODE = '42501';
+    END IF;
     SELECT t.max_rows INTO allowed FROM eggdb_tenancy.tenants t WHERE t.tenant = tenant_value;
     IF allowed IS NOT NULL THEN
         EXECUTE format('SELECT count(*) FROM %I.%I WHERE %I = $1', TG_TABLE_SCHEMA, TG_TABLE_NAME, column_name) INTO used USING tenant_value;
@@ -33,7 +37,7 @@ $$;
 CREATE FUNCTION eggdb_tenancy.isolate(schema_name text, table_name text, tenant_column text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', schema_name, table_name);
-    EXECUTE format('CREATE POLICY eggdb_tenant ON %I.%I USING (%I = current_setting(%L, true)) WITH CHECK (%I = current_setting(%L, true))', schema_name, table_name, tenant_column, 'eggdb.tenant', tenant_column, 'eggdb.tenant');
+    EXECUTE format('CREATE POLICY eggdb_tenant ON %I.%I USING (%I = current_setting(%L, true)) WITH CHECK (true)', schema_name, table_name, tenant_column, 'eggdb.tenant');
     EXECUTE format('CREATE TRIGGER eggdb_tenant_quota BEFORE INSERT ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_tenancy.enforce_quota()', schema_name, table_name);
     INSERT INTO eggdb_tenancy.isolated (table_schema, table_name, tenant_column) VALUES (schema_name, table_name, tenant_column);
 END
@@ -63,15 +67,21 @@ mod tests {
             "INSERT INTO eggdb_tenancy.tenants (tenant, max_rows) VALUES ('acme', 2)",
             "CREATE ROLE app LOGIN",
             "GRANT ALL ON notes TO app",
-            "GRANT USAGE ON SEQUENCE notes_id_seq TO app",
-            "GRANT USAGE ON SCHEMA eggdb_tenancy TO app",
             "GRANT SELECT ON eggdb_tenancy.tenants, eggdb_tenancy.isolated TO app",
-            "SET ROLE app",
         ] {
             run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
         }
+        drop(session);
+        crate::memory_store::use_seeded_random_bytes();
+        let mut session = Session::new(&store);
+        session.identify_role("app", "eggdb").unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT count(*) AS n FROM notes").unwrap(),
+            "n\n0\nSELECT 1",
+            "no tenant chosen must fail closed"
+        );
         assert!(
-            run(&mut session, "SELECT count(*) FROM notes").is_err(),
+            run(&mut session, "INSERT INTO notes (tenant, body) VALUES ('acme', 'early')").is_err(),
             "no tenant chosen must fail closed"
         );
         run(&mut session, "SET eggdb.tenant = 'acme'").unwrap();

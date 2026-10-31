@@ -414,6 +414,6 @@ fn batched_aggregates_give_the_row_at_a_time_results() {
     );
     assert_eq!(
         answer(&mut session, "SELECT sum(v), max(s) FROM n WHERE id < 0"),
-        "sum|max\n|\nSELECT 1"
+        "sum|max\nNULL|NULL\nSELECT 1"
     );
 }

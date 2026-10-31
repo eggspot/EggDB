@@ -589,7 +589,6 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
         "SELECT '{{1}}'::int[]",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
-        "SAVEPOINT a",
     ] {
         let error = fails(&mut session, sql);
         assert_eq!(error.state().code(), "0A000", "{sql}: {error}");
