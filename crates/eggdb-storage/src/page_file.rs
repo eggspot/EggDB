@@ -91,6 +91,7 @@ pub struct PageFile<F: File> {
     scratch: Vec<u8>,
     page_count_before_commit: Option<u64>,
     damaged_header_slot: Option<usize>,
+    older_slot_log_reaches: Option<std::ops::Range<u64>>,
     failed: bool,
 }
 
@@ -220,6 +221,7 @@ impl<F: File> PageFile<F> {
             scratch: Vec::new(),
             page_count_before_commit: None,
             damaged_header_slot: None,
+            older_slot_log_reaches: None,
             failed: false,
         }
     }
@@ -375,15 +377,21 @@ impl<F: File> PageFile<F> {
             self.file_bytes = wanted;
         }
         if let Some(entries) = &plan.free_entries {
+            for &page in &plan.list_pages {
+                self.copy_header_before_reusing(page)?;
+            }
             self.write_free_list_in_place(&plan.list_pages, entries, lsn)?;
         }
         self.sync_unless_off()?;
         let previous_reservation = self.header.log_sequence_reserved;
+        let cut_pages = plan.superblock.page_count..self.superblock.page_count;
         self.write_header(plan.superblock)?;
-        if plan.free_entries.is_some() || plan.cuts_segments_off {
+        if plan.free_entries.is_some() {
             let mut copy = plan.superblock;
             copy.generation = self.next_generation()?;
             self.write_header(copy)?;
+        } else if plan.cuts_segments_off {
+            self.older_slot_log_reaches = Some(cut_pages);
         }
         if let Some(log) = self.log.as_mut() {
             log.skip_sequences_to(previous_reservation.saturating_add(1));
@@ -480,8 +488,24 @@ impl<F: File> PageFile<F> {
             .write_all_at(&slot, (next.slot() * HEADER_SLOT_SIZE) as u64)?;
         self.sync_unless_off()?;
         self.header = next;
+        self.older_slot_log_reaches = None;
         self.adopt_header_fields();
         Ok(())
+    }
+
+    fn copy_header_before_reusing(&mut self, page_id: u64) -> Result<(), StorageError> {
+        let reused = self
+            .older_slot_log_reaches
+            .as_ref()
+            .is_some_and(|cut_pages| cut_pages.contains(&page_id));
+        if !reused {
+            return Ok(());
+        }
+        let copy = Superblock {
+            generation: self.next_generation()?,
+            ..self.header
+        };
+        self.write_header(copy)
     }
 
     fn adopt_header_fields(&mut self) {
@@ -560,6 +584,8 @@ impl<F: File> PageFile<F> {
             self.reused.push(page);
             return Ok(page);
         }
+        let copied = self.copy_header_before_reusing(self.page_count);
+        self.fail_on_error(copied)?;
         grow(&mut self.page_count)
     }
 
@@ -682,6 +708,10 @@ impl<F: File> PageFile<F> {
             None => check_not_listed(&next, &self.available, |pages| {
                 self.free_list_pages.range(pages.clone()).next().is_some()
             })?,
+        }
+        for &page in &list_pages {
+            let copied = self.copy_header_before_reusing(page);
+            self.fail_on_error(copied)?;
         }
         let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
         let before = self.page_count;

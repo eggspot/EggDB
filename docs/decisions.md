@@ -192,3 +192,4 @@ its full title with its status.
 - [D165](decisions/D165.md) Sockets on io_uring and I/O completion ports, on request: `NetBackend::IoUring` (batched submission, kernel cancel, Linux 5.11) and `NetBackend::Iocp` (AcceptEx, ConnectEx, one port per socket), a `net.round_trip` benchmark
 - [D166](decisions/D166.md) EggDB's own memory allocator (`EggAllocator`): 40 size classes, per-thread caches, a budget, the system allocator underneath; opt-in (`--features egg-allocator`) until `allocator.small_blocks` says otherwise
 - [D167](decisions/D167.md) Large values streamed a page at a time (`get_reader`, `put_reader`, `eggdb get -F raw`, `eggdb put @file`); errors roll back; the cache limit stays until M3 spills dirty pages
+- [D168](decisions/D168.md) A checkpoint that cuts segments off writes one header slot; the copy to the other slot waits until a data or free-list page is about to use the cut space (three syncs per long `Normal` commit instead of four)

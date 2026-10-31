@@ -360,9 +360,16 @@ this order:
    `checkpoint_lsn` at the log's current append position, `log_head_page` and
    `log_head_sequence` naming the current segment, the new `recycled_segments` and
    `log_sequence_reserved` as "Segment sequences" says. Sync. When step 2 gave segments to the
-   free list or cut them off, write the same superblock again with `generation` raised by one,
-   to the other slot, and sync, so no header slot names a log that runs through pages now free
-   or cut off.
+   free list, write the same superblock again with `generation` raised by one, to the other
+   slot, and sync, so no header slot names a log that runs through pages now free. When it cut
+   segments off, the other slot still names a log through them, which is harmless while they
+   hold log segments or nothing: a new segment written there carries a sequence above that
+   slot's reservation, so the older slot is refused rather than misread. So the copy to the
+   other slot waits until a page of the cut range is about to hold anything else (a data page
+   handed out at the end of the file, or a free-list page), and is written and synced just
+   before; any other superblock write in between, and the next open for writing, which always
+   makes the older slot a copy, end the wait too. A checkpoint that cuts segments off writes one
+   slot and syncs once (D168).
    A checkpoint that cut segments off leaves the file's length as it is: the pages after
    `page_count` hold nothing the header names, the next growth reuses their space, and the
    next open for writing shortens the file to `page_count` pages (a file longer than its
