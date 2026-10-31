@@ -4,6 +4,7 @@
 //! built for Redis connect to EggDB unchanged. No code of Redis is used or read.
 
 mod aggregates;
+mod aof;
 mod commands;
 mod eviction;
 mod keyspace;
@@ -14,6 +15,7 @@ mod streams;
 mod transactions;
 mod value;
 
+pub use aof::{AofReport, replay_aof};
 pub use commands::{Client, Context, execute};
 pub use eviction::{EvictingKeyspace, EvictionPolicy};
 pub use keyspace::{KeysRead, KeysWrite, Keyspace, MemoryKeyspace};

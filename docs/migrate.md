@@ -459,3 +459,13 @@ known differences (restored, but not as the source had it)
   name, or the one its `USING INDEX` names, when it is on the same columns; `USING INDEX` naming a
   missing index is `ORA-01418`, and one whose leading columns are not the constraint's is
   `ORA-14196`.
+
+## From Redis: an append-only file
+
+`eggdb restore app.eggdb appendonly.aof` replays a Redis append-only file (a file of RESP
+commands, its name ending in `.aof`) into the RESP databases of the file (D193): each `SELECT`
+switches databases, each `MULTI`/`EXEC` block runs as one transaction, and the report counts the
+commands and the ones that failed. Serve the result with `eggdb serve app.eggdb --resp-listen`.
+For Redis 7's multi-part AOF, restore the incremental `.aof` files in order. RDB snapshots are
+not read yet: Redis does not publish a specification of the RDB format, so `BGREWRITEAOF` (or
+`appendonly yes`) in the old server is the way to get a file to restore.

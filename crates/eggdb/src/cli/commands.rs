@@ -21,6 +21,7 @@ mod expiry;
 mod explain;
 mod mcp;
 mod restore;
+mod restore_aof;
 mod row;
 mod follow;
 mod follow_sql_server;

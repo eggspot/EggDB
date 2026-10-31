@@ -147,6 +147,11 @@ impl Session<'_> {
             }
             Some(ExportFile::Standard) | None => (None, "stdin".to_owned(), "-".to_owned()),
         };
+        if let Some(path) = &path
+            && path.extension().is_some_and(|extension| extension == "aof")
+        {
+            return self.restore_aof(path);
+        }
         let mut file = None;
         let mut size = 0;
         if let Some(path) = &path {
