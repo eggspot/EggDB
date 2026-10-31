@@ -3,3 +3,4 @@
 .claude/worktrees/
 /bench-results
 /compare-results
+/web/eggdb.wasm

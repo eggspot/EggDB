@@ -589,6 +589,37 @@ fn main() -> eggdb::Result<()> {
 }
 ```
 
+## In the browser (WebAssembly)
+
+EggDB builds for WebAssembly with WASI (`wasm32-wasip1`) as the `eggdb-wasm` module, and
+`web/eggdb.js` runs it in a browser, or in Node, with no other code (D221):
+
+```sh
+rustup target add wasm32-wasip1
+cargo build --release -p eggdb-wasm --target wasm32-wasip1
+cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb.wasm
+python3 -m http.server --directory web
+```
+
+`web/index.html` is the playground ([docs/ux/playground.md](ux/playground.md)): a SQL editor, a
+dialect picker and the results, all in the page. From your own page:
+
+```js
+import { EggDB } from "./eggdb.js";
+const db = await EggDB.open({ wasm: "eggdb.wasm", path: "/app.eggdb", dialect: "postgresql", persist: true });
+const out = await db.execute("SELECT 1 AS one");
+```
+
+`out.results` holds one `{ tag, columns, rows }` per statement (`columns` is `null` for a
+command such as `CREATE TABLE`), and `out.error` is set when a statement fails.
+
+The database file lives in the page's memory and, with `persist: true` where the browser offers
+it, in the Origin Private File System: the files a statement changed are saved there after the
+statement, and loaded again by the next `EggDB.open`. `persistent` says which you got. Values come
+back as text (`null` for NULL). `reset()` deletes the database's files. The module exports a
+small C ABI (`eggdb_wasm_open`, `eggdb_wasm_execute`, and the buffers they read and write, in
+`crates/eggdb-wasm`), so any WASI runtime can host it the same way.
+
 ## Limits in this release
 - **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
   with 64 KiB pages (`db.max_key_bytes()`).

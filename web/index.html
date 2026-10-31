@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EggDB playground</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg0: #FFFFFF; --bg1: #F4F5F7; --bg2: #E9EBEE; --zebra: #F8F9FA; --border: #D5D8DD; --border-strong: #B8BCC4;
+  --text-primary: #1B1F24; --text-secondary: #5A6270; --text-disabled: #9AA1AB;
+  --accent: #1A6FD6; --accent-hover: #155CB3; --accent-pressed: #114A91; --on-accent: #FFFFFF;
+  --selection: #D6E6FA; --focus-ring: #1A6FD6; --success: #1E8E3E; --warning: #B26A00; --error: #C8322B; --yolk: #F5B700;
+  --ui: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: ui-monospace, Menlo, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg0: #1E2227; --bg1: #23282E; --bg2: #2A3038; --zebra: #21262C; --border: #363D47; --border-strong: #4A525E;
+    --text-primary: #E6E9EE; --text-secondary: #A3ABB7; --text-disabled: #6B7380;
+    --accent: #5A9CFF; --accent-hover: #7AB0FF; --accent-pressed: #4788E8; --on-accent: #0D1117;
+    --selection: #2D4F7F; --focus-ring: #7AB0FF; --success: #3FB950; --warning: #E0A030; --error: #F0625A;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg1); color: var(--text-primary); font: 13px/18px var(--ui); }
+.card { width: min(960px, calc(100% - 48px)); margin: 24px auto; background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+.brand { display: flex; align-items: center; gap: 8px; }
+.egg { position: relative; width: 16px; height: 20px; background: var(--bg0); border: 1px solid var(--border-strong); border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%; }
+.egg::after { content: ""; position: absolute; width: 6px; height: 6px; left: 4px; top: 8px; border-radius: 50%; background: var(--yolk); }
+h1 { margin: 0; font: bold 15px/20px var(--ui); }
+.explain { margin-left: 8px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
+.controls { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+label.dialect { color: var(--text-secondary); }
+select { width: 140px; height: 28px; padding: 0 28px 0 8px; background: var(--bg0); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+button { height: 28px; padding: 0 12px; border-radius: 4px; font: inherit; cursor: pointer; }
+button.primary { min-width: 72px; background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent); }
+button.primary:hover { background: var(--accent-hover); }
+button.primary:active { background: var(--accent-pressed); }
+button.ghost, button.secondary { background: transparent; color: var(--text-primary); border: 1px solid transparent; }
+button.secondary { border-color: var(--border); min-width: 84px; }
+button.ghost:hover, button.secondary:hover { background: var(--bg2); }
+button:disabled { background: var(--bg2); color: var(--text-disabled); border-color: var(--bg2); cursor: default; }
+:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+textarea { display: block; width: 100%; height: 180px; min-height: 80px; resize: vertical; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--border); background: var(--bg0); color: var(--text-primary); font: 13px/20px var(--mono); caret-color: var(--accent); white-space: pre; }
+textarea:focus { outline: none; box-shadow: inset 0 -1px 0 var(--accent); }
+textarea::selection { background: var(--selection); }
+.result-bar { position: relative; display: flex; align-items: center; gap: 12px; height: 32px; padding: 0 12px; background: var(--bg1); border-bottom: 1px solid var(--border); }
+.result-bar strong { font-weight: bold; }
+.summary { color: var(--text-secondary); }
+.running::after { content: ""; position: absolute; left: 0; bottom: -1px; width: 120px; height: 2px; background: var(--accent); animation: sweep 1000ms linear infinite; }
+@keyframes sweep { from { transform: translateX(-120px); } to { transform: translateX(960px); } }
+@media (prefers-reduced-motion: reduce) { .running::after { width: 100%; animation: none; } }
+.results { min-height: 240px; }
+.block { border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tag { padding: 4px 12px; min-height: 28px; font: 13px/20px var(--mono); color: var(--text-secondary); }
+.empty { padding: 8px 12px; color: var(--text-secondary); }
+.note { padding: 7px 12px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
+.error { padding: 8px 12px; margin: 0; font: 13px/20px var(--mono); white-space: pre; color: var(--text-primary); }
+.error .first { color: var(--error); }
+table { border-collapse: collapse; }
+th { height: 28px; padding: 0 12px; background: var(--bg1); font-weight: normal; text-align: left; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border-strong); }
+th:last-child { border-right: 0; }
+td { height: 24px; padding: 2px 12px; min-width: 48px; max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px/20px var(--mono); }
+tr:nth-child(even) td { background: var(--zebra); }
+tr:hover td { background: var(--bg2); }
+td.number, th.number { text-align: right; }
+td.null { color: var(--text-disabled); }
+.status { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; min-height: 28px; padding: 0 12px; background: var(--bg2); border-top: 1px solid var(--border); font-size: 11px; line-height: 14px; color: var(--text-secondary); }
+.storage { display: flex; align-items: center; gap: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-disabled); }
+.right { margin-left: auto; display: flex; gap: 16px; }
+.hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+dialog { width: 360px; padding: 24px; background: var(--bg0); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; }
+dialog h2 { margin: 0 0 8px; font: bold 15px/20px var(--ui); }
+dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+@media (max-width: 640px) {
+  .card { width: 100%; margin: 0; border-radius: 0; border-left: 0; border-right: 0; }
+  .toolbar { padding-bottom: 8px; }
+  .explain { flex-basis: 100%; margin-left: 0; }
+  .controls { flex-basis: 100%; margin-left: 0; }
+  select { flex: 1; }
+  textarea { height: 120px; }
+  .results { min-height: 160px; }
+  dialog { width: calc(100% - 24px); }
+}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="toolbar">
+    <div class="brand"><span class="egg" aria-hidden="true"></span><h1>EggDB playground</h1></div>
+    <span class="explain">Runs in your browser. Nothing is sent to a server.</span>
+    <div class="controls">
+      <label class="dialect" for="dialect">Dialect</label>
+      <select id="dialect">
+        <option value="postgresql" title="Compatible with PostgreSQL">PostgreSQL</option>
+        <option value="sqlite" title="Compatible with SQLite">SQLite</option>
+        <option value="mysql" title="Compatible with MySQL">MySQL</option>
+        <option value="sqlserver" title="Compatible with SQL Server">SQL Server</option>
+        <option value="oracle" title="Compatible with Oracle">Oracle</option>
+      </select>
+      <button id="run" class="primary" disabled>Run</button>
+      <button id="reset" class="ghost" disabled>Reset database</button>
+    </div>
+  </div>
+  <label class="hidden" for="editor">SQL</label>
+  <textarea id="editor" spellcheck="false" wrap="off" placeholder="Type SQL, then press Run.">CREATE TABLE customers (id INTEGER PRIMARY KEY, name VARCHAR(100) NOT NULL);
+INSERT INTO customers VALUES (1, 'Ada Lovelace');
+INSERT INTO customers VALUES (2, 'Grace Hopper');
+SELECT id, name FROM customers ORDER BY id;</textarea>
+  <section aria-label="Result">
+    <div class="result-bar" id="bar"><strong>Result</strong><span class="summary" id="summary" role="status" aria-live="polite">Loading EggDB…</span></div>
+    <div class="results" id="results" tabindex="0" aria-live="polite"></div>
+  </section>
+  <div class="status">
+    <span class="storage" role="status"><span class="dot" id="dot"></span><span id="storage"></span></span>
+    <span class="right"><span id="dialect-name">PostgreSQL</span><span id="version"></span></span>
+  </div>
+</main>
+<dialog id="confirm" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">Reset database</h2>
+  <p>Deletes every table and row in this browser's playground database. This cannot be undone.</p>
+  <div class="buttons"><button class="secondary" id="cancel" autofocus>Cancel</button><button class="primary" id="confirm-reset">Reset database</button></div>
+</dialog>
+<script type="module">
+import { EggDB } from "./eggdb.js";
+const $ = (id) => document.getElementById(id);
+const PATH = "/playground.eggdb";
+const MAX_ROWS = 1000;
+const runKey = navigator.platform.startsWith("Mac") ? "Cmd+Enter" : "Ctrl+Enter";
+let db = null;
+let toast = 0;
+const formatCount = (count) => `${count.toLocaleString("en-US")} ${count === 1 ? "row" : "rows"}`;
+const formatTime = (ms) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`);
+const isNumeric = (rows, column) => rows.some((row) => row[column] !== null) && rows.every((row) => row[column] === null || /^-?\d+(\.\d+)?$/.test(row[column]));
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function empty() {
+  $("results").replaceChildren(element("div", "empty", `Nothing has run yet. Press Run or ${runKey}.`));
+}
+function errorBlock(text) {
+  const pre = element("pre", "error");
+  const [first, ...rest] = text.split("\n");
+  pre.append(element("span", "first", first.startsWith("ERROR:") ? first : `Error: ${first}`));
+  if (rest.length) pre.append(`\n${rest.join("\n")}`);
+  const block = element("div", "block");
+  block.append(pre);
+  return block;
+}
+function rowsBlock(result, index) {
+  const block = element("div", "block");
+  block.append(element("div", "tag", result.tag));
+  const table = element("table");
+  table.append(element("caption", "hidden", `Statement ${index + 1}: ${result.tag}`));
+  const numeric = result.columns.map((_, column) => isNumeric(result.rows, column));
+  const head = element("tr");
+  result.columns.forEach((name, column) => {
+    const cell = element("th", numeric[column] ? "number" : "", name);
+    cell.scope = "col";
+    head.append(cell);
+  });
+  table.append(head);
+  for (const row of result.rows.slice(0, MAX_ROWS)) {
+    const line = element("tr");
+    row.forEach((value, column) => {
+      const cell = element("td", value === null ? "null" : numeric[column] ? "number" : "", value === null ? "NULL" : value);
+      if (value === null) cell.setAttribute("aria-label", "NULL");
+      cell.title = value ?? "NULL";
+      line.append(cell);
+    });
+    table.append(line);
+  }
+  block.append(table);
+  if (result.rows.length > MAX_ROWS) block.append(element("div", "note", `Showing the first 1,000 of ${result.rows.length.toLocaleString("en-US")} rows. Add a LIMIT to see others.`));
+  return block;
+}
+function commandBlock(result) {
+  const block = element("div", "block");
+  block.append(element("div", "tag", result.tag));
+  return block;
+}
+function render(out) {
+  const blocks = out.results.map((result, index) => (result.columns ? rowsBlock(result, index) : commandBlock(result)));
+  if (out.error) blocks.push(errorBlock(out.error));
+  $("results").replaceChildren(...blocks);
+  const last = [...out.results].reverse().find((result) => result.columns);
+  $("summary").textContent = out.error ? "Error" : last ? `${formatCount(last.rows.length)} · ${formatTime(out.elapsedMs)}` : `no rows to show · ${formatTime(out.elapsedMs)}`;
+}
+function storage() {
+  $("dot").style.background = db.persistent ? "var(--success)" : "var(--warning)";
+  $("storage").textContent = db.persistent ? "Saved in this browser (OPFS)" : "In memory: nothing is saved";
+  $("version").textContent = db.version ? `eggdb ${db.version}` : "";
+  $("dialect-name").textContent = $("dialect").selectedOptions[0].textContent;
+}
+async function open(dialect) {
+  try {
+    db = await EggDB.open({ wasm: "eggdb.wasm", path: PATH, dialect, persist: true });
+  } catch {
+    db = await EggDB.open({ wasm: "eggdb.wasm", path: PATH, dialect, persist: false });
+  }
+  storage();
+}
+async function run(whole) {
+  const editor = $("editor");
+  const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+  const sql = !whole && selected.trim() ? selected : editor.value;
+  if (!db || $("run").disabled) return;
+  if (!sql.trim()) {
+    $("summary").textContent = "Nothing to run";
+    return;
+  }
+  $("run").disabled = true;
+  $("bar").classList.add("running");
+  $("results").setAttribute("aria-busy", "true");
+  $("summary").textContent = "Running…";
+  try {
+    render(await db.execute(sql));
+  } finally {
+    $("run").disabled = false;
+    $("bar").classList.remove("running");
+    $("results").setAttribute("aria-busy", "false");
+  }
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    run(event.shiftKey);
+  }
+});
+$("run").addEventListener("click", () => run(false));
+$("reset").addEventListener("click", () => $("confirm").showModal());
+$("cancel").addEventListener("click", () => $("confirm").close());
+$("confirm-reset").addEventListener("click", async () => {
+  $("confirm").close();
+  await db.reset();
+  empty();
+  $("summary").textContent = "";
+  $("storage").textContent = "Database reset";
+  $("dot").style.background = "var(--success)";
+  clearTimeout(toast);
+  toast = setTimeout(storage, 8000);
+  $("reset").focus();
+});
+$("dialect").addEventListener("change", async (event) => {
+  db.close();
+  await open(event.target.value);
+});
+try {
+  await open($("dialect").value);
+  $("summary").textContent = "";
+  empty();
+  $("run").disabled = false;
+  $("reset").disabled = false;
+} catch {
+  $("summary").textContent = "Error";
+  $("results").replaceChildren(errorBlock("EggDB could not load in this browser.\nTry: a current Chrome, Edge, Firefox or Safari."));
+}
+</script>
+</body>
+</html>

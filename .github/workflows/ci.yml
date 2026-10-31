@@ -1109,8 +1109,38 @@ jobs:
             rustup toolchain install
             cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
 
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain and the WASI target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-wasip1
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-browser-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build EggDB for WebAssembly and run it under Node and in headless Chrome
+        run: |
+          cargo build --release -p eggdb-wasm --target wasm32-wasip1
+          cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb.wasm
+          ls -l web/eggdb.wasm
+          node web/test.mjs web/eggdb.wasm
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory web &
+          for attempt in $(seq 1 50); do curl -sf http://127.0.0.1:8000/test.html > /dev/null && break; sleep 0.2; done
+          google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/test.html > "$RUNNER_TEMP/dom.html"
+          cat "$RUNNER_TEMP/dom.html"
+          grep -q "eggdb-browser-test: passed" "$RUNNER_TEMP/dom.html"
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

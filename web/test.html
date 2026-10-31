@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>EggDB browser test</title></head>
+<body>
+<pre id="result">running</pre>
+<script type="module">
+import { EggDB } from "./eggdb.js";
+const result = document.getElementById("result");
+try {
+  const db = await EggDB.open({ wasm: "eggdb.wasm", path: "/browser-test.eggdb", dialect: "postgresql", persist: true });
+  await db.reset();
+  await db.execute("CREATE TABLE t (id integer PRIMARY KEY, name text); INSERT INTO t VALUES (1, 'opfs')");
+  db.close();
+  const reopened = await EggDB.open({ wasm: "eggdb.wasm", path: "/browser-test.eggdb", dialect: "postgresql", persist: true });
+  const out = await reopened.execute("SELECT name FROM t");
+  result.textContent = !out.error && out.results[0].rows[0][0] === "opfs" ? `eggdb-browser-test: passed (persistent: ${reopened.persistent})` : `eggdb-browser-test: failed ${JSON.stringify(out)}`;
+} catch (error) {
+  result.textContent = `eggdb-browser-test: failed ${error}`;
+}
+</script>
+</body>
+</html>

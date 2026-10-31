@@ -1,0 +1,17 @@
+[package]
+name = "eggdb-wasm"
+description = "EggDB for WebAssembly hosts: open a database and run SQL through a small C ABI, for the browser loader in web/ and any WASI runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb = { path = "../eggdb" }
+eggdb-sql = { path = "../eggdb-sql" }
