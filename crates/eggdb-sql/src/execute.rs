@@ -113,6 +113,7 @@ pub(crate) struct TableCache {
     row_counts: RowCountHints,
     pub(crate) triggers: crate::triggers::TriggerCache,
     pub(crate) routines: crate::routines::RoutineCache,
+    pub(crate) partitions: crate::partitions::PartitionCache,
 }
 
 impl TableCache {

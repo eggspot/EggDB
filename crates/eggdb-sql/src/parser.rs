@@ -4,6 +4,7 @@ mod indexes;
 mod merge;
 mod mysql;
 mod oracle;
+mod partitions;
 mod plpgsql;
 mod plsql;
 mod plsql_primary;
@@ -1472,6 +1473,9 @@ impl<'t> Parser<'t> {
             false
         };
         let name = self.table_name()?;
+        if self.postgresql() && self.is_word("partition") && self.is_word_at(1, "of") {
+            return self.create_partition_of(name, temporary, if_not_exists);
+        }
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
         let mut primary_key = None;
@@ -1587,6 +1591,11 @@ impl<'t> Parser<'t> {
         if self.sqlserver() && crate::temporary::is_sqlserver_temporary(&name.text) {
             temporary = Some(crate::ast::OnCommit::PreserveRows);
         }
+        let partition_by = if self.is_word("partition") && self.is_word_at(1, "by") {
+            Some(self.partition_by()?)
+        } else {
+            None
+        };
         if self.is_word("partition") || self.is_word("inherits") || self.is_word("with") {
             return Err(self.not_supported("table options"));
         }
@@ -1600,6 +1609,8 @@ impl<'t> Parser<'t> {
             indexes,
             constraints,
             comment,
+            partition_by,
+            partition_of: None,
         }))
     }
 

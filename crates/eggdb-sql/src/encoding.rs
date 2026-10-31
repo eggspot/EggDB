@@ -8,6 +8,7 @@ use crate::types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlT
 mod catalog;
 mod defined;
 mod packages;
+mod partitions;
 mod routines;
 mod triggers;
 
@@ -16,6 +17,9 @@ pub(crate) use defined::*;
 pub(crate) use packages::{decode_package, encode_package, package_key, packages_prefix};
 pub(crate) use routines::{decode_routines, encode_routines, routine_key, routines_prefix};
 pub(crate) use triggers::{decode_triggers, encode_triggers, trigger_key, triggers_prefix};
+pub(crate) use partitions::{
+    decode_partitioning, encode_partitioning, partition_key, partitions_prefix,
+};
 
 pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];
 const META_SPACE: u8 = 0x01;
@@ -159,7 +163,10 @@ pub(crate) fn is_temporary_key(key: &[u8]) -> bool {
         return false;
     };
     match space {
-        TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE => names_temporary_object(rest),
+        TABLE_SPACE
+        | SEQUENCE_SPACE
+        | triggers::TRIGGER_SPACE
+        | partitions::PARTITION_SPACE => names_temporary_object(rest),
         ROW_SPACE | INDEX_SPACE => has_temporary_id(rest),
         TEMPORARY_ACTION_SPACE => true,
         REFERENCE_SPACE | catalog::DEPENDENCY_SPACE => {
@@ -195,7 +202,10 @@ pub(crate) fn key_owner(key: &[u8]) -> KeyOwner<'_> {
         return KeyOwner::Everyone;
     };
     match space {
-        TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE => KeyOwner::Relation(rest),
+        TABLE_SPACE
+        | SEQUENCE_SPACE
+        | triggers::TRIGGER_SPACE
+        | partitions::PARTITION_SPACE => KeyOwner::Relation(rest),
         ROW_SPACE | INDEX_SPACE => rest
             .get(..4)
             .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())

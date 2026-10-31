@@ -442,6 +442,8 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         let mut cache = TableCache::default();
         let create = CreateTable {
             comment: None,
+            partition_by: None,
+            partition_of: None,
             temporary: None,
             name: Name {
                 text: name.clone(),

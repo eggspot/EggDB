@@ -124,7 +124,7 @@ fn shown_values(row: &[Value], columns: &[usize]) -> String {
         .join(", ")
 }
 
-fn shown_row(row: &[Value]) -> String {
+pub(crate) fn shown_row(row: &[Value]) -> String {
     row.iter()
         .map(|value| value.to_text().unwrap_or_else(|| "null".into()))
         .collect::<Vec<_>>()

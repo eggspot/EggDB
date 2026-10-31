@@ -771,6 +771,22 @@ impl Parser<'_> {
             actions.push(AlterAction::Accepted);
             return Ok(());
         }
+        if self.postgresql() && self.is_word("attach") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let partition = self.table_name()?;
+            let bound = self.partition_bound()?;
+            actions.push(AlterAction::AttachPartition { partition, bound });
+            return Ok(());
+        }
+        if self.postgresql() && self.is_word("detach") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let partition = self.table_name()?;
+            if !self.take_word("concurrently") {
+                self.take_word("finalize");
+            }
+            actions.push(AlterAction::DetachPartition(partition));
+            return Ok(());
+        }
         if self.postgresql() && self.take_word("validate") {
             self.expect_word("constraint")?;
             actions.push(AlterAction::ValidateConstraint(self.name()?));

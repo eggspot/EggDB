@@ -723,6 +723,11 @@ pub(crate) enum AlterAction {
         column: Name,
         if_exists: bool,
     },
+    AttachPartition {
+        partition: Name,
+        bound: PartitionBoundSpec,
+    },
+    DetachPartition(Name),
     Accepted,
 }
 
@@ -852,6 +857,64 @@ pub(crate) struct CreateTable {
     pub(crate) indexes: Vec<IndexSpec>,
     pub(crate) constraints: Vec<ConstraintSpec>,
     pub(crate) comment: Option<String>,
+    pub(crate) partition_by: Option<PartitionBy>,
+    pub(crate) partition_of: Option<PartitionOf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartitionStrategy {
+    Range,
+    List,
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PartitionBoundValue {
+    Value(Expr),
+    MinValue,
+    MaxValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PartitionBoundSpec {
+    Range {
+        from: Vec<PartitionBoundValue>,
+        to: Vec<PartitionBoundValue>,
+    },
+    List(Vec<PartitionBoundValue>),
+    Hash {
+        modulus: u32,
+        remainder: u32,
+    },
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PartitionBy {
+    pub(crate) strategy: PartitionStrategy,
+    pub(crate) columns: Vec<Name>,
+    pub(crate) partitions: Vec<NamedPartition>,
+    pub(crate) hash_partitions: Option<u32>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NamedPartition {
+    pub(crate) name: Name,
+    pub(crate) bound: NamedPartitionBound,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NamedPartitionBound {
+    LessThan(Vec<PartitionBoundValue>),
+    In(Vec<PartitionBoundValue>),
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PartitionOf {
+    pub(crate) parent: Name,
+    pub(crate) bound: PartitionBoundSpec,
 }
 
 #[derive(Debug, Clone, PartialEq)]
