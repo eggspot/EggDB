@@ -6,9 +6,13 @@
 //! - [`serve`] runs a server over any [`eggdb_sql::KeyValueStore`]: one thread and one
 //!   [`eggdb_sql::Session`] in the SQL Server dialect per connection, a bounded number of
 //!   connections, and a graceful stop.
-//! - [`listen_on_loopback`] opens its listener and refuses every address but loopback: until
-//!   EggDB has TLS, only this machine can connect (D102). The pre-login answers that
-//!   encryption is not available, so a client asking for it ends the connection itself.
+//! - [`listen`] opens its listener: on any address when the server has TLS, where connections
+//!   from other machines must encrypt, and only on loopback without TLS (D161, superseding part
+//!   of D102); [`listen_on_loopback`] is the loopback-only form.
+//! - Encryption from [`eggdb_tls`] as [MS-TDS] negotiates it in PRELOGIN: full encryption,
+//!   login-only encryption for a loopback client that asks only for that, and TDS 8 strict
+//!   (TLS first, ALPN `tds/8.0`); without TLS the pre-login answers that encryption is not
+//!   available, so a client asking for it ends the connection itself.
 //! - Every connection logs in with a SQL login checked against [`TdsCredentials`]; there is no
 //!   unauthenticated mode, and integrated (SSPI) and federated logins are refused.
 //! - [`messages`] reads every client message (PRELOGIN, LOGIN7, SQL batches, transaction
@@ -38,6 +42,7 @@ pub mod messages;
 mod procedures;
 pub mod rpc;
 mod server;
+mod tls_transport;
 mod tokens;
 mod types;
 mod wire;
@@ -46,6 +51,6 @@ pub use auth::{DEFAULT_ITERATIONS, TdsCredentials};
 pub use connection::{MAX_BATCH_BYTES, MAX_LOGIN_BYTES};
 pub use server::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
-    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen_on_loopback, serve,
+    MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve,
 };
 pub use tokens::COLLATION;

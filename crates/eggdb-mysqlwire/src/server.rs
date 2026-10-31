@@ -37,6 +37,9 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// How long a client has from connecting to finishing authentication.
     pub authentication_timeout: Duration,
+    /// The TLS setup, when the server offers TLS (D161): `CLIENT_SSL` is then advertised, and
+    /// connections from other machines must use it.
+    pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
 }
 
 /// Why a listener was not opened.
@@ -54,7 +57,7 @@ impl fmt::Display for ListenError {
         match self {
             Self::NotLoopback(address) => write!(
                 f,
-                "{address} is not a loopback address; until EggDB has TLS, it listens only on 127.0.0.1, ::1 or another loopback address, so only this machine can connect"
+                "{address} is not a loopback address; without TLS EggDB listens only on 127.0.0.1, ::1 or another loopback address, so only this machine can connect: give it a certificate (--tls-certificate and --tls-key, or --tls-self-signed) to listen on other addresses"
             ),
             Self::Io(error) => write!(f, "{error}"),
         }
@@ -67,7 +70,13 @@ impl std::error::Error for ListenError {}
 /// `::1`); any other address is refused before anything is bound (D102). Port 0 picks a free
 /// port.
 pub fn listen_on_loopback(address: SocketAddr) -> Result<TcpListener, ListenError> {
-    if !address.ip().is_loopback() {
+    listen(address, false)
+}
+
+/// Opens the listener on `address`: any address when the server has TLS (`tls_configured`),
+/// only loopback addresses without it.
+pub fn listen(address: SocketAddr, tls_configured: bool) -> Result<TcpListener, ListenError> {
+    if !tls_configured && !address.ip().is_loopback() {
         return Err(ListenError::NotLoopback(address));
     }
     TcpListener::bind(address).map_err(ListenError::Io)

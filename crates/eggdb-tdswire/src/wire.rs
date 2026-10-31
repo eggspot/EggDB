@@ -1,3 +1,5 @@
+use crate::tls_transport::TdsTransport;
+use eggdb_tls::{SessionInfo, TlsStream};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
@@ -13,6 +15,55 @@ pub(crate) const HEADER_BYTES: usize = 8;
 pub(crate) const DEFAULT_PACKET_SIZE: usize = 4096;
 const END_OF_MESSAGE: u8 = 0x01;
 const TLS_HANDSHAKE: u8 = 0x16;
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) enum TdsStream {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<TdsTransport>>),
+    Broken,
+}
+
+impl TdsStream {
+    fn tcp(&self) -> Option<&TcpStream> {
+        match self {
+            Self::Plain(stream) => Some(stream),
+            Self::Tls(stream) => Some(&stream.get_ref().tcp),
+            Self::Broken => None,
+        }
+    }
+}
+
+fn broken() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "the TLS handshake failed")
+}
+
+impl Read for TdsStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+            Self::Broken => Err(broken()),
+        }
+    }
+}
+
+impl Write for TdsStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+            Self::Broken => Err(broken()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+            Self::Broken => Err(broken()),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum WireError {
@@ -39,7 +90,7 @@ pub(crate) struct Packet {
 }
 
 pub(crate) struct Wire<'a> {
-    stream: TcpStream,
+    stream: TdsStream,
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
     outbox: Vec<u8>,
@@ -62,7 +113,7 @@ impl<'a> Wire<'a> {
         stream.set_read_timeout(Some(POLL_INTERVAL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self {
-            stream,
+            stream: TdsStream::Plain(stream),
             stop,
             deadline,
             outbox: Vec::new(),
@@ -97,6 +148,8 @@ impl<'a> Wire<'a> {
             let wait = self.next_wait()?;
             if wait != self.read_timeout {
                 self.stream
+                    .tcp()
+                    .ok_or(WireError::Io)?
                     .set_read_timeout(Some(wait))
                     .map_err(|_| WireError::Io)?;
                 self.read_timeout = wait;
@@ -265,16 +318,22 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn close_after_refusal(&mut self) {
         let _ = self.flush();
-        let _ = self.stream.shutdown(Shutdown::Write);
+        if let TdsStream::Tls(stream) = &mut self.stream {
+            let _ = stream.close();
+        }
+        let Some(mut stream) = self.stream.tcp() else {
+            return;
+        };
+        let _ = stream.shutdown(Shutdown::Write);
         let deadline = Instant::now() + REFUSAL_LINGER;
         let mut buffer = [0u8; 8 * 1024];
         let mut discarded = 0;
         while discarded < REFUSAL_LINGER_BYTES {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || self.stream.set_read_timeout(Some(left)).is_err() {
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
                 return;
             }
-            match self.stream.read(&mut buffer) {
+            match stream.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(count) => discarded += count,
                 Err(error)
@@ -291,7 +350,65 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn peer(&self) -> String {
         self.stream
-            .peer_addr()
-            .map_or_else(|_| "an unknown address".to_owned(), |peer| peer.to_string())
+            .tcp()
+            .and_then(|stream| stream.peer_addr().ok())
+            .map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string())
+    }
+
+    pub(crate) fn peer_is_loopback(&self) -> bool {
+        self.stream
+            .tcp()
+            .and_then(|stream| stream.peer_addr().ok())
+            .is_some_and(|peer| peer.ip().is_loopback())
+    }
+
+    pub(crate) fn tls(&self) -> Option<&SessionInfo> {
+        match &self.stream {
+            TdsStream::Tls(stream) => Some(stream.info()),
+            _ => None,
+        }
+    }
+
+    /// Runs the TLS handshake: inside PRELOGIN packets when `framed` (encryption negotiated in
+    /// PRELOGIN), directly on the socket for TDS 8 strict, whose first byte was already read.
+    pub(crate) fn start_tls(
+        &mut self,
+        config: &eggdb_tls::ServerConfig,
+        framed: bool,
+    ) -> Result<(), String> {
+        let TdsStream::Plain(stream) = std::mem::replace(&mut self.stream, TdsStream::Broken)
+        else {
+            return Err("TLS was requested twice".to_owned());
+        };
+        let timeout = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+            .unwrap_or(TLS_HANDSHAKE_TIMEOUT);
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| error.to_string())?;
+        let prefix = if framed { Vec::new() } else { vec![TLS_HANDSHAKE] };
+        let mut tls = TlsStream::accept(TdsTransport::new(stream, prefix, framed), config)
+            .map_err(|error| error.to_string())?;
+        tls.get_mut().framed = false;
+        tls.get_ref()
+            .tcp
+            .set_read_timeout(Some(POLL_INTERVAL))
+            .map_err(|error| error.to_string())?;
+        self.read_timeout = POLL_INTERVAL;
+        self.stream = TdsStream::Tls(Box::new(tls));
+        Ok(())
+    }
+
+    /// Ends TLS after a login-only encryption: the rest of the connection is plaintext, as the
+    /// client negotiated with `ENCRYPT_OFF` ([MS-TDS] 2.2.6.5).
+    pub(crate) fn end_tls_after_login(&mut self) {
+        if !matches!(self.stream, TdsStream::Tls(_)) {
+            return;
+        }
+        if let TdsStream::Tls(stream) = std::mem::replace(&mut self.stream, TdsStream::Broken) {
+            self.stream = TdsStream::Plain(stream.into_inner().tcp);
+        }
     }
 }

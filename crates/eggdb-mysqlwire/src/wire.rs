@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use eggdb_tls::{ServerConnection, SessionInfo};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,7 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
 const REFUSAL_LINGER: Duration = Duration::from_millis(200);
 const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const LARGEST_FRAME: usize = 0xFF_FFFF;
 
 #[derive(Debug)]
@@ -22,7 +24,7 @@ pub(crate) enum WireError {
 }
 
 pub(crate) struct Wire<'a> {
-    stream: TcpStream,
+    stream: ServerConnection,
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
     outbox: Vec<u8>,
@@ -41,7 +43,7 @@ impl<'a> Wire<'a> {
         stream.set_read_timeout(Some(POLL_INTERVAL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self {
-            stream,
+            stream: ServerConnection::Plain(stream),
             stop,
             deadline,
             outbox: Vec::new(),
@@ -72,6 +74,8 @@ impl<'a> Wire<'a> {
             let wait = self.next_wait()?;
             if wait != self.read_timeout {
                 self.stream
+                    .tcp()
+                    .ok_or(WireError::Io)?
                     .set_read_timeout(Some(wait))
                     .map_err(|_| WireError::Io)?;
                 self.read_timeout = wait;
@@ -159,16 +163,20 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn close_after_refusal(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Write);
+        self.stream.close_tls();
+        let Some(mut stream) = self.stream.tcp() else {
+            return;
+        };
+        let _ = stream.shutdown(Shutdown::Write);
         let deadline = Instant::now() + REFUSAL_LINGER;
         let mut buffer = [0u8; 8 * 1024];
         let mut discarded = 0;
         while discarded < REFUSAL_LINGER_BYTES {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || self.stream.set_read_timeout(Some(left)).is_err() {
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
                 return;
             }
-            match self.stream.read(&mut buffer) {
+            match stream.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(count) => discarded += count,
                 Err(error)
@@ -185,7 +193,29 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn peer(&self) -> String {
         self.stream
-            .peer_addr()
-            .map_or_else(|_| "an unknown address".to_owned(), |peer| peer.to_string())
+            .tcp()
+            .and_then(|stream| stream.peer_addr().ok())
+            .map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string())
+    }
+
+    pub(crate) fn peer_is_loopback(&self) -> bool {
+        self.stream.peer_is_loopback()
+    }
+
+    pub(crate) fn tls(&self) -> Option<&SessionInfo> {
+        self.stream.tls()
+    }
+
+    pub(crate) fn start_tls(&mut self, config: &eggdb_tls::ServerConfig) -> Result<(), String> {
+        let timeout = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+            .unwrap_or(TLS_HANDSHAKE_TIMEOUT);
+        self.stream
+            .upgrade(config, Vec::new(), timeout, Some(POLL_INTERVAL))
+            .map_err(|error| error.to_string())?;
+        self.read_timeout = POLL_INTERVAL;
+        Ok(())
     }
 }

@@ -1,7 +1,8 @@
 use crate::messages::{
     ATTENTION, BULK_LOAD, LOGIN7, Login7, PRELOGIN, PreLogin, RESET_CONNECTION,
     RESET_CONNECTION_SKIP_TRANSACTION, RPC, SQL_BATCH, TABULAR_RESULT, TDS_7_4,
-    TRANSACTION_MANAGER, TransactionRequest, parse_login7, parse_prelogin, parse_sql_batch,
+    ENCRYPT_CLIENT_CERT, ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON, ENCRYPT_REQ, TRANSACTION_MANAGER,
+    TransactionRequest, parse_login7, parse_prelogin, parse_sql_batch,
     parse_transaction_manager_request, prelogin_response,
 };
 use crate::bulk::{BulkInput, BulkLoadError, BulkReader};
@@ -163,7 +164,7 @@ fn login_failed(user: &str) -> String {
 pub(crate) fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError) {
     match error {
         WireError::Tls => (shared.log)(&format!(
-            "{}  client requires TLS (TDS 8 / encrypt=strict); EggDB has no TLS yet",
+            "{}  client requires TLS (TDS 8 / encrypt=strict); EggDB is not set up for TLS (give it a certificate)",
             wire.peer()
         )),
         WireError::Malformed(reason) => {
@@ -195,14 +196,58 @@ pub(crate) fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error:
     }
 }
 
-fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<PreLogin> {
-    let message = match wire.read_message(MAX_LOGIN_BYTES) {
-        Ok(message) => message,
-        Err(error) => {
-            report_wire_error(shared, wire, &error);
-            return None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encryption {
+    None,
+    LoginOnly,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncryptionOutcome {
+    Plain,
+    Tls(Encryption),
+    ClientWillEnd(&'static str),
+}
+
+const TDS_8_APPLICATION_PROTOCOL: &[u8] = b"tds/8.0";
+
+fn negotiate_encryption(
+    prelogin: &PreLogin,
+    tls_configured: bool,
+    loopback: bool,
+) -> (u8, EncryptionOutcome) {
+    let requested = prelogin.encryption.unwrap_or(ENCRYPT_NOT_SUP);
+    if requested & ENCRYPT_CLIENT_CERT != 0 {
+        return (
+            ENCRYPT_NOT_SUP,
+            EncryptionOutcome::ClientWillEnd("client certificate authentication is not supported"),
+        );
+    }
+    match (tls_configured, requested & 0x7F) {
+        (false, ENCRYPT_OFF | ENCRYPT_NOT_SUP) => (ENCRYPT_NOT_SUP, EncryptionOutcome::Plain),
+        (false, _) => (
+            ENCRYPT_NOT_SUP,
+            EncryptionOutcome::ClientWillEnd(
+                "client requires encryption; EggDB is not set up for TLS (give it a certificate, or connect with encrypt=false or sqlcmd -N disable)",
+            ),
+        ),
+        (true, ENCRYPT_OFF) if loopback => {
+            (ENCRYPT_OFF, EncryptionOutcome::Tls(Encryption::LoginOnly))
         }
-    };
+        (true, ENCRYPT_OFF) => (ENCRYPT_REQ, EncryptionOutcome::Tls(Encryption::Full)),
+        (true, ENCRYPT_NOT_SUP) if loopback => (ENCRYPT_NOT_SUP, EncryptionOutcome::Plain),
+        (true, ENCRYPT_NOT_SUP) => (
+            ENCRYPT_REQ,
+            EncryptionOutcome::ClientWillEnd(
+                "the client cannot encrypt, and connections from other machines must use TLS",
+            ),
+        ),
+        (true, _) => (ENCRYPT_ON, EncryptionOutcome::Tls(Encryption::Full)),
+    }
+}
+
+fn parse_prelogin_message(shared: &Shared<'_>, wire: &Wire<'_>, message: &Message) -> Option<PreLogin> {
     if message.kind != PRELOGIN {
         (shared.log)(&format!(
             "{}  protocol error: the first message is not PRELOGIN",
@@ -210,35 +255,95 @@ fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<PreLogin> {
         ));
         return None;
     }
-    let prelogin = match parse_prelogin(&message.body) {
-        Ok(prelogin) => prelogin,
+    match parse_prelogin(&message.body) {
+        Ok(prelogin) => Some(prelogin),
         Err(error) => {
             (shared.log)(&format!("{}  protocol error: {error}", wire.peer()));
+            None
+        }
+    }
+}
+
+fn start_tls(shared: &Shared<'_>, wire: &mut Wire<'_>, config: &eggdb_tls::ServerConfig, framed: bool) -> bool {
+    match wire.start_tls(config, framed) {
+        Ok(()) => true,
+        Err(error) => {
+            (shared.log)(&format!("{}  TLS handshake failed: {error}", wire.peer()));
+            false
+        }
+    }
+}
+
+fn read_strict_prelogin(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    config: &eggdb_tls::ServerConfig,
+) -> Option<Encryption> {
+    if !start_tls(shared, wire, config, false) {
+        return None;
+    }
+    let negotiated = wire.tls().and_then(|info| info.application_protocol.as_deref());
+    if negotiated != Some(TDS_8_APPLICATION_PROTOCOL) {
+        (shared.log)(&format!(
+            "{}  TDS 8 connection refused: the client did not ask for tds/8.0 with ALPN",
+            wire.peer()
+        ));
+        return None;
+    }
+    let message = match wire.read_message(MAX_LOGIN_BYTES) {
+        Ok(message) => message,
+        Err(error) => {
+            report_wire_error(shared, wire, &error);
             return None;
         }
     };
-    let answer = prelogin_response(&prelogin, version_bytes());
+    let prelogin = parse_prelogin_message(shared, wire, &message)?;
+    let answer = prelogin_response(&prelogin, version_bytes(), ENCRYPT_NOT_SUP);
+    wire.send_message(TABULAR_RESULT, &answer).ok()?;
+    Some(Encryption::Full)
+}
+
+fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<Encryption> {
+    let tls_config = shared.config.tls.as_deref();
+    let message = match (wire.read_message(MAX_LOGIN_BYTES), tls_config) {
+        (Ok(message), _) => message,
+        (Err(WireError::Tls), Some(config)) => return read_strict_prelogin(shared, wire, config),
+        (Err(error), _) => {
+            report_wire_error(shared, wire, &error);
+            return None;
+        }
+    };
+    let prelogin = parse_prelogin_message(shared, wire, &message)?;
+    let (response, outcome) =
+        negotiate_encryption(&prelogin, tls_config.is_some(), wire.peer_is_loopback());
+    let answer = prelogin_response(&prelogin, version_bytes(), response);
     if wire.send_message(TABULAR_RESULT, &answer).is_err() {
         return None;
     }
-    if prelogin.wants_encryption() {
-        (shared.log)(&format!(
-            "{}  client requires encryption; EggDB has no TLS yet (connect with encrypt=false or sqlcmd -N disable)",
-            wire.peer()
-        ));
-        wire.close_after_refusal();
-        return None;
+    match (outcome, tls_config) {
+        (EncryptionOutcome::Plain, _) => Some(Encryption::None),
+        (EncryptionOutcome::Tls(encryption), Some(config)) => {
+            start_tls(shared, wire, config, true).then_some(encryption)
+        }
+        (EncryptionOutcome::Tls(_), None) => None,
+        (EncryptionOutcome::ClientWillEnd(reason), _) => {
+            (shared.log)(&format!("{}  {reason}", wire.peer()));
+            wire.close_after_refusal();
+            None
+        }
     }
-    Some(prelogin)
 }
 
 pub(crate) fn refuse_too_many(shared: &Shared<'_>, wire: &mut Wire<'_>) {
-    if read_prelogin(shared, wire).is_none() {
+    let Some(encryption) = read_prelogin(shared, wire) else {
         return;
-    }
+    };
     let Ok(mut message) = wire.read_message(MAX_LOGIN_BYTES) else {
         return;
     };
+    if encryption == Encryption::LoginOnly {
+        wire.end_tls_after_login();
+    }
     message.body.fill(0);
     std::hint::black_box(&message.body);
     let text = format!(
@@ -262,7 +367,7 @@ fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &
     refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(user))]);
 }
 
-fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Login {
+fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>, encryption: Encryption) -> Login {
     let mut message = match wire.read_message(MAX_LOGIN_BYTES) {
         Ok(message) => message,
         Err(error) => {
@@ -270,6 +375,9 @@ fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Login {
             return Login::Refused;
         }
     };
+    if encryption == Encryption::LoginOnly {
+        wire.end_tls_after_login();
+    }
     if message.kind != LOGIN7 {
         message.body.fill(0);
         std::hint::black_box(&message.body);
@@ -433,10 +541,10 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         refuse_too_many(shared, &mut wire);
         return;
     };
-    if read_prelogin(shared, &mut wire).is_none() {
+    let Some(encryption) = read_prelogin(shared, &mut wire) else {
         return;
-    }
-    let Login::Accepted { user, packet_size } = log_in(shared, &mut wire) else {
+    };
+    let Login::Accepted { user, packet_size } = log_in(shared, &mut wire, encryption) else {
         return;
     };
     drop(login_slot);

@@ -203,13 +203,13 @@ pub fn parse_prelogin(body: &[u8]) -> Result<PreLogin, MalformedMessage> {
 /// The server's PRELOGIN answer to `request`: `version` (major, minor, build), encryption
 /// not available, the default instance unless the client named another one, no MARS, and
 /// FEDAUTHREQUIRED 0 when the client sent that option.
-pub fn prelogin_response(request: &PreLogin, version: [u8; 4]) -> Vec<u8> {
+pub fn prelogin_response(request: &PreLogin, version: [u8; 4], encryption: u8) -> Vec<u8> {
     let mut options: Vec<(u8, Vec<u8>)> = vec![
         (
             OPTION_VERSION,
             vec![version[0], version[1], version[2], version[3], 0, 0],
         ),
-        (OPTION_ENCRYPTION, vec![ENCRYPT_NOT_SUP]),
+        (OPTION_ENCRYPTION, vec![encryption]),
         (
             OPTION_INSTANCE,
             vec![u8::from(request.names_another_instance())],
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(request.encryption, Some(ENCRYPT_OFF));
         assert!(request.mars);
         assert!(!request.wants_encryption());
-        let answer = prelogin_response(&request, [16, 0, 0x03, 0xE8]);
+        let answer = prelogin_response(&request, [16, 0, 0x03, 0xE8], ENCRYPT_NOT_SUP);
         let parsed = parse_prelogin(&answer).unwrap();
         assert_eq!(parsed.encryption, Some(ENCRYPT_NOT_SUP));
         assert_eq!(parsed.version, [16, 0, 0x03, 0xE8, 0, 0]);

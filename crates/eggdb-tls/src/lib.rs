@@ -19,7 +19,8 @@
 //! - [`negotiation`]: signature schemes, groups, application protocols and ephemeral keys;
 //! - [`tls12`]: TLS 1.2's PRF and key derivation;
 //! - [`config`], [`error`], [`session`] and [`stream`]: TLS 1.3 and TLS 1.2 servers and clients
-//!   over any byte stream, as [`TlsStream`].
+//!   over any byte stream, as [`TlsStream`], and [`ServerConnection`], a server's TCP
+//!   connection upgraded to TLS when the client asks.
 //!
 //! Nothing here panics on its input: every parser returns an error as a value.
 
@@ -42,6 +43,7 @@ mod record_layer;
 pub mod self_signed;
 mod server;
 mod server12;
+pub mod server_connection;
 pub mod session;
 pub mod signature;
 pub mod stream;
@@ -52,5 +54,6 @@ mod x509_time;
 
 pub use config::{ClientConfig, MaximumVersion, MinimumVersion, ServerConfig, ServerVerification};
 pub use error::TlsError;
+pub use server_connection::ServerConnection;
 pub use session::SessionInfo;
 pub use stream::{PrefixedStream, TlsStream};

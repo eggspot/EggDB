@@ -1,11 +1,11 @@
 use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, NONCE_BYTES};
 use crate::packets::{
-    BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, ColumnDefinition, Command,
+    BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, CLIENT_SSL, ColumnDefinition, Command,
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
     STATUS_MORE_RESULTS, TYPE_BLOB, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON,
     TYPE_LONG, TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIME, TYPE_TIMESTAMP, TYPE_TINY,
     TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
-    err_packet, ok_packet, parse_command, parse_execute, parse_handshake_response,
+    err_packet, is_ssl_request, ok_packet, parse_command, parse_execute, parse_handshake_response,
 };
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
@@ -54,7 +54,8 @@ fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
     Some(nonce)
 }
 
-fn handshake_packet(connection_id: u32, nonce: &[u8; NONCE_BYTES]) -> Vec<u8> {
+fn handshake_packet(connection_id: u32, nonce: &[u8; NONCE_BYTES], tls: bool) -> Vec<u8> {
+    let capabilities = if tls { SERVER_CAPABILITIES | CLIENT_SSL } else { SERVER_CAPABILITIES };
     let mut payload = Payload::new();
     payload
         .u8(10)
@@ -62,10 +63,10 @@ fn handshake_packet(connection_id: u32, nonce: &[u8; NONCE_BYTES]) -> Vec<u8> {
         .u32(connection_id)
         .bytes(&nonce[..8])
         .u8(0)
-        .u16(SERVER_CAPABILITIES as u16)
+        .u16(capabilities as u16)
         .u8(UTF8MB4_0900_AI_CI)
         .u16(STATUS_AUTOCOMMIT)
-        .u16((SERVER_CAPABILITIES >> 16) as u16)
+        .u16((capabilities >> 16) as u16)
         .u8(NONCE_BYTES as u8 + 1)
         .bytes(&[0; 10])
         .null_terminated(&nonce[8..])
@@ -268,17 +269,49 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         return;
     };
     wire.sequence = 0;
-    wire.send(&handshake_packet(connection_id, &nonce));
+    let tls_config = shared.config.tls.as_deref();
+    wire.send(&handshake_packet(connection_id, &nonce, tls_config.is_some()));
     if wire.flush().is_err() {
         return;
     }
-    let body = match wire.read_payload(1, MAX_AUTHENTICATION_PACKET_BYTES) {
+    let mut body = match wire.read_payload(1, MAX_AUTHENTICATION_PACKET_BYTES) {
         Ok(body) => body,
         Err(error) => {
             report_wire_error(&mut wire, &error);
             return;
         }
     };
+    if is_ssl_request(&body) {
+        let Some(config) = tls_config else {
+            refuse(
+                &mut wire,
+                1043,
+                "08S01",
+                "Bad handshake: the client asked for TLS, which this server is not set up for",
+            );
+            return;
+        };
+        if let Err(error) = wire.start_tls(config) {
+            (shared.log)(&format!("{}  TLS handshake failed: {error}", wire.peer()));
+            return;
+        }
+        body = match wire.read_payload(2, MAX_AUTHENTICATION_PACKET_BYTES) {
+            Ok(body) => body,
+            Err(error) => {
+                report_wire_error(&mut wire, &error);
+                return;
+            }
+        };
+    }
+    if wire.tls().is_none() && !wire.peer_is_loopback() {
+        refuse(
+            &mut wire,
+            3159,
+            "HY000",
+            "Connections using insecure transport are prohibited: EggDB accepts connections from other machines only over TLS (--ssl-mode=REQUIRED)",
+        );
+        return;
+    }
     let response = match parse_handshake_response(&body) {
         Ok(response) => response,
         Err(error) => {

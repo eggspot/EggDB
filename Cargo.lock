@@ -59,6 +59,7 @@ dependencies = [
  "eggdb-crypto",
  "eggdb-platform",
  "eggdb-sql",
+ "eggdb-tls",
 ]
 
 [[package]]
@@ -93,6 +94,7 @@ dependencies = [
  "eggdb-crypto",
  "eggdb-platform",
  "eggdb-sql",
+ "eggdb-tls",
 ]
 
 [[package]]

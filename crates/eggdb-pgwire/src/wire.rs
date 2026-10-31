@@ -1,5 +1,5 @@
 use crate::messages::{MAX_STARTUP_PACKET_BYTES, Outbox};
-use eggdb_tls::{PrefixedStream, SessionInfo, TlsStream};
+use eggdb_tls::{ServerConnection, SessionInfo};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
@@ -13,65 +13,8 @@ const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) enum WireStream {
-    Plain(TcpStream),
-    Tls(Box<TlsStream<PrefixedStream<TcpStream>>>),
-    Detached,
-}
-
-impl WireStream {
-    fn tcp(&self) -> Option<&TcpStream> {
-        match self {
-            Self::Plain(stream) => Some(stream),
-            Self::Tls(stream) => Some(stream.get_ref().get_ref()),
-            Self::Detached => None,
-        }
-    }
-}
-
-fn detached() -> io::Error {
-    io::Error::new(io::ErrorKind::NotConnected, "the TLS handshake failed")
-}
-
-impl Read for WireStream {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.read(buffer),
-            Self::Tls(stream) => stream.read(buffer),
-            Self::Detached => Err(detached()),
-        }
-    }
-}
-
-impl Write for WireStream {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.write(buffer),
-            Self::Tls(stream) => stream.write(buffer),
-            Self::Detached => Err(detached()),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Plain(stream) => stream.flush(),
-            Self::Tls(stream) => stream.flush(),
-            Self::Detached => Err(detached()),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum WireError {
-    Closed,
-    Stopping,
-    TimedOut,
-    TooLarge(usize),
-    Io,
-}
-
 pub(crate) struct Wire<'a> {
-    stream: WireStream,
+    stream: ServerConnection,
     peeked: Option<u8>,
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
@@ -90,7 +33,7 @@ impl<'a> Wire<'a> {
         stream.set_read_timeout(Some(POLL_INTERVAL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self {
-            stream: WireStream::Plain(stream),
+            stream: ServerConnection::Plain(stream),
             peeked: None,
             stop,
             deadline,
@@ -201,9 +144,7 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn close_after_refusal(&mut self) {
-        if let WireStream::Tls(stream) = &mut self.stream {
-            let _ = stream.close();
-        }
+        self.stream.close_tls();
         let Some(mut stream) = self.stream.tcp() else {
             return;
         };
@@ -239,10 +180,7 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn peer_is_loopback(&self) -> bool {
-        self.stream
-            .tcp()
-            .and_then(|stream| stream.peer_addr().ok())
-            .is_some_and(|peer| peer.ip().is_loopback())
+        self.stream.peer_is_loopback()
     }
 
     pub(crate) fn peek_byte(&mut self) -> Result<u8, WireError> {
@@ -257,33 +195,19 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn start_tls(&mut self, config: &eggdb_tls::ServerConfig) -> Result<(), String> {
         let prefix: Vec<u8> = self.peeked.take().into_iter().collect();
-        let WireStream::Plain(stream) = std::mem::replace(&mut self.stream, WireStream::Detached)
-        else {
-            return Err("TLS was requested twice".to_owned());
-        };
         let timeout = self
             .deadline
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
             .filter(|left| !left.is_zero())
             .unwrap_or(TLS_HANDSHAKE_TIMEOUT);
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(|error| error.to_string())?;
-        let tls = TlsStream::accept(PrefixedStream::new(prefix, stream), config)
-            .map_err(|error| error.to_string())?;
-        tls.get_ref()
-            .get_ref()
-            .set_read_timeout(Some(POLL_INTERVAL))
+        self.stream
+            .upgrade(config, prefix, timeout, Some(POLL_INTERVAL))
             .map_err(|error| error.to_string())?;
         self.read_timeout = POLL_INTERVAL;
-        self.stream = WireStream::Tls(Box::new(tls));
         Ok(())
     }
 
     pub(crate) fn tls(&self) -> Option<&SessionInfo> {
-        match &self.stream {
-            WireStream::Tls(stream) => Some(stream.info()),
-            _ => None,
-        }
+        self.stream.tls()
     }
 }
