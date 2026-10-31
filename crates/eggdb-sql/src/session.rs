@@ -2059,6 +2059,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             "pg_cron" => ("cron", crate::jobs::PG_CRON_SCRIPT),
             "eggdb_tenancy" => ("eggdb_tenancy", crate::tenancy::TENANCY_SCRIPT),
             "eggdb_ledger" => ("eggdb_ledger", crate::ledger::LEDGER_SCRIPT),
+            "eggdb_console" => ("eggdb_console", crate::console::CONSOLE_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

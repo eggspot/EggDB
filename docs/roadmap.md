@@ -195,7 +195,7 @@ From the second gap review (D37–D45):
 - **Observability storage (D39)** follows time series (M11).
 - **Engine internals (D40)** run from M1 (I/O) and M5 (the optimizer).
 - **Embedded detail (D41)** runs from M4.
-- **The console and notebooks (D42)** run with the client track.
+- **The console and notebooks (D42)** run with the client track. Started: ER diagrams in Mermaid and DOT from SQL (D237).
 - **Legal checks (D43)** come before each release.
 - **Public proof (D44)** runs from the first benchmarks.
 

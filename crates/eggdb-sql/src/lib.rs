@@ -29,6 +29,7 @@ mod bytea;
 mod cancel;
 pub mod cdc;
 mod comments;
+mod console;
 mod constraints;
 mod copy;
 mod datetime;

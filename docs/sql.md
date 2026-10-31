@@ -2385,6 +2385,17 @@ the hash of the row before it and its own SHA-256, and updates and deletes fail 
 Protect a table before adding rows to it. `sha256(x)` and `sha512(x)` return a digest as
 `bytea`, of `bytea` or of text's UTF-8 bytes.
 
+## Schema diagrams (eggdb_console)
+
+`CREATE EXTENSION eggdb_console` adds `eggdb_console.er_diagram(schema, format)`, which returns
+the schema's tables, columns, primary keys and foreign keys as a Mermaid `erDiagram` (`'mermaid'`)
+or a Graphviz graph (`'dot'`), ready to paste into Markdown or render with `dot -Tsvg` (D237):
+
+```sql
+CREATE EXTENSION eggdb_console;
+SELECT eggdb_console.er_diagram('public', 'mermaid');
+```
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form
