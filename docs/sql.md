@@ -2385,6 +2385,29 @@ the hash of the row before it and its own SHA-256, and updates and deletes fail 
 Protect a table before adding rows to it. `sha256(x)` and `sha512(x)` return a digest as
 `bytea`, of `bytea` or of text's UTF-8 bytes.
 
+## Industry messages: FIX, HL7 v2 and EDIFACT
+
+Messages from trading, healthcare and supply-chain systems parse into `jsonb` with plain
+functions, so they can be stored, indexed and queried next to everything else (D243):
+
+```sql
+SELECT fix_field(raw, 55) AS symbol FROM orders;            -- one FIX tag's value, or NULL
+SELECT fix_parse(raw) FROM orders;                          -- [{"tag": 8, "value": "FIX.4.4"}, ...]
+SELECT msg -> 1 -> 'fields' -> 4 FROM (SELECT hl7_parse(raw) AS msg FROM lab_feed) AS m;
+SELECT edifact_parse(raw) -> 1 -> 'elements' FROM invoices;
+```
+
+- `fix_parse` reads `tag=value` fields separated by SOH (or `|` when the text has no SOH),
+  keeps repeated tags in order, and checks `BodyLength(9)` and `CheckSum(10)` when present.
+- `hl7_parse` takes the separators from the `MSH` segment, splits segments on carriage returns
+  or new lines, and gives each segment its fields numbered as in HL7 (`MSH-1` is the field
+  separator). A field with repetitions, components or subcomponents becomes a nested array,
+  and the `\F\`, `\S\`, `\T\`, `\R\` and `\E\` escapes are decoded.
+- `edifact_parse` honours a `UNA` service string advice and the release character, and gives
+  each segment its tag and elements, an element with components becoming an array.
+
+A malformed message fails with SQLSTATE `22P02` and says what is wrong; nothing is guessed.
+
 ## Schema diagrams (eggdb_console)
 
 `CREATE EXTENSION eggdb_console` adds `eggdb_console.er_diagram(schema, format)`, which returns

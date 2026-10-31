@@ -122,6 +122,7 @@ mod sqlserver_strings;
 mod sqlserver_types;
 mod statistics;
 mod store;
+mod standards;
 mod string_functions;
 mod subquery;
 mod table_variables;
