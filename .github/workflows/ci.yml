@@ -138,6 +138,36 @@ jobs:
       - name: Test against musl, as the default Linux release is built
         run: cargo test --workspace --target x86_64-unknown-linux-musl
 
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the latest release with the one-line installer and time it
+        if: runner.os != 'Windows'
+        run: scripts/install/check.sh >> "$GITHUB_STEP_SUMMARY"
+      - name: Install the latest release with the PowerShell installer and time it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'eggdb-bin'
+          $env:EGGDB_INSTALL_DIR = $dir
+          $installing = [System.Diagnostics.Stopwatch]::StartNew()
+          ./scripts/install/install.ps1
+          $installing.Stop()
+          $starting = [System.Diagnostics.Stopwatch]::StartNew()
+          & (Join-Path $dir 'eggdb.exe') version
+          $starting.Stop()
+          "| Step | Seconds |`n|------|--------:|`n| download and install | $([math]::Round($installing.Elapsed.TotalSeconds, 2)) |`n| first start | $([math]::Round($starting.Elapsed.TotalSeconds, 2)) |" >> $env:GITHUB_STEP_SUMMARY
+
   egg-allocator:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -708,7 +738,7 @@ jobs:
             cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
 
   check:
-    needs: [lint-and-test, platforms, musl, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
+    needs: [lint-and-test, platforms, musl, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
