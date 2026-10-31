@@ -1,4 +1,4 @@
-use crate::ast::{Expr, ExprKind, Literal, Select, Statement};
+use crate::ast::{Expr, ExprKind, Literal, Select, SelectItem, Statement};
 use crate::dialect::Dialect;
 use crate::eval::children_mut;
 use crate::lexer::{Token, TokenKind};
@@ -72,6 +72,13 @@ fn depends_on_values_outside_the_text(kind: &TokenKind<'_>) -> bool {
 
 fn starts_a_select(token: Option<&Token<'_>>) -> bool {
     matches!(token.map(|token| &token.kind), Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("select"))
+}
+
+fn names_columns_by_text(select: &Select, dialect: Dialect) -> bool {
+    matches!(dialect, Dialect::MySql | Dialect::Sqlite | Dialect::Oracle)
+        && select.items.iter().any(|item| {
+            matches!(item, SelectItem::Expr { expr, alias: Some(_) } if !matches!(expr.kind, ExprKind::Column { .. }))
+        })
 }
 
 fn hash_of(key: &[u8]) -> u64 {
@@ -283,7 +290,7 @@ impl PlanCache {
             return;
         }
         let template = match parsed {
-            Statement::Select(select) if end == shape.stop => {
+            Statement::Select(select) if end == shape.stop && !names_columns_by_text(select, dialect) => {
                 let mut template = select.clone();
                 literals_come_from_tokens(&mut template, tokens, shape).then_some(template)
             }

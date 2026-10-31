@@ -253,7 +253,7 @@ mod tests {
             Some(1821)
         );
         assert!(nls.with("nls_timestamp_format", "'HH24:MI:SS.FF'").is_ok());
-        assert_eq!(code(nls.with("nls_date_format", "'QQQ'")), Some(1821));
+        assert_eq!(code(nls.with("nls_date_format", "'KK'")), Some(1821));
     }
 
     #[test]
