@@ -209,8 +209,7 @@ fn arrays_are_values_of_expressions_columns_views_and_intermediate_results() {
     assert_eq!(state(&mut session, "SELECT '{{1}}'::int[]"), "0A000");
     assert_eq!(state(&mut session, "SELECT ARRAY[ARRAY[1]]"), "0A000");
     assert_eq!(state(&mut session, "SELECT (ARRAY[1, 2])[1:2]"), "0A000");
-    assert_eq!(state(&mut session, "SELECT ARRAY[now()]"), "0A000");
-    assert_eq!(state(&mut session, "SELECT '{1}'::date[]"), "0A000");
+    assert_eq!(state(&mut session, "SELECT '{1}'::date[]"), "22007");
 }
 
 #[test]

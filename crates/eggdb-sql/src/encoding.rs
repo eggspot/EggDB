@@ -3033,10 +3033,10 @@ mod tests {
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
         let mut newer = with_indexes([true, false]).encode();
-        newer[0] = 10;
+        newer[0] = 250;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 10"), "{error}");
+        assert!(error.message().contains("format version 250"), "{error}");
     }
 
     fn with_indexes(auto: [bool; 2]) -> TableDefinition {

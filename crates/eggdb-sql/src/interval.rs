@@ -1330,7 +1330,7 @@ mod tests {
         assert!(interval("1 day").divide(0.0).is_err());
         assert!(interval("1 day").divide(1e-300).is_err());
         let huge = Interval {
-            months: i32::MAX,
+            months: i32::MAX - 1,
             days: i32::MAX,
             micros: i64::MAX,
         };

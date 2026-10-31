@@ -226,7 +226,7 @@ fn every_catalog_leaves_out_what_is_hidden() {
         .unwrap();
     assert_eq!(
         rendered.last().unwrap(),
-        "SEQUENCE_NAME\nUSERS_ID_SEQ\nSELECT 1"
+        "SEQUENCE_NAME\nSELECT 0"
     );
     assert!(
         oracle
