@@ -38,6 +38,7 @@ pub(crate) struct WordRules {
     pub(crate) escape_prefixes: bool,
     pub(crate) q_quotes: bool,
     pub(crate) quoted_names_swap_case: bool,
+    pub(crate) mysql: bool,
 }
 
 impl WordRules {
@@ -47,6 +48,7 @@ impl WordRules {
         escape_prefixes: true,
         q_quotes: false,
         quoted_names_swap_case: false,
+        mysql: false,
     };
 
     pub(crate) const SQLSERVER: Self = Self {
@@ -55,6 +57,7 @@ impl WordRules {
         escape_prefixes: false,
         q_quotes: false,
         quoted_names_swap_case: false,
+        mysql: false,
     };
 
     pub(crate) const ORACLE: Self = Self {
@@ -63,6 +66,16 @@ impl WordRules {
         escape_prefixes: false,
         q_quotes: true,
         quoted_names_swap_case: true,
+        mysql: false,
+    };
+
+    pub(crate) const MYSQL: Self = Self {
+        bracketed_names: false,
+        dollar_quotes: false,
+        escape_prefixes: false,
+        q_quotes: false,
+        quoted_names_swap_case: false,
+        mysql: true,
     };
 }
 
@@ -70,6 +83,7 @@ pub(crate) struct Words<'t> {
     bytes: &'t [u8],
     at: usize,
     rules: WordRules,
+    open_executable_comments: u32,
 }
 
 impl<'t> Words<'t> {
@@ -90,6 +104,7 @@ impl<'t> Words<'t> {
             bytes: text.as_bytes(),
             at: 0,
             rules,
+            open_executable_comments: 0,
         }
     }
 
@@ -105,6 +120,25 @@ impl<'t> Words<'t> {
         loop {
             match self.peek(0) {
                 Some(byte) if byte.is_ascii_whitespace() => self.at += 1,
+                Some(b'*') if self.open_executable_comments > 0 && self.peek(1) == Some(b'/') => {
+                    self.open_executable_comments -= 1;
+                    self.at += 2;
+                }
+                Some(b'/') if self.rules.mysql && self.peek(1) == Some(b'*') && self.peek(2) == Some(b'!') => {
+                    self.at += 3;
+                    while self.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
+                        self.at += 1;
+                    }
+                    self.open_executable_comments += 1;
+                }
+                Some(b'#') if self.rules.mysql => {
+                    while let Some(byte) = self.peek(0) {
+                        self.at += 1;
+                        if byte == b'\n' {
+                            break;
+                        }
+                    }
+                }
                 Some(b'-') if self.peek(1) == Some(b'-') => {
                     while let Some(byte) = self.peek(0) {
                         self.at += 1;
@@ -234,8 +268,16 @@ impl Iterator for Words<'_> {
         self.skip_space_and_comments();
         let byte = self.peek(0)?;
         if byte == b'\'' {
-            self.quoted(b'\'', false);
+            self.quoted(b'\'', self.rules.mysql);
             return Some(Token::Literal);
+        }
+        if byte == b'"' && self.rules.mysql {
+            self.quoted(b'"', true);
+            return Some(Token::Literal);
+        }
+        if byte == b'`' && self.rules.mysql {
+            let name = self.quoted(b'`', false);
+            return Some(Token::Quoted(String::from_utf8_lossy(&name).into_owned()));
         }
         if byte == b'"' {
             let name = self.quoted(b'"', false);

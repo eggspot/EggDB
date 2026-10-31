@@ -1768,12 +1768,14 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     Ok(())
 }
 
-const RESTORE_DIALECTS: [(&str, eggdb_sql::Dialect); 5] = [
+const RESTORE_DIALECTS: [(&str, eggdb_sql::Dialect); 7] = [
     ("postgresql", eggdb_sql::Dialect::PostgreSql),
     ("sqlserver", eggdb_sql::Dialect::SqlServer),
     ("mssql", eggdb_sql::Dialect::SqlServer),
     ("tsql", eggdb_sql::Dialect::SqlServer),
     ("oracle", eggdb_sql::Dialect::Oracle),
+    ("mysql", eggdb_sql::Dialect::MySql),
+    ("mariadb", eggdb_sql::Dialect::MySql),
 ];
 
 fn check_restore_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
@@ -1782,7 +1784,7 @@ fn check_restore_dialect(value: &OsStr) -> Result<eggdb_sql::Dialect, String> {
         return Ok(*dialect);
     }
     Err(format!(
-        "--dialect must be postgresql, sqlserver or oracle, not '{}'",
+        "--dialect must be postgresql, sqlserver, oracle or mysql, not '{}'",
         shown(value)
     ))
 }

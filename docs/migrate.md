@@ -460,6 +460,24 @@ known differences (restored, but not as the source had it)
   missing index is `ORA-01418`, and one whose leading columns are not the constraint's is
   `ORA-14196`.
 
+## From MySQL and MariaDB: a `mysqldump` file
+
+`eggdb restore --dialect mysql --create app.eggdb shop.sql` restores what `mysqldump shop >
+shop.sql` writes (D198). The file is read as the `mysql` client reads it: statements end at `;`
+or at the delimiter a `DELIMITER` line sets (as dumps of triggers and routines do), outside
+strings, backquoted names and comments, and the `/*!NNNNN ... */` comments run as MySQL runs
+them. Tables, rows (`INSERT` and `REPLACE`), indexes, views, triggers and the session settings
+the dump makes run in EggDB's MySQL dialect; `LOCK TABLES`, `ALTER TABLE ... DISABLE KEYS`,
+`CREATE DATABASE` and `USE` (one database per file), `GRANT`, and the replication settings of
+a GTID dump (`SET @@GLOBAL.GTID_PURGED`, `SQL_LOG_BIN`) are counted as ignored. `--dialect
+mariadb` reads the same format. The report lists tables, rows per table and anything left out.
+
+Dump with `--skip-extended-insert` only if you need a failing row to name itself; the default
+multi-row `INSERT` is faster to restore. `mysqldump` writes tables in name order, and EggDB does
+not yet defer a foreign key to a table created later the way `FOREIGN_KEY_CHECKS=0` lets MySQL:
+such a table is reported as failed; restore with `--keep-going` and add the constraint
+afterwards with `ALTER TABLE ... ADD CONSTRAINT`.
+
 ## From Redis: an append-only file
 
 `eggdb restore app.eggdb appendonly.aof` replays a Redis append-only file (a file of RESP

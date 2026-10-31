@@ -1,7 +1,9 @@
 mod classify;
+mod classify_mysql;
 mod classify_oracle;
 mod classify_sqlserver;
 mod column_rewrite;
+mod mysql_reader;
 mod reader;
 mod script;
 mod script_reader;
@@ -418,8 +420,19 @@ pub fn restore_dump<S: KeyValueStore>(
             session.keep_identity_values(false);
             report
         }
+        Dialect::MySql => {
+            let mut script = mysql_reader::MysqlScript::new(input);
+            Restore::new(
+                session,
+                &mut script,
+                RestoreRules::mysql(),
+                options,
+                progress,
+            )
+            .run()
+        }
         _ => failed_before_start(SqlError::not_supported(
-            "restoring a dump in a dialect other than PostgreSQL, SQL Server and Oracle",
+            "restoring a dump in a dialect other than PostgreSQL, SQL Server, Oracle and MySQL",
         )),
     }
 }
@@ -483,6 +496,23 @@ impl RestoreRules {
             differences: classify_sqlserver::sqlserver_differences,
             not_supported: classify_sqlserver::refused_as_not_supported,
             rewrite_refused_table: column_rewrite::without_refused_identity,
+            psql_meta_commands: false,
+            index_names_per_table: true,
+            default_schema: "public",
+            oracle: false,
+        }
+    }
+
+    fn mysql() -> Self {
+        Self {
+            classify: classify_mysql::classify_mysql,
+            table_key: classify_mysql::mysql_table_key,
+            name_key: classify_mysql::mysql_name_key,
+            words: WordRules::MYSQL,
+            client_command_reason: classify_mysql::mysql_command_reason,
+            differences: |_| Vec::new(),
+            not_supported: |error| error.state() == SqlState::FEATURE_NOT_SUPPORTED,
+            rewrite_refused_table: |_, _| None,
             psql_meta_commands: false,
             index_names_per_table: true,
             default_schema: "public",
@@ -1859,6 +1889,8 @@ fn error_line(statement: &ScriptStatement, error: &SqlError) -> u64 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_mysql;
 #[cfg(test)]
 mod tests_oracle;
 #[cfg(test)]

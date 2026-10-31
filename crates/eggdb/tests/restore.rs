@@ -366,13 +366,13 @@ fn files_the_restore_cannot_use_are_refused() {
             &target,
             &"-",
             &"--dialect",
-            &"mysql",
+            &"sqlite",
         ],
         b"SELECT 1;\n",
     );
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        text(&output.stderr).contains("--dialect must be postgresql, sqlserver or oracle"),
+        text(&output.stderr).contains("--dialect must be postgresql, sqlserver, oracle or mysql"),
         "{}",
         text(&output.stderr)
     );
