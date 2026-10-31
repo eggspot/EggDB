@@ -46,6 +46,7 @@ mod os_fs;
 mod os_io;
 mod os_io_uring;
 mod os_iocp;
+mod os_iocp_net;
 mod os_memory;
 mod os_net;
 mod os_net_readiness;

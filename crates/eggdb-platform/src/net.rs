@@ -267,6 +267,12 @@ pub enum NetBackend {
     /// the same ring. A kernel without io_uring, or one that disables it, refuses the request
     /// with [`ErrorKind::Unsupported`].
     IoUring,
+    /// Runs accepts, connects, receives and sends as overlapped operations on a Windows I/O
+    /// completion port, on request only, waiting for their completion packets inside
+    /// [`NetQueue::reap`]. A socket is tied to the first such queue that uses it: another
+    /// completion-port queue refuses it with [`ErrorKind::Unsupported`], while the other
+    /// backends still take it.
+    Iocp,
 }
 
 /// How [`Network::net_queue`] builds a queue.
