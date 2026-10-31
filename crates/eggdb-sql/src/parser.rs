@@ -3109,7 +3109,10 @@ impl<'t> Parser<'t> {
         matches!(
             self.peek_kind(),
             TokenKind::Semicolon | TokenKind::End | TokenKind::RightParen
-        ) || matches!(self.peek_kind(), TokenKind::Word(word) if self.clause_word(word) || word == "from")
+        ) || matches!(self.peek_kind(), TokenKind::Word(word)
+            if (self.clause_word(word) || word == "from")
+                && !(matches!(word.as_ref(), "left" | "right")
+                    && self.peek_kind_at(1) == &TokenKind::LeftParen))
     }
 
     fn select_items(&mut self) -> SqlResult<Vec<SelectItem>> {
@@ -3172,10 +3175,6 @@ impl<'t> Parser<'t> {
             Some(oracle::label(&self.source_text(first_token)))
         } else if self.sqlserver() && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(String::new())
-        } else if self.sqlserver() {
-            let written = self.source_text(first_token);
-            let last = written.rsplit('.').next().unwrap_or(&written);
-            Some(last.trim_matches(|character| matches!(character, '[' | ']' | '"')).to_owned())
         } else if (self.mysql() || self.sqlite()) && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(self.source_text(first_token))
         } else {

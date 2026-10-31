@@ -202,7 +202,7 @@ fn every_catalog_leaves_out_what_is_hidden() {
             &mut |result| rendered.push(render(&result)),
         )
         .unwrap();
-    assert_eq!(rendered.last().unwrap(), "TABLE_NAME\nusers\nSELECT 1");
+    assert_eq!(rendered.last().unwrap(), "table_name\nusers\nSELECT 1");
     assert!(
         sqlserver
             .execute("SELECT * FROM dbo.secrets", &mut |_| {})
