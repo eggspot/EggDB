@@ -225,3 +225,4 @@ its full title with its status.
 - [D198](decisions/D198.md) `mysqldump` files restore through the restore framework with a MySQL reader (delimiters, `/*!` comments) and classifier, running in the MySQL dialect; `--dialect mysql` and `mariadb`
 - [D199](decisions/D199.md) MySQL procedures and functions compile onto the shared routine interpreter (`RoutineLanguage::MySql`), running their SQL in the MySQL dialect; OUT parameters into user variables; handlers and cursors refused for now
 - [D200](decisions/D200.md) Scheduled jobs: `CREATE EXTENSION pg_cron` installs pg_cron's `cron` schema as ordinary objects; `eggdb_sql::jobs::run_due_jobs` runs what is due in a minute, called by `eggdb serve` each UTC minute
+- [D201](decisions/D201.md) Columnar encodings (bit packing, hybrid runs, deltas, dictionaries) and self-describing integer chunks with statistics in `eggdb-columnar`, shared by columnar tables, Parquet and Arrow; `USING columnar` waits for chunk storage
