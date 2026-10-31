@@ -1,0 +1,13 @@
+{
+  "name": "eggdb",
+  "version": "0.1.0",
+  "description": "EggDB embedded in Node.js through EggDB's C API",
+  "license": "MIT OR Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "binding.gyp", "src/addon.c"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test"
+  }
+}

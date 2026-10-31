@@ -7,8 +7,8 @@ Compiles crates/eggdb-capi/tests/c/api_check.c against include/eggdb.h and the s
 with the system C compiler (CC, default cc; warnings are errors), checks that the header also
 compiles as C++ (CXX, default c++), and runs the program. Then runs
 examples/python/eggdb_ctypes.py and the Python driver's tests with PYTHON (default python3)
-against the same library, and the .NET and Java drivers' check programs where dotnet and a
-Java 22 or newer javac are installed.
+against the same library, the Node.js driver's tests where Node's headers are installed, and
+the .NET and Java drivers' check programs where dotnet and a Java 22 or newer javac are installed.
 NO_C_COMPILER=1 leaves out the C and C++ steps, for Windows runners without one."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
@@ -46,6 +46,17 @@ if command -v dotnet >/dev/null 2>&1; then
     || { cat "$work/dotnet-build.log" >&2; exit 1; }
   cp "$library" "$work/dotnet/"
   dotnet "$work/dotnet/EggDB.Data.Check.dll"
+fi
+node_include="$(dirname "$(command -v node 2>/dev/null || echo /none/node)")/../include/node"
+if [ "${NO_C_COMPILER:-}" != 1 ] && [ -f "$node_include/node_api.h" ]; then
+  case "$(uname -s)" in
+    Darwin) addon_link=(-bundle -undefined dynamic_lookup) ;;
+    *) addon_link=(-shared -fPIC) ;;
+  esac
+  "${CC:-cc}" -std=c11 -Wall -Wextra -Werror "${addon_link[@]}" -I "$node_include" -I "$include" \
+    "$root/drivers/node/src/addon.c" -L "$library_dir" -leggdb_capi -Wl,-rpath,"$library_dir" \
+    -o "$work/eggdb.node"
+  EGGDB_NODE_ADDON="$work/eggdb.node" node --test "$root/drivers/node/test/database.test.js"
 fi
 if command -v javac >/dev/null 2>&1 && javac --release 22 -version >/dev/null 2>&1; then
   javac --release 22 -d "$work/java" $(find "$root/drivers/java/src" "$root/drivers/java/check" -name '*.java')
