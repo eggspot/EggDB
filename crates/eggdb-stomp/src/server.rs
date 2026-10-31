@@ -104,6 +104,7 @@ impl<'k> Broker<'k> {
             return;
         };
         let id = self.next_topic_message.fetch_add(1, Ordering::Relaxed);
+        let mut deliveries: Vec<(SharedWriter, Vec<u8>)> = Vec::with_capacity(subscribers.len());
         for subscriber in subscribers {
             let mut frame = Frame::new("MESSAGE")
                 .with("destination", topic)
@@ -113,8 +114,11 @@ impl<'k> Broker<'k> {
                 frame = frame.with("content-type", content_type);
             }
             let bytes = frame.with_body(body).encode();
-            let _ = subscriber
-                .writer
+            deliveries.push((Arc::clone(&subscriber.writer), bytes));
+        }
+        drop(topics);
+        for (writer, bytes) in deliveries {
+            let _ = writer
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .write_all(&bytes);

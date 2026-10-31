@@ -139,31 +139,31 @@ impl Coordinator {
         self.next
     }
 
-    /// Records the decision from the votes, before anyone is told: commit only if every
-    /// participant voted yes.
+    /// Records the decision from the votes, before anyone is told: commit only if there are
+    /// votes and every participant voted yes. A decision already recorded, including an abort
+    /// presumed for a participant in doubt, stands and is returned instead.
     pub fn decide(&mut self, transaction: TransactionId, votes: &[Vote]) -> Decision {
-        let decision = if votes.iter().all(|vote| *vote == Vote::Yes) {
+        let decision = if !votes.is_empty() && votes.iter().all(|vote| *vote == Vote::Yes) {
             Decision::Commit
         } else {
             Decision::Abort
         };
-        self.decisions.insert(transaction, decision);
-        decision
+        *self.decisions.entry(transaction).or_insert(decision)
     }
 
-    /// The outcome of `transaction` for a participant in doubt: the recorded decision, or abort
-    /// when none was recorded.
-    pub fn outcome(&self, transaction: TransactionId) -> Decision {
-        self.decisions
-            .get(&transaction)
-            .copied()
-            .unwrap_or(Decision::Abort)
+    /// The outcome of `transaction` for a participant in doubt: the recorded decision, or an
+    /// abort, recorded now so that a later [`Coordinator::decide`] cannot commit it.
+    pub fn outcome(&mut self, transaction: TransactionId) -> Decision {
+        *self
+            .decisions
+            .entry(transaction)
+            .or_insert(Decision::Abort)
     }
 }
 
 /// Settles every in-doubt transaction of `participants` from the coordinator's record, as a
 /// restarted participant or coordinator does.
-pub fn recover(coordinator: &Coordinator, participants: &mut BTreeMap<ShardId, Participant>) {
+pub fn recover(coordinator: &mut Coordinator, participants: &mut BTreeMap<ShardId, Participant>) {
     for participant in participants.values_mut() {
         let doubts: BTreeSet<TransactionId> = participant.in_doubt().into_iter().collect();
         for transaction in doubts {

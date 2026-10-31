@@ -787,6 +787,9 @@ impl Parser {
                 self.expect_word("batch")?;
                 return Ok(Statement::Batch(statements));
             }
+            if self.word_is("begin") {
+                return Err("a batch cannot hold another batch".to_owned());
+            }
             let statement = self.statement()?;
             if !matches!(
                 statement,

@@ -21,8 +21,8 @@ impl std::fmt::Display for ContentError {
     }
 }
 
-/// The text of an Office Open XML or OpenDocument file, one paragraph per line, reading no
-/// part larger than `limit` bytes once decompressed.
+/// The text of an Office Open XML or OpenDocument file, one paragraph per line, decompressing
+/// at most `limit` bytes over all its parts and refusing a text longer than `limit`.
 pub fn extract_text(file: &[u8], limit: usize) -> Result<String, ContentError> {
     text::extract(&ZipArchive::new(file)?, limit)
 }

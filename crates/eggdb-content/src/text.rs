@@ -40,7 +40,12 @@ fn decode_entities(text: &str, out: &mut String) {
     while let Some(start) = rest.find('&') {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
-        let Some(end) = after.find(';').filter(|end| *end <= 10) else {
+        let Some(end) = after
+            .char_indices()
+            .take(11)
+            .find(|(_, character)| *character == ';')
+            .map(|(end, _)| end)
+        else {
             out.push('&');
             rest = after;
             continue;
@@ -135,7 +140,7 @@ fn xml_text(xml: &str, style: &Style<'_>) -> String {
                 .and_then(|(_, rest)| rest.split('"').next())
                 .and_then(|count| count.parse::<usize>().ok())
                 .unwrap_or(1)
-                .min(1_000);
+                .min(64);
             out.extend(std::iter::repeat_n(' ', count));
         } else if !self_closing && style.text_inside.contains(&name) {
             inside += 1;
@@ -157,10 +162,26 @@ pub(crate) fn extract(
     archive: &crate::ZipArchive<'_>,
     limit: usize,
 ) -> Result<String, crate::ContentError> {
+    let text = extract_within(archive, limit)?;
+    if text.len() > limit {
+        return Err(crate::ContentError(format!(
+            "the document's text is longer than {limit} bytes"
+        )));
+    }
+    Ok(text)
+}
+
+fn extract_within(
+    archive: &crate::ZipArchive<'_>,
+    limit: usize,
+) -> Result<String, crate::ContentError> {
+    let left = std::cell::Cell::new(limit);
     let read = |name: &str| -> Result<Option<String>, crate::ContentError> {
-        Ok(archive
-            .read(name, limit)?
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        let Some(bytes) = archive.read(name, left.get())? else {
+            return Ok(None);
+        };
+        left.set(left.get().saturating_sub(bytes.len()));
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     };
     if let Some(document) = read("word/document.xml")? {
         return Ok(xml_text(&document, &WORD));

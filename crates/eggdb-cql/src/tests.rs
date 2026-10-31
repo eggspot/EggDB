@@ -539,3 +539,14 @@ fn wrong_passwords_and_early_queries_are_refused() {
     wrong_version[0] = 5;
     assert_eq!(converse(&store, &wrong_version)[0].1, ERROR);
 }
+
+#[test]
+fn nested_batches_and_oversized_numbers_are_refused() {
+    let nested = format!("{}INSERT INTO t (k) VALUES ('a') APPLY BATCH", "BEGIN BATCH ".repeat(50_000));
+    assert!(parse(&nested).unwrap_err().contains("another batch"));
+    let mut huge_scale = i32::MAX.to_be_bytes().to_vec();
+    huge_scale.push(1);
+    assert!(crate::types::parameter_text(Some(&huge_scale), crate::types::CqlType::Decimal).is_err());
+    let long_varint = vec![1u8; 1 << 20];
+    assert!(crate::types::parameter_text(Some(&long_varint), crate::types::CqlType::Varint).is_err());
+}

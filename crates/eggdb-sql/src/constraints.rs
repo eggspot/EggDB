@@ -27,6 +27,7 @@ struct Context {
     owner: String,
     identity_insert_table: Option<String>,
     keeps_identity_values: bool,
+    role_checked: bool,
 }
 
 thread_local! {
@@ -49,6 +50,7 @@ pub(crate) fn enter(
     owner: String,
     identity_insert_table: Option<String>,
     keeps_identity_values: bool,
+    role_checked: bool,
 ) -> ContextGuard {
     let context = Context {
         dialect,
@@ -57,6 +59,7 @@ pub(crate) fn enter(
         owner,
         identity_insert_table,
         keeps_identity_values,
+        role_checked,
     };
     ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
 }
@@ -76,7 +79,17 @@ fn context() -> Context {
             owner: String::new(),
             identity_insert_table: None,
             keeps_identity_values: false,
+            role_checked: false,
         })
+    })
+}
+
+pub(crate) fn role_is_checked() -> bool {
+    CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .is_some_and(|context| context.role_checked)
     })
 }
 

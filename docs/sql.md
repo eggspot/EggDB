@@ -1882,8 +1882,13 @@ REVOKE readers FROM clerk;
 
 `psql -U clerk` then logs in with SCRAM-SHA-256 against the stored verifier, and a statement on a
 table the role holds no privilege for fails with `42501 permission denied for table audit`. Roles
-are listed in `pg_roles`. Not yet: logins of stored roles over MySQL's and SQL Server's protocols,
-column and schema privileges, object owners and `SET ROLE`.
+are listed in `pg_roles`. `GRANT` and `REVOKE` on schemas, sequences, functions and the other
+objects EggDB does not check yet are accepted with a `WARNING` and change nothing; on `ALL TABLES
+IN SCHEMA` they are refused (`0A000`) rather than ignored, so a `REVOKE` never seems to work when
+it did not. An upsert (`ON CONFLICT DO UPDATE`) also needs `UPDATE`, and `REPLACE` also needs
+`DELETE`. Only a superuser creates, changes or drops objects, and turns triggers on or off. Not
+yet: logins of stored roles over MySQL's and SQL Server's protocols, column and schema
+privileges, object owners and `SET ROLE`.
 
 Tables can limit which rows a role sees and changes with PostgreSQL's row-level security
 (D186):
@@ -1896,7 +1901,11 @@ CREATE POLICY own_notes ON notes FOR ALL TO PUBLIC
 
 A checked role then reads, updates and deletes only the rows its policies' `USING` let through,
 and none when no policy names it; superusers are not filtered. `WITH CHECK` conditions are not
-evaluated yet, so inserts and updates under row security need `WITH CHECK (true)`.
+evaluated yet, so inserts and updates under row security need `WITH CHECK (true)`. Under row
+security, `COPY ... FROM` is refused as in PostgreSQL ("use INSERT statements instead"), and so
+are `INSERT ... ON CONFLICT DO UPDATE`, `REPLACE` and `MERGE`, which would reach rows the
+policies hide. `COPY ... FROM` into a table with enabled `INSERT` triggers is refused too, since
+COPY does not fire them yet.
 
 Roles can also log in through a directory or an identity provider (D185). Give `eggdb serve
 --auth-rules auth.conf` a file such as:
@@ -2459,8 +2468,9 @@ SELECT cron.schedule('low-stock', '*/5 * * * *', $$SELECT eggdb_bi.run_report('l
 
 `run_report` queues `{"report", "rows", "count", "text"}` for the target; with `only_when_rows` it
 queues nothing when the query finds no rows, which makes the report an alert. `eggdb serve` posts
-the queue at least once, oldest first, to `http://` targets whose prefix is listed in
-`EGGDB_REPORT_TARGETS` (comma-separated). It sends nothing when that is unset, and drops a
+the queue at least once, oldest first, to `http://` targets allowed by
+`EGGDB_REPORT_TARGETS` (comma-separated URLs: the same host and port, and a path that starts with
+the entry's). It sends nothing when that is unset, and drops a
 message whose target is not allowed.
 
 ## Data catalog, quality rules and lineage (eggdb_catalog)
@@ -2538,6 +2548,9 @@ SELECT eggdb_retention.process_erasures();
   updated, and a row is deleted only when its time column plus the period has passed.
 - `place_hold(name, schema, table, reason)` stops every update and delete on the table until
   `lift_hold(name)`; holds stay in `eggdb_retention.holds` with when they were placed and lifted.
+- A guarded table also refuses `TRUNCATE`, `eggdb_retention.rules` cannot be changed or removed,
+  and a hold can only be lifted (all `55000`). Dropping a table or a trigger, and turning a
+  trigger off, need a superuser; a superuser can still get around retention.
 - `request_erasure(schema, table, condition)` records the request in
   `eggdb_retention.erasure_requests` and deletes the matching rows at once when nothing holds
   them; otherwise the request waits with `waiting_for` saying why (`legal hold <name>` or
@@ -2616,9 +2629,12 @@ SELECT count(*) FROM eggdb_foreign('file:/data/lake/events-2026-10.parquet', '*'
 A `postgresql://` source is another EggDB server or a PostgreSQL server, asked the query as it is
 (the password from `PGPASSWORD`); a `file:...parquet` source is read whole (`'*'`). Nothing is
 reachable until the operator allows it: `eggdb sql` and `eggdb serve` read the comma-separated
-URL prefixes allowed in `EGGDB_FOREIGN_SOURCES` (for example
-`postgresql://reports@10.0.0.7,file:/data/lake/`), and a source outside them is refused with
-SQLSTATE `HV000`. With none set, the function answers `0A000`.
+entries of `EGGDB_FOREIGN_SOURCES` (for example `postgresql://reports@10.0.0.7,file:/data/lake/`).
+A PostgreSQL entry allows exactly that user on that host and port (and only its database when it
+names one, and a source's `sslrootcert` only when the entry gives the same one); a `file:` entry
+allows the files under that directory once both paths are made absolute, so `..` cannot leave it.
+A source outside them is refused with SQLSTATE `HV000`, and only a superuser may call the
+function (`42501`). With none set, the function answers `0A000`.
 
 ## Scheduled jobs (pg_cron)
 

@@ -1758,6 +1758,7 @@ impl<'s> Session<'s> {
             },
             self.identity_insert_table.clone(),
             self.keeps_identity_values,
+            self.settings.checked_role.is_some(),
         )
     }
 
@@ -2204,12 +2205,32 @@ impl<'s> Session<'s> {
                         &name.text,
                         crate::roles::Privilege::Insert,
                     )?;
-                    crate::row_security::check_new_rows(
+                    if crate::row_security::visible_rows(
                         writer,
                         binding.settings,
                         &name.text,
                         crate::row_security::PolicyCommand::Insert,
-                    )?;
+                    )?
+                    .is_some()
+                    {
+                        return Err(SqlError::not_supported(
+                            "COPY FROM not supported with row-level security",
+                        )
+                        .with_hint("Use INSERT statements instead."));
+                    }
+                    let fires_on_insert = crate::triggers::of_table(writer, tables, &name.text)?
+                        .is_some_and(|table| {
+                            table.triggers.iter().any(|trigger| {
+                                trigger.enabled
+                                    && trigger.events.contains(crate::triggers::TriggerEvent::Insert)
+                            })
+                        });
+                    if fires_on_insert {
+                        return Err(SqlError::not_supported(
+                            "COPY FROM into a table with INSERT triggers",
+                        )
+                        .with_hint("Use INSERT statements, which fire the triggers, or disable them for the load."));
+                    }
                 }
                 if let Some(condition) = &mut copy.condition {
                     binding.condition(writer, tables, condition)?;

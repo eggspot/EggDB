@@ -196,6 +196,7 @@ fn fetch(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer) -
         Ok((name, partitions))
     })?;
     body.i32(0).count(topics.len());
+    let mut bytes_left = max_bytes;
     for (name, partitions) in topics {
         body.string(Some(&name)).count(partitions.len());
         for (partition, offset, partition_max) in partitions {
@@ -220,8 +221,14 @@ fn fetch(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer) -
             }
             let limit = usize::try_from(partition_max)
                 .unwrap_or(0)
-                .clamp(1, max_bytes);
-            let (records, high) = log::fetch(keyspace, &name, partition, offset, limit)?;
+                .clamp(1, max_bytes)
+                .min(bytes_left);
+            let (records, high) = if limit == 0 {
+                (Vec::new(), high)
+            } else {
+                log::fetch(keyspace, &name, partition, offset, limit)?
+            };
+            bytes_left = bytes_left.saturating_sub(records.len());
             body.i32(partition)
                 .i16(error::NONE)
                 .i64(high)

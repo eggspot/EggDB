@@ -157,3 +157,68 @@ fn archives_that_are_not_documents_or_are_damaged_are_refused() {
     assert_eq!(archive.entries.len(), 2);
     assert_eq!(archive.read("missing.xml", 100).unwrap(), None);
 }
+
+#[test]
+fn every_part_of_a_document_shares_one_decompression_budget() {
+    let slide = b"<p:sld><a:p><a:r><a:t>Slide text that repeats</a:t></a:r></a:p></p:sld>";
+    let names: Vec<String> = (1..=200)
+        .map(|number| format!("ppt/slides/slide{number}.xml"))
+        .collect();
+    let files: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|name| (name.as_str(), &slide[..]))
+        .collect();
+    let pptx = stored_zip(&files);
+    assert!(extract_text(&pptx, 1 << 20).is_ok());
+    assert!(extract_text(&pptx, 4096).is_err());
+    let entities = format!("<sst><si><t>{}</t></si></sst>", "&".repeat(200_000));
+    let xlsx = stored_zip(&[("xl/sharedStrings.xml", entities.as_bytes())]);
+    assert_eq!(extract_text(&xlsx, 1 << 20).unwrap().len(), 200_000);
+}
+
+struct Seeded(u64);
+
+impl Seeded {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+fn mutated(valid: &[u8], random: &mut Seeded) -> Vec<u8> {
+    let mut bytes = valid.to_vec();
+    for _ in 0..=random.next() % 8 {
+        if bytes.is_empty() {
+            break;
+        }
+        let at = (random.next() % bytes.len() as u64) as usize;
+        match random.next() % 4 {
+            0 => bytes[at] ^= 1 << (random.next() % 8),
+            1 => bytes[at] = random.next() as u8,
+            2 => bytes.truncate(at),
+            _ => bytes.insert(at, random.next() as u8),
+        }
+    }
+    bytes
+}
+
+#[test]
+fn mutated_streams_and_archives_are_errors_or_text_never_panics() {
+    let cases: usize = std::env::var("EGGDB_FUZZ_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(20_000);
+    let seed = std::env::var("EGGDB_FUZZ_SEED")
+        .ok()
+        .and_then(|seed| seed.parse().ok())
+        .unwrap_or(0x5eed_c0de_u64);
+    let mut random = Seeded(seed | 1);
+    let dynamic = bytes(&DYNAMIC_STREAM);
+    let docx = bytes(&DOCX);
+    for _ in 0..cases {
+        let _ = inflate(&mutated(&dynamic, &mut random), 1 << 16);
+        let _ = extract_text(&mutated(&docx, &mut random), 1 << 16);
+    }
+}

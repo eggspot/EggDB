@@ -9,6 +9,14 @@ const MAX_SKEW_SECONDS: i64 = 15 * 60;
 const MAX_PRESIGNED_SECONDS: i64 = 7 * 24 * 60 * 60;
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 
+fn carries_unsigned_amz_header(request: &SignedRequest<'_>, signed_headers: &str) -> bool {
+    request.headers.iter().any(|(name, _)| {
+        name.starts_with("x-amz-")
+            && name != "x-amz-content-sha256"
+            && !signed_headers.split(';').any(|signed| signed == name)
+    })
+}
+
 /// The parts of an HTTP request a signature covers.
 #[derive(Debug, Clone, Copy)]
 pub struct SignedRequest<'r> {
@@ -323,7 +331,9 @@ pub fn verify(
         if (now - signed_at).abs() > MAX_SKEW_SECONDS {
             return Err(SigV4Error::TimeSkewed);
         }
-        if !signed_headers.split(';').any(|name| name == "host") {
+        if !signed_headers.split(';').any(|name| name == "host")
+            || carries_unsigned_amz_header(request, signed_headers)
+        {
             return Err(SigV4Error::Malformed);
         }
         let canonical = canonical_request(
@@ -373,6 +383,7 @@ pub fn verify(
     if !amz_date.starts_with(scope.date)
         || scope.date.len() != 8
         || !signed_headers.split(';').any(|name| name == "host")
+        || carries_unsigned_amz_header(request, signed_headers)
     {
         return Err(SigV4Error::Malformed);
     }
@@ -602,6 +613,21 @@ mod tests {
             verify(&request, "AKIDEXAMPLE", "other", NOW),
             Err(SigV4Error::SignatureMismatch)
         );
+        let mut retargeted = signed.clone();
+        retargeted.push(("x-amz-target".to_owned(), "DynamoDB_20120810.DeleteItem".to_owned()));
+        assert_eq!(
+            verify(
+                &SignedRequest {
+                    headers: &retargeted,
+                    ..request
+                },
+                "AKIDEXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                NOW
+            ),
+            Err(SigV4Error::Malformed),
+            "an x-amz header the signature does not cover is refused"
+        );
         assert_eq!(
             verify(&request, "SOMEONE", "x", NOW),
             Err(SigV4Error::UnknownAccessKey)
@@ -677,6 +703,20 @@ mod tests {
                 NOW
             ),
             Err(SigV4Error::Missing)
+        );
+        let copy_source = headers(&[("host", "h"), ("x-amz-copy-source", "/any/secret")]);
+        assert_eq!(
+            verify(
+                &SignedRequest {
+                    headers: &copy_source,
+                    ..request
+                },
+                "a",
+                "s",
+                NOW
+            ),
+            Err(SigV4Error::Malformed),
+            "an x-amz header the presigned URL did not sign is refused"
         );
         assert_eq!(parse_amz_date("19700101T000000Z"), Some(0));
         assert_eq!(parse_amz_date("20150830T123600Z"), Some(NOW));

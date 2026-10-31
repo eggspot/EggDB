@@ -181,6 +181,11 @@ fn time_param(text: Option<&str>, default: i64) -> Result<i64, String> {
     Ok((seconds * 1000.0).round() as i64)
 }
 
+fn label_in_values_path(path: &str) -> Option<&str> {
+    path.strip_prefix("/api/v1/label/")
+        .and_then(|rest| rest.strip_suffix("/values"))
+}
+
 fn step_param(text: Option<&str>) -> Result<i64, String> {
     let text = text.ok_or("missing parameter step")?;
     let ms = match text.parse::<f64>() {
@@ -307,10 +312,8 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             ("GET", "/api/v1/status/buildinfo") => success(&format!(
                 "{{\"version\":\"{VERSION}\",\"revision\":\"eggdb\",\"branch\":\"\",\"buildUser\":\"\",\"buildDate\":\"\",\"goVersion\":\"\"}}"
             )),
-            ("GET", path) if path.starts_with("/api/v1/label/") && path.ends_with("/values") => {
-                let name =
-                    percent_decode(&path["/api/v1/label/".len()..path.len() - "/values".len()]);
-                self.label_values(&name)
+            ("GET", path) if label_in_values_path(path).is_some() => {
+                self.label_values(&percent_decode(label_in_values_path(path).unwrap_or("")))
             }
             _ => json(
                 404,
@@ -445,7 +448,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         if end < start {
             return Err("end timestamp must not be before start time".to_owned());
         }
-        if (end - start) / step > MAX_POINTS_PER_SERIES {
+        if end.saturating_sub(start) / step > MAX_POINTS_PER_SERIES {
             return Err("exceeded maximum resolution of 11,000 points per timeseries. Try decreasing the query resolution (?step=XX)".to_owned());
         }
         let data = self.fetch(&expr, start, end)?;
@@ -465,7 +468,10 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                     );
                 }
             }
-            time += step;
+            let Some(next) = time.checked_add(step) else {
+                break;
+            };
+            time = next;
         }
         Ok(series)
     }

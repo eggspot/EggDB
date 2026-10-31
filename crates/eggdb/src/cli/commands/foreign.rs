@@ -5,9 +5,10 @@ const VARIABLE: &str = "EGGDB_FOREIGN_SOURCES";
 const MICROS_PER_MS: i64 = 1000;
 const MS_PER_DAY: i64 = 86_400_000;
 
-/// Lets `eggdb_foreign(source, query)` read the sources whose URL starts with one of the
-/// comma-separated prefixes in `EGGDB_FOREIGN_SOURCES`; with none set, SQL reaches nothing outside
-/// the database.
+/// Lets `eggdb_foreign(source, query)` read the sources the comma-separated entries of
+/// `EGGDB_FOREIGN_SOURCES` allow: a `postgresql://user@host[:port][/database]` entry allows that
+/// user on that host and port (and only that database when it names one), a `file:` entry allows
+/// the files under that directory; with none set, SQL reaches nothing outside the database.
 pub(super) fn allow_from_environment() {
     let Ok(text) = std::env::var(VARIABLE) else {
         return;
@@ -144,10 +145,7 @@ fn read(
     query: &str,
     row: &mut dyn FnMut(String) -> Result<(), String>,
 ) -> Result<(), String> {
-    if !prefixes
-        .iter()
-        .any(|prefix| source.starts_with(prefix.as_str()))
-    {
+    if !prefixes.iter().any(|allowed| allows(allowed, source)) {
         return Err(format!(
             "{source} is not among the sources {VARIABLE} allows"
         ));
@@ -167,9 +165,89 @@ fn read(
     ))
 }
 
+fn file_path(source: &str) -> Option<&str> {
+    source
+        .strip_prefix("file://")
+        .or_else(|| source.strip_prefix("file:"))
+}
+
+fn is_postgresql(source: &str) -> bool {
+    source.starts_with("postgresql://") || source.starts_with("postgres://")
+}
+
+fn names_database(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let main = rest.split('?').next().unwrap_or(rest);
+    main.split_once('/')
+        .is_some_and(|(_, database)| !database.is_empty())
+}
+
+fn allows(allowed: &str, source: &str) -> bool {
+    if is_postgresql(allowed) && is_postgresql(source) {
+        let (Ok(entry), Ok(wanted)) = (
+            eggdb_pgwire::client::parse_postgres_url(allowed),
+            eggdb_pgwire::client::parse_postgres_url(source),
+        ) else {
+            return false;
+        };
+        return entry.host.eq_ignore_ascii_case(&wanted.host)
+            && entry.port == wanted.port
+            && entry.user == wanted.user
+            && (!names_database(allowed) || entry.database == wanted.database)
+            && (wanted.ssl_root_cert.is_none() || wanted.ssl_root_cert == entry.ssl_root_cert);
+    }
+    let (Some(directory), Some(file)) = (file_path(allowed), file_path(source)) else {
+        return false;
+    };
+    let (Ok(directory), Ok(file)) = (
+        std::fs::canonicalize(directory),
+        std::fs::canonicalize(file),
+    ) else {
+        return false;
+    };
+    file != directory && file.starts_with(&directory)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decimal_text, read};
+    use super::{allows, decimal_text, read};
+
+    #[test]
+    fn database_entries_allow_only_their_own_host_port_and_user() {
+        let entry = "postgresql://reader@db.internal";
+        assert!(allows(entry, "postgresql://reader@db.internal/sales"));
+        assert!(allows(entry, "postgres://reader@DB.internal:5432/x"));
+        assert!(!allows(entry, "postgresql://reader@db.internal.evil.com/x"));
+        assert!(!allows(entry, "postgresql://reader@db.internal:6000/x"));
+        assert!(!allows(entry, "postgresql://admin@db.internal/x"));
+        assert!(!allows(
+            entry,
+            "postgresql://reader@db.internal/x?sslmode=verify-full&sslrootcert=/etc/shadow"
+        ));
+        let one_database = "postgresql://reader@db.internal/sales";
+        assert!(allows(one_database, "postgresql://reader@db.internal/sales"));
+        assert!(!allows(one_database, "postgresql://reader@db.internal/hr"));
+    }
+
+    #[test]
+    fn file_entries_allow_only_files_under_their_directory() {
+        let root = std::env::temp_dir().join(format!("eggdb-foreign-{}", std::process::id()));
+        let lake = root.join("lake");
+        std::fs::create_dir_all(&lake).unwrap();
+        std::fs::write(lake.join("x.parquet"), b"").unwrap();
+        std::fs::write(root.join("secret.parquet"), b"").unwrap();
+        let entry = format!("file:{}/", lake.display());
+        assert!(allows(&entry, &format!("file:{}/x.parquet", lake.display())));
+        assert!(!allows(
+            &entry,
+            &format!("file:{}/../secret.parquet", lake.display())
+        ));
+        assert!(!allows(&entry, "file:/etc/passwd"));
+        let _ = std::fs::remove_file(lake.join("x.parquet"));
+        let _ = std::fs::remove_file(root.join("secret.parquet"));
+        let _ = std::fs::remove_dir(&lake);
+        let _ = std::fs::remove_dir(&root);
+    }
 
     #[test]
     fn sources_outside_the_allowed_prefixes_are_refused_and_decimals_keep_their_scale() {
@@ -180,11 +258,6 @@ mod tests {
             Ok(())
         });
         assert!(refused.unwrap_err().contains("not among the sources"));
-        assert!(
-            read(&allowed, "file:/data/lake/x.csv", "*", &mut |_| Ok(()))
-                .unwrap_err()
-                .contains("give a postgresql")
-        );
         assert!(rows.is_empty());
         assert_eq!(decimal_text(12_345, 2), "123.45");
         assert_eq!(decimal_text(-5, 3), "-0.005");

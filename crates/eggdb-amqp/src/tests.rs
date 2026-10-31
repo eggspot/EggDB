@@ -222,4 +222,10 @@ fn topic_patterns_match_as_the_specification_says() {
     assert!(topic_matches("a.#", "a"));
     assert!(topic_matches("#.c", "a.b.c"));
     assert!(!topic_matches("a.b", "a.b.c"));
+    assert!(topic_matches("#", ""));
+    assert!(topic_matches("a.#.#.c", "a.c"));
+    let hostile = format!("{}z", "#.".repeat(60));
+    let key = vec!["a"; 120].join(".");
+    assert!(!topic_matches(&hostile, &key));
+    assert!(topic_matches(&hostile, &format!("{key}.z")));
 }

@@ -46,6 +46,13 @@ pub(crate) fn foreign_rows(
     ) else {
         return Ok(());
     };
+    if crate::constraints::role_is_checked() {
+        return Err(SqlError::new(
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "permission denied to read foreign sources",
+        )
+        .with_hint("Only a superuser may call eggdb_foreign."));
+    }
     let Some(reader) = SOURCE.get() else {
         return Err(SqlError::not_supported(
             "foreign sources are off: the program running this SQL allows none (eggdb reads EGGDB_FOREIGN_SOURCES)",

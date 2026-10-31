@@ -218,6 +218,32 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    fn check_conflict_action(&self, table: &str, action: &OnDuplicate) -> SqlResult<()> {
+        if self.target_privilege.is_none() {
+            return Ok(());
+        }
+        let (privilege, command, form) = match action {
+            OnDuplicate::Update(_) => (
+                crate::roles::Privilege::Update,
+                crate::row_security::PolicyCommand::Update,
+                "INSERT ... ON CONFLICT DO UPDATE",
+            ),
+            OnDuplicate::Replace => (
+                crate::roles::Privilege::Delete,
+                crate::row_security::PolicyCommand::Delete,
+                "REPLACE",
+            ),
+            OnDuplicate::Fail | OnDuplicate::Ignore => return Ok(()),
+        };
+        self.check_privilege(table, privilege)?;
+        if self.row_security_filter(table, command)?.is_some() {
+            return Err(SqlError::not_supported(format!(
+                "{form} on a table with row-level security for this role"
+            )));
+        }
+        Ok(())
+    }
+
     fn check_new_rows(&self, table: &str, privilege: crate::roles::Privilege) -> SqlResult<()> {
         let command = match privilege {
             crate::roles::Privilege::Insert => crate::row_security::PolicyCommand::Insert,
@@ -1087,6 +1113,7 @@ impl Binding<'_> {
         }
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut insert.table)?;
+        resolver.check_conflict_action(&insert.table.name.text, &insert.on_duplicate)?;
         if !self.walk_expressions {
             return Ok(());
         }

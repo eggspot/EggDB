@@ -8,11 +8,13 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// A batch as bytes for the network: term, sequence, then each change.
+/// A batch as bytes for the network: term, sequence, the previous batch's term, then each
+/// change.
 pub fn encode_batch(batch: &Batch) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&batch.term.to_le_bytes());
     out.extend_from_slice(&batch.sequence.to_le_bytes());
+    out.extend_from_slice(&batch.previous_term.to_le_bytes());
     out.extend_from_slice(&(batch.changes.len() as u64).to_le_bytes());
     for change in &batch.changes {
         match change {
@@ -69,6 +71,7 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Batch, String> {
     let mut reader = Reader { bytes, at: 0 };
     let term = reader.u64()?;
     let sequence = reader.u64()?;
+    let previous_term = reader.u64()?;
     let count = reader.u64()?;
     if count > MAX_CHANGES || count > bytes.len() as u64 {
         return Err("a batch claims more changes than it holds".to_owned());
@@ -96,6 +99,7 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Batch, String> {
     Ok(Batch {
         term,
         sequence,
+        previous_term,
         changes,
     })
 }

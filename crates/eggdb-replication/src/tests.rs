@@ -49,6 +49,7 @@ fn replicas_apply_in_order_and_refuse_gaps_and_stale_terms() {
     let stale = Batch {
         term: 1,
         sequence: 3,
+        previous_term: 1,
         changes: put(3),
     };
     assert_eq!(
@@ -123,6 +124,7 @@ fn batches_cross_the_wire_and_damaged_bytes_are_refused() {
     let batch = Batch {
         term: 4,
         sequence: 9,
+        previous_term: 3,
         changes: vec![
             Change::Put {
                 collection: "resp0".to_owned(),
@@ -235,4 +237,29 @@ fn simulated_partitions_never_lose_a_synchronous_commit_on_failover() {
                 }
         );
     }
+}
+
+#[test]
+fn an_old_primary_that_rejoins_with_commits_nobody_got_is_refused_as_diverged() {
+    let mut old_primary = Primary::new(1, 0, Mode::Asynchronous);
+    let mut old = Replica::new(1, 1, 0, Memory::default(), 8);
+    let mut survivor = Replica::new(2, 1, 0, Memory::default(), 8);
+    for key in 1..=2 {
+        let (batch, _) = old_primary.commit(put(key));
+        assert_eq!(old.receive(&batch), Ok(key));
+        assert_eq!(survivor.receive(&batch), Ok(key));
+    }
+    let (lost, _) = old_primary.commit(put(3));
+    assert_eq!(old.receive(&lost), Ok(3));
+    let (mut new_primary, _) = survivor.promote(2, Mode::Asynchronous);
+    let (replacement, _) = new_primary.commit(put(30));
+    let (next, _) = new_primary.commit(put(40));
+    assert_eq!(replacement.sequence, 3);
+    assert_eq!(replacement.previous_term, 1);
+    assert_eq!(old.receive(&replacement), Err(Refusal::Diverged { at: 3 }));
+    assert_eq!(old.receive(&next), Err(Refusal::Diverged { at: 3 }));
+    assert_eq!(old.applied(), 3);
+    let mut fresh = Replica::new(3, 1, 2, Memory::default(), 8);
+    assert_eq!(fresh.receive(&replacement), Ok(3));
+    assert_eq!(fresh.receive(&next), Ok(4));
 }

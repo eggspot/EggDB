@@ -214,6 +214,19 @@ fn varint_bytes(negative: bool, magnitude: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+const MOST_VARINT_BYTES: usize = 1024;
+const MOST_DECIMAL_SCALE: usize = 4096;
+
+fn checked_varint(bytes: &[u8]) -> Result<&[u8], String> {
+    if bytes.len() > MOST_VARINT_BYTES {
+        return Err(format!(
+            "a varint may be at most {MOST_VARINT_BYTES} bytes, not {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
 fn varint_text(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return "0".to_owned();
@@ -323,19 +336,24 @@ pub(crate) fn parameter_text(bytes: Option<&[u8]>, cql: CqlType) -> Result<Optio
         CqlType::Boolean => (fixed::<1>(bytes, cql)?[0] != 0).to_string(),
         CqlType::Double => float_text(f64::from_be_bytes(fixed(bytes, cql)?)),
         CqlType::Float => float_text(f64::from(f32::from_be_bytes(fixed(bytes, cql)?))),
-        CqlType::Varint => varint_text(bytes),
+        CqlType::Varint => varint_text(checked_varint(bytes)?),
         CqlType::Decimal => {
             let scale = i32::from_be_bytes(fixed(
                 bytes.get(..4).ok_or("a decimal value is cut short")?,
                 cql,
             )?);
-            let digits = varint_text(&bytes[4..]);
+            let digits = varint_text(checked_varint(&bytes[4..])?);
             let (negative, digits) = match digits.strip_prefix('-') {
                 Some(rest) => (true, rest.to_owned()),
                 None => (false, digits),
             };
             let scale = usize::try_from(scale)
                 .map_err(|_| "a decimal with a negative scale is not supported".to_owned())?;
+            if scale > MOST_DECIMAL_SCALE {
+                return Err(format!(
+                    "a decimal's scale may be at most {MOST_DECIMAL_SCALE}, not {scale}"
+                ));
+            }
             let padded = format!("{digits:0>width$}", width = scale + 1);
             let (whole, fraction) = padded.split_at(padded.len() - scale);
             let sign = if negative { "-" } else { "" };

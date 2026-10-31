@@ -231,3 +231,52 @@ fn partitions_crashes_and_drops_never_break_safety_and_the_cluster_recovers() {
         );
     }
 }
+
+fn entry(term: u64, index: u64) -> crate::Entry {
+    crate::Entry {
+        term,
+        index,
+        command: vec![index as u8],
+    }
+}
+
+#[test]
+fn a_follower_never_commits_past_what_it_shares_with_the_leader() {
+    let mut follower = Node::new(2, &[1, 2, 3], Timing::default(), 5);
+    follower.step(
+        1,
+        crate::Message::Append {
+            term: 1,
+            previous_index: 0,
+            previous_term: 0,
+            entries: vec![entry(1, 1), entry(1, 2), entry(1, 3)],
+            commit: 0,
+        },
+    );
+    follower.step(
+        3,
+        crate::Message::Append {
+            term: 2,
+            previous_index: 1,
+            previous_term: 1,
+            entries: Vec::new(),
+            commit: 3,
+        },
+    );
+    assert_eq!(follower.commit_index(), 1);
+    let refused = follower.step(
+        3,
+        crate::Message::Append {
+            term: 2,
+            previous_index: 1,
+            previous_term: 1,
+            entries: vec![entry(2, 0), entry(2, 7)],
+            commit: 3,
+        },
+    );
+    assert_eq!(follower.log().len(), 3);
+    assert!(refused.iter().any(|envelope| matches!(
+        envelope.message,
+        crate::Message::AppendReply { success: false, .. }
+    )));
+}

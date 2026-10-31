@@ -98,17 +98,42 @@ pub(super) fn deliver_reports(
         std::thread::sleep(DELIVER_EVERY);
         let _ =
             eggdb_sql::reports::deliver_reports(store, EVENTS_PER_ROUND, &mut |target, body| {
-                if !prefixes
-                    .iter()
-                    .any(|prefix| target.starts_with(prefix.as_str()))
-                {
-                    return true;
-                }
                 let Ok(url) = eggdb_http::parse_http_url(target) else {
                     return true;
                 };
+                if !prefixes
+                    .iter()
+                    .any(|allowed| report_target_allowed(allowed, &url))
+                {
+                    return true;
+                }
                 eggdb_http::post(&url, "application/json", body.as_bytes(), WEBHOOK_TIMEOUT)
                     .is_ok_and(|status| (200..300).contains(&status))
             });
+    }
+}
+
+fn report_target_allowed(allowed: &str, target: &eggdb_http::HttpTarget) -> bool {
+    eggdb_http::parse_http_url(allowed).is_ok_and(|entry| {
+        entry.host.eq_ignore_ascii_case(&target.host)
+            && entry.port == target.port
+            && target.path.starts_with(&entry.path)
+    })
+}
+
+#[cfg(test)]
+mod report_target_tests {
+    use super::report_target_allowed;
+
+    #[test]
+    fn a_report_target_must_be_on_the_allowed_host_and_port() {
+        let target = |url: &str| eggdb_http::parse_http_url(url).unwrap();
+        let entry = "http://hooks.example.com";
+        assert!(report_target_allowed(entry, &target("http://hooks.example.com/a")));
+        assert!(!report_target_allowed(
+            entry,
+            &target("http://hooks.example.com.evil.net/a")
+        ));
+        assert!(!report_target_allowed(entry, &target("http://hooks.example.com:8080/a")));
     }
 }

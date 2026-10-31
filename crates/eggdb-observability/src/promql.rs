@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 pub(crate) const LOOKBACK_MS: i64 = 5 * 60 * 1000;
 const MAX_DEPTH: usize = 64;
+const MOST_OPERATORS: usize = 1024;
 
 pub(crate) type Labels = Vec<(String, String)>;
 
@@ -213,6 +214,7 @@ struct Parser {
     tokens: Vec<Token>,
     at: usize,
     depth: usize,
+    operators: usize,
 }
 
 fn precedence(symbol: &str) -> Option<u8> {
@@ -404,6 +406,10 @@ impl Parser {
                 break;
             };
             self.at += 1;
+            self.operators += 1;
+            if self.operators > MOST_OPERATORS {
+                return Err("the query has more than 1024 operators".to_owned());
+            }
             let right = self.expression(level)?;
             left = Expr::Binary(symbol.to_owned(), Box::new(left), Box::new(right));
         }
@@ -417,6 +423,7 @@ pub(crate) fn parse(text: &str) -> Result<Expr, String> {
         tokens: tokenize(text)?,
         at: 0,
         depth: 0,
+        operators: 0,
     };
     let expr = parser.expression(0)?;
     if parser.at < parser.tokens.len() {
@@ -431,7 +438,10 @@ pub(crate) fn selectors(expr: &Expr, out: &mut Vec<(String, i64)>) {
         Expr::Number(_) => {}
         Expr::Selector(selector) => out.push((
             selector.name.clone(),
-            selector.range_ms.unwrap_or(LOOKBACK_MS) + selector.offset_ms,
+            selector
+                .range_ms
+                .unwrap_or(LOOKBACK_MS)
+                .saturating_add(selector.offset_ms),
         )),
         Expr::Call(_, arguments) => arguments
             .iter()
@@ -591,7 +601,7 @@ pub(crate) fn evaluate(
     match expr {
         Expr::Number(number) => Ok(Data::Scalar(*number)),
         Expr::Selector(selector) => {
-            let at = time_ms - selector.offset_ms;
+            let at = time_ms.saturating_sub(selector.offset_ms);
             let series = data
                 .get(&selector.name)
                 .map(Vec::as_slice)
@@ -608,7 +618,7 @@ pub(crate) fn evaluate(
                         .map(|series| {
                             (
                                 series.labels.clone(),
-                                window(&series.samples, at - range, at).to_vec(),
+                                window(&series.samples, at.saturating_sub(range), at).to_vec(),
                             )
                         })
                         .filter(|(_, samples)| !samples.is_empty())
@@ -617,7 +627,7 @@ pub(crate) fn evaluate(
                 None => Ok(Data::Vector(
                     chosen
                         .filter_map(|series| {
-                            window(&series.samples, at - LOOKBACK_MS, at)
+                            window(&series.samples, at.saturating_sub(LOOKBACK_MS), at)
                                 .last()
                                 .map(|(_, value)| (series.labels.clone(), *value))
                         })
@@ -635,10 +645,10 @@ pub(crate) fn evaluate(
             match (evaluate(argument, time_ms, data)?, argument) {
                 (Data::Matrix(matrix), Expr::Selector(selector)) => {
                     let range = selector.range_ms.unwrap_or(0);
-                    let end = time_ms - selector.offset_ms;
+                    let end = time_ms.saturating_sub(selector.offset_ms);
                     let mut out = Vec::new();
                     for (labels, samples) in matrix {
-                        if let Some(value) = range_function(name, &samples, end - range, end)? {
+                        if let Some(value) = range_function(name, &samples, end.saturating_sub(range), end)? {
                             out.push((without_name(&labels), value));
                         }
                     }

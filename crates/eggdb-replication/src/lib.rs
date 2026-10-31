@@ -43,6 +43,9 @@ pub struct Batch {
     pub term: u64,
     /// Its place in the history, from 1.
     pub sequence: u64,
+    /// The term of the batch before it in the history, 0 for the first: a replica whose own
+    /// batch there has another term holds a history the primary does not, and refuses it.
+    pub previous_term: u64,
     /// The changes, in the order the commit made them.
     pub changes: Vec<Change>,
 }
@@ -88,6 +91,12 @@ pub enum Refusal {
         /// The sequence the replica needs next.
         next: u64,
     },
+    /// The replica's history differs from the primary's from `at` on, as after a failover
+    /// that lost the old primary's last commits: it must be copied again from the primary.
+    Diverged {
+        /// The first sequence where the histories differ.
+        at: u64,
+    },
     /// Applying it failed.
     Failed(String),
 }
@@ -97,6 +106,7 @@ pub enum Refusal {
 pub struct Primary {
     term: u64,
     last: u64,
+    last_term: u64,
     mode: Mode,
     retained: VecDeque<Batch>,
     acknowledged: BTreeMap<ReplicaId, u64>,
@@ -108,6 +118,7 @@ impl Primary {
         Self {
             term,
             last,
+            last_term: if last == 0 { 0 } else { term },
             mode,
             retained: VecDeque::new(),
             acknowledged: BTreeMap::new(),
@@ -125,8 +136,10 @@ impl Primary {
         let batch = Batch {
             term: self.term,
             sequence: self.last,
+            previous_term: self.last_term,
             changes,
         };
+        self.last_term = self.term;
         self.retained.push_back(batch.clone());
         (
             batch,
@@ -139,7 +152,7 @@ impl Primary {
     /// The batches a replica that has applied up to `applied` still needs, at most `limit`.
     pub fn batches_after(&self, applied: u64, limit: usize) -> Result<Vec<Batch>, u64> {
         match self.retained.front() {
-            Some(first) if first.sequence > applied + 1 => Err(first.sequence),
+            Some(first) if first.sequence > applied.saturating_add(1) => Err(first.sequence),
             _ => Ok(self
                 .retained
                 .iter()
@@ -199,6 +212,7 @@ pub struct Replica<A: Apply> {
     id: ReplicaId,
     term: u64,
     applied: u64,
+    term_starts: Vec<(u64, u64)>,
     storage: A,
     retained: VecDeque<Batch>,
     retain: usize,
@@ -212,6 +226,11 @@ impl<A: Apply> Replica<A> {
             id,
             term,
             applied,
+            term_starts: if applied == 0 {
+                Vec::new()
+            } else {
+                vec![(1, term)]
+            },
             storage,
             retained: VecDeque::new(),
             retain,
@@ -244,14 +263,24 @@ impl<A: Apply> Replica<A> {
             return Err(Refusal::StaleTerm { current: self.term });
         }
         if batch.sequence <= self.applied {
-            return Ok(self.applied);
-        }
-        if batch.sequence != self.applied + 1 {
-            return Err(Refusal::Gap {
-                next: self.applied + 1,
+            if self.term_at(batch.sequence) == batch.term {
+                return Ok(self.applied);
+            }
+            return Err(Refusal::Diverged {
+                at: batch.sequence,
             });
         }
+        let next = self.applied.saturating_add(1);
+        if batch.sequence != next {
+            return Err(Refusal::Gap { next });
+        }
+        if self.term_at(self.applied) != batch.previous_term {
+            return Err(Refusal::Diverged { at: self.applied });
+        }
         self.storage.apply(batch).map_err(Refusal::Failed)?;
+        if self.term_starts.last().is_none_or(|(_, term)| *term != batch.term) {
+            self.term_starts.push((batch.sequence, batch.term));
+        }
         self.term = batch.term;
         self.applied = batch.sequence;
         self.retained.push_back(batch.clone());
@@ -259,6 +288,17 @@ impl<A: Apply> Replica<A> {
             self.retained.pop_front();
         }
         Ok(self.applied)
+    }
+
+    fn term_at(&self, sequence: u64) -> u64 {
+        if sequence == 0 {
+            return 0;
+        }
+        self.term_starts
+            .iter()
+            .rev()
+            .find(|(first, _)| *first <= sequence)
+            .map_or(0, |(_, term)| *term)
     }
 
     /// Joins a new term announced by an elected primary, refusing older primaries after.
@@ -269,7 +309,7 @@ impl<A: Apply> Replica<A> {
     /// The batches a cascading replica that applied up to `applied` needs from this one.
     pub fn batches_after(&self, applied: u64) -> Result<Vec<Batch>, u64> {
         match self.retained.front() {
-            Some(first) if first.sequence > applied + 1 => Err(first.sequence),
+            Some(first) if first.sequence > applied.saturating_add(1) => Err(first.sequence),
             None if applied < self.applied => Err(self.applied),
             _ => Ok(self
                 .retained
@@ -287,10 +327,9 @@ impl<A: Apply> Replica<A> {
 
     /// Turns this replica into the primary of `term`.
     pub fn promote(self, term: u64, mode: Mode) -> (Primary, A) {
-        (
-            Primary::new(term.max(self.term + 1), self.applied, mode),
-            self.storage,
-        )
+        let mut primary = Primary::new(term.max(self.term + 1), self.applied, mode);
+        primary.last_term = self.term_at(self.applied);
+        (primary, self.storage)
     }
 }
 

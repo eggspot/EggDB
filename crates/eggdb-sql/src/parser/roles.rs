@@ -157,8 +157,14 @@ impl Parser<'_> {
             match &self.tokens.get(at)?.kind {
                 TokenKind::Semicolon | TokenKind::End => return None,
                 TokenKind::Word(word) if word.as_ref() == "on" => {
-                    return match &self.tokens.get(at + 1)?.kind {
-                        TokenKind::Word(target) => Some(target.as_ref().to_owned()),
+                    let TokenKind::Word(target) = &self.tokens.get(at + 1)?.kind else {
+                        return None;
+                    };
+                    if target.as_ref() != "all" {
+                        return Some(target.as_ref().to_owned());
+                    }
+                    return match &self.tokens.get(at + 2)?.kind {
+                        TokenKind::Word(kind) => Some(format!("all {}", kind.as_ref())),
                         _ => None,
                     };
                 }
@@ -183,7 +189,10 @@ impl Parser<'_> {
                     | "tablespace"
                     | "foreign"
                     | "large"
-                    | "all"
+                    | "all sequences"
+                    | "all functions"
+                    | "all procedures"
+                    | "all routines"
             )
         }) {
             let tag = if granting { "GRANT" } else { "REVOKE" };
@@ -227,7 +236,11 @@ impl Parser<'_> {
         if role_names.is_empty() {
             self.expect_word("on")?;
             if self.take_word("all") {
-                return Err(self.not_supported("GRANT ON ALL TABLES IN SCHEMA"));
+                return Err(self.not_supported(if granting {
+                    "GRANT ON ALL TABLES IN SCHEMA"
+                } else {
+                    "REVOKE ON ALL TABLES IN SCHEMA"
+                }));
             }
             if self.is_word("schema")
                 || self.is_word("database")

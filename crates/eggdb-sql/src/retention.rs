@@ -30,10 +30,40 @@ BEGIN
     RETURN NEW;
 END
 $$;
+CREATE FUNCTION eggdb_retention.guard_truncate() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM eggdb_retention.holds h WHERE h.schema_name = TG_TABLE_SCHEMA AND h.table_name = TG_TABLE_NAME AND h.lifted_at IS NULL)
+        OR EXISTS (SELECT 1 FROM eggdb_retention.rules r WHERE r.schema_name = TG_TABLE_SCHEMA AND r.table_name = TG_TABLE_NAME) THEN
+        RAISE EXCEPTION 'table %.% has a retention rule or a legal hold: it cannot be truncated', TG_TABLE_SCHEMA, TG_TABLE_NAME USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE FUNCTION eggdb_retention.protect_rules() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'retention rules are permanent: they cannot be changed or removed' USING ERRCODE = '55000';
+END
+$$;
+CREATE FUNCTION eggdb_retention.protect_holds() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND OLD.lifted_at IS NULL AND NEW.lifted_at IS NOT NULL
+        AND NEW.hold_name = OLD.hold_name AND NEW.schema_name = OLD.schema_name
+        AND NEW.table_name = OLD.table_name AND NEW.reason = OLD.reason AND NEW.placed_at = OLD.placed_at THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'a legal hold can only be lifted, with eggdb_retention.lift_hold' USING ERRCODE = '55000';
+END
+$$;
+CREATE TRIGGER eggdb_retention_rules_kept BEFORE UPDATE OR DELETE ON eggdb_retention.rules FOR EACH ROW EXECUTE FUNCTION eggdb_retention.protect_rules();
+CREATE TRIGGER eggdb_retention_rules_not_truncated BEFORE TRUNCATE ON eggdb_retention.rules FOR EACH STATEMENT EXECUTE FUNCTION eggdb_retention.protect_rules();
+CREATE TRIGGER eggdb_retention_holds_kept BEFORE UPDATE OR DELETE ON eggdb_retention.holds FOR EACH ROW EXECUTE FUNCTION eggdb_retention.protect_holds();
+CREATE TRIGGER eggdb_retention_holds_not_truncated BEFORE TRUNCATE ON eggdb_retention.holds FOR EACH STATEMENT EXECUTE FUNCTION eggdb_retention.protect_rules();
 CREATE FUNCTION eggdb_retention.guard_table(schema_name text, table_name text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     EXECUTE format('DROP TRIGGER IF EXISTS eggdb_retention_guard ON %I.%I', schema_name, table_name);
     EXECUTE format('CREATE TRIGGER eggdb_retention_guard BEFORE UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_retention.guard()', schema_name, table_name);
+    EXECUTE format('DROP TRIGGER IF EXISTS eggdb_retention_truncate ON %I.%I', schema_name, table_name);
+    EXECUTE format('CREATE TRIGGER eggdb_retention_truncate BEFORE TRUNCATE ON %I.%I FOR EACH STATEMENT EXECUTE FUNCTION eggdb_retention.guard_truncate()', schema_name, table_name);
 END
 $$;
 CREATE FUNCTION eggdb_retention.retain(schema_name text, table_name text, time_column text, retain interval) RETURNS void LANGUAGE plpgsql AS $$
@@ -201,5 +231,41 @@ mod tests {
             "left\n1\nSELECT 1"
         );
         assert!(run(&mut session, "SELECT eggdb_retention.lift_hold('case-42')").is_err());
+    }
+
+    #[test]
+    fn truncate_and_edits_of_the_rules_and_holds_cannot_get_around_retention() {
+        let store = records();
+        let mut session = Session::new(&store);
+        run(
+            &mut session,
+            "SELECT eggdb_retention.retain('public', 'trades', 'booked_at', interval '7 years')",
+        )
+        .unwrap();
+        run(
+            &mut session,
+            "SELECT eggdb_retention.place_hold('case-7', 'public', 'trades', 'audit')",
+        )
+        .unwrap();
+        for sql in [
+            "TRUNCATE trades",
+            "DELETE FROM eggdb_retention.rules",
+            "UPDATE eggdb_retention.rules SET retain = interval '1 day'",
+            "TRUNCATE eggdb_retention.rules",
+            "DELETE FROM eggdb_retention.holds",
+            "UPDATE eggdb_retention.holds SET table_name = 'other'",
+            "TRUNCATE eggdb_retention.holds",
+        ] {
+            assert_eq!(
+                run(&mut session, sql).unwrap_err().state(),
+                SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "{sql}"
+            );
+        }
+        run(&mut session, "SELECT eggdb_retention.lift_hold('case-7')").unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT count(*) FROM trades").unwrap(),
+            "count\n3\nSELECT 1"
+        );
     }
 }

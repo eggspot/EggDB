@@ -25,7 +25,7 @@ BEGIN
         RAISE EXCEPTION 'new row violates row-level security policy for table %', TG_TABLE_NAME USING ERRCODE = '42501';
     END IF;
     SELECT t.max_rows INTO allowed FROM eggdb_tenancy.tenants t WHERE t.tenant = tenant_value;
-    IF allowed IS NOT NULL THEN
+    IF allowed IS NOT NULL AND (TG_OP = 'INSERT' OR tenant_value IS DISTINCT FROM to_jsonb(OLD) ->> column_name) THEN
         EXECUTE format('SELECT count(*) FROM %I.%I WHERE %I = $1', TG_TABLE_SCHEMA, TG_TABLE_NAME, column_name) INTO used USING tenant_value;
         IF used >= allowed THEN
             RAISE EXCEPTION 'tenant % has reached its quota of % rows in %', tenant_value, allowed, TG_TABLE_NAME USING ERRCODE = '53400';
@@ -38,7 +38,7 @@ CREATE FUNCTION eggdb_tenancy.isolate(schema_name text, table_name text, tenant_
 BEGIN
     EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', schema_name, table_name);
     EXECUTE format('CREATE POLICY eggdb_tenant ON %I.%I USING (%I = current_setting(%L, true)) WITH CHECK (true)', schema_name, table_name, tenant_column, 'eggdb.tenant');
-    EXECUTE format('CREATE TRIGGER eggdb_tenant_quota BEFORE INSERT ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_tenancy.enforce_quota()', schema_name, table_name);
+    EXECUTE format('CREATE TRIGGER eggdb_tenant_quota BEFORE INSERT OR UPDATE ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_tenancy.enforce_quota()', schema_name, table_name);
     INSERT INTO eggdb_tenancy.isolated (table_schema, table_name, tenant_column) VALUES (schema_name, table_name, tenant_column);
 END
 $$;
@@ -128,6 +128,27 @@ mod tests {
         assert_eq!(
             run(&mut session, "SELECT body FROM notes").unwrap(),
             "body\nmine\nSELECT 1"
+        );
+        assert!(
+            run(&mut session, "UPDATE notes SET tenant = 'acme'").is_err(),
+            "a tenant cannot move its rows into another tenant"
+        );
+        assert!(
+            run(
+                &mut session,
+                "INSERT INTO notes (id, tenant, body) VALUES (1, 'globex', 'x') ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body"
+            )
+            .is_err(),
+            "an upsert must not reach another tenant's row"
+        );
+        assert!(
+            run(&mut session, "COPY notes (tenant, body) FROM STDIN").is_err(),
+            "COPY FROM must not get around the tenant check"
+        );
+        run(&mut session, "SET eggdb.tenant = 'acme'").unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT body FROM notes ORDER BY id").unwrap(),
+            "body\none\ntwo\nSELECT 2"
         );
     }
 }

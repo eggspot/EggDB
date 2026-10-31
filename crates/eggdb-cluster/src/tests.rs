@@ -148,7 +148,7 @@ fn transfers_across_shards_keep_the_total_through_conflicts_and_coordinator_cras
             );
         }
         coordinator.decide(setup, &[Vote::Yes]);
-        recover(&coordinator, &mut participants);
+        recover(&mut coordinator, &mut participants);
         let mut pending: Vec<(u64, u32, u32)> = Vec::new();
         for _ in 0..300 {
             let from = (rng.next() % u64::from(accounts)) as u32;
@@ -207,11 +207,11 @@ fn transfers_across_shards_keep_the_total_through_conflicts_and_coordinator_cras
                 }
             }
             if rng.next().is_multiple_of(7) {
-                recover(&coordinator, &mut participants);
+                recover(&mut coordinator, &mut participants);
                 pending.clear();
             }
         }
-        recover(&coordinator, &mut participants);
+        recover(&mut coordinator, &mut participants);
         let total: i64 = (0..accounts)
             .map(|account| balance(&participants, account))
             .sum();
@@ -359,4 +359,21 @@ mod leaderless {
             Some(QuorumError::UnknownCoordinator(2))
         );
     }
+}
+
+#[test]
+fn a_presumed_abort_stands_against_a_later_commit_and_no_votes_never_commit() {
+    let mut coordinator = Coordinator::default();
+    let early = coordinator.begin();
+    assert_eq!(coordinator.outcome(early), Decision::Abort);
+    assert_eq!(
+        coordinator.decide(early, &[Vote::Yes, Vote::Yes]),
+        Decision::Abort
+    );
+    let empty = coordinator.begin();
+    assert_eq!(coordinator.decide(empty, &[]), Decision::Abort);
+    let normal = coordinator.begin();
+    assert_eq!(coordinator.decide(normal, &[Vote::Yes]), Decision::Commit);
+    assert_eq!(coordinator.decide(normal, &[Vote::No]), Decision::Commit);
+    assert_eq!(coordinator.outcome(normal), Decision::Commit);
 }

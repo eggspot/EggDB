@@ -456,6 +456,21 @@ impl Node {
                     )];
                 }
                 let received = entries.len() as u64;
+                let consecutive = entries.iter().enumerate().all(|(at, entry)| {
+                    previous_index
+                        .checked_add(at as u64 + 1)
+                        .is_some_and(|expected| entry.index == expected)
+                });
+                if !consecutive {
+                    return vec![self.send(
+                        from,
+                        Message::AppendReply {
+                            term: self.term,
+                            success: false,
+                            index: previous_index.min(self.last_index()),
+                        },
+                    )];
+                }
                 for entry in entries {
                     match self.term_at(entry.index) {
                         Some(existing) if existing == entry.term => {}
@@ -468,7 +483,7 @@ impl Node {
                 }
                 let matched = previous_index + received;
                 if commit > self.commit {
-                    self.commit = commit.min(self.last_index());
+                    self.commit = self.commit.max(commit.min(matched));
                 }
                 vec![self.send(
                     from,

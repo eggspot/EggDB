@@ -37,6 +37,8 @@ impl std::fmt::Debug for ServerConfig {
 
 type SharedWriter = Arc<Mutex<dyn Write + Send>>;
 
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 struct Subscriber {
     filters: Vec<(String, u8)>,
     writer: SharedWriter,
@@ -79,6 +81,7 @@ impl<'k> Broker<'k> {
     }
 
     fn deliver(&self, topic: &str, payload: &[u8], qos: u8) {
+        let mut deliveries: Vec<(SharedWriter, Vec<u8>)> = Vec::new();
         let mut subscribers = self
             .subscribers
             .lock()
@@ -105,8 +108,11 @@ impl<'k> Broker<'k> {
                 false,
                 subscriber.next_id,
             );
-            let mut writer = subscriber
-                .writer
+            deliveries.push((Arc::clone(&subscriber.writer), packet));
+        }
+        drop(subscribers);
+        for (writer, packet) in deliveries {
+            let mut writer = writer
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = writer.write_all(&packet);
@@ -522,6 +528,7 @@ pub fn serve(
             };
             if stream.set_nonblocking(false).is_err()
                 || stream.set_read_timeout(Some(READ_POLL)).is_err()
+                || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
                 || stream.set_nodelay(true).is_err()
             {
                 continue;

@@ -410,3 +410,22 @@ fn written_points_are_queried_with_sql_and_promql() {
         .unwrap();
     assert_eq!(total.as_deref(), Some("2"));
 }
+
+#[test]
+fn hostile_query_api_requests_are_answered_without_panics_or_endless_loops() {
+    let store = MemoryStore::default();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb");
+    let (status, _) = post(&endpoint, "/api/v1/label/values", "", b"");
+    assert_eq!(status, 404);
+    for query in [
+        "query=1&start=1e300&end=1e300&step=1",
+        "query=1&start=-1e300&end=1e300&step=1",
+        "query=up%20offset%20100000000000000000000s&start=0&end=1&step=1",
+    ] {
+        let (status, answer) = post(&endpoint, "/api/v1/query_range", query, b"");
+        assert!(status == 200 || status == 400, "{query}: {status} {answer}");
+    }
+    let long_sum = format!("query=1{}&time=1", "%2B1".repeat(100_000));
+    let (status, answer) = post(&endpoint, "/api/v1/query", &long_sum, b"");
+    assert_eq!(status, 400, "{answer}");
+}

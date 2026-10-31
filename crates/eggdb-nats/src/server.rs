@@ -99,6 +99,7 @@ impl Broker {
         for members in groups.into_values() {
             targets.push(members[turn % members.len()].clone());
         }
+        let mut deliveries: Vec<(SharedWriter, Vec<u8>)> = Vec::with_capacity(targets.len());
         for (id, sid) in targets {
             let Some(client) = clients.get_mut(&id) else {
                 continue;
@@ -111,11 +112,7 @@ impl Broker {
                 published.payload,
                 client.headers,
             );
-            let _ = client
-                .writer
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .write_all(&packet);
+            deliveries.push((Arc::clone(&client.writer), packet));
             if let Some(subscription) = client.subscriptions.get_mut(&sid) {
                 subscription.delivered += 1;
                 if subscription
@@ -125,6 +122,13 @@ impl Broker {
                     client.subscriptions.remove(&sid);
                 }
             }
+        }
+        drop(clients);
+        for (writer, packet) in deliveries {
+            let _ = writer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .write_all(&packet);
         }
     }
 }

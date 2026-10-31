@@ -623,6 +623,7 @@ pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> Sql
             | Statement::CreateTrigger(_)
             | Statement::AlterTrigger(_)
             | Statement::DropTrigger(_)
+            | Statement::EnableTrigger(_)
             | Statement::CreateRoutine(_)
             | Statement::AlterRoutine(_)
             | Statement::DropRoutine(_)

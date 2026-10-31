@@ -159,3 +159,33 @@ fn hostile_policy_records_are_errors() {
         assert!(decode("p", bytes).is_err(), "{bytes:?}");
     }
 }
+
+#[test]
+fn only_a_superuser_reads_foreign_sources() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut ada = as_role(&store, "ada");
+    assert_eq!(
+        run(&mut ada, "SELECT * FROM eggdb_foreign('file:/x.parquet', 'x')")
+            .unwrap_err()
+            .state(),
+        SqlState::INSUFFICIENT_PRIVILEGE
+    );
+}
+
+#[test]
+fn only_a_superuser_turns_triggers_off() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut ada = as_role(&store, "ada");
+    for sql in [
+        "ALTER TABLE notes DISABLE TRIGGER ALL",
+        "ALTER TABLE notes ENABLE TRIGGER ALL",
+    ] {
+        assert_eq!(
+            run(&mut ada, sql).unwrap_err().state(),
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "{sql}"
+        );
+    }
+}

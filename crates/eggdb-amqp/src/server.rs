@@ -115,21 +115,40 @@ impl<'s> Broker<'s> {
 
 /// Whether an AMQP topic pattern (`*` one word, `#` zero or more) matches a routing key.
 pub(crate) fn topic_matches(pattern: &str, key: &str) -> bool {
-    fn matches(pattern: &[&str], key: &[&str]) -> bool {
-        match pattern.split_first() {
-            None => key.is_empty(),
-            Some((&"#", rest)) => (0..=key.len()).any(|skip| matches(rest, &key[skip..])),
-            Some((&"*", rest)) => !key.is_empty() && matches(rest, &key[1..]),
-            Some((word, rest)) => key.first() == Some(word) && matches(rest, &key[1..]),
-        }
-    }
     let pattern: Vec<&str> = pattern.split('.').collect();
     let key: Vec<&str> = if key.is_empty() {
         Vec::new()
     } else {
         key.split('.').collect()
     };
-    pattern.len() <= 64 && matches(&pattern, &key)
+    if pattern.len() > 64 {
+        return false;
+    }
+    let mut reachable = vec![false; key.len() + 1];
+    reachable[0] = true;
+    for part in &pattern {
+        let mut next = vec![false; key.len() + 1];
+        for at in 0..=key.len() {
+            if !reachable[at] {
+                continue;
+            }
+            match *part {
+                "#" => next[at..].fill(true),
+                "*" => {
+                    if at < key.len() {
+                        next[at + 1] = true;
+                    }
+                }
+                word => {
+                    if key.get(at) == Some(&word) {
+                        next[at + 1] = true;
+                    }
+                }
+            }
+        }
+        reachable = next;
+    }
+    reachable[key.len()]
 }
 
 fn now_ms() -> u64 {
