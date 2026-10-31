@@ -73,6 +73,7 @@ pub struct Options {
     pub(crate) write_timeout: Duration,
     pub(crate) clock: ClockChoice,
     pub(crate) lock_cache: bool,
+    pub(crate) compress_values: bool,
 }
 
 #[derive(Clone, Default)]
@@ -122,6 +123,7 @@ impl Options {
             write_timeout: DEFAULT_WRITE_TIMEOUT,
             clock: ClockChoice::default(),
             lock_cache: false,
+            compress_values: false,
         }
     }
 
@@ -167,6 +169,15 @@ impl Options {
     /// working-set size, or lower [`Options::cache_bytes`].
     pub fn lock_cache(mut self, lock: bool) -> Self {
         self.lock_cache = lock;
+        self
+    }
+
+    /// Compresses values of 4 KiB or more that are written from now on, when compressing
+    /// saves at least a sixteenth of them, with EggDB's own LZ4-format codec. Off by default.
+    /// The first compressed value marks the file, so a release from before compressed values
+    /// refuses to open it rather than misread it; reading needs no option.
+    pub fn compress_values(mut self, compress: bool) -> Self {
+        self.compress_values = compress;
         self
     }
 

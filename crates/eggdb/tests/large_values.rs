@@ -185,3 +185,54 @@ fn values_stream_in_and_out_a_piece_at_a_time() {
     assert_eq!(db.get("short").unwrap(), None);
     assert_eq!(db.check().unwrap().overflow_values, 1);
 }
+
+#[test]
+fn compressed_values_read_back_and_take_less_space() {
+    use std::io::Read;
+    let plain = TempPath::new("uncompressed-values");
+    let packed = TempPath::new("compressed-values");
+    let text: Vec<u8> = b"a line of text that repeats itself, as logs and documents do. "
+        .iter()
+        .copied()
+        .cycle()
+        .take(2 << 20)
+        .collect();
+    let noise = patterned(300_000, 3);
+    for (file, compress) in [(&plain, false), (&packed, true)] {
+        let db = Database::open_with(
+            file.path(),
+            Options::new()
+                .create_if_missing(true)
+                .compress_values(compress)
+                .cache_bytes(16 << 20),
+        )
+        .unwrap();
+        db.put("text", &text).unwrap();
+        db.put("noise", &noise).unwrap();
+        db.put("small", b"tiny").unwrap();
+        db.close().unwrap();
+    }
+    let size = |file: &TempPath| std::fs::metadata(file.path()).unwrap().len();
+    assert!(
+        size(&packed) * 4 < size(&plain),
+        "{} compressed against {} plain",
+        size(&packed),
+        size(&plain)
+    );
+    let db = Database::open(packed.path()).unwrap();
+    assert_eq!(db.get("text").unwrap(), Some(text.clone()));
+    assert_eq!(db.get("noise").unwrap(), Some(noise));
+    assert_eq!(db.get("small").unwrap(), Some(b"tiny".to_vec()));
+    let tx = db.begin_read().unwrap();
+    let mut reader = tx.get_reader("text").unwrap().unwrap();
+    assert_eq!(reader.len(), text.len() as u64);
+    let mut copied = Vec::new();
+    reader.read_to_end(&mut copied).unwrap();
+    assert!(copied == text);
+    let scanned: Vec<_> = tx.scan(..).map(Result::unwrap).collect();
+    assert_eq!(scanned.len(), 3);
+    drop(reader);
+    drop(tx);
+    let report = db.check().unwrap();
+    assert_eq!(report.leaked_pages, 0);
+}

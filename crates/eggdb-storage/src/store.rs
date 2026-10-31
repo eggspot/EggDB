@@ -869,6 +869,14 @@ impl<'t, 's, F: File> ValueReader<'t, 's, F> {
     ) -> Result<Self, StorageError> {
         let state = match stored {
             StoredValue::Inline(bytes) => ValueState::Inline { bytes, offset: 0 },
+            StoredValue::Overflow(reference)
+                if crate::overflow::chain_layout(pages, &reference)?
+                    == crate::overflow::COMPRESSED_LAYOUT =>
+            {
+                let mut bytes = Vec::new();
+                crate::overflow::read_value(pages, &reference, &mut bytes)?;
+                ValueState::Inline { bytes, offset: 0 }
+            }
             StoredValue::Overflow(reference) => {
                 ValueState::Chain(ChainReader::start(pages, reference)?)
             }

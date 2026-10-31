@@ -255,6 +255,9 @@ impl Database {
         if options.lock_cache {
             cache.lock_in_memory().map_err(Error::storage)?;
         }
+        if options.compress_values {
+            cache.set_value_compression(eggdb_storage::ValueCompression::Lz4);
+        }
         let clock = options.clock.clock();
         let store = Store::new(cache, Arc::clone(&clock));
         let features = store.superblock().map_err(Error::storage)?.features;

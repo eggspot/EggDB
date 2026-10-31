@@ -125,6 +125,7 @@ other than 0, compression and encryption. The bits defined so far:
 | Set | Bit | Name | Set by |
 |-----|----:|------|--------|
 | read-only compatible | 0 | `EXPIRING_KEYS` | the first commit that gives a key a time to live (D140). A release without expiring keys would show expired keys and could write a key without removing its deadline, so it may only read the file. The bit stays set. |
+| incompatible | 0 | `COMPRESSED_VALUES` | the first commit that writes a value compressed on overflow pages of layout 2 (D171). A release without them would refuse those pages as damaged, so it refuses the file at open instead. The bit stays set. |
 
 ## Pages
 Every page except the header slots starts with a 16-byte header:
@@ -582,6 +583,16 @@ After the 16-byte page header, each overflow page holds:
   kind of reference, such as one keeping part of the value in the leaf, uses another length in
   the low bits behind a feature flag; this layout refuses every length but 16.
 
+
+**Compressed chains (layout 2, D171).** With value compression on, a value of at least 4 KiB
+is compressed with an LZ4 block (the block format of LZ4's public format description: sequences
+of a token, literals, a 2-byte little-endian offset and extra length bytes, the last five bytes
+literals). When the block and a 4-byte little-endian length of the uncompressed value save at
+least a sixteenth of the value, the chain holds those bytes instead, and every page of the chain
+has layout 2. Everything else about the chain is as above: the reference's `value_bytes` is the
+stored length, and pages, indexes, counts and the zero tail are checked the same way. A chain
+mixing layouts, a length above 1 GiB, or a block that does not give exactly that many bytes is
+damage. Writing one sets the incompatible feature `COMPRESSED_VALUES`.
 ## Hybrid-clock stamps (item 9)
 - A commit stamp is a `u64`: 52 bits of microseconds since **2026-01-01T00:00:00Z** (Unix time
   1767225600), followed by a 12-bit logical counter.

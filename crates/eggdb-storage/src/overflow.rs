@@ -6,6 +6,9 @@ use crate::page_set::PageSet;
 use eggdb_platform::{Error, ErrorKind, File};
 
 pub(crate) const LAYOUT: u8 = 1;
+pub(crate) const COMPRESSED_LAYOUT: u8 = 2;
+const COMPRESSION_THRESHOLD: usize = 4096;
+const COMPRESSED_LENGTH_BYTES: usize = 4;
 pub(crate) const REFERENCE_BYTES: usize = 16;
 pub(crate) const MAX_VALUE_BYTES: usize = 1 << 30;
 
@@ -21,6 +24,26 @@ const HEADER: PageHeader = PageHeader {
     flags: 0,
     lsn: 0,
 };
+
+const COMPRESSED_HEADER: PageHeader = PageHeader {
+    layout: COMPRESSED_LAYOUT,
+    ..HEADER
+};
+
+fn compressed_form(value: &[u8]) -> Option<Vec<u8>> {
+    if value.len() < COMPRESSION_THRESHOLD {
+        return None;
+    }
+    let block = crate::compression::lz4::compress(value);
+    let stored = block.len() + COMPRESSED_LENGTH_BYTES;
+    if stored > value.len() - value.len() / 16 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(stored);
+    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    out.extend_from_slice(&block);
+    Some(out)
+}
 
 pub(crate) fn data_bytes_per_page(page_size: PageSize) -> usize {
     page_size.bytes() - PAGE_HEADER_SIZE - DATA
@@ -67,13 +90,24 @@ pub(crate) fn write_value<F: File>(
     key: &[u8],
     value: &[u8],
 ) -> Result<OverflowReference, StorageError> {
+    let compressed = match cache.value_compression() {
+        crate::compression::ValueCompression::Lz4 => compressed_form(value),
+        crate::compression::ValueCompression::Off => None,
+    };
+    let (value, header) = match &compressed {
+        Some(stored) => {
+            cache.note_compressed_value();
+            (stored.as_slice(), COMPRESSED_HEADER)
+        }
+        None => (value, HEADER),
+    };
     let mut chunks = value.chunks(data_bytes_per_page(cache.page_size()));
     let first_chunk = chunks.next().unwrap_or_default();
-    let mut page = cache.allocate(HEADER)?;
+    let mut page = cache.allocate(header)?;
     let first_page = page.page_id();
     fill(&mut page, first_page, 0, first_chunk);
     for (index, chunk) in (1u32..).zip(chunks) {
-        let mut next = cache.allocate(HEADER)?;
+        let mut next = cache.allocate(header)?;
         write_u64(&mut page, NEXT, next.page_id());
         fill(&mut next, first_page, index, chunk);
         page = next;
@@ -99,6 +133,23 @@ pub(crate) fn read_value(
     value: &mut Vec<u8>,
 ) -> Result<(), StorageError> {
     let length = checked_length(pages, reference)?;
+    if chain_layout(pages, reference)? == COMPRESSED_LAYOUT {
+        let mut stored = Vec::new();
+        stored
+            .try_reserve_exact(length)
+            .map_err(|_| StorageError::Io(Error::new(ErrorKind::OutOfMemory)))?;
+        walk(pages, reference, |_, data| {
+            stored.extend_from_slice(data);
+            Ok(())
+        })?;
+        let expanded = decompressed(&stored, reference.first_page)?;
+        if value.is_empty() {
+            *value = expanded;
+        } else {
+            value.extend_from_slice(&expanded);
+        }
+        return Ok(());
+    }
     value
         .try_reserve_exact(length)
         .map_err(|_| StorageError::Io(Error::new(ErrorKind::OutOfMemory)))?;
@@ -106,6 +157,46 @@ pub(crate) fn read_value(
         value.extend_from_slice(data);
         Ok(())
     })
+}
+
+fn stored_length(stored: &[u8], first_page: u64) -> Result<usize, StorageError> {
+    let header = stored
+        .get(..COMPRESSED_LENGTH_BYTES)
+        .ok_or_else(|| corrupt(first_page, "a compressed value is shorter than its length"))?;
+    let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    if length > MAX_VALUE_BYTES {
+        return Err(corrupt(first_page, "a compressed value is longer than the largest value"));
+    }
+    Ok(length)
+}
+
+fn decompressed(stored: &[u8], first_page: u64) -> Result<Vec<u8>, StorageError> {
+    let length = stored_length(stored, first_page)?;
+    crate::compression::lz4::decompress(&stored[COMPRESSED_LENGTH_BYTES..], length)
+        .map_err(|problem| corrupt(first_page, problem))
+}
+
+pub(crate) fn chain_layout(
+    pages: &impl PageSource,
+    reference: &OverflowReference,
+) -> Result<u8, StorageError> {
+    let page = pages.page(reference.first_page)?;
+    match page.header().layout {
+        layout @ (LAYOUT | COMPRESSED_LAYOUT) => Ok(layout),
+        _ => Err(corrupt(reference.first_page, "the page has an unknown layout")),
+    }
+}
+
+pub(crate) fn value_length(
+    pages: &impl PageSource,
+    reference: &OverflowReference,
+) -> Result<usize, StorageError> {
+    let length = checked_length(pages, reference)?;
+    if chain_layout(pages, reference)? != COMPRESSED_LAYOUT {
+        return Ok(length);
+    }
+    let page = pages.page(reference.first_page)?;
+    stored_length(&page[DATA..], reference.first_page)
 }
 
 pub(crate) fn value_pages(
@@ -187,6 +278,7 @@ fn walk(
 ) -> Result<(), StorageError> {
     let per_page = data_bytes_per_page(pages.page_size()) as u64;
     let page_count = pages_for(reference.value_bytes, pages.page_size());
+    let layout = chain_layout(pages, reference)?;
     let mut page_id = reference.first_page;
     let mut remaining = reference.value_bytes;
     for index in 0..page_count {
@@ -199,7 +291,7 @@ fn walk(
         })?;
         let chunk = remaining.min(per_page) as usize;
         let last = index + 1 == page_count;
-        let next = check_page(&page, reference, index, chunk, last)?;
+        let next = check_page(&page, reference, index, chunk, last, layout)?;
         visit(page_id, &page[DATA..DATA + chunk])?;
         remaining -= chunk as u64;
         page_id = next;
@@ -213,6 +305,7 @@ fn check_page(
     index: u64,
     chunk: usize,
     last: bool,
+    layout: u8,
 ) -> Result<u64, StorageError> {
     let page_id = page.page_id();
     let header = page.header();
@@ -222,8 +315,8 @@ fn check_page(
             "a large value leads to a page of another type",
         ));
     }
-    if header.layout != LAYOUT {
-        return Err(corrupt(page_id, "the page has an unknown layout"));
+    if header.layout != layout {
+        return Err(corrupt(page_id, "the page's layout differs from its chain's"));
     }
     if read_u64(page, FIRST) != reference.first_page || u64::from(read_u32(page, INDEX)) != index {
         return Err(corrupt(
@@ -308,7 +401,7 @@ impl ChainReader {
             })?;
             let chunk = (self.reference.value_bytes - self.index * per_page).min(per_page) as usize;
             let last = self.index + 1 == page_count;
-            let next = check_page(&page, &self.reference, self.index, chunk, last)?;
+            let next = check_page(&page, &self.reference, self.index, chunk, last, LAYOUT)?;
             let taken = (chunk - self.offset).min(out.len() - copied);
             out[copied..copied + taken]
                 .copy_from_slice(&page[DATA + self.offset..DATA + self.offset + taken]);

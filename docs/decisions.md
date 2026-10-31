@@ -195,3 +195,4 @@ its full title with its status.
 - [D168](decisions/D168.md) A checkpoint that cuts segments off writes one header slot; the copy to the other slot waits until a data or free-list page is about to use the cut space (three syncs per long `Normal` commit instead of four)
 - [D169](decisions/D169.md) Declarative partitioning: partitions are tables linked by a catalog record (`0x0E`), routed writes, reads expanded into a pruned `UNION ALL`, MySQL's and Oracle's named partitions
 - [D170](decisions/D170.md) An LSM tree made of B+trees (delta, runs, a manifest), sealed deltas without copying and merges in bounded steps, in the storage engine first; `lsm.random_put` against a B+tree
+- [D171](decisions/D171.md) Compressed values: our own LZ4-format codec, overflow chains of layout 2 behind the incompatible feature `COMPRESSED_VALUES`, `Options::compress_values`

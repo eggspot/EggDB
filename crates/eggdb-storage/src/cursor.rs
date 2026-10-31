@@ -475,7 +475,7 @@ fn large_value_len(
     cell: &CellRef<'_>,
 ) -> Result<u64, StorageError> {
     match shape.overflow_reference(cell)? {
-        Some(reference) => overflow::checked_length(pages, &reference).map(|len| len as u64),
+        Some(reference) => overflow::value_length(pages, &reference).map(|len| len as u64),
         None => Ok(0),
     }
 }

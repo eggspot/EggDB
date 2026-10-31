@@ -170,8 +170,11 @@ impl Features {
     pub const EXPIRING_KEYS: u64 = 1 << 0;
     /// The read-only-compatible features this release knows: [`Features::EXPIRING_KEYS`].
     pub const KNOWN_READ_ONLY_COMPATIBLE: u64 = Self::EXPIRING_KEYS;
-    /// The incompatible features this release knows: none yet.
-    pub const KNOWN_INCOMPATIBLE: u64 = 0;
+    /// The incompatible bit of a file that holds values compressed on overflow pages of
+    /// layout 2 (D171): a release that does not know it would refuse those pages as damaged.
+    pub const COMPRESSED_VALUES: u64 = 1 << 0;
+    /// The incompatible features this release knows: [`Features::COMPRESSED_VALUES`].
+    pub const KNOWN_INCOMPATIBLE: u64 = Self::COMPRESSED_VALUES;
 
     /// Whether this release may open a file with these features for `access`. Unknown
     /// compatible bits are ignored, unknown read-only-compatible bits refuse a write, and

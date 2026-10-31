@@ -36,6 +36,7 @@ mod btree_delete_tests;
 mod btree_tests;
 mod bytes;
 mod cells;
+mod compression;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
@@ -74,6 +75,7 @@ mod test_rng;
 mod tree_page;
 
 pub use btree::{BTree, TreeReport};
+pub use compression::ValueCompression;
 pub use crc32c::{crc32c, crc32c_append};
 pub use cursor::{Cursor, ScanOrder};
 pub use error::{FormatError, StorageError};

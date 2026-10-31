@@ -109,9 +109,27 @@ pub struct PageCache<F: File> {
     commit_order: Vec<usize>,
     images: RefCell<BeforeImages>,
     new_chains: RefCell<BTreeMap<u64, Box<[u8]>>>,
+    value_compression: Cell<crate::compression::ValueCompression>,
+    compressed_written: Cell<bool>,
 }
 
 impl<F: File> PageCache<F> {
+    /// Sets whether large values written from now on are compressed (see
+    /// [`ValueCompression`](crate::ValueCompression)). Values already written keep their form.
+    pub fn set_value_compression(&self, compression: crate::compression::ValueCompression) {
+        self.value_compression.set(compression);
+    }
+
+    /// Whether large values written from now on are compressed.
+    pub fn value_compression(&self) -> crate::compression::ValueCompression {
+        self.value_compression.get()
+    }
+
+    pub(crate) fn note_compressed_value(&self) {
+        self.compressed_written.set(true);
+    }
+
+
     /// Keeps the cache's memory in RAM, never swapped out, for as long as the cache lives.
     /// Fails with the platform's error when the process may not lock that much memory.
     pub fn lock_in_memory(&mut self) -> Result<(), StorageError> {
@@ -150,6 +168,8 @@ impl<F: File> PageCache<F> {
             commit_order: cells::reserved(frames)?,
             images: RefCell::new(BeforeImages::new(frames)),
             new_chains: RefCell::new(BTreeMap::new()),
+            value_compression: Cell::new(crate::compression::ValueCompression::Off),
+            compressed_written: Cell::new(false),
         })
     }
 
@@ -347,7 +367,16 @@ impl<F: File> PageCache<F> {
         );
         order.sort_unstable_by_key(|&frame| (self.pages[frame].get(), frame));
         order.dedup();
-        let committed = self.write_and_commit(&order, stamp, update);
+        let compressed = self.compressed_written.get();
+        let committed = self.write_and_commit(&order, stamp, |superblock| {
+            update(superblock);
+            if compressed {
+                superblock.features.incompatible |= crate::format::Features::COMPRESSED_VALUES;
+            }
+        });
+        if committed.is_ok() {
+            self.compressed_written.set(false);
+        }
         if committed.is_ok() {
             self.images.get_mut().commit();
             self.new_chains.get_mut().clear();
@@ -375,6 +404,7 @@ impl<F: File> PageCache<F> {
     /// commit.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.new_chains.get_mut().clear();
+        self.compressed_written.set(false);
         self.drop_changes();
         self.images.get_mut().discard_pending();
         self.file.get_mut().rollback()
