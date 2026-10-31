@@ -57,6 +57,9 @@ internal static partial class Native
     [LibraryImport(Library, EntryPoint = "eggdb_sql_open", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int SqlOpen(nint database, string dialect, out nint session);
 
+    [LibraryImport(Library, EntryPoint = "eggdb_sql_connect", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int SqlConnect(string url, out nint session);
+
     [LibraryImport(Library, EntryPoint = "eggdb_sql_close")]
     internal static partial int SqlClose(nint session);
 

@@ -46,6 +46,13 @@ var dialects = map[string]bool{"sqlite": true, "postgresql": true, "mysql": true
 
 // Open opens the database a data source name names.
 func (Driver) Open(name string) (driver.Conn, error) {
+	if isServerURL(name) {
+		session, err := openSession(name, "postgresql", false)
+		if err != nil {
+			return nil, err
+		}
+		return &conn{session: session, dialect: "postgresql"}, nil
+	}
 	path, query, _ := strings.Cut(name, "?")
 	settings, err := url.ParseQuery(query)
 	if err != nil {

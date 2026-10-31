@@ -1,5 +1,6 @@
 #include <node_api.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "eggdb.h"
 
@@ -83,11 +84,16 @@ static napi_value open_connection(napi_env env, napi_callback_info info) {
         free(dialect);
         return throw_message(env, "out of memory");
     }
-    eggdb_options options = {0};
-    options.flags = read_only ? EGGDB_OPEN_READ_ONLY : 0;
-    int status = eggdb_open(path, &options, &open->database);
-    if (status == EGGDB_OK) {
-        status = eggdb_sql_open(open->database, dialect, &open->session);
+    int status;
+    if (strncmp(path, "postgresql://", 13) == 0 || strncmp(path, "postgres://", 11) == 0) {
+        status = eggdb_sql_connect(path, &open->session);
+    } else {
+        eggdb_options options = {0};
+        options.flags = read_only ? EGGDB_OPEN_READ_ONLY : 0;
+        status = eggdb_open(path, &options, &open->database);
+        if (status == EGGDB_OK) {
+            status = eggdb_sql_open(open->database, dialect, &open->session);
+        }
     }
     free(path);
     free(dialect);

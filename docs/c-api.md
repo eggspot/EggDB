@@ -229,6 +229,17 @@ eggdb_sql_close(sql);
   its SQLSTATE (`42P01` for a missing table) and `eggdb_last_error()` its message. The
   statements before it keep their effects.
 
+### On a server
+
+`eggdb_sql_connect("postgresql://user:password@host:5432/db?sslmode=require", &sql)` gives a
+session on an EggDB server (or any server that speaks PostgreSQL's protocol) through EggDB's own
+client (D192). It takes the same calls as a session from `eggdb_sql_open`:
+`eggdb_sql_execute` sends the simple query protocol, `eggdb_sql_execute_with_parameters` the
+extended one with the parameters bound as text to `$1`, `$2`, ..., and values come back typed
+from the columns' types (integers, reals, `bytea` as a blob, the rest as text).
+`eggdb_sql_close` ends the connection. The official drivers use it when they are given a
+`postgresql://` URL instead of a file.
+
 ## Backup and compaction
 `eggdb_backup(db, path, &report)` writes a copy of the last commit to a new file while readers
 and the writer keep working; a file at `path` fails with `EGGDB_ERR_ALREADY_EXISTS`.

@@ -67,6 +67,13 @@ func lastError(status C.int) error {
 func openSession(path, dialect string, readOnly bool) (*nativeSession, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
+	if isServerURL(path) {
+		opened := &nativeSession{}
+		if status := C.eggdb_sql_connect(cPath, &opened.session); status != C.EGGDB_OK {
+			return nil, lastError(status)
+		}
+		return opened, nil
+	}
 	cDialect := C.CString(dialect)
 	defer C.free(unsafe.Pointer(cDialect))
 	var options C.eggdb_options
@@ -83,6 +90,10 @@ func openSession(path, dialect string, readOnly bool) (*nativeSession, error) {
 		return nil, err
 	}
 	return opened, nil
+}
+
+func isServerURL(path string) bool {
+	return strings.HasPrefix(path, "postgresql://") || strings.HasPrefix(path, "postgres://")
 }
 
 func (s *nativeSession) close() {

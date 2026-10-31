@@ -66,6 +66,15 @@ pub struct EggdbResult {
 
 type SqlSession = Session<'static, Store<'static>>;
 
+const OID_BOOL: u32 = 16;
+const OID_BYTEA: u32 = 17;
+const OID_INT8: u32 = 20;
+const OID_INT2: u32 = 21;
+const OID_INT4: u32 = 23;
+const OID_OID: u32 = 26;
+const OID_FLOAT4: u32 = 700;
+const OID_FLOAT8: u32 = 701;
+
 #[derive(Debug, Clone, Copy)]
 struct PendingValue {
     kind: i32,
@@ -147,6 +156,67 @@ impl ResultBatch {
         });
     }
 
+    fn add_remote_value(&mut self, text: Option<&str>, type_oid: u32) {
+        let Some(text) = text else {
+            self.pending_values.push(PendingValue {
+                kind: EGGDB_NULL,
+                integer: 0,
+                real: 0.0,
+                text: None,
+            });
+            return;
+        };
+        let (kind, integer, real, bytes) = match type_oid {
+            OID_BOOL => (EGGDB_INTEGER, i64::from(text == "t"), 0.0, text.as_bytes().to_vec()),
+            OID_INT2 | OID_INT4 | OID_INT8 | OID_OID => match text.parse::<i64>() {
+                Ok(number) => (EGGDB_INTEGER, number, 0.0, text.as_bytes().to_vec()),
+                Err(_) => (EGGDB_TEXT, 0, 0.0, text.as_bytes().to_vec()),
+            },
+            OID_FLOAT4 | OID_FLOAT8 => match text.parse::<f64>() {
+                Ok(number) => (EGGDB_REAL, 0, number, text.as_bytes().to_vec()),
+                Err(_) => (EGGDB_TEXT, 0, 0.0, text.as_bytes().to_vec()),
+            },
+            OID_BYTEA => match hex_bytes(text) {
+                Some(bytes) => (EGGDB_BLOB, 0, 0.0, bytes),
+                None => (EGGDB_TEXT, 0, 0.0, text.as_bytes().to_vec()),
+            },
+            _ => (EGGDB_TEXT, 0, 0.0, text.as_bytes().to_vec()),
+        };
+        let kept = self.keep(&bytes);
+        self.pending_values.push(PendingValue {
+            kind,
+            integer,
+            real,
+            text: Some(kept),
+        });
+    }
+
+    fn add_remote(&mut self, result: &eggdb_pgwire::client::QueryRows) {
+        let (tag, _) = self.keep(result.tag.as_bytes());
+        let first_name = self.name_offsets.len();
+        for column in &result.columns {
+            let (name, _) = self.keep(column.as_bytes());
+            self.name_offsets.push(name);
+        }
+        let first_value = self.pending_values.len();
+        let column_count = result.columns.len();
+        let row_count = if column_count == 0 { 0 } else { result.rows.len() };
+        for row in result.rows.iter().take(row_count) {
+            for column in 0..column_count {
+                let text = row.get(column).and_then(Option::as_deref);
+                let type_oid = result.column_types.get(column).copied().unwrap_or(0);
+                self.add_remote_value(text, type_oid);
+            }
+        }
+        self.pending_results.push(PendingResult {
+            tag,
+            first_name,
+            column_count,
+            first_value,
+            row_count,
+        });
+    }
+
     fn add(&mut self, result: &QueryResult, dialect: Dialect) {
         let (tag, _) = self.keep(result.tag.as_bytes());
         let columns = result.columns.as_deref().unwrap_or_default();
@@ -220,23 +290,51 @@ impl ResultBatch {
     }
 }
 
-/// A SQL session on a database (`eggdb_sql` in `eggdb.h`), from [`eggdb_sql_open`], closed by
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    let digits = text.strip_prefix("\\x")?;
+    if digits.len() % 2 != 0 {
+        return None;
+    }
+    (0..digits.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(digits.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
+enum Backend {
+    Local {
+        session: SqlSession,
+        store: Arc<Store<'static>>,
+        database: Arc<Database>,
+    },
+    Remote(Box<eggdb_pgwire::client::PgClient>),
+}
+
+/// A SQL session (`eggdb_sql` in `eggdb.h`): on a database opened in the process, from
+/// [`eggdb_sql_open`], or on an EggDB server, from [`eggdb_sql_connect`]; closed by
 /// [`eggdb_sql_close`]. Outside a `BEGIN` block each statement is its own transaction; a block
 /// holds the database's one write transaction until `COMMIT` or `ROLLBACK`. One call at a time
 /// may use it, from any thread.
 pub struct EggdbSql {
-    session: SqlSession,
+    backend: Backend,
     results: ResultBatch,
-    store: Arc<Store<'static>>,
-    database: Arc<Database>,
 }
 
 impl std::fmt::Debug for EggdbSql {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EggdbSql")
-            .field("dialect", &self.session.dialect())
-            .field("database", &self.database.path())
-            .finish_non_exhaustive()
+        match &self.backend {
+            Backend::Local {
+                session, database, ..
+            } => f
+                .debug_struct("EggdbSql")
+                .field("dialect", &session.dialect())
+                .field("database", &database.path())
+                .finish_non_exhaustive(),
+            Backend::Remote(client) => f
+                .debug_struct("EggdbSql")
+                .field("server", &client.server_version())
+                .finish_non_exhaustive(),
+        }
     }
 }
 
@@ -281,10 +379,12 @@ pub unsafe extern "C" fn eggdb_sql_open(
         let store_ref: &'static Store<'static> = unsafe { &*Arc::as_ptr(&store) };
         let session = store_ref.session(dialect);
         let handle = args::give(EggdbSql {
-            session,
+            backend: Backend::Local {
+                session,
+                store,
+                database,
+            },
             results: ResultBatch::default(),
-            store,
-            database,
         });
         // SAFETY: as for the first write to `sql`.
         unsafe { args::write(sql, handle, "sql") }
@@ -294,14 +394,42 @@ pub unsafe extern "C" fn eggdb_sql_open(
 impl EggdbSql {
     fn run(
         &mut self,
-        run: impl FnOnce(&mut SqlSession, &mut Vec<QueryResult>) -> SqlResult<()>,
+        text: &str,
+        parameters: Option<&[Parameter]>,
     ) -> Result<(*const EggdbResult, usize), Failure> {
         self.results.clear();
-        let mut gathered = Vec::new();
-        run(&mut self.session, &mut gathered).map_err(|error| Failure::sql(&error))?;
-        let dialect = self.session.dialect();
-        for result in &gathered {
-            self.results.add(result, dialect);
+        match &mut self.backend {
+            Backend::Local { session, .. } => {
+                let mut gathered: Vec<QueryResult> = Vec::new();
+                let ran: SqlResult<()> = match parameters {
+                    Some(values) => session.execute_prepared(text, values, &mut |result| {
+                        gathered.push(result);
+                        true
+                    }),
+                    None => session.execute(text, &mut |result| gathered.push(result)),
+                };
+                ran.map_err(|error| Failure::sql(&error))?;
+                let dialect = session.dialect();
+                for result in &gathered {
+                    self.results.add(result, dialect);
+                }
+            }
+            Backend::Remote(client) => {
+                let answered = match parameters {
+                    Some(values) => {
+                        let bound: Vec<Option<&[u8]>> = values
+                            .iter()
+                            .map(|value| value.value.as_deref().map(str::as_bytes))
+                            .collect();
+                        client.execute_with_parameters(text, &bound)
+                    }
+                    None => client.simple_query(text),
+                };
+                let gathered = answered.map_err(remote_failure)?;
+                for result in &gathered {
+                    self.results.add_remote(result);
+                }
+            }
         }
         Ok(self.results.publish())
     }
@@ -379,9 +507,7 @@ pub unsafe extern "C" fn eggdb_sql_execute(
         let sql = unsafe { args::handle_mut(sql, "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated statement text.
         let text = unsafe { args::text(text, "text") }?;
-        let (published, len) = sql.run(|session, gathered| {
-            session.execute(text, &mut |result| gathered.push(result))
-        })?;
+        let (published, len) = sql.run(text, None)?;
         // SAFETY: as for the first write to `results`.
         unsafe { args::write(results, published, "results") }?;
         // SAFETY: as for the first write to `count`.
@@ -417,16 +543,47 @@ pub unsafe extern "C" fn eggdb_sql_execute_with_parameters(
         let text = unsafe { args::text(text, "text") }?;
         // SAFETY: eggdb.h asks for `parameter_count` parameters at `parameters`.
         let values = unsafe { self::parameters(parameters, parameter_count) }?;
-        let (published, len) = sql.run(|session, gathered| {
-            session.execute_prepared(text, &values, &mut |result| {
-                gathered.push(result);
-                true
-            })
-        })?;
+        let (published, len) = sql.run(text, Some(&values))?;
         // SAFETY: as for the first write to `results`.
         unsafe { args::write(results, published, "results") }?;
         // SAFETY: as for the first write to `count`.
         unsafe { args::write(count, len, "count") }
+    })
+}
+
+fn remote_failure(error: eggdb_pgwire::client::ClientError) -> Failure {
+    match error {
+        eggdb_pgwire::client::ClientError::Server { code, message } => {
+            Failure::remote_sql(&code, &message)
+        }
+        other => Failure::new(crate::status::EGGDB_ERR_IO, other.to_string()),
+    }
+}
+
+/// Connects to an EggDB server (or any server speaking PostgreSQL's protocol) at `url`, a
+/// `postgresql://user:password@host:port/database?sslmode=...` URL, and puts a SQL session on
+/// it in `*sql` (NULL on failure). The session works as one from [`eggdb_sql_open`]:
+/// `eggdb_sql_execute` sends the simple query protocol, `eggdb_sql_execute_with_parameters`
+/// the extended one with the parameters bound as text (`$1`, `$2` placeholders), and values
+/// come back typed from the columns' types.
+///
+/// # Safety
+/// `url` is a NUL-terminated string and `sql` points to writable memory for one handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_sql_connect(url: *const c_char, sql: *mut *mut EggdbSql) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for writable memory for one handle at `sql`.
+        unsafe { args::write(sql, std::ptr::null_mut(), "sql") }?;
+        // SAFETY: eggdb.h asks for a NUL-terminated URL.
+        let url = unsafe { args::text(url, "url") }?;
+        let options = eggdb_pgwire::client::parse_postgres_url(url).map_err(Failure::invalid_argument)?;
+        let client = eggdb_pgwire::client::PgClient::connect(&options).map_err(remote_failure)?;
+        let handle = args::give(EggdbSql {
+            backend: Backend::Remote(Box::new(client)),
+            results: ResultBatch::default(),
+        });
+        // SAFETY: as for the first write to `sql`.
+        unsafe { args::write(sql, handle, "sql") }
     })
 }
 
@@ -443,17 +600,24 @@ pub unsafe extern "C" fn eggdb_sql_close(sql: *mut EggdbSql) -> c_int {
         let Some(handle) = (unsafe { args::take(sql) }) else {
             return Ok(());
         };
-        let EggdbSql {
-            session,
-            results,
-            store,
-            database,
-        } = *handle;
-        let closed = session.close();
+        let EggdbSql { backend, results } = *handle;
         drop(results);
-        drop(store);
-        drop(database);
-        closed.map(|_| ()).map_err(|error| Failure::sql(&error))
+        match backend {
+            Backend::Local {
+                session,
+                store,
+                database,
+            } => {
+                let closed = session.close();
+                drop(store);
+                drop(database);
+                closed.map(|_| ()).map_err(|error| Failure::sql(&error))
+            }
+            Backend::Remote(client) => {
+                client.terminate();
+                Ok(())
+            }
+        }
     })
 }
 

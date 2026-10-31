@@ -36,7 +36,7 @@ pub use scan::{
 pub use sql::{
     EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbParameter, EggdbResult,
     EggdbSql, EggdbValue, eggdb_sql_close, eggdb_sql_execute, eggdb_sql_execute_with_parameters,
-    eggdb_sql_open,
+    eggdb_sql_connect, eggdb_sql_open,
 };
 pub use status::{
     EGGDB_ERR_ALREADY_EXISTS, EGGDB_ERR_CACHE_FULL, EGGDB_ERR_COLLECTION_NOT_FOUND,

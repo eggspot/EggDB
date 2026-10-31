@@ -97,7 +97,8 @@ function changedRows(tag) {
 
 class Database {
   constructor(file, options = {}) {
-    const dialect = options.dialect || 'sqlite';
+    const server = /^postgres(ql)?:\/\//.test(String(file));
+    const dialect = server ? 'postgresql' : options.dialect || 'sqlite';
     if (!DIALECTS.has(dialect)) {
       throw new TypeError(`unknown dialect ${dialect}`);
     }

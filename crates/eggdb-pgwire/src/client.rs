@@ -282,6 +282,8 @@ impl Write for Transport {
 pub struct QueryRows {
     /// The column names.
     pub columns: Vec<String>,
+    /// The columns' type OIDs, in the same order.
+    pub column_types: Vec<u32>,
     /// Each row's values as text, `None` for null.
     pub rows: Vec<Vec<Option<String>>>,
     /// The command tag.
@@ -636,7 +638,7 @@ impl PgClient {
         loop {
             let (tag, body) = self.read_message()?;
             match tag {
-                b'T' => current.columns = row_description_names(&body)?,
+                b'T' => (current.columns, current.column_types) = row_description(&body)?,
                 b'D' => current.rows.push(data_row(&body)?),
                 b'C' => {
                     current.tag = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body)).into_owned();
@@ -656,6 +658,78 @@ impl PgClient {
                 other => {
                     return Err(ClientError::Protocol(format!(
                         "unexpected message {} in a query's answer",
+                        char::from(other)
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Runs `sql`, one statement with `$1`, `$2`, ... placeholders, with the extended query
+    /// protocol: `parameters` bound in text form (`None` for null) and the rows returned as
+    /// text, so a value never becomes part of the statement's text.
+    pub fn execute_with_parameters(
+        &mut self,
+        sql: &str,
+        parameters: &[Option<&[u8]>],
+    ) -> Result<Vec<QueryRows>, ClientError> {
+        let count = u16::try_from(parameters.len())
+            .map_err(|_| ClientError::Protocol("more than 65,535 parameters".to_owned()))?;
+        let mut parse = cstring("");
+        parse.extend_from_slice(&cstring(sql));
+        parse.extend_from_slice(&0u16.to_be_bytes());
+        let mut bind = cstring("");
+        bind.extend_from_slice(&cstring(""));
+        bind.extend_from_slice(&0u16.to_be_bytes());
+        bind.extend_from_slice(&count.to_be_bytes());
+        for parameter in parameters {
+            match parameter {
+                None => bind.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(bytes) => {
+                    let length = i32::try_from(bytes.len())
+                        .map_err(|_| ClientError::Protocol("a parameter of 2 GiB or more".to_owned()))?;
+                    bind.extend_from_slice(&length.to_be_bytes());
+                    bind.extend_from_slice(bytes);
+                }
+            }
+        }
+        bind.extend_from_slice(&0u16.to_be_bytes());
+        let mut describe = vec![b'P'];
+        describe.extend_from_slice(&cstring(""));
+        let mut execute = cstring("");
+        execute.extend_from_slice(&0u32.to_be_bytes());
+        let mut messages = frontend_message(b'P', &parse);
+        messages.extend_from_slice(&frontend_message(b'B', &bind));
+        messages.extend_from_slice(&frontend_message(b'D', &describe));
+        messages.extend_from_slice(&frontend_message(b'E', &execute));
+        messages.extend_from_slice(&frontend_message(b'S', &[]));
+        self.send(&messages)?;
+        let mut current = QueryRows::default();
+        let mut results = Vec::new();
+        let mut failure = None;
+        loop {
+            let (tag, body) = self.read_message()?;
+            match tag {
+                b'1' | b'2' | b'n' | b'I' | b'N' | b'S' | b's' => {}
+                b'T' => (current.columns, current.column_types) = row_description(&body)?,
+                b'D' => current.rows.push(data_row(&body)?),
+                b'C' => {
+                    current.tag = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body)).into_owned();
+                    results.push(std::mem::take(&mut current));
+                }
+                b'E' => {
+                    let (code, message) = error_fields(&body);
+                    failure = Some(ClientError::Server { code, message });
+                }
+                b'Z' => {
+                    return match failure {
+                        Some(error) => Err(error),
+                        None => Ok(results),
+                    };
+                }
+                other => {
+                    return Err(ClientError::Protocol(format!(
+                        "unexpected message {} in an extended query's answer",
                         char::from(other)
                     )));
                 }
@@ -774,17 +848,26 @@ impl PgClient {
     }
 }
 
+#[cfg(test)]
 fn row_description_names(body: &[u8]) -> Result<Vec<String>, ClientError> {
+    row_description(body).map(|(names, _)| names)
+}
+
+fn row_description(body: &[u8]) -> Result<(Vec<String>, Vec<u32>), ClientError> {
     let malformed = || ClientError::Protocol("a malformed row description".to_owned());
     let count = usize::from(u16::from_be_bytes(*body.first_chunk::<2>().ok_or_else(malformed)?));
-    let mut names = Vec::with_capacity(count);
+    let mut names = Vec::with_capacity(count.min(body.len()));
+    let mut types = Vec::with_capacity(count.min(body.len()));
     let mut at = 2;
     for _ in 0..count {
         let end = body.get(at..).and_then(|rest| rest.iter().position(|byte| *byte == 0)).ok_or_else(malformed)?;
         names.push(String::from_utf8_lossy(&body[at..at + end]).into_owned());
-        at += end + 1 + 18;
+        at += end + 1;
+        let oid = body.get(at + 6..at + 10).ok_or_else(malformed)?;
+        types.push(u32::from_be_bytes([oid[0], oid[1], oid[2], oid[3]]));
+        at += 18;
     }
-    Ok(names)
+    Ok((names, types))
 }
 
 fn data_row(body: &[u8]) -> Result<Vec<Option<String>>, ClientError> {

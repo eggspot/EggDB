@@ -49,7 +49,11 @@ public sealed class EggDbConnection : DbConnection
     /// <inheritdoc />
     public override ConnectionState State => _state;
 
-    internal string Dialect => Settings().GetValueOrDefault("dialect", "sqlite");
+    internal string Dialect => IsServer ? "postgresql" : Settings().GetValueOrDefault("dialect", "sqlite");
+
+    private bool IsServer =>
+        DataSource.StartsWith("postgresql://", StringComparison.Ordinal)
+        || DataSource.StartsWith("postgres://", StringComparison.Ordinal);
 
     internal EggDbTransaction? Transaction { get; set; }
 
@@ -69,6 +73,16 @@ public sealed class EggDbConnection : DbConnection
     {
         if (_state == ConnectionState.Open)
         {
+            return;
+        }
+        if (IsServer)
+        {
+            var connected = Native.SqlConnect(DataSource, out _session);
+            if (connected != 0)
+            {
+                throw Native.LastException(connected);
+            }
+            _state = ConnectionState.Open;
             return;
         }
         var settings = Settings();
@@ -102,7 +116,10 @@ public sealed class EggDbConnection : DbConnection
             return;
         }
         Native.SqlClose(_session);
-        Native.Close(_database);
+        if (_database != 0)
+        {
+            Native.Close(_database);
+        }
         _session = 0;
         _database = 0;
         Transaction = null;

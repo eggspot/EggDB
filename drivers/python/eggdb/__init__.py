@@ -126,6 +126,7 @@ def _api():
             [c_void_p, c_char_p, POINTER(_Parameter), c_size_t, POINTER(POINTER(_Result)), POINTER(c_size_t)],
         ),
         "eggdb_sql_close": (c_int, [c_void_p]),
+        "eggdb_sql_connect": (c_int, [c_char_p, POINTER(c_void_p)]),
     }
     for name, (restype, argtypes) in prototypes.items():
         function = getattr(library, name)
@@ -207,6 +208,17 @@ class Connection:
 
     def __init__(self, path, dialect, read_only):
         api = _api()
+        if _is_server_url(path):
+            session = c_void_p()
+            status = api.eggdb_sql_connect(str(path).encode("utf-8"), byref(session))
+            if status != 0:
+                _raise_last(status)
+            self._database = None
+            self._session = session
+            self._dialect = "postgresql"
+            self._in_transaction = False
+            self.autocommit = False
+            return
         options = _Options(_OPEN_READ_ONLY if read_only else 0, 0, 0)
         database = c_void_p()
         status = api.eggdb_open(os.fsencode(os.fspath(path)), byref(options), byref(database))
@@ -288,7 +300,8 @@ class Connection:
             return
         api = _api()
         api.eggdb_sql_close(self._session)
-        api.eggdb_close(self._database)
+        if self._database is not None:
+            api.eggdb_close(self._database)
         self._session = None
         self._database = None
 
@@ -372,8 +385,13 @@ class Cursor:
             yield self._rows.pop(0)
 
 
+def _is_server_url(path):
+    return isinstance(path, str) and path.startswith(("postgresql://", "postgres://"))
+
+
 def connect(path, dialect="sqlite", read_only=False):
-    """Opens the database at `path` (":memory:" for one in memory) in `dialect`."""
+    """Opens the database at `path` (":memory:" for one in memory) in `dialect`, or connects to
+    an EggDB server when `path` is a `postgresql://` URL (its dialect is then PostgreSQL's)."""
     if dialect not in ("sqlite", "postgresql", "mysql", "oracle", "sqlserver"):
         raise InterfaceError(f"unknown dialect {dialect!r}")
     return Connection(path, dialect, read_only)

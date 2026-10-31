@@ -28,6 +28,7 @@ final class NativeSession implements AutoCloseable {
         static final MethodHandle CLOSE;
         static final MethodHandle SQL_OPEN;
         static final MethodHandle SQL_CLOSE;
+        static final MethodHandle SQL_CONNECT;
         static final MethodHandle EXECUTE;
         static final MethodHandle LAST_ERROR;
         static final MethodHandle LAST_SQLSTATE;
@@ -41,6 +42,7 @@ final class NativeSession implements AutoCloseable {
             CLOSE = handle(linker, library, "eggdb_close", FunctionDescriptor.of(status, pointer));
             SQL_OPEN = handle(linker, library, "eggdb_sql_open", FunctionDescriptor.of(status, pointer, pointer, pointer));
             SQL_CLOSE = handle(linker, library, "eggdb_sql_close", FunctionDescriptor.of(status, pointer));
+            SQL_CONNECT = handle(linker, library, "eggdb_sql_connect", FunctionDescriptor.of(status, pointer, pointer));
             EXECUTE = handle(linker, library, "eggdb_sql_execute_with_parameters",
                     FunctionDescriptor.of(status, pointer, pointer, pointer, ValueLayout.JAVA_LONG, pointer, pointer));
             LAST_ERROR = handle(linker, library, "eggdb_last_error", FunctionDescriptor.of(pointer));
@@ -84,9 +86,20 @@ final class NativeSession implements AutoCloseable {
     private MemorySegment database;
     private MemorySegment session;
 
+    static boolean isServerUrl(String path) {
+        return path.startsWith("postgresql://") || path.startsWith("postgres://");
+    }
+
     NativeSession(String path, String dialect, boolean readOnly) throws SQLException {
-        this.dialect = dialect;
+        this.dialect = isServerUrl(path) ? "postgresql" : dialect;
         try (Arena arena = Arena.ofConfined()) {
+            if (isServerUrl(path)) {
+                MemorySegment out = arena.allocate(ValueLayout.ADDRESS);
+                check((int) Api.SQL_CONNECT.invokeExact(arena.allocateFrom(path), out));
+                database = null;
+                session = out.get(ValueLayout.ADDRESS, 0);
+                return;
+            }
             MemorySegment options = arena.allocate(16, 8);
             options.set(ValueLayout.JAVA_INT, 0, readOnly ? OPEN_READ_ONLY : 0);
             MemorySegment out = arena.allocate(ValueLayout.ADDRESS);
@@ -212,7 +225,9 @@ final class NativeSession implements AutoCloseable {
         }
         try {
             int sessionClosed = (int) Api.SQL_CLOSE.invokeExact(session);
-            int databaseClosed = (int) Api.CLOSE.invokeExact(database);
+            if (database != null) {
+                int databaseClosed = (int) Api.CLOSE.invokeExact(database);
+            }
         } catch (Throwable ignored) {
             return;
         } finally {

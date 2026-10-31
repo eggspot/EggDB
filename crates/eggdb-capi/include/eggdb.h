@@ -170,6 +170,7 @@ int eggdb_scan_next(eggdb_txn *txn, eggdb_scan *scan, size_t max_entries,
 void eggdb_scan_free(eggdb_scan *scan);
 
 int eggdb_sql_open(eggdb_db *db, const char *dialect, eggdb_sql **sql);
+int eggdb_sql_connect(const char *url, eggdb_sql **sql);
 int eggdb_sql_execute(eggdb_sql *sql, const char *text, const eggdb_result **results,
                       size_t *count);
 int eggdb_sql_execute_with_parameters(eggdb_sql *sql, const char *text,

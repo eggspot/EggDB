@@ -121,6 +121,14 @@ impl Failure {
         Self::new(EGGDB_ERR_INVALID_ARGUMENT, message)
     }
 
+    pub(crate) fn remote_sql(sqlstate: &str, message: &str) -> Self {
+        Self {
+            status: EGGDB_ERR_SQL,
+            message: message.to_owned(),
+            sqlstate: Some(sqlstate.to_owned()),
+        }
+    }
+
     pub(crate) fn sql(error: &SqlError) -> Self {
         Self {
             status: EGGDB_ERR_SQL,
