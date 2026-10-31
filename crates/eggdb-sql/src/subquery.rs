@@ -526,6 +526,9 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
         || !select.group_by.is_empty()
         || select.having.is_some()
         || crate::aggregate::is_aggregate_query(select) != (shape == LookupShape::Aggregate)
+        || select_expressions(select)
+            .into_iter()
+            .any(mentions_correlated)
     {
         return None;
     }
@@ -2036,10 +2039,7 @@ fn is_lateral(
     let Some(generated) = reference.generated.as_deref() else {
         return false;
     };
-    if !matches!(
-        generated,
-        GeneratedTable::Function(_) | GeneratedTable::Values(_)
-    ) {
+    if !matches!(generated, GeneratedTable::Function(_)) {
         return false;
     }
     let preceding = siblings_where(from, ctes, |other| other < index);
