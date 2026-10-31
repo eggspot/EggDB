@@ -926,7 +926,7 @@ pub(crate) fn analyze(select: &Select, scope: Scope<'_>) -> SqlResult<Grouping> 
 }
 
 #[derive(Clone)]
-enum Sum {
+pub(crate) enum Sum {
     Empty,
     Integer { total: i128, wide: bool },
     Real(f32),
@@ -935,7 +935,7 @@ enum Sum {
 }
 
 #[derive(Clone)]
-enum Accumulator {
+pub(crate) enum Accumulator {
     Count(i64),
     Sum(Sum),
     Average { sum: Sum, count: i64 },
@@ -1470,6 +1470,48 @@ impl WindowAggregate {
 }
 
 impl Grouping {
+    fn batched_calls(&self) -> Option<Vec<crate::vector::BatchCall>> {
+        if !self.keys.is_empty()
+            || self.having.is_some()
+            || self
+                .group_columns
+                .iter()
+                .any(|column| matches!(column, GroupColumn::Carried(_)))
+        {
+            return None;
+        }
+        self.calls
+            .iter()
+            .map(|call| {
+                if call.distinct {
+                    return None;
+                }
+                let operation = match call.function {
+                    AggregateFunction::Count => crate::vector::BatchOperation::Count,
+                    AggregateFunction::Sum => crate::vector::BatchOperation::Sum,
+                    AggregateFunction::Min => crate::vector::BatchOperation::Min,
+                    AggregateFunction::Max => crate::vector::BatchOperation::Max,
+                    _ => return None,
+                };
+                let slot = match &call.argument {
+                    None if operation == crate::vector::BatchOperation::Count => None,
+                    None => return None,
+                    Some(argument) => {
+                        let ExprKind::Slot { index, .. } = &argument.kind else {
+                            return None;
+                        };
+                        match call.argument_type? {
+                            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => {}
+                            _ => return None,
+                        }
+                        Some(*index)
+                    }
+                };
+                Some(crate::vector::BatchCall { slot, operation })
+            })
+            .collect()
+    }
+
     pub(crate) fn run(
         &self,
         scope: Scope<'_>,
@@ -1501,6 +1543,11 @@ impl Grouping {
             seen: self.calls.iter().map(|_| HashSet::new()).collect(),
             held: crate::memory::RowBytes::default(),
         };
+        if let Some(batched) = self.batched_calls() {
+            let mut group = new_group(Vec::new(), &[]);
+            group.accumulators = crate::vector::run_batched(&batched, feed)?;
+            groups.push(group);
+        } else {
         feed(&mut |row| {
             let evaluator = Evaluator {
                 scope,
@@ -1641,6 +1688,7 @@ impl Grouping {
             }
             Ok(true)
         })?;
+        }
         if groups.is_empty() && self.keys.is_empty() {
             groups.push(new_group(Vec::new(), &[]));
         }

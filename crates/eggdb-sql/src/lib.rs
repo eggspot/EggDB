@@ -117,6 +117,7 @@ mod time_zones;
 mod triggers;
 mod tsql;
 mod types;
+mod vector;
 mod typing;
 mod updatable_views;
 mod user_types;

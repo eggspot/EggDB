@@ -337,3 +337,38 @@ fn analyze_records_row_counts_and_approx_count_distinct_estimates() {
     let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
     answer(&mut oracle, "ANALYZE TABLE a COMPUTE STATISTICS");
 }
+
+#[test]
+fn batched_aggregates_give_the_row_at_a_time_results() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(&mut session, "CREATE TABLE n (id integer PRIMARY KEY, v bigint, s smallint)");
+    let mut values = Vec::new();
+    for id in 0..3000i64 {
+        let v = match id % 7 {
+            0 => None,
+            1 => Some(i64::MAX / 4),
+            2 => Some(-(id * 997)),
+            _ => Some(id),
+        };
+        values.push(v);
+        let shown = v.map_or("NULL".to_owned(), |v| v.to_string());
+        answer(&mut session, &format!("INSERT INTO n VALUES ({id}, {shown}, {})", id % 100));
+    }
+    let present: Vec<i128> = values.iter().flatten().map(|&v| i128::from(v)).collect();
+    let expected = format!(
+        "count|count|sum|min|max|min\n3000|{}|{}|{}|{}|0\nSELECT 1",
+        present.len(),
+        present.iter().sum::<i128>(),
+        present.iter().min().unwrap(),
+        present.iter().max().unwrap()
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*), count(v), sum(v), min(v), max(v), min(s) FROM n"),
+        expected
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT sum(v), max(s) FROM n WHERE id < 0"),
+        "sum|max\n|\nSELECT 1"
+    );
+}
