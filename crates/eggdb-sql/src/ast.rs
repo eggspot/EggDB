@@ -24,6 +24,7 @@ pub(crate) enum Statement {
     Savepoint(SavepointCommand),
     Analyze(Vec<Name>),
     Role(crate::roles::RoleStatement),
+    RowSecurity(crate::row_security::RowSecurityStatement),
     Listen(Name),
     Unlisten(Option<Name>),
     Notify {

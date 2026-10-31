@@ -440,6 +440,10 @@ fn drop_roles(writer: &mut dyn KeyValueWrite, names: &[Name], if_exists: bool) -
     Ok(())
 }
 
+pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
+    crate::store::delete_prefix(writer, &grant_prefix(table))
+}
+
 fn granted_tables(reader: &dyn KeyValueRead, grantee: &str) -> SqlResult<Vec<String>> {
     let mut prefix = NAMESPACE.to_vec();
     prefix.push(GRANT_SPACE);
@@ -524,7 +528,7 @@ fn change_membership(
     Ok(())
 }
 
-fn role_closure(reader: &dyn KeyValueRead, user: &str) -> SqlResult<BTreeSet<String>> {
+pub(crate) fn role_closure(reader: &dyn KeyValueRead, user: &str) -> SqlResult<BTreeSet<String>> {
     let mut held = BTreeSet::from([user.to_owned(), PUBLIC.to_owned()]);
     let mut frontier = vec![user.to_owned()];
     for _ in 0..MAX_MEMBERSHIP_DEPTH {
@@ -626,6 +630,7 @@ pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> Sql
             | Statement::CreatePackage(_)
             | Statement::AlterPackage(_)
             | Statement::DropPackage(_)
+            | Statement::Analyze(_)
     );
     if defines {
         return Err(SqlError::new(

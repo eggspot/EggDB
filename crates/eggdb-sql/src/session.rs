@@ -1955,6 +1955,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         return Err(crate::pg_catalog::read_only(relation.name()).at(name.position));
                     }
                     binding.names(writer, tables, std::slice::from_mut(name))?;
+                    crate::roles::check_table(
+                        writer,
+                        binding.settings,
+                        &name.text,
+                        crate::roles::Privilege::Insert,
+                    )?;
+                    crate::row_security::check_new_rows(
+                        writer,
+                        binding.settings,
+                        &name.text,
+                        crate::row_security::PolicyCommand::Insert,
+                    )?;
                 }
                 if let Some(condition) = &mut copy.condition {
                     binding.condition(writer, tables, condition)?;
@@ -1967,6 +1979,25 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     return self.read(|reader, tables| {
                         if let CopySource::Table { name, .. } = &mut copy.source {
                             binding.names(reader, tables, std::slice::from_mut(name))?;
+                            crate::roles::check_table(
+                                reader,
+                                binding.settings,
+                                &name.text,
+                                crate::roles::Privilege::Select,
+                            )?;
+                            if crate::row_security::visible_rows(
+                                reader,
+                                binding.settings,
+                                &name.text,
+                                crate::row_security::PolicyCommand::Select,
+                            )?
+                            .is_some()
+                            {
+                                return Err(SqlError::not_supported(
+                                    "COPY of a table with row-level security to this role",
+                                )
+                                .with_hint("Use COPY (SELECT * FROM table) TO STDOUT, which applies the policies."));
+                            }
                         }
                         crate::copy::copy_table_to_client(reader, tables, copy, channel)
                     });
@@ -2126,6 +2157,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 let in_block = !matches!(self.block, Block::None);
                 self.notifications.queue(notification, in_block)?;
                 Ok(QueryResult::command("NOTIFY"))
+            }
+            Statement::RowSecurity(statement) => {
+                let mut statement = statement.clone();
+                let tag = statement.tag();
+                self.write(tag, |writer, tables| {
+                    let mut names = [statement.table_mut().clone()];
+                    binding.names(writer, tables, &mut names)?;
+                    let [resolved] = names;
+                    *statement.table_mut() = resolved;
+                    crate::row_security::run(writer, binding.settings, &statement)
+                })
             }
             Statement::Role(role) => {
                 let mut role = role.clone();

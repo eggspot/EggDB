@@ -175,6 +175,7 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Savepoint(_)
         | Statement::Analyze(_)
         | Statement::Role(_)
+        | Statement::RowSecurity(_)
         | Statement::Listen(_)
         | Statement::Unlisten(_)
         | Statement::Notify { .. }

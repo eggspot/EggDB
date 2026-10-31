@@ -212,9 +212,84 @@ impl<'a> Resolver<'a> {
         }
         if let Some(privilege) = self.target_privilege {
             self.check_privilege(&resolved, privilege)?;
+            self.check_new_rows(&resolved, privilege)?;
         }
         reference.name.text = resolved;
         Ok(())
+    }
+
+    fn check_new_rows(&self, table: &str, privilege: crate::roles::Privilege) -> SqlResult<()> {
+        let command = match privilege {
+            crate::roles::Privilege::Insert => crate::row_security::PolicyCommand::Insert,
+            crate::roles::Privilege::Update => crate::row_security::PolicyCommand::Update,
+            _ => return Ok(()),
+        };
+        match self.settings {
+            Some(settings) if self.stack.is_empty() => {
+                crate::row_security::check_new_rows(self.reader, settings, table, command)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn row_security_filter(
+        &self,
+        table: &str,
+        command: crate::row_security::PolicyCommand,
+    ) -> SqlResult<Option<Expr>> {
+        let Some(settings) = self.settings else {
+            return Ok(None);
+        };
+        crate::row_security::visible_rows(self.reader, settings, table, command)?
+            .map(|text| crate::row_security::condition_expression(&text, settings))
+            .transpose()
+    }
+
+    fn row_security_view(
+        &mut self,
+        reference: &mut TableReference,
+        table: &crate::encoding::TableDefinition,
+    ) -> SqlResult<bool> {
+        let Some(settings) = self.settings else {
+            return Ok(false);
+        };
+        if self.stack.contains(&table.name) {
+            return Ok(false);
+        }
+        let Some(text) = crate::row_security::visible_rows(
+            self.reader,
+            settings,
+            &table.name,
+            crate::row_security::PolicyCommand::Select,
+        )?
+        else {
+            return Ok(false);
+        };
+        let shown: Vec<String> = display(&table.name)
+            .split('.')
+            .map(crate::schema::quoted)
+            .collect();
+        let view = crate::encoding::ViewDefinition {
+            name: table.name.clone(),
+            dialect: Dialect::PostgreSql,
+            query: format!("SELECT * FROM {} WHERE {text}", shown.join(".")),
+            columns: table
+                .columns
+                .iter()
+                .map(|column| crate::encoding::ViewColumn {
+                    name: column.name.clone(),
+                    sql_type: Some(column.sql_type.clone()),
+                    source: String::new(),
+                })
+                .collect(),
+            search_path: Vec::new(),
+            references: vec![table.name.clone()],
+            expands_wildcard: false,
+            has_column_list: false,
+            check_option: None,
+        };
+        self.expand(reference, Arc::new(view))?;
+        Ok(true)
     }
 
     fn check_privilege(&self, table: &str, privilege: crate::roles::Privilege) -> SqlResult<()> {
@@ -436,6 +511,11 @@ impl<'a> Resolver<'a> {
         let relation = self.tables.relation(self.reader, &reference.name.text)?;
         if relation.is_some() {
             self.check_privilege(&reference.name.text, crate::roles::Privilege::Select)?;
+        }
+        if let Some(Relation::Table(table)) = &relation
+            && self.row_security_view(reference, table)?
+        {
+            return Ok(());
         }
         if relation.is_some() && self.recorded_at.is_some() {
             let name = reference.name.text.clone();
@@ -1034,6 +1114,11 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut update.table)?;
+        if let Some(condition) = resolver
+            .row_security_filter(&update.table.name.text, crate::row_security::PolicyCommand::Update)?
+        {
+            update.filter = Some(crate::row_security::restricted(update.filter.take(), condition));
+        }
         if !self.walk_expressions {
             return Ok(());
         }
@@ -1059,6 +1144,14 @@ impl Binding<'_> {
         self.select(reader, tables, &mut merge.source)?;
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut merge.target)?;
+        if resolver
+            .row_security_filter(&merge.target.name.text, crate::row_security::PolicyCommand::Update)?
+            .is_some()
+        {
+            return Err(SqlError::not_supported(
+                "MERGE into a table with row-level security for this role",
+            ));
+        }
         if !self.walk_expressions {
             return Ok(());
         }
@@ -1084,6 +1177,11 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut delete.table)?;
+        if let Some(condition) = resolver
+            .row_security_filter(&delete.table.name.text, crate::row_security::PolicyCommand::Delete)?
+        {
+            delete.filter = Some(crate::row_security::restricted(delete.filter.take(), condition));
+        }
         if !self.walk_expressions {
             return Ok(());
         }

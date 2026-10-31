@@ -14,6 +14,7 @@ mod postgresql;
 mod query;
 mod roles;
 mod routines;
+mod row_security;
 mod schemas;
 mod sqlite;
 mod sqlserver;
@@ -859,6 +860,13 @@ impl<'t> Parser<'t> {
             "show" => self.show(),
             "reset" => self.reset(),
             "explain" => self.explain(),
+            "alter"
+                if self.postgresql()
+                    && self.is_word_at(1, "table")
+                    && self.alters_row_security() =>
+            {
+                self.alter_row_security()
+            }
             "alter" if self.is_word_at(1, "table") => {
                 self.at += 1;
                 self.alter_table()
@@ -1494,6 +1502,9 @@ impl<'t> Parser<'t> {
         self.at += 1;
         if !self.sqlite() && self.at_role_definition() {
             return self.create_role();
+        }
+        if self.postgresql() && self.is_word("policy") {
+            return self.create_policy();
         }
         if self.sqlserver()
             && let Some(refused) = self.sqlserver_special_index()
@@ -2363,6 +2374,9 @@ impl<'t> Parser<'t> {
         self.at += 1;
         if !self.sqlite() && self.at_role_definition() {
             return self.drop_role();
+        }
+        if self.postgresql() && self.is_word("policy") {
+            return self.drop_policy();
         }
         if self.is_word("index") {
             return self.drop_index();

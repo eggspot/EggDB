@@ -98,6 +98,7 @@ mod settings;
 mod sqlite_errors;
 mod notifications;
 mod roles;
+mod row_security;
 mod sqlite_datetime;
 mod sqlite_functions;
 mod sqlserver_catalog;

@@ -1831,6 +1831,19 @@ table the role holds no privilege for fails with `42501 permission denied for ta
 are listed in `pg_roles`. Not yet: logins of stored roles over MySQL's and SQL Server's protocols,
 column and schema privileges, object owners and `SET ROLE`.
 
+Tables can limit which rows a role sees and changes with PostgreSQL's row-level security
+(D186):
+
+```sql
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own_notes ON notes FOR ALL TO PUBLIC
+  USING (owner = current_user) WITH CHECK (true);
+```
+
+A checked role then reads, updates and deletes only the rows its policies' `USING` let through,
+and none when no policy names it; superusers are not filtered. `WITH CHECK` conditions are not
+evaluated yet, so inserts and updates under row security need `WITH CHECK (true)`.
+
 Roles can also log in through a directory or an identity provider (D185). Give `eggdb serve
 --auth-rules auth.conf` a file such as:
 
