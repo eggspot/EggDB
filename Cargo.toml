@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/eggdb", "crates/eggdb-bench", "crates/eggdb-capi", "crates/eggdb-commands", "crates/eggdb-crypto", "crates/eggdb-mcp", "crates/eggdb-mysqlwire", "crates/eggdb-pgwire", "crates/eggdb-platform", "crates/eggdb-sql", "crates/eggdb-sqlite-format", "crates/eggdb-storage", "crates/eggdb-tdswire", "crates/eggdb-tls", "crates/eggdb-ui"]
+members = ["crates/eggdb", "crates/eggdb-bench", "crates/eggdb-capi", "crates/eggdb-commands", "crates/eggdb-crypto", "crates/eggdb-mcp", "crates/eggdb-mysqlwire", "crates/eggdb-pgwire", "crates/eggdb-platform", "crates/eggdb-sql", "crates/eggdb-sqlite-format", "crates/eggdb-sqlite3", "crates/eggdb-storage", "crates/eggdb-tdswire", "crates/eggdb-tls", "crates/eggdb-ui"]
 exclude = ["crates/eggdb-redis-compare", "crates/eggdb-sqlite-compare"]
 
 [workspace.package]

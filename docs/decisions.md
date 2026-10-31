@@ -205,3 +205,4 @@ its full title with its status.
 - [D178](decisions/D178.md) `ANALYZE` row counts in a catalog record (`0x10`) shown as `reltuples`; `approx_count_distinct` by a HyperLogLog sketch
 - [D179](decisions/D179.md) Vectorized execution starts with batched ungrouped integer aggregates (count, sum, min, max) through SIMD-friendly lane kernels
 - [D180](decisions/D180.md) Our own reader of SQLite's file format (`eggdb-sqlite-format`, WAL included), and SQLite files opened by the command line as copies in memory
+- [D181](decisions/D181.md) SQLite's C API as `libsqlite3` (`eggdb-sqlite3`) with our own `sqlite3.h`, on the SQLite dialect
