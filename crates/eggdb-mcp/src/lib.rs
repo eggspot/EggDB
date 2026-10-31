@@ -36,6 +36,7 @@ mod call_store;
 mod confirmation;
 mod json_out;
 mod jsonrpc;
+mod prompts;
 mod results;
 mod server;
 mod tools;

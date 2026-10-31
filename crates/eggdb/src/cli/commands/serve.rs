@@ -109,14 +109,14 @@ impl Session<'_> {
                         "--mcp-listen {address}: the MCP endpoint has no TLS yet, so it listens only on a loopback address"
                     )));
                 }
-                let token = super::serve_mcp::read_token(token_file).map_err(usage)?;
+                let tokens = super::serve_mcp::read_tokens(token_file).map_err(usage)?;
                 let listener = std::net::TcpListener::bind(address).map_err(|error| {
                     Failure::database(
                         format!("cannot listen for MCP on {address}: {error}"),
                         Exit::DatabaseError,
                     )
                 })?;
-                Some((listener, token))
+                Some((listener, tokens))
             }
         };
         let mysql_listener = match options.mysql_listen {
@@ -289,11 +289,11 @@ impl Session<'_> {
                 None => Ok(()),
             });
             let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
-            let mcp_endpoint = mcp_listener.as_ref().map(|(_, token)| {
+            let mcp_endpoint = mcp_listener.as_ref().map(|(_, tokens)| {
                 super::serve_mcp::McpEndpoint::new(
                     &mcp_opener,
                     &config.database,
-                    token.clone(),
+                    tokens.clone(),
                     eggdb_mcp::audit::audit_path_for(&self.request.file),
                 )
             });

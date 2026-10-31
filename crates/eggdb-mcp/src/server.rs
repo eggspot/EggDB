@@ -84,6 +84,10 @@ pub struct ServerConfig {
     /// The pause after a call before the next call opens the database (`--call-gap`), so
     /// other programs get the file between an agent's calls; zero for none.
     pub call_gap: Duration,
+    /// The stored role every call runs as (D183, D190), so the role's table privileges and row
+    /// security apply to the agent; `None` runs calls as the database's owner. With a role, the
+    /// key-value tools are not offered, because they read beneath SQL's privileges.
+    pub agent_role: Option<String>,
     /// Called with exit code 3 when a call is still running a second past its time limit,
     /// after the audit log records it; `None` runs no watchdog.
     pub exit_process: Option<fn(i32) -> !>,
@@ -299,6 +303,8 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
                 | "resources/list"
                 | "resources/read"
                 | "resources/templates/list"
+                | "prompts/list"
+                | "prompts/get"
         );
         if needs_initialize && !self.client.initialized {
             if is_call(method)
@@ -321,6 +327,11 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             "resources/list" => result_line(id, &resources_list()),
             "resources/templates/list" => result_line(id, "{\"resourceTemplates\":[]}"),
             "resources/read" => self.read_resource(id, params),
+            "prompts/list" => result_line(id, &crate::prompts::prompts_list()),
+            "prompts/get" => match crate::prompts::prompt(params) {
+                Ok(prompt) => result_line(id, &prompt),
+                Err(message) => error_line(Some(id), INVALID_PARAMS, &message, None),
+            },
             _ => {
                 let mut data = JsonOut::new();
                 data.begin_object()
@@ -389,6 +400,9 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             .key("resources")
             .begin_object()
             .end_object()
+            .key("prompts")
+            .begin_object()
+            .end_object()
             .end_object()
             .key("serverInfo")
             .begin_object()
@@ -408,7 +422,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
     fn grants(&self) -> Grants {
         Grants {
             allow_write: self.config.allow_write,
-            key_value_store: self.config.tables.is_none(),
+            key_value_store: self.config.tables.is_none() && self.config.agent_role.is_none(),
         }
     }
 
@@ -421,6 +435,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             allow_write: self.config.allow_write,
             tables: self.config.tables.as_ref(),
             watchdog: self.watchdog.as_ref(),
+            agent_role: self.config.agent_role.as_deref(),
         }
     }
 

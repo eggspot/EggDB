@@ -656,6 +656,31 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
         self.notifications.take_committed()
     }
 
+    /// Checks that this session's role may read every stored row of `schema.name` directly, as
+    /// a tool that pages through stored rows does: it holds `SELECT`, and row security does not
+    /// filter the table for it.
+    pub fn check_readable(&mut self, schema: &str, name: &str) -> SqlResult<()> {
+        let settings = Arc::clone(&self.settings);
+        let table = crate::schemas::qualified(schema, name);
+        self.read(|reader, _| {
+            crate::roles::check_table(reader, &settings, &table, crate::roles::Privilege::Select)?;
+            if crate::row_security::visible_rows(
+                reader,
+                &settings,
+                &table,
+                crate::row_security::PolicyCommand::Select,
+            )?
+            .is_some()
+            {
+                return Err(SqlError::not_supported(
+                    "reading the stored rows of a table with row-level security for this role",
+                )
+                .with_hint("Query the table with SQL, which applies the policies."));
+            }
+            Ok(())
+        })
+    }
+
     /// Names every database the server serves, which `pg_database` lists beside this one.
     pub fn set_database_names(&mut self, names: Vec<String>) {
         Arc::make_mut(&mut self.settings).database_names = names;

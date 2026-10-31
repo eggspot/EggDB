@@ -402,6 +402,7 @@ pub(crate) struct Call<'a, O: DatabaseOpener> {
     pub(crate) allow_write: bool,
     pub(crate) tables: Option<&'a VisibleTables>,
     pub(crate) watchdog: Option<&'a Watchdog>,
+    pub(crate) agent_role: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +478,19 @@ impl<O: DatabaseOpener> Call<'_, O> {
         match (result, closed) {
             (Ok(_), Err(refusal)) => Err(self.open_refused(refusal)),
             (result, _) => result,
+        }
+    }
+
+    fn as_agent<S: KeyValueStore>(
+        &self,
+        session: &mut Session<'_, S>,
+        limits: &CallLimits,
+    ) -> Result<(), ToolError> {
+        match self.agent_role {
+            Some(role) => session
+                .identify_role(role, self.database_name)
+                .map_err(|error| self.sql_failure(limits, error)),
+            None => Ok(()),
         }
     }
 
@@ -655,6 +669,7 @@ fn one_statement<S: KeyValueStore, O: DatabaseOpener>(
     let mut session = Session::with_dialect(store, dialect);
     session.set_max_value_bytes(MAX_VALUE_BYTES);
     session.set_max_row_bytes(MAX_ROW_BYTES);
+    call.as_agent(&mut session, limits)?;
     let mut result = None;
     let ran = session.run_one_statement(sql, &mut |returned| {
         result = Some(returned);
@@ -820,6 +835,10 @@ pub(crate) fn write_sql<O: DatabaseOpener>(
         let mut session = Session::with_dialect(store, dialect);
         session.set_max_value_bytes(MAX_VALUE_BYTES);
         session.set_max_row_bytes(MAX_ROW_BYTES);
+        if let Err(error) = call.as_agent(&mut session, limits) {
+            let _ = session.close();
+            return Err(error);
+        }
         let mut result = None;
         let mut ran =
             session.run_one_statement_if_confirmed(request.sql, confirmed, &mut |returned| {
@@ -1188,6 +1207,12 @@ fn row_page<S: KeyValueStore, O: DatabaseOpener>(
     let mut last: Option<Vec<u8>> = None;
     let mut cut_by: Option<&str> = None;
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    call.as_agent(&mut session, limits)?;
+    if call.agent_role.is_some() {
+        session
+            .check_readable(&relation.schema, &relation.name)
+            .map_err(|error| call.sql_failure(limits, error))?;
+    }
     let read = session.read_stored_rows(relation, after, &mut |position, values| {
         if listed >= limit {
             cut_by = Some("limit");

@@ -129,6 +129,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         allow_write: request.allow_write,
         tables,
         call_gap: Duration::from_millis(call_gap_ms),
+        agent_role: None,
         exit_process: Some(std::process::exit),
     };
     let mut server = Server::new(&opener, config).map_err(|failure| match failure {

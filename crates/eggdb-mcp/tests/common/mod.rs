@@ -240,6 +240,7 @@ pub fn config(audit: &TempAudit) -> ServerConfig {
         allow_write: false,
         tables: None,
         call_gap: Duration::ZERO,
+        agent_role: None,
         exit_process: None,
     }
 }
