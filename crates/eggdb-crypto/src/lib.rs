@@ -9,6 +9,8 @@
 //!   RFC 4231);
 //! - [`hkdf_extract`] and [`hkdf_expand`]: HKDF (RFC 5869), the key derivation of TLS 1.3;
 //! - [`ChaCha20`], [`Poly1305`] and the AEAD [`ChaCha20Poly1305`] (RFC 8439);
+//! - [`Aes`] (FIPS 197) and the AEAD [`AesGcm`] (NIST SP 800-38D), with a computed S-box and a
+//!   masked GHASH, so neither looks up memory by a secret;
 //! - [`pbkdf2_hmac_sha256`]: PBKDF2 with HMAC-SHA-256 (RFC 8018, vectors from RFC 7914);
 //! - [`base64_encode`] and [`base64_decode`]: Base64 with padding, the standard alphabet
 //!   (RFC 4648), decoded strictly;
@@ -17,9 +19,11 @@
 //! It has no dependencies and never panics on its input.
 
 mod aead;
+mod aes;
 mod base64;
 mod chacha20;
 mod constant_time;
+mod gcm;
 mod hash;
 mod hkdf;
 mod hmac;
@@ -30,9 +34,11 @@ mod sha256;
 mod sha512;
 
 pub use aead::{AEAD_NONCE_BYTES, AEAD_TAG_BYTES, AeadError, ChaCha20Poly1305};
+pub use aes::{AES_BLOCK_BYTES, Aes, AesKeyLengthError};
 pub use base64::{Base64Error, base64_decode, base64_encode};
 pub use chacha20::{CHACHA20_BLOCK_BYTES, CHACHA20_KEY_BYTES, CHACHA20_NONCE_BYTES, ChaCha20};
 pub use constant_time::constant_time_eq;
+pub use gcm::AesGcm;
 pub use hash::{HashFunction, MAX_HASH_BLOCK_BYTES, MAX_HASH_DIGEST_BYTES};
 pub use hkdf::{HkdfError, hkdf_expand, hkdf_extract};
 pub use hmac::{Hmac, HmacSha256, hmac, hmac_sha256};
