@@ -25,6 +25,7 @@ dependencies = [
  "eggdb-mcp",
  "eggdb-platform",
  "eggdb-storage",
+ "eggdb-tls",
 ]
 
 [[package]]

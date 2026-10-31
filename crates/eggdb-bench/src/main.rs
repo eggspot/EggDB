@@ -38,6 +38,7 @@ mod log;
 mod mcp;
 mod measure;
 mod page_cache;
+mod tls;
 mod transaction;
 
 use crate::allocations::CountingAllocator;
@@ -51,7 +52,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 29] = [
+const COUNTED: [(&str, Counted); 31] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -81,6 +82,8 @@ const COUNTED: [(&str, Counted); 29] = [
     (copy::TO_BINARY, copy::to_stdout_binary),
     (mcp::TOOLS_CALL, mcp::tools_call),
     (mcp::WRITE_CALL, mcp::write_call),
+    (tls::RECORD_SEAL, tls::record_seal),
+    (tls::HANDSHAKE, tls::handshake),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 3] = [
