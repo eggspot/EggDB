@@ -122,7 +122,7 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         | "similar_to_escape" | "similar_substring_pattern" | "to_char" | "jsonb_pretty"
         | "json_extract_path_text" | "jsonb_extract_path_text" | "pg_sleep" | "pg_notify"
         | "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery"
-        | "websearch_to_tsquery" => Some(SqlType::Text),
+        | "websearch_to_tsquery" | "normalize" => Some(SqlType::Text),
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
         "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm" => {
             Some(SqlType::Double)
@@ -135,7 +135,7 @@ fn added_function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Opti
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => {
             Some(SqlType::Integer)
         }
-        "starts_with" | "regexp_like" | "isfinite" => Some(SqlType::Boolean),
+        "starts_with" | "regexp_like" | "isfinite" | "is_normalized" => Some(SqlType::Boolean),
         "regexp_match" | "regexp_split_to_array" => {
             Some(SqlType::Array(crate::arrays::ArrayElement::Text))
         }

@@ -2350,6 +2350,14 @@ COMMIT;
 When the `INSERT` inserts no row, the message was handled before: roll back instead of
 committing, and acknowledge the message.
 
+## Unicode normalization
+
+`normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form
+(`'NFC'`, `'NFD'`, `'NFKC'` or `'NFKD'`, any case) says otherwise, and `is_normalized(text [, form])`
+says whether it already is (D233). Both follow Unicode 16.0 and pass Unicode's own conformance
+file. The form is written as a string for now; PostgreSQL's bare keyword (`normalize(x, NFKC)`)
+and `x IS NFC NORMALIZED` come later.
+
 ## Foreign sources (eggdb_foreign)
 
 `eggdb_foreign(source, query)` reads rows from outside the database, one `json` object per row

@@ -3654,3 +3654,12 @@ fn mysql_and_oracle_read_strings_given_to_binary_columns_by_their_own_rules() {
         "bytea|bytea\n\\x41|\\x615c62\nSELECT 1"
     );
 }
+
+#[test]
+fn normalize_and_is_normalized_follow_unicode() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(last(&mut session, "SELECT normalize(E'e\\u0301') = 'é' AS same, is_normalized(E'e\\u0301') AS nfc, is_normalized(E'e\\u0301', 'NFD') AS nfd"), "same|nfc|nfd\nt|f|t\nSELECT 1");
+    assert_eq!(last(&mut session, "SELECT normalize('ﬁ', 'nfkc') AS folded"), "folded\nfi\nSELECT 1");
+    assert_eq!(fails(&mut session, "SELECT normalize('a', 'NFX')").state().code(), "22023");
+}

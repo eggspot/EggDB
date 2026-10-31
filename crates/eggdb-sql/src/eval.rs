@@ -1587,6 +1587,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "left" | "right" | "repeat" => &[TEXT, INTEGER],
         "lpad" | "rpad" => &[TEXT, INTEGER, TEXT],
         "initcap" | "reverse" | "ascii" | "md5" | "quote_literal" => &[TEXT],
+        "normalize" | "is_normalized" => &[TEXT, TEXT],
         "chr" => &[INTEGER],
         "pg_sleep" => &[DOUBLE],
         "pg_notify" => &[TEXT, TEXT],

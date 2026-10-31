@@ -59,7 +59,7 @@ fn trimmed(text: &str, characters: &str, ends: Ends) -> String {
     text.to_owned()
 }
 
-pub(crate) const FUNCTIONS: [&str; 23] = [
+pub(crate) const FUNCTIONS: [&str; 25] = [
     "split_part",
     "concat",
     "concat_ws",
@@ -83,6 +83,8 @@ pub(crate) const FUNCTIONS: [&str; 23] = [
     "substr",
     "quote_literal",
     "quote_nullable",
+    "normalize",
+    "is_normalized",
 ];
 
 const MAX_TEXT_BYTES: usize = (1 << 30) - 1;
@@ -353,6 +355,10 @@ fn repeated(text: &str, count: i64) -> SqlResult<Value> {
     Ok(Value::Text(text.repeat(count)))
 }
 
+fn normalization_form(name: &str) -> SqlResult<eggdb_text::Form> {
+    eggdb_text::Form::named(name.trim()).ok_or_else(|| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("invalid normalization form: {name}")))
+}
+
 fn initcap(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_word = false;
@@ -524,6 +530,10 @@ fn text_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         )),
         ("md5", 1) => Ok(Value::Text(crate::md5::hex_digest(text(0)?.as_bytes()))),
         ("starts_with", 2) => Ok(Value::Boolean(text(0)?.starts_with(text(1)?))),
+        ("normalize", 1) => Ok(Value::Text(eggdb_text::normalize(text(0)?, eggdb_text::Form::Nfc))),
+        ("normalize", 2) => normalization_form(text(1)?).map(|form| Value::Text(eggdb_text::normalize(text(0)?, form))),
+        ("is_normalized", 1) => Ok(Value::Boolean(eggdb_text::is_normalized(text(0)?, eggdb_text::Form::Nfc))),
+        ("is_normalized", 2) => normalization_form(text(1)?).map(|form| Value::Boolean(eggdb_text::is_normalized(text(0)?, form))),
         ("overlay", 3) => overlaid(text(0)?, text(1)?, number(2)?, None),
         ("overlay", 4) => overlaid(text(0)?, text(1)?, number(2)?, Some(number(3)?)),
         ("quote_literal", 1) => Ok(Value::Text(quote_literal(&output_text(&values[0])?))),

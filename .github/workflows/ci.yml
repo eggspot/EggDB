@@ -1293,8 +1293,27 @@ jobs:
           sha256sum "$RUNNER_TEMP/first/release/eggdb" "$RUNNER_TEMP/second/release/eggdb"
           cmp "$RUNNER_TEMP/first/release/eggdb" "$RUNNER_TEMP/second/release/eggdb"
 
+  unicode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Check the tables are what the generator makes, and pass Unicode's normalization conformance file
+        run: |
+          mkdir -p "$RUNNER_TEMP/ucd"
+          for file in UnicodeData.txt CompositionExclusions.txt CaseFolding.txt NormalizationTest.txt; do
+            curl --retry 3 -fsSL -o "$RUNNER_TEMP/ucd/$file" "https://www.unicode.org/Public/16.0.0/ucd/$file"
+          done
+          python3 -I scripts/unicode/generate.py "$RUNNER_TEMP/ucd" "$RUNNER_TEMP/tables.rs"
+          diff -u crates/eggdb-text/src/tables.rs "$RUNNER_TEMP/tables.rs"
+          EGGDB_UNICODE_NORMALIZATION_TEST="$RUNNER_TEMP/ucd/NormalizationTest.txt" cargo test -p eggdb-text
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

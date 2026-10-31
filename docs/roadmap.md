@@ -180,6 +180,8 @@ More tracks that run alongside the milestones, each starting where its dependenc
   (M6).
 - **Interchange and lakehouse (D29):** after columnar storage (M11).
 - **Text and locales (D30):** collation with SQL (M5), analyzers with full-text search (M8).
+  Started: Unicode normalization, case folding and case- and accent-insensitive comparison from
+  Unicode's own data, with `normalize()` in SQL (D233).
 - **AI (D31):** after vectors (M12) and the MCP server (M6).
 - **Relational completeness and multi-tenancy (D32):** across the SQL milestones, tracked as a
   conformance list.
