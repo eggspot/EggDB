@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EggDB on one EC2 instance running the ghcr.io/eggspot/eggdb image, its data on an encrypted EBS volume kept when the instance goes, its password from Secrets Manager.
+Parameters:
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: The tag of ghcr.io/eggspot/eggdb to run, such as 0.3.0.
+  PasswordSecretArn:
+    Type: String
+    Description: The ARN of a Secrets Manager secret whose plain-text value is the password of the eggdb user.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AllowedCidr:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: The addresses allowed to reach PostgreSQL's port, 5432.
+  InstanceType:
+    Type: String
+    Default: t4g.small
+  DataVolumeGiB:
+    Type: Number
+    Default: 20
+    MinValue: 1
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Amazon Linux 2023 for the instance type's architecture (use the x86_64 parameter for x86 types).
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-eggdb-password
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref PasswordSecretArn
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Role
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EggDB's PostgreSQL port
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref AllowedCidr
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Profile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+      BlockDeviceMappings:
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeSize: !Ref DataVolumeGiB
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: false
+      Tags:
+        - Key: Name
+          Value: eggdb
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          root_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")
+          device=$(lsblk -dpno NAME,TYPE | awk -v root="/dev/$root_disk" '$2 == "disk" && $1 != root { print $1; exit }')
+          blkid "$device" || mkfs.xfs "$device"
+          mkdir -p /var/lib/eggdb /etc/eggdb
+          echo "$device /var/lib/eggdb xfs defaults,nofail 0 2" >> /etc/fstab
+          mount /var/lib/eggdb
+          chown 65532:65532 /var/lib/eggdb
+          aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id '${PasswordSecretArn}' --query SecretString --output text > /etc/eggdb/password
+          chown 65532:65532 /etc/eggdb/password
+          chmod 400 /etc/eggdb/password
+          docker run -d --restart unless-stopped --name eggdb -p 5432:5432 -v /var/lib/eggdb:/data -v /etc/eggdb:/secrets:ro ghcr.io/eggspot/eggdb:${ImageTag}
+Outputs:
+  PrivateAddress:
+    Description: Connect with psql "host=<this> port=5432 user=eggdb dbname=eggdb sslmode=require".
+    Value: !GetAtt Instance.PrivateIp

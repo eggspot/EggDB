@@ -172,7 +172,7 @@ jobs:
         run: |
           kind load docker-image eggdb:local --name eggdb
           helm lint deploy/helm/eggdb --set password=ci-password
-          helm install db deploy/helm/eggdb --set password=ci-password --wait --timeout 5m
+          helm install db deploy/helm/eggdb --set password=ci-password --set image.repository=eggdb --set image.tag=local --wait --timeout 5m
           kubectl rollout status statefulset/db --timeout=3m
           kubectl port-forward service/db 15432:5432 19187:9187 &
           sleep 3
@@ -1236,8 +1236,23 @@ jobs:
           if [ -n "$RUNNER" ]; then export "CARGO_TARGET_${upper}_RUNNER=$RUNNER"; fi
           cargo test --target "$TARGET_ENV" -p eggdb-format -p eggdb-storage -p eggdb-crypto -p eggdb-columnar
 
+  deploy-templates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Check the AWS, Azure and Google Cloud templates (test tools only, never shipped)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cfn"
+          "$RUNNER_TEMP/cfn/bin/pip" install --quiet cfn-lint==1.20.0
+          "$RUNNER_TEMP/cfn/bin/cfn-lint" deploy/aws/eggdb.yaml
+          az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
+          shellcheck deploy/gcp/deploy.sh scripts/apple/xcframework.sh
+
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
