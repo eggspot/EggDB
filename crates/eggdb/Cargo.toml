@@ -40,6 +40,7 @@ eggdb-dynamodb = { path = "../eggdb-dynamodb" }
 eggdb-observability = { path = "../eggdb-observability" }
 eggdb-api = { path = "../eggdb-api" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-kql = { path = "../eggdb-kql" }
 eggdb-queues = { path = "../eggdb-queues" }
 eggdb-parquet = { path = "../eggdb-parquet" }
 eggdb-arrow = { path = "../eggdb-arrow" }

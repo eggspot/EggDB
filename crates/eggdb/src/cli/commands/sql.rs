@@ -35,7 +35,12 @@ impl Session<'_> {
                 Some(crate::cli::args::CommandName::Sql),
             ));
         }
-        let text = self.sql_text()?;
+        let mut text = self.sql_text()?;
+        if self.request.kql {
+            text = eggdb_kql::translate(&text).map_err(|error| {
+                Failure::usage(format!("the KQL query is not valid: {}", error.0), Some(CommandName::Sql))
+            })?;
+        }
         let json = self.format == Format::Json;
         let script = !matches!(self.request.sql, Some(SqlSource::Command(_)));
         let access = if self.request.read_only {

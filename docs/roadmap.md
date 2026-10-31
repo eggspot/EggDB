@@ -210,7 +210,8 @@ More tracks (D46), and any further missing capability is added here without aski
   Connect.
 
 From the third gap review (D47–D58), each after its foundations:
-- **Dialects and APIs (D47–D49)** follow the SQL and protocol milestones.
+- **Dialects and APIs (D47–D49)** follow the SQL and protocol milestones. Started: KQL
+  pipelines translated to SQL by `eggdb sql --kql` (D242).
 - **Industry standards (D50)** follow the messaging work.
 - **Catalog and master data (D51)** follow the console.
 - **Sharing and privacy (D52)** follow branching (D28).

@@ -810,6 +810,20 @@ NOTICE:  line 2: SPOOL load.log never writes a file; redirect stdout instead (eg
 NOTICE:  5 SQL*Plus commands had no effect: SET 4, COLUMN 1 (eggdb sql runs the SQL only)
 ```
 
+### `sql --kql`
+
+`--kql` reads the text as a Kusto Query Language (KQL) pipeline and runs it as SQL against the
+same tables. A pipeline starts with a table and passes it through `where` (or `filter`),
+`project`, `extend`, `summarize ... by` (with `count`, `countif`, `sum`, `avg`, `min`, `max`,
+`dcount` and `bin`), `order by` (or `sort by`), `take` (or `limit`), `top N by`, `count` and
+`distinct`. Expressions take `==`, `!=`, `=~`, `contains`, `has`, `startswith`, `endswith`
+(each with its `!` form), `in`, `between`, `ago()`, `now()`, `datetime()` and timespans such as
+`5m` or `1d`. Anything else is refused with exit 2, naming what is not supported yet.
+
+```
+$ eggdb sql logs.db --kql -c "Requests | where Status >= 500 | summarize count() by bin(At, 1h) | order by At"
+```
+
 ### `sql --read-only`
 
 `--read-only` opens the file read-only, beside other readers, as `get` and `scan` do: the
