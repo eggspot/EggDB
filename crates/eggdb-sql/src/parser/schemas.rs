@@ -478,14 +478,18 @@ impl<'t> Parser<'t> {
 
     pub(super) fn create_extension(&mut self) -> SqlResult<Statement> {
         self.expect_word("extension")?;
-        let _ = self.if_not_exists()?;
+        let if_not_exists = self.if_not_exists()?;
         let name = self.name()?;
+        if name.text == "pg_cron" {
+            self.skip_statement();
+            return Ok(Statement::CreatePgCron { if_not_exists });
+        }
         if name.text != "plpgsql" {
             return Err(SqlError::not_supported(format!(
                 "extension \"{}\" is not supported",
                 name.text
             ))
-            .with_hint("EggDB accepts CREATE EXTENSION plpgsql only; other extensions are not available yet.")
+            .with_hint("EggDB accepts CREATE EXTENSION plpgsql and pg_cron only; other extensions are not available yet.")
             .at(name.position));
         }
         self.skip_statement();

@@ -1934,6 +1934,23 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
     }
 
     /// Ends the session: an open block is rolled back. Whether one was open.
+    fn create_pg_cron(&mut self, if_not_exists: bool) -> SqlResult<QueryResult> {
+        let mut installed = false;
+        self.execute(
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron'",
+            &mut |result| installed = !result.rows.is_empty(),
+        )?;
+        if installed {
+            if if_not_exists {
+                return Ok(QueryResult::command("CREATE EXTENSION")
+                    .with_notice("NOTICE:  extension \"pg_cron\" already exists, skipping".to_owned()));
+            }
+            return Err(SqlError::new(SqlState::DUPLICATE_OBJECT, "extension \"pg_cron\" already exists"));
+        }
+        self.execute(crate::jobs::PG_CRON_SCRIPT, &mut |_| {})?;
+        Ok(QueryResult::command("CREATE EXTENSION"))
+    }
+
     pub fn close(mut self) -> SqlResult<bool> {
         let was_open = self.in_block();
         match std::mem::replace(&mut self.block, Block::None) {
@@ -2156,6 +2173,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
         }
         match statement {
+            Statement::CreatePgCron { if_not_exists } => return self.create_pg_cron(*if_not_exists),
             Statement::Begin { read_only } => return self.begin(*read_only),
             Statement::Commit => return self.commit(),
             Statement::Rollback => return self.rollback(),

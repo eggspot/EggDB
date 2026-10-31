@@ -354,6 +354,7 @@ impl Session<'_> {
                 std::iter::once((config.database.as_str(), &*db))
                     .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
                     .collect();
+            let job_scheduler = scope.spawn(|| super::serve_jobs::run_scheduled_jobs(&store, &stop_signals::requested));
             let metrics_server = scope.spawn(|| match &metrics_listener {
                 Some(listener) => eggdb_http::serve(
                     listener,
@@ -479,6 +480,7 @@ impl Session<'_> {
             let _ = memcached_server.join();
             let _ = es_server.join();
             let _ = mongo_server.join();
+            let _ = job_scheduler.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))

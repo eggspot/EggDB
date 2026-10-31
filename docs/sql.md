@@ -2222,6 +2222,29 @@ constraint and event triggers, SQL Server DDL and logon triggers, Oracle compoun
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
 fire on `TRUNCATE` too.
 
+## Scheduled jobs (pg_cron)
+
+`CREATE EXTENSION pg_cron` installs the `cron` schema as the pg_cron extension has it (D200):
+the tables `cron.job` and `cron.job_run_details`, and the functions `cron.schedule(schedule,
+command)`, `cron.schedule(job_name, schedule, command)` (which replaces a job of that name)
+and `cron.unschedule(job_id | job_name)`. While `eggdb serve` runs, it runs each active job
+whose schedule fires in the minute (UTC), each in its own transaction in the PostgreSQL dialect,
+and records the run in `cron.job_run_details` with `succeeded` or `failed` and the message.
+
+```sql
+CREATE EXTENSION pg_cron;
+SELECT cron.schedule('nightly-cleanup', '0 3 * * *', $$DELETE FROM events WHERE at < now() - interval '30 days'$$);
+SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;
+```
+
+Schedules are cron's five fields (minute, hour, day of month, month, day of week) with `*`,
+lists, ranges, `/` steps and month and weekday names, or `@hourly`, `@daily`, `@weekly`,
+`@monthly` and `@yearly`; when both day fields are restricted, either one matching fires the
+job. A job whose schedule does not read never runs. Not yet: pg_cron's `'n seconds'`
+schedules and `$` for the last day of the month, `cron.alter_job`, `cron.schedule_in_database`,
+`cron.timezone`, checking a schedule when it is added, SQL Server Agent jobs, MySQL events and
+Oracle's `DBMS_SCHEDULER`.
+
 ## Functions, procedures and DO blocks
 
 In the PostgreSQL dialect (D158), users create and call their own functions and procedures in
