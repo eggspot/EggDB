@@ -68,9 +68,12 @@ fn run_handshake(
     Result<TlsStream<TcpStream>, TlsError>,
 ) {
     let (server_socket, client_socket) = connected_pair();
+    let held_open_until_the_server_reads_the_alert =
+        client_socket.try_clone().expect("clone the client socket");
     let server = thread::spawn(move || TlsStream::accept(server_socket, &server_config));
     let client = TlsStream::connect(client_socket, &client_config);
     let server = server.join().expect("server thread");
+    drop(held_open_until_the_server_reads_the_alert);
     (server, client)
 }
 
