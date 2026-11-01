@@ -42,7 +42,7 @@ fi
 EGGDB_LIBRARY="$library" PYTHONPATH="$root/drivers/python" \
   "${PYTHON:-python3}" -m unittest discover -s "$root/drivers/python/tests"
 if command -v dotnet >/dev/null 2>&1; then
-  dotnet build "$root/drivers/dotnet/EggDB.Data.Check" -o "$work/dotnet" > "$work/dotnet-build.log" 2>&1 \
+  env -u VERSION dotnet build "$root/drivers/dotnet/EggDB.Data.Check" -o "$work/dotnet" > "$work/dotnet-build.log" 2>&1 \
     || { cat "$work/dotnet-build.log" >&2; exit 1; }
   cp "$library" "$work/dotnet/"
   dotnet "$work/dotnet/EggDB.Data.Check.dll"
