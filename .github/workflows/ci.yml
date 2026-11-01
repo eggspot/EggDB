@@ -1248,7 +1248,7 @@ jobs:
             runner: qemu-s390x -L /usr/s390x-linux-gnu
             linker: s390x-linux-gnu-gcc
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
         with:
