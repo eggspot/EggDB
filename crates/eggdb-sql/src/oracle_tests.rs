@@ -166,7 +166,7 @@ fn to_char_is_refused_before_it_builds_past_the_value_limit() {
 }
 
 #[test]
-fn merge_is_destructive_when_on_does_not_restrict_the_rows_it_updates_or_deletes() {
+fn merge_that_updates_or_deletes_is_destructive_and_one_that_only_inserts_is_not() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
     let classify = |session: &mut Session<'_>, text: &str| {
@@ -175,78 +175,34 @@ fn merge_is_destructive_when_on_does_not_restrict_the_rows_it_updates_or_deletes
             .map(|found| found.is_some())
             .unwrap_or_else(|_| panic!("{text}"))
     };
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v DELETE WHERE s.v > 1"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO t USING s ON (1 = 1) WHEN MATCHED THEN UPDATE SET t.v = s.v DELETE WHERE s.v > 1"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts a USING dual ON (1 = 1) WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO t USING s ON (1 = 1) WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts a USING dual ON (dummy = 'X') WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts a USING (SELECT 1 x FROM dual) s ON (x = 1) WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO accounts a USING (SELECT 1 x FROM dual) s ON (a.id = s.x) WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO accounts USING (SELECT 1 x FROM dual) s ON (accounts.id = s.x) WHEN MATCHED THEN UPDATE SET balance = 0"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts t USING (SELECT 1 id FROM dual) accounts ON (accounts.id = 1) WHEN MATCHED THEN UPDATE SET t.balance = 0"
-    ));
-    for always_true in [
+    for on in [
+        "t.id = s.id",
+        "t.id = s.id AND t.v > 0",
+        "s.id = t.id",
+        "t.id = 5",
+        "(t.id = s.id AND t.k = s.k)",
+        "1 = 1",
         "t.id = t.id",
         "t.id IS NOT NULL",
         "t.id = s.id OR 1 = 1",
         "t.id = id",
     ] {
-        assert!(
-            classify(
-                &mut session,
-                &format!(
-                    "MERGE INTO t USING s ON ({always_true}) WHEN MATCHED THEN UPDATE SET t.v = s.v"
-                )
-            ),
-            "{always_true}"
-        );
+        for then in [
+            "UPDATE SET t.v = s.v",
+            "UPDATE SET t.v = s.v DELETE WHERE s.v > 1",
+        ] {
+            let text = format!("MERGE INTO t USING s ON ({on}) WHEN MATCHED THEN {then}");
+            assert!(classify(&mut session, &text), "{text}");
+        }
     }
-    for pinned in [
-        "t.id = s.id AND t.v > 0",
-        "s.id = t.id",
-        "t.id = 5",
-        "(t.id = s.id AND t.k = s.k)",
-    ] {
-        assert!(
-            !classify(
-                &mut session,
-                &format!(
-                    "MERGE INTO t USING s ON ({pinned}) WHEN MATCHED THEN UPDATE SET t.v = s.v"
-                )
-            ),
-            "{pinned}"
-        );
-    }
+    assert!(classify(
+        &mut session,
+        "MERGE INTO accounts a USING (SELECT 1 x FROM dual) s ON (a.id = s.x) WHEN MATCHED THEN UPDATE SET a.balance = 0"
+    ));
+    assert!(!classify(
+        &mut session,
+        "MERGE INTO t USING s ON (1 = 1) WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)"
+    ));
 }
 
 #[test]

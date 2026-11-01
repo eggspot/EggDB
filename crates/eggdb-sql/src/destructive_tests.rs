@@ -159,25 +159,312 @@ fn an_alter_table_doing_several_kinds_of_destruction_names_each_with_its_own_kin
     );
 }
 
+fn keyed_store() -> MemoryStore {
+    let store = MemoryStore::default();
+    Session::new(&store)
+        .execute(
+            "CREATE TABLE t (id integer PRIMARY KEY, name text, code varchar(10), n integer); \
+             CREATE UNIQUE INDEX t_code ON t (code); \
+             CREATE TABLE pair (a integer, b integer, note text, PRIMARY KEY (a, b)); \
+             CREATE TABLE loose (id integer, note text); \
+             CREATE TABLE u (id integer PRIMARY KEY); \
+             CREATE TABLE parent (id integer PRIMARY KEY, v integer); \
+             CREATE TABLE child (id integer PRIMARY KEY, parent_id integer REFERENCES parent (id) ON DELETE CASCADE ON UPDATE CASCADE); \
+             CREATE TABLE guarded (id integer PRIMARY KEY, v integer); \
+             CREATE TABLE guarded_child (id integer PRIMARY KEY, guarded_id integer REFERENCES guarded (id)); \
+             CREATE TABLE audited (id integer PRIMARY KEY, v integer); \
+             CREATE FUNCTION keep_row() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN OLD; END $$; \
+             CREATE TRIGGER audited_delete BEFORE DELETE ON audited FOR EACH ROW EXECUTE FUNCTION keep_row()",
+            &mut |_| {},
+        )
+        .unwrap();
+    store
+}
+
+fn kind_with_keys(store: &MemoryStore, dialect: Dialect, text: &str) -> Option<DestructiveKind> {
+    let mut session = Session::with_dialect(store, dialect);
+    match session.destructive_statement(text) {
+        Ok(found) => found.map(|statement| statement.parts[0].kind),
+        Err(error) => panic!("{dialect:?} {text:?}: {error:?}"),
+    }
+}
+
 #[test]
-fn a_where_naming_a_column_of_the_table_is_not_destructive() {
+fn without_the_database_every_filtered_delete_and_update_is_destructive() {
+    for dialect in Dialect::ALL {
+        for (text, expected) in [
+            (
+                "DELETE FROM t WHERE id = 1",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE t.id > 0",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "UPDATE t SET name = 'x' WHERE id = 2",
+                DestructiveKind::UpdateOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE EXISTS (SELECT 1 FROM u)",
+                DestructiveKind::DeleteWithoutFilter,
+            ),
+            (
+                "DELETE FROM t WHERE u.id = 1",
+                DestructiveKind::DeleteWithoutFilter,
+            ),
+            (
+                "UPDATE t SET name = 'x' WHERE (SELECT count(*) FROM u) > 0",
+                DestructiveKind::UpdateWithoutFilter,
+            ),
+        ] {
+            assert_eq!(kind(dialect, text), Some(expected), "{dialect:?} {text}");
+        }
+    }
+}
+
+#[test]
+fn a_where_pinning_every_column_of_a_key_to_values_is_not_destructive_in_any_dialect() {
+    let store = keyed_store();
     for dialect in Dialect::ALL {
         for text in [
-            "DELETE FROM t WHERE id = 1",
-            "DELETE FROM t WHERE t.id > 0",
-            "DELETE FROM t WHERE id IN (SELECT id FROM u)",
+            "DELETE FROM t WHERE id = 7",
+            "DELETE FROM t WHERE t.id = 7",
+            "DELETE FROM t WHERE 7 = id",
+            "DELETE FROM t WHERE id = -7",
+            "DELETE FROM t WHERE id IN (1, 2, 3)",
+            "DELETE FROM t WHERE id = 7 AND name = 'x'",
+            "DELETE FROM t WHERE id = 7 AND (name = 'x' OR name = 'y')",
+            "DELETE FROM t WHERE code = 'a1'",
+            "DELETE FROM pair WHERE a = 1 AND b = 2",
+            "DELETE FROM pair WHERE b IN (2, 3) AND a = 1",
             "UPDATE t SET name = 'x' WHERE id = 2",
-            "UPDATE t SET name = 'x' WHERE name IS NOT NULL",
+            "UPDATE t SET name = NULL, n = 3 WHERE code = 'a1'",
+            "UPDATE parent SET v = 2 WHERE id = 1",
+            "DELETE FROM guarded WHERE id = 1",
+            "UPDATE audited SET v = 2 WHERE id = 1",
         ] {
-            assert_eq!(kind(dialect, text), None, "{dialect:?} {text}");
+            assert_eq!(
+                kind_with_keys(&store, dialect, text),
+                None,
+                "{dialect:?} {text}"
+            );
         }
-        for text in [
-            "DELETE FROM t WHERE EXISTS (SELECT 1 FROM u)",
-            "DELETE FROM t WHERE u.id = 1",
-            "UPDATE t SET name = 'x' WHERE (SELECT count(*) FROM u) > 0",
+    }
+}
+
+#[test]
+fn a_where_that_can_match_many_rows_is_destructive_in_every_dialect() {
+    let store = keyed_store();
+    let long_list: Vec<String> = (1..=101).map(|id| id.to_string()).collect();
+    let long_delete = format!("DELETE FROM t WHERE id IN ({})", long_list.join(", "));
+    let wide_pair = format!(
+        "DELETE FROM pair WHERE a IN ({}) AND b IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)",
+        long_list[..10].join(", ")
+    );
+    for dialect in Dialect::ALL {
+        for (text, expected) in [
+            (
+                "DELETE FROM t WHERE id = id",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE id IS NOT NULL",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE id >= 0 OR id < 0",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "UPDATE t SET name = NULL WHERE id = id",
+                DestructiveKind::UpdateOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE id > 5",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE id = 1 OR id = 2",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE NOT (id <> 1)",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE id NOT IN (1)",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE name = 'x'",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE code = 1",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE id IN (SELECT id FROM loose)",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM t WHERE id = (SELECT max(id) FROM loose)",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM pair WHERE a = 1",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM loose WHERE id = 1",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "DELETE FROM parent WHERE id = 1",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (
+                "UPDATE parent SET id = 2 WHERE id = 1",
+                DestructiveKind::UpdateOfManyRows,
+            ),
+            (
+                "DELETE FROM audited WHERE id = 1",
+                DestructiveKind::DeleteOfManyRows,
+            ),
+            (&long_delete, DestructiveKind::DeleteOfManyRows),
+            (&wide_pair, DestructiveKind::DeleteOfManyRows),
+            (
+                "DELETE FROM t WHERE 1 = 1",
+                DestructiveKind::DeleteWithoutFilter,
+            ),
+            ("DELETE FROM t", DestructiveKind::DeleteWithoutFilter),
         ] {
-            assert!(kind(dialect, text).is_some(), "{dialect:?} {text}");
+            assert_eq!(
+                kind_with_keys(&store, dialect, text),
+                Some(expected),
+                "{dialect:?} {text}"
+            );
         }
+    }
+    for (dialect, text) in [
+        (
+            Dialect::PostgreSql,
+            "DELETE FROM t WHERE id = CAST('7' AS integer)",
+        ),
+        (
+            Dialect::PostgreSql,
+            "DELETE FROM t WHERE code = CAST(1 AS text)",
+        ),
+    ] {
+        assert_eq!(kind_with_keys(&store, dialect, text), None, "{text}");
+    }
+    for (dialect, text) in [
+        (
+            Dialect::PostgreSql,
+            "DELETE FROM t WHERE code = CAST('1' AS integer)",
+        ),
+        (Dialect::PostgreSql, "DELETE FROM t WHERE id = random()"),
+        (
+            Dialect::PostgreSql,
+            "DELETE FROM t WHERE (id, n) IN ((1, 2))",
+        ),
+        (Dialect::PostgreSql, "DELETE FROM missing WHERE id = 1"),
+    ] {
+        assert!(
+            !matches!(kind_with_keys_or_error(&store, dialect, text), Ok(None)),
+            "{text}"
+        );
+    }
+}
+
+fn kind_with_keys_or_error(
+    store: &MemoryStore,
+    dialect: Dialect,
+    text: &str,
+) -> Result<Option<DestructiveKind>, OneStatementError> {
+    let mut session = Session::with_dialect(store, dialect);
+    session
+        .destructive_statement(text)
+        .map(|found| found.map(|statement| statement.parts[0].kind))
+}
+
+#[test]
+fn upserts_and_merges_that_overwrite_rows_are_destructive() {
+    let store = keyed_store();
+    for (dialect, text, expected) in [
+        (
+            Dialect::MySql,
+            "REPLACE INTO t VALUES (1, 'a', 'c1', 1)",
+            DestructiveKind::InsertOverwritingRows,
+        ),
+        (
+            Dialect::MySql,
+            "INSERT INTO t VALUES (1, 'a', 'c1', 1) ON DUPLICATE KEY UPDATE name = 'b'",
+            DestructiveKind::InsertOverwritingRows,
+        ),
+        (
+            Dialect::Sqlite,
+            "INSERT OR REPLACE INTO t VALUES (1, 'a', 'c1', 1)",
+            DestructiveKind::InsertOverwritingRows,
+        ),
+        (
+            Dialect::Sqlite,
+            "REPLACE INTO t VALUES (1, 'a', 'c1', 1)",
+            DestructiveKind::InsertOverwritingRows,
+        ),
+        (
+            Dialect::Sqlite,
+            "INSERT INTO t VALUES (1, 'a', 'c1', 1) ON CONFLICT (id) DO UPDATE SET name = 'b'",
+            DestructiveKind::InsertOverwritingRows,
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t VALUES (1, 'a', 'c1', 1) ON CONFLICT (id) DO UPDATE SET name = 'b'",
+            DestructiveKind::InsertOverwritingRows,
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t SELECT id, note, note, id FROM loose WHERE id > 0 ON CONFLICT (id) DO UPDATE SET name = 'b'",
+            DestructiveKind::InsertOverwritingRows,
+        ),
+        (
+            Dialect::Oracle,
+            "MERGE INTO t USING u ON (t.id = u.id) WHEN MATCHED THEN UPDATE SET t.name = 'b'",
+            DestructiveKind::UpdateOfManyRows,
+        ),
+    ] {
+        assert_eq!(kind(dialect, text), Some(expected), "{dialect:?} {text}");
+        assert_eq!(
+            kind_with_keys(&store, dialect, text),
+            Some(expected),
+            "{dialect:?} {text}"
+        );
+    }
+    for (dialect, text) in [
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t VALUES (1, 'a', 'c1', 1)",
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t VALUES (1, 'a', 'c1', 1) ON CONFLICT DO NOTHING",
+        ),
+        (
+            Dialect::MySql,
+            "INSERT IGNORE INTO t VALUES (1, 'a', 'c1', 1)",
+        ),
+        (
+            Dialect::Sqlite,
+            "INSERT OR IGNORE INTO t VALUES (1, 'a', 'c1', 1)",
+        ),
+        (Dialect::PostgreSql, "INSERT INTO u SELECT id FROM loose"),
+    ] {
+        assert_eq!(
+            kind_with_keys(&store, dialect, text),
+            None,
+            "{dialect:?} {text}"
+        );
     }
 }
 
@@ -213,12 +500,6 @@ fn creating_inserting_renaming_and_reading_are_not_destructive() {
             "ALTER TABLE t RENAME COLUMN name TO full_name",
         ),
         (Dialect::PostgreSql, "COMMENT ON TABLE t IS 'x'"),
-        (Dialect::MySql, "REPLACE INTO t VALUES (1, 'a')"),
-        (
-            Dialect::MySql,
-            "INSERT INTO t VALUES (1, 'a') ON DUPLICATE KEY UPDATE name = 'b'",
-        ),
-        (Dialect::Sqlite, "INSERT OR REPLACE INTO t VALUES (1, 'a')"),
         (Dialect::Sqlite, "PRAGMA foreign_keys = ON"),
     ] {
         assert_eq!(kind(dialect, text), None, "{dialect:?} {text}");
@@ -327,10 +608,28 @@ fn transact_sql_brackets_and_transactions_are_classified_as_in_the_other_dialect
         ),
         ("TRUNCATE TABLE [dbo].[t]", Some(DestructiveKind::Truncate)),
         ("DROP TABLE [dbo].[t]", Some(DestructiveKind::DropTable)),
-        ("DELETE FROM [t] WHERE [id] = 1", None),
+        (
+            "DELETE FROM [t] WHERE [id] = 1",
+            Some(DestructiveKind::DeleteOfManyRows),
+        ),
         ("SELECT TOP 1 [id] FROM [dbo].[t]", None),
     ] {
         assert_eq!(kind(Dialect::SqlServer, text), expected, "{text}");
+    }
+    let keyed = keyed_store();
+    for (text, expected) in [
+        ("DELETE FROM [t] WHERE [id] = 1", None),
+        ("DELETE FROM [dbo].[t] WHERE [Id] = 1", None),
+        (
+            "DELETE FROM [t] WHERE [name] = N'x'",
+            Some(DestructiveKind::DeleteOfManyRows),
+        ),
+    ] {
+        assert_eq!(
+            kind_with_keys(&keyed, Dialect::SqlServer, text),
+            expected,
+            "{text}"
+        );
     }
     assert_eq!(
         statement(Dialect::SqlServer, "TRUNCATE TABLE [dbo].[T]").parts[0].objects,

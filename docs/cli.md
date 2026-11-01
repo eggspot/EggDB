@@ -1289,7 +1289,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
 - **`--allow-write`** adds `write_sql`: one statement per call that may change the file, in a
   transaction of its own, the file opened read-write for that call only. Destructive statements
   (`DROP`, `TRUNCATE`, dropping a column, constraint or primary key, a column's type change, a
-  `DELETE` or `UPDATE` whose `WHERE` names no column of its table) run only after the user
+  `DELETE` or `UPDATE` whose `WHERE` does not pin every column of a primary or unique key to
+  values, `REPLACE` and upserts, a `MERGE` that updates or deletes) run only after the user
   confirms them: through the client's question when it can ask, otherwise through the agent's
   `confirm: true`. `run_sql` stays read-only.
 - **`--tables <names>`** shows the agent only those tables and views (comma-separated, `name` or

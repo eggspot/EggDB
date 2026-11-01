@@ -44,7 +44,10 @@ dialect on the same file: tables, joins, `GROUP BY` with aggregates ([docs/sql.m
 writer at a time. `eggdb sql --dialect sqlite` and the embedded API run SQLite's SQL on the same
 file, and `--dialect oracle` Oracle's (no Oracle wire protocol). `eggdb mcp` lets AI agents
 such as Claude Code read the file over MCP, read-only, every call in an audit log
-([docs/mcp.md](docs/mcp.md)). What is in it and what
+([docs/mcp.md](docs/mcp.md)). With `--allow-write` an agent may also change it; a statement that
+can drop data or change many rows waits for your yes, but a client that cannot ask you lets the
+agent answer for you (`confirm: true`), so `--allow-write` then lets the agent change anything,
+and there is no per-table grant for writes: give unattended agents read-only access. What is in it and what
 is not: [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md);
 what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:
 [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).

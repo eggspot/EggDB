@@ -1339,7 +1339,9 @@ impl<'s> Session<'s> {
     }
 
     /// Parses `text` as [`Session::run_one_statement`] does and says whether its one
-    /// statement is destructive, without running it.
+    /// statement is destructive, without running it. For a `DELETE` or `UPDATE` it reads the
+    /// keys, foreign keys and triggers of the table it changes; when it cannot read them, the
+    /// statement counts as one that can change many rows.
     pub fn destructive_statement(
         &mut self,
         text: &str,
@@ -1349,10 +1351,24 @@ impl<'s> Session<'s> {
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         };
         match self.one_statement_in(text, &tokens) {
-            Ok(Ok(destructive)) => Ok(destructive),
+            Ok(Ok(statement)) => Ok(self.destructive_part_of(statement)),
             Ok(Err(refusal)) => Err(OneStatementError::Refused(refusal)),
             Err(error) => Err(OneStatementError::Failed(self.in_dialect(text, error))),
         }
+    }
+
+    fn destructive_part_of(
+        &mut self,
+        statement: Option<Statement>,
+    ) -> Option<DestructiveStatement> {
+        let statement = statement?;
+        crate::destructive::classify(&statement, &mut |table| self.table_keys(table))
+    }
+
+    fn table_keys(&mut self, table: &str) -> Option<crate::destructive::TableKeys> {
+        self.read(|reader, tables| crate::destructive::table_keys(reader, tables, table))
+            .ok()
+            .flatten()
     }
 
     fn run_checked_statement(
@@ -1366,7 +1382,11 @@ impl<'s> Session<'s> {
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         };
         match self.one_statement_in(text, &tokens) {
-            Ok(Ok(destructive)) => {
+            Ok(Ok(statement)) => {
+                let destructive = match rule {
+                    DestructiveRule::OnlyConfirmed(_) => self.destructive_part_of(statement),
+                    DestructiveRule::Allowed => None,
+                };
                 if let DestructiveRule::OnlyConfirmed(confirmed) = rule
                     && destructive.is_some()
                     && destructive.as_ref() != confirmed
@@ -1399,7 +1419,7 @@ impl<'s> Session<'s> {
         &self,
         text: &str,
         tokens: &[Token<'_>],
-    ) -> SqlResult<Result<Option<DestructiveStatement>, OneStatementRefusal>> {
+    ) -> SqlResult<Result<Option<Statement>, OneStatementRefusal>> {
         let settings = Arc::clone(&self.settings);
         let _clock = crate::datetime::enter_statement(settings.time_zone);
         let _bytes = crate::bytea::enter_dialect(self.dialect);
@@ -1412,7 +1432,7 @@ impl<'s> Session<'s> {
             return Ok(Err(OneStatementRefusal::Empty));
         }
         let _constraints = self.enter_constraints();
-        let destructive = if parser.literal_rows().is_none() {
+        let statement = if parser.literal_rows().is_none() {
             match parser.statement()? {
                 Statement::Begin { .. }
                 | Statement::Commit
@@ -1424,14 +1444,14 @@ impl<'s> Session<'s> {
                     return Ok(Err(OneStatementRefusal::TransactionControl));
                 }
                 Statement::Copy(_) => return Ok(Err(OneStatementRefusal::Copy)),
-                statement => crate::destructive::classify(&statement),
+                statement => Some(statement),
             }
         } else {
             None
         };
         parser.skip_empty_statements();
         if parser.at_end() {
-            Ok(Ok(destructive))
+            Ok(Ok(statement))
         } else {
             Ok(Err(OneStatementRefusal::MoreThanOne {
                 position: parser.position(),

@@ -156,18 +156,34 @@ stay drawn, as in the database itself. Only `write_sql` opens the file read-writ
 statement runs (the time limit bounds it), commits and closes the file, other programs cannot
 open the file at all.
 
-**Destructive statements need your confirmation**: `DROP` of anything, `TRUNCATE`, `ALTER TABLE
-... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change, and a `DELETE`
-or `UPDATE` whose `WHERE` names no column of its table (or that has no `WHERE`), and an Oracle
-`MERGE` that updates or deletes unless a top-level `AND` part of its `ON` equates a target column,
-qualified with the target's name or alias, with an expression that names no target column
-(`ON (t.id = s.id)`). A statement
-that can run other statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`)
-counts as destructive too; EggDB does not run any of them yet. `INSERT` in every form, `CREATE`,
-renames, `ADD COLUMN` and the like run without asking.
+**Destructive statements need your confirmation** (DNEW-I80): `DROP` of anything, `TRUNCATE`,
+`ALTER TABLE ... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change,
+any statement that can change or delete many rows, and a statement that can run other
+statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`). A `DELETE` or
+`UPDATE` runs without asking only when its `WHERE` pins every column of the table's primary key,
+or of one of its unique indexes, to values, in parts joined by a top-level `AND`:
+
+- each such column is compared with `=` to a literal (`id = 7`, `7 = id`, `t.id = -7`,
+  `id = CAST('7' AS integer)`), or is `IN` a list of literals; across the key's columns the lists
+  allow at most 100 rows. Other `AND` parts may be anything, since they can only narrow it;
+- a text column compared with a number (`code = 1`) does not count, since some dialects compare
+  it as a number and match `'1'`, `'01'` and `' 1'`;
+- and the statement reaches no other rows: no `ON DELETE` (or, for an `UPDATE` of a referenced
+  column, `ON UPDATE`) `CASCADE`, `SET NULL` or `SET DEFAULT` foreign key points at the table,
+  and no trigger fires on it for that statement.
+
+So `DELETE FROM t WHERE id = 7` runs, while `WHERE id = id`, `WHERE id IS NOT NULL`,
+`WHERE id >= 0 OR id < 0`, `WHERE id > 5`, `WHERE NOT (id <> 7)`, `WHERE id IN (SELECT ...)`,
+a `WHERE` on a column outside every key, and any `DELETE` or `UPDATE` of a table without a key
+ask first. `REPLACE`, `INSERT OR REPLACE`, `ON DUPLICATE KEY UPDATE`, `ON CONFLICT ... DO UPDATE`
+and a `MERGE` that updates or deletes always ask, since they overwrite rows chosen by the data.
+Other `INSERT`s (`ON CONFLICT DO NOTHING` and `INSERT IGNORE` too), `CREATE`, renames,
+`ADD COLUMN` and the like run without asking. To tell, `eggdb mcp` reads the table's keys,
+foreign keys and triggers from the file before it asks you, and closes it again; when it cannot
+read them it asks.
 
 - **Clients that can ask you** (they declare MCP form elicitation in `initialize`)
-  get a question from `eggdb mcp` itself before anything is opened: what the statement does, to
+  get a question from `eggdb mcp` itself before anything runs: what the statement does, to
   what, whether `CASCADE` takes more with it, and the SQL, with a yes-or-no field that defaults
   to no. Yes runs it; no, closing the question or cancelling the call runs nothing, and the agent
   is told you declined. While you think, the database is not open, no lock is held and the time
@@ -182,10 +198,14 @@ to it, even when the SQL shown is cut. Names are as the statement gives them: an
 (which needs no confirmation) can make a familiar name stand for another table, so read the
 question with the agent's recent calls in mind.
 
-The confirmation guards against accidents. It is not a security boundary: a `DELETE` with an
-always-true condition that names a column (`WHERE id IS NOT NULL`) runs without asking, and a
-client may be set to accept for you. Give `--allow-write` only to agents you would let change the
-data, and keep a backup.
+**What `confirm: true` protects, and what it does not.** With a client that asks you, nothing
+destructive runs until you say yes. With a client that cannot ask, `confirm: true` is sent by the
+agent itself: it stops an agent that did not mean to destroy data, not one that decides to (or is
+talked into it by text it read, a prompt injection). Without a client that asks you,
+`--allow-write` lets the agent change or drop anything in the file. A client may also be set to
+accept for you. And with `--allow-write` there is no per-table grant: the agent can change every
+table (`--tables` limits only a read-only server). Give unattended agents a read-only server,
+give `--allow-write` only to agents you would let change all the data, and keep a backup.
 
 ## Over HTTP, from eggdb serve
 

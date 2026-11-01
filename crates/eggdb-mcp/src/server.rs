@@ -647,7 +647,8 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             begun: Instant::now(),
         };
         let prepared = tools::write_request(arguments).and_then(|request| {
-            let destructive = tools::destructive_part(&request)?;
+            let call = self.call(Instant::now() + self.config.time_limit);
+            let destructive = tools::destructive_part(&request, &call)?;
             Ok((request, destructive))
         });
         let (request, destructive) = match prepared {
@@ -925,7 +926,7 @@ pub(crate) fn instructions(allow_write: bool, limited_to_tables: bool) -> String
     let (read, change, destroy) = (Effect::Read, Effect::Change, Effect::Destroy);
     if allow_write {
         format!(
-            "This is an EggDB database the user lets you change (--allow-write). Effects: {} {}; {} {}; {} removes data (DROP, TRUNCATE, a whole-table DELETE or UPDATE, dropping or retyping a column) and needs the user's confirmation. Start with list_tables, then describe_table or sample_rows. row_list pages a table's rows: send next_cursor back as after. One SQL statement per call, in the dialect you name (postgresql by default, or mysql, sqlite, oracle): run_sql reads, write_sql writes and commits on its own. Never send confirm: true without asking your user. {errors} {closing}",
+            "This is an EggDB database the user lets you change (--allow-write). Effects: {} {}; {} {}; {} removes data (DROP, TRUNCATE, an upsert, a DELETE or UPDATE not pinned by a key, dropping or retyping a column) and needs the user's confirmation. Start with list_tables, then describe_table or sample_rows. row_list pages a table's rows: send next_cursor back as after. One SQL statement per call, in the dialect you name (postgresql by default, or mysql, sqlite, oracle): run_sql reads, write_sql writes and commits on its own. Never send confirm: true without asking your user. {errors} {closing}",
             read.name(),
             read.meaning(),
             change.name(),

@@ -1117,8 +1117,9 @@ The command list line of section 9 loses "read-only":
 can read." with: "Without --allow-write every call is read-only and a write is refused with an
 error the agent can read. With it the agent also gets write_sql, one statement per call that may
 change the file, run in its own transaction; the file is opened read-write for that call only.
-A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE names no column
-of the table, dropping a column, constraint or primary key, changing a column's type) runs only
+A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE does not pin
+every column of a primary or unique key to values, REPLACE or an upsert, a MERGE that updates or
+deletes, dropping a column, constraint or primary key, changing a column's type) runs only
 after you confirm it: in a client that can ask you, a dialog; in one that cannot, the agent must
 pass confirm: true, so set that client to ask you before write_sql runs." The option line, before
 `--time-limit`:
@@ -1133,7 +1134,7 @@ before `audit`:
 ```
 eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
   writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
-  confirm      DROP, TRUNCATE, a DELETE or UPDATE of a whole table, dropping or retyping a column: only after you say yes
+  confirm      DROP, TRUNCATE, a DELETE or UPDATE not pinned by a key, an upsert, dropping or retyping a column: only after you say yes
   audit        app.db.mcp-audit.jsonl (eggdb audit app.db shows it)
   time limit   5 s per call
   add it       claude mcp add mydb -- eggdb mcp app.db --allow-write
@@ -2975,8 +2976,9 @@ The registry's `confirm` field is where the MCP server now picks its confirmatio
 - **`help --json`**: a tool object keeps `confirm` as a string or `null` (`"destructive_statement"`
   for `write_sql`) and gains `confirm_when` right after it, one sentence or `null`, present on
   every tool as the other tool fields are. For `destructive_statement`: `the statement is
-  destructive: DROP, TRUNCATE, a column dropped or retyped, or a DELETE or UPDATE whose WHERE
-  names no column of its table`. An object in place of the string would change the type of a
+  destructive: DROP, TRUNCATE, a column dropped or retyped, a DELETE or UPDATE whose WHERE does
+  not pin every column of the primary key or of a unique key to values, REPLACE or an upsert, or
+  a MERGE that updates or deletes` (DNEW-I80). An object in place of the string would change the type of a
   field that slice 1's JSON already has; a second key costs nothing.
 - **`command-model.md`'s tools table**: the Confirm cell reads the check's name in code and its
   sentence: `` `destructive_statement`: the statement is destructive (DROP, TRUNCATE, …) ``.

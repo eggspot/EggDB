@@ -466,10 +466,13 @@ pub(crate) fn describe(
     described(reader, tables, &body)
 }
 
-pub(crate) fn classify(with: &WithStatement) -> Option<crate::destructive::DestructiveStatement> {
-    crate::destructive::classify(&with.body).or_else(|| {
+pub(crate) fn classify(
+    with: &WithStatement,
+    keys: &mut crate::destructive::KeyLookup<'_>,
+) -> Option<crate::destructive::DestructiveStatement> {
+    crate::destructive::classify(&with.body, keys).or_else(|| {
         with.tables.iter().find_map(|table| match table {
-            WithTable::Modifying { statement, .. } => crate::destructive::classify(statement),
+            WithTable::Modifying { statement, .. } => crate::destructive::classify(statement, keys),
             WithTable::Query(_) => None,
         })
     })
