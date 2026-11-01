@@ -1,0 +1,36 @@
+## DNEW-F-citext `citext` and `hstore` are built-in base types with fixed OIDs and their own row tags, a file-format change reviewed as security-critical — Decided by research (2026-11-02); refines D19, D20, D35, D163 and D233
+
+PostgreSQL's `citext` and `hstore` extensions add types that applications and SQLAlchemy's test
+setup create with `CREATE EXTENSION`. EggDB has neither yet (D163). This decision fixes how they
+are represented, before any code is written, because the choice changes the file format.
+
+- **Representation.** A new `DefinedKind::Base` (PostgreSQL's `typtype` `b`) with
+  `DefinedValue::Citext(String)` and `DefinedValue::Hstore(HstoreValue)`. A collation flag on the
+  column was rejected: comparisons, `GROUP BY`, `DISTINCT` and hash joins see only the value, so
+  the flag would never reach them. New `SqlType` and `Value` variants were rejected because they
+  touch every exhaustive match in the engine (`Bpchar` appears in about 30 files); the defined
+  value paths are about 7 files. Nothing runs when neither type is used (D6).
+- **OIDs.** `citext` 9000, `_citext` 9001, `hstore` 9002, `_hstore` 9003, from PostgreSQL's
+  development range, below the first user type OID (16384). PostgreSQL assigns these at
+  `CREATE EXTENSION` time and drivers look them up by `typname` in `pg_type`, so fixed numbers are
+  safe. They join `pg_catalog/oids.rs`'s built-in types.
+- **One case fold.** `citext` compares `case_fold(a)` with `case_fold(b)` (D233's full folding)
+  and has no tie-break. Equality, ordering, grouping keys, partition hashing and index keys all
+  use the same folded text, so they can never disagree, and a unique index rejects case variants.
+  `eggdb_text::compare_case_insensitive` is not used, because its exact tie-break would make `'A'`
+  and `'a'` different.
+- **hstore.** Pairs are kept sorted as PostgreSQL keeps them (by key length, then bytes; the first
+  duplicate key wins). Its text form is `"a"=>"1", "b"=>NULL`. Operators `->`, `?`, `?&`, `?|`,
+  `@>`, `<@`, `||` and `-` (`?` only in the PostgreSQL dialect, where it is no placeholder), and
+  functions `akeys`, `avals`, `each`, `hstore(text, text)` and `hstore_to_json`.
+- **Format.** Row tags `CITEXT_TAG = 27` (text's payload) and `HSTORE_TAG = 28` (a count, then each
+  key, a null flag and the value; unsorted or duplicate keys are damaged). The text tag is not
+  reused, because values inside composites and arrays are decoded by tag alone. Type records gain
+  kind code 5. A table or type that uses either type is written with format version 11
+  (`BASE_TYPES_FORMAT_VERSION`); every other table keeps writing version 10, so files without
+  these types stay readable by the previous release, which refuses version 11 cleanly.
+- **Review.** Because it changes the file format, the PR merges under D35: a second review on
+  security only, format compatibility tests (version 10 files still read; version 11 refused
+  cleanly by the old reader), and fuzzing of the hstore text parser and the new row decoders.
+- **Then** `CREATE EXTENSION citext` and `hstore` succeed and list in `pg_extension`, and
+  `scripts/sqlalchemy-suite/eggdb_provision.py` drops its `0A000` skip.
