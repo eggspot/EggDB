@@ -2555,6 +2555,11 @@ fn prepare_generated(
             name,
             env.columns_only,
         )?),
+        GeneratedTable::Sequence(name) => Filling::Rows(crate::sequences::relation_rows(
+            env.reader,
+            name,
+            env.columns_only,
+        )?),
         GeneratedTable::Values(_) | GeneratedTable::Function(_) => {
             lateral_reference(env, tables, prepared, &generated, siblings)?;
             let mut correlated = false;
@@ -2623,7 +2628,8 @@ fn prepare_generated(
                 }
                 GeneratedTable::Expansion(_)
                 | GeneratedTable::Catalog(_)
-                | GeneratedTable::Variable(_) => {
+                | GeneratedTable::Variable(_)
+                | GeneratedTable::Sequence(_) => {
                     Filling::Rows(crate::set_returning::GeneratedRows::empty(Vec::new()))
                 }
             }
@@ -2632,7 +2638,10 @@ fn prepare_generated(
     let renamed = match &generated {
         GeneratedTable::Function(function) => function.column_names.clone(),
         GeneratedTable::Values(list) => list.column_names.clone(),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
+        GeneratedTable::Expansion(_)
+        | GeneratedTable::Catalog(_)
+        | GeneratedTable::Variable(_)
+        | GeneratedTable::Sequence(_) => {
             Vec::new()
         }
     };

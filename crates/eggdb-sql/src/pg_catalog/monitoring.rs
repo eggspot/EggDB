@@ -4,6 +4,7 @@
 //! only activity, no foreign data, no replication, no extensions but `plpgsql`.
 
 use super::snapshot::{self, CatalogSnapshot};
+use super::types::{RegKind, RegValue};
 use super::{CatalogColumn, CatalogRow, CatalogType, oids};
 use crate::arrays::ArrayElement;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -58,6 +59,7 @@ pub(crate) enum MonitoringRelation {
     Tables,
     Views,
     Matviews,
+    Sequences,
 }
 
 const TABLES: [CatalogColumn; 8] = [
@@ -76,6 +78,20 @@ const VIEWS: [CatalogColumn; 4] = [
     column("viewname", NAME),
     column("viewowner", NAME),
     column("definition", SqlType::Text),
+];
+
+const SEQUENCES: [CatalogColumn; 11] = [
+    column("schemaname", NAME),
+    column("sequencename", NAME),
+    column("sequenceowner", NAME),
+    column("data_type", SqlType::Catalog(CatalogType::Reg(RegKind::Type))),
+    column("start_value", SqlType::BigInt),
+    column("min_value", SqlType::BigInt),
+    column("max_value", SqlType::BigInt),
+    column("increment_by", SqlType::BigInt),
+    column("cycle", SqlType::Boolean),
+    column("cache_size", SqlType::BigInt),
+    column("last_value", SqlType::BigInt),
 ];
 
 const MATVIEWS: [CatalogColumn; 7] = [
@@ -377,7 +393,7 @@ const OPFAMILY: [CatalogColumn; 5] = [
 ];
 
 impl MonitoringRelation {
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::StatActivity,
         Self::StatDatabase,
         Self::Locks,
@@ -408,6 +424,7 @@ impl MonitoringRelation {
         Self::Tables,
         Self::Views,
         Self::Matviews,
+        Self::Sequences,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -442,6 +459,7 @@ impl MonitoringRelation {
             Self::Tables => "pg_tables",
             Self::Views => "pg_views",
             Self::Matviews => "pg_matviews",
+            Self::Sequences => "pg_sequences",
         }
     }
 
@@ -491,6 +509,7 @@ impl MonitoringRelation {
             Self::Tables => &TABLES,
             Self::Views => &VIEWS,
             Self::Matviews => &MATVIEWS,
+            Self::Sequences => &SEQUENCES,
         }
     }
 
@@ -508,6 +527,7 @@ impl MonitoringRelation {
                 | Self::Tables
                 | Self::Views
                 | Self::Matviews
+                | Self::Sequences
                 | Self::StatUserIndexes
         )
     }
@@ -609,6 +629,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             .collect(),
         MonitoringRelation::Tables => table_rows(snapshot),
         MonitoringRelation::Views => view_rows(snapshot),
+        MonitoringRelation::Sequences => sequence_rows(snapshot),
         _ => Vec::new(),
     }
 }
@@ -653,6 +674,48 @@ fn view_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .set("definition", Value::Text(view.query.clone()))
                     .done(),
             ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn sequence_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .relations
+        .iter()
+        .filter_map(|entry| match &entry.source {
+            super::snapshot::RelationSource::Sequence(sequence) => {
+                let type_oid = oids::type_oid(sequence.sql_type);
+                Some(
+                    CatalogRow::new(&SEQUENCES)
+                        .set("schemaname", Value::Text(entry.schema.clone()))
+                        .set("sequencename", Value::Text(entry.name.clone()))
+                        .set("sequenceowner", Value::Text(session_user_name()))
+                        .set(
+                            "data_type",
+                            Value::Reg(Box::new(RegValue {
+                                kind: RegKind::Type,
+                                oid: type_oid,
+                                name: oids::format_type(type_oid, None),
+                            })),
+                        )
+                        .set("start_value", Value::BigInt(sequence.start))
+                        .set("min_value", Value::BigInt(sequence.min))
+                        .set("max_value", Value::BigInt(sequence.max))
+                        .set("increment_by", Value::BigInt(sequence.increment))
+                        .set("cycle", Value::Boolean(sequence.cycle))
+                        .set("cache_size", Value::BigInt(sequence.cache))
+                        .set(
+                            "last_value",
+                            if sequence.is_called {
+                                Value::BigInt(sequence.last_value)
+                            } else {
+                                Value::Null
+                            },
+                        )
+                        .done(),
+                )
+            }
             _ => None,
         })
         .collect()

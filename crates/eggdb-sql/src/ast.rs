@@ -1003,6 +1003,7 @@ pub(crate) enum GeneratedTable {
     Expansion(Box<SelectListExpansion>),
     Catalog(crate::pg_catalog::CatalogRelation),
     Variable(String),
+    Sequence(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
