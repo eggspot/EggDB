@@ -13,8 +13,6 @@
 #[path = "../../eggdb-bench/src/baseline.rs"]
 #[allow(dead_code)]
 mod baseline;
-#[path = "../../eggdb-bench/src/bench_file.rs"]
-mod bench_file;
 #[path = "../../eggdb-bench/src/entries.rs"]
 mod entries;
 #[path = "../../eggdb-bench/src/harness.rs"]
