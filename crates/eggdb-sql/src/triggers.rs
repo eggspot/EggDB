@@ -245,14 +245,16 @@ pub(crate) fn row_triggers_fire_on(
     })
 }
 
-pub(crate) fn guarded_by_extension_on(
+pub(crate) fn sqlite_replace_must_fire_on(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
     table: &str,
     event: TriggerEvent,
 ) -> SqlResult<bool> {
     any_enabled(reader, tables, table, event, |trigger| {
-        trigger.name.starts_with(EXTENSION_TRIGGER_PREFIX)
+        trigger.level == TriggerLevel::Row
+            && (trigger.name.starts_with(EXTENSION_TRIGGER_PREFIX)
+                || trigger.dialect != Dialect::Sqlite)
     })
 }
 

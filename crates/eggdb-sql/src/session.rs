@@ -945,6 +945,12 @@ impl<'s> Session<'s> {
                 } else {
                     "DEALLOCATE ALL"
                 };
+                match &name {
+                    Some(named) => self
+                        .deallocated
+                        .retain(|known| known.as_ref() != Some(named)),
+                    None => self.deallocated.clear(),
+                }
                 self.deallocated.push(name);
                 Ok(QueryResult::command(tag))
             }

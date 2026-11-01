@@ -162,6 +162,7 @@ impl<'a> Wire<'a> {
         if std::mem::replace(&mut self.closed, true) {
             return;
         }
+        let _ = self.stream.set_write_timeout(Some(CLOSE_LINGER));
         self.stream.close_tls();
         self.stream.shutdown_write();
         let deadline = Instant::now() + CLOSE_LINGER;

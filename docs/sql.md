@@ -98,6 +98,9 @@ relations psql's `\d` family reads.
   connection's prepared statements and portals and returns every setting to the value the client
   sent when it connected (`RESET` and `RESET ALL` do the same); `DISCARD PLANS`, `TEMP` and
   `SEQUENCES` are accepted too. Inside a block `DISCARD ALL` is `25001`.
+- **`DEALLOCATE [PREPARE] {name | ALL}`** forgets the connection's prepared statements of that
+  name, or all of them (psycopg sends it after a rollback). Not yet: `26000` for a name that was
+  never prepared, which is ignored instead.
 
 psql's `\d` family (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du`) reads EggDB's
 catalog: see [The PostgreSQL catalog](#the-postgresql-catalog).
@@ -2238,8 +2241,10 @@ Triggers that fire triggers nest at most 32 deep; deeper is an error, never a cr
 triggers do not fire yet for rows a cascading foreign key changes or removes, nor for rows
 MySQL's `REPLACE` removes, so those are refused (`0A000`) on a table with `UPDATE` or `DELETE`
 triggers instead of running without them. SQLite's `REPLACE` conflict resolution doesn't fire
-`DELETE` triggers either (as SQLite does with `recursive_triggers` off, its default), except that
-it is refused on a table guarded by an EggDB extension's trigger (retention, ledger). Dropping
+`DELETE` triggers written in the SQLite dialect (as SQLite does with `recursive_triggers` off,
+its default); it is refused (`0A000`) on a table whose row `DELETE` triggers come from another
+dialect or from an EggDB extension (retention, ledger, change capture), which expect to see every
+removed row. Dropping
 a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
 constraint and event triggers, SQL Server DDL and logon triggers, Oracle compound and event
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
@@ -2353,9 +2358,8 @@ rolled-back change never streams and a committed one always does. `eggdb serve
 --cdc-webhook http://...` delivers the outbox as Debezium-style events (`before`, `after`,
 `source`, `op` of `c`, `u` or `d`, `ts_ms`), oldest first, at least once. `eggdb serve
 --cdc-queue <name>` delivers the same events into EggDB's durable queue `<name>`, where AMQP
-0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). A cascading foreign key or a MySQL
-`REPLACE` that would change a captured table's rows is refused (`0A000`), since it would not be
-captured. Not yet: Kafka and MQTT sinks, Debezium's schema section, capture without triggers,
+0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). A cascading foreign key or a `REPLACE`
+that would change a captured table's rows is refused (`0A000`), since it would not be captured. Not yet: Kafka and MQTT sinks, Debezium's schema section, capture without triggers,
 and capturing cascaded changes.
 
 ### Transactional outbox and inbox

@@ -1351,7 +1351,7 @@ pub(crate) fn insert(
                                 event,
                             )?
                         } else {
-                            crate::triggers::guarded_by_extension_on(
+                            crate::triggers::sqlite_replace_must_fire_on(
                                 &*writer,
                                 tables,
                                 &table.name,

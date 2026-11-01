@@ -262,7 +262,9 @@ fn import_csv_dry_run_loads_into_a_copy_and_reports_the_rows() {
     assert_eq!(
         succeeded(&dry),
         format!(
-            "{{\"file\":\"{path}\",\"from\":\"{csv_path}\",\"table\":\"people (name)\",\"rows\":2,\"dry_run\":true}}\n"
+            "{{\"file\":\"{}\",\"from\":\"{}\",\"table\":\"people (name)\",\"rows\":2,\"dry_run\":true}}\n",
+            path.replace('\\', "\\\\"),
+            csv_path.replace('\\', "\\\\")
         )
     );
     assert_eq!(std::fs::read(file.path()).unwrap(), before);
