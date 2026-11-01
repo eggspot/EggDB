@@ -138,7 +138,7 @@ pub(super) const SERVE: CommandDefinition = CommandDefinition {
     words: &["serve"],
     aliases: &[],
     synopsis: "<file>",
-    summary: "serve the file to PostgreSQL and MySQL clients; see --listen",
+    summary: "serve the file to PostgreSQL, MySQL and SQL Server clients; see --listen",
     description: "Serves the file to PostgreSQL clients, and with options to MySQL and SQL Server (TDS) clients, until stopped: on this machine's loopback address without TLS, and on any address with TLS, which other machines must then use; clients log in with a password and may run any statement. The first line says where it listens.",
     usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--idle-timeout <seconds>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
     help: "\

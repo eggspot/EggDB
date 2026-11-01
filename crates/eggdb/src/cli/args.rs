@@ -596,7 +596,6 @@ impl OptionName {
 pub(crate) enum Invocation {
     Help(Option<CommandName>),
     HelpJson(Option<CommandName>, Option<&'static str>),
-    NoArguments,
     Version,
     VersionJson,
     Run(Box<Request>),
@@ -865,7 +864,7 @@ fn asks_for_json(tokens: &Tokens<'_>) -> bool {
 
 pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     if args.is_empty() {
-        return Ok(Invocation::NoArguments);
+        return Ok(Invocation::Help(None));
     }
     let tokens = tokenize(args);
     let first = tokens
@@ -2447,8 +2446,8 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_is_its_own_case() {
-        assert_eq!(parse(&[]), Ok(Invocation::NoArguments));
+    fn no_arguments_asks_for_the_main_help() {
+        assert_eq!(parse(&[]), Ok(Invocation::Help(None)));
     }
 
     #[test]

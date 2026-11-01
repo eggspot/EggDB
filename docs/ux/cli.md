@@ -337,7 +337,7 @@ Options for every command:
   -V, --version                      print the version
 
 Exit codes: 0 ok, 1 not found, 2 usage, 3 database error, 4 damaged, 5 busy.
-Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
+Guide: https://github.com/eggspot/EggDB/blob/main/docs/cli.md
 ```
 `eggdb help scan` (the pattern for every command: usage, one paragraph, options, examples):
 ```

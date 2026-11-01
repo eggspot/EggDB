@@ -637,3 +637,68 @@ fn every_command_of_the_parser_is_in_the_registry_with_its_json_form() {
         );
     }
 }
+
+fn dialect_product_name(dialect: eggdb_sql::Dialect) -> &'static str {
+    match dialect {
+        eggdb_sql::Dialect::PostgreSql => "PostgreSQL",
+        eggdb_sql::Dialect::MySql => "MySQL",
+        eggdb_sql::Dialect::Sqlite => "SQLite",
+        eggdb_sql::Dialect::Oracle => "Oracle",
+        eggdb_sql::Dialect::SqlServer => "SQL Server",
+    }
+}
+
+fn serve_listener_protocol(option: &str) -> Option<&'static str> {
+    match option {
+        "listen" => Some("PostgreSQL"),
+        "mysql-listen" => Some("MySQL"),
+        "tds-listen" => Some("SQL Server (TDS)"),
+        _ => None,
+    }
+}
+
+#[test]
+fn the_main_help_names_every_dialect_the_parser_takes() {
+    let header = help::MAIN.split("\n\nUsage:").next().unwrap_or_default();
+    for dialect in eggdb_sql::Dialect::ALL {
+        assert_eq!(
+            eggdb_sql::Dialect::named(dialect.name()),
+            Some(dialect),
+            "--dialect {} is taken by the parser",
+            dialect.name()
+        );
+        let product = dialect_product_name(dialect);
+        assert!(
+            header.contains(product),
+            "the main help's first lines name the {product} dialect: {header}"
+        );
+    }
+}
+
+#[test]
+fn the_main_help_names_every_protocol_eggdb_serve_listens_with() {
+    let Some(serve) = eggdb_commands::command(&["serve"]) else {
+        panic!("serve is not in the registry");
+    };
+    let header = help::MAIN.split("\n\nUsage:").next().unwrap_or_default();
+    let listeners: Vec<&str> = serve
+        .options
+        .iter()
+        .map(|option| option.long)
+        .filter(|long| *long == "listen" || long.ends_with("-listen"))
+        .collect();
+    assert!(listeners.contains(&"listen"), "{listeners:?}");
+    for long in listeners {
+        let Some(protocol) = serve_listener_protocol(long) else {
+            panic!("--{long} serves a protocol the main help does not name yet");
+        };
+        assert!(
+            header.contains(protocol),
+            "the main help's first lines name {protocol}, which --{long} serves: {header}"
+        );
+    }
+    let ran = piped(&[]);
+    assert_eq!(ran.exit, 0);
+    assert_eq!(text(&ran.stdout), help::MAIN);
+    assert!(ran.stderr.is_empty());
+}

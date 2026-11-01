@@ -40,10 +40,6 @@ pub(crate) fn run(args: &[OsString], console: &mut Console<'_>) -> u8 {
         Ok(Invocation::HelpJson(command, verb)) => {
             print(console.stdout, &help::registry_json(command, verb))
         }
-        Ok(Invocation::NoArguments) => {
-            let _ = console.stderr.write_all(help::MAIN.as_bytes());
-            Exit::Usage
-        }
         Ok(Invocation::Version) => print(console.stdout, &format!("eggdb {}\n", eggdb::VERSION)),
         Ok(Invocation::VersionJson) => print(console.stdout, &help::version_json()),
         Ok(Invocation::Run(request)) => {
