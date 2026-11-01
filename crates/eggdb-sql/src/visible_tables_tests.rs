@@ -224,10 +224,7 @@ fn every_catalog_leaves_out_what_is_hidden() {
             &mut |result| rendered.push(render(&result)),
         )
         .unwrap();
-    assert_eq!(
-        rendered.last().unwrap(),
-        "SEQUENCE_NAME\nUSERS_ID_SEQ\nSELECT 1"
-    );
+    assert_eq!(rendered.last().unwrap(), "SEQUENCE_NAME\nSELECT 0");
     assert!(
         oracle
             .execute("SELECT * FROM secrets", &mut |_| {})

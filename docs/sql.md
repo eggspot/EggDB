@@ -2736,7 +2736,9 @@ schemas and the foreign keys that reference them), `ALTER SCHEMA name RENAME TO 
 TO` (accepted). Tables, views, sequences and indexes live in a schema; write `schema.name`
 anywhere a table name goes (`app.t`, `public.t`, `REFERENCES app.t (id)`, `nextval('app.s')`,
 `OWNED BY app.t.id`, `DROP INDEX app.i`, `COMMENT ON COLUMN app.t.c`), and move a table with
-`ALTER TABLE t SET SCHEMA s`. `public` always exists and cannot be dropped or renamed;
+`ALTER TABLE t SET SCHEMA s`. `database.schema.name` works when the database is the one the
+session is connected to (dbt writes names this way), and is `0A000` for another database; a
+column may be written `schema.table.column`. `public` always exists and cannot be dropped or renamed;
 `pg_catalog`, `information_schema` and names starting with `pg_` are reserved (`42939`). Errors:
 `3F000 schema "x" does not exist`, `42P06 schema "x" already exists`, and messages show
 qualified names as `app.t`.
@@ -2961,7 +2963,10 @@ and procedure (D158), and `pg_language` (`internal`, `c`, `sql`, `plpgsql`), the
 `pg_matviews` (empty: no materialized views are listed yet), each with PostgreSQL 16's columns
 and column types. An identity column shows its implicit sequence, `<table>_<column>_seq`, in
 `pg_class` and `pg_sequence` and through `pg_get_serial_sequence`, so SQLAlchemy and other ORMs
-reflect it as an identity; `nextval` on that name is not supported yet. `pg_get_functiondef`, `pg_get_function_arguments`,
+reflect it as an identity. `setval` on that name succeeds when it leaves the column's next
+value where it is (Django's and Rails' resets to the largest id), and `nextval`, `currval` and
+any other `setval` are `0A000`, since the next value always follows the column's largest value.
+Oracle's and SQL Server's dictionaries don't list these sequences. `pg_get_functiondef`, `pg_get_function_arguments`,
 `pg_get_function_identity_arguments`, `pg_get_function_result`, `pg_function_is_visible` and
 `regproc` name user routines, `pg_trigger.tgfoid` is the trigger's function, and
 `information_schema.routines` and `parameters` list them, so psql's `\df` shows them. `information_schema`'s views are catalog relations too: see

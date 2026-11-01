@@ -457,8 +457,7 @@ jobs:
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           from cassandra.auth import PlainTextAuthProvider
           from cassandra.cluster import Cluster
-          from cassandra.io.asyncioreactor import AsyncioConnection
-          cluster = Cluster(["127.0.0.1"], port=9043, protocol_version=4, auth_provider=PlainTextAuthProvider("eggdb", "ci-resp-password"), connection_class=AsyncioConnection)
+          cluster = Cluster(["127.0.0.1"], port=9043, protocol_version=4, auth_provider=PlainTextAuthProvider("eggdb", "ci-resp-password"))
           session = cluster.connect()
           session.execute("CREATE KEYSPACE IF NOT EXISTS shop WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}")
           session.set_keyspace("shop")

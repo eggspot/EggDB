@@ -38,6 +38,17 @@ struct StatementSequences {
     session: SessionSequences,
     memory: WorkMemory,
     missing: Option<String>,
+    identities: Option<HashMap<String, IdentityCounter>>,
+}
+
+struct IdentityCounter {
+    next: Option<i64>,
+    increment: i64,
+}
+
+/// The name PostgreSQL gives the sequence behind `table`'s identity or serial `column`.
+pub(crate) fn implicit_sequence_name(table: &str, column: &str) -> String {
+    format!("{table}_{column}_seq")
 }
 
 const MAX_IDENTIFIER_BYTES: usize = 63;
@@ -58,6 +69,7 @@ pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
             session,
             memory: WorkMemory::new(),
             missing: None,
+            identities: None,
         });
     });
 }
@@ -99,7 +111,73 @@ fn with_state<T>(body: impl FnOnce(&mut StatementSequences) -> SqlResult<T>) -> 
 
 pub(crate) fn load_for_sequence_calls(reader: &dyn KeyValueRead) -> SqlResult<()> {
     let wanted = STATEMENT.with(|state| state.borrow().last().is_some_and(|state| state.wanted));
-    if wanted { load_all(reader) } else { Ok(()) }
+    if !wanted {
+        return Ok(());
+    }
+    load_all(reader)?;
+    load_identity_counters(reader)
+}
+
+fn load_identity_counters(reader: &dyn KeyValueRead) -> SqlResult<()> {
+    let needed = STATEMENT.with(|state| {
+        state
+            .borrow()
+            .last()
+            .is_some_and(|state| state.identities.is_none())
+    });
+    if !needed {
+        return Ok(());
+    }
+    let mut tables = crate::indexes::every_table(reader)?;
+    tables.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut found = Vec::new();
+    for table in &tables {
+        let schema = crate::schemas::schema_of(&table.name);
+        let base = crate::schemas::base_name(&table.name);
+        for (index, column) in table.columns.iter().enumerate() {
+            if table.identity_of(index).is_none() {
+                continue;
+            }
+            let name =
+                crate::schemas::qualified(schema, &implicit_sequence_name(base, &column.name));
+            let next = if table.auto_increment_column() == Some(index) {
+                crate::execute::StoredRows::next_identity_value(reader, table)?
+            } else {
+                None
+            };
+            found.push((
+                name,
+                IdentityCounter {
+                    next,
+                    increment: table.identity_seed().increment,
+                },
+            ));
+        }
+    }
+    with_state(|state| {
+        let mut identities = HashMap::new();
+        for (name, counter) in found {
+            if !state.loaded.contains_key(&name) && !identities.contains_key(&name) {
+                identities.insert(name, counter);
+            }
+        }
+        state.identities = Some(identities);
+        Ok(())
+    })
+}
+
+fn identity_counter<'s>(state: &'s StatementSequences, name: &str) -> Option<&'s IdentityCounter> {
+    state
+        .identities
+        .as_ref()
+        .and_then(|identities| identities.get(name))
+}
+
+fn drawn_by_inserts(name: &str) -> SqlError {
+    SqlError::not_supported(format!(
+        "nextval and currval of \"{name}\", the sequence an identity column owns"
+    ))
+    .with_hint("Insert a row to take the column's next value; setval may set it to the value it already has.")
 }
 
 pub(crate) fn load_all(reader: &dyn KeyValueRead) -> SqlResult<()> {
@@ -1068,6 +1146,9 @@ fn next_value(name: &str, sequence: &mut SequenceDefinition, dialect: Dialect) -
 
 fn nextval(name: &str) -> SqlResult<Value> {
     with_state(|state| {
+        if identity_counter(state, name).is_some() {
+            return Err(drawn_by_inserts(name));
+        }
         let dialect = state.dialect;
         let sequence = loaded(state, name)?;
         let value = next_value(name, sequence, dialect)?;
@@ -1080,6 +1161,9 @@ fn nextval(name: &str) -> SqlResult<Value> {
 
 fn currval(name: &str) -> SqlResult<Value> {
     with_state(|state| {
+        if identity_counter(state, name).is_some() {
+            return Err(drawn_by_inserts(name));
+        }
         let dialect = state.dialect;
         loaded(state, name)?;
         match state.session.currval.get(name) {
@@ -1154,6 +1238,20 @@ fn setval(name: &str, value: &Value, is_called: &Value) -> SqlResult<Value> {
         }
     };
     with_state(|state| {
+        if let Some(counter) = identity_counter(state, name) {
+            let next = if called {
+                number.checked_add(counter.increment)
+            } else {
+                Some(number)
+            };
+            if counter.next.is_some() && next == counter.next {
+                return Ok(Value::BigInt(number));
+            }
+            return Err(SqlError::not_supported(format!(
+                "setval of \"{name}\", the sequence an identity column owns, to a value other than the one it holds"
+            ))
+            .with_hint("The column's next value follows its largest value; delete or insert rows to move it."));
+        }
         let sequence = loaded(state, name)?;
         if number < sequence.min || number > sequence.max {
             return Err(SqlError::new(

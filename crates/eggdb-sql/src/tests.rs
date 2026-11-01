@@ -2516,6 +2516,29 @@ fn pg_tables_and_pg_views_list_what_the_schema_holds() {
 }
 
 #[test]
+fn a_table_named_with_the_current_database_is_found_and_another_database_is_refused() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SCHEMA analytics");
+    last(&mut session, "CREATE TABLE analytics.daily (n integer)");
+    last(&mut session, "INSERT INTO analytics.daily VALUES (1)");
+    let shown = last(&mut session, "SELECT current_database() AS d");
+    let database = shown.lines().nth(1).unwrap_or_default().to_owned();
+    assert_eq!(
+        last(
+            &mut session,
+            &format!("SELECT count(*) FROM \"{database}\".\"analytics\".\"daily\"")
+        ),
+        "count\n1\nSELECT 1"
+    );
+    let other = fails(
+        &mut session,
+        "SELECT count(*) FROM elsewhere.analytics.daily",
+    );
+    assert_eq!(other.state(), crate::SqlState::FEATURE_NOT_SUPPORTED);
+}
+
+#[test]
 fn identity_columns_show_their_implicit_sequence_in_the_catalog() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
@@ -2537,6 +2560,38 @@ fn identity_columns_show_their_implicit_sequence_in_the_catalog() {
         ),
         "seqstart|seqincrement|seqmax\n1|1|2147483647\nSELECT 1"
     );
+    let django_reset = "SELECT setval(pg_get_serial_sequence('\"tickets\"','id'), coalesce(max(\"id\"), 1), max(\"id\") IS NOT null) AS s FROM \"tickets\"";
+    assert_eq!(last(&mut session, django_reset), "s\n1\nSELECT 1");
+    last(
+        &mut session,
+        "INSERT INTO tickets (code) VALUES ('a'), ('b')",
+    );
+    assert_eq!(last(&mut session, django_reset), "s\n2\nSELECT 1");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT setval('\"public\".\"tickets_id_seq\"', (SELECT max(id) FROM tickets)) AS s"
+        ),
+        "s\n2\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO tickets (code) VALUES ('c') RETURNING id"
+        ),
+        "id\n3\nINSERT 0 1"
+    );
+    for refused in [
+        "SELECT setval('tickets_id_seq', 100)",
+        "SELECT nextval('tickets_id_seq')",
+        "SELECT currval('tickets_id_seq')",
+    ] {
+        assert_eq!(
+            fails(&mut session, refused).state(),
+            crate::SqlState::FEATURE_NOT_SUPPORTED,
+            "{refused}"
+        );
+    }
 }
 
 #[test]

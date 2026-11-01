@@ -423,7 +423,10 @@ struct PendingRelation {
 }
 
 fn implicit_identity_sequences(pending: &[PendingRelation]) -> Vec<PendingRelation> {
-    let mut implicit = Vec::new();
+    let mut implicit: Vec<PendingRelation> = Vec::new();
+    if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
+        return implicit;
+    }
     for entry in pending {
         let RelationSource::Table(table) = &entry.source else {
             continue;
@@ -433,8 +436,8 @@ fn implicit_identity_sequences(pending: &[PendingRelation]) -> Vec<PendingRelati
                 continue;
             }
             let owned = (table.name.clone(), column.name.clone());
-            let name = format!("{}_{}_seq", entry.name, column.name);
-            let taken = pending.iter().any(|other| {
+            let name = crate::sequences::implicit_sequence_name(&entry.name, &column.name);
+            let taken = pending.iter().chain(implicit.iter()).any(|other| {
                 other.schema == entry.schema && other.name == name
                     || matches!(&other.source, RelationSource::Sequence(sequence)
                         if sequence.owned_by.as_ref() == Some(&owned))

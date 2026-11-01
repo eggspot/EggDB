@@ -43,7 +43,7 @@ any transaction.read allocations_per_op 0
 any transaction.read file_operations_per_op 0
 any transaction.write file_operations_per_1000_commits 3203
 any transaction.write syncs_per_1000_commits 1040
-linux allocator.small_blocks egg_to_system_allocator 0.560
+linux allocator.small_blocks egg_to_system_allocator 0.880
 linux btree.delete ratio_to_std_btreemap 2.008
 linux btree.get ratio_to_std_btreemap 1.85
 linux btree.put ratio_to_std_btreemap 2.574

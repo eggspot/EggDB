@@ -45,6 +45,18 @@ impl<'t> Parser<'t> {
 
     pub(super) fn qualified_part(&mut self, schema: &Name) -> SqlResult<Name> {
         let name = self.name()?;
+        if self.postgresql()
+            && self.peek_kind() == &TokenKind::Dot
+            && self.check_database(schema).is_ok()
+        {
+            self.at += 1;
+            let in_schema = self.name()?;
+            return self.qualified_part_of(&name, in_schema);
+        }
+        self.qualified_part_of(schema, name)
+    }
+
+    fn qualified_part_of(&mut self, schema: &Name, name: Name) -> SqlResult<Name> {
         if self.peek_kind() == &TokenKind::Dot {
             return Err(
                 SqlError::not_supported("cross-database references are not implemented")

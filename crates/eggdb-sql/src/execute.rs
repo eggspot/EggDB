@@ -1804,6 +1804,18 @@ impl<'a> StoredRows<'a> {
         }
     }
 
+    pub(crate) fn next_identity_value(
+        reader: &dyn KeyValueRead,
+        table: &'a TableDefinition,
+    ) -> SqlResult<Option<i64>> {
+        let Some(index) = table.auto_increment_column() else {
+            return Ok(None);
+        };
+        let stored = Self::new(table);
+        let furthest = stored.furthest_auto_value(reader, index)?;
+        Ok(stored.identity_seed.next_after(furthest))
+    }
+
     fn furthest_auto_value(
         &self,
         reader: &dyn KeyValueRead,
