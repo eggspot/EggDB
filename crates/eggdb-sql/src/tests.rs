@@ -2356,10 +2356,32 @@ fn postgresql_upserts_act_only_on_their_conflict_target_and_once_per_row() {
         &mut session,
         "INSERT INTO users VALUES (5, 'old@x', 'Gus') ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING",
     );
-    assert_eq!(by_constraint.state(), crate::SqlState::FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        by_constraint.state(),
+        crate::SqlState::FEATURE_NOT_SUPPORTED
+    );
     assert_eq!(
         last(&mut session, "SELECT count(*) FROM users"),
         "count\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_sqlite_upsert_that_updates_counts_one_change() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    last(
+        &mut session,
+        "CREATE TABLE stock (sku TEXT PRIMARY KEY, units INT)",
+    );
+    last(&mut session, "INSERT INTO stock VALUES ('egg', 1)");
+    last(
+        &mut session,
+        "INSERT INTO stock VALUES ('egg', 2) ON CONFLICT (sku) DO UPDATE SET units = units + excluded.units",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT changes() AS n, units FROM stock"),
+        "n|units\n1|3\nSELECT 1"
     );
 }
 

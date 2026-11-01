@@ -36,7 +36,7 @@ fn put(key: u64) -> Vec<Change> {
 #[test]
 fn replicas_apply_in_order_and_refuse_gaps_and_stale_terms() {
     let mut primary = Primary::new(1, 0, Mode::Asynchronous);
-    let mut replica = Replica::new(7, 1, 0, Memory::default(), 16);
+    let mut replica = Replica::new(7, 1, 0, 0, Memory::default(), 16);
     let (first, _) = primary.commit(put(1));
     let (second, token) = primary.commit(put(2));
     assert_eq!(replica.receive(&second), Err(Refusal::Gap { next: 1 }));
@@ -84,8 +84,8 @@ fn synchronous_commits_wait_for_acknowledgements_and_logs_are_trimmed() {
 #[test]
 fn cascading_replicas_follow_another_replica() {
     let mut primary = Primary::new(1, 0, Mode::Asynchronous);
-    let mut middle = Replica::new(1, 1, 0, Memory::default(), 8);
-    let mut leaf = Replica::new(2, 1, 0, Memory::default(), 8);
+    let mut middle = Replica::new(1, 1, 0, 0, Memory::default(), 8);
+    let mut leaf = Replica::new(2, 1, 0, 0, Memory::default(), 8);
     for key in 0..5 {
         let (batch, _) = primary.commit(put(key));
         middle.receive(&batch).unwrap();
@@ -170,7 +170,7 @@ fn simulated_partitions_never_lose_a_synchronous_commit_on_failover() {
             },
         );
         let mut replicas: Vec<Replica<Memory>> = (1..=2)
-            .map(|id| Replica::new(id, 1, 0, Memory::default(), 1_000))
+            .map(|id| Replica::new(id, 1, 0, 0, Memory::default(), 1_000))
             .collect();
         for replica in &replicas {
             primary.add_replica(replica.id(), 0);
@@ -242,8 +242,8 @@ fn simulated_partitions_never_lose_a_synchronous_commit_on_failover() {
 #[test]
 fn an_old_primary_that_rejoins_with_commits_nobody_got_is_refused_as_diverged() {
     let mut old_primary = Primary::new(1, 0, Mode::Asynchronous);
-    let mut old = Replica::new(1, 1, 0, Memory::default(), 8);
-    let mut survivor = Replica::new(2, 1, 0, Memory::default(), 8);
+    let mut old = Replica::new(1, 1, 0, 0, Memory::default(), 8);
+    let mut survivor = Replica::new(2, 1, 0, 0, Memory::default(), 8);
     for key in 1..=2 {
         let (batch, _) = old_primary.commit(put(key));
         assert_eq!(old.receive(&batch), Ok(key));
@@ -259,7 +259,9 @@ fn an_old_primary_that_rejoins_with_commits_nobody_got_is_refused_as_diverged() 
     assert_eq!(old.receive(&replacement), Err(Refusal::Diverged { at: 3 }));
     assert_eq!(old.receive(&next), Err(Refusal::Diverged { at: 3 }));
     assert_eq!(old.applied(), 3);
-    let mut fresh = Replica::new(3, 1, 2, Memory::default(), 8);
+    let mut fresh = Replica::new(3, 1, 2, 1, Memory::default(), 8);
     assert_eq!(fresh.receive(&replacement), Ok(3));
     assert_eq!(fresh.receive(&next), Ok(4));
+    let mut restarted = Replica::new(4, 2, 2, 1, Memory::default(), 8);
+    assert_eq!(restarted.receive(&replacement), Ok(3));
 }

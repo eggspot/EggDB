@@ -219,17 +219,25 @@ pub struct Replica<A: Apply> {
 }
 
 impl<A: Apply> Replica<A> {
-    /// A replica that has applied up to `applied` in `term`, keeping its last `retain` batches
-    /// to feed cascading replicas.
-    pub fn new(id: ReplicaId, term: u64, applied: u64, storage: A, retain: usize) -> Self {
+    /// A replica that follows `term` and has applied up to `applied`, whose last batch was
+    /// written in `applied_term` (an earlier term when the primary changed since), keeping its
+    /// last `retain` batches to feed cascading replicas.
+    pub fn new(
+        id: ReplicaId,
+        term: u64,
+        applied: u64,
+        applied_term: u64,
+        storage: A,
+        retain: usize,
+    ) -> Self {
         Self {
             id,
-            term,
+            term: term.max(applied_term),
             applied,
             term_starts: if applied == 0 {
                 Vec::new()
             } else {
-                vec![(1, term)]
+                vec![(1, applied_term)]
             },
             storage,
             retained: VecDeque::new(),

@@ -7,8 +7,8 @@ use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const COLLECTION_RECORD: u8 = 1;
-const MAX_NESTING_DEPTH: usize = 100;
 const DOCUMENT_RECORD: u8 = 2;
+const MAX_NESTING_DEPTH: usize = 100;
 const ROLLED_BACK: &str = "the document operation was rolled back";
 
 /// The largest document a collection holds, as MongoDB documents it: 16 MiB.

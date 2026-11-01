@@ -34,11 +34,20 @@ BEGIN
     RETURN NEW;
 END
 $$;
+CREATE FUNCTION eggdb_tenancy.refuse_truncate() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false) THEN
+        RAISE EXCEPTION 'table % holds the rows of every tenant: only a superuser may truncate it', TG_TABLE_NAME USING ERRCODE = '42501', HINT = 'Delete the rows of your tenant instead.';
+    END IF;
+    RETURN NULL;
+END
+$$;
 CREATE FUNCTION eggdb_tenancy.isolate(schema_name text, table_name text, tenant_column text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', schema_name, table_name);
     EXECUTE format('CREATE POLICY eggdb_tenant ON %I.%I USING (%I = current_setting(%L, true)) WITH CHECK (true)', schema_name, table_name, tenant_column, 'eggdb.tenant');
     EXECUTE format('CREATE TRIGGER eggdb_tenant_quota BEFORE INSERT OR UPDATE ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_tenancy.enforce_quota()', schema_name, table_name);
+    EXECUTE format('CREATE TRIGGER eggdb_tenant_truncate BEFORE TRUNCATE ON %I.%I FOR EACH STATEMENT EXECUTE FUNCTION eggdb_tenancy.refuse_truncate()', schema_name, table_name);
     INSERT INTO eggdb_tenancy.isolated (table_schema, table_name, tenant_column) VALUES (schema_name, table_name, tenant_column);
 END
 $$;
@@ -144,6 +153,14 @@ mod tests {
         assert!(
             run(&mut session, "COPY notes (tenant, body) FROM STDIN").is_err(),
             "COPY FROM must not get around the tenant check"
+        );
+        assert_eq!(
+            run(&mut session, "TRUNCATE notes")
+                .unwrap_err()
+                .state()
+                .code(),
+            "42501",
+            "TRUNCATE must not wipe the other tenants' rows"
         );
         run(&mut session, "SET eggdb.tenant = 'acme'").unwrap();
         assert_eq!(

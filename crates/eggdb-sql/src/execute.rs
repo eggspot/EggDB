@@ -1327,69 +1327,71 @@ pub(crate) fn insert(
             Some(found) => {
                 let conflict = stored.arbitrated(writer, arbiter, found, &row)?;
                 match (&insert.on_duplicate, &updates) {
-                (OnDuplicate::Ignore, _) => {
-                    warnings.push(Warning {
-                        level: "Warning",
-                        code: 1062,
-                        message: crate::mysql_errors::translate(
-                            conflict.error(&table, &row),
-                            "",
-                            "",
-                        )
-                        .message()
-                        .to_owned(),
-                    });
-                    continue;
-                }
-                (OnDuplicate::Replace, _) => {
-                    let event = crate::triggers::TriggerEvent::Delete;
-                    if crate::triggers::fire_on(&*writer, tables, &table.name, event)? {
-                        return Err(crate::triggers::unfired(event, &table.name, "REPLACE"));
-                    }
-                    let mut conflict = Some(conflict);
-                    while let Some(found) = conflict {
-                        let removed = delete_row(writer, &table, &found.row_key)?;
-                        if stored.track {
-                            stored.changes.push(RowChange {
-                                table: Arc::clone(&table),
-                                old: removed,
-                                new: None,
-                            });
-                        }
-                        affected += 1;
-                        conflict = stored.try_insert(writer, &mut row)?;
-                    }
-                    inserted_children.push(&row)?;
-                    affected += 1;
-                    if let Some(firing) = firing.as_mut() {
-                        firing.after_row(writer, tables, None, Some(row.as_slice()))?;
-                        stored.forget_generated_ids();
-                    }
-                }
-                (OnDuplicate::Update(_), Some(updates)) => {
-                    if let Some(changed) = changed_once.as_mut()
-                        && !changed.insert(conflict.row_key.clone())
-                    {
-                        return Err(row_affected_twice());
-                    }
-                    let upsert = Upsert {
-                        updates,
-                        inserted: &row,
-                        existing_key: &conflict.row_key,
-                    };
-                    let fired = update_firing.as_mut().map(|firing| (firing, &mut *tables));
-                    let outcome = stored.update_existing(writer, scope, upsert, fired)?;
-                    stored.forget_generated_ids();
-                    affected += outcome.affected_rows();
-                    let Some(updated) = outcome.into_row() else {
+                    (OnDuplicate::Ignore, _) => {
+                        warnings.push(Warning {
+                            level: "Warning",
+                            code: 1062,
+                            message: crate::mysql_errors::translate(
+                                conflict.error(&table, &row),
+                                "",
+                                "",
+                            )
+                            .message()
+                            .to_owned(),
+                        });
                         continue;
-                    };
-                    if let Some(projection) = &returning {
-                        result_rows.push(projection.project(&updated)?);
                     }
-                    continue;
-                }
-                _ => return Err(conflict.error(&table, &row)),
+                    (OnDuplicate::Replace, _) => {
+                        let event = crate::triggers::TriggerEvent::Delete;
+                        if crate::triggers::fire_on(&*writer, tables, &table.name, event)? {
+                            return Err(crate::triggers::unfired(event, &table.name, "REPLACE"));
+                        }
+                        let mut conflict = Some(conflict);
+                        while let Some(found) = conflict {
+                            let removed = delete_row(writer, &table, &found.row_key)?;
+                            if stored.track {
+                                stored.changes.push(RowChange {
+                                    table: Arc::clone(&table),
+                                    old: removed,
+                                    new: None,
+                                });
+                            }
+                            if dialect == Dialect::MySql {
+                                affected += 1;
+                            }
+                            conflict = stored.try_insert(writer, &mut row)?;
+                        }
+                        inserted_children.push(&row)?;
+                        affected += 1;
+                        if let Some(firing) = firing.as_mut() {
+                            firing.after_row(writer, tables, None, Some(row.as_slice()))?;
+                            stored.forget_generated_ids();
+                        }
+                    }
+                    (OnDuplicate::Update(_), Some(updates)) => {
+                        if let Some(changed) = changed_once.as_mut()
+                            && !changed.insert(conflict.row_key.clone())
+                        {
+                            return Err(row_affected_twice());
+                        }
+                        let upsert = Upsert {
+                            updates,
+                            inserted: &row,
+                            existing_key: &conflict.row_key,
+                        };
+                        let fired = update_firing.as_mut().map(|firing| (firing, &mut *tables));
+                        let outcome = stored.update_existing(writer, scope, upsert, fired)?;
+                        stored.forget_generated_ids();
+                        affected += outcome.affected_rows();
+                        let Some(updated) = outcome.into_row() else {
+                            continue;
+                        };
+                        if let Some(projection) = &returning {
+                            result_rows.push(projection.project(&updated)?);
+                        }
+                        continue;
+                    }
+                    _ => return Err(conflict.error(&table, &row)),
                 }
             }
         }
@@ -1435,7 +1437,7 @@ enum UpsertOutcome {
 
 impl UpsertOutcome {
     fn affected_rows(&self) -> usize {
-        let counts_twice = constraints::current_dialect() != Dialect::PostgreSql;
+        let counts_twice = constraints::current_dialect() == Dialect::MySql;
         match self {
             Self::Skipped => 0,
             Self::Unchanged(_) if counts_twice => 0,

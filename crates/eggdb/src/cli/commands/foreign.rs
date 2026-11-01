@@ -80,14 +80,15 @@ fn cell_json(cell: &Cell, column_type: &ColumnType) -> String {
 }
 
 fn read_parquet(
-    path: &str,
+    path: &std::path::Path,
     query: &str,
     row: &mut dyn FnMut(String) -> Result<(), String>,
 ) -> Result<(), String> {
     if !query.trim().is_empty() && query.trim() != "*" {
         return Err("a Parquet source reads every column: give '*' as the query".to_owned());
     }
-    let bytes = std::fs::read(path).map_err(|error| format!("cannot read {path}: {error}"))?;
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let columns: Vec<Column> = eggdb_parquet::read(&bytes).map_err(|error| error.to_string())?;
     let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
     let count = columns.first().map_or(0, |column| column.cells.len());
@@ -158,7 +159,11 @@ fn read(
         .or_else(|| source.strip_prefix("file:"))
         && path.ends_with(".parquet")
     {
-        return read_parquet(path, query, row);
+        let checked = prefixes
+            .iter()
+            .find_map(|allowed| allowed_file(allowed, source))
+            .ok_or_else(|| format!("{source} is not among the sources {VARIABLE} allows"))?;
+        return read_parquet(&checked, query, row);
     }
     Err(format!(
         "{source}: give a postgresql:// URL (EggDB or PostgreSQL) or a file:...parquet path"
@@ -194,18 +199,16 @@ fn allows(allowed: &str, source: &str) -> bool {
             && entry.port == wanted.port
             && entry.user == wanted.user
             && (!names_database(allowed) || entry.database == wanted.database)
+            && wanted.ssl_mode >= entry.ssl_mode
             && (wanted.ssl_root_cert.is_none() || wanted.ssl_root_cert == entry.ssl_root_cert);
     }
-    let (Some(directory), Some(file)) = (file_path(allowed), file_path(source)) else {
-        return false;
-    };
-    let (Ok(directory), Ok(file)) = (
-        std::fs::canonicalize(directory),
-        std::fs::canonicalize(file),
-    ) else {
-        return false;
-    };
-    file != directory && file.starts_with(&directory)
+    allowed_file(allowed, source).is_some()
+}
+
+fn allowed_file(allowed: &str, source: &str) -> Option<std::path::PathBuf> {
+    let directory = std::fs::canonicalize(file_path(allowed)?).ok()?;
+    let file = std::fs::canonicalize(file_path(source)?).ok()?;
+    (file != directory && file.starts_with(&directory)).then_some(file)
 }
 
 #[cfg(test)]
@@ -230,6 +233,16 @@ mod tests {
             "postgresql://reader@db.internal/sales"
         ));
         assert!(!allows(one_database, "postgresql://reader@db.internal/hr"));
+        let verified = "postgresql://reader@db.internal?sslmode=verify-full&sslrootcert=/ca.pem";
+        assert!(allows(
+            verified,
+            "postgresql://reader@db.internal/x?sslmode=verify-full&sslrootcert=/ca.pem"
+        ));
+        assert!(!allows(
+            verified,
+            "postgresql://reader@db.internal/x?sslmode=require"
+        ));
+        assert!(!allows(verified, "postgresql://reader@db.internal/x"));
     }
 
     #[test]

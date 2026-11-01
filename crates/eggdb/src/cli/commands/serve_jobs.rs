@@ -117,8 +117,26 @@ fn report_target_allowed(allowed: &str, target: &eggdb_http::HttpTarget) -> bool
     eggdb_http::parse_http_url(allowed).is_ok_and(|entry| {
         entry.host.eq_ignore_ascii_case(&target.host)
             && entry.port == target.port
-            && target.path.starts_with(&entry.path)
+            && path_within(&entry.path, &target.path)
     })
+}
+
+fn path_within(allowed: &str, target: &str) -> bool {
+    let target_path = target.split('?').next().unwrap_or_default();
+    let climbs = target_path.split('/').any(|segment| {
+        let decoded = segment.to_ascii_lowercase().replace("%2e", ".");
+        decoded == "." || decoded == ".."
+    });
+    if climbs {
+        return false;
+    }
+    let allowed = allowed.split('?').next().unwrap_or_default();
+    let allowed = allowed.trim_end_matches('/');
+    allowed.is_empty()
+        || target_path == allowed
+        || target_path
+            .strip_prefix(allowed)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -141,5 +159,25 @@ mod report_target_tests {
             entry,
             &target("http://hooks.example.com:8080/a")
         ));
+    }
+
+    #[test]
+    fn a_report_target_must_stay_under_the_allowed_path() {
+        let target = |url: &str| eggdb_http::parse_http_url(url).unwrap();
+        let entry = "http://hooks.example.com/hooks";
+        for allowed in [
+            "http://hooks.example.com/hooks",
+            "http://hooks.example.com/hooks/orders?x=1",
+        ] {
+            assert!(report_target_allowed(entry, &target(allowed)), "{allowed}");
+        }
+        for refused in [
+            "http://hooks.example.com/hooksX",
+            "http://hooks.example.com/hooks/../admin",
+            "http://hooks.example.com/hooks/%2E%2E/admin",
+            "http://hooks.example.com/admin",
+        ] {
+            assert!(!report_target_allowed(entry, &target(refused)), "{refused}");
+        }
     }
 }

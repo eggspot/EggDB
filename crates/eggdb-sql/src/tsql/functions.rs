@@ -44,7 +44,7 @@ impl Drop for NestingLevel {
 }
 
 pub(crate) fn enter_nesting() -> SqlResult<NestingLevel> {
-    crate::stack_depth::check()?;
+    crate::stack_depth::check().map_err(|_| nesting_too_deep())?;
     NESTING_LEVEL.with(|level| {
         if level.get() >= MAX_DYNAMIC_NESTING {
             return Err(nesting_too_deep());

@@ -89,7 +89,7 @@ pub(crate) fn role_is_checked() -> bool {
         context
             .borrow()
             .as_ref()
-            .is_some_and(|context| context.role_checked)
+            .is_none_or(|context| context.role_checked)
     })
 }
 

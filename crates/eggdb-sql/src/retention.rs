@@ -283,7 +283,11 @@ mod tests {
             run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
         }
         let cascaded = run(&mut session, "DELETE FROM clients WHERE name = 'ada'").unwrap_err();
-        assert_eq!(cascaded.state(), SqlState::FEATURE_NOT_SUPPORTED, "{cascaded}");
+        assert_eq!(
+            cascaded.state(),
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "{cascaded}"
+        );
         assert_eq!(
             run(&mut session, "DELETE FROM clients WHERE name = 'bob'").unwrap(),
             "DELETE 1"

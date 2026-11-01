@@ -102,9 +102,9 @@ relations psql's `\d` family reads.
 psql's `\d` family (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du`) reads EggDB's
 catalog: see [The PostgreSQL catalog](#the-postgresql-catalog).
 
-Not yet (each fails readably or is ignored harmlessly): TLS, `\d+`, `\df` and the other psql
-commands beyond the `\d` family, the catalog queries of GUI tools beyond it, `LISTEN`/`NOTIFY`, stored
-users and roles, and non-ASCII passwords.
+Not yet (each fails readably or is ignored harmlessly): `\d+`, `\df` and the other psql
+commands beyond the `\d` family, the catalog queries of GUI tools beyond it, and non-ASCII
+passwords. TLS, `LISTEN`/`NOTIFY` and stored roles have their own sections.
 
 ## The MySQL dialect
 
@@ -2389,7 +2389,8 @@ SET eggdb.tenant = 'acme';
 After `isolate`, a session sees and writes only the rows whose tenant column equals its
 `eggdb.tenant` setting; a session that has set none sees no rows and cannot add any, and a
 new row for another tenant fails with SQLSTATE `42501`. This holds for roles that are not
-superusers, so connect the application as such a role. A
+superusers, so connect the application as such a role. `TRUNCATE` of an isolated table is
+refused (`42501`) for every role but a superuser, since it would remove every tenant's rows. A
 tenant with `max_rows` gets SQLSTATE `53400` once it holds that many rows in a table.
 
 ## Ledger tables (eggdb_ledger)
@@ -2663,7 +2664,10 @@ SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;
 Schedules are cron's five fields (minute, hour, day of month, month, day of week) with `*`,
 lists, ranges, `/` steps and month and weekday names, or `@hourly`, `@daily`, `@weekly`,
 `@monthly` and `@yearly`; when both day fields are restricted, either one matching fires the
-job. A job whose schedule does not read never runs. Not yet: pg_cron's `'n seconds'`
+job. A job whose schedule does not read never runs. Every job runs with a superuser's rights,
+whoever scheduled it, so scheduling needs writing `cron.job`: grant that to administrators only,
+as pg_cron's superuser-only table is. Not yet: running a job as its `username`, pg_cron's
+`'n seconds'`
 schedules and `$` for the last day of the month, `cron.alter_job`, `cron.schedule_in_database`,
 `cron.timezone`, checking a schedule when it is added, SQL Server Agent jobs, MySQL events and
 Oracle's `DBMS_SCHEDULER`.
@@ -3612,8 +3616,6 @@ And more, not in the suite yet:
   `AUTOINCREMENT` reuses the row id of a deleted last row (SQLite's never does).
   `last_insert_rowid()` is not changed by inserts into tables whose key is not an `INTEGER
   PRIMARY KEY`.
-- `changes()` counts 2 for a row that `REPLACE` or an upsert replaced, as MySQL does, where
-  SQLite counts 1.
 - A statement that fails after it wrote rows inside a transaction rolls the whole transaction
   back, where SQLite rolls back the statement (no statement savepoints yet); `INSERT OR FAIL`
   behaves as `ABORT`, and the `OR` forms cover the primary key only (there are no `UNIQUE`

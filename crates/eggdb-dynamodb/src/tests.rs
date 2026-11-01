@@ -185,8 +185,28 @@ fn numbers_sort_numerically_and_unsigned_requests_are_refused() {
         crate::keys::Decimal::parse("1.50"),
         crate::keys::Decimal::parse("15e-1")
     );
-    for refused in ["", ".", "1e", "abc", "1.2.3", "1e999", &"9".repeat(39)] {
+    for refused in [
+        "",
+        ".",
+        "1e",
+        "abc",
+        "1.2.3",
+        "1e999",
+        &"9".repeat(39),
+        "1E-131",
+        "1E+126",
+    ] {
         assert!(crate::keys::Decimal::parse(refused).is_none(), "{refused}");
+    }
+    for accepted in [
+        "1E-130",
+        "-1E-130",
+        "9.9999999999999999999999999999999999999E+125",
+    ] {
+        assert!(
+            crate::keys::Decimal::parse(accepted).is_some(),
+            "{accepted}"
+        );
     }
     let keyspace = MemoryKeyspace::default();
     let endpoint = Endpoint::new(&keyspace, "eggdb", "secret");

@@ -942,16 +942,13 @@ fn format_number(value: &Value, template_text: &str) -> SqlResult<String> {
     let shape = NumberShape {
         negative,
         fill: template.fill,
-        explicit_sign: template
-            .pieces
-            .iter()
-            .any(|piece| {
-                matches!(
-                    piece,
-                    NumberPiece::Sign(SignKind::Anchored | SignKind::Both | SignKind::Minus)
-                        | NumberPiece::Brackets
-                )
-            }),
+        explicit_sign: template.pieces.iter().any(|piece| {
+            matches!(
+                piece,
+                NumberPiece::Sign(SignKind::Anchored | SignKind::Both | SignKind::Minus)
+                    | NumberPiece::Brackets
+            )
+        }),
         anchored_leading: template
             .pieces
             .iter()

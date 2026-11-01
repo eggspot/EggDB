@@ -94,7 +94,10 @@ fn percent_decode(text: &str) -> Result<Vec<u8>, SigV4Error> {
     let mut at = 0;
     while at < bytes.len() {
         if bytes[at] == b'%' {
-            let pair = text.get(at + 1..at + 3).ok_or(SigV4Error::Malformed)?;
+            let pair = text
+                .get(at + 1..at + 3)
+                .filter(|pair| pair.bytes().all(|digit| digit.is_ascii_hexdigit()))
+                .ok_or(SigV4Error::Malformed)?;
             out.push(u8::from_str_radix(pair, 16).map_err(|_| SigV4Error::Malformed)?);
             at += 3;
         } else {
@@ -566,6 +569,18 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn percent_escapes_need_two_hex_digits() {
+        assert_eq!(percent_decode("a%2Fb").unwrap(), b"a/b");
+        for broken in ["%+1", "%-1", "%1", "%zz", "%"] {
+            assert_eq!(
+                percent_decode(broken),
+                Err(SigV4Error::Malformed),
+                "{broken}"
+            );
+        }
     }
 
     #[test]

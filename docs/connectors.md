@@ -2,8 +2,8 @@
 
 Most tools reach EggDB today through a protocol it already speaks, so they need no EggDB plugin.
 Native connectors for each tool's own plugin system follow (D46, D239). The `compatibility` CI
-job runs the tools listed as checked against `eggdb serve` and reports each result in the run's
-summary. The same check, `scripts/compatibility.sh`, runs every Monday in the `Compatibility
+job runs the tools listed as checked against `eggdb serve`, reports each result in the run's
+summary, and fails CI when one of them fails. The same check, `scripts/compatibility.sh`, runs every Monday in the `Compatibility
 farm` workflow, which publishes the matrix as the run's summary and as an artifact kept for 90
 days (D44, D252).
 

@@ -664,8 +664,8 @@ fn build_lookup(
 }
 
 fn fails_only_on_rows_per_row_evaluation_may_skip(error: &SqlError) -> bool {
-    let code = error.state().code();
-    code.starts_with("22") || code == "53200"
+    let state = error.state();
+    state.code().starts_with("22") || state == SqlState::OUT_OF_MEMORY
 }
 
 fn lookup_over_every_inner_row(

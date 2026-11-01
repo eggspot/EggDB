@@ -89,7 +89,7 @@ impl Decimal {
         let exponent = point
             .checked_sub(i32::try_from(first).ok()?)?
             .checked_add(power)?;
-        if !(-130..=126).contains(&exponent) {
+        if !(-129..=126).contains(&exponent) {
             return None;
         }
         Some(Self {

@@ -72,6 +72,13 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
         if token.len() < MIN_TOKEN_BYTES || !token.is_ascii() {
             return Err(wrong(index + 1));
         }
+        if tokens.iter().any(|known: &AgentToken| known.token == token) {
+            return Err(format!(
+                "--mcp-token-file {} line {}: this token is already on an earlier line; give each agent its own token",
+                path.display(),
+                index + 1
+            ));
+        }
         tokens.push(AgentToken {
             role,
             token: token.to_owned(),
@@ -224,5 +231,23 @@ impl<'d> McpEndpoint<'d> {
         } else {
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_tokens;
+
+    #[test]
+    fn a_token_given_twice_is_refused() {
+        let folder = std::env::temp_dir().join(format!("eggdb-mcp-tokens-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("tokens");
+        let token = "0123456789abcdef0123456789abcdef";
+        std::fs::write(&file, format!("reporter {token}\n{token}\n")).unwrap();
+        let refused = read_tokens(&file).err().unwrap_or_default();
+        assert!(refused.contains("line 2"), "{refused}");
+        std::fs::write(&file, format!("reporter {token}\nanalyst {token}x\n")).unwrap();
+        assert_eq!(read_tokens(&file).map(|tokens| tokens.len()), Ok(2));
     }
 }

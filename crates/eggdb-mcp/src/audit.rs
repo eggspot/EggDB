@@ -151,7 +151,9 @@ fn prev_of(line: &[u8]) -> Option<&str> {
 }
 
 /// Checks that every record of the audit file at `path` links to the line before it by its
-/// SHA-256, so no record was changed, removed or inserted since it was written.
+/// SHA-256, so a record changed, removed or inserted before the last one shows as a break.
+/// Records cut off the end, and a file rewritten whole with a new chain, still verify: compare
+/// the last record's digest with a copy kept elsewhere to catch those.
 pub fn verify_chain(path: &Path) -> io::Result<ChainReport> {
     let mut report = ChainReport::default();
     let Some(mut reader) = open_audit(path)? else {

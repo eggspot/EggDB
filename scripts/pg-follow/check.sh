@@ -14,7 +14,7 @@ eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 work=$2
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
-container=eggdb-pg-follow
+container="eggdb-pg-follow"
 port=55432
 export PGPASSWORD=follow-check
 

@@ -216,7 +216,11 @@ fn wal_of(frames: &[(u32, &[u8])]) -> Vec<u8> {
     for (index, (number, page)) in frames.iter().enumerate() {
         let mut header = Vec::new();
         header.extend_from_slice(&number.to_be_bytes());
-        let commit = if index + 1 == frames.len() { *number } else { 0 };
+        let commit = if index + 1 == frames.len() {
+            *number
+        } else {
+            0
+        };
         header.extend_from_slice(&commit.to_be_bytes());
         header.extend_from_slice(&salts);
         sums = wal_checksum(&header, true, sums);

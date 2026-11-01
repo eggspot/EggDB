@@ -71,9 +71,9 @@ pub(crate) fn get_exact<'d>(document: &'d Document, path: &str) -> Option<&'d Bs
     Some(value)
 }
 
-/// Where a path to change ends: the container and the last part.
 const MAX_PATH_PARTS: usize = 100;
 
+/// Where a path to change ends: the container and the last part.
 pub(crate) enum Slot<'d> {
     Field(&'d mut Document, String),
     Element(&'d mut Vec<Bson>, usize),

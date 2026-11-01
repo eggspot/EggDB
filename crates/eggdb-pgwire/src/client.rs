@@ -21,8 +21,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_MESSAGE_BYTES: usize = 1 << 30;
 const CLIENT_NONCE_BYTES: usize = 18;
 
-/// How the client uses TLS, as libpq's `sslmode` names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the client uses TLS, as libpq's `sslmode` names it, ordered from the least protection to
+/// the most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SslMode {
     /// Never TLS.
     Disable,
