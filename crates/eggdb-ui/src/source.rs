@@ -45,6 +45,35 @@ pub trait Source {
     /// [`ErrorKind::NeedsReopen`].
     fn reopen(&mut self) -> Result<(), SourceError>;
 
+    /// The names of the database's collections, in byte order. A source without collections
+    /// has none.
+    fn collections(&self) -> Result<Vec<String>, SourceError> {
+        Ok(Vec::new())
+    }
+
+    /// Makes [`Source::keys`], [`Source::value`], [`Source::count`] and [`Source::write`] act on
+    /// the collection `name` from now on, or on the default key space for `None`. It fails with
+    /// [`ErrorKind::CollectionNotFound`] when there is no such collection.
+    fn show_collection(&mut self, name: Option<&str>) -> Result<(), SourceError> {
+        match name {
+            None => Ok(()),
+            Some(name) => Err(SourceError::new(
+                ErrorKind::CollectionNotFound,
+                format!("there is no collection named \"{name}\""),
+            )),
+        }
+    }
+
+    /// Creates an empty collection named `name` in one commit, and returns the commit's time,
+    /// UTC, as `HH:MM:SSZ`.
+    fn add_collection(&mut self, name: &str) -> Result<String, SourceError> {
+        let _ = name;
+        Err(SourceError::new(
+            ErrorKind::Other,
+            "this database has no collections",
+        ))
+    }
+
     /// Runs `text` as a SQL script, statement by statement, as `eggdb sql` does, and rolls
     /// back a transaction block the script leaves open. A source without SQL answers with an
     /// error.
@@ -110,13 +139,16 @@ pub enum Start<'a> {
     Before(&'a [u8]),
 }
 
-/// One key of the list: the key and its value's size.
+/// One key of the list: the key, its value's size and the time it has left.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRow {
     /// The key.
     pub key: Vec<u8>,
     /// The value's size in bytes.
     pub value_bytes: u64,
+    /// How long the key had left before it expires when it was read; `None` for a key without
+    /// a time to live.
+    pub time_to_live: Option<Duration>,
 }
 
 /// One step of a count.
@@ -143,13 +175,36 @@ pub enum Change {
         /// The key.
         key: Vec<u8>,
     },
+    /// Gives `key` a time to live, replacing any it had.
+    Expire {
+        /// The key.
+        key: Vec<u8>,
+        /// The time from the commit until the key expires.
+        time_to_live: Duration,
+    },
+    /// Removes the time to live of `key`, so it no longer expires.
+    Persist {
+        /// The key.
+        key: Vec<u8>,
+    },
+    /// Adds `by` to the counter stored under `key`; a negative `by` subtracts.
+    Increment {
+        /// The key.
+        key: Vec<u8>,
+        /// The amount to add.
+        by: i64,
+    },
 }
 
 impl Change {
     /// The key the change is to.
     pub fn key(&self) -> &[u8] {
         match self {
-            Self::Put { key, .. } | Self::Delete { key } => key,
+            Self::Put { key, .. }
+            | Self::Delete { key }
+            | Self::Expire { key, .. }
+            | Self::Persist { key }
+            | Self::Increment { key, .. } => key,
         }
     }
 }
@@ -246,6 +301,14 @@ pub enum ErrorKind {
     DatabaseFull,
     /// An option is outside what EggDB accepts.
     InvalidOption,
+    /// There is no collection of that name.
+    CollectionNotFound,
+    /// The name can't name a collection.
+    InvalidCollectionName,
+    /// The key starts with the bytes EggDB keeps for collections.
+    ReservedKey,
+    /// The value is not a counter, or the step would take it out of a counter's range.
+    NotAnInteger,
     /// Anything else.
     Other,
 }
@@ -271,6 +334,10 @@ impl ErrorKind {
             Self::NeedsReopen => "NeedsReopen",
             Self::DatabaseFull => "DatabaseFull",
             Self::InvalidOption => "InvalidOption",
+            Self::CollectionNotFound => "CollectionNotFound",
+            Self::InvalidCollectionName => "InvalidCollectionName",
+            Self::ReservedKey => "ReservedKey",
+            Self::NotAnInteger => "NotAnInteger",
             Self::Other => "Other",
         }
     }
@@ -312,4 +379,6 @@ pub struct Summary {
     pub log_bytes: u64,
     /// How long a write waits for another write transaction to end.
     pub write_timeout: Duration,
+    /// Whether the file has held keys with a time to live, which the key list then shows.
+    pub expiring_keys: bool,
 }

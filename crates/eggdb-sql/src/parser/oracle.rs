@@ -1,37 +1,20 @@
 use super::Parser;
 use crate::ast::{
-    BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OrderItem, SelectItem,
-    Statement, TableReference, UnaryOperator,
+    AggregateFunction, BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OrderItem,
+    SelectItem, SequenceOptions, Statement, TableReference, UnaryOperator,
 };
+use crate::encoding::{IdentitySeed, integer_type_range};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children;
 use crate::lexer::{TokenKind, swap_uniform_case};
+use crate::oracle_intervals::{DEFAULT_LEADING_PRECISION, IntervalField, MAX_PRECISION, Qualifier};
 use crate::settings::Settings;
-use crate::types::SqlType;
+use crate::types::{SqlType, Value};
 
 /// The Oracle Database release whose documented behaviour EggDB's Oracle dialect follows.
 pub const ORACLE_COMPATIBLE_VERSION: &str = "23ai";
 
 const MAX_DECODE_ARGUMENTS: usize = 255;
-
-const DICTIONARY_VIEWS: [&str; 16] = [
-    "user_views",
-    "all_views",
-    "user_tab_comments",
-    "all_tab_comments",
-    "user_col_comments",
-    "all_col_comments",
-    "user_tables",
-    "all_tables",
-    "user_tab_columns",
-    "all_tab_columns",
-    "user_tab_cols",
-    "all_tab_cols",
-    "user_indexes",
-    "all_indexes",
-    "user_ind_columns",
-    "all_ind_columns",
-];
 
 pub(crate) fn is_reserved(word: &str) -> bool {
     matches!(
@@ -152,11 +135,7 @@ pub(super) fn is_clause_word(word: &str) -> bool {
 }
 
 pub(super) fn is_dictionary_name(name: &str) -> bool {
-    DICTIONARY_VIEWS.contains(&name)
-}
-
-pub(crate) fn is_dictionary_view(table: &TableReference) -> bool {
-    table.derived.is_none() && DICTIONARY_VIEWS.contains(&table.name.text.as_str())
+    crate::oracle_dictionary::OracleRelation::named(name).is_some()
 }
 
 fn literal(literal: Literal, position: usize) -> Expr {
@@ -401,9 +380,79 @@ impl<'t> Parser<'t> {
         })
     }
 
+    pub(super) fn oracle_user_schema(&self) -> String {
+        self.oracle_settings(|settings| {
+            settings
+                .oracle_user_schema
+                .clone()
+                .unwrap_or_else(|| crate::schemas::DEFAULT_SCHEMA.to_owned())
+        })
+    }
+
+    fn oracle_current_schema(&self) -> String {
+        let user_schema = self.oracle_user_schema();
+        let first = self.oracle_settings(|settings| {
+            crate::schemas::path_entries(&settings.get("search_path").unwrap_or_default())
+                .into_iter()
+                .next()
+        });
+        let schema = match first {
+            Some(entry) if entry != "$user" => entry,
+            _ => user_schema.clone(),
+        };
+        crate::oracle_dictionary::owner_name(&schema, &self.oracle_user(), &user_schema)
+    }
+
+    fn sys_context(&mut self, name: &Name) -> SqlResult<Expr> {
+        let position = name.position;
+        let arguments = self.oracle_arguments()?;
+        if arguments.len() < 2 {
+            return Err(wrong_argument_count(name, true));
+        }
+        if arguments.len() > 3 {
+            return Err(wrong_argument_count(name, false));
+        }
+        let constant = |expr: &Expr| match &expr.kind {
+            ExprKind::Literal(Literal::String(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let (Some(namespace), Some(parameter)) = (
+            arguments.first().and_then(constant),
+            arguments.get(1).and_then(constant),
+        ) else {
+            return Err(self.not_supported("SYS_CONTEXT with arguments other than text constants"));
+        };
+        if !namespace.trim().eq_ignore_ascii_case("userenv") {
+            return Ok(literal(Literal::Null, position));
+        }
+        let user = self.oracle_user();
+        let current_schema = self.oracle_current_schema();
+        let (database, session_id) = self.oracle_settings(|settings| {
+            (settings.database.clone(), settings.sqlserver.connection_id)
+        });
+        let facts = crate::oracle_dictionary::SessionFacts {
+            user: &user,
+            current_schema: &current_schema,
+            database: &database,
+            session_id,
+        };
+        let value = crate::oracle_dictionary::userenv(&parameter, &facts)
+            .map_err(|error| error.at(position))?;
+        Ok(match value {
+            Some(value) => Expr {
+                kind: ExprKind::SessionValue {
+                    name: "sys_context",
+                    value,
+                },
+                position,
+            },
+            None => literal(Literal::Null, position),
+        })
+    }
+
     pub(super) fn oracle_statement(&mut self) -> SqlResult<Option<Statement>> {
         let TokenKind::Word(word) = self.peek_kind() else {
-            return Ok(None);
+            return self.plsql_statement();
         };
         let statement = match word.as_ref() {
             "drop" if self.is_word_at(1, "table") => self.oracle_drop_table()?,
@@ -427,19 +476,17 @@ impl<'t> Parser<'t> {
             }
             "merge" => self.merge(&super::merge::MergeRules::oracle())?,
             "alter" if self.is_word_at(1, "session") => self.alter_session()?,
-            "begin" | "declare" => {
-                return Err(self.not_supported(
-                    "PL/SQL blocks (Oracle starts a transaction with the first change)",
-                ));
+            "begin" if matches!(self.peek_kind_at(1), TokenKind::End | TokenKind::Semicolon) => {
+                return Ok(None);
             }
             "start" | "end" | "abort" | "show" | "reset" | "values" | "table" | "listen"
-            | "notify" | "unlisten" | "vacuum" | "discard" | "copy" => {
+            | "notify" | "unlisten" | "vacuum" | "discard" => {
                 return Err(self.unexpected());
             }
             "insert" if self.is_word_at(1, "all") || self.is_word_at(1, "first") => {
                 return Err(self.not_supported("INSERT ALL and INSERT FIRST"));
             }
-            _ => return Ok(None),
+            _ => return self.plsql_statement(),
         };
         Ok(Some(statement))
     }
@@ -547,17 +594,29 @@ impl<'t> Parser<'t> {
         } else {
             self.expression()?
         };
-        if self.is_word("percent") {
-            return Err(self.not_supported("FETCH ... PERCENT"));
-        }
+        let percent = self.take_word("percent");
         if !self.take_word("rows") {
             self.expect_word("row")?;
         }
-        if self.is_word("with") {
-            return Err(self.not_supported("FETCH ... WITH TIES"));
-        }
-        self.expect_word("only")?;
-        Ok(not_below_zero(count))
+        let with_ties = if self.take_word("with") {
+            self.expect_word("ties")?;
+            true
+        } else {
+            self.expect_word("only")?;
+            false
+        };
+        Ok(match (percent, with_ties) {
+            (false, false) => not_below_zero(count),
+            (false, true) => oracle_function(
+                "oracle_fetch_with_ties",
+                vec![not_below_zero(count)],
+                position,
+            ),
+            (true, false) => oracle_function("oracle_fetch_percent", vec![count], position),
+            (true, true) => {
+                oracle_function("oracle_fetch_percent_with_ties", vec![count], position)
+            }
+        })
     }
 
     pub(super) fn oracle_type(&mut self) -> SqlResult<SqlType> {
@@ -607,8 +666,8 @@ impl<'t> Parser<'t> {
             "date" => SqlType::Timestamp(Some(0)),
             "timestamp" => self.oracle_timestamp(start)?,
             "json" => SqlType::Jsonb,
-            "interval" | "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector"
-            | "sdo_geometry" => {
+            "interval" => self.oracle_interval_type(start)?,
+            "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector" | "sdo_geometry" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()
@@ -699,6 +758,164 @@ impl<'t> Parser<'t> {
         Ok(SqlType::Timestamp(Some(precision)))
     }
 
+    fn oracle_interval_precision(&mut self, position: usize) -> SqlResult<u8> {
+        let digits = self.oracle_type_argument()?;
+        u8::try_from(digits)
+            .ok()
+            .filter(|digits| *digits <= MAX_PRECISION)
+            .ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_TABLE_DEFINITION,
+                    "datetime/interval precision is out of range",
+                )
+                .with_oracle_code(30088)
+                .at(position)
+            })
+    }
+
+    fn oracle_interval_field(&mut self) -> SqlResult<IntervalField> {
+        let TokenKind::Word(word) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let Some(field) = IntervalField::named(word.as_ref()) else {
+            return Err(self.unexpected());
+        };
+        self.at += 1;
+        Ok(field)
+    }
+
+    pub(super) fn oracle_interval_qualifier(&mut self, position: usize) -> SqlResult<Qualifier> {
+        let leading = self.oracle_interval_field()?;
+        let mut qualifier = Qualifier {
+            leading,
+            trailing: leading,
+            leading_precision: DEFAULT_LEADING_PRECISION,
+            fraction_digits: crate::oracle_intervals::DEFAULT_FRACTION_DIGITS,
+        };
+        if self.take(&TokenKind::LeftParen) {
+            qualifier.leading_precision = self.oracle_interval_precision(position)?;
+            if leading == IntervalField::Second && self.take(&TokenKind::Comma) {
+                qualifier.fraction_digits = self.oracle_interval_precision(position)?;
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        if self.take_word("to") {
+            qualifier.trailing = self.oracle_interval_field()?;
+            if qualifier.trailing == IntervalField::Second && self.take(&TokenKind::LeftParen) {
+                qualifier.fraction_digits = self.oracle_interval_precision(position)?;
+                self.expect(&TokenKind::RightParen)?;
+            }
+        }
+        if !qualifier.is_valid() {
+            return Err(SqlError::syntax("missing keyword", self.position()).with_oracle_code(905));
+        }
+        if qualifier.trailing != IntervalField::Second {
+            qualifier.fraction_digits = 0;
+        }
+        Ok(qualifier)
+    }
+
+    fn oracle_interval_type(&mut self, position: usize) -> SqlResult<SqlType> {
+        let qualifier = self.oracle_interval_qualifier(position)?;
+        match (qualifier.leading, qualifier.trailing) {
+            (IntervalField::Year, IntervalField::Month)
+            | (IntervalField::Day, IntervalField::Second) => Ok(qualifier.sql_type()),
+            _ => Err(SqlError::syntax("missing keyword", position).with_oracle_code(905)),
+        }
+    }
+
+    fn oracle_interval_literal(&mut self, position: usize) -> SqlResult<Option<Expr>> {
+        let text = match self.peek_kind_at(1) {
+            TokenKind::String(text) => text.as_ref().to_owned(),
+            _ => return Ok(None),
+        };
+        self.at += 2;
+        let qualifier = self.oracle_interval_qualifier(position)?;
+        let value = crate::oracle_intervals::parse_literal(&text, qualifier)
+            .map_err(|error| error.at(position))?;
+        Ok(Some(Expr {
+            kind: ExprKind::Constant {
+                value: Value::Interval(value),
+                sql_type: Some(qualifier.sql_type()),
+            },
+            position,
+        }))
+    }
+
+    fn oracle_listagg(&mut self, name: &Name) -> SqlResult<Expr> {
+        let position = name.position;
+        self.expect(&TokenKind::LeftParen)?;
+        let distinct = self.take_word("distinct");
+        if !distinct {
+            self.take_word("all");
+        }
+        let measure = self.expression()?;
+        let delimiter = if self.take(&TokenKind::Comma) {
+            self.expression()?
+        } else {
+            literal(Literal::Null, position)
+        };
+        let mut truncate = false;
+        let mut indicator = crate::oracle_listagg::DEFAULT_TRUNCATION_INDICATOR.to_owned();
+        let mut with_count = true;
+        if self.take_word("on") {
+            self.expect_word("overflow")?;
+            if self.take_word("truncate") {
+                truncate = true;
+                if let TokenKind::String(text) = self.peek_kind() {
+                    indicator = text.as_ref().to_owned();
+                    self.at += 1;
+                }
+                if self.take_word("with") {
+                    self.expect_word("count")?;
+                } else if self.take_word("without") {
+                    self.expect_word("count")?;
+                    with_count = false;
+                }
+            } else {
+                self.expect_word("error")?;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let mut order = Vec::new();
+        if self.take_word("within") {
+            self.expect_word("group")?;
+            self.expect(&TokenKind::LeftParen)?;
+            self.expect_word("order")?;
+            self.expect_word("by")?;
+            order = self.order_items()?;
+            self.expect(&TokenKind::RightParen)?;
+        }
+        if self.is_word("over") {
+            return Err(self.not_supported("LISTAGG as an analytic function (OVER)"));
+        }
+        let text = oracle_function("oracle_concat", vec![measure], position);
+        let argument = if order.is_empty() {
+            text
+        } else {
+            crate::aggregate::ordered_arguments(text, order)
+        };
+        let parts = Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::ArrayAgg,
+                argument: Some(Box::new(argument)),
+                distinct,
+            },
+            position,
+        };
+        Ok(oracle_function(
+            "oracle_listagg",
+            vec![
+                parts,
+                delimiter,
+                literal(Literal::Boolean(truncate), position),
+                literal(Literal::String(indicator), position),
+                literal(Literal::Boolean(with_count), position),
+            ],
+            position,
+        ))
+    }
+
     fn oracle_number(&mut self) -> SqlResult<SqlType> {
         if !self.take(&TokenKind::LeftParen) {
             return Ok(SqlType::Numeric(None));
@@ -737,29 +954,41 @@ impl<'t> Parser<'t> {
 
     pub(super) fn oracle_identity(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
         self.at += 1;
-        if !self.take_word("always") && self.take_word("by") {
+        let by_default = !self.take_word("always") && self.take_word("by");
+        if by_default {
             self.expect_word("default")?;
             if self.take_word("on") {
                 self.expect_word("null")?;
+                if self.take_word("for") {
+                    self.expect_word("insert")?;
+                    if !self.take_word("only") {
+                        self.expect_word("and")?;
+                        self.expect_word("update")?;
+                    }
+                }
             }
         }
         self.expect_word("as")?;
         self.expect_word("identity")?;
-        if self.is(&TokenKind::LeftParen) {
-            return Err(self.not_supported("identity options"));
-        }
+        let position = self.position();
+        let options = if self.take(&TokenKind::LeftParen) {
+            let options = self.sequence_options(false)?;
+            self.expect(&TokenKind::RightParen)?;
+            options
+        } else {
+            self.sequence_options(false)?
+        };
         if !matches!(
             column.sql_type,
             SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
         ) {
             column.sql_type = SqlType::BigInt;
         }
+        column.identity_seed =
+            oracle_identity_seed(&options, column.sql_type).map_err(|error| error.at(position))?;
         column.auto_increment = true;
+        column.generated_always = !by_default;
         Ok(())
-    }
-
-    fn is(&self, kind: &TokenKind) -> bool {
-        self.peek_kind() == kind
     }
 
     pub(super) fn oracle_primary(
@@ -776,6 +1005,26 @@ impl<'t> Parser<'t> {
                 return self.parameter(&number.to_string(), position).map(Some);
             }
             TokenKind::Word(word) => match word.as_ref() {
+                "interval" => return self.oracle_interval_literal(position),
+                "sessiontimezone" | "dbtimezone" => {
+                    self.at += 1;
+                    let (name, value) = if word.as_ref() == "sessiontimezone" {
+                        let zone = self.oracle_settings(|settings| settings.time_zone);
+                        let shown = match zone.region_name() {
+                            Some(region) => region.to_owned(),
+                            None => {
+                                crate::oracle_datetime::zone_text(zone.fixed_offset().unwrap_or(0))
+                            }
+                        };
+                        ("sessiontimezone", shown)
+                    } else {
+                        ("dbtimezone", crate::oracle_datetime::zone_text(0))
+                    };
+                    Expr {
+                        kind: ExprKind::SessionValue { name, value },
+                        position,
+                    }
+                }
                 "rownum" => {
                     self.at += 1;
                     Expr {
@@ -837,6 +1086,35 @@ impl<'t> Parser<'t> {
         Ok(arguments)
     }
 
+    fn oracle_routine_call(&mut self, name: &Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut names: Vec<Option<String>> = Vec::new();
+        let mut arguments = Vec::new();
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                let parameter = self.named_argument_name()?;
+                if parameter.is_none() && names.iter().any(Option::is_some) {
+                    return Err(SqlError::syntax(
+                        "positional argument cannot follow named argument",
+                        self.position(),
+                    ));
+                }
+                names.push(parameter.map(|parameter| parameter.text));
+                arguments.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(crate::routines::marked_call(
+            name.text.clone(),
+            names,
+            arguments,
+            name.position,
+        ))
+    }
+
     fn oracle_trim(&mut self, name: &Name) -> SqlResult<Expr> {
         self.expect(&TokenKind::LeftParen)?;
         let (left, right) = if self.take_word("leading") {
@@ -875,6 +1153,12 @@ impl<'t> Parser<'t> {
         if name.text == "trim" {
             return self.oracle_trim(name).map(Some);
         }
+        if name.text == "sys_context" {
+            return self.sys_context(name).map(Some);
+        }
+        if name.text == "listagg" {
+            return self.oracle_listagg(name).map(Some);
+        }
         if crate::ast::AggregateFunction::named(&name.text).is_some() {
             return Ok(None);
         }
@@ -897,6 +1181,8 @@ impl<'t> Parser<'t> {
             "rpad" => ("oracle_rpad", 2, 3),
             "replace" => ("oracle_replace", 2, 3),
             "chr" => ("oracle_chr", 1, 1),
+            "hextoraw" => ("oracle_hextoraw", 1, 1),
+            "rawtohex" => ("oracle_rawtohex", 1, 1),
             "ascii" => ("oracle_ascii", 1, 1),
             "abs" => ("oracle_abs", 1, 1),
             "round" => ("oracle_round", 1, 2),
@@ -915,15 +1201,20 @@ impl<'t> Parser<'t> {
             "to_timestamp" => ("oracle_to_timestamp", 1, 3),
             "add_months" => ("oracle_add_months", 2, 2),
             "last_day" => ("oracle_last_day", 1, 1),
-            "months_between" | "next_day" | "to_timestamp_tz" | "numtodsinterval"
-            | "numtoyminterval" => {
-                return Err(self.not_supported(&format!(
-                    "{}() in the Oracle dialect",
-                    name.text.to_ascii_uppercase()
-                )));
+            "months_between" => ("oracle_months_between", 2, 2),
+            "next_day" => ("oracle_next_day", 2, 2),
+            "to_timestamp_tz" => ("oracle_to_timestamp_tz", 1, 3),
+            "from_tz" => ("oracle_from_tz", 2, 2),
+            "sys_extract_utc" => ("oracle_sys_extract_utc", 1, 1),
+            "tz_offset" => ("oracle_tz_offset", 1, 1),
+            "numtodsinterval" => ("oracle_numtodsinterval", 2, 2),
+            "numtoyminterval" => ("oracle_numtoyminterval", 2, 2),
+            "to_dsinterval" => ("oracle_to_dsinterval", 1, 1),
+            "to_yminterval" => ("oracle_to_yminterval", 1, 1),
+            _ if crate::window::WindowFunction::named(&name.text).is_some() => {
+                return Err(invalid_identifier(&name.text, position));
             }
-            "listagg" => return Err(self.not_supported("LISTAGG")),
-            _ => return Err(invalid_identifier(&name.text, position)),
+            _ => return self.oracle_routine_call(name).map(Some),
         };
         let arguments = self.oracle_arguments()?;
         if arguments.len() < least {
@@ -964,4 +1255,388 @@ impl<'t> Parser<'t> {
         };
         Ok(Some(expr))
     }
+}
+
+pub(crate) fn oracle_table_name(text: &str, settings: &Settings) -> SqlResult<Name> {
+    let tokens = crate::lexer::tokenize_in(text, crate::dialect::Dialect::Oracle)?;
+    let mut parser = Parser::new(text, &tokens)
+        .with_context(super::Parameters::Absent, settings)
+        .in_dialect(crate::dialect::Dialect::Oracle);
+    let name = parser.table_name()?;
+    if !matches!(parser.peek_kind(), TokenKind::End | TokenKind::Semicolon) {
+        return Err(parser.unexpected());
+    }
+    Ok(name)
+}
+
+const BINARY_COLLATIONS: [&str; 3] = ["using_nls_comp", "binary", "using_nls_sort"];
+
+impl Parser<'_> {
+    pub(super) fn oracle_collation(&mut self) -> SqlResult<()> {
+        let position = self.position();
+        let name = self.label()?.to_ascii_lowercase();
+        if BINARY_COLLATIONS.contains(&name.as_str()) {
+            return Ok(());
+        }
+        Err(self
+            .not_supported(&format!("the collation {}", name.to_ascii_uppercase()))
+            .at(position))
+    }
+
+    pub(super) fn oracle_view_options(&mut self) -> SqlResult<()> {
+        loop {
+            if self.is_word("default") && self.is_word_at(1, "collation") {
+                self.at += 2;
+                self.oracle_collation()?;
+            } else if self.take_word("bequeath") {
+                if !self.take_word("current_user") {
+                    self.expect_word("definer")?;
+                }
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    fn skip_balanced(&mut self) -> SqlResult<()> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek_kind() {
+                TokenKind::End => return Err(self.unexpected()),
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => depth -= 1,
+                _ => {}
+            }
+            self.at += 1;
+        }
+        Ok(())
+    }
+
+    fn take_integer(&mut self) -> bool {
+        if matches!(self.peek_kind(), TokenKind::Integer(_)) {
+            self.at += 1;
+            return true;
+        }
+        false
+    }
+
+    fn skip_compression(&mut self) {
+        if self.take_integer() {
+            return;
+        }
+        let _ = self.take_word("basic") || self.take_word("advanced");
+        if self.take_word("for") {
+            while [
+                "oltp",
+                "query",
+                "archive",
+                "all",
+                "direct_load",
+                "operations",
+                "low",
+                "high",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+            }
+        }
+    }
+
+    fn skip_partitioning(&mut self) -> SqlResult<()> {
+        loop {
+            match self.peek_kind() {
+                TokenKind::LeftParen => self.skip_balanced()?,
+                TokenKind::Integer(_) => self.at += 1,
+                TokenKind::Word(word)
+                    if [
+                        "partition",
+                        "subpartition",
+                        "by",
+                        "range",
+                        "list",
+                        "hash",
+                        "reference",
+                        "system",
+                        "interval",
+                        "template",
+                        "partitions",
+                        "subpartitions",
+                        "store",
+                        "in",
+                        "automatic",
+                        "consistent",
+                        "columns",
+                    ]
+                    .contains(&word.as_ref()) =>
+                {
+                    self.at += 1;
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    pub(super) fn skip_physical_properties(&mut self) -> SqlResult<()> {
+        loop {
+            if self.is_word("segment") && self.is_word_at(1, "creation") {
+                self.at += 2;
+                if !self.take_word("immediate") {
+                    self.expect_word("deferred")?;
+                }
+            } else if ["pctfree", "pctused", "initrans", "maxtrans", "pctthreshold"]
+                .iter()
+                .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+                if !self.take_integer() {
+                    return Err(self.unexpected());
+                }
+            } else if (self.is_word("storage") || self.is_word("result_cache"))
+                && self.peek_kind_at(1) == &TokenKind::LeftParen
+            {
+                self.at += 1;
+                self.skip_balanced()?;
+            } else if self.take_word("tablespace") {
+                self.take_word("set");
+                self.name()?;
+            } else if [
+                "logging",
+                "nologging",
+                "filesystem_like_logging",
+                "nocompress",
+                "cache",
+                "nocache",
+                "monitoring",
+                "nomonitoring",
+                "rowdependencies",
+                "norowdependencies",
+                "noparallel",
+                "reverse",
+                "visible",
+                "invisible",
+                "online",
+                "overflow",
+                "noinmemory",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+            } else if self.take_word("compress") {
+                self.skip_compression();
+            } else if (self.is_word("row") || self.is_word("column"))
+                && self.is_word_at(1, "store")
+                && self.is_word_at(2, "compress")
+            {
+                self.at += 3;
+                self.skip_compression();
+            } else if self.take_word("parallel") {
+                self.take_integer();
+            } else if (self.is_word("enable") || self.is_word("disable"))
+                && self.is_word_at(1, "row")
+                && self.is_word_at(2, "movement")
+            {
+                self.at += 3;
+            } else if self.is_word("no") && self.is_word_at(1, "inmemory") {
+                self.at += 2;
+            } else if self.take_word("inmemory") {
+                if self.peek_kind() == &TokenKind::LeftParen {
+                    self.skip_balanced()?;
+                }
+            } else if self.is_word("organization") {
+                if self.is_word_at(1, "heap") || self.is_word_at(1, "index") {
+                    self.at += 2;
+                } else {
+                    return Err(self.not_supported("ORGANIZATION EXTERNAL tables"));
+                }
+            } else if self.take_word("including") {
+                self.name()?;
+            } else if self.is_word("lob") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+                self.at += 1;
+                self.skip_balanced()?;
+                self.expect_word("store")?;
+                self.expect_word("as")?;
+                let _ = self.take_word("securefile") || self.take_word("basicfile");
+                if !matches!(self.peek_kind(), TokenKind::LeftParen) && !self.at_physical_end() {
+                    self.name()?;
+                }
+                if self.peek_kind() == &TokenKind::LeftParen {
+                    self.skip_balanced()?;
+                }
+            } else if self.is_word("compute") && self.is_word_at(1, "statistics") {
+                self.at += 2;
+            } else if self.is_word("default") && self.is_word_at(1, "collation") {
+                self.at += 2;
+                self.oracle_collation()?;
+            } else if self.is_word("partition") && self.is_word_at(1, "by") {
+                self.skip_partitioning()?;
+            } else if self.is_word("cluster") {
+                return Err(self.not_supported("tables in a CLUSTER"));
+            } else if self.is_word("nested") || self.is_word("xmltype") {
+                return Err(self.not_supported("NESTED TABLE and XMLTYPE storage clauses"));
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    fn at_physical_end(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::End | TokenKind::Semicolon)
+            || [
+                "tablespace",
+                "storage",
+                "logging",
+                "nologging",
+                "enable",
+                "disable",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+    }
+
+    pub(super) fn oracle_using_index(&mut self) -> SqlResult<Option<Name>> {
+        if self.peek_kind() == &TokenKind::LeftParen {
+            self.skip_balanced()?;
+            return Ok(None);
+        }
+        let mut named = None;
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+        ) && !self.at_physical_end()
+            && ![
+                "pctfree",
+                "initrans",
+                "maxtrans",
+                "compute",
+                "compress",
+                "nocompress",
+                "pctused",
+                "reverse",
+                "local",
+                "global",
+                "online",
+                "visible",
+                "invisible",
+                "noparallel",
+                "parallel",
+                "nosort",
+                "sort",
+                "validate",
+                "novalidate",
+                "rely",
+                "norely",
+                "segment",
+                "indexing",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+        {
+            named = Some(self.table_name()?);
+        }
+        while self.take_word("local") || self.take_word("global") {
+            if self.is_word("partition") && self.is_word_at(1, "by") {
+                self.skip_partitioning()?;
+            } else if self.peek_kind() == &TokenKind::LeftParen {
+                self.skip_balanced()?;
+            }
+        }
+        loop {
+            if self.take_word("indexing") {
+                if !self.take_word("partial") {
+                    self.expect_word("full")?;
+                }
+            } else if !(self.take_word("nosort") || self.take_word("sort")) {
+                break;
+            }
+        }
+        self.skip_physical_properties()?;
+        Ok(named)
+    }
+
+    pub(super) fn oracle_constraint_states(&mut self) -> SqlResult<bool> {
+        Ok(self.oracle_constraint_state_list()?.enabled)
+    }
+
+    pub(super) fn oracle_constraint_state_list(&mut self) -> SqlResult<ConstraintStates> {
+        let mut states = ConstraintStates {
+            enabled: true,
+            using_index: None,
+        };
+        loop {
+            if self.take_word("enable") {
+                states.enabled = true;
+            } else if self.take_word("disable") {
+                states.enabled = false;
+            } else if self.take_word("validate")
+                || self.take_word("novalidate")
+                || self.take_word("rely")
+                || self.take_word("norely")
+            {
+            } else if self.is_word("using") && self.is_word_at(1, "index") {
+                self.at += 2;
+                if let Some(index) = self.oracle_using_index()? {
+                    states.using_index = Some(index);
+                }
+            } else {
+                return Ok(states);
+            }
+        }
+    }
+}
+
+fn oracle_identity_seed(
+    options: &SequenceOptions,
+    sql_type: SqlType,
+) -> SqlResult<Option<IdentitySeed>> {
+    let invalid = |code: u16, message: &str| {
+        SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message).with_oracle_code(code)
+    };
+    let (low, high) = integer_type_range(sql_type).unwrap_or((i64::MIN, i64::MAX));
+    let increment = options.increment.unwrap_or(1);
+    if increment == 0 {
+        return Err(invalid(4002, "INCREMENT must be a nonzero integer"));
+    }
+    let ascending = increment > 0;
+    let min = options.min.flatten();
+    let max = options.max.flatten();
+    if let (Some(min), Some(max)) = (min, max)
+        && min >= max
+    {
+        return Err(invalid(4004, "MINVALUE must be less than MAXVALUE"));
+    }
+    let start = options.start.unwrap_or(if ascending {
+        min.unwrap_or(1)
+    } else {
+        max.unwrap_or(-1)
+    });
+    if start < min.unwrap_or(low) {
+        return Err(invalid(4006, "START WITH cannot be less than MINVALUE"));
+    }
+    if start > max.unwrap_or(high) {
+        return Err(invalid(4008, "START WITH cannot be more than MAXVALUE"));
+    }
+    let limited = if ascending {
+        max.is_some_and(|max| max < high)
+    } else {
+        min.is_some_and(|min| min > low)
+    };
+    if limited || options.cycle == Some(true) {
+        return Err(SqlError::not_supported(
+            "identity options that end or cycle the identity before its type's range (MAXVALUE, MINVALUE, CYCLE) are not supported yet",
+        ));
+    }
+    let seed = IdentitySeed {
+        seed: start,
+        increment,
+    };
+    Ok((seed != IdentitySeed::ONE_BY_ONE).then_some(seed))
+}
+
+pub(super) struct ConstraintStates {
+    pub(super) enabled: bool,
+    pub(super) using_index: Option<Name>,
 }

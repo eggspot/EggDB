@@ -205,6 +205,7 @@ mod tests {
             last_insert_id: None,
             last_insert_rowid: None,
             last_identity_value: None,
+            info_messages: Vec::new(),
         };
         let mut out = JsonOut::new();
         out.begin_object();

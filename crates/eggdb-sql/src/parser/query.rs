@@ -2,7 +2,7 @@ use super::{Parser, oracle, sqlite};
 use crate::ast::{
     BinaryOperator, CommonTable, DerivedTable, Expr, ExprKind, GeneratedTable, Literal, Name,
     OrderItem, Query, Select, SetExpr, SetOperation, SetOperator, Statement, Subquery,
-    SubqueryState, SubqueryTest, TableReference,
+    SubqueryState, SubqueryTest, TableReference, WithStatement, WithTable,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -52,7 +52,11 @@ impl Parser<'_> {
     fn starts_query_at(&self, ahead: usize) -> bool {
         self.is_word_at(ahead, "select")
             || self.is_word_at(ahead, "with")
-            || (self.postgresql() && self.is_word_at(ahead, "values"))
+            || (self.reads_values_lists() && self.is_word_at(ahead, "values"))
+    }
+
+    fn reads_values_lists(&self) -> bool {
+        self.postgresql() || self.sqlserver()
     }
 
     fn starts_query_in_parentheses(&self) -> bool {
@@ -63,9 +67,8 @@ impl Parser<'_> {
         ahead > 0 && self.starts_query_at(ahead)
     }
 
-    pub(super) fn query_statement(&mut self) -> SqlResult<Statement> {
-        let query = self.query()?;
-        Ok(match query {
+    fn as_statement(query: Query) -> Statement {
+        match query {
             Query {
                 with,
                 body: SetExpr::Select(select),
@@ -75,7 +78,66 @@ impl Parser<'_> {
                 ..
             } if with.is_empty() && order_by.is_empty() => Statement::Select(*select),
             query => Statement::Query(Box::new(query)),
-        })
+        }
+    }
+
+    fn at_data_modifying_statement(&self) -> bool {
+        ["insert", "update", "delete"]
+            .iter()
+            .any(|word| self.is_word(word))
+    }
+
+    fn data_modifying_statement(&mut self) -> SqlResult<Statement> {
+        if self.is_word("insert") {
+            self.insert()
+        } else if self.is_word("update") {
+            self.update()
+        } else {
+            self.delete()
+        }
+    }
+
+    pub(super) fn query_statement(&mut self) -> SqlResult<Statement> {
+        if !self.is_word("with") {
+            return Ok(Self::as_statement(self.query()?));
+        }
+        let position = self.position();
+        self.at += 1;
+        let (tables, recursive) = self.with_tables(true)?;
+        let modifying = tables
+            .iter()
+            .any(|table| matches!(table, WithTable::Modifying { .. }));
+        if modifying || self.at_data_modifying_statement() {
+            let body = if self.at_data_modifying_statement() {
+                self.data_modifying_statement()?
+            } else {
+                Statement::Query(Box::new(self.query_after_with(
+                    Vec::new(),
+                    false,
+                    position,
+                )?))
+            };
+            return Ok(Statement::With(Box::new(WithStatement {
+                tables,
+                recursive,
+                body,
+            })));
+        }
+        let with = tables
+            .into_iter()
+            .filter_map(|table| match table {
+                WithTable::Query(table) => Some(*table),
+                WithTable::Modifying { .. } => None,
+            })
+            .collect();
+        Ok(Self::as_statement(
+            self.query_after_with(with, recursive, position)?,
+        ))
+    }
+
+    pub(super) fn insert_query(&mut self) -> SqlResult<Query> {
+        self.count_query()?;
+        self.nested_query()
     }
 
     pub(super) fn nested_query(&mut self) -> SqlResult<Query> {
@@ -99,14 +161,23 @@ impl Parser<'_> {
         } else {
             (Vec::new(), false)
         };
-        if !with.is_empty()
-            && ["insert", "update", "delete"]
-                .iter()
-                .any(|word| self.is_word(word))
-        {
-            return Err(self.not_supported("WITH before INSERT, UPDATE or DELETE"));
+        if !with.is_empty() && self.at_data_modifying_statement() {
+            return Err(SqlError::not_supported(
+                "WITH before INSERT, UPDATE or DELETE inside another statement is not supported yet",
+            )
+            .at(self.position()));
         }
+        self.query_after_with(with, recursive, position)
+    }
+
+    fn query_after_with(
+        &mut self,
+        with: Vec<CommonTable>,
+        recursive: bool,
+        position: usize,
+    ) -> SqlResult<Query> {
         let body = self.set_expression()?;
+        let windows = self.select_windows.take();
         let top = self.pending_top.take();
         let mut tail = self.query_tail()?;
         if self.ignored_view_top && self.at_view_top_level() {
@@ -148,6 +219,11 @@ impl Parser<'_> {
                     )?;
                 }
                 select.order_by = tail.order_by;
+                if let Some(windows) = &windows {
+                    for item in &mut select.order_by {
+                        crate::window::resolve_references(&mut item.expr, windows)?;
+                    }
+                }
                 select.limit = tail.limit;
                 select.offset = tail.offset;
                 (SetExpr::Select(select), QueryTail::default())
@@ -166,14 +242,26 @@ impl Parser<'_> {
     }
 
     fn common_tables(&mut self) -> SqlResult<(Vec<CommonTable>, bool)> {
+        let (tables, recursive) = self.with_tables(false)?;
+        let tables = tables
+            .into_iter()
+            .filter_map(|table| match table {
+                WithTable::Query(table) => Some(*table),
+                WithTable::Modifying { .. } => None,
+            })
+            .collect();
+        Ok((tables, recursive))
+    }
+
+    fn with_tables(&mut self, top_level: bool) -> SqlResult<(Vec<WithTable>, bool)> {
         let recursive = self.take_word("recursive");
         if recursive && self.oracle() {
             return Err(self.unexpected());
         }
-        let mut tables: Vec<CommonTable> = Vec::new();
+        let mut tables: Vec<WithTable> = Vec::new();
         loop {
             let name = self.name()?;
-            if tables.iter().any(|table| table.name.text == name.text) {
+            if tables.iter().any(|table| table.name().text == name.text) {
                 return Err(SqlError::new(
                     SqlState::DUPLICATE_ALIAS,
                     format!("WITH query name \"{}\" specified more than once", name.text),
@@ -194,26 +282,39 @@ impl Parser<'_> {
                 self.expect_word("materialized")?;
             }
             self.expect(&TokenKind::LeftParen)?;
-            if !self.starts_query() && !self.starts_query_in_parentheses() {
-                if ["insert", "update", "delete"]
-                    .iter()
-                    .any(|word| self.is_word(word))
-                {
+            if self.at_data_modifying_statement() {
+                if !self.postgresql() {
                     return Err(self.not_supported("data-modifying statements in WITH"));
                 }
-                return Err(self.unexpected());
+                if !top_level || self.query_depth > 0 {
+                    return Err(SqlError::not_supported(
+                        "WITH clause containing a data-modifying statement must be at the top level",
+                    )
+                    .at(name.position));
+                }
+                let statement = self.data_modifying_statement()?;
+                self.expect(&TokenKind::RightParen)?;
+                tables.push(WithTable::Modifying {
+                    name,
+                    column_names,
+                    statement: Box::new(statement),
+                });
+            } else {
+                if !self.starts_query() && !self.starts_query_in_parentheses() {
+                    return Err(self.unexpected());
+                }
+                let query = self.nested_query()?;
+                self.expect(&TokenKind::RightParen)?;
+                if self.is_word("search") || self.is_word("cycle") {
+                    return Err(self.not_supported("SEARCH and CYCLE clauses"));
+                }
+                tables.push(WithTable::Query(Box::new(CommonTable {
+                    name,
+                    column_names,
+                    query,
+                    dialect: self.dialect,
+                })));
             }
-            let query = self.nested_query()?;
-            self.expect(&TokenKind::RightParen)?;
-            if self.is_word("search") || self.is_word("cycle") {
-                return Err(self.not_supported("SEARCH and CYCLE clauses"));
-            }
-            tables.push(CommonTable {
-                name,
-                column_names,
-                query,
-                dialect: self.dialect,
-            });
             if !self.take(&TokenKind::Comma) {
                 return Ok((tables, recursive));
             }
@@ -317,7 +418,7 @@ impl Parser<'_> {
                 body => SetExpr::Query(Box::new(Query { body, ..query })),
             });
         }
-        if self.postgresql() && self.is_word("values") {
+        if self.reads_values_lists() && self.is_word("values") {
             return Ok(SetExpr::Select(Box::new(self.values_list()?)));
         }
         if !self.is_word("select") {
@@ -337,40 +438,46 @@ impl Parser<'_> {
         Ok(())
     }
 
+    pub(super) fn order_items(&mut self) -> SqlResult<Vec<OrderItem>> {
+        let mut order_by = Vec::new();
+        loop {
+            let expr = self.expression()?;
+            let descending = if self.take_word("desc") {
+                true
+            } else {
+                self.take_word("asc");
+                false
+            };
+            if self.is_word("using") {
+                return Err(self.not_supported("ORDER BY ... USING"));
+            }
+            let nulls_first = if self.take_word("nulls") {
+                if self.take_word("first") {
+                    Some(true)
+                } else {
+                    self.expect_word("last")?;
+                    Some(false)
+                }
+            } else {
+                None
+            };
+            order_by.push(OrderItem {
+                expr,
+                descending,
+                nulls_first,
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(order_by)
+    }
+
     pub(super) fn query_tail(&mut self) -> SqlResult<QueryTail> {
         let mut order_by = Vec::new();
         if self.take_word("order") {
             self.expect_word("by")?;
-            loop {
-                let expr = self.expression()?;
-                let descending = if self.take_word("desc") {
-                    true
-                } else {
-                    self.take_word("asc");
-                    false
-                };
-                if self.is_word("using") {
-                    return Err(self.not_supported("ORDER BY ... USING"));
-                }
-                let nulls_first = if self.take_word("nulls") {
-                    if self.take_word("first") {
-                        Some(true)
-                    } else {
-                        self.expect_word("last")?;
-                        Some(false)
-                    }
-                } else {
-                    None
-                };
-                order_by.push(OrderItem {
-                    expr,
-                    descending,
-                    nulls_first,
-                });
-                if !self.take(&TokenKind::Comma) {
-                    break;
-                }
-            }
+            order_by = self.order_items()?;
         }
         let mut limit = None;
         let mut offset = None;
@@ -439,6 +546,16 @@ impl Parser<'_> {
                 let _ = self.take_word("rows") || self.take_word("row");
             } else if self.is_word("fetch") {
                 return Err(self.not_supported("FETCH FIRST"));
+            } else if self.is_word("for")
+                && ["update", "share", "no", "key"]
+                    .iter()
+                    .any(|word| self.is_word_at(1, word))
+            {
+                self.row_locking()?;
+            } else if self.mysql() && self.is_word("lock") && self.is_word_at(1, "in") {
+                self.at += 2;
+                self.expect_word("share")?;
+                self.expect_word("mode")?;
             } else if self.is_word("for") || self.mysql() && self.is_word("lock") {
                 return Err(self.not_supported("row locking (FOR UPDATE, FOR SHARE)"));
             } else {
@@ -493,7 +610,7 @@ impl Parser<'_> {
                 .unwrap_or_else(|| "unnamed_subquery".to_owned()),
             position,
         };
-        if self.postgresql()
+        if self.reads_values_lists()
             && let Some(mut list) = Self::values_table(&mut query)
         {
             list.column_names = column_names;
@@ -511,6 +628,7 @@ impl Parser<'_> {
                 query,
                 column_names,
                 dialect: self.dialect,
+                lateral: false,
             })),
             generated: None,
         })
@@ -694,5 +812,43 @@ fn is_cheap_to_repeat(expr: &Expr) -> bool {
         ExprKind::Column { .. } | ExprKind::Literal(_) => true,
         ExprKind::Cast { expr, .. } => is_cheap_to_repeat(expr),
         _ => false,
+    }
+}
+
+impl Parser<'_> {
+    fn row_locking(&mut self) -> SqlResult<()> {
+        while self.take_word("for") {
+            if !(self.take_word("update") || self.take_word("share")) {
+                if self.take_word("no") {
+                    self.expect_word("key")?;
+                    self.expect_word("update")?;
+                } else {
+                    self.expect_word("key")?;
+                    self.expect_word("share")?;
+                }
+            }
+            if self.take_word("of") {
+                loop {
+                    self.name()?;
+                    while self.take(&TokenKind::Dot) {
+                        self.name()?;
+                    }
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            if self.take_word("skip") {
+                self.expect_word("locked")?;
+            } else if self.oracle() && self.take_word("wait") {
+                if !matches!(self.peek_kind(), TokenKind::Integer(_)) {
+                    return Err(self.unexpected());
+                }
+                self.at += 1;
+            } else {
+                self.take_word("nowait");
+            }
+        }
+        Ok(())
     }
 }

@@ -513,6 +513,16 @@ impl Outbox {
         self.bytes.push(b'N');
     }
 
+    /// `S`: the answer to an `SSLRequest` when TLS is set up; the TLS handshake follows.
+    pub fn accept_encryption(&mut self) {
+        self.bytes.push(b'S');
+    }
+
+    /// `AuthenticationCleartextPassword`, for methods that check the password elsewhere.
+    pub fn authentication_cleartext_password(&mut self) {
+        self.message(b'R', |body| body.extend_from_slice(&3i32.to_be_bytes()));
+    }
+
     /// `AuthenticationOk`.
     pub fn authentication_ok(&mut self) {
         self.message(b'R', |body| body.extend_from_slice(&0i32.to_be_bytes()));
@@ -578,6 +588,18 @@ impl Outbox {
     }
 
     /// `ReadyForQuery` with the transaction status byte, `I`, `T` or `E`.
+    /// `NotificationResponse`: a notification from the backend `sender` on `channel`.
+    pub fn notification_response(&mut self, sender: i32, channel: &str, payload: &str) {
+        self.message(b'A', |body| {
+            body.extend_from_slice(&sender.to_be_bytes());
+            body.extend_from_slice(channel.as_bytes());
+            body.push(0);
+            body.extend_from_slice(payload.as_bytes());
+            body.push(0);
+        });
+    }
+
+    /// Queues ReadyForQuery with the transaction status: `I` idle, `T` in a transaction, `E` failed.
     pub fn ready_for_query(&mut self, status: u8) {
         self.message(b'Z', |body| body.push(status));
     }
@@ -626,31 +648,33 @@ impl Outbox {
         Ok(())
     }
 
-    fn copy_response(&mut self, tag: u8, columns: usize) -> Result<(), TooLarge> {
+    fn copy_response(&mut self, tag: u8, columns: usize, format: Format) -> Result<(), TooLarge> {
         let count = count_field(columns, TooLarge::Columns)?;
+        let code = format.code();
         self.message(tag, |body| {
-            body.push(0);
+            body.push(u8::from(format == Format::Binary));
             body.extend_from_slice(&count);
             for _ in 0..columns {
-                body.extend_from_slice(&0i16.to_be_bytes());
+                body.extend_from_slice(&code.to_be_bytes());
             }
         });
         Ok(())
     }
 
-    /// `CopyInResponse` for text data (format 0) with `columns` columns; refused for more
-    /// than 32,767 columns.
-    pub fn copy_in_response(&mut self, columns: usize) -> Result<(), TooLarge> {
-        self.copy_response(b'G', columns)
+    /// `CopyInResponse` for data in `format` (text for the text and CSV formats, binary for
+    /// the binary one) with `columns` columns; refused for more than 32,767 columns.
+    pub fn copy_in_response(&mut self, columns: usize, format: Format) -> Result<(), TooLarge> {
+        self.copy_response(b'G', columns, format)
     }
 
-    /// `CopyOutResponse` for text data (format 0) with `columns` columns; refused for more
-    /// than 32,767 columns.
-    pub fn copy_out_response(&mut self, columns: usize) -> Result<(), TooLarge> {
-        self.copy_response(b'H', columns)
+    /// `CopyOutResponse` for data in `format` (text for the text and CSV formats, binary for
+    /// the binary one) with `columns` columns; refused for more than 32,767 columns.
+    pub fn copy_out_response(&mut self, columns: usize, format: Format) -> Result<(), TooLarge> {
+        self.copy_response(b'H', columns, format)
     }
 
-    /// `CopyData` with one row of a `COPY ... TO STDOUT`; refused over 2 GiB.
+    /// `CopyData` with one piece of a `COPY ... TO STDOUT`: a row, or for the binary format
+    /// the file header with the first row and the trailer; refused over 2 GiB.
     pub fn copy_data(&mut self, data: &[u8]) -> Result<(), TooLarge> {
         if data.len() > i32::MAX as usize - 4 {
             return Err(TooLarge::ValueBytes(data.len()));
@@ -956,14 +980,17 @@ mod tests {
         );
         assert_eq!(outbox.bytes(), b"E\0\0\0\x10C42P01\0Mab\0\0");
         outbox.clear();
-        outbox.copy_in_response(2).unwrap();
-        outbox.copy_out_response(1).unwrap();
+        outbox.copy_in_response(2, Format::Text).unwrap();
+        outbox.copy_out_response(1, Format::Text).unwrap();
         outbox.copy_data(b"1\tx\n").unwrap();
         outbox.copy_done();
         assert_eq!(
             outbox.bytes(),
             b"G\0\0\0\x0b\0\0\x02\0\0\0\0H\0\0\0\x09\0\0\x01\0\0d\0\0\0\x081\tx\nc\0\0\0\x04"
         );
-        assert!(outbox.copy_in_response(40_000).is_err());
+        assert!(outbox.copy_in_response(40_000, Format::Text).is_err());
+        outbox.clear();
+        outbox.copy_in_response(2, Format::Binary).unwrap();
+        assert_eq!(outbox.bytes(), b"G\0\0\0\x0b\x01\0\x02\0\x01\0\x01");
     }
 }

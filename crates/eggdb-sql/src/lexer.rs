@@ -47,10 +47,18 @@ pub(crate) fn tokenize(text: &str) -> SqlResult<Vec<Token<'_>>> {
 }
 
 pub(crate) fn tokenize_in(text: &str, dialect: Dialect) -> SqlResult<Vec<Token<'_>>> {
+    tokenize_from(text, dialect, 0)
+}
+
+pub(crate) fn tokenize_from(
+    text: &str,
+    dialect: Dialect,
+    start: usize,
+) -> SqlResult<Vec<Token<'_>>> {
     let mut lexer = Lexer {
         text,
         bytes: text.as_bytes(),
-        at: 0,
+        at: start.min(text.len()),
         dialect,
         open_executable_comments: 0,
         named_parameters: Vec::new(),
@@ -371,6 +379,7 @@ impl<'t> Lexer<'t> {
             b'0'..=b'9' => self.number(),
             b'\'' | b'"' => self.mysql_string(byte),
             b'`' => self.backtick_identifier(),
+            b'x' | b'X' if self.peek(1) == Some(b'\'') => self.blob_literal(),
             b'?' => {
                 self.at += 1;
                 Ok(TokenKind::Placeholder)

@@ -1,0 +1,16 @@
+[package]
+name = "eggdb-s3"
+description = "EggDB's S3-compatible object endpoint: buckets, objects, ranges, copies, listings, multipart uploads and presigned URLs, with Signature Version 4 checked, stored in EggDB."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-auth = { path = "../eggdb-auth" }
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }

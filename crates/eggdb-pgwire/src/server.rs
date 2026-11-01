@@ -1,11 +1,14 @@
+use crate::backend_keys::BackendKeys;
 use crate::connection::{refuse_too_many, serve_connection};
-use crate::scram::ScramVerifier;
 use crate::wire::Wire;
+use eggdb_auth::scram::ScramVerifier;
+use eggdb_platform::local_socket::LocalListener;
 use eggdb_sql::KeyValueStore;
+use eggdb_tls::ServerConnection;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -27,7 +30,8 @@ const LONGEST_FAILURE_DELAY: Duration = Duration::from_secs(5);
 /// What a server serves and to whom.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// The one user that may connect.
+    /// The server's own user, a superuser; roles stored in the database with `LOGIN` and a
+    /// password may connect too, with their privileges checked.
     pub user: String,
     /// That user's SCRAM-SHA-256 verifier.
     pub verifier: ScramVerifier,
@@ -37,6 +41,12 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// How long a client has from connecting to finishing authentication.
     pub authentication_timeout: Duration,
+    /// The rule file that picks how users other than [`ServerConfig::user`] log in (D185);
+    /// without one, stored roles use SCRAM-SHA-256.
+    pub auth_rules: Option<std::sync::Arc<eggdb_auth::AuthRules>>,
+    /// The TLS setup, when the server offers TLS (D161): `SSLRequest` is then answered `S`,
+    /// PostgreSQL 17's direct TLS is accepted, and connections from other machines must use it.
+    pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
 }
 
 impl ServerConfig {
@@ -60,7 +70,7 @@ impl fmt::Display for ListenError {
         match self {
             Self::NotLoopback(address) => write!(
                 f,
-                "{address} is not a loopback address; until EggDB has TLS, it listens only on 127.0.0.1, ::1 or another loopback address, so only this machine can connect"
+                "{address} is not a loopback address; without TLS EggDB listens only on 127.0.0.1, ::1 or another loopback address, so only this machine can connect: give it a certificate (--tls-certificate and --tls-key, or --tls-self-signed) to listen on other addresses"
             ),
             Self::Io(error) => write!(f, "{error}"),
         }
@@ -73,7 +83,14 @@ impl std::error::Error for ListenError {}
 /// `::1`); any other address is refused before anything is bound (D102). Port 0 picks a free
 /// port.
 pub fn listen_on_loopback(address: SocketAddr) -> Result<TcpListener, ListenError> {
-    if !address.ip().is_loopback() {
+    listen(address, false)
+}
+
+/// Opens the listener on `address`. Any address is allowed when the server has TLS
+/// (`tls_configured`), since connections from other machines must then use it; without TLS only
+/// loopback addresses are.
+pub fn listen(address: SocketAddr, tls_configured: bool) -> Result<TcpListener, ListenError> {
+    if !tls_configured && !address.ip().is_loopback() {
         return Err(ListenError::NotLoopback(address));
     }
     TcpListener::bind(address).map_err(ListenError::Io)
@@ -118,8 +135,10 @@ pub(crate) struct Shared<'a> {
     pub(crate) log: &'a (dyn Fn(&str) + Sync),
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) secret: [u8; 32],
+    pub(crate) backend_keys: BackendKeys,
     pub(crate) unauthenticated: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
+    pub(crate) notifications: crate::notifications::NotificationHub,
 }
 
 pub(crate) struct Slot<'c>(&'c AtomicUsize);
@@ -155,7 +174,43 @@ pub fn serve<S: KeyValueStore + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_with_local(store, listener, None, config, stop, log)
+}
+
+/// [`serve`], also accepting connections on the Unix socket `local`.
+pub fn serve_with_local<S: KeyValueStore + Sync>(
+    store: &S,
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
+    serve_databases(
+        &[(config.database.as_str(), store)],
+        listener,
+        local,
+        config,
+        stop,
+        log,
+    )
+}
+
+/// [`serve_with_local`] for several databases, each reached by its name in the startup
+/// packet (`psql -d <name>`, `\c <name>`); `pg_database` lists them all. The first is
+/// [`ServerConfig::database`]'s.
+pub fn serve_databases<S: KeyValueStore + Sync>(
+    databases: &[(&str, &S)],
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     listener.set_nonblocking(true)?;
+    if let Some(local) = local {
+        local.set_nonblocking(true)?;
+    }
     let mut secret = [0u8; 32];
     eggdb_platform::secure_random::fill(&mut secret)?;
     let shared = Shared {
@@ -164,36 +219,32 @@ pub fn serve<S: KeyValueStore + Sync>(
         log,
         throttle: AuthenticationThrottle::new(),
         secret,
+        backend_keys: BackendKeys::new(),
         unauthenticated: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
+        notifications: crate::notifications::NotificationHub::default(),
     };
     let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);
     let next_process_id = AtomicU32::new(1);
     std::thread::scope(|scope| {
         while !stop() {
-            let (stream, peer) = match listener.accept() {
-                Ok(accepted) => accepted,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
-                    continue;
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => {
-                    log(&format!("accepting a connection failed: {error}"));
-                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
-                    continue;
-                }
+            let Some(stream) = accept_next(listener, local, log) else {
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                continue;
             };
+            let peer = stream.peer_text();
             let process_id = next_process_id.fetch_add(1, Ordering::Relaxed);
             let shared = &shared;
             match take_slot(&active, config.max_connections) {
                 Some(slot) => {
                     let started = std::thread::Builder::new()
                         .name(format!("eggdb-pg-{process_id}"))
+                        .stack_size(eggdb_sql::SESSION_STACK_BYTES)
                         .spawn_scoped(scope, move || {
+                            eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
                             let _slot = slot;
-                            run_connection(stream, shared, store, process_id);
+                            run_connection(stream, shared, databases, process_id);
                         });
                     if let Err(error) = started {
                         log(&format!("starting a connection thread failed: {error}"));
@@ -223,23 +274,49 @@ pub fn serve<S: KeyValueStore + Sync>(
     Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }
 
+fn accept_next(
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    log: &(dyn Fn(&str) + Sync),
+) -> Option<ServerConnection> {
+    let report = |error: io::Error| {
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ) {
+            log(&format!("accepting a connection failed: {error}"));
+        }
+    };
+    match listener.accept() {
+        Ok((stream, _)) => return Some(ServerConnection::Plain(stream)),
+        Err(error) => report(error),
+    }
+    match local?.accept() {
+        Ok((stream, _)) => Some(ServerConnection::Local(stream)),
+        Err(error) => {
+            report(error);
+            None
+        }
+    }
+}
+
 fn run_connection<S: KeyValueStore>(
-    stream: TcpStream,
+    stream: ServerConnection,
     shared: &Shared<'_>,
-    store: &S,
+    databases: &[(&str, &S)],
     process_id: u32,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;
     };
-    serve_connection(wire, shared, store, process_id as i32);
+    serve_connection(wire, shared, databases, process_id as i32);
 }
 
-fn refuse_connection(stream: TcpStream, shared: &Shared<'_>) {
+fn refuse_connection(stream: ServerConnection, shared: &Shared<'_>) {
     let deadline = Instant::now() + REFUSAL_TIMEOUT;
     if let Ok(mut wire) = Wire::new(stream, shared.stop, Some(deadline)) {
-        refuse_too_many(&mut wire);
+        refuse_too_many(&mut wire, shared);
     }
 }
 

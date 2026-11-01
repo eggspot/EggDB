@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-keyspace"
+description = "The key-value transaction interface EggDB's key-value and document servers share (RESP, memcached, the Elasticsearch-compatible REST API and the MongoDB-compatible wire protocol), and a keyspace in memory for tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

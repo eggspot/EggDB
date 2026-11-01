@@ -1,0 +1,18 @@
+[package]
+name = "eggdb-sqlite3"
+description = "SQLite's C API (sqlite3_open, sqlite3_prepare_v2, sqlite3_step and the rest) on EggDB's SQLite dialect, built as libsqlite3 so SQLite programs link against EggDB unchanged."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "sqlite3"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb = { path = "../eggdb" }

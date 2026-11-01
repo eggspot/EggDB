@@ -216,6 +216,10 @@ fn quoted(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_owned(),
         Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
+        Value::Bytea(bytes) => format!(
+            "X'{}'",
+            crate::bytea::format_hex(bytes)[2..].to_ascii_uppercase()
+        ),
         other => text_of(other).unwrap_or_else(|| "NULL".to_owned()),
     }
 }
@@ -229,6 +233,9 @@ pub(crate) fn truth(value: &Value) -> Value {
 }
 
 pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
+    if let Some(function) = crate::sqlite_datetime::DateFunction::of_internal_name(name) {
+        return Ok(crate::sqlite_datetime::call(function, values));
+    }
     let text = |index: usize| values.get(index).and_then(text_of);
     let any_null = values.iter().any(Value::is_null);
     let null = Value::Null;
@@ -240,6 +247,7 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             match first {
                 Value::Null => "null",
                 Value::Text(_) => "text",
+                Value::Bytea(_) => "blob",
                 Value::Real(_) | Value::Double(_) => "real",
                 _ => "integer",
             }
@@ -272,7 +280,10 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             Some(format) => Value::Text(printf(&format, values.get(1..).unwrap_or(&[]))?),
         },
         _ if any_null => Value::Null,
-        "sqlite_length" => Value::BigInt(text(0).unwrap_or_default().chars().count() as i64),
+        "sqlite_length" => match first {
+            Value::Bytea(bytes) => Value::BigInt(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
+            _ => Value::BigInt(text(0).unwrap_or_default().chars().count() as i64),
+        },
         "sqlite_substr" => {
             let start = integer_of(second).unwrap_or(0);
             let length = values.get(2).and_then(integer_of);
@@ -317,10 +328,38 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             let digits = values.get(1).and_then(integer_of).unwrap_or(0);
             Value::Double(rounded(number, digits))
         }
+        "sqlite_strftime" => crate::sqlite_datetime::strftime(values),
+        "sqlite_timediff" => crate::sqlite_datetime::timediff(values),
+        "sqlite_unicode" => match text(0) {
+            Some(text) if !any_null => text.chars().next().map_or(Value::Null, |first| {
+                Value::BigInt(i64::from(u32::from(first)))
+            }),
+            _ => Value::Null,
+        },
+        "sqlite_char" => Value::Text(
+            values
+                .iter()
+                .filter_map(integer_of)
+                .filter_map(|code| u32::try_from(code).ok().and_then(char::from_u32))
+                .collect(),
+        ),
+        "sqlite_sign" => match first {
+            Value::Null => Value::Null,
+            Value::Text(text) if text.trim().parse::<f64>().is_err() => Value::Null,
+            other => match number_of(other) {
+                Some(number) if number > 0.0 => Value::BigInt(1),
+                Some(number) if number < 0.0 => Value::BigInt(-1),
+                Some(_) => Value::BigInt(0),
+                None => Value::Null,
+            },
+        },
         "sqlite_hex" => {
-            let bytes = text(0).unwrap_or_default();
+            let bytes = match first {
+                Value::Bytea(bytes) => bytes.clone(),
+                _ => text(0).unwrap_or_default().as_bytes().to_vec(),
+            };
             within_limit(bytes.len().saturating_mul(2))?;
-            Value::Text(bytes.bytes().map(|byte| format!("{byte:02X}")).collect())
+            Value::Text(bytes.iter().map(|byte| format!("{byte:02X}")).collect())
         }
         _ => {
             return Err(SqlError::new(

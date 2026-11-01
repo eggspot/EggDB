@@ -18,9 +18,23 @@ first. The second compares EggDB with SQLite; it is a crate with a workspace of 
 is compiled only by this command and never reaches what EggDB ships. Both compare their results
 with `benchmarks/baseline.txt`, print a table of the changes, print the lines a new system is
 missing, and take `--update` to rewrite this system's lines of what they measured (refused in CI)
-and `--results <path>` to write one line per metric. In CI, the `bench` and `compare` jobs run
-them on Linux on every pull request and push to `main`, add the table to the job summary and
+and `--results <path>` to write one line per metric. In CI, the `bench` job runs on Linux
+and the `compare` job on Linux and macOS (D155), on every pull request and push to `main`; they add the table to the job summary and
 upload the results files as artifacts.
+
+## Reproducing them on your machine (D252)
+
+```sh
+scripts/reproduce-benchmarks.sh results/my-laptop
+```
+
+The script writes everything someone else needs to compare with your numbers into the
+directory: `hardware.txt` (commit, operating system, CPU, cores, memory and Rust toolchain),
+`eggdb.txt` and `sqlite-compare.txt` (one line per metric, as `--results` writes them) with the
+tables the two harnesses print, and `energy.txt`. On Linux machines that expose Intel's RAPL
+counter (`/sys/class/powercap/intel-rapl:0/energy_uj`, readable by your user), `energy.txt`
+gives the processor package's energy while `eggdb-bench` ran; elsewhere it says the energy was
+not measured. Energy is reported only: it is gated once a repeatable method is fixed (D44).
 
 ## What blocks a pull request (D101)
 Benchmarks report on pull requests; they block only when something is more than twice as slow as
@@ -81,7 +95,7 @@ include.
 | `sqlite_compare.batch_put` | one overwrite of a random existing key, in transactions of 1,000 | `Off` / `OFF` | 50% above the line |
 | `sqlite_compare.batch_put_normal` | the same | `Normal` / `NORMAL` | reported |
 | `sqlite_compare.durable_commit` | one put in its own transaction, waiting for the disk | `Full` / `FULL` | reported |
-| `sqlite_compare.sql_point_select` | `SELECT name, score FROM people WHERE id = N` as SQL text, parsed and run each time, over 100,000 rows (`bigint PRIMARY KEY` in EggDB, `INTEGER PRIMARY KEY` in SQLite) | `Normal` / `NORMAL` | 15% above the line (D99) |
+| `sqlite_compare.sql_point_select` | `SELECT name, score FROM people WHERE id = N` as SQL text, run each time (EggDB's plan cache skips the parse of a shape it has seen, D155; SQLite prepares each time), over 100,000 rows (`bigint PRIMARY KEY` in EggDB, `INTEGER PRIMARY KEY` in SQLite) | `Normal` / `NORMAL` | 15% above the line (D99) |
 | `sqlite_compare.sql_indexed_lookup` | `SELECT id, score FROM people WHERE name = 'person N'` as SQL text over the same 100,000 rows with `CREATE INDEX people_name ON people (name)` in both | `Normal` / `NORMAL` | 50% above the line; 1.95 on a Mac when it was added, the Linux line follows its first CI run (D109) |
 | `sqlite_compare.sql_bulk_insert` | one row of 100-row `INSERT ... VALUES` statements, 1,000 rows per `BEGIN ... COMMIT`, as SQL text | `Off` / `OFF` | 15% above the line (D99) |
 | `sqlite_compare.sql_join` | `SELECT count(*), sum(o.amount) FROM orders o JOIN people p ON p.id = o.person_id WHERE p.score > 100` as SQL text: 10,000 orders, each joined to one of 10,000 people by primary key | `Normal` / `NORMAL` | 15% above the line (D100) |
@@ -89,6 +103,9 @@ include.
 | `sqlite_compare.sql_in_subquery` | `SELECT count(*), sum(amount) FROM orders WHERE person_id IN (SELECT id FROM people WHERE score > 500)` over the same tables: an uncorrelated subquery run once into a hash set | `Normal` / `NORMAL` | 15% above the line; 2.2 times SQLite's time on a Mac when added, the Linux line follows its first CI run (D112) |
 | `sqlite_compare.sql_correlated_exists` | `SELECT count(*) FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person_id = p.id AND o.amount > 900)`: a correlated `EXISTS`, run once into a hash set of `person_id`s that each person looks up (D112) | `Normal` / `NORMAL` | 15% above the line; 6.4 times SQLite's time on a Mac when added (D112) |
 | `sqlite_compare.sql_union` | `SELECT count(*) FROM (SELECT person_id FROM orders UNION SELECT id + 5000 FROM people) u`: a hashed `UNION` of 20,000 rows read through a derived table | `Normal` / `NORMAL` | 15% above the line; 4.4 times SQLite's time on a Mac when added (D112) |
+| `sqlite_compare.sql_view_point_select` | `SELECT name, score FROM people_view WHERE id = N` through `CREATE VIEW people_view AS SELECT id, name, score FROM people`, over the 100,000 rows of `sql_point_select`: the condition is pushed into the view and read by key (D155) | `Normal` / `NORMAL` | 15% above the line (D155) |
+| `sqlite_compare.sql_correlated_in` | `SELECT count(*) FROM people p WHERE 990 IN (SELECT o.amount FROM orders o WHERE o.person_id = p.id)`: a correlated `IN` run once and grouped by `person_id` (D155), with `CREATE INDEX orders_person ON orders (person_id)` in both so SQLite looks each person up instead of scanning `orders` per person | `Normal` / `NORMAL` | 15% above the line (D155) |
+| `sqlite_compare.sql_scalar_aggregate` | `SELECT count(*) FROM people p WHERE (SELECT sum(o.amount) FROM orders o WHERE o.person_id = p.id) > 900`: a correlated aggregate run once `GROUP BY person_id` (D155), with the same `orders_person` index in both | `Normal` / `NORMAL` | 15% above the line (D155) |
 
 The band is wider than the 30% of EggDB's other ratios because two engines respond differently
 to each CI runner's processor: seven runs gave point gets from 0.60 to 0.83 and scans from 0.35
@@ -148,3 +165,10 @@ all of its time.
 The binary is unchanged by this measurement; its growth since v0.1.0 (302,448 bytes on macOS,
 when it only printed its version) is the storage engine, the command-line tool, `eggdb ui` and
 `export`/`import`, each stated with its reason when it landed (D90 to D93).
+
+## Footprint per build profile
+`scripts/footprint.sh` builds the `embedded` artifacts (the C API library, and the WebAssembly
+module when it has been built) and the `full` binary in release, strips them, and checks each
+size against `benchmarks/footprint.txt` (D6, D34, D230). CI runs it on Linux and macOS; a size
+over its budget fails until the budget is raised with a stated reason, and `--update` rewrites
+the current system's lines.

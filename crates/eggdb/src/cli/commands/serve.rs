@@ -1,3 +1,4 @@
+use super::serve_tls::{CertificateSource, TlsSetup, tls_setup};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure};
@@ -11,6 +12,7 @@ use eggdb_platform::{secure_random, stop_signals};
 use std::io::BufRead;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
 
 const DEFAULT_USER: &str = "eggdb";
 const DEFAULT_PORT: u16 = 5432;
@@ -44,10 +46,28 @@ fn database_name_of(file: &Path) -> String {
 
 impl Session<'_> {
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
+        super::foreign::allow_from_environment();
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
         let options = self.request.serve.clone();
-        let user = options.user.unwrap_or_else(|| DEFAULT_USER.to_owned());
+        if let Some(url) = &options.restore_from
+            && std::fs::symlink_metadata(&self.request.file).is_err()
+        {
+            let (file, _) = super::archive::restore_from_bucket_into(url, None, &self.request.file)
+                .map_err(|message| {
+                    Failure::database(
+                        format!("--restore-from {url}: {message}"),
+                        Exit::DatabaseError,
+                    )
+                })?;
+            self.out
+                .text(&format!("restored {file} from {url} into {}\n", self.file));
+        }
+        let user = options
+            .user
+            .clone()
+            .unwrap_or_else(|| DEFAULT_USER.to_owned());
         let password = self.serve_password(&user)?;
+        let max_connections = options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
         if !password.is_ascii() {
             return Err(usage(
                 "the password must be ASCII in this release: SASLprep, which normalizes other characters for SCRAM, is not implemented yet".to_owned(),
@@ -57,11 +77,19 @@ impl Session<'_> {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             DEFAULT_PORT,
         ));
+        let listen_hosts: Vec<IpAddr> = [Some(address), options.mysql_listen, options.tds_listen]
+            .into_iter()
+            .flatten()
+            .map(|listen| listen.ip())
+            .collect();
+        let tls = tls_setup(&options, &listen_hosts)?;
+        let with_tls = tls.is_some();
+        missing_socket_directory(&options).map_or(Ok(()), |message| Err(usage(message)))?;
         let listener = self.listener(
             "--listen",
             "PostgreSQL",
             address,
-            eggdb_pgwire::listen_on_loopback(address).map_err(|error| match error {
+            eggdb_pgwire::listen(address, with_tls).map_err(|error| match error {
                 ListenError::NotLoopback(_) => None,
                 ListenError::Io(error) => Some(error),
             }),
@@ -71,19 +99,364 @@ impl Session<'_> {
                 "--tds-listen",
                 "SQL Server",
                 address,
-                eggdb_tdswire::listen_on_loopback(address).map_err(|error| match error {
+                eggdb_tdswire::listen(address, with_tls).map_err(|error| match error {
                     eggdb_tdswire::ListenError::NotLoopback(_) => None,
                     eggdb_tdswire::ListenError::Io(error) => Some(error),
                 }),
             )?),
             None => None,
         };
+        let metrics_listener = match options.metrics_listen {
+            Some(address) => Some(std::net::TcpListener::bind(address).map_err(|error| {
+                Failure::database(
+                    format!("cannot listen for metrics on {address}: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?),
+            None => None,
+        };
+        let mcp_listener = match (options.mcp_listen, &options.mcp_token_file) {
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(usage(
+                    "--mcp-listen and --mcp-token-file go together: agents must send the token as a Bearer token".to_owned(),
+                ));
+            }
+            (Some(address), Some(token_file)) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--mcp-listen {address}: the MCP endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                let tokens = super::serve_mcp::read_tokens(token_file).map_err(usage)?;
+                let listener = std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for MCP on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?;
+                Some((listener, tokens))
+            }
+        };
+        let resp_listener = match options.resp_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--resp-listen {address}: the RESP listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for RESP on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let memcached_listener = match options.memcached_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--memcached-listen {address}: memcached's protocol has no authentication, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for memcached on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let es_listener = match options.es_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--es-listen {address}: the REST API has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for the REST API on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let es_password = eggdb_crypto::sha256(password.as_bytes());
+        let mongo_listener = match options.mongo_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--mongo-listen {address}: the MongoDB-compatible listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for MongoDB clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let bolt_listener = match options.bolt_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--bolt-listen {address}: the Bolt listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for Bolt on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let kafka_listener = match options.kafka_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--kafka-listen {address}: the Kafka listener has no authentication or TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for Kafka clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let kafka_config = eggdb_kafka::ServerConfig {
+            advertised: kafka_listener
+                .as_ref()
+                .and_then(|listener| listener.local_addr().ok())
+                .unwrap_or(address),
+            max_connections,
+        };
+        let amqp_listener = match options.amqp_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--amqp-listen {address}: the AMQP listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for AMQP clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let mqtt_listener = match options.mqtt_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--mqtt-listen {address}: the MQTT listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for MQTT clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let sqs_listener = match options.sqs_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--sqs-listen {address}: the SQS-compatible endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for SQS clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let sqs_secret = sqs_listener.as_ref().map(|_| password.clone());
+        let s3_listener = match options.s3_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--s3-listen {address}: the S3-compatible endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for S3 clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let s3_secret = s3_listener.as_ref().map(|_| password.clone());
+        let dynamodb_listener = match options.dynamodb_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--dynamodb-listen {address}: the DynamoDB-compatible endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for DynamoDB clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let dynamodb_secret = dynamodb_listener.as_ref().map(|_| password.clone());
+        let observability_listener = match options.observability_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--observability-listen {address}: the metrics endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for metrics clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let server_password_sha256 = eggdb_crypto::sha256(password.as_bytes());
+        let rest_listener = match options.rest_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--rest-listen {address}: the REST API has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for the REST API on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let cql_listener = match options.cql_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--cql-listen {address}: the CQL listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for CQL clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let mut cql_config = eggdb_cql::ServerConfig {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            database: String::new(),
+            max_connections,
+        };
+        let stomp_listener = match options.stomp_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--stomp-listen {address}: the STOMP listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for STOMP clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let stomp_config = eggdb_stomp::ServerConfig {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections,
+        };
+        let nats_listener = match options.nats_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--nats-listen {address}: the NATS listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for NATS clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let nats_config = eggdb_nats::ServerConfig {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections,
+        };
+        let mqtt_config = eggdb_mqtt::ServerConfig {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections,
+        };
+        let amqp_config = eggdb_amqp::ServerConfig {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections,
+        };
+        let bolt_config = eggdb_bolt::ServerConfig {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections,
+        };
+        let mongo_config = match &mongo_listener {
+            Some(_) => Some(
+                super::serve_mongo::config(&user, &password, max_connections).map_err(|error| {
+                    Failure::database(
+                        format!("cannot prepare the MongoDB-compatible listener: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?,
+            ),
+            None => None,
+        };
+        let resp_password = resp_listener
+            .as_ref()
+            .map(|_| eggdb_crypto::sha256(password.as_bytes()));
         let mysql_listener = match options.mysql_listen {
             Some(address) => Some(self.listener(
                 "--mysql-listen",
                 "MySQL",
                 address,
-                eggdb_mysqlwire::listen_on_loopback(address).map_err(|error| match error {
+                eggdb_mysqlwire::listen(address, with_tls).map_err(|error| match error {
                     eggdb_mysqlwire::ListenError::NotLoopback(_) => None,
                     eggdb_mysqlwire::ListenError::Io(error) => Some(error),
                 }),
@@ -93,6 +466,23 @@ impl Session<'_> {
         let bound = listener.local_addr().map_err(|error| {
             Failure::database(format!("cannot listen: {error}"), Exit::DatabaseError)
         })?;
+        if options.mysql_socket.is_some() && options.mysql_listen.is_none() {
+            return Err(usage(
+                "--mysql-socket needs --mysql-listen: the socket serves the same MySQL server"
+                    .to_owned(),
+            ));
+        }
+        let socket_path = options.socket_dir.as_ref().map(|directory| {
+            eggdb_platform::local_socket::postgresql_socket_path(directory, bound.port())
+        });
+        let local_listener = match &socket_path {
+            Some(path) => Some(self.local_listener(path, "--socket-dir")?),
+            None => None,
+        };
+        let mysql_local_listener = match &options.mysql_socket {
+            Some(path) => Some(self.local_listener(path, "--mysql-socket")?),
+            None => None,
+        };
         let mysql_bound = match &mysql_listener {
             Some(listener) => Some(listener.local_addr().map_err(|error| {
                 Failure::database(format!("cannot listen: {error}"), Exit::DatabaseError)
@@ -140,22 +530,33 @@ impl Session<'_> {
                 create: self.request.create,
             }
         };
-        let db = self.open(access, None)?;
+        let mut directory = self.directory_databases(access)?;
+        let (db, served_name) = if directory.is_empty() {
+            (
+                self.open(access, None)?,
+                database_name_of(&self.request.file),
+            )
+        } else {
+            let (name, first) = directory.remove(0);
+            (super::Opened::Owned(Box::new(first)), name)
+        };
         let config = ServerConfig {
             user,
             verifier,
-            database: options
-                .database
-                .unwrap_or_else(|| database_name_of(&self.request.file)),
-            max_connections: options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
+            database: options.database.unwrap_or(served_name),
+            max_connections,
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
+            auth_rules: self.auth_rules()?,
+            tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
         };
+        cql_config.database = config.database.clone();
         let mysql_config = mysql_credentials.map(|credentials| eggdb_mysqlwire::ServerConfig {
             user: config.user.clone(),
             credentials,
             database: config.database.clone(),
             max_connections: config.max_connections,
             authentication_timeout: eggdb_mysqlwire::DEFAULT_AUTHENTICATION_TIMEOUT,
+            tls: tls.as_ref().map(|setup| Arc::clone(&setup.mysql)),
         });
         let tds_config = tds_credentials.map(|credentials| eggdb_tdswire::ServerConfig {
             user: config.user.clone(),
@@ -164,32 +565,356 @@ impl Session<'_> {
             max_connections: config.max_connections,
             authentication_timeout: eggdb_tdswire::DEFAULT_AUTHENTICATION_TIMEOUT,
             log_batches: options.log_batches,
+            tls: tls.as_ref().map(|setup| Arc::clone(&setup.tds)),
         });
-        self.print_listening(bound, mysql_bound, tds_bound, &config, read_only);
+        let sockets = Sockets {
+            postgresql: socket_path.clone(),
+            mysql: options.mysql_socket.clone(),
+        };
+        let bound = Bound {
+            postgresql: bound,
+            mysql: mysql_bound,
+            tds: tds_bound,
+        };
+        self.print_listening(bound, &config, read_only, tls.as_ref(), &sockets);
         self.out.finish()?;
         let _ = stop_signals::watch();
         let store = DatabaseStore(&db);
+        let other_stores: Vec<(String, DatabaseStore<'_>)> = directory
+            .iter()
+            .map(|(name, other)| (name.clone(), DatabaseStore(other)))
+            .collect();
+        let mut pg_databases: Vec<(&str, &DatabaseStore<'_>)> =
+            vec![(config.database.as_str(), &store)];
+        pg_databases.extend(
+            other_stores
+                .iter()
+                .map(|(name, other)| (name.as_str(), other)),
+        );
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
+        let metrics_databases: Vec<(&str, &eggdb::Database)> =
+            std::iter::once((config.database.as_str(), &*db))
+                .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
+                .collect();
+        let observability_endpoint = eggdb_observability::Endpoint::new(
+            &store,
+            &config.user,
+            server_password_sha256,
+            &config.database,
+        );
+        let rest_endpoint = eggdb_api::Endpoint::new(
+            &store,
+            &config.user,
+            server_password_sha256,
+            &config.database,
+            "public",
+        );
+        let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
+        let mcp_endpoint = mcp_listener.as_ref().map(|(_, tokens)| {
+            super::serve_mcp::McpEndpoint::new(
+                &mcp_opener,
+                &config.database,
+                tokens.clone(),
+                eggdb_mcp::audit::audit_path_for(&self.request.file),
+            )
+        });
+        let resp_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::RESP_COLLECTIONS,
+        };
+        let memcached_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MEMCACHED_COLLECTIONS,
+        };
+        let memcached_shared = eggdb_memcached::Shared {
+            keyspace: &memcached_database,
+            next_cas: std::sync::atomic::AtomicU64::new(1),
+        };
+        let es_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::ES_COLLECTIONS,
+        };
+        let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password);
+        let graph_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::GRAPH_COLLECTIONS,
+        };
+        let kafka_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::KAFKA_COLLECTIONS,
+        };
+        let queue_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::QUEUE_COLLECTIONS,
+        };
+        let mqtt_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MQTT_COLLECTIONS,
+        };
+        let sqs_endpoint = match (&sqs_listener, &sqs_secret) {
+            (Some(listener), Some(secret)) => {
+                let base_url = listener.local_addr().map_or_else(
+                    |_| "http://127.0.0.1".to_owned(),
+                    |address| format!("http://{address}"),
+                );
+                Some(eggdb_sqs::Endpoint::new(
+                    &queue_database,
+                    &base_url,
+                    &config.user,
+                    secret,
+                ))
+            }
+            _ => None,
+        };
+        let object_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::OBJECT_COLLECTIONS,
+        };
+        let s3_endpoint = s3_secret
+            .as_ref()
+            .map(|secret| eggdb_s3::Endpoint::new(&object_database, &config.user, secret));
+        let dynamodb_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::DYNAMODB_COLLECTIONS,
+        };
+        let dynamodb_endpoint = dynamodb_secret
+            .as_ref()
+            .map(|secret| eggdb_dynamodb::Endpoint::new(&dynamodb_database, &config.user, secret));
+        let mongo_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MONGO_COLLECTIONS,
+        };
+        let mongo_store =
+            eggdb_documents::Store::new(&mongo_database, super::serve_mongo::store_seed());
+        let resp_limited = options.resp_max_memory.and_then(|limit| {
+            let policy = options
+                .resp_eviction
+                .unwrap_or(eggdb_resp::EvictionPolicy::NoEviction);
+            eggdb_resp::EvictingKeyspace::new(&resp_database, limit, policy).ok()
+        });
+        let resp_keyspace: &(dyn eggdb_resp::Keyspace + Sync) = match &resp_limited {
+            Some(limited) => limited,
+            None => &resp_database,
+        };
+        let resp_config = eggdb_resp::ServerConfig {
+            password_sha256: resp_password,
+            max_connections: config.max_connections,
+        };
         let served = std::thread::scope(|scope| {
             let server = scope.spawn(|| {
                 let log = move |line: &str| {
                     let _ = events.send(stamped(line));
                 };
-                eggdb_pgwire::serve(&store, &listener, &config, &stop_signals::requested, &log)
+                eggdb_pgwire::serve_databases(
+                    &pg_databases,
+                    &listener,
+                    local_listener.as_ref(),
+                    &config,
+                    &stop_signals::requested,
+                    &log,
+                )
             });
             let mysql_server = scope.spawn(|| match (&mysql_listener, &mysql_config) {
                 (Some(listener), Some(config)) => {
                     let log = move |line: &str| {
                         let _ = mysql_events.send(stamped(&format!("mysql {line}")));
                     };
-                    eggdb_mysqlwire::serve(&store, listener, config, &stop_signals::requested, &log)
+                    eggdb_mysqlwire::serve_with_local(
+                        &store,
+                        listener,
+                        mysql_local_listener.as_ref(),
+                        config,
+                        &stop_signals::requested,
+                        &log,
+                    )
                 }
                 _ => {
                     drop(mysql_events);
                     Ok(0)
                 }
+            });
+            let observability_server = scope.spawn(|| match &observability_listener {
+                Some(listener) => eggdb_http::serve_with_body_limit(
+                    listener,
+                    &|request| observability_endpoint.answer(request),
+                    &stop_signals::requested,
+                    eggdb_observability::MAX_REQUEST_BYTES,
+                ),
+                None => Ok(()),
+            });
+            let rest_server = scope.spawn(|| match &rest_listener {
+                Some(listener) => eggdb_http::serve_with_body_limit(
+                    listener,
+                    &|request| rest_endpoint.answer(request),
+                    &stop_signals::requested,
+                    eggdb_api::MAX_REQUEST_BYTES,
+                ),
+                None => Ok(()),
+            });
+            let cql_server = scope.spawn(|| match &cql_listener {
+                Some(listener) => {
+                    eggdb_cql::serve(&store, listener, &cql_config, &stop_signals::requested)
+                }
+                None => Ok(()),
+            });
+            let job_scheduler = scope
+                .spawn(|| super::serve_jobs::run_scheduled_jobs(&store, &stop_signals::requested));
+            let report_delivery = scope
+                .spawn(|| super::serve_jobs::deliver_reports(&store, &stop_signals::requested));
+            let cdc_delivery = scope.spawn(|| {
+                if let Some(url) = &options.cdc_webhook {
+                    super::serve_jobs::deliver_changes(
+                        &store,
+                        &config.database,
+                        url,
+                        &stop_signals::requested,
+                    )
+                }
+            });
+            let metrics_server = scope.spawn(|| match &metrics_listener {
+                Some(listener) => eggdb_http::serve(
+                    listener,
+                    &|request| super::serve_metrics::answer(request, &metrics_databases),
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let mcp_server = scope.spawn(|| match (&mcp_listener, &mcp_endpoint) {
+                (Some((listener, _)), Some(endpoint)) => eggdb_http::serve(
+                    listener,
+                    &|request| endpoint.answer(request),
+                    &stop_signals::requested,
+                ),
+                _ => Ok(()),
+            });
+            let memcached_server = scope.spawn(|| match &memcached_listener {
+                Some(listener) => eggdb_memcached::serve(
+                    &memcached_shared,
+                    listener,
+                    eggdb_memcached::ServerConfig {
+                        max_connections: config.max_connections,
+                    },
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let es_server = scope.spawn(|| match &es_listener {
+                Some(listener) => eggdb_http::serve(
+                    listener,
+                    &|request| es_api.answer(request),
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let mqtt_server = scope.spawn(|| match &mqtt_listener {
+                Some(listener) => eggdb_mqtt::serve(
+                    &mqtt_database,
+                    listener,
+                    &mqtt_config,
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let stomp_server = scope.spawn(|| match &stomp_listener {
+                Some(listener) => eggdb_stomp::serve(
+                    &queue_database,
+                    listener,
+                    &stomp_config,
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let cdc_queue_delivery = scope.spawn(|| {
+                if let Some(queue) = &options.cdc_queue {
+                    super::serve_jobs::deliver_changes_to_queue(
+                        &store,
+                        &config.database,
+                        &queue_database,
+                        queue,
+                        &stop_signals::requested,
+                    );
+                }
+            });
+            let nats_server = scope.spawn(|| match &nats_listener {
+                Some(listener) => {
+                    eggdb_nats::serve(listener, &nats_config, &stop_signals::requested)
+                }
+                None => Ok(()),
+            });
+            let dynamodb_server = scope.spawn(|| match (&dynamodb_listener, &dynamodb_endpoint) {
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
+                    listener,
+                    &|request| endpoint.answer(request),
+                    &stop_signals::requested,
+                    16 << 20,
+                ),
+                _ => Ok(()),
+            });
+            let s3_server = scope.spawn(|| match (&s3_listener, &s3_endpoint) {
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
+                    listener,
+                    &|request| endpoint.answer(request),
+                    &stop_signals::requested,
+                    eggdb_s3::MAX_REQUEST_BYTES,
+                ),
+                _ => Ok(()),
+            });
+            let sqs_server = scope.spawn(|| match (&sqs_listener, &sqs_endpoint) {
+                (Some(listener), Some(endpoint)) => eggdb_http::serve(
+                    listener,
+                    &|request| endpoint.answer(request),
+                    &stop_signals::requested,
+                ),
+                _ => Ok(()),
+            });
+            let amqp_server = scope.spawn(|| match &amqp_listener {
+                Some(listener) => eggdb_amqp::serve(
+                    &queue_database,
+                    listener,
+                    &amqp_config,
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let kafka_server = scope.spawn(|| match &kafka_listener {
+                Some(listener) => eggdb_kafka::serve(
+                    &kafka_database,
+                    listener,
+                    &kafka_config,
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let bolt_server = scope.spawn(|| match &bolt_listener {
+                Some(listener) => eggdb_bolt::serve(
+                    &graph_database,
+                    listener,
+                    &bolt_config,
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let mongo_server = scope.spawn(|| match (&mongo_listener, &mongo_config) {
+                (Some(listener), Some(mongo_config)) => eggdb_mongowire::serve(
+                    &mongo_store,
+                    listener,
+                    mongo_config,
+                    &stop_signals::requested,
+                ),
+                _ => Ok(()),
+            });
+            let resp_server = scope.spawn(|| match &resp_listener {
+                Some(listener) => eggdb_resp::serve(
+                    resp_keyspace,
+                    listener,
+                    &resp_config,
+                    &stop_signals::requested,
+                    &|_| {},
+                )
+                .map(|_| ()),
+                None => Ok(()),
             });
             let tds_server = scope.spawn(|| match (&tds_listener, &tds_config) {
                 (Some(listener), Some(config)) => {
@@ -215,6 +940,28 @@ impl Session<'_> {
             let postgresql = server.join().unwrap_or_else(|_| unexpected());
             let mysql = mysql_server.join().unwrap_or_else(|_| unexpected());
             let tds = tds_server.join().unwrap_or_else(|_| unexpected());
+            let _ = metrics_server.join();
+            let _ = mcp_server.join();
+            let _ = resp_server.join();
+            let _ = memcached_server.join();
+            let _ = es_server.join();
+            let _ = mongo_server.join();
+            let _ = bolt_server.join();
+            let _ = kafka_server.join();
+            let _ = amqp_server.join();
+            let _ = mqtt_server.join();
+            let _ = nats_server.join();
+            let _ = stomp_server.join();
+            let _ = cql_server.join();
+            let _ = observability_server.join();
+            let _ = rest_server.join();
+            let _ = cdc_queue_delivery.join();
+            let _ = sqs_server.join();
+            let _ = s3_server.join();
+            let _ = dynamodb_server.join();
+            let _ = job_scheduler.join();
+            let _ = report_delivery.join();
+            let _ = cdc_delivery.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))
                 .and_then(|open| tds.map(|tds_open| open + tds_open))
@@ -222,6 +969,12 @@ impl Session<'_> {
         drop(listener);
         drop(mysql_listener);
         drop(tds_listener);
+        for path in [socket_path.as_ref(), options.mysql_socket.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = std::fs::remove_file(path);
+        }
         let open = served.map_err(|error| {
             Failure::database(format!("the server failed: {error}"), Exit::DatabaseError)
         })?;
@@ -242,8 +995,77 @@ impl Session<'_> {
                 self.out.text("stopped\n");
             }
         }
+        drop(other_stores);
+        for (_, other) in directory {
+            self.close_database(other)?;
+        }
         self.close(db)?;
         Ok(Exit::Done)
+    }
+
+    fn auth_rules(&self) -> Result<Option<Arc<eggdb_auth::AuthRules>>, Failure> {
+        let Some(path) = &self.request.serve.auth_rules else {
+            return Ok(None);
+        };
+        eggdb_auth::AuthRules::load(path)
+            .map(|rules| Some(Arc::new(rules)))
+            .map_err(|error| {
+                Failure::usage(
+                    format!("--auth-rules {}: {error}", path.display()),
+                    Some(CommandName::Serve),
+                )
+            })
+    }
+
+    fn directory_databases(
+        &self,
+        access: Access,
+    ) -> Result<Vec<(String, eggdb::Database)>, Failure> {
+        if !self.request.file.is_dir() {
+            return Ok(Vec::new());
+        }
+        let entries = std::fs::read_dir(&self.request.file).map_err(|error| {
+            Failure::database(
+                format!(
+                    "cannot list the data directory {}: {error}",
+                    self.file_display
+                ),
+                Exit::DatabaseError,
+            )
+        })?;
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "eggdb")
+            })
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            return Err(Failure::usage(
+                format!(
+                    "the data directory {} holds no .eggdb files; create one with eggdb sql {}/<name>.eggdb --create",
+                    self.file_display, self.file_display
+                ),
+                Some(CommandName::Serve),
+            ));
+        }
+        paths
+            .into_iter()
+            .map(|path| {
+                eggdb::Database::open_with(&path, self.database_options(access, None))
+                    .map(|db| (database_name_of(&path), db))
+                    .map_err(|error| {
+                        Failure::database(
+                            format!("cannot open {}: {error}", path.display()),
+                            Exit::DatabaseError,
+                        )
+                    })
+            })
+            .collect()
     }
 
     fn listener(
@@ -257,7 +1079,7 @@ impl Session<'_> {
             Ok(listener) => Ok(listener),
             Err(None) => Err(Failure::Database {
                 message: format!(
-                    "cannot listen on {address}: it is not a loopback address. Until EggDB speaks TLS, serve listens only on this machine (127.0.0.1, ::1 or another 127.x address), so no password crosses a network in the clear."
+                    "cannot listen on {address}: it is not a loopback address. Without TLS, serve listens only on this machine (127.0.0.1, ::1 or another 127.x address), so no password crosses a network in the clear. Pass --tls-certificate <file> --tls-key <file>, or --tls-self-signed"
                 ),
                 try_command: Some(format!(
                     "eggdb serve {} {option} 127.0.0.1:{}",
@@ -265,6 +1087,7 @@ impl Session<'_> {
                     address.port()
                 )),
                 exit: Exit::Usage,
+                code: crate::cli::failure::USAGE_CODE,
             }),
             Err(Some(error)) => {
                 let in_use = error.kind() == std::io::ErrorKind::AddrInUse;
@@ -284,6 +1107,11 @@ impl Session<'_> {
                         )
                     }),
                     exit: Exit::DatabaseError,
+                    code: if in_use {
+                        "database_busy"
+                    } else {
+                        "database_failed"
+                    },
                 })
             }
         }
@@ -291,11 +1119,15 @@ impl Session<'_> {
 
     fn print_listening(
         &mut self,
-        bound: SocketAddr,
-        mysql_bound: Option<SocketAddr>,
-        tds_bound: Option<SocketAddr>,
+        Bound {
+            postgresql: bound,
+            mysql: mysql_bound,
+            tds: tds_bound,
+        }: Bound,
         config: &ServerConfig,
         read_only: bool,
+        tls: Option<&TlsSetup>,
+        sockets: &Sockets,
     ) {
         let host = bound.ip().to_string();
         let url_host = match bound.ip() {
@@ -303,22 +1135,34 @@ impl Session<'_> {
             IpAddr::V4(_) => host.clone(),
         };
         let mysql_line = mysql_bound.map_or_else(String::new, |mysql| {
-            let mysql_host = mysql.ip().to_string();
             format!(
-                "  mysql        listening on {mysql} (MySQL protocol): mysql -h {mysql_host} -P {} -u {} -p {}\n",
+                "  mysql        listening on {mysql} (MySQL protocol): mysql -h {} -P {} -u {} -p {}{}\n",
+                client_host(mysql.ip(), tls),
                 mysql.port(),
                 config.user,
+                mysql_ssl_mode(tls),
                 config.database
             )
         });
         let tds_line = tds_bound.map_or_else(String::new, |tds| {
-            format!(
-                "  sqlcmd       listening on {tds} (SQL Server's TDS protocol, no encryption): sqlcmd -S {},{} -U {} -d {} (password in SQLCMDPASSWORD or -P; go-sqlcmd's default encryption or -N disable)\n",
-                tds.ip(),
-                tds.port(),
-                config.user,
-                config.database
-            )
+            match tls {
+                None => format!(
+                    "  sqlcmd       listening on {tds} (SQL Server's TDS protocol, no encryption): sqlcmd -S {},{} -U {} -d {} (password in SQLCMDPASSWORD or -P; go-sqlcmd's default encryption or -N disable)\n",
+                    tds.ip(),
+                    tds.port(),
+                    config.user,
+                    config.database
+                ),
+                Some(setup) => format!(
+                    "  sqlcmd       listening on {tds} (SQL Server's TDS protocol, encrypted): sqlcmd -S {},{} -U {} -d {}{} (password in SQLCMDPASSWORD or -P{})\n",
+                    client_host(tds.ip(), tls),
+                    tds.port(),
+                    config.user,
+                    config.database,
+                    if matches!(setup.source, CertificateSource::SelfSigned) { " -C" } else { "" },
+                    if matches!(setup.source, CertificateSource::SelfSigned) { "; -C trusts this certificate" } else { "" },
+                ),
+            }
         });
         match self.format {
             Format::Json => {
@@ -336,27 +1180,132 @@ impl Session<'_> {
                         .string("tds_listening", &tds.to_string())
                         .number("tds_port", u64::from(tds.port()));
                 }
-                self.out.text(
-                    &object
+                object = object
                     .string("file", &self.file_display)
                     .string("database", &config.database)
                     .string("user", &config.user)
                     .number("max_connections", config.max_connections as u64)
                     .boolean("read_only", read_only)
-                    .line(),
-                );
+                    .boolean("tls", tls.is_some())
+                    .string_if_any(
+                        "socket",
+                        sockets
+                            .postgresql
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .as_deref(),
+                    )
+                    .string_if_any(
+                        "mysql_socket",
+                        sockets
+                            .mysql
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .as_deref(),
+                    )
+                    .boolean("loopback_only", tls.is_none());
+                if let Some(setup) = tls {
+                    let certificate = match &setup.source {
+                        CertificateSource::Files { certificate, .. } => certificate.as_str(),
+                        CertificateSource::SelfSigned => "self-signed",
+                    };
+                    object = object
+                        .string("tls_certificate", certificate)
+                        .string("tls_fingerprint_sha256", &setup.fingerprint_hex())
+                        .raw("tls_names", &json_list(&setup.names))
+                        .string("tls_not_after", &setup.not_after_rfc3339())
+                        .string("tls_min_version", setup.minimum_version_number());
+                    if let CertificateSource::Files { key, .. } = &setup.source {
+                        object = object.string("tls_key", key);
+                    }
+                }
+                self.out.text(&object.line());
             }
-            _ => self.out.text(&format!(
-                "listening on {bound} (PostgreSQL protocol; loopback only until EggDB has TLS)\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n  connect      psql postgresql://{}@{url_host}:{}/{}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
-                config.database,
-                self.file,
-                if read_only { "read-only" } else { "for writing" },
-                config.user,
-                config.max_connections,
-                config.user,
-                bound.port(),
-                config.database,
-            )),
+            _ => {
+                let (transport, tls_lines, connect) = match tls {
+                    None => (
+                        "loopback only without TLS: see --tls-certificate".to_owned(),
+                        String::new(),
+                        format!(
+                            "psql postgresql://{}@{url_host}:{}/{}",
+                            config.user,
+                            bound.port(),
+                            config.database
+                        ),
+                    ),
+                    Some(setup) => {
+                        let required = if bound.ip().is_loopback() {
+                            "optional on loopback"
+                        } else {
+                            "required from other machines"
+                        };
+                        let (certificate_line, fingerprint_note, ssl_mode) = match &setup.source {
+                            CertificateSource::Files { certificate, key } => (
+                                format!(
+                                    "{certificate} (chain of {}, {}, expires {}) with {key}, for {}",
+                                    setup.chain_length,
+                                    setup.key_kind,
+                                    setup.not_after_date(),
+                                    setup.names.join(", ")
+                                ),
+                                "the server certificate",
+                                "verify-full",
+                            ),
+                            CertificateSource::SelfSigned => (
+                                format!(
+                                    "self-signed {} for {}, made at this start (new one each start)",
+                                    setup.key_kind,
+                                    setup.names.join(" and ")
+                                ),
+                                "pin it: clients cannot verify a self-signed certificate by name",
+                                "require",
+                            ),
+                        };
+                        (
+                            format!("{}, {required}", setup.version_text()),
+                            format!(
+                                "  tls          {certificate_line}\n  fingerprint  SHA256 {} ({fingerprint_note})\n",
+                                setup.fingerprint_colons()
+                            ),
+                            format!(
+                                "psql \"postgresql://{}@{}:{}/{}?sslmode={ssl_mode}\"",
+                                config.user,
+                                client_host(bound.ip(), tls),
+                                bound.port(),
+                                config.database
+                            ),
+                        )
+                    }
+                };
+                let mut socket_lines = String::new();
+                let mut connect = connect;
+                if let Some(path) = &sockets.postgresql {
+                    socket_lines.push_str(&format!(
+                        "  socket       {} (owner only, PostgreSQL protocol)\n",
+                        path.display()
+                    ));
+                    if let Some(directory) = path.parent() {
+                        connect.push_str(&format!(
+                            "   or   psql -h {} -p {} -d {}",
+                            directory.display(),
+                            bound.port(),
+                            config.database
+                        ));
+                    }
+                }
+                if let Some(path) = &sockets.mysql {
+                    socket_lines
+                        .push_str(&format!("  mysql socket {} (owner only)\n", path.display()));
+                }
+                self.out.text(&format!(
+                    "listening on {bound} (PostgreSQL protocol; {transport})\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n{socket_lines}{tls_lines}  connect      {connect}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
+                    config.database,
+                    self.file,
+                    if read_only { "read-only" } else { "for writing" },
+                    config.user,
+                    config.max_connections,
+                ));
+            }
         }
     }
 
@@ -406,5 +1355,95 @@ impl Session<'_> {
                 ))),
             },
         }
+    }
+}
+
+fn client_host(address: IpAddr, tls: Option<&TlsSetup>) -> String {
+    let host = if address.is_unspecified() {
+        tls.and_then(TlsSetup::first_dns_name)
+            .map_or_else(|| "localhost".to_owned(), str::to_owned)
+    } else {
+        address.to_string()
+    };
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("[{host}]"),
+        _ => host,
+    }
+}
+
+fn json_list(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|item| render::json_string(item)).collect();
+    format!("[{}]", quoted.join(","))
+}
+
+fn mysql_ssl_mode(tls: Option<&TlsSetup>) -> &'static str {
+    match tls.map(|setup| &setup.source) {
+        None => "",
+        Some(CertificateSource::Files { .. }) => " --ssl-mode=VERIFY_IDENTITY",
+        Some(CertificateSource::SelfSigned) => " --ssl-mode=REQUIRED",
+    }
+}
+
+struct Bound {
+    postgresql: SocketAddr,
+    mysql: Option<SocketAddr>,
+    tds: Option<SocketAddr>,
+}
+
+fn missing_socket_directory(options: &crate::cli::args::ServeOptions) -> Option<String> {
+    let directories = [
+        (options.socket_dir.as_deref(), "--socket-dir"),
+        (
+            options.mysql_socket.as_deref().and_then(Path::parent),
+            "--mysql-socket",
+        ),
+    ];
+    directories.into_iter().find_map(|(directory, option)| {
+        let directory = directory.filter(|directory| !directory.as_os_str().is_empty())?;
+        (!directory.is_dir()).then(|| {
+            format!(
+                "cannot listen in {}: the directory does not exist. Create it (mkdir -p {}), or pass another {option}",
+                directory.display(),
+                directory.display()
+            )
+        })
+    })
+}
+
+pub(super) struct Sockets {
+    postgresql: Option<std::path::PathBuf>,
+    mysql: Option<std::path::PathBuf>,
+}
+
+impl Session<'_> {
+    fn local_listener(
+        &self,
+        path: &Path,
+        option: &str,
+    ) -> Result<eggdb_platform::local_socket::LocalListener, Failure> {
+        use eggdb_platform::local_socket::{LocalBindError, bind_local};
+        let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
+        bind_local(path).map_err(|error| match error {
+            LocalBindError::MissingDirectory(directory) => usage(format!(
+                "cannot listen on {}: directory {} does not exist. Create it (mkdir -p {}), or pass another {option}",
+                path.display(),
+                directory.display(),
+                directory.display()
+            )),
+            LocalBindError::NotASocket => usage(format!(
+                "cannot listen on {}: it is not a socket. Remove it or pass another path",
+                path.display()
+            )),
+            LocalBindError::InUse => Failure::database(
+                format!(
+                    "cannot listen on {}: a server is already accepting connections there (often {} itself). Stop it, or pick another --listen port or {option}",
+                    path.display(),
+                    if option == "--mysql-socket" { "MySQL" } else { "PostgreSQL" }
+                ),
+                Exit::DatabaseError,
+            ),
+            LocalBindError::Unsupported => usage(format!("{option} is not available on Windows yet; connect over --listen instead")),
+            LocalBindError::Io(error) => Failure::database(format!("cannot listen on {}: {error}", path.display()), Exit::DatabaseError),
+        })
     }
 }

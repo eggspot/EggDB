@@ -6,7 +6,7 @@ usage="usage: scripts/pg-restore/check.sh <eggdb binary> <work directory> [--row
 Fills a database of a running PostgreSQL server with scripts/pg-restore/fixture.sql, dumps it
 plain, with --inserts, with --column-inserts and as a custom-format archive converted by
 pg_restore -f, restores every dump with eggdb restore and the --inserts one with psql -f against
-eggdb serve, and compares every table's sorted COPY output and every sequence's next value with
+eggdb serve, runs the fixture's PL/pgSQL trigger on both sides, and compares every table's sorted COPY output and every sequence's next value with
 PostgreSQL's. psql -f reads the --inserts dump: with a plain dump, psql reads the COPY data of a
 table that could not be created as SQL, against EggDB as against PostgreSQL.
 
@@ -47,8 +47,6 @@ fail() {
   exit 1
 }
 
-unsupported_column="EXISTS (SELECT 1 FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
-  WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND ty.typtype IN ('e', 'd', 'c'))"
 user_tables="FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'"
 tables_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) || '|' || coalesce(
@@ -58,13 +56,10 @@ tables_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) || 
     WHERE i.indrelid = c.oid AND i.indisprimary),
   (SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) FROM pg_attribute a
     WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.atttypid <> 'json'::regtype))
-  $user_tables AND NOT $unsupported_column ORDER BY 1"
-skipped_query="SELECT count(*) $user_tables AND $unsupported_column"
+  $user_tables ORDER BY 1"
 sequences_query="SELECT quote_ident(n.nspname) || '.' || quote_ident(s.relname)
   FROM pg_class s JOIN pg_namespace n ON n.oid = s.relnamespace
-  WHERE s.relkind = 'S' AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_class c ON c.oid = d.refobjid
-    WHERE d.classid = 'pg_class'::regclass AND d.objid = s.oid AND d.refclassid = 'pg_class'::regclass
-      AND d.deptype IN ('a', 'i') AND $unsupported_column)
+  WHERE s.relkind = 'S'
   ORDER BY 1"
 
 table_query() {
@@ -92,7 +87,7 @@ sequences=()
 while IFS= read -r sequence; do
   sequences+=("$sequence")
 done < <(pg psql -v ON_ERROR_STOP=1 -At -c "$sequences_query")
-expected_skipped=$(pg psql -v ON_ERROR_STOP=1 -At -c "$skipped_query")
+expected_skipped=0
 [ "${#tables[@]}" -gt 0 ] || fail "the fixture database has no tables"
 echo "${#tables[@]} tables and ${#sequences[@]} sequences to compare; tables expected to be skipped: $expected_skipped"
 
@@ -113,6 +108,23 @@ for sequence in "${sequences[@]}"; do
   echo "== $query" >> "$work/expected.txt"
   pg psql -v ON_ERROR_STOP=1 -q -c "$query" >> "$work/expected.txt"
 done
+
+touched="UPDATE public.customers SET name = name WHERE id IN (1, 2)"
+touched_rows="COPY (SELECT id, note FROM public.customers WHERE id IN (1, 2) ORDER BY id) TO STDOUT"
+pg psql -v ON_ERROR_STOP=1 -q -c "BEGIN" -c "$touched" -c "$touched_rows" -c "ROLLBACK" > "$work/expected-trigger.txt"
+
+check_trigger() {
+  local form=$1 db=$2
+  "$eggdb" sql "$db" -c "$touched" > /dev/null ||
+    fail "$form: the restored trigger function failed"
+  "$eggdb" sql "$db" -c "$touched_rows" > "$work/$form.trigger" ||
+    fail "$form: eggdb could not read the rows the trigger changed"
+  if ! cmp -s "$work/expected-trigger.txt" "$work/$form.trigger"; then
+    diff "$work/expected-trigger.txt" "$work/$form.trigger" >&2 || true
+    fail "$form: the restored PL/pgSQL trigger changed rows differently from PostgreSQL's"
+  fi
+  echo "ok   $form: the restored PL/pgSQL trigger runs as on PostgreSQL"
+}
 
 compare() {
   local form=$1 db=$2
@@ -150,6 +162,7 @@ for form in plain inserts column-inserts custom; do
   grep -q "\"tables_skipped\":$expected_skipped," "$work/$form.report.json" ||
     fail "$form: expected $expected_skipped skipped tables: $(cat "$work/$form.report.json")"
   compare "$form" "$work/$form.db"
+  check_trigger "$form" "$work/$form.db"
 done
 
 if [ "${OS:-}" != Windows_NT ]; then

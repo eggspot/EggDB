@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-consensus"
+description = "Raft for EggDB, from Ongaro and Ousterhout's paper: leader election, log replication and commitment as a deterministic, message-driven state machine checked by simulation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

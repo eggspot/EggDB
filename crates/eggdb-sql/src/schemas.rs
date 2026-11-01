@@ -15,7 +15,7 @@ use std::sync::{Arc, Weak};
 pub(crate) const QUALIFIER: char = '\0';
 pub(crate) const DEFAULT_SCHEMA: &str = "public";
 pub(crate) const CATALOG_SCHEMA: &str = "pg_catalog";
-const INFORMATION_SCHEMA: &str = "information_schema";
+pub(crate) const INFORMATION_SCHEMA: &str = "information_schema";
 const DROP_BATCH: usize = 256;
 
 pub(crate) fn is_qualified(name: &str) -> bool {
@@ -228,7 +228,7 @@ fn split_list(setting: &str) -> Vec<&str> {
 }
 
 pub(crate) fn schema_exists(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
-    if name == DEFAULT_SCHEMA {
+    if name == DEFAULT_SCHEMA || name == crate::temporary::SCHEMA {
         return Ok(true);
     }
     if name.is_empty() || name.contains(QUALIFIER) {
@@ -266,7 +266,10 @@ fn compute_path(
     let mut existing: Vec<String> = Vec::new();
     for entry in path_entries(&settings.get("search_path").unwrap_or_default()) {
         let name = if entry == "$user" && dialect == Dialect::Oracle {
-            DEFAULT_SCHEMA.to_owned()
+            settings
+                .oracle_user_schema
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SCHEMA.to_owned())
         } else if entry == "$user" {
             user.clone()
         } else {

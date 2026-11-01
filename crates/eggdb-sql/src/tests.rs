@@ -22,31 +22,31 @@ pub(crate) fn render(result: &QueryResult) -> String {
     out
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
     }
 }
 
-fn state(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn state(session: &mut Session<'_>, sql: &str) -> String {
     fails(session, sql).state().code().to_owned()
 }
 
-fn with_people(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn with_people(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);
     last(
         &mut session,
@@ -583,19 +583,12 @@ fn not_supported_yet_answers_0a000_with_a_hint() {
     let store = MemoryStore::default();
     let mut session = with_people(&store);
     for sql in [
-        "SELECT * FROM people a FULL JOIN people b USING (id)",
         "SELECT * FROM people a NATURAL JOIN people b",
-        "SELECT array_agg(name) FROM people",
         "SELECT age FROM people GROUP BY ROLLUP (age)",
         "SELECT DISTINCT ON (age) age FROM people",
-        "SELECT * FROM people, LATERAL (SELECT 1) x",
         "SELECT '{{1}}'::int[]",
-        "WITH x AS (DELETE FROM people RETURNING id) SELECT * FROM x",
-        "INSERT INTO people SELECT * FROM people",
-        "ALTER TABLE people RENAME CONSTRAINT a TO b",
         "CREATE TABLE ts (t money)",
         "CREATE TABLE js (j inet)",
-        "SAVEPOINT a",
     ] {
         let error = fails(&mut session, sql);
         assert_eq!(error.state().code(), "0A000", "{sql}: {error}");
@@ -932,7 +925,7 @@ fn hostile_input_returns_errors_and_never_panics() {
     fuzz(&mut session, &fragments);
 }
 
-pub(crate) fn fuzz(session: &mut Session<'_, MemoryStore>, fragments: &[&str]) {
+pub(crate) fn fuzz(session: &mut Session<'_>, fragments: &[&str]) {
     let mut random = Seeded(0xDEAD_BEEF_CAFE_F00D);
     for _ in 0..20_000 {
         let length = 1 + random.below(14);
@@ -1272,7 +1265,7 @@ fn literal_inserts_take_the_direct_path_and_match_the_general_one() {
             COLUMNS[..width].join(", ")
         );
         let shift = general_sql.len() - direct_sql.len();
-        let outcome = |session: &mut Session<'_, MemoryStore>, sql: &str, shift: usize| {
+        let outcome = |session: &mut Session<'_>, sql: &str, shift: usize| {
             run(session, sql).map_err(|error| {
                 (
                     error.state(),
@@ -1326,7 +1319,7 @@ fn rows_without_a_key_stop_at_the_last_row_identifier_in_one_statement_or_many()
     assert_eq!(last(&mut session, "SELECT a FROM t"), "a\n1\n2\nSELECT 2");
 }
 
-fn with_orders(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn with_orders(store: &MemoryStore) -> Session<'_> {
     let mut session = with_people(store);
     last(
         &mut session,
@@ -1507,8 +1500,6 @@ fn join_errors_follow_postgresql() {
             "SELECT * FROM a JOIN b ON b.k = c.k JOIN people c ON true",
             "42P01",
         ),
-        ("SELECT * FROM a FULL JOIN b USING (k)", "0A000"),
-        ("SELECT * FROM a, LATERAL (SELECT 1) s", "0A000"),
         ("SELECT * FROM a NATURAL JOIN b", "0A000"),
         ("SELECT * FROM a JOIN (a JOIN b ON true) ON true", "0A000"),
         ("SELECT * FROM nope JOIN a ON true", "42P01"),
@@ -1689,9 +1680,6 @@ fn grouping_errors_follow_postgresql() {
         ("SELECT DISTINCT ON (person_id) amount FROM orders", "0A000"),
         ("SELECT age FROM people GROUP BY ROLLUP (age)", "0A000"),
         ("SELECT age FROM people GROUP BY ()", "0A000"),
-        ("SELECT array_agg(name) FROM people", "0A000"),
-        ("SELECT count(*) OVER () FROM people", "0A000"),
-        ("SELECT count(*) FILTER (WHERE true) FROM people", "0A000"),
         ("UPDATE people SET age = count(*)", "42803"),
         ("UPDATE people SET age = 1 WHERE count(*) > 1", "42803"),
         ("DELETE FROM people WHERE count(*) > 1", "42803"),
@@ -2012,7 +2000,7 @@ fn parameter(declared_type: Option<crate::SqlType>, value: Option<&str>) -> crat
 }
 
 fn run_prepared(
-    session: &mut Session<'_, MemoryStore>,
+    session: &mut Session<'_>,
     sql: &str,
     parameters: &[crate::Parameter],
 ) -> Result<Vec<String>, SqlError> {
@@ -2282,6 +2270,360 @@ fn coalesce_has_the_common_type_of_its_arguments() {
 }
 
 #[test]
+fn postgresql_upserts_skip_or_update_the_conflicting_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE stock (sku text PRIMARY KEY, units integer NOT NULL)",
+    );
+    last(&mut session, "INSERT INTO stock VALUES ('egg', 1)");
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO stock VALUES ('egg', 5) ON CONFLICT DO NOTHING"
+        ),
+        "INSERT 0 0"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO stock VALUES ('egg', 5), ('jam', 1) ON CONFLICT DO NOTHING RETURNING sku"
+        ),
+        "sku\njam\nINSERT 0 1"
+    );
+    last(&mut session, "DELETE FROM stock WHERE sku = 'jam'");
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO stock AS s VALUES ('egg', 2), ('milk', 3) \
+             ON CONFLICT (sku) DO UPDATE SET units = s.units + EXCLUDED.units RETURNING units",
+        ),
+        "units\n3\n3\nINSERT 0 2"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT sku, units FROM stock ORDER BY sku"),
+        "sku|units\negg|3\nmilk|3\nSELECT 2"
+    );
+    let untargeted = fails(
+        &mut session,
+        "INSERT INTO stock VALUES ('egg', 1) ON CONFLICT DO UPDATE SET units = 0",
+    );
+    assert_eq!(untargeted.state(), crate::SqlState::SYNTAX_ERROR);
+}
+
+#[test]
+fn postgresql_upserts_act_only_on_their_conflict_target_and_once_per_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE users (id integer PRIMARY KEY, email text UNIQUE, name text)",
+    );
+    last(&mut session, "INSERT INTO users VALUES (5, 'old@x', 'Ann')");
+    let other_key = fails(
+        &mut session,
+        "INSERT INTO users VALUES (5, 'new@x', 'Bob') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+    );
+    assert_eq!(other_key.state(), crate::SqlState::UNIQUE_VIOLATION);
+    let other_key = fails(
+        &mut session,
+        "INSERT INTO users VALUES (5, 'new@x', 'Bob') ON CONFLICT (email) DO NOTHING",
+    );
+    assert_eq!(other_key.state(), crate::SqlState::UNIQUE_VIOLATION);
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO users VALUES (6, 'old@x', 'Cy') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name"
+        ),
+        "INSERT 0 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id, email, name FROM users"),
+        "id|email|name\n5|old@x|Cy\nSELECT 1"
+    );
+    let no_key = fails(
+        &mut session,
+        "INSERT INTO users VALUES (7, 'z@x', 'Di') ON CONFLICT (name) DO NOTHING",
+    );
+    assert_eq!(no_key.state(), crate::SqlState::INVALID_COLUMN_REFERENCE);
+    let twice = fails(
+        &mut session,
+        "INSERT INTO users VALUES (8, 'a@x', 'Ed'), (9, 'a@x', 'Flo') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+    );
+    assert_eq!(twice.state(), crate::SqlState::CARDINALITY_VIOLATION);
+    let by_constraint = fails(
+        &mut session,
+        "INSERT INTO users VALUES (5, 'old@x', 'Gus') ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING",
+    );
+    assert_eq!(
+        by_constraint.state(),
+        crate::SqlState::FEATURE_NOT_SUPPORTED
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO users VALUES (5, 'old@x', 'Hal') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name"
+        ),
+        "INSERT 0 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO users VALUES (5, 'old@x', 'Ivy') ON CONFLICT (email) DO NOTHING"
+        ),
+        "INSERT 0 0"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id, name FROM users"),
+        "id|name\n5|Hal\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlite_replace_runs_beside_delete_triggers_as_sqlite_does() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    last(&mut session, "CREATE TABLE kv (k TEXT PRIMARY KEY, v INT)");
+    last(&mut session, "CREATE TABLE gone (k TEXT)");
+    last(
+        &mut session,
+        "CREATE TRIGGER kv_gone AFTER DELETE ON kv BEGIN INSERT INTO gone VALUES (old.k); END",
+    );
+    last(&mut session, "INSERT INTO kv VALUES ('a', 1)");
+    last(&mut session, "INSERT OR REPLACE INTO kv VALUES ('a', 2)");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT v, (SELECT count(*) FROM gone) AS g FROM kv"
+        ),
+        "v|g\n2|0\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlite_replace_is_refused_where_a_trigger_of_another_dialect_watches_deletes() {
+    let store = MemoryStore::default();
+    let mut postgresql = Session::new(&store);
+    for sql in [
+        "CREATE TABLE kv (k text PRIMARY KEY, v integer)",
+        "CREATE TABLE gone (k text)",
+        "CREATE FUNCTION remember() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO gone VALUES (OLD.k); RETURN OLD; END $$",
+        "CREATE TRIGGER kv_gone AFTER DELETE ON kv FOR EACH ROW EXECUTE FUNCTION remember()",
+        "INSERT INTO kv VALUES ('a', 1)",
+    ] {
+        last(&mut postgresql, sql);
+    }
+    let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    let refused = fails(&mut sqlite, "INSERT OR REPLACE INTO kv VALUES ('a', 2)");
+    assert_eq!(refused.state(), crate::SqlState::FEATURE_NOT_SUPPORTED);
+    assert_eq!(last(&mut postgresql, "SELECT v FROM kv"), "v\n1\nSELECT 1");
+}
+
+#[test]
+fn sqlite_hex_shows_every_byte_of_a_blob() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    assert_eq!(
+        last(&mut session, "SELECT hex(X'00ff80') AS h, hex('é') AS t"),
+        "h|t\n00FF80|C3A9\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_sqlite_upsert_that_updates_counts_one_change() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    last(
+        &mut session,
+        "CREATE TABLE stock (sku TEXT PRIMARY KEY, units INT)",
+    );
+    last(&mut session, "INSERT INTO stock VALUES ('egg', 1)");
+    last(
+        &mut session,
+        "INSERT INTO stock VALUES ('egg', 2) ON CONFLICT (sku) DO UPDATE SET units = units + excluded.units",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT changes() AS n, units FROM stock"),
+        "n|units\n1|3\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_subquery_sees_outer_columns_of_a_join_that_nothing_else_reads() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE owners (id integer PRIMARY KEY)");
+    last(
+        &mut session,
+        "CREATE TABLE pets (id integer PRIMARY KEY, kind text)",
+    );
+    last(&mut session, "CREATE TABLE toys (n integer)");
+    last(&mut session, "INSERT INTO owners VALUES (1), (2)");
+    last(
+        &mut session,
+        "INSERT INTO pets VALUES (1, 'cat'), (2, NULL)",
+    );
+    last(&mut session, "INSERT INTO toys VALUES (1)");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT owners.id, (SELECT count(*) FROM toys WHERE pets.kind IS NOT NULL) AS n \
+             FROM owners JOIN pets ON owners.id = pets.id ORDER BY owners.id"
+        ),
+        "id|n\n1|1\n2|0\nSELECT 2"
+    );
+    let catalog = last(
+        &mut session,
+        "SELECT a.attname, (SELECT count(*) FROM pg_namespace WHERE a.attnotnull AND pg_namespace.nspname = 'public') AS n \
+         FROM pg_class c JOIN pg_attribute a ON c.oid = a.attrelid AND a.attnum > 0 \
+         WHERE c.relname = 'pets' ORDER BY a.attnum",
+    );
+    assert_eq!(catalog, "attname|n\nid|1\nkind|0\nSELECT 2");
+}
+
+#[test]
+fn pg_tables_and_pg_views_list_what_the_schema_holds() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SCHEMA analytics");
+    last(
+        &mut session,
+        "CREATE TABLE analytics.orders (id integer PRIMARY KEY)",
+    );
+    last(
+        &mut session,
+        "CREATE VIEW analytics.recent AS SELECT id FROM analytics.orders",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT tablename, hasindexes FROM pg_tables WHERE schemaname = 'analytics'"
+        ),
+        "tablename|hasindexes\norders|t\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT viewname FROM pg_views WHERE schemaname = 'analytics'"
+        ),
+        "viewname\nrecent\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM pg_matviews"),
+        "count\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_table_named_with_the_current_database_is_found_and_another_database_is_refused() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SCHEMA analytics");
+    last(&mut session, "CREATE TABLE analytics.daily (n integer)");
+    last(&mut session, "INSERT INTO analytics.daily VALUES (1)");
+    let shown = last(&mut session, "SELECT current_database() AS d");
+    let database = shown.lines().nth(1).unwrap_or_default().to_owned();
+    assert_eq!(
+        last(
+            &mut session,
+            &format!("SELECT count(*) FROM \"{database}\".\"analytics\".\"daily\"")
+        ),
+        "count\n1\nSELECT 1"
+    );
+    let other = fails(
+        &mut session,
+        "SELECT count(*) FROM elsewhere.analytics.daily",
+    );
+    assert_eq!(other.state(), crate::SqlState::FEATURE_NOT_SUPPORTED);
+}
+
+#[test]
+fn alter_table_renames_a_view_as_dbt_does_after_building_it() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SCHEMA analytics");
+    last(&mut session, "CREATE TABLE orders (id integer)");
+    last(&mut session, "INSERT INTO orders VALUES (1), (2)");
+    last(
+        &mut session,
+        "CREATE VIEW analytics.daily__dbt_tmp AS SELECT id FROM orders",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "ALTER TABLE analytics.daily__dbt_tmp RENAME TO daily"
+        ),
+        "ALTER TABLE"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM analytics.daily"),
+        "count\n2\nSELECT 1"
+    );
+    let other = fails(
+        &mut session,
+        "ALTER TABLE analytics.daily ADD COLUMN extra integer",
+    );
+    assert_eq!(other.state().code(), "42809");
+}
+
+#[test]
+fn identity_columns_show_their_implicit_sequence_in_the_catalog() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE tickets (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code text)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT pg_get_serial_sequence('tickets', 'id') AS s"
+        ),
+        "s\npublic.tickets_id_seq\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT seqstart, seqincrement, seqmax FROM pg_sequence WHERE seqrelid = 'tickets_id_seq'::regclass"
+        ),
+        "seqstart|seqincrement|seqmax\n1|1|2147483647\nSELECT 1"
+    );
+    let django_reset = "SELECT setval(pg_get_serial_sequence('\"tickets\"','id'), coalesce(max(\"id\"), 1), max(\"id\") IS NOT null) AS s FROM \"tickets\"";
+    assert_eq!(last(&mut session, django_reset), "s\n1\nSELECT 1");
+    last(
+        &mut session,
+        "INSERT INTO tickets (code) VALUES ('a'), ('b')",
+    );
+    assert_eq!(last(&mut session, django_reset), "s\n2\nSELECT 1");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT setval('\"public\".\"tickets_id_seq\"', (SELECT max(id) FROM tickets)) AS s"
+        ),
+        "s\n2\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO tickets (code) VALUES ('c') RETURNING id"
+        ),
+        "id\n3\nINSERT 0 1"
+    );
+    for refused in [
+        "SELECT setval('tickets_id_seq', 100)",
+        "SELECT nextval('tickets_id_seq')",
+        "SELECT currval('tickets_id_seq')",
+    ] {
+        assert_eq!(
+            fails(&mut session, refused).state(),
+            crate::SqlState::FEATURE_NOT_SUPPORTED,
+            "{refused}"
+        );
+    }
+}
+
+#[test]
 fn hostile_sqlite_input_returns_errors_and_never_panics() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
@@ -2426,6 +2768,158 @@ fn sqlite_functions_stay_inside_the_sqlite_dialect() {
 }
 
 #[test]
+fn full_text_search_matches_and_ranks_rows() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE TABLE docs (id integer PRIMARY KEY, body text)",
+    )
+    .unwrap();
+    run(
+        &mut session,
+        "INSERT INTO docs VALUES (1, 'The fat cats ate fat rats'), (2, 'A rat ran'), (3, 'Dogs bark')",
+    )
+    .unwrap();
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT id FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('english', 'rats') ORDER BY ts_rank(to_tsvector(body), to_tsquery('rat')) DESC, id"
+        ),
+        "id\n1\n2\nSELECT 2"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT to_tsvector('english', 'The fat cats') AS v, plainto_tsquery('english', 'fat rats') AS q"
+        ),
+        "v|q\n'cat':3 'fat':2|'fat' & 'rat'\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM docs WHERE body @@ 'dogs'"
+        ),
+        "count\n1\nSELECT 1"
+    );
+}
+
+#[test]
+fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE TABLE t (id integer PRIMARY KEY, n integer)",
+    )
+    .unwrap();
+    run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
+    let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t WHERE n > 1");
+    let lines: Vec<&str> = plan.lines().collect();
+    assert!(lines[1].ends_with("(actual rows=2 loops=1)"), "{plan}");
+    assert!(
+        lines[lines.len() - 3].starts_with("Planning Time: "),
+        "{plan}"
+    );
+    assert!(
+        lines[lines.len() - 2].starts_with("Execution Time: "),
+        "{plan}"
+    );
+    assert_eq!(lines[lines.len() - 1], "EXPLAIN");
+    let plan = last(
+        &mut session,
+        "EXPLAIN (ANALYZE, COSTS OFF) DELETE FROM t WHERE id = 3",
+    );
+    assert!(
+        plan.lines()
+            .nth(1)
+            .unwrap()
+            .ends_with("(actual rows=1 loops=1)"),
+        "{plan}"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM t"),
+        "count\n2\nSELECT 1"
+    );
+    assert_eq!(
+        fails(&mut session, "EXPLAIN (FORMAT JSON) SELECT 1").state(),
+        crate::SqlState::FEATURE_NOT_SUPPORTED
+    );
+}
+
+#[test]
+fn statement_timeout_stops_a_long_statement_with_57014() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "SET statement_timeout = 50").unwrap();
+    let started = std::time::Instant::now();
+    let error = fails(&mut session, "SELECT pg_sleep(5)");
+    assert_eq!(error.state(), crate::SqlState::QUERY_CANCELED);
+    assert_eq!(
+        error.message(),
+        "canceling statement due to statement timeout"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    run(&mut session, "SET statement_timeout = 0").unwrap();
+    assert_eq!(
+        last(&mut session, "SELECT pg_sleep(0.01)"),
+        "pg_sleep\n\nSELECT 1"
+    );
+}
+
+#[test]
+fn the_slow_statement_threshold_follows_log_min_duration_statement() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(session.slow_statement_threshold(), None);
+    for (value, millis) in [
+        ("250", Some(250)),
+        ("'2s'", Some(2000)),
+        ("0", Some(0)),
+        ("-1", None),
+    ] {
+        run(
+            &mut session,
+            &format!("SET log_min_duration_statement = {value}"),
+        )
+        .unwrap();
+        assert_eq!(
+            session.slow_statement_threshold(),
+            millis.map(std::time::Duration::from_millis),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn sqlite_date_and_time_functions_follow_their_modifiers() {
+    let store = MemoryStore::default();
+    let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    assert_eq!(
+        last(
+            &mut sqlite,
+            "SELECT date('2023-01-31', '+1 month') AS d, datetime(1092941466, 'unixepoch') AS t, \
+             strftime('%Y/%j', '2024-03-05') AS f, unixepoch('2004-01-01 02:34:56') AS u"
+        ),
+        "d|t|f|u\n2023-03-03|2004-08-19 18:51:06|2024/065|1072924496\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut sqlite,
+            "SELECT date('nonsense') IS NULL AS invalid, length(date('now')) AS n"
+        ),
+        "invalid|n\nt|10\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut sqlite,
+            "SELECT unicode('Ä') AS u, char(72, 105) AS c, sign(-3) AS s"
+        ),
+        "u|c|s\n196|Hi|-1\nSELECT 1"
+    );
+}
+
+#[test]
 fn sqlite_parameters_number_like_sqlite_and_unbound_ones_are_null() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
@@ -2521,6 +3015,17 @@ fn hostile_oracle_input_returns_errors_and_never_panics() {
         "FROM people",
         "FROM user_tables",
         "FROM all_tab_columns",
+        "FROM user_constraints c JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name",
+        "FROM all_objects",
+        "FROM dba_indexes",
+        "FROM sys.v$version",
+        "FROM nls_session_parameters",
+        "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')",
+        "SYS_CONTEXT('USERENV', name)",
+        "SYS_CONTEXT(",
+        "SET eggdb.dialect = oracle",
+        "SET eggdb.dialect = postgresql",
+        "$1",
         "INSERT INTO people VALUES",
         "INSERT INTO people (name) VALUES ('x')",
         "UPDATE people SET age =",
@@ -2535,6 +3040,13 @@ fn hostile_oracle_input_returns_errors_and_never_panics() {
         "NUMBER(5,-2)",
         "CLOB",
         "GENERATED ALWAYS AS IDENTITY",
+        "GENERATED BY DEFAULT ON NULL FOR INSERT AND UPDATE AS IDENTITY (",
+        "START WITH LIMIT VALUE",
+        "INCREMENT BY 0",
+        "MAXVALUE 9999999999999999999999999999 CYCLE",
+        "MINVALUE -9223372036854775808",
+        "USING INDEX people_pkey",
+        "USING INDEX (CREATE INDEX",
         "WHERE ROWNUM <=",
         "ROWNUM",
         "ROWNUM = 1",
@@ -3302,7 +3814,7 @@ fn hostile_item_31_statements_never_panic_in_any_dialect() {
 
 #[test]
 fn item_31_types_and_functions_stay_in_their_dialects() {
-    let refused: [(crate::Dialect, &str); 16] = [
+    let refused: [(crate::Dialect, &str); 15] = [
         (crate::Dialect::MySql, "SELECT mysql_curtime()"),
         (crate::Dialect::PostgreSql, "SELECT mysql_curtime()"),
         (crate::Dialect::MySql, "SELECT encode('a', 'hex')"),
@@ -3313,13 +3825,12 @@ fn item_31_types_and_functions_stay_in_their_dialects() {
         (crate::Dialect::Sqlite, "SELECT get_byte('a', 0)"),
         (crate::Dialect::Sqlite, "SELECT age('2024-01-01')"),
         (crate::Dialect::Sqlite, "SELECT time '10:00'"),
-        (crate::Dialect::Sqlite, "CREATE TABLE b (x BLOB)"),
         (crate::Dialect::Oracle, "SELECT gen_random_uuid() FROM dual"),
         (crate::Dialect::Oracle, "SELECT time '10:00' FROM dual"),
         (crate::Dialect::Oracle, "SELECT bytea 'x' FROM dual"),
         (
             crate::Dialect::Oracle,
-            "CREATE TABLE i (x INTERVAL DAY TO SECOND)",
+            "CREATE TABLE i (x INTERVAL HOUR TO SECOND)",
         ),
         (crate::Dialect::PostgreSql, "CREATE TABLE r (x raw(4))"),
     ];
@@ -3549,5 +4060,28 @@ fn mysql_and_oracle_read_strings_given_to_binary_columns_by_their_own_rules() {
     assert_eq!(
         last(&mut postgresql, "SELECT '\\x41'::bytea, 'a\\\\b'::bytea"),
         "bytea|bytea\n\\x41|\\x615c62\nSELECT 1"
+    );
+}
+
+#[test]
+fn normalize_and_is_normalized_follow_unicode() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT normalize('e\u{301}') = 'é' AS same, is_normalized('e\u{301}') AS nfc, is_normalized('e\u{301}', 'NFD') AS nfd"
+        ),
+        "same|nfc|nfd\nt|f|t\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT normalize('ﬁ', 'nfkc') AS folded"),
+        "folded\nfi\nSELECT 1"
+    );
+    assert_eq!(
+        fails(&mut session, "SELECT normalize('a', 'NFX')")
+            .state()
+            .code(),
+        "22023"
     );
 }

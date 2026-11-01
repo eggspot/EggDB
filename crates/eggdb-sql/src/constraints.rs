@@ -26,6 +26,8 @@ struct Context {
     database: String,
     owner: String,
     identity_insert_table: Option<String>,
+    keeps_identity_values: bool,
+    role_checked: bool,
 }
 
 thread_local! {
@@ -47,6 +49,8 @@ pub(crate) fn enter(
     database: String,
     owner: String,
     identity_insert_table: Option<String>,
+    keeps_identity_values: bool,
+    role_checked: bool,
 ) -> ContextGuard {
     let context = Context {
         dialect,
@@ -54,7 +58,15 @@ pub(crate) fn enter(
         database,
         owner,
         identity_insert_table,
+        keeps_identity_values,
+        role_checked,
     };
+    ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
+}
+
+pub(crate) fn enter_with_dialect(dialect: Dialect) -> ContextGuard {
+    let mut context = context();
+    context.dialect = dialect;
     ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
 }
 
@@ -66,7 +78,18 @@ fn context() -> Context {
             database: String::new(),
             owner: String::new(),
             identity_insert_table: None,
+            keeps_identity_values: false,
+            role_checked: true,
         })
+    })
+}
+
+pub(crate) fn role_is_checked() -> bool {
+    CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .is_none_or(|context| context.role_checked)
     })
 }
 
@@ -89,6 +112,15 @@ pub(crate) fn identity_insert_is_on(table: &str) -> bool {
     })
 }
 
+pub(crate) fn keeps_identity_values() -> bool {
+    CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .is_some_and(|context| context.keeps_identity_values)
+    })
+}
+
 fn foreign_keys_enforced() -> bool {
     context().foreign_keys
 }
@@ -105,7 +137,7 @@ fn shown_values(row: &[Value], columns: &[usize]) -> String {
         .join(", ")
 }
 
-fn shown_row(row: &[Value]) -> String {
+pub(crate) fn shown_row(row: &[Value]) -> String {
     row.iter()
         .map(|value| value.to_text().unwrap_or_else(|| "null".into()))
         .collect::<Vec<_>>()
@@ -305,9 +337,23 @@ fn table_scope(table: &TableDefinition) -> Scope<'_> {
 
 pub(crate) struct PreparedChecks {
     checks: Vec<(usize, Expr)>,
+    domains: Option<crate::user_types::DomainChecks>,
+    partition: Option<std::sync::Arc<crate::partitions::PartitionConstraint>>,
+    partitioned: Option<crate::partitions::Partitioned>,
 }
 
 impl PreparedChecks {
+    pub(crate) fn of_validated(table: &TableDefinition) -> SqlResult<Self> {
+        let mut prepared = Self::of(table)?;
+        prepared.checks.retain(|(position, _)| {
+            table
+                .checks
+                .get(*position)
+                .is_some_and(|check| table.is_validated(&check.name))
+        });
+        Ok(prepared)
+    }
+
     pub(crate) fn of(table: &TableDefinition) -> SqlResult<Self> {
         let mut checks = Vec::with_capacity(table.checks.len());
         for (position, check) in table.checks.iter().enumerate() {
@@ -316,14 +362,44 @@ impl PreparedChecks {
                 .map_err(|_| crate::encoding::corrupt("check constraint"))?;
             checks.push((position, expr));
         }
-        Ok(Self { checks })
+        Ok(Self {
+            checks,
+            domains: crate::user_types::DomainChecks::of(table)?,
+            partition: None,
+            partitioned: None,
+        })
+    }
+
+    pub(crate) fn with_partitions(
+        mut self,
+        reader: &dyn KeyValueRead,
+        tables: &mut crate::execute::TableCache,
+        table: &TableDefinition,
+    ) -> SqlResult<Self> {
+        self.partition = crate::partitions::constraint_of(reader, tables, table)?;
+        self.partitioned = crate::partitions::partitioned(reader, tables, table)?;
+        Ok(self)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.checks.is_empty()
+            && self.domains.is_none()
+            && self.partition.is_none()
+            && self.partitioned.is_none()
     }
 
     pub(crate) fn check(&self, table: &TableDefinition, row: &[Value]) -> SqlResult<()> {
+        if let Some(partitioned) = &self.partitioned {
+            return Err(partitioned.no_partition(row));
+        }
+        if let Some(partition) = &self.partition
+            && !partition.holds(row)
+        {
+            return Err(partition.violation(&table.name, row));
+        }
+        if let Some(domains) = &self.domains {
+            domains.check(row)?;
+        }
         for (position, expr) in &self.checks {
             let evaluator = Evaluator {
                 scope: table_scope(table),
@@ -500,12 +576,18 @@ fn parent_has_key(
     Ok(found)
 }
 
+fn deferred_now(child: &TableDefinition, key: &ForeignKey) -> bool {
+    key.deferrable
+        && crate::deferred_checks::is_deferred(&key.name, child.is_initially_deferred(&key.name))
+}
+
 fn check_parent(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
     child: &TableDefinition,
     key: &ForeignKey,
     row: &[Value],
+    deferral: bool,
 ) -> SqlResult<()> {
     let Some(values) = key_values(row, &key.columns) else {
         return Ok(());
@@ -515,7 +597,17 @@ fn check_parent(
     } else {
         tables.table(reader, &key.parent)?
     };
+    let defer = |values: Vec<Value>| {
+        crate::deferred_checks::defer(crate::deferred_checks::PendingCheck::ParentOfChild {
+            child: child.name.clone(),
+            constraint: key.name.clone(),
+            values,
+        })
+    };
     let Some(parent) = parent else {
+        if deferral && deferred_now(child, key) {
+            return defer(values);
+        }
         return Err(missing_parent(child, key, row));
     };
     let Some(parent_columns) = key
@@ -528,6 +620,8 @@ fn check_parent(
     };
     if parent_has_key(reader, &parent, &parent_columns, &values)? {
         Ok(())
+    } else if deferral && deferred_now(child, key) {
+        defer(values)
     } else {
         Err(missing_parent(child, key, row))
     }
@@ -552,7 +646,7 @@ pub(crate) fn check_parents(
         {
             continue;
         }
-        check_parent(reader, tables, child, key, row)?;
+        check_parent(reader, tables, child, key, row, true)?;
     }
     Ok(())
 }
@@ -694,8 +788,27 @@ fn apply_action(
         if batch.is_empty() {
             return Ok(());
         }
+        if let Some(event) = event_of_action(action, change.new.is_none())
+            && crate::triggers::row_triggers_fire_on(&*writer, tables, &child.name, event)?
+        {
+            return Err(crate::triggers::unfired(
+                event,
+                &child.name,
+                "a cascading foreign key",
+            ));
+        }
         for (row_key, row) in batch {
             match action {
+                ReferentialAction::NoAction if deferred_now(child, key) => {
+                    return crate::deferred_checks::defer(
+                        crate::deferred_checks::PendingCheck::ChildrenOfParent {
+                            parent: change.table.name.clone(),
+                            child: child.name.clone(),
+                            constraint: key.name.clone(),
+                            values: pairs.iter().map(|(_, value)| value.clone()).collect(),
+                        },
+                    );
+                }
                 ReferentialAction::NoAction | ReferentialAction::Restrict => {
                     return Err(still_referenced(
                         &change.table,
@@ -726,7 +839,7 @@ fn apply_action(
                                 &child.columns[column],
                             )?,
                             (ReferentialAction::SetDefault, _) => {
-                                execute::default_of(&child.columns[column])?
+                                execute::default_of(child, column)?
                             }
                             _ => Value::Null,
                         };
@@ -737,7 +850,7 @@ fn apply_action(
                     }
                     execute::replace_stored_row(writer, child, &row_key, &row, &updated)?;
                     if action == ReferentialAction::SetDefault {
-                        check_parent(writer, tables, child, key, &updated)?;
+                        check_parent(writer, tables, child, key, &updated, true)?;
                     }
                     memory.charge_row(&row)?;
                     queue.push_back((
@@ -752,6 +865,19 @@ fn apply_action(
             }
         }
         memory.release(charged);
+    }
+}
+
+fn event_of_action(
+    action: ReferentialAction,
+    parent_deleted: bool,
+) -> Option<crate::triggers::TriggerEvent> {
+    match action {
+        ReferentialAction::NoAction | ReferentialAction::Restrict => None,
+        ReferentialAction::Cascade if parent_deleted => Some(crate::triggers::TriggerEvent::Delete),
+        ReferentialAction::Cascade | ReferentialAction::SetNull | ReferentialAction::SetDefault => {
+            Some(crate::triggers::TriggerEvent::Update)
+        }
     }
 }
 
@@ -1114,7 +1240,133 @@ pub(crate) fn define_foreign_key(
         on_update: key.on_update,
         deferrable: key.deferrable,
     });
+    if key.initially_deferred {
+        let name = table.foreign_keys[table.foreign_keys.len() - 1]
+            .name
+            .clone();
+        table.set_status(&name, true, true);
+    }
     Ok(table.foreign_keys.len() - 1)
+}
+
+fn first_row_with(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+    pairs: &[(usize, Value)],
+) -> SqlResult<Option<Vec<Value>>> {
+    let mut found = None;
+    execute::for_each_row_with(reader, table, pairs, &mut |_, row| {
+        found = Some(row);
+        Ok(false)
+    })?;
+    Ok(found)
+}
+
+pub(crate) fn check_pending(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    pending: &[crate::deferred_checks::PendingCheck],
+) -> SqlResult<()> {
+    use crate::deferred_checks::PendingCheck;
+    for check in pending {
+        match check {
+            PendingCheck::ParentOfChild {
+                child,
+                constraint,
+                values,
+            } => {
+                let Some(child) = tables.table(reader, child)? else {
+                    continue;
+                };
+                let Some(key) = child
+                    .foreign_keys
+                    .iter()
+                    .find(|key| key.name == *constraint)
+                else {
+                    continue;
+                };
+                let pairs: Vec<(usize, Value)> = key
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(values.iter().cloned())
+                    .collect();
+                if let Some(row) = first_row_with(reader, &child, &pairs)? {
+                    check_parent(reader, tables, &child, key, &row, false)?;
+                }
+            }
+            PendingCheck::ChildrenOfParent {
+                parent,
+                child,
+                constraint,
+                values,
+            } => {
+                let (Some(parent), Some(child)) =
+                    (tables.table(reader, parent)?, tables.table(reader, child)?)
+                else {
+                    continue;
+                };
+                let Some(key) = child
+                    .foreign_keys
+                    .iter()
+                    .find(|key| key.name == *constraint)
+                else {
+                    continue;
+                };
+                let Some(parent_columns) = key
+                    .parent_columns
+                    .iter()
+                    .map(|name| parent.column_index(name))
+                    .collect::<Option<Vec<usize>>>()
+                else {
+                    continue;
+                };
+                if parent_has_key(reader, &parent, &parent_columns, values)? {
+                    continue;
+                }
+                let pairs: Vec<(usize, Value)> = key
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(values.iter().cloned())
+                    .collect();
+                if first_row_with(reader, &child, &pairs)?.is_some() {
+                    let mut parent_row = vec![Value::Null; parent.columns.len()];
+                    for (&column, value) in parent_columns.iter().zip(values) {
+                        if let Some(slot) = parent_row.get_mut(column) {
+                            *slot = value.clone();
+                        }
+                    }
+                    return Err(still_referenced(
+                        &parent,
+                        &child,
+                        key,
+                        &parent_row,
+                        &parent_columns,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn deferrable_constraint(
+    reader: &dyn KeyValueRead,
+    name: &str,
+) -> SqlResult<Option<bool>> {
+    let mut found = None;
+    for table in crate::indexes::every_table(reader)? {
+        if let Some(key) = table.foreign_keys.iter().find(|key| key.name == name) {
+            if key.deferrable {
+                return Ok(Some(true));
+            }
+            found = Some(false);
+        } else if table.constraint_name_taken(name) {
+            found = found.or(Some(false));
+        }
+    }
+    Ok(found)
 }
 
 pub(crate) fn validate_existing(
@@ -1187,7 +1439,7 @@ pub(crate) fn validate_existing(
             if let Some(key) = key
                 && foreign_keys_enforced()
             {
-                check_parent(writer, tables, table, key, row)?;
+                check_parent(writer, tables, table, key, row, false)?;
             }
         }
         if batch.len() < CHILD_BATCH {
@@ -1233,4 +1485,88 @@ fn quoted_in(name: &str, dialect: Dialect) -> String {
         }
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConstraintClauseKind {
+    Key,
+    ForeignKey,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConstraintClause {
+    pub(crate) kind: ConstraintClauseKind,
+    pub(crate) table: String,
+    pub(crate) clause: Option<String>,
+}
+
+fn oracle_quoted(name: &str) -> String {
+    format!("\"{}\"", swap_uniform_case(name).replace('"', "\"\""))
+}
+
+pub(crate) fn oracle_qualified(internal: &str) -> String {
+    format!(
+        "{}.{}",
+        oracle_quoted(crate::schemas::schema_of(internal)),
+        oracle_quoted(crate::schemas::base_name(internal))
+    )
+}
+
+pub(crate) fn constraint_clause(table: &TableDefinition, name: &str) -> Option<ConstraintClause> {
+    let shown_table = oracle_qualified(&table.name);
+    if let Some(key) = table.foreign_keys.iter().find(|key| key.name == name) {
+        let columns: Vec<String> = key
+            .columns
+            .iter()
+            .filter_map(|&index| table.columns.get(index))
+            .map(|column| oracle_quoted(&column.name))
+            .collect();
+        let parent_columns: Vec<String> = key
+            .parent_columns
+            .iter()
+            .map(|column| oracle_quoted(column))
+            .collect();
+        let on_delete = match key.on_delete {
+            ReferentialAction::Cascade => " ON DELETE CASCADE",
+            ReferentialAction::SetNull => " ON DELETE SET NULL",
+            _ => "",
+        };
+        let clause = format!(
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){on_delete}",
+            oracle_quoted(name),
+            columns.join(", "),
+            oracle_qualified(&key.parent),
+            parent_columns.join(", ")
+        );
+        return Some(ConstraintClause {
+            kind: ConstraintClauseKind::ForeignKey,
+            table: shown_table,
+            clause: Some(clause),
+        });
+    }
+    if let Some(check) = table.checks.iter().find(|check| check.name == name) {
+        let clause = (check.dialect == Dialect::Oracle).then(|| {
+            format!(
+                "CONSTRAINT {} CHECK ({})",
+                oracle_quoted(name),
+                check.expression
+            )
+        });
+        return Some(ConstraintClause {
+            kind: ConstraintClauseKind::Check,
+            table: shown_table,
+            clause,
+        });
+    }
+    let primary = !table.primary_key.is_empty() && table.primary_key_constraint_name() == name;
+    let unique = table
+        .indexes
+        .iter()
+        .any(|index| index.unique && index.name == name);
+    (primary || unique).then_some(ConstraintClause {
+        kind: ConstraintClauseKind::Key,
+        table: shown_table,
+        clause: None,
+    })
 }

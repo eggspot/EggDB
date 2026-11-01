@@ -2,20 +2,20 @@ use crate::memory_store::MemoryStore;
 use crate::tests::{fuzz, render};
 use crate::{Dialect, Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
@@ -797,7 +797,7 @@ impl Operation {
     }
 }
 
-fn table_state(session: &mut Session<'_, MemoryStore>) -> Model {
+fn table_state(session: &mut Session<'_>) -> Model {
     let mut model = Model::default();
     let mut outputs = Vec::new();
     session

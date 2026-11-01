@@ -19,7 +19,8 @@ pub const CLIENT_COMPRESS: u32 = 1 << 5;
 pub const CLIENT_LOCAL_FILES: u32 = 1 << 7;
 /// `CLIENT_PROTOCOL_41`: the protocol every client since MySQL 4.1 speaks; required.
 pub const CLIENT_PROTOCOL_41: u32 = 1 << 9;
-/// `CLIENT_SSL`, never offered until EggDB has TLS (D102).
+/// `CLIENT_SSL`, offered when the server has TLS (D161): the client then sends an SSL request
+/// (the first 32 bytes of its handshake response) and the rest of the login runs over TLS.
 pub const CLIENT_SSL: u32 = 1 << 11;
 /// `CLIENT_TRANSACTIONS`: status flags in OK and EOF packets.
 pub const CLIENT_TRANSACTIONS: u32 = 1 << 13;
@@ -222,6 +223,17 @@ pub struct HandshakeResponse {
     pub auth_plugin: Option<String>,
 }
 
+/// The length of an SSL request: a handshake response cut after its reserved bytes.
+pub const SSL_REQUEST_BYTES: usize = 32;
+
+/// Whether `body`, the client's first packet, is an SSL request asking to continue over TLS.
+pub fn is_ssl_request(body: &[u8]) -> bool {
+    body.len() == SSL_REQUEST_BYTES
+        && body
+            .first_chunk::<4>()
+            .is_some_and(|flags| u32::from_le_bytes(*flags) & CLIENT_SSL != 0)
+}
+
 /// Reads a client's `HandshakeResponse41` (protocol 4.1 only: older clients are refused).
 pub fn parse_handshake_response(body: &[u8]) -> Result<HandshakeResponse, PacketError> {
     let mut reader = Reader::new(body);
@@ -234,11 +246,6 @@ pub fn parse_handshake_response(body: &[u8]) -> Result<HandshakeResponse, Packet
     let max_packet_size = reader.u32("maximum packet size")?;
     let collation = reader.u8("character set")?;
     reader.take(23, "reserved bytes")?;
-    if capabilities & CLIENT_SSL != 0 && reader.is_empty() {
-        return Err(PacketError(
-            "the client asked for TLS, which this server does not offer yet".into(),
-        ));
-    }
     let user = text(reader.null_terminated("user name")?, "user name")?;
     let auth_response = if capabilities & CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
         reader.length_encoded_bytes("authentication response")?

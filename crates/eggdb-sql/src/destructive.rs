@@ -67,6 +67,9 @@ pub enum DestructiveKind {
     DropSequence,
     /// `DROP SCHEMA`.
     DropSchema,
+    /// `DROP TYPE ... CASCADE` or `DROP DOMAIN ... CASCADE`, which drops the columns of that
+    /// type.
+    DropType,
     /// `ALTER TABLE ... DROP COLUMN`.
     DropColumn,
     /// `ALTER TABLE ... DROP CONSTRAINT`.
@@ -81,6 +84,8 @@ pub enum DestructiveKind {
     DeleteWithoutFilter,
     /// An `UPDATE` whose `WHERE` names no column of its table, or that has none.
     UpdateWithoutFilter,
+    /// `CALL` of a procedure or a `DO` block, whose code may change or drop anything.
+    RunCode,
 }
 
 impl DestructiveKind {
@@ -92,6 +97,7 @@ impl DestructiveKind {
             Self::DropIndex => "DROP INDEX",
             Self::DropSequence => "DROP SEQUENCE",
             Self::DropSchema => "DROP SCHEMA",
+            Self::DropType => "DROP TYPE ... CASCADE",
             Self::DropColumn => "ALTER TABLE ... DROP COLUMN",
             Self::DropConstraint => "ALTER TABLE ... DROP of a constraint, key or index",
             Self::DropPrimaryKey => "ALTER TABLE ... DROP PRIMARY KEY",
@@ -99,6 +105,7 @@ impl DestructiveKind {
             Self::Truncate => "TRUNCATE",
             Self::DeleteWithoutFilter => "DELETE of the whole table",
             Self::UpdateWithoutFilter => "UPDATE of the whole table",
+            Self::RunCode => "CALL or DO, which runs code that may change or drop data",
         }
     }
 }
@@ -129,6 +136,11 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
             dropped(DestructiveKind::DropSchema, names, *cascade)
         }
         Statement::DropIndex(drop) => dropped(DestructiveKind::DropIndex, &drop.names, false),
+        Statement::DropType {
+            names,
+            cascade: true,
+            ..
+        } => dropped(DestructiveKind::DropType, names, true),
         Statement::Truncate(table) => Some(DestructiveStatement::new(
             DestructiveKind::Truncate,
             vec![shown(&table.name)],
@@ -153,6 +165,10 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
             })
         }
         Statement::AlterTable(alter) => altered(&alter.name, &alter.actions),
+        Statement::MaterializedView(crate::ast::MaterializedViewCommand::Drop {
+            names, ..
+        }) => dropped(DestructiveKind::DropView, names, false),
+        Statement::MaterializedView(_) | Statement::InstallExtension { .. } => None,
         Statement::CreateTable(_)
         | Statement::Insert(_)
         | Statement::Select(_)
@@ -160,6 +176,13 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Begin { .. }
         | Statement::Commit
         | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::Analyze(_)
+        | Statement::Role(_)
+        | Statement::RowSecurity(_)
+        | Statement::Listen(_)
+        | Statement::Unlisten(_)
+        | Statement::Notify { .. }
         | Statement::Set { .. }
         | Statement::Show { .. }
         | Statement::Reset { .. }
@@ -177,7 +200,40 @@ pub(crate) fn classify(statement: &Statement) -> Option<DestructiveStatement> {
         | Statement::Copy(_)
         | Statement::Ignored { .. }
         | Statement::AlterSession(_)
+        | Statement::Discard(_)
+        | Statement::CreateType(_)
+        | Statement::CreateDomain(_)
+        | Statement::DropType { cascade: false, .. }
+        | Statement::AlterType(_)
+        | Statement::AlterDomain(_)
+        | Statement::SetConstraints { .. }
+        | Statement::CreateTrigger(_)
+        | Statement::DropTrigger(_)
+        | Statement::EnableTrigger(_)
+        | Statement::AlterTrigger(_)
+        | Statement::CreateRoutine(_)
+        | Statement::DropRoutine(_)
+        | Statement::AlterRoutine(_)
+        | Statement::CreatePackage(_)
+        | Statement::DropPackage(_)
+        | Statement::AlterPackage(_)
         | Statement::SqlServer(_) => None,
+        Statement::Call(call) => Some(DestructiveStatement::new(
+            DestructiveKind::RunCode,
+            vec![shown(&call.name)],
+            false,
+        )),
+        Statement::Do(_) => Some(DestructiveStatement::new(
+            DestructiveKind::RunCode,
+            vec!["DO".to_owned()],
+            false,
+        )),
+        Statement::PlsqlBlock(_) => Some(DestructiveStatement::new(
+            DestructiveKind::RunCode,
+            vec![crate::plsql::ANONYMOUS_BLOCK_NAME.to_owned()],
+            false,
+        )),
+        Statement::With(with) => crate::with_statement::classify(with),
         Statement::Merge(merge) => merge
             .update
             .as_ref()
@@ -239,6 +295,12 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::AddIdentity { .. }
             | AlterAction::AddDefault { .. }
             | AlterAction::EnableConstraint(_)
+            | AlterAction::ValidateConstraint(_)
+            | AlterAction::RenameConstraint { .. }
+            | AlterAction::AlterIdentity { .. }
+            | AlterAction::DropIdentity { .. }
+            | AlterAction::AttachPartition { .. }
+            | AlterAction::DetachPartition(_)
             | AlterAction::Accepted => continue,
         };
         match &mut found {

@@ -43,7 +43,56 @@ pub enum ArrayElement {
     Int2Vector,
     /// `oidvector`: `oid` elements numbered from 0 and written separated by spaces.
     OidVector,
+    /// `date[]`.
+    Date,
+    /// `timestamp[]`.
+    Timestamp,
+    /// `timestamptz[]`.
+    TimestampTz,
+    /// `time[]`.
+    Time,
+    /// `timetz[]`.
+    TimeTz,
+    /// `interval[]`.
+    Interval,
+    /// `uuid[]`.
+    Uuid,
+    /// `json[]`.
+    Json,
+    /// `jsonb[]`.
+    Jsonb,
+    /// `bytea[]`.
+    Bytea,
 }
+
+const ELEMENT_CODES: [(ArrayElement, u8); 26] = [
+    (ArrayElement::SmallInt, 1),
+    (ArrayElement::Integer, 2),
+    (ArrayElement::BigInt, 3),
+    (ArrayElement::Real, 4),
+    (ArrayElement::Double, 5),
+    (ArrayElement::Numeric, 6),
+    (ArrayElement::Boolean, 7),
+    (ArrayElement::Text, 8),
+    (ArrayElement::Varchar, 9),
+    (ArrayElement::Bpchar, 10),
+    (ArrayElement::Oid, 11),
+    (ArrayElement::Name, 12),
+    (ArrayElement::InternalChar, 13),
+    (ArrayElement::AclItem, 14),
+    (ArrayElement::Int2Vector, 15),
+    (ArrayElement::OidVector, 16),
+    (ArrayElement::Date, 17),
+    (ArrayElement::Timestamp, 18),
+    (ArrayElement::TimestampTz, 19),
+    (ArrayElement::Time, 20),
+    (ArrayElement::TimeTz, 21),
+    (ArrayElement::Interval, 22),
+    (ArrayElement::Uuid, 23),
+    (ArrayElement::Json, 24),
+    (ArrayElement::Jsonb, 25),
+    (ArrayElement::Bytea, 26),
+];
 
 impl ArrayElement {
     /// The SQL type of one element.
@@ -64,7 +113,43 @@ impl ArrayElement {
             Self::InternalChar => SqlType::Catalog(CatalogType::InternalChar),
             Self::AclItem => SqlType::Catalog(CatalogType::AclItem),
             Self::Int2Vector => SqlType::SmallInt,
+            Self::Date => SqlType::Date,
+            Self::Timestamp => SqlType::Timestamp(None),
+            Self::TimestampTz => SqlType::TimestampTz(None),
+            Self::Time => SqlType::Time(None),
+            Self::TimeTz => SqlType::TimeTz(None),
+            Self::Interval => SqlType::INTERVAL,
+            Self::Uuid => SqlType::Uuid,
+            Self::Json => SqlType::Json,
+            Self::Jsonb => SqlType::Jsonb,
+            Self::Bytea => SqlType::Bytea,
         }
+    }
+
+    pub(crate) fn code(self) -> u8 {
+        ELEMENT_CODES
+            .iter()
+            .find(|(element, _)| *element == self)
+            .map_or(0, |(_, code)| *code)
+    }
+
+    pub(crate) fn of_code(code: u8) -> Option<Self> {
+        ELEMENT_CODES
+            .iter()
+            .find(|(_, known)| *known == code)
+            .map(|(element, _)| *element)
+    }
+
+    pub(crate) fn is_storable(self) -> bool {
+        !matches!(
+            self,
+            Self::Oid
+                | Self::Name
+                | Self::InternalChar
+                | Self::AclItem
+                | Self::Int2Vector
+                | Self::OidVector
+        )
     }
 
     pub(crate) fn of(sql_type: SqlType) -> Option<Self> {
@@ -83,6 +168,16 @@ impl ArrayElement {
             SqlType::Catalog(CatalogType::Name) => Self::Name,
             SqlType::Catalog(CatalogType::InternalChar) => Self::InternalChar,
             SqlType::Catalog(CatalogType::AclItem) => Self::AclItem,
+            SqlType::Date => Self::Date,
+            SqlType::Timestamp(_) => Self::Timestamp,
+            SqlType::TimestampTz(_) => Self::TimestampTz,
+            SqlType::Time(_) => Self::Time,
+            SqlType::TimeTz(_) => Self::TimeTz,
+            SqlType::Interval { .. } => Self::Interval,
+            SqlType::Uuid => Self::Uuid,
+            SqlType::Json => Self::Json,
+            SqlType::Jsonb => Self::Jsonb,
+            SqlType::Bytea => Self::Bytea,
             _ => return None,
         })
     }

@@ -1,15 +1,16 @@
 use crate::messages::{MAX_STARTUP_PACKET_BYTES, Outbox};
+use eggdb_tls::{ServerConnection, SessionInfo};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_CHUNK_BYTES: usize = 64 * 1024;
-const REFUSAL_LINGER: Duration = Duration::from_millis(200);
-const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
+const CLOSE_LINGER: Duration = Duration::from_millis(200);
+const CLOSE_LINGER_BYTES: usize = 256 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) enum WireError {
@@ -21,29 +22,39 @@ pub(crate) enum WireError {
 }
 
 pub(crate) struct Wire<'a> {
-    stream: TcpStream,
+    stream: ServerConnection,
+    peeked: Option<u8>,
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
     pub(crate) outbox: Outbox,
     read_timeout: Duration,
+    closed: bool,
+}
+
+impl Drop for Wire<'_> {
+    fn drop(&mut self) {
+        self.close_gracefully();
+    }
 }
 
 impl<'a> Wire<'a> {
     pub(crate) fn new(
-        stream: TcpStream,
+        stream: ServerConnection,
         stop: &'a (dyn Fn() -> bool + Sync),
         deadline: Option<Instant>,
     ) -> io::Result<Self> {
-        stream.set_nonblocking(false)?;
-        stream.set_nodelay(true)?;
+        stream.set_blocking()?;
+        stream.set_nodelay()?;
         stream.set_read_timeout(Some(POLL_INTERVAL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self {
             stream,
+            peeked: None,
             stop,
             deadline,
             outbox: Outbox::new(),
             read_timeout: POLL_INTERVAL,
+            closed: false,
         })
     }
 
@@ -63,15 +74,25 @@ impl<'a> Wire<'a> {
         }
     }
 
+    fn set_read_timeout(&mut self, wait: Duration) -> Result<(), WireError> {
+        self.stream
+            .set_read_timeout(Some(wait))
+            .map_err(|_| WireError::Io)?;
+        self.read_timeout = wait;
+        Ok(())
+    }
+
     fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), WireError> {
         let mut filled = 0;
+        if let (Some(byte), Some(first)) = (self.peeked, buffer.first_mut()) {
+            *first = byte;
+            self.peeked = None;
+            filled = 1;
+        }
         while filled < buffer.len() {
             let wait = self.next_wait()?;
             if wait != self.read_timeout {
-                self.stream
-                    .set_read_timeout(Some(wait))
-                    .map_err(|_| WireError::Io)?;
-                self.read_timeout = wait;
+                self.set_read_timeout(wait)?;
             }
             match self.stream.read(&mut buffer[filled..]) {
                 Ok(0) => return Err(WireError::Closed),
@@ -137,17 +158,22 @@ impl<'a> Wire<'a> {
         Ok(())
     }
 
-    pub(crate) fn close_after_refusal(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Write);
-        let deadline = Instant::now() + REFUSAL_LINGER;
+    pub(crate) fn close_gracefully(&mut self) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        let _ = self.stream.set_write_timeout(Some(CLOSE_LINGER));
+        self.stream.close_tls();
+        self.stream.shutdown_write();
+        let deadline = Instant::now() + CLOSE_LINGER;
         let mut buffer = [0u8; 8 * 1024];
         let mut discarded = 0;
-        while discarded < REFUSAL_LINGER_BYTES {
+        while discarded < CLOSE_LINGER_BYTES {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || self.stream.set_read_timeout(Some(left)).is_err() {
+            if left.is_zero() {
                 return;
             }
-            match self.stream.read(&mut buffer) {
+            match self.stream.drain(&mut buffer, left) {
                 Ok(0) => return,
                 Ok(count) => discarded += count,
                 Err(error)
@@ -163,8 +189,71 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn peer(&self) -> String {
+        self.stream.peer_text()
+    }
+
+    pub(crate) fn is_local(&self) -> bool {
+        self.stream.is_local()
+    }
+
+    pub(crate) fn peer_is_loopback(&self) -> bool {
+        self.stream.peer_is_loopback()
+    }
+
+    pub(crate) fn wait_for_message(&mut self) -> Result<bool, WireError> {
+        if self.peeked.is_some() {
+            return Ok(true);
+        }
+        let wait = self.next_wait()?;
+        if wait != self.read_timeout {
+            self.set_read_timeout(wait)?;
+        }
+        let mut byte = [0u8; 1];
+        match self.stream.read(&mut byte) {
+            Ok(0) => Err(WireError::Closed),
+            Ok(_) => {
+                self.peeked = Some(byte[0]);
+                Ok(true)
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(_) => Err(WireError::Io),
+        }
+    }
+
+    pub(crate) fn peek_byte(&mut self) -> Result<u8, WireError> {
+        if let Some(byte) = self.peeked {
+            return Ok(byte);
+        }
+        let mut byte = [0u8; 1];
+        self.read_exact(&mut byte)?;
+        self.peeked = Some(byte[0]);
+        Ok(byte[0])
+    }
+
+    pub(crate) fn start_tls(&mut self, config: &eggdb_tls::ServerConfig) -> Result<(), String> {
+        let prefix: Vec<u8> = self.peeked.take().into_iter().collect();
+        let timeout = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+            .unwrap_or(TLS_HANDSHAKE_TIMEOUT);
         self.stream
-            .peer_addr()
-            .map_or_else(|_| "an unknown address".to_owned(), |peer| peer.to_string())
+            .upgrade(config, prefix, timeout, Some(POLL_INTERVAL))
+            .map_err(|error| error.to_string())?;
+        self.read_timeout = POLL_INTERVAL;
+        Ok(())
+    }
+
+    pub(crate) fn tls(&self) -> Option<&SessionInfo> {
+        self.stream.tls()
     }
 }

@@ -7,6 +7,9 @@ bytes, and every change commits atomically and survives a crash. The API is the 
 `cargo test` (the `EmbeddedGuide` doctests in `crates/eggdb/src/lib.rs`), so none of them can
 drift from the API.
 
+From C and any other language that calls C (Python, .NET, Java, Go and the rest), the same
+database is a C library with the header `eggdb.h`: see [c-api.md](c-api.md).
+
 ## Adding it to a project
 EggDB is not on crates.io yet (publishing waits for the project's accounts). Depend on a
 release tag from the repository, which uses no other crate:
@@ -29,6 +32,9 @@ fn main() -> eggdb::Result<()> {
 
 ## Opening
 - `Database::open(path)` opens the file, or creates an empty database there if there is none.
+- `Database::in_memory()` (and `in_memory_with(options)`) creates a database that lives in
+  memory: nothing touches the disk, it is gone when dropped, and `backup_to(path)` still writes a
+  copy to a file. `compact` is refused, and so is `read_only`.
 - `Database::open_with(path, options)` takes `Options`, a builder:
 
 | Option | Default | What it does |
@@ -37,6 +43,8 @@ fn main() -> eggdb::Result<()> {
 | `read_only(bool)` | `false` | opens for reading only; several read-only opens can share the file |
 | `durability(Durability)` | `Full` | how commits wait for the disk (below) |
 | `cache_bytes(usize)` | 16 MiB | the page cache; also the most one write transaction can change, a large value included |
+| `compress_values(bool)` | off | compress values of 4 KiB or more with EggDB's LZ4-format codec when that saves at least a sixteenth; the first one marks the file so older releases refuse it |
+| `lock_cache(bool)` | off | keep the page cache in RAM, never swapped out (`mlock`, `VirtualLock`); the open fails when the process may not lock that much |
 | `snapshot_memory_bytes(usize)` | the cache's size | memory for pages that open read transactions still need |
 | `auto_checkpoint_log_bytes(Option<u64>)` | 1 MiB | log written before a commit checkpoints by itself; `None` turns it off |
 | `page_size_bytes(usize)` | 4096 | the page size of a new file, a power of two up to 65,536 |
@@ -157,12 +165,130 @@ fn main() -> eggdb::Result<()> {
 - A write transaction's scans include its own changes. A scan borrows its transaction, so
   nothing changes under it.
 
+## Collections
+A database holds the **default key space**, which `get`, `put`, `delete` and `scan` on the
+database and its transactions use, and any number of **collections**: named key spaces in the
+same file, each its own ordered map from byte-string keys to byte-string values (D139).
+`db.create_collection(name)` makes one and `db.drop_collection(name)` removes it with every key
+in it, each in one commit; `db.collection_names()` lists them in byte order. A name is 1 to 128
+bytes of text without whitespace or control characters.
+
+`tx.collection(name)` gives the collection as a transaction sees it: a `ReadCollection` from a
+read transaction, a `WriteCollection` from the write transaction, with the default key space's
+methods (`get`, `get_with`, `scan`, `scan_prefix`, and `put`, `put_if_absent` and `delete` when
+writing). One write transaction changes any number of collections and the default key space,
+and commits them together. `db.collection(name)` gives a `Collection` whose `get`, `put` and
+`delete` are transactions of one step.
+
+```rust,no_run
+use eggdb::Database;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    db.create_collection("users")?;
+    db.create_collection("sessions")?;
+    db.write(|tx| {
+        tx.collection("users")?.put("1", "Ada")?;
+        tx.collection("sessions")?.put("s1", "user 1")?;
+        tx.put("config:theme", "dark")?;
+        Ok(())
+    })?;
+    let tx = db.begin_read()?;
+    let users = tx.collection("users")?;
+    for entry in users.scan(..) {
+        let (id, name) = entry?;
+        println!("{id:?} = {name:?}");
+    }
+    assert_eq!(tx.scan(..).count(), 1);
+    drop(users);
+    drop(tx);
+    println!("{:?}", db.collection_names()?);
+    db.collection("sessions").delete("s1")?;
+    db.drop_collection("sessions")?;
+    Ok(())
+}
+```
+
+- **Missing collections** are errors, never empty: `collection` fails with
+  `ErrorKind::CollectionNotFound` until `create_collection` made it (in this transaction or a
+  committed one). `create_collection` returns `false` for one that exists; `drop_collection`
+  returns `false` for one that does not.
+- **Keys** in a collection are up to `db.max_collection_key_bytes()`, ten bytes shorter than in
+  the default key space (502 with 4 KiB pages): the ten bytes say which collection a key is in.
+- **The default key space never shows a collection's keys**: its scans skip them, and its `put`
+  refuses keys that start with the bytes kept for collections, `0xff 'C' 'O' 'L' 0x00`, with
+  `ErrorKind::ReservedKey`. SQL's tables stay in the default key space under their own prefix
+  (`sql.md`), as before.
+- **Dropping** deletes every key of the collection in one transaction, so a collection that
+  changes more pages than the page cache holds fails with `CacheFull`; open the database with a
+  larger `Options::cache_bytes`.
+- A read transaction keeps its snapshot: a collection dropped or changed after it began is still
+  there, as it was, for it.
+
+## Expiring keys and counters
+A key, in the default key space or in a collection, can have a **time to live** (D140):
+`tx.put_with_expiry(key, value, ttl)` stores it with one, `tx.set_expiry(key, ttl)` gives one to
+a key that is there (and returns whether it was), `tx.clear_expiry(key)` removes it, and
+`tx.time_to_live(key)` says how long the key has left (`None`: no time to live, or no key). At
+its deadline the key is gone for every read: `get`, `get_with` and scans leave it out, and the
+write methods treat it as absent. Every commit removes up to 32 keys whose time has run out, and
+`db.remove_expired()` removes all of them at once; reads never need that to be correct.
+
+A **counter** is a value that is a decimal integer stored as text, such as `42` or `-7`, from
+`i64::MIN` to `i64::MAX`. `tx.increment(key, by)` adds `by` (subtracts a negative one) and
+returns the new count; an absent key counts as 0. A value that is not a counter, or a sum outside
+the range, fails with `ErrorKind::NotAnInteger` and changes nothing. **Compare-and-set**,
+`tx.compare_and_set(key, expected, new)`, stores `new` (or removes the key, for `None`) only when
+the value is `expected` (`None`: the key is absent), and returns whether it did.
+
+```rust,no_run
+use eggdb::Database;
+use std::time::Duration;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    db.put_with_expiry("session:1", "alice", Duration::from_secs(30 * 60))?;
+    println!("{:?} left", db.time_to_live("session:1")?);
+    let visits = db.increment("visits", 1)?;
+    println!("{visits} visits");
+    if db.compare_and_set("lock", None, Some(b"worker-7".as_slice()))? {
+        println!("the lock is ours");
+        db.compare_and_set("lock", Some(b"worker-7".as_slice()), None)?;
+    }
+    db.create_collection("stats")?;
+    db.collection("stats").increment("page:home", 1)?;
+    Ok(())
+}
+```
+
+- **Atomic.** Each of these runs in the one write transaction, so increments from any number
+  of threads never lose a count, and nothing changes between a compare and its set.
+- **What a put does to the time to live.** `put` and a `compare_and_set` that stores a value
+  replace the value and remove the time to live, as Redis's `SET` does; `increment` keeps it;
+  `put_if_absent` stores over an expired key. A time to live of zero removes the key.
+- **Time** is the database's clock, read when a transaction begins, and never earlier than the
+  last commit's stamp, so a wall clock set back cannot bring an expired key back. A read
+  transaction keeps its time: a key that expires while it lives stays readable in it.
+  `Options::clock` sets the clock; a `SimClock` makes time move only when a test moves it.
+- **Keys with a time to live are 14 bytes shorter** than other keys (498 bytes in the default
+  key space with 4 KiB pages, 488 in a collection): the deadline is kept in a key of its own.
+- **Cost.** A file that never held a key with a time to live reads and writes exactly as
+  before. Once one has, each read also looks up the key's deadline, and each write that
+  replaces or deletes a key looks it up too.
+- **Older releases** read such a file but do not write it: the first time to live sets the
+  file's read-only-compatible `EXPIRING_KEYS` feature flag (format.md).
+- Exports carry the keys that are live when they are made, without their deadlines.
+
 ## SQL
 `eggdb::sql` runs SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, all on
 the same tables ([sql.md](sql.md)). `db.sql_store()` gives the database as a SQL store, and
 `store.session(dialect)` a session on it; `execute` runs statements separated by semicolons and
 hands each result to a closure. The session's transactions are the database's write
 transactions, so a SQL `BEGIN` holds the one writer until `COMMIT` or `ROLLBACK`.
+
+`tx.sql(dialect, text)` runs SQL inside a write transaction you already hold, so key-value writes
+and SQL changes commit together or roll back together. A statement that fails undoes its own
+writes and returns its error; the transaction stays open with what came before it.
 
 Result rows are `eggdb::sql::Value`s, one variant per type: `Value::Text`, `Value::Numeric`,
 `Value::Date` (days since 2000-01-01), `Value::Timestamp` and `Value::TimestampTz`
@@ -274,6 +400,40 @@ open replays the log since the last checkpoint, about a megabyte at most by defa
 `Normal`, commits since the last sync stay exposed to a power loss until the next open syncs
 them. `db.checkpoint()` writes a checkpoint without closing.
 
+## Backup and compaction
+`db.backup_to("app.bak")` writes a copy of the last commit to a new file while the database keeps
+working: readers and the writer go on, and commits made while it runs are not in the copy. The
+copy is rebuilt key by key, with every collection, SQL table and time to live, so it has no free
+or leaked pages; it is built as `app.bak.backing-up`, synced, checked (its entries counted
+again) and only then renamed to `app.bak`, so a crash never leaves part of a copy. A backup never
+replaces a file: an existing `app.bak`, or a `app.bak.backing-up` left by a backup that did not
+finish, fails with `ErrorKind::AlreadyExists`. It returns a `BackupReport` (the commit's stamp,
+the entries, the copy's pages and bytes). A writer that changes more pages than the snapshot
+memory holds while a long backup runs makes it fail with `SnapshotTooOld`; give it more
+`snapshot_memory_bytes`, or back up again.
+
+`db.compact()` rewrites the database's file without free or leaked pages and puts it in place
+atomically, then closes the database: the file is checked first (a damaged one is refused and
+left as it is), rebuilt as `app.db.compacting`, synced, checked and renamed over `app.db`, so a
+crash leaves the old file or the compacted one. `Database::compact_file("app.db")` opens the file
+read-only and compacts it, so programs reading it keep working (they read the file they opened
+until they open it again); one that has it open for writing makes it fail with `Locked`. It
+returns a `CompactReport` (pages and bytes before and after, the free and leaked pages
+reclaimed). Both are [decision D141](decisions/D141.md).
+
+```rust,no_run
+use eggdb::Database;
+
+fn main() -> eggdb::Result<()> {
+    let db = Database::open("app.db")?;
+    let backup = db.backup_to("app.bak")?;
+    println!("{} entries in {} bytes", backup.entries, backup.file_bytes);
+    let compacted = db.compact()?;
+    println!("{} pages, then {}", compacted.pages_before, compacted.pages_after);
+    Ok(())
+}
+```
+
 ## Errors
 Every error is an `eggdb::Error`. Its message says what happened and what to do, for people and
 for AI models; `error.kind()` is an `ErrorKind` to match on:
@@ -290,6 +450,10 @@ for AI models; `error.kind()` is an `ErrorKind` to match on:
 | `SnapshotTooOld` | a read transaction's snapshot expired; begin a new one |
 | `TransactionFailed` | the write transaction failed earlier; begin a new one |
 | `NeedsReopen` | a write or sync failed; open the database again to recover |
+| `CollectionNotFound`, `InvalidCollectionName` | no collection of that name, or a name no collection can have |
+| `ReservedKey` | a key of the default key space that starts with the bytes kept for collections |
+| `NotAnInteger` | `increment` on a value that is not a counter, or a sum outside `i64`'s range |
+| `AlreadyExists` | a backup's destination exists, or a staging file a backup or a compaction left |
 | `DatabaseFull`, `OutOfMemory`, `InvalidOption`, `Other` | the rest |
 
 `ErrorKind` may gain kinds in later releases, so a `match` needs a wildcard arm. An
@@ -322,6 +486,84 @@ in the snapshot memory. When that memory runs out, the oldest snapshots expire w
 `SnapshotTooOld`, so a forgotten reader never blocks the writer. Keep read transactions short,
 or give them more `snapshot_memory_bytes`.
 
+## Concurrent transactions
+`begin_write` gives one writer at a time. `begin_concurrent` gives any number of write
+transactions at once: each reads a snapshot, keeps its changes in memory, and takes the writer
+only while it commits.
+
+```rust,no_run
+use eggdb::{Database, ErrorKind, Isolation};
+
+fn transfer(db: &Database, from: &str, to: &str, amount: i64) -> eggdb::Result<()> {
+    loop {
+        let mut tx = db.begin_concurrent(Isolation::Serializable)?;
+        let balance = |value: Option<Vec<u8>>| -> i64 {
+            value.and_then(|v| String::from_utf8(v).ok()?.parse().ok()).unwrap_or(0)
+        };
+        let from_balance = balance(tx.get(from)?);
+        let to_balance = balance(tx.get(to)?);
+        tx.put(from, (from_balance - amount).to_string())?;
+        tx.put(to, (to_balance + amount).to_string())?;
+        match tx.commit() {
+            Err(error) if error.kind() == ErrorKind::Conflict => continue,
+            other => return other.map(|_| ()),
+        }
+    }
+}
+```
+
+- **`Isolation::Serializable`** (the default) checks at the commit that every key it read and
+  every range it scanned is unchanged, so committed transactions give the same results as running
+  one at a time in commit order: write skew and phantoms fail the commit.
+- **`Isolation::Snapshot`** checks only the keys it writes, so the first committer wins and
+  write skew is allowed, as in PostgreSQL's `REPEATABLE READ`.
+- A failed check returns `ErrorKind::Conflict` and writes nothing: run the transaction again.
+  `get`, `put`, `delete` and `scan` work on the default key space, and a transaction's changes
+  must fit in memory.
+
+## Large values, streamed
+`get_reader` on a read or write transaction gives a value as a `std::io::Read`, reading its
+overflow pages one at a time, so a value of any size goes to a file or a socket without being
+held whole in memory. `put_reader` stores a value of a given length from any reader the same
+way:
+
+```rust,no_run
+use std::fs::File;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = eggdb::Database::open("app.db")?;
+    let mut photo = File::open("photo.jpg")?;
+    let len = photo.metadata()?.len();
+    db.write(|tx| tx.put_reader("photo", len, &mut photo))?;
+    let tx = db.begin_read()?;
+    if let Some(mut reader) = tx.get_reader("photo")? {
+        std::io::copy(&mut reader, &mut File::create("copy.jpg")?)?;
+    }
+    Ok(())
+}
+```
+
+A reader keeps its transaction's snapshot: a commit that replaces the value while it is being
+read does not change what it reads. A source that fails, ends before the length given or holds
+more rolls the transaction back. Written pages stay in the page cache until the commit, like
+every page a write transaction changes, so a value still needs about its size in cache
+(`Options::cache_bytes`).
+
+## EggDB's memory allocator
+A program can hand all of its memory, EggDB's included, to EggDB's own allocator. It keeps a
+cache of free blocks per thread for each size up to 32 KiB, so most allocations and frees take
+no lock, and it can stop at a budget on devices with a fixed amount of memory:
+
+```rust
+#[global_allocator]
+static ALLOCATOR: eggdb_platform::EggAllocator = eggdb_platform::EggAllocator::with_budget(64 << 20);
+```
+
+With a budget, an allocation that would hold more than that many bytes from the system fails
+the way an out-of-memory allocation does. `EggAllocator::new()` has no budget. The `eggdb`
+binary uses it when built with `--features egg-allocator`; the default build keeps the system
+allocator until the benchmark line `allocator.small_blocks` shows ours ahead on every system.
+
 ## Checking and measuring
 - `db.check()` reads every page of the tree and every large value as of the last commit, checks
   how the pages fit together, and accounts for every page of the file: each must belong to the
@@ -347,11 +589,63 @@ fn main() -> eggdb::Result<()> {
 }
 ```
 
+## In the browser (WebAssembly)
+
+EggDB builds for WebAssembly with WASI (`wasm32-wasip1`) as the `eggdb-wasm` module, and
+`web/eggdb.js` runs it in a browser, or in Node, with no other code (D221):
+
+```sh
+rustup target add wasm32-wasip1
+cargo build --release -p eggdb-wasm --target wasm32-wasip1
+cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb.wasm
+python3 -m http.server --directory web
+```
+
+`web/index.html` is the playground ([docs/ux/playground.md](ux/playground.md)): a SQL editor, a
+dialect picker and the results, all in the page. From your own page:
+
+```js
+import { EggDB } from "./eggdb.js";
+const db = await EggDB.open({ wasm: "eggdb.wasm", path: "/app.eggdb", dialect: "postgresql", persist: true });
+const out = await db.execute("SELECT 1 AS one");
+```
+
+`out.results` holds one `{ tag, columns, rows }` per statement (`columns` is `null` for a
+command such as `CREATE TABLE`), and `out.error` is set when a statement fails.
+
+The database file lives in the page's memory and, with `persist: true` where the browser offers
+it, in the Origin Private File System: the files a statement changed are saved there after the
+statement, and loaded again by the next `EggDB.open`. `persistent` says which you got. Values come
+back as text (`null` for NULL). `reset()` deletes the database's files. The module exports a
+small C ABI (`eggdb_wasm_open`, `eggdb_wasm_execute`, and the buffers they read and write, in
+`crates/eggdb-wasm`), so any WASI runtime can host it the same way.
+
+## On microcontrollers (`no_std`)
+
+The file format's building blocks are their own crate, `eggdb-format`, which builds without the
+standard library (`default-features = false`, needing only an allocator): CRC-32C, the header
+slots, page headers and their checksums (D223). Its `FlashPages` keeps EggDB pages directly on
+raw flash through a small `Flash` trait your board's driver implements (read, erase a sector,
+program), with no file system and no allocation, and refuses a damaged, torn or misplaced page
+as the engine does in a file. CI builds it for a Cortex-M4F (`thumbv7em-none-eabihf`). The B-tree,
+transactions and SQL do not run there yet.
+
+## Offline-first sync
+
+`eggdb-sync` lets an embedded database take writes while it is offline and exchange them with a
+server later (D228). A `Replica` keeps synced keys and a change log in any EggDB key-value store;
+`sync(client, server, &mut cursors, batch)` sends what the server lacks and takes in what the
+client lacks, and the newest write of each key (by a hybrid-clock stamp) wins everywhere. The
+network transport is the next step; until then the two replicas must be reachable from one
+program, or their changes carried as bytes with `encode` and `decode`.
+
 ## Limits in this release
 - **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
   with 64 KiB pages (`db.max_key_bytes()`).
-- **Size of values:** at most 1 GiB (`db.max_value_bytes()`). A value is read and written
-  whole, so it takes its size in memory while it is used; a streaming read comes later.
+- **Size of values:** at most 1 GiB (`db.max_value_bytes()`). `get` and `put` take the value
+  whole; `get_reader` and `put_reader` stream it a page at a time (see
+  [Large values, streamed](#large-values-streamed)). A value being written still needs about its
+  size in page cache until the commit.
   - A key and value of up to `3 × page_size / 16 − 18` bytes together (750 bytes with 4 KiB
     pages, 12,270 with 64 KiB pages) sit in a B+tree leaf.
   - A longer value goes to overflow pages of its own, about one page per 4,056 bytes with 4
@@ -372,8 +666,9 @@ fn main() -> eggdb::Result<()> {
   commit, so a transaction larger than `cache_bytes` fails with `CacheFull`. Split bulk loads
   into several transactions.
 - **One writer at a time** in the whole file; any number of readers.
-- **One key space** per database. Named collections come later, as an addition: the default key
-  space stays what `get`, `put`, `delete` and `scan` use (D87).
+- **Collections** share the file's one B+tree, each under its own key prefix (D139), so a
+  collection's keys are ten bytes shorter than the default key space's, and dropping one
+  deletes its keys one by one in a single transaction.
 - **No in-memory database** yet: every database is a file (D87).
 - **The file format** is version 1 ([format.md](format.md)). Every later release reads the
   files v0.2.0 writes, and CI keeps opening the v0.2.0 sample files to hold it to that (D20,

@@ -74,8 +74,16 @@ impl<'a> Scope<'a> {
     pub(crate) fn star(&self) -> Vec<usize> {
         match self {
             Scope::Many(sources) => sources.star.clone(),
-            _ => (0..self.width()).collect(),
+            _ => (0..self.width())
+                .filter(|&offset| !self.is_hidden(offset))
+                .collect(),
         }
+    }
+
+    pub(crate) fn is_hidden(&self, offset: usize) -> bool {
+        self.source_of(offset).is_some_and(|(source, index)| {
+            crate::temp_tables::is_hidden_column(&source.table.columns[index].name)
+        })
     }
 
     pub(crate) fn source_of(&self, offset: usize) -> Option<(&Source<'a>, usize)> {
@@ -358,6 +366,7 @@ pub(crate) fn check_columns(expr: &Expr, scope: Scope<'_>) -> SqlResult<()> {
                 .as_deref()
                 .map_or(Ok(()), |otherwise| check_columns(otherwise, scope))
         }
+        ExprKind::Function { name, .. } if name == crate::json_functions::WHOLE_ROW => Ok(()),
         ExprKind::Function { arguments, .. }
         | ExprKind::SqliteFunction { arguments, .. }
         | ExprKind::OracleFunction { arguments, .. }
@@ -409,12 +418,39 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Function { name, .. } if name == "array_any" || name == "array_all" => {
             ("?column?".into(), false)
         }
+        ExprKind::Function { name, arguments } if name == crate::window::WINDOW_CALL => {
+            (crate::window::function_name(arguments), true)
+        }
+        ExprKind::Function { name, arguments } if name == crate::records::FIELD_FUNCTION => {
+            match arguments.get(1).map(|field| &field.kind) {
+                Some(ExprKind::Literal(Literal::String(field))) => (field.clone(), true),
+                _ => ("?column?".into(), false),
+            }
+        }
+        ExprKind::Function { name, .. } if name == crate::records::ROW_FUNCTION => {
+            ("row".into(), true)
+        }
+        ExprKind::Function { name, arguments } if name == crate::routines::ROUTINE_CALL => {
+            (crate::routines::called_name(arguments), true)
+        }
+        ExprKind::Function { name, .. } if crate::schemas::is_qualified(name) => {
+            (crate::schemas::base_name(name).to_owned(), true)
+        }
+        ExprKind::Function { name, .. }
+            if crate::ranges::OPERATORS
+                .iter()
+                .any(|(_, internal)| *internal == name.as_str()) =>
+        {
+            ("?column?".into(), false)
+        }
         ExprKind::Column { name, .. } | ExprKind::Function { name, .. } => (name.clone(), true),
         ExprKind::SessionValue { name, .. }
         | ExprKind::SqliteFunction { name, .. }
         | ExprKind::OracleFunction { name, .. } => ((*name).to_owned(), true),
         ExprKind::SqlServerFunction {
-            function: crate::sqlserver_functions::Function::Convert { .. },
+            function:
+                crate::sqlserver_functions::Function::Convert { .. }
+                | crate::sqlserver_functions::Function::TryConvert { .. },
             arguments,
         } => match arguments.first().map(name_and_whether_it_names_a_value) {
             Some((name, true)) => (name, true),
@@ -424,7 +460,14 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         ExprKind::Aggregate { function, .. } => (function.name().to_owned(), true),
         ExprKind::Cast { expr, sql_type } => match name_and_whether_it_names_a_value(expr) {
             (name, true) => (name, true),
-            (_, false) => (sql_type.internal_name().to_owned(), false),
+            (_, false) => match sql_type {
+                SqlType::Defined(defined) => (
+                    crate::user_types::base_type_name(defined.oid)
+                        .unwrap_or_else(|| sql_type.internal_name().to_owned()),
+                    false,
+                ),
+                _ => (sql_type.internal_name().to_owned(), false),
+            },
         },
         ExprKind::Case { .. } => ("case".into(), false),
         ExprKind::Subquery(subquery) => match crate::subquery::output_column(expr) {
@@ -637,9 +680,10 @@ impl Evaluator<'_> {
                 let values = self.arguments(arguments)?;
                 let declared: Vec<Option<SqlType>> =
                     if matches!(*name, "oracle_concat" | "oracle_to_char")
-                        && values
-                            .iter()
-                            .any(|value| value.sql_type().is_some_and(SqlType::is_datetime))
+                        && values.iter().any(|value| {
+                            value.sql_type().is_some_and(SqlType::is_datetime)
+                                || matches!(value, Value::Interval(_))
+                        })
                     {
                         arguments
                             .iter()
@@ -697,6 +741,11 @@ impl Evaluator<'_> {
     }
 
     fn type_of(&self, value: &Value, expr: &Expr) -> Option<SqlType> {
+        if crate::constraints::current_dialect() == crate::Dialect::Sqlite
+            && self.declared_type(expr) == Some(SqlType::Dynamic)
+        {
+            return Some(SqlType::Dynamic);
+        }
         value.sql_type().or_else(|| self.declared_type(expr))
     }
 
@@ -713,9 +762,11 @@ impl Evaluator<'_> {
             | ExprKind::Constant { sql_type, .. }
             | ExprKind::OuterColumn { sql_type, .. } => *sql_type,
             ExprKind::Subquery(subquery) => crate::subquery::result_type(subquery),
-            ExprKind::Cast { sql_type, .. } => Some(*sql_type),
+            ExprKind::Cast { sql_type, .. } => Some(crate::user_types::storable_base(*sql_type)),
             ExprKind::SqlServerFunction {
-                function: crate::sqlserver_functions::Function::Convert { target, .. },
+                function:
+                    crate::sqlserver_functions::Function::Convert { target, .. }
+                    | crate::sqlserver_functions::Function::TryConvert { target, .. },
                 ..
             } => Some(target.engine_type()),
             ExprKind::SessionValue { .. } => Some(SqlType::Text),
@@ -724,6 +775,19 @@ impl Evaluator<'_> {
             }
             _ => None,
         }
+    }
+
+    fn oracle_timestamp_operands(&self, left: &Expr, right: &Expr) -> bool {
+        let fractional = |expr: &Expr| {
+            matches!(
+                self.oracle_declared_type(expr),
+                Some(SqlType::TimestampTz(_) | SqlType::Timestamp(None))
+            ) || matches!(
+                self.oracle_declared_type(expr),
+                Some(SqlType::Timestamp(Some(precision))) if precision > 0
+            )
+        };
+        fractional(left) || fractional(right)
     }
 
     fn oracle_declared_type(&self, expr: &Expr) -> Option<SqlType> {
@@ -788,6 +852,46 @@ impl Evaluator<'_> {
             BinaryOperator::Concat => self
                 .concatenation(left, right)
                 .map(|concatenated| concatenated.value),
+            BinaryOperator::Subtract if !is_unknown_literal(left) => {
+                let left_value = self.eval(left, None)?;
+                let left_type = self.type_of(&left_value, left);
+                if left_type == Some(SqlType::Jsonb) {
+                    let right_value = self.eval(right, None)?;
+                    return crate::json_functions::subtract(&left_value, &right_value);
+                }
+                let right_value = self.eval(right, left_type)?;
+                if crate::constraints::current_dialect() == crate::Dialect::Oracle
+                    && self.oracle_timestamp_operands(left, right)
+                    && let Some(difference) =
+                        crate::oracle_intervals::timestamp_difference(&left_value, &right_value)
+                {
+                    return difference;
+                }
+                arithmetic(operator, &left_value, &right_value)
+            }
+            BinaryOperator::JsonHasKey
+            | BinaryOperator::JsonHasAnyKey
+            | BinaryOperator::JsonHasAllKeys => {
+                let document = self.eval(left, Some(SqlType::Jsonb))?;
+                let keys = self.eval(right, Some(SqlType::Text))?;
+                crate::json_functions::has_key(operator.symbol(), &document, &keys)
+            }
+            BinaryOperator::TextSearchMatch => {
+                let (left, right) = self.pair(left, right)?;
+                crate::text_search::matches(&left, &right)
+            }
+            BinaryOperator::VectorL2Distance
+            | BinaryOperator::VectorCosineDistance
+            | BinaryOperator::VectorNegativeInnerProduct
+            | BinaryOperator::VectorL1Distance => {
+                let (left, right) = self.pair(left, right)?;
+                crate::vector_functions::operator(operator, &left, &right)
+            }
+            BinaryOperator::JsonDeletePath => {
+                let document = self.eval(left, Some(SqlType::Jsonb))?;
+                let path = self.eval(right, Some(SqlType::Text))?;
+                crate::json_functions::delete_path(&document, &path)
+            }
             BinaryOperator::Equal
             | BinaryOperator::NotEqual
             | BinaryOperator::Less
@@ -801,10 +905,18 @@ impl Evaluator<'_> {
                     operator.symbol(),
                 )?))
             }
+            BinaryOperator::Divide => {
+                let (left_value, right_value) = self.pair(left, right)?;
+                if let Some(divided) =
+                    self.sqlserver_decimal_division(left, right, &left_value, &right_value)
+                {
+                    return divided;
+                }
+                arithmetic(operator, &left_value, &right_value)
+            }
             BinaryOperator::Add
             | BinaryOperator::Subtract
             | BinaryOperator::Multiply
-            | BinaryOperator::Divide
             | BinaryOperator::Modulo
             | BinaryOperator::Power => {
                 let (left, right) = self.pair(left, right)?;
@@ -812,6 +924,13 @@ impl Evaluator<'_> {
             }
             BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {
                 let (left, right) = self.pair(left, right)?;
+                if let Some(result) = crate::ranges::containment(
+                    operator == BinaryOperator::JsonContains,
+                    &left,
+                    &right,
+                ) {
+                    return result;
+                }
                 let (container, contained) = if operator == BinaryOperator::JsonContains {
                     (&left, &right)
                 } else {
@@ -856,6 +975,18 @@ impl Evaluator<'_> {
                 (left, left_operand),
                 (right, right_operand),
             );
+        }
+        let jsonb_pair = match (&left_operand.value, &right_operand.value) {
+            (Value::Jsonb(_), Value::Jsonb(_) | Value::Null) | (Value::Null, Value::Jsonb(_)) => {
+                true
+            }
+            (Value::Jsonb(_), Value::Text(_)) => is_unknown_literal(right),
+            (Value::Text(_), Value::Jsonb(_)) => is_unknown_literal(left),
+            _ => false,
+        };
+        if jsonb_pair {
+            return crate::json_functions::concatenated(&left_operand.value, &right_operand.value)
+                .map(Concatenated::scalar);
         }
         let (left, right) = (left_operand.value, right_operand.value);
         if let Some(joined) = bytes_concatenated(&left, &right) {
@@ -1009,6 +1140,38 @@ impl Evaluator<'_> {
         }
     }
 
+    fn sqlserver_decimal_division(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        left_value: &Value,
+        right_value: &Value,
+    ) -> Option<SqlResult<Value>> {
+        let exact = |value: &Value| {
+            matches!(
+                value,
+                Value::Numeric(_) | Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_)
+            )
+        };
+        if !(matches!(left_value, Value::Numeric(_)) || matches!(right_value, Value::Numeric(_)))
+            || !exact(left_value)
+            || !exact(right_value)
+            || crate::constraints::current_dialect() != crate::Dialect::SqlServer
+        {
+            return None;
+        }
+        let declared = |expr: &Expr, value: &Value| {
+            crate::sqlserver_numbers::declared_decimal(expr, self.scope)
+                .or_else(|| crate::sqlserver_numbers::value_decimal_type(value))
+        };
+        crate::sqlserver_numbers::divide(
+            left_value,
+            right_value,
+            declared(left, left_value)?,
+            declared(right, right_value)?,
+        )
+    }
+
     fn declared_scale(&self, expr: &Expr) -> Option<u8> {
         match crate::typing::static_type(expr, self.scope)? {
             SqlType::Timestamp(scale) | SqlType::TimestampTz(scale) | SqlType::Time(scale) => scale,
@@ -1028,6 +1191,19 @@ impl Evaluator<'_> {
                 let value = self.eval(argument, None)?;
                 let scale = self.declared_scale(argument);
                 crate::sqlserver_conversion::convert(value, target, style, scale)
+            }
+            (Function::TryConvert { target, style }, [argument]) => {
+                let value = self.eval(argument, None)?;
+                let scale = self.declared_scale(argument);
+                crate::sqlserver_conversion::try_convert(value, target, style, scale)
+            }
+            (function, [first, ..]) if function.needs_declared_type() => {
+                let declared = match &first.kind {
+                    ExprKind::Literal(_) => None,
+                    _ => crate::typing::static_type(first, self.scope),
+                };
+                let values = self.arguments(arguments)?;
+                crate::sqlserver_functions::call_declared(function, &values, declared)
             }
             (Function::IsNull, [first, second]) => {
                 let declared = crate::typing::static_type(first, self.scope);
@@ -1083,6 +1259,14 @@ impl Evaluator<'_> {
             Some(SqlType::Timestamp(Some(0)))
         ) || matches!(&source.kind, ExprKind::Function { name, .. } if name == "mysql_now");
         let value = self.eval(source, None)?;
+        if let Value::Interval(interval) = &value {
+            let kind = self
+                .oracle_declared_type(source)
+                .and_then(crate::oracle_intervals::kind_of_type);
+            return crate::oracle_intervals::extract(field, *interval, kind)
+                .map(Value::Numeric)
+                .ok_or_else(invalid_extract_field);
+        }
         let Some((kind, local, offset)) = local_instant(&value)? else {
             return if value.is_null() {
                 Ok(Value::Null)
@@ -1113,14 +1297,73 @@ impl Evaluator<'_> {
         Ok(values)
     }
 
+    fn field_selection(&self, arguments: &[Expr]) -> SqlResult<Value> {
+        let [record, field] = arguments else {
+            return Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "a field selection lost its field",
+            ));
+        };
+        let ExprKind::Literal(Literal::String(field)) = &field.kind else {
+            return Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "a field selection lost its field",
+            ));
+        };
+        let value = self.eval(record, None)?;
+        crate::records::field(&value, field)
+    }
+
     fn function(&self, name: &str, arguments: &[Expr]) -> SqlResult<Value> {
+        if let Some(range) = crate::ranges::builtin_named(name) {
+            return crate::ranges::construct(self, range.oid, arguments);
+        }
         match name {
+            crate::records::ROW_FUNCTION => {
+                return crate::records::construct(self.arguments(arguments)?);
+            }
+            crate::records::FIELD_FUNCTION => return self.field_selection(arguments),
+            crate::triggers::RAISE_FUNCTION => return crate::triggers::raise(self, arguments),
+            crate::routines::ROUTINE_CALL => return crate::routines::evaluate(self, arguments),
+            "enum_first" | "enum_last" | "enum_range" => {
+                return crate::enums::function(self, name, arguments);
+            }
             "oracle_extract" => return self.oracle_extract(arguments),
             "array_constructor" => return crate::arrays::construct(self, arguments, None),
             "array_element_cast" => return crate::arrays::element_cast(self, arguments),
             "array_any" => return crate::arrays::quantified(self, arguments, false),
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
+            "to_tsvector"
+            | "to_tsquery"
+            | "plainto_tsquery"
+            | "phraseto_tsquery"
+            | "websearch_to_tsquery"
+            | "ts_rank"
+            | "ts_rank_cd" => {
+                return crate::text_search::function(name, &self.arguments(arguments)?);
+            }
+            name if crate::geo_functions::FUNCTIONS.contains(&name) => {
+                return crate::geo_functions::function(name, &self.arguments(arguments)?);
+            }
+            "eggdb_embed" | "rrf_score" => {
+                return crate::vector_functions::ai_function(name, &self.arguments(arguments)?);
+            }
+            "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_dims"
+            | "vector_norm" | "l2_normalize" => {
+                return crate::vector_functions::function(name, &self.arguments(arguments)?);
+            }
+            crate::json_functions::WHOLE_ROW => {
+                return crate::json_functions::whole_row(self, arguments);
+            }
+            crate::json_functions::ROW_OBJECT => {
+                return crate::json_functions::row_object(self, arguments);
+            }
+            "substring" => {
+                if let Some(result) = crate::regexp_functions::substring(self, arguments) {
+                    return result;
+                }
+            }
             _ => {}
         }
         if name == "pg_get_expr" {
@@ -1128,8 +1371,9 @@ impl Evaluator<'_> {
         }
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
-        let declared =
-            declared_argument_types(name).or_else(|| crate::pg_catalog::argument_types(name));
+        let declared = declared_argument_types(name)
+            .or_else(|| crate::pg_catalog::argument_types(name))
+            .or_else(|| crate::advisory_locks::argument_types(name, arguments.len()));
         let mut held = crate::memory::RowBytes::default();
         for (position, argument) in arguments.iter().enumerate() {
             let argument = crate::sequences::name_argument(name, position, argument);
@@ -1161,7 +1405,19 @@ impl Evaluator<'_> {
         if let Some(result) = crate::sequences::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::advisory_locks::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::pg_catalog::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::pg_catalog::monitoring_function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::ranges::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::ranges::operator(name, &values) {
             return result;
         }
         if let Some(result) = self.datetime_function(name, &values) {
@@ -1171,6 +1427,22 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = json_function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::json_functions::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::regexp_functions::function(name, &values) {
+            return result;
+        }
+        let formatted = match name {
+            "to_char" => crate::pg_format::to_char(&values),
+            "to_date" => crate::pg_format::to_date(&values),
+            "to_timestamp" => crate::pg_format::to_timestamp(&values),
+            "to_number" => crate::pg_format::to_number(&values),
+            _ => None,
+        };
+        if let Some(result) = formatted {
             return result;
         }
         if let Some(result) = crate::temporal::function(name, &values) {
@@ -1183,6 +1455,12 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::string_functions::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::standards::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::privacy::function(name, &values) {
             return result;
         }
         match (name, values.as_slice()) {
@@ -1252,7 +1530,29 @@ impl Evaluator<'_> {
             }
             ("lower", [Value::Text(text)]) => Ok(Value::Text(text.to_lowercase())),
             ("upper", [Value::Text(text)]) => Ok(Value::Text(text.to_uppercase())),
-            _ => Err(unknown()),
+            ("pg_notify", [channel, payload]) => {
+                let text = |value: &Value| match value {
+                    Value::Null => String::new(),
+                    Value::Text(text) => text.clone(),
+                    other => crate::Dialect::PostgreSql
+                        .value_text(other)
+                        .unwrap_or_default(),
+                };
+                crate::notifications::raise(&text(channel), &text(payload))
+                    .map(|()| Value::Text(String::new()))
+            }
+            ("pg_sleep", [Value::Null]) => Ok(Value::Null),
+            ("pg_sleep", [seconds]) => match seconds.as_float() {
+                Some(seconds) => crate::cancel::sleep(seconds).map(|()| Value::Text(String::new())),
+                None => Err(unknown()),
+            },
+            _ => match (crate::ranges::constructor(name), self.correlation) {
+                (Some(oid), _) => crate::ranges::construct_from_values(oid, &values),
+                (None, Some(correlation)) if crate::set_returning::named(name).is_none() => {
+                    correlation.call_routine(name, &vec![None; values.len()], values.clone())
+                }
+                (None, _) => Err(unknown()),
+            },
         }
     }
 }
@@ -1262,6 +1562,7 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);
     Some(match name {
         "encode" => &[Some(SqlType::Bytea), Some(SqlType::Text)],
+        "sha256" | "sha512" => &[None],
         "decode" => &[Some(SqlType::Text), Some(SqlType::Text)],
         "get_byte" => &[Some(SqlType::Bytea), Some(SqlType::Integer)],
         "substring" => &[None, Some(SqlType::Integer), Some(SqlType::Integer)],
@@ -1282,6 +1583,65 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "array_ndims" | "cardinality" => &[None],
         "btrim" | "ltrim" | "rtrim" => &[Some(SqlType::Text), Some(SqlType::Text)],
         "quote_ident" => &[Some(SqlType::Text)],
+        _ => return function_argument_types(name),
+    })
+}
+
+fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
+    const TEXT: Option<SqlType> = Some(SqlType::Text);
+    const INTEGER: Option<SqlType> = Some(SqlType::Integer);
+    const DOUBLE: Option<SqlType> = Some(SqlType::Double);
+    const BOOLEAN: Option<SqlType> = Some(SqlType::Boolean);
+    const JSONB: Option<SqlType> = Some(SqlType::Jsonb);
+    const JSON: Option<SqlType> = Some(SqlType::Json);
+    const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);
+    Some(match name {
+        "split_part" => &[TEXT, TEXT, INTEGER],
+        "replace" | "translate" => &[TEXT, TEXT, TEXT],
+        "strpos" | "position" | "starts_with" => &[TEXT, TEXT],
+        "left" | "right" | "repeat" => &[TEXT, INTEGER],
+        "lpad" | "rpad" => &[TEXT, INTEGER, TEXT],
+        "initcap" | "reverse" | "ascii" | "md5" | "quote_literal" => &[TEXT],
+        "normalize" | "is_normalized" => &[TEXT, TEXT],
+        "fix_parse" | "hl7_parse" | "edifact_parse" => &[TEXT],
+        "fix_field" => &[TEXT, INTEGER],
+        "extract_text" => &[Some(SqlType::Bytea)],
+        "laplace_noise" => &[DOUBLE, DOUBLE],
+        "chr" => &[INTEGER],
+        "pg_sleep" => &[DOUBLE],
+        "pg_notify" => &[TEXT, TEXT],
+        "overlay" => &[TEXT, TEXT, INTEGER, INTEGER],
+        "substr" => &[None, INTEGER, INTEGER],
+        "format" => &[TEXT],
+        "regexp_like"
+        | "regexp_match"
+        | "regexp_split_to_array"
+        | "similar_to_escape"
+        | "similar_substring_pattern" => &[TEXT, TEXT, TEXT],
+        "regexp_replace" => &[TEXT, TEXT, TEXT],
+        "regexp_count" => &[TEXT, TEXT, INTEGER, TEXT],
+        "regexp_instr" => &[TEXT, TEXT, INTEGER, INTEGER, INTEGER, TEXT, INTEGER],
+        "regexp_substr" => &[TEXT, TEXT, INTEGER, INTEGER, TEXT, INTEGER],
+        "to_char" => &[None, TEXT],
+        "to_date" | "to_number" => &[TEXT, TEXT],
+        "to_timestamp" => &[None, TEXT],
+        "make_date" => &[INTEGER, INTEGER, INTEGER],
+        "make_time" => &[INTEGER, INTEGER, DOUBLE],
+        "make_timestamp" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE],
+        "make_timestamptz" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE, TEXT],
+        "make_interval" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE],
+        "date_bin" => &[INTERVAL, None, None],
+        "timezone" => &[None, Some(SqlType::TimestampTz(None))],
+        "jsonb_set" | "jsonb_insert" => &[JSONB, None, JSONB, BOOLEAN],
+        "jsonb_strip_nulls" | "jsonb_pretty" => &[JSONB],
+        "json_strip_nulls" => &[JSON],
+        "json_extract_path" | "json_extract_path_text" => &[JSON],
+        crate::json_functions::OPENJSON_VALUE | crate::json_functions::OPENJSON_JSON => &[None],
+        "jsonb_extract_path" | "jsonb_extract_path_text" => &[JSONB],
+        "row_to_json" => &[None, BOOLEAN],
+        "concat" | "concat_ws" | "json_build_object" | "jsonb_build_object"
+        | "json_build_array" | "jsonb_build_array" | "to_json" | "to_jsonb" | "quote_nullable"
+        | "isfinite" => &[],
         _ => return None,
     })
 }
@@ -1417,6 +1777,11 @@ pub(crate) fn literal_value(literal: &Literal, hint: Option<SqlType>) -> SqlResu
 }
 
 fn read_by_dialect(sql_type: SqlType) -> Option<crate::Dialect> {
+    if matches!(sql_type, SqlType::Interval { .. })
+        && crate::constraints::current_dialect() == crate::Dialect::Oracle
+    {
+        return Some(crate::Dialect::Oracle);
+    }
     if !matches!(
         sql_type,
         SqlType::Date
@@ -1436,7 +1801,8 @@ fn read_by_dialect(sql_type: SqlType) -> Option<crate::Dialect> {
 }
 
 fn oracle_datetime_of(text: &str, target: SqlType) -> Option<SqlResult<Value>> {
-    if !target.is_datetime() || crate::constraints::current_dialect() != crate::Dialect::Oracle {
+    let readable = target.is_datetime() || matches!(target, SqlType::Interval { .. });
+    if !readable || crate::constraints::current_dialect() != crate::Dialect::Oracle {
         return None;
     }
     crate::oracle_conversion::datetime_of(text, target)
@@ -1496,7 +1862,7 @@ fn local_instant(value: &Value) -> SqlResult<Option<(DateTimeKind, LocalTime, i3
         Value::TimestampTz(micros) => (
             DateTimeKind::TimestampTz,
             LocalTime::of_micros(datetime::utc_to_local(*micros)?),
-            datetime::session_offset(),
+            datetime::session_offset_at(*micros),
         ),
         _ => return Ok(None),
     }))
@@ -1735,6 +2101,12 @@ pub(crate) fn compare_truth(left: &Value, right: &Value, symbol: &str) -> SqlRes
             return Err(error);
         }
         let dialect = crate::constraints::current_dialect();
+        if dialect == crate::Dialect::Sqlite {
+            if left.is_null() || right.is_null() {
+                return Ok(None);
+            }
+            return Ok(Some(ordering_holds(symbol, compare_values(left, right))));
+        }
         if dialect != crate::Dialect::SqlServer && dialect != crate::Dialect::Oracle {
             return Err(error);
         }
@@ -1766,14 +2138,18 @@ fn engine_compare_truth(left: &Value, right: &Value, symbol: &str) -> SqlResult<
         return Ok(None);
     }
     let ordering = compare_checked(left, right, symbol)?;
-    Ok(Some(match symbol {
+    Ok(Some(ordering_holds(symbol, ordering)))
+}
+
+fn ordering_holds(symbol: &str, ordering: Ordering) -> bool {
+    match symbol {
         "=" => ordering == Ordering::Equal,
         "<>" => ordering != Ordering::Equal,
         "<" => ordering == Ordering::Less,
         "<=" => ordering != Ordering::Greater,
         ">" => ordering == Ordering::Greater,
         _ => ordering != Ordering::Less,
-    }))
+    }
 }
 
 fn wider_integer(left: SqlType, right: SqlType) -> SqlType {
@@ -1798,6 +2174,17 @@ pub(crate) fn arithmetic(
     left: &Value,
     right: &Value,
 ) -> SqlResult<Value> {
+    if matches!(left, Value::Defined(_))
+        && let Some(result) = crate::ranges::arithmetic(operator, left, right)
+    {
+        return result;
+    }
+    if crate::constraints::current_dialect() == crate::Dialect::Oracle
+        && (matches!(left, Value::Interval(_)) || matches!(right, Value::Interval(_)))
+        && let Some(result) = crate::oracle_intervals::arithmetic(operator, left, right)
+    {
+        return result;
+    }
     if operator == BinaryOperator::Subtract
         && matches!(left, Value::Timestamp(_) | Value::TimestampTz(_))
         && matches!(right, Value::Timestamp(_) | Value::TimestampTz(_))

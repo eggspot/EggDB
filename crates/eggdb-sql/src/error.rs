@@ -34,8 +34,32 @@ impl SqlState {
     pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
     pub const FEATURE_NOT_SUPPORTED: Self = Self(*b"0A000");
+    /// `09000` triggered_action_exception: a trigger's body ended the statement that fired
+    /// it, as SQLite's `RAISE(IGNORE)` does for the row being changed.
+    pub const TRIGGERED_ACTION_EXCEPTION: Self = Self(*b"09000");
+    /// `45000`: the SQLSTATE MySQL's `SIGNAL` uses for an unhandled user-defined condition.
+    pub const USER_DEFINED_CONDITION: Self = Self(*b"45000");
+    /// `P0001` raise_exception: an error a statement raised on purpose, such as Transact-SQL's
+    /// `THROW` and `RAISERROR`.
+    pub const RAISE_EXCEPTION: Self = Self(*b"P0001");
+    /// `P0002` no_data_found: a PL/pgSQL `INTO STRICT` that found no row.
+    pub const NO_DATA_FOUND: Self = Self(*b"P0002");
+    /// `P0003` too_many_rows: a PL/pgSQL `INTO STRICT` that found more than one row.
+    pub const TOO_MANY_ROWS: Self = Self(*b"P0003");
+    /// `P0004` assert_failure: a PL/pgSQL `ASSERT` whose condition was not true.
+    pub const ASSERT_FAILURE: Self = Self(*b"P0004");
+    /// `20000` case_not_found: a PL/pgSQL `CASE` statement with no matching branch and no `ELSE`.
+    pub const CASE_NOT_FOUND: Self = Self(*b"20000");
+    /// `22005` error_in_assignment, such as assigning to a `CONSTANT` PL/pgSQL variable.
+    pub const ERROR_IN_ASSIGNMENT: Self = Self(*b"22005");
+    /// `2F005` function_executed_no_return_statement: a function's body ended without `RETURN`.
+    pub const FUNCTION_EXECUTED_NO_RETURN_STATEMENT: Self = Self(*b"2F005");
+    /// `0Z002` stacked_diagnostics_accessed_without_active_handler.
+    pub const STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER: Self = Self(*b"0Z002");
     /// `21000` cardinality_violation.
     pub const CARDINALITY_VIOLATION: Self = Self(*b"21000");
+    /// `2D000` invalid_transaction_termination, such as `COMMIT` inside a function.
+    pub const INVALID_TRANSACTION_TERMINATION: Self = Self(*b"2D000");
     /// `22001` string_data_right_truncation.
     pub const STRING_DATA_RIGHT_TRUNCATION: Self = Self(*b"22001");
     /// `22021` character_not_in_repertoire: bytes that are not valid UTF-8.
@@ -46,10 +70,14 @@ impl SqlState {
     pub const INVALID_DATETIME_FORMAT: Self = Self(*b"22007");
     /// `22008` datetime_field_overflow: a date or time stamp outside its type's range.
     pub const DATETIME_FIELD_OVERFLOW: Self = Self(*b"22008");
+    /// `22000` data_exception, such as a range whose lower bound is above its upper bound.
+    pub const DATA_EXCEPTION: Self = Self(*b"22000");
     /// `22023` invalid_parameter_value.
     pub const INVALID_PARAMETER_VALUE: Self = Self(*b"22023");
     /// `22011` substring_error.
     pub const SUBSTRING_ERROR: Self = Self(*b"22011");
+    /// `22004` null_value_not_allowed.
+    pub const NULL_VALUE_NOT_ALLOWED: Self = Self(*b"22004");
     /// `22015` interval_field_overflow.
     pub const INTERVAL_FIELD_OVERFLOW: Self = Self(*b"22015");
     /// `2202E` array_subscript_error.
@@ -74,6 +102,9 @@ impl SqlState {
     pub const INVALID_TEXT_REPRESENTATION: Self = Self(*b"22P02");
     /// `22P04` bad_copy_file_format: `COPY` data that does not follow its format.
     pub const BAD_COPY_FILE_FORMAT: Self = Self(*b"22P04");
+    /// `22P05` untranslatable_character: a character with no equivalent in the other
+    /// encoding of a conversion.
+    pub const UNTRANSLATABLE_CHARACTER: Self = Self(*b"22P05");
     /// `23502` not_null_violation.
     pub const NOT_NULL_VIOLATION: Self = Self(*b"23502");
     /// `23505` unique_violation.
@@ -100,8 +131,12 @@ impl SqlState {
     pub const READ_ONLY_SQL_TRANSACTION: Self = Self(*b"25006");
     /// `25P01` no_active_sql_transaction.
     pub const NO_ACTIVE_SQL_TRANSACTION: Self = Self(*b"25P01");
+    /// `3B001` invalid_savepoint_specification: no savepoint has that name.
+    pub const SAVEPOINT_EXCEPTION: Self = Self(*b"3B001");
     /// `25P02` in_failed_sql_transaction.
     pub const IN_FAILED_SQL_TRANSACTION: Self = Self(*b"25P02");
+    /// `40000` transaction_rollback.
+    pub const TRANSACTION_ROLLBACK: Self = Self(*b"40000");
     /// `42601` syntax_error.
     pub const SYNTAX_ERROR: Self = Self(*b"42601");
     /// `42622` name_too_long.
@@ -114,6 +149,8 @@ impl SqlState {
     pub const UNDEFINED_COLUMN: Self = Self(*b"42703");
     /// `42704` undefined_object.
     pub const UNDEFINED_OBJECT: Self = Self(*b"42704");
+    /// `428C9` generated_always: a value given for a `GENERATED ALWAYS` identity column.
+    pub const GENERATED_ALWAYS: Self = Self(*b"428C9");
     /// `42712` duplicate_alias.
     pub const DUPLICATE_ALIAS: Self = Self(*b"42712");
     /// `42803` grouping_error.
@@ -128,6 +165,10 @@ impl SqlState {
     pub const UNDEFINED_FUNCTION: Self = Self(*b"42883");
     /// `42725` ambiguous_function.
     pub const AMBIGUOUS_FUNCTION: Self = Self(*b"42725");
+    /// `42723` duplicate_function.
+    pub const DUPLICATE_FUNCTION: Self = Self(*b"42723");
+    /// `42P13` invalid_function_definition.
+    pub const INVALID_FUNCTION_DEFINITION: Self = Self(*b"42P13");
     /// `42P01` undefined_table.
     pub const UNDEFINED_TABLE: Self = Self(*b"42P01");
     /// `42P07` duplicate_table.
@@ -136,12 +177,24 @@ impl SqlState {
     pub const INVALID_COLUMN_REFERENCE: Self = Self(*b"42P10");
     /// `42P19` invalid_recursion.
     pub const INVALID_RECURSION: Self = Self(*b"42P19");
+    /// `42P20` windowing_error.
+    pub const WINDOWING_ERROR: Self = Self(*b"42P20");
+    /// `22013` invalid_preceding_or_following_size.
+    pub const INVALID_PRECEDING_OR_FOLLOWING_SIZE: Self = Self(*b"22013");
+    /// `22014` invalid_argument_for_ntile_function.
+    pub const INVALID_ARGUMENT_FOR_NTILE: Self = Self(*b"22014");
+    /// `22016` invalid_argument_for_nth_value_function.
+    pub const INVALID_ARGUMENT_FOR_NTH_VALUE: Self = Self(*b"22016");
+    /// `44000` with_check_option_violation.
+    pub const WITH_CHECK_OPTION_VIOLATION: Self = Self(*b"44000");
     /// `42P16` invalid_table_definition.
     pub const INVALID_TABLE_DEFINITION: Self = Self(*b"42P16");
     /// `42P06` duplicate_schema.
     pub const DUPLICATE_SCHEMA: Self = Self(*b"42P06");
     /// `42939` reserved_name: a name kept for the system, such as `pg_catalog`.
     pub const RESERVED_NAME: Self = Self(*b"42939");
+    /// `0LP01` invalid_grant_operation, such as making a role a member of itself.
+    pub const INVALID_GRANT_OPERATION: Self = Self(*b"0LP01");
     /// `42P17` invalid_object_definition, such as a view that refers to itself.
     pub const INVALID_OBJECT_DEFINITION: Self = Self(*b"42P17");
     /// `42P02` undefined_parameter: a `$n` without a value.
@@ -164,6 +217,8 @@ impl SqlState {
     pub const CANT_CHANGE_RUNTIME_PARAM: Self = Self(*b"55P02");
     /// `58030` io_error.
     pub const IO_ERROR: Self = Self(*b"58030");
+    /// `HV000` fdw_error: a foreign data source failed.
+    pub const FDW_ERROR: Self = Self(*b"HV000");
     /// `XX000` internal_error.
     pub const INTERNAL_ERROR: Self = Self(*b"XX000");
     /// `XX001` data_corrupted.
@@ -186,6 +241,14 @@ impl SqlState {
     pub const MYSQL_GENERAL: Self = Self(*b"HY000");
     /// `08S01`: MySQL's communication link failure.
     pub const MYSQL_COMMUNICATION: Self = Self(*b"08S01");
+
+    pub(crate) fn from_text(code: &str) -> Option<Self> {
+        let bytes: [u8; 5] = code.as_bytes().try_into().ok()?;
+        bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+            .then_some(Self(bytes))
+    }
 
     /// The code as text, such as `"42601"`.
     pub fn code(&self) -> &str {
@@ -217,6 +280,16 @@ struct Report {
     vendor: Option<crate::Dialect>,
     table: Option<String>,
     context: Option<String>,
+    raised: Option<Raised>,
+    declared_exception: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Raised {
+    number: u32,
+    severity: u8,
+    state: u8,
+    ends_batch: bool,
 }
 
 /// The result of SQL operations.
@@ -236,6 +309,8 @@ impl SqlError {
                 vendor: None,
                 table: None,
                 context: None,
+                raised: None,
+                declared_exception: None,
             }),
         }
     }
@@ -272,6 +347,43 @@ impl SqlError {
     pub(crate) fn at(mut self, position: usize) -> Self {
         self.report.position = Some(position);
         self
+    }
+
+    pub(crate) fn without_position(mut self) -> Self {
+        self.report.position = None;
+        self
+    }
+
+    pub(crate) fn with_declared_exception(mut self, identity: impl Into<String>) -> Self {
+        self.report.declared_exception = Some(identity.into());
+        self
+    }
+
+    pub(crate) fn declared_exception(&self) -> Option<&str> {
+        self.report.declared_exception.as_deref()
+    }
+
+    pub(crate) fn raised_in_sqlserver(
+        number: u32,
+        severity: u8,
+        state: u8,
+        message: impl Into<String>,
+        ends_batch: bool,
+    ) -> Self {
+        let mut error = Self::new(SqlState::RAISE_EXCEPTION, message);
+        error.report.vendor = Some(crate::Dialect::SqlServer);
+        error.report.vendor_code = u16::try_from(number).ok();
+        error.report.raised = Some(Raised {
+            number,
+            severity,
+            state,
+            ends_batch,
+        });
+        error
+    }
+
+    pub(crate) fn ends_sqlserver_batch(&self) -> Option<bool> {
+        self.report.raised.map(|raised| raised.ends_batch)
     }
 
     pub(crate) fn at_if_unplaced(mut self, position: usize) -> Self {
@@ -342,9 +454,35 @@ impl SqlError {
         if self.report.vendor != Some(crate::Dialect::SqlServer) {
             return None;
         }
+        if let Some(raised) = self.report.raised {
+            return Some(raised.severity);
+        }
         self.report
             .vendor_code
             .map(crate::sqlserver_errors::severity_of)
+    }
+
+    /// The error number SQL Server reports with an error of its numbering, such as `208` or
+    /// the number a `THROW` or `RAISERROR` chose (up to 2147483647), or `None` for an error
+    /// numbered by another dialect.
+    pub fn sqlserver_number(&self) -> Option<u32> {
+        if self.report.vendor != Some(crate::Dialect::SqlServer) {
+            return None;
+        }
+        match self.report.raised {
+            Some(raised) => Some(raised.number),
+            None => self.report.vendor_code.map(u32::from),
+        }
+    }
+
+    /// The state SQL Server reports with an error of its numbering (`State 1` in `Msg 208,
+    /// Level 16, State 1`): the one a `THROW` or `RAISERROR` chose, else 1; `None` for an error
+    /// numbered by another dialect.
+    pub fn sqlserver_state(&self) -> Option<u8> {
+        if self.report.vendor != Some(crate::Dialect::SqlServer) {
+            return None;
+        }
+        Some(self.report.raised.map_or(1, |raised| raised.state))
     }
 
     /// The database's own error number, when the dialect has them: MySQL's `1146` for a
@@ -402,11 +540,12 @@ impl fmt::Display for SqlError {
             return write!(f, "ORA-{code:05}: {}", self.report.message);
         }
         if self.report.vendor == Some(crate::Dialect::SqlServer) {
-            let code = self.report.vendor_code.unwrap_or(0);
-            let severity = crate::sqlserver_errors::severity_of(code);
+            let code = self.sqlserver_number().unwrap_or(0);
+            let severity = self.severity().unwrap_or(16);
+            let state = self.sqlserver_state().unwrap_or(1);
             return write!(
                 f,
-                "Msg {code}, Level {severity}, State 1: {}",
+                "Msg {code}, Level {severity}, State {state}: {}",
                 self.report.message
             );
         }

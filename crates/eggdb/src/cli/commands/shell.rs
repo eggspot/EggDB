@@ -1,3 +1,5 @@
+use super::collection::collections_count;
+use super::compact::shell_holds_the_file;
 use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
@@ -10,7 +12,9 @@ use crate::cli::{Console, Terminal, help, report};
 use eggdb::Database;
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_platform::user_files;
-use eggdb_sql::{QueryResult, TableSchema, TransactionStatus};
+use eggdb_sql::{
+    Dialect, QueryResult, ServerOutputSetting, TableSchema, TransactionStatus, starts_plsql_unit,
+};
 use eggdb_ui::{Completion, InlineTerminal, LineEnd, LineReader, LineTerminal};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -20,10 +24,31 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const KEY_VALUE_COMMANDS: [&str; 6] = ["put", "get", "del", "scan", "check", "stats"];
-const META_COMMANDS: [&str; 7] = [
-    ".help", ".tables", ".schema", ".mode", ".timer", ".quit", ".exit",
+const SERVEROUTPUT_SHORTEST: usize = "serverout".len();
+const NOTHING_TO_RUN: &str =
+    "eggdb: nothing to run: / ends a PL/SQL unit here; Up then Enter repeats the last statement\n";
+const KEY_VALUE_COMMANDS: [&str; 13] = [
+    "put", "get", "del", "scan", "check", "stats", "backup", "ttl", "expire", "persist", "incr",
+    "decr", "cas",
 ];
+const META_COMMANDS: [&str; 8] = [
+    ".help",
+    ".tables",
+    ".schema",
+    ".collection",
+    ".mode",
+    ".timer",
+    ".quit",
+    ".exit",
+];
+const KEY_SPACE_COMMANDS: [&str; 10] = [
+    "put", "get", "del", "scan", "ttl", "expire", "persist", "incr", "decr", "cas",
+];
+const ONE_KEY_COMMANDS: [&str; 8] = [
+    "get", "del", "ttl", "expire", "persist", "incr", "decr", "cas",
+];
+const DEFAULT_KEY_SPACE: &str = "default key space";
+const LONGEST_PROMPT_COLLECTION: usize = 16;
 const STATEMENT_KEYWORDS: [&str; 15] = [
     "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "BEGIN", "COMMIT", "ROLLBACK", "SET",
     "SHOW", "RESET", "START", "END", "ABORT",
@@ -171,7 +196,7 @@ struct Shell<'s> {
     file: String,
     stem: String,
     db: &'s Database,
-    sql: eggdb_sql::Session<'s, DatabaseStore<'s>>,
+    sql: eggdb_sql::Session<'s>,
     buffer: String,
     entry: String,
     mode: ResultMode,
@@ -184,6 +209,7 @@ struct Shell<'s> {
     history_notice: Option<String>,
     pending: VecDeque<String>,
     line_reader: Option<LineReader>,
+    collection: Option<String>,
 }
 
 struct CopyFiles {
@@ -208,7 +234,7 @@ impl<'s> Shell<'s> {
             (None, None)
         };
         let dialect = request.dialect;
-        Self {
+        let mut shell = Self {
             mode: request.shell.mode.unwrap_or(ResultMode::Table),
             color_out: interactive && uses_color(request.color, terminal.stdout_color),
             color_err: interactive && uses_color(request.color, terminal.stderr_color),
@@ -226,7 +252,12 @@ impl<'s> Shell<'s> {
             history_notice,
             pending: VecDeque::new(),
             line_reader: None,
+            collection: None,
+        };
+        if dialect == Dialect::Oracle {
+            shell.sql.enable_server_output(None);
         }
+        shell
     }
 
     fn batch(&mut self, console: &mut Console<'_>) -> Result<Exit, Failure> {
@@ -357,13 +388,28 @@ impl<'s> Shell<'s> {
             "read-write"
         };
         let tables = self.sql.tables().map(|tables| tables.len()).unwrap_or(0);
-        let counts = match tables {
-            0 => String::new(),
-            1 => " (1 table)".to_owned(),
-            count => format!(" ({count} tables)"),
+        let collections = self.collection_names().len();
+        let mut parts = Vec::new();
+        match tables {
+            0 => {}
+            1 => parts.push("1 table".to_owned()),
+            count => parts.push(format!("{count} tables")),
+        }
+        if collections > 0 {
+            parts.push(collections_count(collections));
+        }
+        let counts = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        };
+        let endings = if self.sql.dialect() == Dialect::Oracle {
+            "SQL ends with ; and a PL/SQL block with a / line;"
+        } else {
+            "SQL ends with ; and"
         };
         let text = format!(
-            "EggDB {}: {}, open {access}{counts}\nType .help for help. SQL ends with ; and .quit or Ctrl-D quits.\n",
+            "EggDB {}: {}, open {access}{counts}\nType .help for help. {endings} .quit or Ctrl-D quits.\n",
             eggdb::VERSION,
             self.file
         );
@@ -385,7 +431,15 @@ impl<'s> Shell<'s> {
             TransactionStatus::InBlock => "*",
             TransactionStatus::Failed => "!",
         };
-        format!("{}{state}{block}> ", self.stem)
+        let collection = match &self.collection {
+            Some(name) if name.chars().count() > LONGEST_PROMPT_COLLECTION => {
+                let cut: String = name.chars().take(LONGEST_PROMPT_COLLECTION - 1).collect();
+                format!("[{cut}…]")
+            }
+            Some(name) => format!("[{name}]"),
+            None => String::new(),
+        };
+        format!("{}{collection}{state}{block}> ", self.stem)
     }
 
     fn pending(&self) -> Pending {
@@ -403,8 +457,21 @@ impl<'s> Shell<'s> {
                 return self.backslash_copy(console, arguments);
             }
             let first = trimmed.split_whitespace().next().unwrap_or_default();
+            if first == "compact" {
+                let exit = report(
+                    &shell_holds_the_file(&self.file),
+                    console,
+                    self.request.color,
+                );
+                return Step::Continue(exit);
+            }
             if KEY_VALUE_COMMANDS.contains(&first) {
                 return self.key_value(console, trimmed);
+            }
+            if self.sql.dialect() == Dialect::Oracle
+                && let Some(step) = self.sqlplus_command(console, trimmed)
+            {
+                return step;
             }
             if trimmed.is_empty() {
                 return Step::Continue(Exit::Done);
@@ -413,6 +480,11 @@ impl<'s> Shell<'s> {
             self.buffer.push('\n');
         }
         self.buffer.push_str(line);
+        if self.sql.dialect() == Dialect::Oracle
+            && let Some(step) = self.plsql_unit_line(console, line)
+        {
+            return step;
+        }
         let pending = self.pending();
         if pending.complete_to == 0 {
             return Step::Continue(Exit::Done);
@@ -422,6 +494,69 @@ impl<'s> Shell<'s> {
             self.buffer.clear();
         }
         self.run_sql(console, &statements)
+    }
+
+    fn sqlplus_command(&mut self, console: &mut Console<'_>, line: &str) -> Option<Step> {
+        let line = line.trim_end();
+        if line == "/" {
+            let mut messages = Output::new(&mut *console.stderr, false);
+            messages.text(NOTHING_TO_RUN);
+            let _ = messages.finish();
+            return Some(Step::Continue(Exit::Done));
+        }
+        let line = line.strip_suffix(';').unwrap_or(line).trim_end();
+        let (first, rest) = match line.split_once(char::is_whitespace) {
+            Some((first, rest)) => (first, rest.trim()),
+            None => (line, ""),
+        };
+        let first = first.to_ascii_lowercase();
+        if first == "exec" || first == "execute" {
+            return Some(self.run_sql(console, &format!("BEGIN {rest}; END;")));
+        }
+        if first != "set" {
+            return None;
+        }
+        let (option, value) = match rest.split_once(char::is_whitespace) {
+            Some((option, value)) => (option, value.trim()),
+            None => (rest, ""),
+        };
+        let option = option.to_ascii_lowercase();
+        if option.len() < SERVEROUTPUT_SHORTEST || !"serveroutput".starts_with(option.as_str()) {
+            return None;
+        }
+        Some(match ServerOutputSetting::parse(value) {
+            Ok(ServerOutputSetting::On { buffer_bytes }) => {
+                self.sql.enable_server_output(buffer_bytes);
+                Step::Continue(Exit::Done)
+            }
+            Ok(ServerOutputSetting::Off) => {
+                self.sql.disable_server_output();
+                Step::Continue(Exit::Done)
+            }
+            Err(error) => {
+                self.print_sql_error(console, &error, line);
+                Step::Continue(exit_for(&error))
+            }
+        })
+    }
+
+    fn plsql_unit_line(&mut self, console: &mut Console<'_>, line: &str) -> Option<Step> {
+        match starts_plsql_unit(&self.buffer) {
+            Some(false) => None,
+            None => Some(Step::Continue(Exit::Done)),
+            Some(true) if line.trim() != "/" => Some(Step::Continue(Exit::Done)),
+            Some(true) => {
+                let end = self.buffer.len().saturating_sub(line.len());
+                let unit = self
+                    .buffer
+                    .get(..end)
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_owned();
+                self.buffer.clear();
+                Some(self.run_sql(console, &unit))
+            }
+        }
     }
 
     fn flush(&mut self, console: &mut Console<'_>) -> Step {
@@ -445,6 +580,7 @@ impl<'s> Shell<'s> {
         let started = Instant::now();
         let (width, mode, color_err) = (self.width, self.mode, self.color_err);
         let dialect = self.sql.dialect();
+        let server_output = (dialect == Dialect::Oracle).then(|| self.sql.server_output_reader());
         let Self {
             sql,
             pending,
@@ -472,6 +608,9 @@ impl<'s> Shell<'s> {
                 for notice in &result.notices {
                     print_notice(&mut *stderr, color_err, notice);
                 }
+                if let Some(reader) = &server_output {
+                    print_server_output(&mut stdout.borrow_mut(), &reader.take_lines());
+                }
                 if copied_out.replace(false)
                     && result.tag.starts_with("COPY ")
                     && !files.show_copy_tag
@@ -486,6 +625,11 @@ impl<'s> Shell<'s> {
             &mut copy,
         );
         drop(copy);
+        if outcome.is_err()
+            && let Some(reader) = &server_output
+        {
+            print_server_output(&mut stdout.borrow_mut(), &reader.take_lines());
+        }
         if stdout.into_inner().finish().is_err() || closed {
             return Step::Quit;
         }
@@ -569,6 +713,13 @@ impl<'s> Shell<'s> {
         let mut words = line.split_whitespace();
         let command = words.next().unwrap_or_default();
         let argument = words.next();
+        if command == ".collection" && words.next().is_some() {
+            return self.fail(
+                console,
+                ".collection takes one name, or - for the default key space",
+                Exit::Usage,
+            );
+        }
         if words.next().is_some() {
             return self.fail(
                 console,
@@ -610,6 +761,8 @@ impl<'s> Shell<'s> {
                 self.time(console, started.elapsed());
                 step
             }
+            (".collection", None) => self.list_collections(console),
+            (".collection", Some(name)) => self.choose_collection(console, name),
             (".mode", None) => {
                 let text = format!("mode: {}\n", self.mode.name());
                 self.print(console, &text);
@@ -696,6 +849,76 @@ impl<'s> Shell<'s> {
         Step::Continue(Exit::Done)
     }
 
+    fn collection_names(&self) -> Vec<String> {
+        self.db.collection_names().unwrap_or_default()
+    }
+
+    fn list_collections(&mut self, console: &mut Console<'_>) -> Step {
+        let names = match self.db.collection_names() {
+            Ok(names) => names,
+            Err(error) => {
+                return self.fail(
+                    console,
+                    &format!("cannot list the collections of {}: {error}", self.file),
+                    Exit::for_error(error.kind()),
+                );
+            }
+        };
+        let marker = |shown: bool| if shown { "* " } else { "  " };
+        let mut text = format!("{}{DEFAULT_KEY_SPACE}\n", marker(self.collection.is_none()));
+        for name in &names {
+            let shown = self.collection.as_deref() == Some(name.as_str());
+            text.push_str(&format!("{}{name}\n", marker(shown)));
+        }
+        self.print(console, &text);
+        if names.is_empty() {
+            let mut out = Output::new(&mut *console.stdout, self.color_out);
+            out.styled(Style::Dim, "no collections");
+            out.text("\n");
+            let _ = out.finish();
+        }
+        Step::Continue(Exit::Done)
+    }
+
+    fn choose_collection(&mut self, console: &mut Console<'_>, name: &str) -> Step {
+        if name == "-" {
+            self.collection = None;
+            self.print(console, &format!("collection: {DEFAULT_KEY_SPACE}\n"));
+            return Step::Continue(Exit::Done);
+        }
+        if !args::is_collection_name(name) {
+            return self.fail(console, &args::bad_collection_name(None, name), Exit::Usage);
+        }
+        let exists = self
+            .db
+            .begin_read()
+            .and_then(|transaction| transaction.collection(name).map(drop));
+        match exists {
+            Ok(()) => {
+                self.collection = Some(name.to_owned());
+                self.print(console, &format!("collection: {name}\n"));
+                Step::Continue(Exit::Done)
+            }
+            Err(error) if error.kind() == eggdb::ErrorKind::CollectionNotFound => {
+                let mut messages = Output::new(&mut *console.stderr, self.color_err);
+                crate::cli::error_line(
+                    &mut messages,
+                    &format!("no collection named {name} in {}", self.file),
+                );
+                messages.text("  ");
+                messages.styled(Style::Bold, "try:");
+                messages.text(" .collection\n");
+                let _ = messages.finish();
+                Step::Continue(Exit::NotFound)
+            }
+            Err(error) => self.fail(
+                console,
+                &format!("cannot read {}: {error}", self.file),
+                Exit::for_error(error.kind()),
+            ),
+        }
+    }
+
     fn help_text(&self) -> String {
         let history = match &self.history_path {
             Some(path) => format!(
@@ -706,19 +929,28 @@ impl<'s> Shell<'s> {
         };
         format!(
             "Key-value commands, as on the command line without 'eggdb <command> {file}':
-  put <key> <value>            store a value (text, 0x.. hex, @file, =text)
+  put <key> <value> [--ttl t]  store a value (text, 0x.. hex, @file, =text); --ttl 30s expires it
   get <key>                    print a value
   del <key>                    remove a key
   scan [--prefix p] [--from a] [--to b] [-r] [-n count] [-k]
+  ttl <key>                    how long a key still lives: 29s, 1h4m12s, never
+  expire <key> <time>          give a key a time to live (30s, 5m, 1h30m, 7d, 1500ms)
+  persist <key>                remove a key's time to live
+  incr <key> [n]               add n (1) to a counter and print the new value; decr subtracts
+  cas <key> <expected> <new>   replace a value only while it is <expected>; --if-absent, --delete
   check                        read every page and report the file's health
   stats                        size, pages, last commit and log
+  backup <copy>                write a consistent copy of {file} to a new file, while open here
+  -C <name> on a key command   work in that collection for this line
 SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
-  (docs/sql.md); BEGIN spans prompts:
+  (docs/sql.md; in Oracle's a PL/SQL block or CREATE PROCEDURE ends at a line holding /); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
   'delete' starts a DELETE statement here; the key-value command is 'del'.
 Shell commands:
   .tables                      list the tables
   .schema [table]              CREATE TABLE statements, all or one
+  .collection [name|-]         work in a collection: alone lists them (* marks the one in use),
+                               a name chooses one, - returns to the default key space
   .mode [table|expanded|csv]   how results print; no argument shows the current mode
   .timer [on|off]              print each command's time
   \\copy t from 'file' [options]  load a file into a table, read here (also: from stdin)
@@ -746,8 +978,19 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
                 Exit::Usage,
             );
         }
-        let positional = words.iter().skip(1).filter(|word| !word.starts_with('-'));
-        if words[0] == "put" && positional.count() < 2 {
+        let positional = words
+            .iter()
+            .skip(1)
+            .filter(|word| !word.starts_with('-'))
+            .count();
+        if words[0] == "backup" && positional != 1 {
+            return self.fail(
+                console,
+                "backup takes one argument, the file to write (T-SQL's BACKUP DATABASE is not a statement EggDB runs)",
+                Exit::Usage,
+            );
+        }
+        if words[0] == "put" && positional < 2 {
             return self.fail(
                 console,
                 "put needs a key and a value here; stdin is the shell's own, so give the value or @file",
@@ -756,6 +999,11 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         }
         let mut arguments: Vec<OsString> = vec![OsString::from(&words[0])];
         arguments.push(self.request.file.clone().into_os_string());
+        let in_key_space = KEY_SPACE_COMMANDS.contains(&words[0].as_str());
+        if let Some(name) = self.collection.as_ref().filter(|_| in_key_space) {
+            arguments.push(OsString::from("--collection"));
+            arguments.push(OsString::from(name));
+        }
         arguments.extend(words[1..].iter().map(OsString::from));
         let terminal = Terminal {
             stdin: true,
@@ -823,7 +1071,11 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         if !continuing && let Some(first) = first {
             if KEY_VALUE_COMMANDS.contains(&first) {
                 let last = previous.last().copied().unwrap_or_default();
-                let takes_key = (matches!(first, "get" | "del") && previous.len() == 1)
+                if matches!(last, "-C" | "--collection") {
+                    completion.candidates = self.collections_starting_with(word, false);
+                    return completion;
+                }
+                let takes_key = (ONE_KEY_COMMANDS.contains(&first) && previous.len() == 1)
                     || (first == "scan" && matches!(last, "--prefix" | "-p" | "--from" | "--to"));
                 if takes_key {
                     completion.candidates = self.keys_starting_with(word);
@@ -834,6 +1086,7 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             if first.starts_with('.') {
                 completion.candidates = match (first, previous.len()) {
                     (".schema", 1) => self.table_names(word),
+                    (".collection", 1) => self.collections_starting_with(word, true),
                     (".mode", 1) => ["table", "expanded", "csv"]
                         .iter()
                         .filter(|mode| mode.starts_with(word))
@@ -899,11 +1152,34 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         columns
     }
 
+    fn collections_starting_with(&self, word: &str, with_default: bool) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        if with_default && "-".starts_with(word) {
+            names.push("-".to_owned());
+        }
+        names.extend(
+            self.collection_names()
+                .into_iter()
+                .filter(|name| name.starts_with(word)),
+        );
+        names
+    }
+
     fn keys_starting_with(&self, word: &str) -> Vec<String> {
         let Ok(transaction) = self.db.begin_read() else {
             return Vec::new();
         };
-        let mut scan = transaction.scan_prefix(word.as_bytes());
+        let collection = match &self.collection {
+            Some(name) => match transaction.collection(name) {
+                Ok(collection) => Some(collection),
+                Err(_) => return Vec::new(),
+            },
+            None => None,
+        };
+        let mut scan = match &collection {
+            Some(collection) => collection.scan_prefix(word.as_bytes()),
+            None => transaction.scan_prefix(word.as_bytes()),
+        };
         let mut keys = Vec::new();
         while keys.len() < KEY_CANDIDATES {
             match scan.next_entry() {
@@ -985,6 +1261,13 @@ fn print_sql_error(
         messages.text("\n");
     }
     let _ = messages.finish();
+}
+
+fn print_server_output(stdout: &mut Output<'_>, lines: &[String]) {
+    for line in lines {
+        stdout.text(line);
+        stdout.text("\n");
+    }
 }
 
 fn print_notice(stderr: &mut dyn Write, color: bool, notice: &str) {

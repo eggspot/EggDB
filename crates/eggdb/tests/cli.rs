@@ -117,15 +117,31 @@ Commands:
   get    <file> <key>           print a value (exit 1 if the key is not there)
   del    <file> <key>           remove a key (exit 1 if it was not there)
   scan   <file>                 list entries in key order; see --prefix, --from, --to
+  ttl    <file> <key>           print how long a key still lives (exit 1 if it is not there)
+  expire <file> <key> <time>    give a key a time to live: 30s, 5m, 1h30m, 7d, 1500ms
+  persist <file> <key>          remove a key's time to live, so it stays until deleted
+  incr   <file> <key> [n]       add n (1) to a counter and print the new value
+  decr   <file> <key> [n]       subtract n (1) from a counter and print the new value
+  cas    <file> <key> <expected> <new>
+                                replace a value only while it is <expected>; see eggdb help cas
   check  <file>                 read every page and report the file's health
   stats  <file>                 size, pages, last commit and log, without reading pages
+  backup <file> <copy>          write a consistent copy of the file while readers keep working
+  compact <file>                rewrite the file without free or leaked pages, in place
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, or a CSV file into a table with --csv
   sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
+  explain <file>                show the plan for one statement given with -c, without running it
+  table  list|show|sample <file> [table]
+                                tables and views: list them, show one, sample rows; see eggdb help table
+  row    list <file> <table>    the rows of one table, as stored, a page at a time; see eggdb help row
   serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
-  restore <file> [dump]         restore a PostgreSQL dump or a SQL Server script into the file
+  restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
+  follow <file> <source-url>    copy a running PostgreSQL or SQL Server database into the file and keep it in step
+  collection list|add|delete <file> [name]
+                                a named key space inside the file; see eggdb help collection
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help
@@ -146,7 +162,7 @@ Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
 ";
 
 const SCAN_HELP: &str = "\
-Usage: eggdb scan <file> [--prefix <bytes> | --from <bytes> [--to <bytes>]] [-r] [-n <count>] [-k]
+Usage: eggdb scan <file> [--prefix <bytes> | --from <bytes> [--to <bytes>]] [-r] [-n <count>] [-k] [-C <name>]
 
 Lists entries in key order, from one snapshot. Keys are compared as unsigned bytes.
 
@@ -156,6 +172,7 @@ Lists entries in key order, from one snapshot. Keys are compared as unsigned byt
   -r, --reverse          largest key first
   -n, --limit <count>    stop after this many entries
   -k, --keys-only        print keys only
+  -C, --collection <name>  work in this collection instead of the default key space
 
 Examples:
   eggdb scan app.db --prefix user:
@@ -181,7 +198,8 @@ fn help_text_matches_the_design() {
         assert_eq!(stdout(&output), SCAN_HELP, "{args:?}");
     }
     for command in [
-        "create", "put", "get", "del", "delete", "check", "stats", "ui", "export", "import",
+        "create", "put", "get", "del", "delete", "check", "stats", "backup", "compact", "ui",
+        "export", "import", "explain", "table",
     ] {
         let output = dir.eggdb(&["help", command]);
         assert_exit(&output, 0);
@@ -460,22 +478,20 @@ fn every_exit_code_and_its_message() {
     assert_exit(&unknown, 2);
     assert_eq!(
         stderr(&unknown),
-        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, check, stats, ui, export, import, sql, serve, shell, restore, mcp, audit, help, version.\n  try: eggdb help\n"
+        "eggdb: unknown command 'frobnicate'. Commands: create, put, get, del, scan, ttl, expire, persist, incr, decr, cas, check, stats, backup, compact, ui, export, import, sql, explain, table, row, serve, shell, restore, mcp, audit, collection, help, version.\n  try: eggdb help\n"
     );
     let option = dir.eggdb(&["get", "app.db", "k", "--reverse"]);
     assert_exit(&option, 2);
     assert_eq!(
         stderr(&option),
-        "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key>\n  try: eggdb help get\n"
+        "eggdb: unknown option '--reverse' for eggdb get\n  usage: eggdb get <file> <key> [-C <name>]\n  try: eggdb help get\n"
     );
-    for reserved in ["backup", "compact"] {
-        let output = dir.eggdb(&[reserved, "app.db"]);
-        assert_exit(&output, 2);
-        assert_eq!(
-            stderr(&output),
-            format!("eggdb: eggdb {reserved} is not in this release yet; see docs/roadmap.md\n")
-        );
-    }
+    let backup = dir.eggdb(&["backup", "app.db"]);
+    assert_exit(&backup, 2);
+    assert_eq!(
+        stderr(&backup),
+        "eggdb: eggdb backup needs the path of the copy\n  usage: eggdb backup <file> <copy>\n  try: eggdb help backup\n"
+    );
     let format = dir.eggdb(&["scan", "app.db", "--format", "yaml"]);
     assert_exit(&format, 2);
     assert!(
@@ -813,4 +829,23 @@ fn import_reads_dev_stdin_given_as_a_path_once() {
     let source = dir.eggdb(&["scan", "source.db", "-F", "hex"]);
     let copy = dir.eggdb(&["scan", "copy.db", "-F", "hex"]);
     assert_eq!(copy.stdout, source.stdout);
+}
+
+#[test]
+fn put_from_a_file_and_raw_get_stream_large_values() {
+    let dir = TempDirectory::new("streamed-cli");
+    let value: Vec<u8> = (0..3_000_000_u32)
+        .map(|index| (index % 253) as u8)
+        .collect();
+    std::fs::write(dir.path().join("value.bin"), &value).unwrap();
+    assert_exit(
+        &dir.eggdb(&["put", "--create", "app.db", "big", "@value.bin"]),
+        0,
+    );
+    let raw = dir.eggdb(&["get", "app.db", "big", "-F", "raw"]);
+    assert_exit(&raw, 0);
+    assert!(raw.stdout == value);
+    let missing = dir.eggdb(&["put", "app.db", "other", "@absent.bin"]);
+    assert_exit(&missing, 2);
+    assert!(stderr(&missing).starts_with("eggdb: cannot read @absent.bin: "));
 }

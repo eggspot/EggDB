@@ -151,6 +151,18 @@ impl TestServer {
     }
 
     pub fn start_with(max_connections: usize, authentication_timeout: Duration) -> Self {
+        Self::start_configured(max_connections, authentication_timeout, None)
+    }
+
+    pub fn start_with_tls(tls: Arc<eggdb_tls::ServerConfig>) -> Self {
+        Self::start_configured(8, Duration::from_secs(5), Some(tls))
+    }
+
+    fn start_configured(
+        max_connections: usize,
+        authentication_timeout: Duration,
+        tls: Option<Arc<eggdb_tls::ServerConfig>>,
+    ) -> Self {
         let listener: TcpListener =
             eggdb_pgwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
         let address = listener.local_addr().unwrap();
@@ -162,6 +174,8 @@ impl TestServer {
             database: DATABASE.to_owned(),
             max_connections,
             authentication_timeout,
+            auth_rules: None,
+            tls,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);
@@ -170,6 +184,48 @@ impl TestServer {
             let stop = move || thread_stop.load(Ordering::Acquire);
             let log = move |line: &str| thread_logged.lock().unwrap().push(line.to_owned());
             eggdb_pgwire::serve(&store, &listener, &config, &stop, &log).unwrap()
+        });
+        Self {
+            address,
+            stop,
+            logged,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn start_databases(names: &'static [&'static str]) -> Self {
+        Self::start_databases_with_rules(names, None)
+    }
+
+    pub fn start_databases_with_rules(
+        names: &'static [&'static str],
+        auth_rules: Option<Arc<eggdb_auth::AuthRules>>,
+    ) -> Self {
+        let listener: TcpListener =
+            eggdb_pgwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let logged = Arc::new(Mutex::new(Vec::new()));
+        let config = ServerConfig {
+            user: USER.to_owned(),
+            verifier: ScramVerifier::derive(PASSWORD.as_bytes(), b"0123456789abcdef", 4096),
+            database: names[0].to_owned(),
+            max_connections: 8,
+            authentication_timeout: Duration::from_secs(5),
+            auth_rules,
+            tls: None,
+        };
+        let thread_stop = Arc::clone(&stop);
+        let thread_logged = Arc::clone(&logged);
+        let thread = std::thread::spawn(move || {
+            let stores: Vec<SharedMemoryStore> =
+                names.iter().map(|_| SharedMemoryStore::default()).collect();
+            let databases: Vec<(&str, &SharedMemoryStore)> =
+                names.iter().copied().zip(stores.iter()).collect();
+            let stop = move || thread_stop.load(Ordering::Acquire);
+            let log = move |line: &str| thread_logged.lock().unwrap().push(line.to_owned());
+            eggdb_pgwire::serve_databases(&databases, &listener, None, &config, &stop, &log)
+                .unwrap()
         });
         Self {
             address,
@@ -409,6 +465,18 @@ impl Client {
         );
         assert_eq!(&message.body[4..], expected.as_bytes());
         self.read().expect("authentication ok")
+    }
+
+    pub fn login_as(
+        address: SocketAddr,
+        user: &str,
+        password: &str,
+        database: &str,
+    ) -> (Self, Message) {
+        let mut client = Self::connect(address);
+        client.send_startup(196_608, &[("user", user), ("database", database)]);
+        let outcome = client.authenticate(password);
+        (client, outcome)
     }
 
     pub fn login(address: SocketAddr) -> (Self, Vec<Message>) {

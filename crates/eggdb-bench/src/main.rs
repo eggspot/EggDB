@@ -30,14 +30,18 @@ mod btree;
 mod checkpoint;
 mod copy;
 mod database;
+mod egg_allocator;
 mod entries;
 mod footprint;
 mod harness;
 mod large_value;
 mod log;
+mod lsm;
 mod mcp;
 mod measure;
+mod net;
 mod page_cache;
+mod tls;
 mod transaction;
 
 use crate::allocations::CountingAllocator;
@@ -51,7 +55,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 24] = [
+const COUNTED: [(&str, Counted); 34] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -70,12 +74,22 @@ const COUNTED: [(&str, Counted); 24] = [
     (database::OPEN, database::open),
     (database::READ, database::read),
     (database::WRITE, database::write),
+    (database::READ_EXPIRING, database::read_expiring),
+    (database::INCREMENT, database::increment),
+    (database::BACKUP, database::backup),
     (large_value::PUT, large_value::put),
     (large_value::GET, large_value::get),
     (copy::FROM, copy::from_stdin),
     (copy::TO, copy::to_stdout),
+    (copy::FROM_BINARY, copy::from_stdin_binary),
+    (copy::TO_BINARY, copy::to_stdout_binary),
     (mcp::TOOLS_CALL, mcp::tools_call),
     (mcp::WRITE_CALL, mcp::write_call),
+    (tls::RECORD_SEAL, tls::record_seal),
+    (tls::HANDSHAKE, tls::handshake),
+    (net::ROUND_TRIP, net::round_trip),
+    (egg_allocator::SMALL_BLOCKS, egg_allocator::small_blocks),
+    (lsm::RANDOM_PUT, lsm::random_put),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 3] = [

@@ -148,3 +148,91 @@ fn a_value_larger_than_the_cache_is_refused_and_the_write_continues() {
     assert_eq!(db.get("fits").unwrap(), Some(vec![1; 512 << 10]));
     assert_eq!(db.get("big").unwrap(), None);
 }
+
+#[test]
+fn values_stream_in_and_out_a_piece_at_a_time() {
+    use std::io::Read;
+    let file = TempPath::new("streamed-values");
+    let db = Database::open(file.path()).unwrap();
+    let big = patterned(3 << 20, 7);
+    let small = patterned(100, 9);
+    let mut tx = db.begin_write().unwrap();
+    tx.put_reader("big", big.len() as u64, &mut big.as_slice())
+        .unwrap();
+    tx.put_reader("small", small.len() as u64, &mut small.as_slice())
+        .unwrap();
+    let mut inside = tx.get_reader("big").unwrap().unwrap();
+    let mut first = vec![0; 5000];
+    inside.read_exact(&mut first).unwrap();
+    assert_eq!(first, big[..5000]);
+    drop(inside);
+    tx.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    for (key, value) in [("big", &big), ("small", &small)] {
+        let mut reader = read.get_reader(key).unwrap().unwrap();
+        assert_eq!(reader.len(), value.len() as u64);
+        let mut copied = Vec::new();
+        std::io::copy(&mut reader, &mut copied).unwrap();
+        assert_eq!(&copied, value);
+        assert_eq!(reader.remaining(), 0);
+    }
+    assert!(read.get_reader("absent").unwrap().is_none());
+    drop(read);
+    let short = patterned(10, 1);
+    let mut tx = db.begin_write().unwrap();
+    assert!(tx.put_reader("short", 20, &mut short.as_slice()).is_err());
+    drop(tx);
+    assert_eq!(db.get("short").unwrap(), None);
+    assert_eq!(db.check().unwrap().overflow_values, 1);
+}
+
+#[test]
+fn compressed_values_read_back_and_take_less_space() {
+    use std::io::Read;
+    let plain = TempPath::new("uncompressed-values");
+    let packed = TempPath::new("compressed-values");
+    let text: Vec<u8> = b"a line of text that repeats itself, as logs and documents do. "
+        .iter()
+        .copied()
+        .cycle()
+        .take(2 << 20)
+        .collect();
+    let noise = patterned(300_000, 3);
+    for (file, compress) in [(&plain, false), (&packed, true)] {
+        let db = Database::open_with(
+            file.path(),
+            Options::new()
+                .create_if_missing(true)
+                .compress_values(compress)
+                .cache_bytes(16 << 20),
+        )
+        .unwrap();
+        db.put("text", &text).unwrap();
+        db.put("noise", &noise).unwrap();
+        db.put("small", b"tiny").unwrap();
+        db.close().unwrap();
+    }
+    let size = |file: &TempPath| std::fs::metadata(file.path()).unwrap().len();
+    assert!(
+        size(&packed) * 4 < size(&plain),
+        "{} compressed against {} plain",
+        size(&packed),
+        size(&plain)
+    );
+    let db = Database::open(packed.path()).unwrap();
+    assert_eq!(db.get("text").unwrap(), Some(text.clone()));
+    assert_eq!(db.get("noise").unwrap(), Some(noise));
+    assert_eq!(db.get("small").unwrap(), Some(b"tiny".to_vec()));
+    let tx = db.begin_read().unwrap();
+    let mut reader = tx.get_reader("text").unwrap().unwrap();
+    assert_eq!(reader.len(), text.len() as u64);
+    let mut copied = Vec::new();
+    reader.read_to_end(&mut copied).unwrap();
+    assert!(copied == text);
+    let scanned: Vec<_> = tx.scan(..).map(Result::unwrap).collect();
+    assert_eq!(scanned.len(), 3);
+    drop(reader);
+    drop(tx);
+    let report = db.check().unwrap();
+    assert_eq!(report.leaked_pages, 0);
+}

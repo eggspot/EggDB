@@ -1,13 +1,25 @@
 use super::classify::{Action, Effect, Ignored, Skip};
+use super::column_rewrite::alias_type_definition;
 use super::script::DifferenceNote;
 use super::words::{Token, Words, plain_qualified_name};
 use crate::error::{SqlError, SqlState};
 
 const HEAD_TOKENS: usize = 64;
-const BATCH_LOGIC: &str = "batch logic (IF, WHILE, DECLARE, BEGIN ... END) comes with item 47";
+const BATCH_LOGIC: &str = "batch logic (IF, WHILE, DECLARE, BEGIN ... END) is restored only as existence guards (IF [NOT] EXISTS (...), IF OBJECT_ID(...) IS [NOT] NULL) around one statement";
+const LOGIC_WORDS: [&str; 9] = [
+    "if",
+    "while",
+    "declare",
+    "begin",
+    "goto",
+    "return",
+    "throw",
+    "raiserror",
+    "try",
+];
 const NOT_SUPPORTED_YET: &str = "not supported yet";
 
-const RUNNABLE_SET_OPTIONS: [&str; 14] = [
+const RUNNABLE_SET_OPTIONS: [&str; 15] = [
     "ansi_nulls",
     "quoted_identifier",
     "ansi_padding",
@@ -22,6 +34,7 @@ const RUNNABLE_SET_OPTIONS: [&str; 14] = [
     "language",
     "lock_timeout",
     "transaction",
+    "xact_abort",
 ];
 
 const ON_ONLY_OPTIONS: [&str; 7] = [
@@ -134,7 +147,111 @@ fn ignore(kind: &'static str) -> Action {
     Action::Ignore(Ignored::Other(kind))
 }
 
-pub(crate) fn classify_sqlserver(text: &str, _known_parameter: &dyn Fn(&str) -> bool) -> Action {
+fn skip_balanced(words: &mut Words<'_>) -> Option<()> {
+    if !words.next()?.is_symbol(b'(') {
+        return None;
+    }
+    let mut depth = 1usize;
+    while depth > 0 {
+        let token = words.next()?;
+        if token.is_symbol(b'(') {
+            depth += 1;
+        } else if token.is_symbol(b')') {
+            depth -= 1;
+        }
+    }
+    Some(())
+}
+
+fn without_block(body: &str) -> Option<&str> {
+    let mut words = Words::sqlserver(body);
+    if !words.next()?.is_word("begin") {
+        return Some(body);
+    }
+    let after_begin = words.offset();
+    if words
+        .next()
+        .is_some_and(|token| token.is_word("tran") || token.is_word("transaction"))
+    {
+        return None;
+    }
+    let inside = body
+        .get(after_begin..)?
+        .trim_end()
+        .trim_end_matches(';')
+        .trim_end();
+    let cut = inside.len().checked_sub(3)?;
+    let (rest, last) = (inside.get(..cut)?, inside.get(cut..)?);
+    let separated = rest
+        .chars()
+        .last()
+        .is_none_or(|character| !(character.is_alphanumeric() || character == '_'));
+    (last.eq_ignore_ascii_case("end") && separated).then(|| rest.trim())
+}
+
+fn guarded_statement(text: &str) -> Option<&str> {
+    let mut words = Words::sqlserver(text);
+    if !words.next()?.is_word("if") {
+        return None;
+    }
+    let mut token = words.next()?;
+    if token.is_word("not") {
+        token = words.next()?;
+    }
+    if token.is_word("exists") {
+        skip_balanced(&mut words)?;
+    } else if token.is_word("object_id") {
+        skip_balanced(&mut words)?;
+        if !words.next()?.is_word("is") {
+            return None;
+        }
+        let mut token = words.next()?;
+        if token.is_word("not") {
+            token = words.next()?;
+        }
+        if !token.is_word("null") {
+            return None;
+        }
+    } else {
+        return None;
+    }
+    let inner = without_block(text.get(words.offset()..)?.trim())?;
+    let first = Words::sqlserver(inner).next();
+    match first {
+        Some(Token::Word(word)) if !LOGIC_WORDS.contains(&word.as_str()) => Some(inner),
+        _ => None,
+    }
+}
+
+fn guard(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Action {
+    match guarded_statement(text) {
+        Some(inner) => classify_sqlserver(inner, known_parameter),
+        None => skip_statement(text, BATCH_LOGIC),
+    }
+}
+
+fn executed_text(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let after = lower.find("sp_executesql")? + "sp_executesql".len();
+    let rest = text.get(after..)?;
+    let quote = rest.find('\'')?;
+    let mut statement = String::new();
+    let mut characters = rest.get(quote + 1..)?.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\'' {
+            statement.push(character);
+            continue;
+        }
+        if characters.peek() != Some(&'\'') {
+            return Some(statement);
+        }
+        characters.next();
+        statement.push('\'');
+    }
+    None
+}
+
+pub(crate) fn classify_sqlserver(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Action {
     let tokens = head(text);
     let Some(first) = word_at(&tokens, 0) else {
         return Action::Run(Effect::Other);
@@ -154,8 +271,10 @@ pub(crate) fn classify_sqlserver(text: &str, _known_parameter: &dyn Fn(&str) -> 
         {
             ignore("BEGIN and COMMIT")
         }
-        "begin" | "if" | "while" | "declare" | "goto" | "return" | "throw" | "raiserror"
-        | "try" => skip_statement(text, BATCH_LOGIC),
+        "if" => guard(text, known_parameter),
+        "begin" | "while" | "declare" | "goto" | "return" | "throw" | "raiserror" | "try" => {
+            skip_statement(text, BATCH_LOGIC)
+        }
         "set" => set(&tokens),
         "create" => create(&tokens, text),
         "alter" => alter(&tokens, text),
@@ -172,8 +291,8 @@ pub(crate) fn classify_sqlserver(text: &str, _known_parameter: &dyn Fn(&str) -> 
         }
         "update" if is(&tokens, 1, "statistics") => ignore("UPDATE STATISTICS"),
         "update" | "delete" | "truncate" | "select" | "with" => Action::Run(Effect::Data),
-        "exec" | "execute" => exec(&tokens, text),
-        "enable" | "disable" if is(&tokens, 1, "trigger") => ignore("ENABLE and DISABLE TRIGGER"),
+        "exec" | "execute" => exec(&tokens, text, known_parameter),
+        "enable" | "disable" if is(&tokens, 1, "trigger") => Action::Run(Effect::OtherDdl),
         _ => skip_statement(text, NOT_SUPPORTED_YET),
     }
 }
@@ -202,14 +321,30 @@ fn set(tokens: &[Token]) -> Action {
     Action::Run(Effect::Setting)
 }
 
-fn exec(tokens: &[Token], text: &str) -> Action {
+fn exec(tokens: &[Token], text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Action {
     let mut at = 1;
     if matches!(tokens.get(at), Some(Token::Symbol(b'@'))) {
-        return skip_statement(text, "procedures come later");
+        return skip_statement(text, BATCH_LOGIC);
     }
     let name = name_at(tokens, &mut at).to_lowercase();
     let procedure = name.rsplit('.').next().unwrap_or(&name);
     match procedure {
+        "sp_executesql" => match executed_text(text) {
+            Some(executed)
+                if Words::sqlserver(&executed).next().is_some_and(|token| {
+                    matches!(&token, Token::Word(word) if !LOGIC_WORDS.contains(&word.as_str())
+                        && word != "exec" && word != "execute")
+                }) =>
+            {
+                classify_sqlserver(&executed, known_parameter)
+            }
+            _ => skip_statement(text, BATCH_LOGIC),
+        },
+        "sp_addextendedproperty" | "sp_updateextendedproperty" | "sp_dropextendedproperty"
+            if text.to_ascii_lowercase().contains("ms_description") =>
+        {
+            Action::Run(Effect::Comment)
+        }
         "sp_addextendedproperty" | "sp_updateextendedproperty" | "sp_dropextendedproperty" => {
             ignore("extended properties")
         }
@@ -224,8 +359,29 @@ fn exec(tokens: &[Token], text: &str) -> Action {
             String::new(),
             "rules and bound defaults come later",
         ),
-        _ => skip_statement(text, "procedures come later"),
+        system if system.starts_with("sp_") || system.starts_with("xp_") => {
+            skip_statement(text, NOT_SUPPORTED_YET)
+        }
+        _ => Action::Run(Effect::Data),
     }
+}
+
+fn routine(kind: &'static str, tokens: &[Token], mut at: usize) -> Action {
+    Action::Run(Effect::Routine {
+        kind,
+        name: name_at(tokens, &mut at),
+    })
+}
+
+fn trigger(tokens: &[Token], at: usize) -> Action {
+    let mut name_end = at;
+    let name = name_at(tokens, &mut name_end);
+    if is(tokens, name_end, "on")
+        && matches!(word_at(tokens, name_end + 1), Some("database" | "all"))
+    {
+        return skip("DDL trigger", name, "DDL triggers come later");
+    }
+    Action::Run(Effect::OtherDdl)
 }
 
 fn create(tokens: &[Token], text: &str) -> Action {
@@ -256,20 +412,17 @@ fn create(tokens: &[Token], text: &str) -> Action {
                 "XML, spatial, columnstore and full-text indexes come later",
             )
         }
-        "procedure" | "proc" => skip(
-            "procedure",
-            name_at(tokens, &mut at),
-            "procedures come later",
-        ),
-        "function" => skip("function", name_at(tokens, &mut at), "functions come later"),
-        "trigger" => skip("trigger", name_at(tokens, &mut at), "triggers come later"),
+        "procedure" | "proc" => routine("procedure", tokens, at),
+        "function" => routine("function", tokens, at),
+        "trigger" => trigger(tokens, at),
         "synonym" => skip("synonym", name_at(tokens, &mut at), "synonyms come later"),
+        "type" if alias_type_definition(text).is_some() => ignore("alias types"),
         "type" => skip(
             "type",
             name_at(tokens, &mut at),
-            "user-defined types come later",
+            "user-defined table types come later",
         ),
-        "sequence" => skip("sequence", name_at(tokens, &mut at), "sequences come later"),
+        "sequence" => Action::Run(Effect::Sequence(name_at(tokens, &mut at))),
         "user" | "login" | "role" | "application" => skip(
             if kind == "login" {
                 "login"
@@ -385,14 +538,11 @@ fn alter(tokens: &[Token], text: &str) -> Action {
         "view" => Action::Run(Effect::View(name_at(tokens, &mut at))),
         "database" => ignore("ALTER DATABASE"),
         "index" => ignore("ALTER INDEX"),
+        "sequence" => Action::Run(Effect::OtherDdl),
         "authorization" => ignore("ALTER AUTHORIZATION"),
-        "procedure" | "proc" => skip(
-            "procedure",
-            name_at(tokens, &mut at),
-            "procedures come later",
-        ),
-        "function" => skip("function", name_at(tokens, &mut at), "functions come later"),
-        "trigger" => skip("trigger", name_at(tokens, &mut at), "triggers come later"),
+        "procedure" | "proc" => routine("procedure", tokens, at),
+        "function" => routine("function", tokens, at),
+        "trigger" => trigger(tokens, at),
         "role" | "user" | "login" | "application" => skip(
             "role membership",
             name_at(tokens, &mut at),
@@ -415,7 +565,7 @@ fn alter_table(tokens: &[Token], mut at: usize, text: &str) -> Action {
         Some("nocheck") if is(tokens, at + 1, "constraint") => ignore("NOCHECK CONSTRAINT"),
         Some("check") if is(tokens, at + 1, "constraint") => Action::Run(Effect::OtherDdl),
         Some("enable" | "disable") if is(tokens, at + 1, "trigger") => {
-            ignore("ENABLE and DISABLE TRIGGER")
+            Action::Run(Effect::OtherDdl)
         }
         Some("set")
             if tokens
@@ -499,6 +649,7 @@ pub(crate) fn sqlserver_differences(text: &str) -> Vec<DifferenceNote> {
     let tokens = head(text);
     match (word_at(&tokens, 0), word_at(&tokens, 1)) {
         (Some("create"), Some("table")) => table_differences(text),
+        (Some("create"), Some("type")) => alias_type_differences(text),
         (Some("create"), Some("unique" | "clustered" | "nonclustered" | "index")) => {
             index_differences(text)
         }
@@ -595,6 +746,20 @@ fn table_differences(text: &str) -> Vec<DifferenceNote> {
         ));
     }
     notes
+}
+
+fn alias_type_differences(text: &str) -> Vec<DifferenceNote> {
+    let Some((name, alias)) = alias_type_definition(text) else {
+        return Vec::new();
+    };
+    let nullability = if alias.not_null { " NOT NULL" } else { "" };
+    vec![DifferenceNote::new(
+        format!("type {name}"),
+        format!(
+            "an alias type: its columns are created as {}{nullability}",
+            alias.base
+        ),
+    )]
 }
 
 fn index_differences(text: &str) -> Vec<DifferenceNote> {

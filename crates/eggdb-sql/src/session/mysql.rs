@@ -5,7 +5,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, like};
 use crate::mysql_variables::SetRefused;
 use crate::schema::{ColumnSchema, TableSchema, read_tables};
-use crate::store::KeyValueStore;
+use crate::time_zones::TimeZone;
+use crate::triggers::{TriggerAction, TriggerDefinition, TriggerTiming};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
@@ -59,7 +60,9 @@ pub(crate) fn mysql_type_name(sql_type: SqlType) -> String {
         | SqlType::Interval { .. }
         | SqlType::Uuid
         | SqlType::Array(_)
-        | SqlType::Catalog(_) => "text".into(),
+        | SqlType::Catalog(_)
+        | SqlType::Defined(_)
+        | SqlType::Dynamic => "text".into(),
     }
 }
 
@@ -89,7 +92,22 @@ fn create_statement(table: &TableSchema) -> String {
         lines.push(format!("  PRIMARY KEY ({})", key.join(",")));
     }
     for index in &table.indexes {
-        let columns: Vec<String> = index.columns.iter().map(|name| backticked(name)).collect();
+        let columns: Vec<String> = index
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(position, name)| {
+                let descending = index
+                    .orders
+                    .get(position)
+                    .is_some_and(|order| order.descending);
+                format!(
+                    "{}{}",
+                    backticked(name),
+                    if descending { " DESC" } else { "" }
+                )
+            })
+            .collect();
         lines.push(format!(
             "  {}KEY {} ({})",
             if index.unique { "UNIQUE " } else { "" },
@@ -135,7 +153,7 @@ fn column_definition(table: &TableSchema, column: &ColumnSchema) -> String {
     line
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(super) fn describe_mysql(
         &mut self,
         statement: &MySqlStatement,
@@ -148,10 +166,18 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Some(vec![text_column("Table"), text_column("Create Table")])
             }
             MySqlStatement::ShowCreateView(_) => Some(create_view_columns()),
+            MySqlStatement::ShowCreateTrigger(_) => Some(create_trigger_columns()),
+            MySqlStatement::ShowTriggers { .. } => Some(triggers_columns()),
             MySqlStatement::ShowIndex(_) => Some(index_columns()),
             MySqlStatement::ShowVariables { .. } | MySqlStatement::ShowStatus => {
                 Some(vec![text_column("Variable_name"), text_column("Value")])
             }
+            MySqlStatement::ShowServerFacts { view, .. } => Some(
+                crate::mysql_catalog::show_columns(*view)
+                    .iter()
+                    .map(|(label, _)| text_column(label))
+                    .collect(),
+            ),
             MySqlStatement::ShowWarnings { .. } => Some(warnings_columns()),
             MySqlStatement::ShowCount { errors_only } => {
                 Some(vec![number_column(count_name(*errors_only))])
@@ -226,6 +252,49 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         Value::Text(text),
                         Value::Text("utf8mb4".into()),
                         Value::Text("utf8mb4_0900_ai_ci".into()),
+                    ]],
+                ))
+            }
+            MySqlStatement::ShowTriggers { like } => {
+                let listed = self.read(|reader, _| crate::triggers::every_trigger(reader))?;
+                let mut rows = Vec::new();
+                for table in &listed {
+                    if !matches_pattern(crate::schemas::base_name(&table.table), like.as_deref())? {
+                        continue;
+                    }
+                    for trigger in &table.triggers {
+                        rows.push(show_triggers_row(&table.table, trigger));
+                    }
+                }
+                Ok(rows_result(triggers_columns(), rows))
+            }
+            MySqlStatement::ShowCreateTrigger(name) => {
+                let listed = self.read(|reader, _| crate::triggers::every_trigger(reader))?;
+                let found = listed
+                    .iter()
+                    .flat_map(|table| &table.triggers)
+                    .find(|trigger| {
+                        trigger
+                            .name
+                            .eq_ignore_ascii_case(crate::schemas::base_name(&name.text))
+                    });
+                let Some(trigger) = found else {
+                    return Err(
+                        SqlError::new(SqlState::MYSQL_GENERAL, "Trigger does not exist")
+                            .with_vendor_code(1360)
+                            .at(name.position),
+                    );
+                };
+                Ok(rows_result(
+                    create_trigger_columns(),
+                    vec![vec![
+                        Value::Text(trigger.name.clone()),
+                        Value::Text(String::new()),
+                        Value::Text(trigger.text.clone()),
+                        Value::Text("utf8mb4".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                        Value::Text("utf8mb4_0900_ai_ci".into()),
+                        Value::Null,
                     ]],
                 ))
             }
@@ -311,6 +380,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     vec![text_column("Variable_name"), text_column("Value")],
                     rows,
                 ))
+            }
+            MySqlStatement::ShowServerFacts { view, like } => {
+                let rows = self.read(|reader, _| {
+                    let snapshot = crate::pg_catalog::snapshot_for(reader)?;
+                    Ok(crate::mysql_catalog::show_rows(&snapshot, *view))
+                })?;
+                let mut kept = Vec::new();
+                for row in rows {
+                    let first = row.first().and_then(Value::to_text).unwrap_or_default();
+                    if matches_pattern(&first, like.as_deref())? {
+                        kept.push(row);
+                    }
+                }
+                let columns = crate::mysql_catalog::show_columns(*view)
+                    .iter()
+                    .map(|(label, _)| text_column(label))
+                    .collect();
+                Ok(rows_result(columns, kept))
             }
             MySqlStatement::ShowStatus => Ok(rows_result(
                 vec![text_column("Variable_name"), text_column("Value")],
@@ -399,6 +486,11 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 Ok(())
             }
             VariableTarget::System(name) => {
+                let zone = if name.eq_ignore_ascii_case("time_zone") {
+                    Some(mysql_time_zone(value.as_ref())?)
+                } else {
+                    None
+                };
                 let shown = value
                     .as_ref()
                     .and_then(|value| Dialect::MySql.value_text(value))
@@ -419,6 +511,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                         )
                         .with_vendor_code(1231),
                     })?;
+                if let Some(zone) = zone {
+                    Arc::make_mut(&mut self.settings).time_zone = zone;
+                }
                 if !was_autocommit
                     && self.autocommit()
                     && let Block::Writing(_) = self.block
@@ -429,6 +524,48 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             }
         }
     }
+}
+
+fn mysql_time_zone(value: Option<&Value>) -> SqlResult<TimeZone> {
+    let Some(text) = value.and_then(Value::character_text) else {
+        return Ok(TimeZone::UTC);
+    };
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("system") {
+        return Ok(TimeZone::UTC);
+    }
+    let zone = match trimmed.as_bytes().first() {
+        Some(b'+' | b'-') => mysql_offset(trimmed),
+        _ => TimeZone::region(trimmed),
+    };
+    zone.ok_or_else(|| {
+        SqlError::new(
+            SqlState::MYSQL_GENERAL,
+            format!("Unknown or incorrect time zone: '{trimmed}'"),
+        )
+        .with_vendor_code(1298)
+    })
+}
+
+fn mysql_offset(text: &str) -> Option<TimeZone> {
+    let negative = text.starts_with('-');
+    let (hours, minutes) = text.get(1..)?.split_once(':')?;
+    let digits = |part: &str, longest: usize| -> Option<i32> {
+        if part.is_empty() || part.len() > longest || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let (hours, minutes) = (digits(hours, 2)?, digits(minutes, 2)?);
+    if minutes > 59 {
+        return None;
+    }
+    let magnitude = hours * 3600 + minutes * 60;
+    let east = if negative { -magnitude } else { magnitude };
+    if !(-(13 * 3600 + 59 * 60)..=14 * 3600).contains(&east) {
+        return None;
+    }
+    TimeZone::fixed(east)
 }
 
 fn unquoted(default: &str) -> String {
@@ -487,16 +624,25 @@ fn index_columns() -> Vec<OutputColumn> {
 }
 
 fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
-    let primary = (!table.primary_key.is_empty()).then_some(("PRIMARY", true, &table.primary_key));
-    let keys = primary.into_iter().chain(
-        table
-            .indexes
-            .iter()
-            .map(|index| (index.name.as_str(), index.unique, &index.columns)),
-    );
+    let primary_orders: &[crate::schema::IndexColumnOrder] = &[];
+    let primary = (!table.primary_key.is_empty()).then_some((
+        "PRIMARY",
+        true,
+        &table.primary_key,
+        primary_orders,
+    ));
+    let keys = primary.into_iter().chain(table.indexes.iter().map(|index| {
+        (
+            index.name.as_str(),
+            index.unique,
+            &index.columns,
+            index.orders.as_slice(),
+        )
+    }));
     let mut rows = Vec::new();
-    for (name, unique, columns) in keys {
+    for (name, unique, columns, orders) in keys {
         for (position, column) in columns.iter().enumerate() {
+            let descending = orders.get(position).is_some_and(|order| order.descending);
             let nullable = table
                 .columns
                 .iter()
@@ -509,7 +655,7 @@ fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
                 text(name),
                 Value::BigInt(position as i64 + 1),
                 text(column),
-                text("A"),
+                text(if descending { "D" } else { "A" }),
                 Value::Null,
                 Value::Null,
                 Value::Null,
@@ -523,6 +669,72 @@ fn index_rows(table: &TableSchema) -> Vec<Vec<Value>> {
         }
     }
     rows
+}
+
+fn create_trigger_columns() -> Vec<OutputColumn> {
+    [
+        "Trigger",
+        "sql_mode",
+        "SQL Original Statement",
+        "character_set_client",
+        "collation_connection",
+        "Database Collation",
+        "Created",
+    ]
+    .into_iter()
+    .map(text_column)
+    .collect()
+}
+
+fn triggers_columns() -> Vec<OutputColumn> {
+    [
+        "Trigger",
+        "Event",
+        "Table",
+        "Statement",
+        "Timing",
+        "Created",
+        "sql_mode",
+        "Definer",
+        "character_set_client",
+        "collation_connection",
+        "Database Collation",
+    ]
+    .into_iter()
+    .map(text_column)
+    .collect()
+}
+
+fn show_triggers_row(table: &str, trigger: &TriggerDefinition) -> Vec<Value> {
+    let event = trigger
+        .events
+        .listed()
+        .first()
+        .map_or("", |event| event.keyword());
+    let timing = match trigger.timing {
+        TriggerTiming::Before => "BEFORE",
+        TriggerTiming::After => "AFTER",
+        TriggerTiming::InsteadOf => "INSTEAD OF",
+    };
+    let statement = match &trigger.action {
+        TriggerAction::Statements(body)
+        | TriggerAction::Batch(body)
+        | TriggerAction::PlSql { body, .. } => body.clone(),
+        TriggerAction::Function { name, .. } => format!("EXECUTE FUNCTION {name}()"),
+    };
+    vec![
+        Value::Text(trigger.name.clone()),
+        Value::Text(event.to_owned()),
+        Value::Text(crate::schemas::base_name(table).to_owned()),
+        Value::Text(statement),
+        Value::Text(timing.to_owned()),
+        Value::Null,
+        Value::Text(String::new()),
+        Value::Text("CURRENT_USER".into()),
+        Value::Text("utf8mb4".into()),
+        Value::Text("utf8mb4_0900_ai_ci".into()),
+        Value::Text("utf8mb4_0900_ai_ci".into()),
+    ]
 }
 
 fn create_view_columns() -> Vec<OutputColumn> {

@@ -1,30 +1,51 @@
 use super::Console;
 use super::args::{ColorChoice, CommandName, Format, Request};
 use super::byte_argument::ByteArgument;
-use super::failure::{Exit, Failure};
+use super::failure::{Exit, Failure, code_for_error};
 use super::output::{Output, Style};
 use super::render::{self, JsonObject, LineBreaks};
 use super::reports::{self, Damage};
 use super::ui;
 use eggdb::{Database, Error, ErrorKind, Options};
 use eggdb_storage::{BTree, PageSize, StorageError};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::ops::Bound;
 
+mod archive;
 mod audit;
+mod backup;
+mod collection;
+mod compact;
 mod copy_io;
 mod csv_import;
+mod expiry;
+mod explain;
+mod follow;
+mod follow_sql_server;
+mod foreign;
 mod mcp;
+mod parquet_io;
 mod restore;
+mod restore_aof;
+mod restore_mongodump;
+mod row;
 mod serve;
+mod serve_jobs;
+mod serve_mcp;
+mod serve_metrics;
+mod serve_mongo;
+mod serve_resp;
+mod serve_tls;
 mod shell;
 mod shell_copy;
 pub(super) mod sql;
+mod table;
 mod transfer;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
 const CACHE_HEADROOM_BYTES: usize = 1 << 20;
 const SCAN_VALUE_SHOWN_BYTES: usize = 128;
+const EXPIRY_KEY_OVERHEAD_BYTES: usize = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Access {
@@ -64,7 +85,7 @@ struct Session<'a> {
 
 pub(crate) fn default_format(command: CommandName, stdout_is_terminal: bool) -> Format {
     match (stdout_is_terminal, command) {
-        (true, _) => Format::Text,
+        (true, _) | (false, CommandName::Sql) => Format::Text,
         (false, CommandName::Get) => Format::Raw,
         (false, _) => Format::Json,
     }
@@ -136,12 +157,15 @@ fn execute_on(
         CommandName::Scan => session.scan(),
         CommandName::Check => session.check(),
         CommandName::Stats => session.stats(),
+        CommandName::Backup => session.backup(),
+        CommandName::Compact => session.compact(),
         CommandName::Ui => session.ui(),
         CommandName::Export => session.export(),
         CommandName::Import => session.import(),
         CommandName::Sql => session.sql(),
         CommandName::Serve => session.serve(),
         CommandName::Restore => session.restore(),
+        CommandName::Follow => session.follow(),
         CommandName::Shell => Err(Failure::usage(
             "eggdb shell does not run inside itself",
             Some(CommandName::Shell),
@@ -151,6 +175,15 @@ fn execute_on(
             Some(CommandName::Mcp),
         )),
         CommandName::Audit => session.audit(),
+        CommandName::Collection => session.collection_command(),
+        CommandName::Ttl => session.ttl(),
+        CommandName::Expire => session.expire(),
+        CommandName::Persist => session.persist(),
+        CommandName::Incr | CommandName::Decr => session.counter(),
+        CommandName::Cas => session.compare_and_set(),
+        CommandName::Explain => session.explain(),
+        CommandName::Table => session.table_command(),
+        CommandName::Row => session.row_list(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();
@@ -162,7 +195,8 @@ fn execute_on(
 impl<'a> Session<'a> {
     fn create(&mut self) -> Result<Exit, Failure> {
         if std::fs::symlink_metadata(&self.request.file).is_ok() {
-            return Err(Failure::database(
+            return Err(Failure::coded(
+                "already_exists",
                 format!(
                     "{} already exists; eggdb create never replaces a file. Use it as it is, or choose another name.",
                     self.file
@@ -201,9 +235,23 @@ impl<'a> Session<'a> {
             }
             None => ByteArgument::Stdin,
         };
+        if let ByteArgument::File(path) = &value
+            && self.request.collection.is_none()
+            && self.request.ttl.is_none()
+        {
+            let path = path.clone();
+            return self.put_streamed(&key, &path);
+        }
         let value = self.resolve(Some(value))?;
-        if self.request.create && std::fs::symlink_metadata(&self.request.file).is_err() {
-            self.refuse_what_a_new_file_cannot_store(&key, &value)?;
+        if self.request.create
+            && self.request.collection.is_none()
+            && std::fs::symlink_metadata(&self.request.file).is_err()
+        {
+            self.refuse_what_a_new_file_cannot_store(
+                &key,
+                value.len(),
+                self.request.ttl.is_some(),
+            )?;
         }
         let cache = cache_for_value(value.len());
         let db = self.open(
@@ -212,17 +260,70 @@ impl<'a> Session<'a> {
             },
             Some(cache),
         )?;
-        db.put(&key, &value).map_err(|error| {
-            operation_failure(
+        let ttl = self.request.ttl;
+        let stored = match (&self.request.collection, ttl) {
+            (Some(name), _) => db.write(|transaction| {
+                if self.request.create {
+                    transaction.create_collection(name)?;
+                }
+                let mut collection = transaction.collection(name)?;
+                match ttl {
+                    Some(ttl) => collection.put_with_expiry(&key, &value, ttl),
+                    None => collection.put(&key, &value),
+                }
+            }),
+            (None, Some(ttl)) => db.put_with_expiry(&key, &value, ttl),
+            (None, None) => db.put(&key, &value),
+        };
+        stored.map_err(|error| {
+            self.key_space_failure(
                 &error,
                 &format!("cannot store {} in {}", render::text(&key), self.file),
             )
         })?;
         self.close(db)?;
         if self.format == Format::Json {
+            let object = JsonObject::new().bytes("key", &key).boolean("stored", true);
+            let object = match ttl {
+                Some(ttl) => expiry::with_time_to_live(object, Some(ttl)),
+                None => object,
+            };
+            self.out.text(&object.line());
+        }
+        Ok(Exit::Done)
+    }
+
+    fn put_streamed(&mut self, key: &[u8], path: &std::path::Path) -> Result<Exit, Failure> {
+        let unreadable = |error: std::io::Error| {
+            Failure::usage(
+                format!("cannot read @{}: {error}", path.display()),
+                Some(CommandName::Put),
+            )
+        };
+        let mut source = std::fs::File::open(path).map_err(unreadable)?;
+        let len = source.metadata().map_err(unreadable)?.len();
+        let value_bytes = usize::try_from(len).unwrap_or(usize::MAX);
+        if self.request.create && std::fs::symlink_metadata(&self.request.file).is_err() {
+            self.refuse_what_a_new_file_cannot_store(key, value_bytes, false)?;
+        }
+        let db = self.open(
+            Access::Write {
+                create: self.request.create,
+            },
+            Some(cache_for_value(value_bytes)),
+        )?;
+        db.write(|transaction| transaction.put_reader(key, len, &mut source))
+            .map_err(|error| {
+                self.key_space_failure(
+                    &error,
+                    &format!("cannot store {} in {}", render::text(key), self.file),
+                )
+            })?;
+        self.close(db)?;
+        if self.format == Format::Json {
             self.out.text(
                 &JsonObject::new()
-                    .bytes("key", &key)
+                    .bytes("key", key)
                     .boolean("stored", true)
                     .line(),
             );
@@ -230,16 +331,26 @@ impl<'a> Session<'a> {
         Ok(Exit::Done)
     }
 
-    fn refuse_what_a_new_file_cannot_store(&self, key: &[u8], value: &[u8]) -> Result<(), Failure> {
-        let max_key = BTree::max_key_bytes(PageSize::DEFAULT);
+    fn refuse_what_a_new_file_cannot_store(
+        &self,
+        key: &[u8],
+        value_bytes: usize,
+        expires: bool,
+    ) -> Result<(), Failure> {
+        let deadline_bytes = if expires {
+            EXPIRY_KEY_OVERHEAD_BYTES
+        } else {
+            0
+        };
+        let max_key = BTree::max_key_bytes(PageSize::DEFAULT).saturating_sub(deadline_bytes);
         let refusal = if key.len() > max_key {
             StorageError::KeyTooLarge {
                 bytes: key.len(),
                 max: max_key,
             }
-        } else if value.len() > BTree::MAX_VALUE_BYTES {
+        } else if value_bytes > BTree::MAX_VALUE_BYTES {
             StorageError::ValueTooLarge {
-                bytes: value.len(),
+                bytes: value_bytes,
                 max: BTree::MAX_VALUE_BYTES,
             }
         } else {
@@ -258,8 +369,15 @@ impl<'a> Session<'a> {
     fn get(&mut self) -> Result<Exit, Failure> {
         let key = self.resolve(self.request.key.clone())?;
         let db = self.open(Access::ReadOnly, None)?;
-        let found = db.get(&key).map_err(|error| {
-            operation_failure(
+        if self.format == Format::Raw && self.request.collection.is_none() {
+            return self.get_streamed(&db, &key);
+        }
+        let found = match &self.request.collection {
+            Some(name) => db.collection(name).get(&key),
+            None => db.get(&key),
+        };
+        let found = found.map_err(|error| {
+            self.key_space_failure(
                 &error,
                 &format!("cannot read {} from {}", render::text(&key), self.file),
             )
@@ -292,11 +410,45 @@ impl<'a> Session<'a> {
         Ok(Exit::Done)
     }
 
+    fn get_streamed(&mut self, db: &Database, key: &[u8]) -> Result<Exit, Failure> {
+        let context = format!("cannot read {} from {}", render::text(key), self.file);
+        let transaction = db
+            .begin_read()
+            .map_err(|error| self.key_space_failure(&error, &context))?;
+        let found = transaction
+            .get_reader(key)
+            .map_err(|error| self.key_space_failure(&error, &context))?;
+        let Some(mut reader) = found else {
+            self.error_message(&format!("key not found: {}", render::text(key)));
+            return Ok(Exit::NotFound);
+        };
+        let mut buffer = vec![0u8; STREAM_CHUNK_BYTES];
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => {
+                    let failure = match error.into_inner().map(|inner| inner.downcast::<Error>()) {
+                        Some(Ok(error)) => self.key_space_failure(&error, &context),
+                        _ => Failure::database(context, Exit::DatabaseError),
+                    };
+                    return Err(failure);
+                }
+            };
+            self.out.write_through(&buffer[..read])?;
+        }
+        Ok(Exit::Done)
+    }
+
     fn del(&mut self) -> Result<Exit, Failure> {
         let key = self.resolve(self.request.key.clone())?;
         let db = self.open(Access::Write { create: false }, None)?;
-        let deleted = db.delete(&key).map_err(|error| {
-            operation_failure(
+        let deleted = match &self.request.collection {
+            Some(name) => db.collection(name).delete(&key),
+            None => db.delete(&key),
+        };
+        let deleted = deleted.map_err(|error| {
+            self.key_space_failure(
                 &error,
                 &format!("cannot delete {} from {}", render::text(&key), self.file),
             )
@@ -332,20 +484,27 @@ impl<'a> Session<'a> {
         let transaction = db
             .begin_read()
             .map_err(|error| scan_failure(error, &self.file))?;
-        let mut scan = if has_prefix {
-            transaction.scan_prefix(&prefix)
+        let collection = match &self.request.collection {
+            Some(name) => Some(transaction.collection(name).map_err(|error| {
+                self.key_space_failure(&error, &format!("cannot scan {}", self.file))
+            })?),
+            None => None,
+        };
+        let start = if has_from {
+            Bound::Included(from)
         } else {
-            let start = if has_from {
-                Bound::Included(from)
-            } else {
-                Bound::Unbounded
-            };
-            let end = if has_to {
-                Bound::Excluded(to)
-            } else {
-                Bound::Unbounded
-            };
-            transaction.scan((start, end))
+            Bound::Unbounded
+        };
+        let end = if has_to {
+            Bound::Excluded(to)
+        } else {
+            Bound::Unbounded
+        };
+        let mut scan = match (&collection, has_prefix) {
+            (Some(collection), true) => collection.scan_prefix(&prefix),
+            (Some(collection), false) => collection.scan((start, end)),
+            (None, true) => transaction.scan_prefix(&prefix),
+            (None, false) => transaction.scan((start, end)),
         };
         let limit = self.request.scan.limit.unwrap_or(u64::MAX);
         let mut entries = 0u64;
@@ -484,6 +643,15 @@ impl<'a> Session<'a> {
         Ok(Exit::Done)
     }
 
+    fn key_space_failure(&self, error: &Error, context: &str) -> Failure {
+        match (&self.request.collection, error.kind()) {
+            (Some(name), ErrorKind::CollectionNotFound) => {
+                missing_collection(&self.file, name, context, self.request.command)
+            }
+            _ => operation_failure(error, context),
+        }
+    }
+
     fn resolve(&mut self, argument: Option<ByteArgument>) -> Result<Vec<u8>, Failure> {
         let Some(argument) = argument else {
             return Ok(Vec::new());
@@ -587,10 +755,25 @@ impl<'a> Session<'a> {
         access: Access,
         cache_for_command: Option<usize>,
     ) -> Result<Database, Error> {
-        Database::open_with(
-            &self.request.file,
-            self.database_options(access, cache_for_command),
-        )
+        let options = self.database_options(access, cache_for_command);
+        if self.request.file.as_os_str() == IN_MEMORY_FILE {
+            return Database::in_memory_with(options.read_only(false));
+        }
+        if super::sqlite_import::is_sqlite_file(&self.request.file) {
+            let db = Database::in_memory_with(options.read_only(false))?;
+            let warnings = super::sqlite_import::import(&db, &self.request.file)?;
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "eggdb: {} is an SQLite file; EggDB read it into memory, and changes are not written back to it",
+                self.request.file.display()
+            );
+            for warning in warnings {
+                let _ = writeln!(stderr, "eggdb: {warning}");
+            }
+            return Ok(db);
+        }
+        Database::open_with(&self.request.file, options)
     }
 
     fn database_options(&self, access: Access, cache_for_command: Option<usize>) -> Options {
@@ -606,6 +789,9 @@ impl<'a> Session<'a> {
         };
         if let Some(page_size) = self.request.page_size {
             options = options.page_size_bytes(page_size);
+        }
+        if let Some(key) = &self.request.encryption_key {
+            options = options.encryption_key(key.0);
         }
         options
     }
@@ -631,7 +817,8 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
     let creates = matches!(access, Access::Write { create: true });
     match error.kind() {
         ErrorKind::NotFound if !creates => match access {
-            Access::ReadOnly => Failure::database(
+            Access::ReadOnly => Failure::coded(
+                "not_found",
                 format!(
                     "cannot open {file}: no such file. Check the path, or create it with `eggdb create {file}`"
                 ),
@@ -643,6 +830,7 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
                 ),
                 try_command: Some(format!("eggdb create {file}")),
                 exit: Exit::DatabaseError,
+                code: "not_found",
             },
         },
         ErrorKind::Locked => match access {
@@ -660,20 +848,23 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
                 Exit::Busy,
             ),
         },
-        ErrorKind::NotADatabase => Failure::database(
+        ErrorKind::NotADatabase => Failure::coded(
+            "not_a_database",
             format!(
                 "cannot open {file}: not an EggDB database. If it is a database of another kind, EggDB restores its backups in a later release (docs/roadmap.md)."
             ),
             Exit::DatabaseError,
         ),
-        ErrorKind::Incompatible => Failure::database(
+        ErrorKind::Incompatible => Failure::coded(
+            "incompatible",
             format!(
                 "cannot open {file}: it was written by a newer EggDB ({}). Upgrade eggdb from https://github.com/eggspot/EggDB/releases.",
                 incompatibility(error, file_display)
             ),
             Exit::DatabaseError,
         ),
-        kind => Failure::database(
+        kind => Failure::coded(
+            code_for_error(kind),
             format!(
                 "cannot open {file}: {}",
                 without_open_prefix(&error.to_string(), file_display)
@@ -683,11 +874,30 @@ fn open_failure(file: &str, file_display: &str, error: &Error, access: Access) -
     }
 }
 
+fn missing_collection(file: &str, name: &str, context: &str, command: CommandName) -> Failure {
+    let create = if command == CommandName::Put {
+        ", or pass --create to put"
+    } else {
+        ""
+    };
+    Failure::Database {
+        message: format!(
+            "{context}: no collection named {name}. Add it with `eggdb collection add {file} {name}`{create}."
+        ),
+        try_command: Some(format!("eggdb collection add {file} {name}")),
+        exit: Exit::NotFound,
+        code: "collection_not_found",
+    }
+}
+
 fn mcp_may_hold(file: &str) -> String {
     format!(
         "  it may be an AI agent's call through eggdb mcp, which holds the file for up to its time limit; run the command again, or see `eggdb audit {file}`."
     )
 }
+
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+pub(crate) const IN_MEMORY_FILE: &str = ":memory:";
 
 fn cache_for_value(value_bytes: usize) -> usize {
     let needed = value_bytes
@@ -697,7 +907,11 @@ fn cache_for_value(value_bytes: usize) -> usize {
 }
 
 fn operation_failure(error: &Error, context: &str) -> Failure {
-    Failure::database(format!("{context}: {error}"), Exit::for_error(error.kind()))
+    Failure::coded(
+        code_for_error(error.kind()),
+        format!("{context}: {error}"),
+        Exit::for_error(error.kind()),
+    )
 }
 
 fn without_open_prefix(message: &str, file: &str) -> String {
@@ -732,12 +946,13 @@ mod tests {
     use crate::cli::args::{ColorChoice, CommandName, Format};
 
     #[test]
-    fn a_pipe_gets_json_except_get_which_gets_raw_bytes() {
+    fn a_pipe_gets_json_except_get_which_gets_raw_bytes_and_sql_which_keeps_its_text() {
         assert_eq!(default_format(CommandName::Get, true), Format::Text);
         assert_eq!(default_format(CommandName::Scan, true), Format::Text);
         assert_eq!(default_format(CommandName::Get, false), Format::Raw);
         assert_eq!(default_format(CommandName::Scan, false), Format::Json);
         assert_eq!(default_format(CommandName::Check, false), Format::Json);
+        assert_eq!(default_format(CommandName::Sql, false), Format::Text);
     }
 
     #[test]

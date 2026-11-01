@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-stomp"
+description = "EggDB's STOMP 1.2 server, written from the public STOMP specification: durable queues on EggDB's queues, topics, acknowledgements, transactions and receipts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-queues = { path = "../eggdb-queues" }

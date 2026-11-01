@@ -355,7 +355,6 @@ SELECT substr('alphabet', 3, 2), substr('alphabet', 3)
 substr|substr
 ph|phabet
 SELECT 1
-... differs
 
 rows
 SELECT substring('alphabet' from 3 for 2)
@@ -377,7 +376,6 @@ SELECT replace('abcabc', 'b', 'X'), concat('a', NULL, 'b', 1)
 replace|concat
 aXcaXc|ab1
 SELECT 1
-... differs
 
 rows
 SELECT position('c' in 'abc')
@@ -385,7 +383,6 @@ SELECT position('c' in 'abc')
 position
 3
 SELECT 1
-... differs
 
 rows
 SELECT 'abc' LIKE 'a%', 'abc' LIKE '_b_', 'abc' LIKE 'A%', 'abc' ILIKE 'A%', 'abc' NOT LIKE '%d'
@@ -407,7 +404,6 @@ SELECT left('abcde', 2), right('abcde', 2), repeat('ab', 3), reverse('abc')
 left|right|repeat|reverse
 ab|de|ababab|cba
 SELECT 1
-... differs
 
 chapter ddl-basics, ddl-constraints, dml-insert
 ok
@@ -1668,8 +1664,19 @@ WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n FROM t) SELECT count(*) FROM
 error 42P19
 WITH RECURSIVE t(n) AS (SELECT n FROM t UNION ALL SELECT 1) SELECT * FROM t
 
-error 0A000
-WITH t AS (DELETE FROM sq_emp RETURNING id) SELECT * FROM t
+rows
+WITH t AS (DELETE FROM sq_emp RETURNING id) SELECT * FROM t ORDER BY id
+----
+id
+1
+2
+3
+4
+5
+SELECT 5
+
+ok
+INSERT INTO sq_emp VALUES (1, 1, 100, NULL), (2, 1, 80, 1), (3, 2, 120, 1), (4, NULL, 50, 3), (5, 2, 90, 3)
 
 rows
 SELECT id, CASE WHEN pay > 95 THEN 'high' WHEN pay > 60 THEN 'mid' ELSE 'low' END AS band, CASE dept WHEN 1 THEN 'one' WHEN 2 THEN 'two' END AS d FROM sq_emp ORDER BY id
@@ -1728,11 +1735,25 @@ id|name|dept|pay|boss
 5|NULL|2|90.00|3
 SELECT 2
 
-error 0A000
+rows
 SELECT * FROM sq_dept FULL JOIN sq_emp USING (id)
+----
+id|name|dept|pay|boss
+1|sales|1|100.00|NULL
+2|research|1|80.00|1
+3|empty|2|120.00|1
+4|NULL|NULL|50.00|3
+5|NULL|2|90.00|3
+SELECT 5
 
-error 0A000
+rows
 SELECT * FROM sq_dept, LATERAL (SELECT 1) x
+----
+id|name|?column?
+1|sales|1
+2|research|1
+3|empty|1
+SELECT 3
 
 chapter datatype-datetime, "Time Types" and "Interval Input", "Interval Output"
 rows
@@ -2428,13 +2449,13 @@ CREATE VIEW too_many33 (a, b) AS SELECT 1
 error 42701
 CREATE VIEW twice33 AS SELECT code, code FROM films33
 
-error 0A000
+ok
 CREATE VIEW checked33 AS SELECT * FROM films33 WITH CHECK OPTION
 
-error 0A000
+ok
 CREATE MATERIALIZED VIEW m33 AS SELECT 1
 
-error 0A000
+ok
 INSERT INTO comedies33 (code) VALUES (9)
 
 error 42P17
@@ -2620,11 +2641,40 @@ COPY country_names TO STDOUT
 
 ok
 COPY country TO STDOUT (FORMAT binary)
-... differs
 
-ok
+rows
 COPY country TO STDOUT (ENCODING 'LATIN1')
-... differs
+----
+AF	AFGHANISTAN
+AL	ALBANIA
+DZ	ALGERIA
+ZM	ZAMBIA
+ZW	ZIMBABWE
+COPY 5
+
+rows
+COPY country FROM STDIN WHERE country_code <> 'XX';
+XX	NOWHERE
+FR	FRANCE
+\.
+----
+COPY 1
+
+rows
+COPY country FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose);
+DE	GERMANY
+DEUTSCHLAND	GERMANY
+\.
+----
+COPY 1
+
+rows
+SELECT country_code FROM country WHERE country_code IN ('DE', 'FR', 'XX') ORDER BY 1
+----
+country_code
+DE
+FR
+SELECT 2
 
 chapter sql-copy, "COPY": Text Format
 ok
@@ -3020,8 +3070,12 @@ nextval
 2
 SELECT 1
 
-error 0A000
-INSERT INTO ident_plain OVERRIDING USER VALUE VALUES (5)
+rows
+INSERT INTO ident_plain OVERRIDING USER VALUE VALUES (5) RETURNING n
+----
+n
+3
+INSERT 0 1
 
 chapter sql-createtable, "CREATE TABLE": UNLOGGED
 ok
@@ -3106,7 +3160,6 @@ SELECT 'aa' ~ '(a)\1'
 ?column?
 t
 SELECT 1
-... differs
 
 rows
 SELECT 'a' || 'b' ~ 'ab', 'ab' ~ 'a' = true, 3 OPERATOR(+) 4 * 2, 1 + 1 OPERATOR(pg_catalog.=) 2
@@ -3636,11 +3689,23 @@ x|max
 3|3
 SELECT 2
 
-error 0A000
+rows
 SELECT * FROM generate_series(1,2) g JOIN generate_series(1, g.g) h ON true
+----
+g|h
+1|1
+2|2
+2|1
+SELECT 3
 
-error 0A000
+rows
 SELECT * FROM generate_series(1,2) g, generate_series(1, g) h
+----
+g|h
+1|1
+2|2
+2|1
+SELECT 3
 
 error 0A000
 SELECT * FROM (VALUES (2)) w(x), generate_series(1, (SELECT x)) g
@@ -3873,3 +3938,677 @@ gamma
 "Charlie"
 SELECT 4
 
+
+chapter functions-string, "Other String Functions and Operators": split_part, concat_ws, padding, format and the rest
+rows
+SELECT split_part('abc~@~def~@~ghi', '~@~', 2), split_part('abc,def,ghi,jkl', ',', -2), concat_ws(',', 'abcde', 2, NULL, 22), initcap('hi THOMAS'), translate('12345', '143', 'ax')
+----
+split_part|split_part|concat_ws|initcap|translate
+def|ghi|abcde,2,22|Hi Thomas|a2x5
+SELECT 1
+
+rows
+SELECT lpad('hi', 5, 'xy'), rpad('hi', 5, 'xy'), lpad('hello', 3), chr(65), ascii('x'), strpos('high', 'ig'), starts_with('alphabet', 'alph')
+----
+lpad|rpad|lpad|chr|ascii|strpos|starts_with
+xyxhi|hixyx|hel|A|120|2|t
+SELECT 1
+
+rows
+SELECT md5('abc'), overlay('Txxxxas' placing 'hom' from 2 for 4), left('abc', -1), right('abc', -1), repeat('x', 0), concat(NULL)
+----
+md5|overlay|left|right|repeat|concat
+900150983cd24fb0d6963f7d28e17f72|Thomas|ab|bc||
+SELECT 1
+
+rows
+SELECT format('Hello %s', 'World'), format('Testing %s, %s, %s, %%', 'one', 'two', 'three'), format('INSERT INTO %I VALUES(%L)', 'Foo bar', 'O''Reilly'), format('[%10s]', 'foo'), format('[%-10s]', 'foo'), format('%2$s %1$s', 'world', 'hello'), format('%s', NULL)
+----
+format|format|format|format|format|format|format
+Hello World|Testing one, two, three, %|INSERT INTO "Foo bar" VALUES('O''Reilly')|[       foo]|[foo       ]|hello world|
+SELECT 1
+
+rows
+SELECT split_part('a,b', '', 1), split_part('a,b', ',', 5), quote_literal('it''s'), quote_nullable(NULL), position('' in 'abc'), strpos('abc', 'z')
+----
+split_part|split_part|quote_literal|quote_nullable|position|strpos
+a,b||'it''s'|NULL|1|0
+SELECT 1
+
+error 22023
+SELECT format('%s %s', 'a')
+
+error 22004
+SELECT format('%I', NULL)
+
+error 22023
+SELECT split_part('a,b', ',', 0)
+
+error 54000
+SELECT chr(0)
+
+chapter functions-matching, "POSIX Regular Expressions": the regexp functions, substring and SIMILAR TO
+rows
+SELECT regexp_match('foobarbequebaz', 'bar.*que'), regexp_match('foobarbequebaz', '(bar)(beque)'), regexp_match('foobarbequebaz', 'x'), regexp_match('abcd', 'a|ab')
+----
+regexp_match|regexp_match|regexp_match|regexp_match
+{barbeque}|{bar,beque}|NULL|{ab}
+SELECT 1
+
+rows
+SELECT regexp_matches('foobarbequebazilbarfbonk', '(b[^b]+)(b[^b]+)', 'g')
+----
+regexp_matches
+{bar,beque}
+{bazil,barf}
+SELECT 2
+
+rows
+SELECT regexp_replace('Thomas', '.[mN]a.', 'M'), regexp_replace('foobarbaz', 'b(..)', 'X\1Y', 'g'), regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 0, 'i'), regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 3, 'i')
+----
+regexp_replace|regexp_replace|regexp_replace|regexp_replace
+ThM|fooXarYXazY|X PXstgrXSQL fXnctXXn|A PostgrXSQL function
+SELECT 1
+
+rows
+SELECT regexp_split_to_array('hello world', '\s+'), regexp_count('ABCABCAXYaxy', 'A.'), regexp_count('ABCABCAXYaxy', 'A.', 1, 'i'), regexp_instr('ABCDEFGHI', '(c..)(...)', 1, 1, 0, 'i', 2), regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2), regexp_like('Hello World', 'world$', 'i')
+----
+regexp_split_to_array|regexp_count|regexp_count|regexp_instr|regexp_substr|regexp_like
+{hello,world}|3|4|6|FGH|t
+SELECT 1
+
+rows
+SELECT foo FROM regexp_split_to_table('the quick brown fox', '\s+') AS foo
+----
+foo
+the
+quick
+brown
+fox
+SELECT 4
+
+rows
+SELECT substring('Thomas' from '...$'), substring('Thomas' from 'o(.)m'), substring('foobar' similar '%#"o_b#"%' escape '#'), substring('foobar' from '%#"o_b#"%' for '#'), substring('Thomas' from 'x')
+----
+substring|substring|substring|substring|substring
+mas|NULL|oob|oob|NULL
+SELECT 1
+
+rows
+SELECT 'abc' SIMILAR TO 'abc', 'abc' SIMILAR TO 'a', 'abc' SIMILAR TO '%(b|d)%', 'abc' SIMILAR TO '(b|c)%', '-abc-' SIMILAR TO '%\mabc\M%', 'xyz' SIMILAR TO '%\mabc\M%', 'abc' NOT SIMILAR TO 'a_c'
+----
+?column?|?column?|?column?|?column?|?column?|?column?|?column?
+t|f|t|f|t|f|f
+SELECT 1
+
+rows
+SELECT 'foobar' ~ 'foo(?=bar)', 'abcabc' ~ '^(abc)\1$', 'a cat' ~ '\mcat\M', 'ABC' ~ '(?i)abc', 'a.c' ~ '***=a.c'
+----
+?column?|?column?|?column?|?column?|?column?
+t|t|t|t|t
+SELECT 1
+
+error 2201B
+SELECT regexp_match('a', '(a)\2')
+
+error 22023
+SELECT regexp_match('a', 'a', 'g')
+
+error 22023
+SELECT regexp_like('a', 'a', 'z')
+
+chapter functions-datetime, "Date/Time Functions": make_*, date_bin, isfinite and AT TIME ZONE
+rows
+SELECT make_date(2013, 7, 15), make_time(8, 15, 23.5), make_timestamp(2013, 7, 15, 8, 15, 23.5), make_interval(days => 10), make_interval(1, 2, 3, 4, 5, 6, 7.5), make_date(-44, 3, 15)
+----
+make_date|make_time|make_timestamp|make_interval|make_interval|make_date
+2013-07-15|08:15:23.5|2013-07-15 08:15:23.5|10 days|1 year 2 mons 25 days 05:06:07.5|0044-03-15 BC
+SELECT 1
+
+rows
+SELECT date_bin('15 minutes', TIMESTAMP '2020-02-11 15:44:17', TIMESTAMP '2001-01-01'), date_bin('15 minutes', TIMESTAMP '2020-02-11 15:44:17', TIMESTAMP '2001-01-01 00:02:30'), isfinite(date '2001-02-16'), isfinite(interval '4 hours')
+----
+date_bin|date_bin|isfinite|isfinite
+2020-02-11 15:30:00|2020-02-11 15:32:30|t|t
+SELECT 1
+
+rows
+SELECT TIMESTAMP '2001-02-16 20:38:40' AT TIME ZONE '+05', '2001-02-16 20:38:40+00'::timestamptz AT TIME ZONE 'UTC', TIMESTAMP '2001-02-16 20:38:40' AT TIME ZONE INTERVAL '-08:00'
+----
+timezone|timezone|timezone
+2001-02-17 01:38:40+00|2001-02-16 20:38:40|2001-02-17 04:38:40+00
+SELECT 1
+
+error 22008
+SELECT make_date(2013, 2, 30)
+
+error 22023
+SELECT TIMESTAMP '2001-02-16 20:38:40' AT TIME ZONE 'Mars/Olympus'
+
+chapter functions-formatting, "Data Type Formatting Functions": to_char, to_date, to_timestamp and to_number
+rows
+SELECT to_char(TIMESTAMP '2002-04-20 17:31:12.66', 'HH12:MI:SS'), to_char(TIMESTAMP '2002-04-20 17:31:12.66', 'FMDay, FMDD  HH12:MI:SS'), to_char(-0.1, 'FM90.99'), to_char(485, '999'), to_char(148.5, '999D999'), to_char(-485, '999PR'), to_char(485, 'FMRN'), to_char(interval '15 hours 2 minutes 12 seconds', 'HH24:MI:SS')
+----
+to_char|to_char|to_char|to_char|to_char|to_char|to_char|to_char
+05:31:12|Saturday, 20  05:31:12|-0.1| 485| 148.500|<485>|CDLXXXV|15:02:12
+SELECT 1
+
+rows
+SELECT to_date('05 Dec 2000', 'DD Mon YYYY'), to_timestamp('05 Dec 2000', 'DD Mon YYYY'), to_number('12,454.8-', '99G999D9S'), to_timestamp(1284352323)
+----
+to_date|to_timestamp|to_number|to_timestamp
+2000-12-05|2000-12-05 00:00:00+00|-12454.8|2010-09-13 04:32:03+00
+SELECT 1
+
+error 22008
+SELECT to_date('2009-02-30', 'YYYY-MM-DD')
+
+error 22007
+SELECT to_date('2009-xx-30', 'YYYY-MM-DD')
+
+chapter functions-json, "JSON Creation Functions", "JSON Processing Functions", jsonb operators and the JSON aggregates
+rows
+SELECT to_json('Fred said "Hi."'::text), row_to_json(row(1, 'foo')), json_build_array(1, 2, 'foo', 4, 5), json_build_object('foo', 1, 2, row_to_json(row(3, 'bar')))
+----
+to_json|row_to_json|json_build_array|json_build_object
+"Fred said \"Hi.\""|{"f1":1,"f2":"foo"}|[1, 2, "foo", 4, 5]|{"foo" : 1, "2" : {"f1":3,"f2":"bar"}}
+SELECT 1
+
+rows
+SELECT jsonb_build_object('b', 1, 'a', 2), jsonb_build_array('x', NULL), to_jsonb(1.50), to_json(ARRAY[1, 2])
+----
+jsonb_build_object|jsonb_build_array|to_jsonb|to_json
+{"a": 2, "b": 1}|["x", null]|1.50|[1,2]
+SELECT 1
+
+rows
+SELECT key, value FROM json_each('{"a":"foo", "b":"bar"}') ORDER BY key
+----
+key|value
+a|"foo"
+b|"bar"
+SELECT 2
+
+rows
+SELECT * FROM jsonb_each_text('{"a":"foo", "b":"bar"}')
+----
+key|value
+a|foo
+b|bar
+SELECT 2
+
+rows
+SELECT * FROM json_array_elements('[1,true, [2,false]]')
+----
+value
+1
+true
+[2,false]
+SELECT 3
+
+rows
+SELECT * FROM json_object_keys('{"f1":"abc","f2":{"f3":"a", "f4":"b"}}')
+----
+json_object_keys
+f1
+f2
+SELECT 2
+
+rows
+SELECT json_extract_path('{"f2":{"f3":1},"f4":{"f5":99,"f6":"foo"}}', 'f4', 'f6'), json_extract_path_text('{"f2":{"f3":1},"f4":{"f5":99,"f6":"foo"}}', 'f4', 'f6'), json_strip_nulls('[{"f1":1, "f2":null}, 2, null, 3]')
+----
+json_extract_path|json_extract_path_text|json_strip_nulls
+"foo"|foo|[{"f1":1},2,null,3]
+SELECT 1
+
+rows
+SELECT jsonb_set('[{"f1":1,"f2":null},2,null,3]', '{0,f1}', '[2,3,4]', false), jsonb_insert('{"a": [0,1,2]}', '{a, 1}', '"new_value"'), jsonb_strip_nulls('[{"f1":1, "f2":null}, 2, null, 3]')
+----
+jsonb_set|jsonb_insert|jsonb_strip_nulls
+[{"f1": [2, 3, 4], "f2": null}, 2, null, 3]|{"a": [0, "new_value", 1, 2]}|[{"f1": 1}, 2, null, 3]
+SELECT 1
+
+rows
+SELECT '{"a":1, "b":2}'::jsonb ? 'b', '{"a":1, "b":2, "c":3}'::jsonb ?| ARRAY['b', 'd'], '["a", "b", "c"]'::jsonb ?& ARRAY['a', 'b'], '["a", "b"]'::jsonb || '["a", "d"]'::jsonb, '{"a": "b", "c": "d"}'::jsonb - 'a', '["a", "b"]'::jsonb - 1, '["a", {"b":1}]'::jsonb #- '{1,b}'
+----
+?column?|?column?|?column?|?column?|?column?|?column?|?column?
+t|t|t|["a", "b", "a", "d"]|{"c": "d"}|["a"]|["a", {}]
+SELECT 1
+
+rows
+SELECT json_agg(n), jsonb_agg(n), json_object_agg(k, n), jsonb_object_agg(k, n) FROM (VALUES ('a', 1), ('b', NULL)) v(k, n)
+----
+json_agg|jsonb_agg|json_object_agg|jsonb_object_agg
+[1, null]|[1, null]|{ "a" : 1, "b" : null }|{"a": 1, "b": null}
+SELECT 1
+
+rows
+SELECT row_to_json(r), to_jsonb(r) FROM (VALUES (1, 'x')) r(a, b)
+----
+row_to_json|to_jsonb
+{"a":1,"b":"x"}|{"a": 1, "b": "x"}
+SELECT 1
+
+rows
+SELECT jsonb_agg(r) FROM (VALUES (1, 'x'), (2, 'y')) r(a, b)
+----
+jsonb_agg
+[{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
+SELECT 1
+
+rows
+SELECT json_agg(n) FROM (VALUES (1)) v(n) WHERE false
+----
+json_agg
+NULL
+SELECT 1
+
+error 22023
+SELECT * FROM json_each('[1, 2]')
+
+error 22023
+SELECT json_build_object('a')
+
+error 22023
+SELECT '1'::jsonb - 'a'
+
+
+chapter sql-set-transaction, "SET TRANSACTION": every isolation level is accepted and runs serializable
+ok
+SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED
+
+ok
+SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE
+
+ok
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, NOT DEFERRABLE
+
+ok
+SET TRANSACTION READ WRITE ISOLATION LEVEL READ UNCOMMITTED
+
+error 42601
+SET TRANSACTION ISOLATION LEVEL READ
+
+error 0A000
+SET TRANSACTION SNAPSHOT '00000003-0000001B-1'
+
+
+chapter functions-aggregate, "Aggregate Functions": array_agg, bool_and, bool_or, every and ORDER BY inside the call
+rows
+SELECT array_agg(n ORDER BY n DESC), array_agg(n), bool_and(n > 0), bool_or(n > 2), every(n < 3) FROM (VALUES (1), (2), (3)) v(n)
+----
+array_agg|array_agg|bool_and|bool_or|every
+{3,2,1}|{1,2,3}|t|t|f
+SELECT 1
+
+rows
+SELECT string_agg(s, ',' ORDER BY s), array_agg(s ORDER BY s NULLS FIRST) FROM (VALUES ('b'), (NULL), ('a')) v(s)
+----
+string_agg|array_agg
+a,b|{NULL,a,b}
+SELECT 1
+
+rows
+SELECT g, array_agg(n ORDER BY n) FROM (VALUES (1, 30), (2, 10), (1, 20)) v(g, n) GROUP BY g ORDER BY g
+----
+g|array_agg
+1|{20,30}
+2|{10}
+SELECT 2
+
+rows
+SELECT array_agg(n), bool_and(n > 0) FROM (VALUES (1)) v(n) WHERE false
+----
+array_agg|bool_and
+NULL|NULL
+SELECT 1
+
+error 42883
+SELECT bool_and(n) FROM (VALUES (1)) v(n)
+
+chapter xfunc-sql, "SQL Functions Returning Sets": set-returning functions in one select list run in lock-step
+rows
+SELECT unnest('{1,2,3}'::int[]) AS a, unnest('{x,y}'::text[]) AS b
+----
+a|b
+1|x
+2|y
+3|NULL
+SELECT 3
+
+rows
+SELECT unnest('{10,20}'::int[]) AS e, generate_subscripts('{10,20}'::int[], 1) AS s
+----
+e|s
+10|1
+20|2
+SELECT 2
+
+
+chapter functions-window, "Window Functions": row_number, rank and dense_rank as select-list items
+rows
+SELECT g, n, row_number() OVER (PARTITION BY g ORDER BY n DESC) AS r, rank() OVER (ORDER BY g), dense_rank() OVER (ORDER BY g) FROM (VALUES (1, 10), (2, 20), (1, 30)) v(g, n) ORDER BY g, n
+----
+g|n|r|rank|dense_rank
+1|10|2|1|1
+1|30|1|1|1
+2|20|1|3|2
+SELECT 3
+
+rows
+SELECT * FROM (SELECT n, row_number() OVER (ORDER BY n) AS position FROM (VALUES (5), (3)) v(n)) numbered WHERE position = 2
+----
+n|position
+5|2
+SELECT 1
+
+rows
+SELECT row_number() OVER () + 1 FROM (VALUES (1)) v(n)
+----
+?column?
+2
+SELECT 1
+
+error 42P20
+SELECT n FROM (VALUES (1)) v(n) WHERE row_number() OVER () = 1
+
+rows
+SELECT count(*) OVER () FROM (VALUES (1)) v(n)
+----
+count
+1
+SELECT 1
+
+chapter infoschema-tables, "information_schema": tables, columns and constraints
+ok
+CREATE TABLE infoschema_parent (id integer PRIMARY KEY, code varchar(10) UNIQUE)
+
+ok
+CREATE TABLE infoschema_child (id integer PRIMARY KEY, parent_id integer REFERENCES infoschema_parent (id), amount numeric(8,2) NOT NULL)
+
+rows
+SELECT table_name, table_type FROM information_schema.tables WHERE table_name LIKE 'infoschema%' ORDER BY 1
+----
+table_name|table_type
+infoschema_child|BASE TABLE
+infoschema_parent|BASE TABLE
+SELECT 2
+
+rows
+SELECT column_name, data_type, is_nullable, numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'infoschema_child' ORDER BY ordinal_position
+----
+column_name|data_type|is_nullable|numeric_precision|numeric_scale
+id|integer|NO|32|0
+parent_id|integer|YES|32|0
+amount|numeric|NO|8|2
+SELECT 3
+
+rows
+SELECT tc.constraint_name, kcu.column_name, ccu.table_name AS references_table, ccu.column_name AS references_column FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name AND kcu.constraint_schema = tc.constraint_schema JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.constraint_schema = tc.constraint_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = 'infoschema_child'
+----
+constraint_name|column_name|references_table|references_column
+infoschema_child_parent_id_fkey|parent_id|infoschema_parent|id
+SELECT 1
+
+error 42P01
+SELECT * FROM tables
+
+error 42501
+DELETE FROM information_schema.columns
+
+chapter sql-createindex, "CREATE INDEX": access methods, sort order, unique indexes that are not constraints and GENERATED ALWAYS identities
+ok
+CREATE TABLE idx37c (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code text NOT NULL, priority integer, opened timestamptz, closed timestamptz)
+
+ok
+CREATE UNIQUE INDEX idx37c_code_idx ON idx37c (code)
+
+ok
+CREATE INDEX idx37c_opened_idx ON idx37c (opened DESC)
+
+ok
+CREATE INDEX idx37c_priority_idx ON idx37c USING btree (priority NULLS FIRST, closed DESC NULLS LAST)
+
+ok
+CREATE INDEX idx37c_code_hash ON idx37c USING hash (code)
+
+error 0A000
+CREATE UNIQUE INDEX idx37c_bad ON idx37c USING hash (code)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code, priority)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code DESC)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code ASC)
+
+error 0A000
+CREATE INDEX idx37c_bad ON idx37c USING hash (code NULLS FIRST)
+
+rows
+SELECT pg_get_indexdef(indexrelid), indoption FROM pg_index WHERE indrelid = 'idx37c'::regclass ORDER BY 1
+----
+pg_get_indexdef|indoption
+CREATE INDEX idx37c_code_hash ON public.idx37c USING hash (code)|0
+CREATE INDEX idx37c_opened_idx ON public.idx37c USING btree (opened DESC)|3
+CREATE INDEX idx37c_priority_idx ON public.idx37c USING btree (priority NULLS FIRST, closed DESC NULLS LAST)|2 1
+CREATE UNIQUE INDEX idx37c_code_idx ON public.idx37c USING btree (code)|0
+CREATE UNIQUE INDEX idx37c_pkey ON public.idx37c USING btree (id)|0
+SELECT 5
+
+rows
+SELECT conname, contype FROM pg_constraint WHERE conrelid = 'idx37c'::regclass ORDER BY 1
+----
+conname|contype
+idx37c_pkey|p
+SELECT 1
+
+rows
+SELECT attname, attidentity, atthasdef FROM pg_attribute WHERE attrelid = 'idx37c'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname|attidentity|atthasdef
+id|a|f
+code||f
+priority||f
+opened||f
+closed||f
+SELECT 5
+
+rows
+INSERT INTO idx37c (code) VALUES ('a') RETURNING id
+----
+id
+1
+INSERT 0 1
+
+error 428C9
+INSERT INTO idx37c (id, code) VALUES (5, 'x')
+
+error 428C9
+INSERT INTO idx37c SELECT 6, 'y'
+
+rows
+INSERT INTO idx37c (id, code) OVERRIDING USER VALUE VALUES (77, 'u') RETURNING id
+----
+id
+2
+INSERT 0 1
+
+rows
+INSERT INTO idx37c (id, code) OVERRIDING SYSTEM VALUE VALUES (5, 'x') RETURNING id
+----
+id
+5
+INSERT 0 1
+
+error 23505
+INSERT INTO idx37c (code) VALUES ('a')
+
+error 428C9
+UPDATE idx37c SET id = 9 WHERE code = 'a'
+
+ok
+UPDATE idx37c SET id = DEFAULT WHERE code = 'none'
+
+error 42704
+ALTER TABLE idx37c DROP CONSTRAINT idx37c_code_idx
+
+error 42601
+ALTER TABLE idx37c ALTER COLUMN id DROP DEFAULT
+
+ok
+CREATE TABLE idx37c_restored (id integer NOT NULL, label text)
+
+ok
+ALTER TABLE idx37c_restored ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.idx37c_restored_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1)
+
+error 428C9
+INSERT INTO idx37c_restored VALUES (1, 'refused')
+
+error 42601
+ALTER TABLE idx37c_restored ALTER COLUMN id SET DEFAULT 5
+
+rows
+SELECT attidentity, atthasdef FROM pg_attribute WHERE attrelid = 'idx37c_restored'::regclass AND attname = 'id'
+----
+attidentity|atthasdef
+a|f
+SELECT 1
+
+rows
+SELECT count(*) FROM pg_attrdef WHERE adrelid = 'idx37c_restored'::regclass
+----
+count
+0
+SELECT 1
+
+rows
+SELECT deptype FROM pg_depend WHERE objid = 'idx37c_restored_id_seq'::regclass AND refobjsubid = 1
+----
+deptype
+i
+SELECT 1
+
+rows
+SELECT column_name, column_default, is_identity, identity_generation FROM information_schema.columns WHERE table_name = 'idx37c_restored' ORDER BY ordinal_position
+----
+column_name|column_default|is_identity|identity_generation
+id|NULL|YES|ALWAYS
+label|NULL|NO|NULL
+SELECT 2
+
+chapter datatype-datetime, "Time Zones": regions of the time zone database in TimeZone, input, output, arithmetic, AT TIME ZONE, to_char and pg_timezone_names
+ok
+SET TimeZone = 'Europe/Paris'
+
+rows
+SHOW TimeZone
+----
+TimeZone
+Europe/Paris
+SHOW
+
+rows
+SELECT '2026-07-01 12:00:00+00'::timestamptz, '2026-01-01 12:00:00+00'::timestamptz
+----
+timestamptz|timestamptz
+2026-07-01 14:00:00+02|2026-01-01 13:00:00+01
+SELECT 1
+
+rows
+SELECT '2026-03-29 02:30:00'::timestamptz, '2026-10-25 02:30:00'::timestamptz, '1900-01-01 00:00:00'::timestamptz
+----
+timestamptz|timestamptz|timestamptz
+2026-03-29 03:30:00+02|2026-10-25 02:30:00+01|1900-01-01 00:00:00+00:09:21
+SELECT 1
+
+rows
+SELECT '2026-03-28 12:00:00'::timestamptz + interval '1 day', '2026-03-28 12:00:00'::timestamptz + interval '24 hours'
+----
+?column?|?column?
+2026-03-29 12:00:00+02|2026-03-29 13:00:00+02
+SELECT 1
+
+rows
+SELECT to_char('2026-07-01 12:00:00+00'::timestamptz, 'YYYY-MM-DD HH24:MI TZ'), to_char('2026-01-01 12:00:00+00'::timestamptz, 'HH24:MI tz')
+----
+to_char|to_char
+2026-07-01 14:00 CEST|13:00 cet
+SELECT 1
+
+ok
+SET TimeZone = 'america/new_york'
+
+rows
+SELECT current_setting('TimeZone'), '2026-11-01 01:30:00'::timestamptz, '2026-03-08 02:30:00'::timestamptz
+----
+current_setting|timestamptz|timestamptz
+America/New_York|2026-11-01 01:30:00-05|2026-03-08 03:30:00-04
+SELECT 1
+
+error 22023
+SET TimeZone = 'Mars/Olympus'
+
+ok
+SET TimeZone = 'UTC'
+
+rows
+SELECT TIMESTAMP '2026-07-01 12:00:00' AT TIME ZONE 'America/New_York', '2026-07-01 12:00:00+00'::timestamptz AT TIME ZONE 'Asia/Kolkata', '2026-01-15 12:00:00+00'::timestamptz AT TIME ZONE 'Australia/Sydney'
+----
+timezone|timezone|timezone
+2026-07-01 16:00:00+00|2026-07-01 17:30:00|2026-01-15 23:00:00
+SELECT 1
+
+rows
+SELECT '2026-07-01 12:00:00 Europe/Paris'::timestamptz, make_timestamptz(2026, 1, 1, 12, 0, 0, 'Europe/Paris'), timezone('Asia/Kathmandu', '2026-07-01 00:00:00+00'::timestamptz)
+----
+timestamptz|make_timestamptz|timezone
+2026-07-01 10:00:00+00|2026-01-01 11:00:00+00|2026-07-01 05:45:00
+SELECT 1
+
+rows
+SELECT name, abbrev, utc_offset, is_dst FROM pg_timezone_names WHERE name = 'Asia/Kolkata'
+----
+name|abbrev|utc_offset|is_dst
+Asia/Kolkata|IST|05:30:00|f
+SELECT 1
+
+chapter datatype-datetime, "Interval Input" and "Interval Output": PostgreSQL 17's infinity and -infinity
+rows
+SELECT interval 'infinity', '-infinity'::interval, isfinite(interval 'infinity'), interval 'infinity' > interval '1000000 years', - interval 'infinity'
+----
+interval|interval|isfinite|?column?|?column?
+infinity|-infinity|f|t|-infinity
+SELECT 1
+
+rows
+SELECT interval '1 day' * 'infinity'::float8, interval 'infinity' / 2, interval 'infinity' + interval '1 day', date_part('epoch', interval '-infinity'), extract(month from interval 'infinity')
+----
+?column?|?column?|?column?|date_part|extract
+infinity|infinity|infinity|-Infinity|NULL
+SELECT 1
+
+error 22008
+SELECT interval 'infinity' - interval 'infinity'
+
+error 22008
+SELECT interval '0' * 'infinity'::float8
+
+ok
+CREATE TABLE spans31 (id integer PRIMARY KEY, span interval)
+
+rows
+INSERT INTO spans31 VALUES (1, 'infinity'), (2, '-infinity'), (3, '1 day')
+----
+INSERT 0 3
+
+rows
+SELECT id, span FROM spans31 ORDER BY span
+----
+id|span
+2|-infinity
+3|1 day
+1|infinity
+SELECT 3

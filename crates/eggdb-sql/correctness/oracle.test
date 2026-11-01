@@ -414,9 +414,36 @@ ok
 SELECT ROWNUM, ename FROM emp
 ... differs
 
-ok
+rows
 SELECT ename FROM emp ORDER BY sal FETCH FIRST 50 PERCENT ROWS ONLY
-... differs
+----
+ENAME
+JAMES
+WARD
+ALLEN
+SELECT 3
+
+rows
+SELECT COUNT(*) FROM (SELECT ename FROM emp ORDER BY deptno FETCH FIRST 1 ROWS WITH TIES)
+----
+COUNT(*)
+2
+SELECT 1
+
+rows
+SELECT COUNT(*) FROM (SELECT deptno FROM emp ORDER BY deptno FETCH FIRST 40 PERCENT ROWS WITH TIES)
+----
+COUNT(*)
+6
+SELECT 1
+
+rows
+SELECT ename FROM emp ORDER BY sal DESC OFFSET 1 ROWS FETCH NEXT 20 PERCENT ROWS ONLY
+----
+ENAME
+BLAKE
+CLARK
+SELECT 2
 
 chapter "Arithmetic Operators", "Numeric Functions"
 rows
@@ -704,9 +731,34 @@ A
 3725
 SELECT 1
 
-ok
-SELECT LISTAGG(ename, ',') WITHIN GROUP (ORDER BY ename) FROM emp
-... differs
+rows
+SELECT LISTAGG(ename, ',') WITHIN GROUP (ORDER BY ename) names FROM emp
+----
+NAMES
+ALLEN,BLAKE,CLARK,JAMES,KING,WARD
+SELECT 1
+
+rows
+SELECT deptno, LISTAGG(ename, '; ') WITHIN GROUP (ORDER BY sal DESC) "Emp_list" FROM emp GROUP BY deptno ORDER BY deptno
+----
+DEPTNO|Emp_list
+10|KING; CLARK
+30|BLAKE; ALLEN; WARD; JAMES
+SELECT 2
+
+rows
+SELECT LISTAGG(DISTINCT deptno, ',') WITHIN GROUP (ORDER BY deptno) depts, LISTAGG(comm) WITHIN GROUP (ORDER BY comm) comms FROM emp
+----
+DEPTS|COMMS
+10,30|300500
+SELECT 1
+
+rows
+SELECT LISTAGG(ename, ',') WITHIN GROUP (ORDER BY ename) names FROM emp WHERE deptno = 99
+----
+NAMES
+NULL
+SELECT 1
 
 chapter "Joins"
 ok
@@ -801,7 +853,7 @@ DNAME
 TEMP
 SELECT 1
 
-error 0A000 3001
+ok
 BEGIN NULL; END;
 
 chapter "UPDATE", "DELETE", "TRUNCATE TABLE"
@@ -1298,7 +1350,7 @@ VIEW_NAME
 EMP_VIEW33
 SELECT 1
 
-error 0A000
+ok
 CREATE VIEW checked33 AS SELECT * FROM emp33 WITH CHECK OPTION
 
 ok
@@ -1490,11 +1542,19 @@ SELECT 1
 error 22007 1821
 SELECT TO_DATE('10:00:00.5', 'HH24:MI:SS.FF') FROM dual
 
-error 0A000 3001
-SELECT TO_DATE('2451514', 'J') FROM dual
+rows
+SELECT TO_CHAR(TO_DATE('2451514', 'J'), 'YYYY-MM-DD') a, TO_CHAR(TO_DATE('2024 060', 'YYYY DDD'), 'YYYY-MM-DD') b, TO_CHAR(TO_DATE('2024-01-01 45296', 'YYYY-MM-DD SSSSS'), 'HH24:MI:SS') c FROM dual
+----
+A|B|C
+1999-12-01|2024-02-29|12:34:56
+SELECT 1
 
-error 22007 1821
-SELECT TO_CHAR(DATE '2024-01-01', 'DS') FROM dual
+rows
+SELECT TO_CHAR(DATE '1999-12-01', 'DS') a, TO_CHAR(DATE '1999-12-01', 'DL') b FROM dual
+----
+A|B
+12/01/1999|Wednesday, December 1, 1999
+SELECT 1
 
 error 22007 1843
 SELECT TO_DATE('15-XYZ-2020', 'DD-MON-YYYY') FROM dual
@@ -1626,8 +1686,21 @@ SELECT DATE '2024-02-03 10:00:00' FROM dual
 error 42601 2248
 ALTER SESSION SET NO_SUCH_PARAMETER = 1
 
-error 0A000 3001
+ok
 ALTER SESSION SET TIME_ZONE = '-8:00'
+
+rows
+SELECT SESSIONTIMEZONE, DBTIMEZONE FROM dual
+----
+SESSIONTIMEZONE|DBTIMEZONE
+-08:00|+00:00
+SELECT 1
+
+ok
+ALTER SESSION SET TIME_ZONE = 'UTC'
+
+error 22023 1882
+ALTER SESSION SET TIME_ZONE = 'Mars/Olympus'
 
 error 0A000 3001
 ALTER SESSION SET NLS_SORT = XGERMAN
@@ -2046,3 +2119,1111 @@ SELECT 6
 
 ok
 COMMIT
+
+chapter "CREATE TABLE": physical_properties, segment_attributes_clause, table_compression, LOB_storage_clause and index_org_table_clause, accepted with no effect (item 43)
+ok
+CREATE TABLE phys_t ("ID" NUMBER(6,0) CONSTRAINT "PHYS_ID_NN" NOT NULL ENABLE, "NAME" VARCHAR2(20 BYTE), "BODY" CLOB) SEGMENT CREATION IMMEDIATE PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255 NOCOMPRESS LOGGING STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645 PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT) TABLESPACE "USERS" LOB ("BODY") STORE AS SECUREFILE (TABLESPACE "USERS" ENABLE STORAGE IN ROW CHUNK 8192 NOCACHE LOGGING NOCOMPRESS KEEP_DUPLICATES STORAGE(INITIAL 106496 NEXT 1048576))
+
+ok
+CREATE TABLE iot_t (code CHAR(2) CONSTRAINT iot_code_nn NOT NULL ENABLE, name VARCHAR2(10), CONSTRAINT iot_pk PRIMARY KEY (code) ENABLE) ORGANIZATION INDEX NOCOMPRESS PCTFREE 10 INITRANS 2 MAXTRANS 255 LOGGING TABLESPACE "USERS" PCTTHRESHOLD 50
+
+ok
+INSERT INTO iot_t VALUES ('IT', 'Italy')
+
+ok
+COMMIT
+
+error 23505 1
+INSERT INTO iot_t VALUES ('IT', 'Again')
+
+ok
+ALTER TABLE phys_t MODIFY ("NAME" CONSTRAINT "PHYS_NAME_NN" NOT NULL ENABLE)
+
+error 23502 1400
+INSERT INTO phys_t (id) VALUES (1)
+
+ok
+CREATE TABLE nn_off (a NUMBER CONSTRAINT nn_off_a NOT NULL DISABLE)
+
+ok
+INSERT INTO nn_off VALUES (NULL)
+
+error 0A000 3001
+CREATE TABLE ext_t (a NUMBER) ORGANIZATION EXTERNAL (TYPE oracle_loader DEFAULT DIRECTORY d LOCATION ('a.csv'))
+
+ok
+CREATE TABLE part_t (a NUMBER, d DATE) PARTITION BY RANGE (d) INTERVAL (NUMTOYMINTERVAL(1, 'MONTH')) (PARTITION p0 VALUES LESS THAN (DATE '2020-01-01'))
+
+chapter "ALTER TABLE": add_constraint_clause with several elements in one ADD ( ... ), applied in order, as HR's hr_create.sql writes it (item 43)
+ok
+CREATE TABLE hr_departments (department_id NUMBER(4), manager_id NUMBER(6))
+
+ok
+CREATE TABLE hr_jobs (job_id VARCHAR2(10) PRIMARY KEY)
+
+ok
+CREATE TABLE hr_employees (employee_id NUMBER(6), job_id VARCHAR2(10), manager_id NUMBER(6), department_id NUMBER(4))
+
+ok
+CREATE UNIQUE INDEX hr_dept_id_pk ON hr_departments (department_id)
+
+ok
+ALTER TABLE hr_departments ADD ( CONSTRAINT hr_dept_id_pk PRIMARY KEY (department_id) )
+
+ok
+CREATE UNIQUE INDEX hr_emp_emp_id_pk ON hr_employees (employee_id)
+
+ok
+ALTER TABLE hr_employees ADD ( CONSTRAINT hr_emp_emp_id_pk PRIMARY KEY (employee_id) , CONSTRAINT hr_emp_dept_fk FOREIGN KEY (department_id) REFERENCES hr_departments , CONSTRAINT hr_emp_job_fk FOREIGN KEY (job_id) REFERENCES hr_jobs (job_id) , CONSTRAINT hr_emp_manager_fk FOREIGN KEY (manager_id) REFERENCES hr_employees )
+
+ok
+INSERT INTO hr_jobs VALUES ('AD_PRES')
+
+ok
+INSERT INTO hr_employees VALUES (100, 'AD_PRES', NULL, NULL)
+
+ok
+COMMIT
+
+error 23503 2291
+INSERT INTO hr_employees VALUES (101, 'AD_PRES', 999, NULL)
+
+error 23503 2291
+INSERT INTO hr_employees VALUES (102, 'AD_PRES', NULL, 10)
+
+error 23505 1
+INSERT INTO hr_employees VALUES (100, 'AD_PRES', NULL, NULL)
+
+ok
+CREATE TABLE uq_t (a NUMBER, b NUMBER)
+
+ok
+CREATE UNIQUE INDEX uq_t_a ON uq_t (a)
+
+ok
+ALTER TABLE uq_t ADD CONSTRAINT uq_t_a UNIQUE (a) USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS TABLESPACE "USERS" ENABLE
+
+ok
+CREATE INDEX uq_t_b ON uq_t (b)
+
+error 42P07 955
+ALTER TABLE uq_t ADD CONSTRAINT uq_t_b UNIQUE (b)
+
+ok
+CREATE TABLE ui_t (a NUMBER)
+
+ok
+CREATE UNIQUE INDEX ui_t_pk ON ui_t (a) PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645 PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT) TABLESPACE "USERS" PARALLEL 1
+
+ok
+ALTER TABLE ui_t ADD CONSTRAINT ui_t_pk PRIMARY KEY (a) USING INDEX ui_t_pk ENABLE
+
+ok
+INSERT INTO ui_t VALUES (1)
+
+ok
+COMMIT
+
+error 23505 1
+INSERT INTO ui_t VALUES (1)
+
+chapter "CREATE SEQUENCE": SCALE, EXTEND and NOSHARD accepted, SHARD refused, MAXVALUE past the 64-bit range (item 43)
+ok
+CREATE SEQUENCE big_seq MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 207 NOCACHE NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL
+
+rows
+SELECT big_seq.NEXTVAL n FROM dual
+----
+N
+207
+SELECT 1
+
+ok
+CREATE SEQUENCE scaled_seq SCALE EXTEND NOSHARD
+
+error 0A000 3001
+CREATE SEQUENCE sharded_seq SHARD
+
+chapter "CREATE VIEW", "Data-Bound Collation": DEFAULT COLLATION, BEQUEATH and binary COLLATE names (item 43)
+ok
+CREATE OR REPLACE FORCE EDITIONABLE VIEW coll_v DEFAULT COLLATION "USING_NLS_COMP" BEQUEATH DEFINER AS SELECT 1 one FROM dual
+
+rows
+SELECT one FROM coll_v
+----
+ONE
+1
+SELECT 1
+
+ok
+CREATE TABLE coll_t (a VARCHAR2(10) COLLATE "USING_NLS_COMP") DEFAULT COLLATION "USING_NLS_COMP"
+
+error 0A000 3001
+CREATE TABLE coll_x (a VARCHAR2(10) COLLATE "BINARY_CI")
+
+ok
+COMMIT
+
+chapter "MONTHS_BETWEEN", "NEXT_DAY", "ROUND (date)", "TRUNC (date)", "ROUND and TRUNC Date Functions" (item 42b)
+ok
+ALTER SESSION SET NLS_TERRITORY = America
+
+rows
+SELECT ROUND(MONTHS_BETWEEN(TO_DATE('02-02-1995', 'MM-DD-YYYY'), TO_DATE('01-01-1995', 'MM-DD-YYYY')), 8) "Months" FROM dual
+----
+Months
+1.03225806
+SELECT 1
+
+rows
+SELECT MONTHS_BETWEEN(DATE '2024-03-31', DATE '2024-02-29') a, MONTHS_BETWEEN(DATE '2024-01-15', TO_DATE('2024-03-15 12:00', 'YYYY-MM-DD HH24:MI')) b FROM dual
+----
+A|B
+1|-2
+SELECT 1
+
+rows
+SELECT TO_CHAR(NEXT_DAY('15-OCT-2009', 'TUESDAY')) "NEXT DAY" FROM dual
+----
+NEXT DAY
+20-OCT-09
+SELECT 1
+
+error 22007 1846
+SELECT NEXT_DAY(DATE '2009-10-15', 'Funday') FROM dual
+
+rows
+SELECT TO_CHAR(ROUND(TO_DATE('27-OCT-00'), 'YEAR')) "New Year" FROM dual
+----
+New Year
+01-JAN-01
+SELECT 1
+
+rows
+SELECT TO_CHAR(ROUND(DATE '2024-05-16', 'MM'), 'YYYY-MM-DD') a, TO_CHAR(ROUND(TO_DATE('2024-01-04 12:00', 'YYYY-MM-DD HH24:MI'), 'DAY'), 'YYYY-MM-DD') b, TO_CHAR(ROUND(TO_DATE('2024-01-01 11:59', 'YYYY-MM-DD HH24:MI')), 'YYYY-MM-DD') c, TO_CHAR(ROUND(TO_DATE('2024-01-01 10:30', 'YYYY-MM-DD HH24:MI'), 'HH'), 'HH24:MI') d FROM dual
+----
+A|B|C|D
+2024-06-01|2024-01-07|2024-01-01|11:00
+SELECT 1
+
+rows
+SELECT TO_CHAR(TRUNC(DATE '2024-05-17', 'Q'), 'YYYY-MM-DD') a, TO_CHAR(TRUNC(DATE '2024-05-17', 'IW'), 'YYYY-MM-DD') b, TO_CHAR(TRUNC(DATE '2024-05-17', 'DAY'), 'YYYY-MM-DD') c, TO_CHAR(TRUNC(DATE '2024-05-17', 'CC'), 'YYYY-MM-DD') d FROM dual
+----
+A|B|C|D
+2024-04-01|2024-05-13|2024-05-12|2001-01-01
+SELECT 1
+
+chapter "Datetime Format Models": AD and BC, signed years, calendar elements, suffixes and conflicts (item 42b)
+rows
+SELECT TO_CHAR(TO_DATE('15-03-0044 BC', 'DD-MM-YYYY BC'), 'DD-MON-YYYY BC') a, TO_CHAR(TO_DATE('-0044-03-15', 'SYYYY-MM-DD'), 'SYYYY B.C.') b FROM dual
+----
+A|B
+15-MAR-0044 BC|-0044 B.C.
+SELECT 1
+
+rows
+SELECT TO_CHAR(DATE '1999-12-01', 'CC Q WW IW W') a, TO_CHAR(DATE '1999-12-01', 'DDTH DDSP Ddspth') b, TO_CHAR(DATE '1999-12-01', 'FMRM Year') c FROM dual
+----
+A|B|C
+20 4 48 48 1|01ST ONE First|XII Nineteen Ninety-Nine
+SELECT 1
+
+rows
+SELECT TO_CHAR(TO_DATE('Monday 06-JAN-2025', 'Day DD-MON-YYYY'), 'YYYY-MM-DD') a FROM dual
+----
+A
+2025-01-06
+SELECT 1
+
+error 22007 1835
+SELECT TO_DATE('Tuesday 06-JAN-2025', 'Day DD-MON-YYYY') FROM dual
+
+error 22007 1811
+SELECT TO_DATE('2451514 335', 'J DDD') FROM dual
+
+error 22007 1820
+SELECT TO_DATE('48', 'WW') FROM dual
+
+error 22007 1818
+SELECT TO_DATE('10 AM', 'HH24 AM') FROM dual
+
+chapter "TO_TIMESTAMP_TZ", "FROM_TZ", "SYS_EXTRACT_UTC", "TZ_OFFSET", "SESSIONTIMEZONE" (item 42b)
+ok
+ALTER SESSION SET TIME_ZONE = '-8:00'
+
+rows
+SELECT TO_CHAR(TO_TIMESTAMP_TZ('1999-12-01 11:00:00 -8:00', 'YYYY-MM-DD HH:MI:SS TZH:TZM'), 'YYYY-MM-DD HH24:MI TZH:TZM') a FROM dual
+----
+A
+1999-12-01 11:00 -08:00
+SELECT 1
+
+ok
+ALTER SESSION SET TIME_ZONE = 'UTC'
+
+rows
+SELECT TO_CHAR(SYS_EXTRACT_UTC(TIMESTAMP '2000-03-28 11:30:00.00 -08:00')) a, TO_CHAR(SYS_EXTRACT_UTC(FROM_TZ(TIMESTAMP '2000-03-28 08:00:00', '3:00')), 'YYYY-MM-DD HH24:MI') b, TZ_OFFSET('-08:00') c FROM dual
+----
+A|B|C
+28-MAR-00 07.30.00.000000 PM|2000-03-28 05:00|-08:00
+SELECT 1
+
+rows
+SELECT TO_CHAR(SYS_EXTRACT_UTC(TO_TIMESTAMP_TZ('1999-12-01 11:00 US/Pacific', 'YYYY-MM-DD HH24:MI TZR')), 'YYYY-MM-DD HH24:MI') a, TO_CHAR(SYS_EXTRACT_UTC(FROM_TZ(TIMESTAMP '2000-07-01 08:00:00', 'Europe/Paris')), 'YYYY-MM-DD HH24:MI') b FROM dual
+----
+A|B
+1999-12-01 19:00|2000-07-01 06:00
+SELECT 1
+
+error 22023 1882
+SELECT TO_TIMESTAMP_TZ('1999-12-01 11:00 Mars/Olympus', 'YYYY-MM-DD HH24:MI TZR') FROM dual
+
+ok
+ALTER SESSION SET TIME_ZONE = 'Europe/Paris'
+
+rows
+SELECT SESSIONTIMEZONE FROM dual
+----
+SESSIONTIMEZONE
+Europe/Paris
+SELECT 1
+
+ok
+ALTER SESSION SET TIME_ZONE = '-8:00'
+
+chapter "Number Format Models": "Results of Number Conversions", RN, X, PR, V and TO_NUMBER (item 42b)
+rows
+SELECT TO_CHAR(123.456, '9.9EEEE') a, TO_CHAR(123.456, 'FM9.9EEEE') b, TO_CHAR(123.45, 'L999.99') c, TO_CHAR(123.45, 'FML999.99') d, TO_CHAR(1234567890, '9999999999S') e FROM dual
+----
+A|B|C|D|E
+  1.2E+02|1.2E+02|            $123.45|$123.45|1234567890+
+SELECT 1
+
+rows
+SELECT TO_CHAR(123.45, 'FM999.009') a, TO_CHAR(123, 'FM999.009') b, TO_CHAR(0, '90.99') c, TO_CHAR(-0.2, '99.99') d FROM dual
+----
+A|B|C|D
+123.45|123.00|  0.00|  -.20
+SELECT 1
+
+rows
+SELECT TO_CHAR(14, 'RN') a, TO_CHAR(14, 'FMrn') b, TO_CHAR(255, 'XXXX') c, TO_CHAR(-12, '99PR') d, TO_CHAR(12.3, '99V9') e FROM dual
+----
+A|B|C|D|E
+            XIV|xiv|   FF|<12>| 123
+SELECT 1
+
+rows
+SELECT TO_NUMBER('FF', 'XX') a, TO_NUMBER('<12>', '99PR') b, TO_NUMBER('1.2E+03', '9.9EEEE') c FROM dual
+----
+A|B|C
+255|-12|1200
+SELECT 1
+
+error 22P02 1481
+SELECT TO_CHAR(1, '9EEEE9') FROM dual
+
+chapter "Interval Literals", "INTERVAL YEAR TO MONTH Data Type", "INTERVAL DAY TO SECOND Data Type", "Datetime/Interval Arithmetic" (item 42b)
+rows
+SELECT INTERVAL '123-2' YEAR(3) TO MONTH a, INTERVAL '4' YEAR b, INTERVAL '50' MONTH c FROM dual
+----
+A|B|C
++123-02|+04-00|+04-02
+SELECT 1
+
+rows
+SELECT INTERVAL '4 5:12:10.222' DAY TO SECOND(3) a, INTERVAL '30.12345' SECOND(2,4) b, INTERVAL '11:12:10.5' HOUR TO SECOND c FROM dual
+----
+A|B|C
++04 05:12:10.222|+00 00:00:30.1235|+00 11:12:10.500000
+SELECT 1
+
+error 22015 1873
+SELECT INTERVAL '123' YEAR FROM dual
+
+error 22008 1843
+SELECT INTERVAL '1-12' YEAR TO MONTH FROM dual
+
+ok
+CREATE TABLE interval_spans (id NUMBER(2) PRIMARY KEY, ym INTERVAL YEAR TO MONTH, ds INTERVAL DAY TO SECOND(2))
+
+ok
+INSERT INTO interval_spans VALUES (1, INTERVAL '1-2' YEAR TO MONTH, INTERVAL '3 04:05:06.789' DAY TO SECOND)
+
+ok
+INSERT INTO interval_spans VALUES (2, '2-6', '1 00:00:00')
+
+rows
+SELECT ym, ds FROM interval_spans ORDER BY id
+----
+YM|DS
++01-02|+03 04:05:06.79
++02-06|+01 00:00:00.00
+SELECT 2
+
+rows
+SELECT id FROM interval_spans WHERE ds > INTERVAL '2' DAY AND ym < INTERVAL '2' YEAR
+----
+ID
+1
+SELECT 1
+
+rows
+SELECT data_type FROM user_tab_columns WHERE table_name = 'INTERVAL_SPANS' AND column_name IN ('YM', 'DS') ORDER BY column_name
+----
+DATA_TYPE
+INTERVAL DAY(2) TO SECOND(2)
+INTERVAL YEAR(2) TO MONTH
+SELECT 2
+
+rows
+SELECT TO_CHAR(DATE '2024-01-31' + INTERVAL '1' DAY, 'YYYY-MM-DD') a, TO_CHAR(TIMESTAMP '2024-01-15 10:00:00' + INTERVAL '1-1' YEAR TO MONTH, 'YYYY-MM-DD HH24:MI') b, INTERVAL '20' DAY - INTERVAL '240' HOUR(3) c FROM dual
+----
+A|B|C
+2024-02-01|2025-02-15 10:00|+10 00:00:00.000000
+SELECT 1
+
+error 22008 1839
+SELECT DATE '2024-01-31' + INTERVAL '1' MONTH FROM dual
+
+rows
+SELECT EXTRACT(DAY FROM (TIMESTAMP '2024-01-02 12:00:00' - TIMESTAMP '2024-01-01 00:00:00')) d, EXTRACT(HOUR FROM (TIMESTAMP '2024-01-02 12:00:00' - TIMESTAMP '2024-01-01 00:00:00')) h, EXTRACT(MONTH FROM INTERVAL '1-7' YEAR TO MONTH) m FROM dual
+----
+D|H|M
+1|12|7
+SELECT 1
+
+error 22023 30076
+SELECT EXTRACT(YEAR FROM INTERVAL '3' DAY) FROM dual
+
+rows
+SELECT EXTRACT(DAY FROM NUMTODSINTERVAL(100, 'day')) a, EXTRACT(MONTH FROM NUMTOYMINTERVAL(1.5, 'YEAR')) b, EXTRACT(SECOND FROM TO_DSINTERVAL('2 10:20:30.456')) c, EXTRACT(YEAR FROM TO_YMINTERVAL('01-02')) d, EXTRACT(HOUR FROM TO_DSINTERVAL('P1DT5H')) e FROM dual
+----
+A|B|C|D|E
+100|6|30.456|1|5
+SELECT 1
+
+rows
+SELECT NUMTODSINTERVAL(100, 'day') a FROM dual
+----
+A
++000000100 00:00:00.000000000
+SELECT 1
+... differs
+
+error 22023 1760
+SELECT NUMTODSINTERVAL(1, 'week') FROM dual
+
+ok
+COMMIT
+
+chapter "PL/SQL Language Reference": "Overview of PL/SQL", "PL/SQL Control Statements" (part 3.16)
+ok
+CREATE TABLE emp316 (empno NUMBER PRIMARY KEY, ename VARCHAR2(20), sal NUMBER, deptno NUMBER)
+
+ok
+INSERT INTO emp316 VALUES (7369, 'SMITH', 800, 20)
+
+ok
+INSERT INTO emp316 VALUES (7499, 'ALLEN', 1600, 30)
+
+ok
+INSERT INTO emp316 VALUES (7521, 'WARD', 1250, 30)
+
+ok
+INSERT INTO emp316 VALUES (7839, 'KING', 5000, 10)
+
+ok
+CREATE TABLE log316 (n NUMBER, msg VARCHAR2(200))
+
+ok
+BEGIN
+  FOR i IN 1..3 LOOP
+    INSERT INTO log316 VALUES (i, 'pass ' || i);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|pass 1
+2|pass 2
+3|pass 3
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  v_name emp316.ename%TYPE;
+  v_sal emp316.sal%TYPE;
+  v_grade VARCHAR2(10);
+BEGIN
+  SELECT ename, sal INTO v_name, v_sal FROM emp316 WHERE empno = 7499;
+  IF v_sal > 3000 THEN
+    v_grade := 'high';
+  ELSIF v_sal > 1000 THEN
+    v_grade := 'middle';
+  ELSE
+    v_grade := 'low';
+  END IF;
+  INSERT INTO log316 VALUES (v_sal, v_name || ' ' || v_grade);
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+1600|ALLEN middle
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  n PLS_INTEGER := 0;
+  total NUMBER := 0;
+BEGIN
+  WHILE n < 10 LOOP
+    n := n + 1;
+    CONTINUE WHEN MOD(n, 2) = 0;
+    total := total + n;
+  END LOOP;
+  LOOP
+    n := n - 1;
+    EXIT WHEN n <= 7;
+  END LOOP;
+  CASE
+    WHEN total = 25 THEN
+      INSERT INTO log316 VALUES (total, 'odd sum ' || n);
+    ELSE
+      INSERT INTO log316 VALUES (total, 'wrong');
+  END CASE;
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+25|odd sum 7
+SELECT 1
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Error Handling" (part 3.16)
+ok
+DECLARE
+  v NUMBER;
+BEGIN
+  BEGIN
+    SELECT sal INTO v FROM emp316 WHERE empno = 1;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+  END;
+  BEGIN
+    SELECT sal INTO v FROM emp316;
+  EXCEPTION
+    WHEN TOO_MANY_ROWS THEN
+      INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+  END;
+  BEGIN
+    v := 10 / 0;
+  EXCEPTION
+    WHEN ZERO_DIVIDE THEN
+      INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+  END;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+-1476|ORA-01476: divisor is equal to zero
+-1422|ORA-01422: exact fetch returns more than requested number of rows
+100|ORA-01403: no data found
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  salary_too_low EXCEPTION;
+  PRAGMA EXCEPTION_INIT(salary_too_low, -20101);
+  v_sal NUMBER;
+BEGIN
+  SELECT sal INTO v_sal FROM emp316 WHERE empno = 7369;
+  IF v_sal < 1000 THEN
+    RAISE_APPLICATION_ERROR(-20101, 'salary ' || v_sal || ' is too low');
+  END IF;
+EXCEPTION
+  WHEN salary_too_low THEN
+    INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+-20101|ORA-20101: salary 800 is too low
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  out_of_stock EXCEPTION;
+  on_hand NUMBER := 0;
+BEGIN
+  INSERT INTO log316 VALUES (0, 'before the check');
+  IF on_hand < 1 THEN
+    RAISE out_of_stock;
+  END IF;
+  INSERT INTO log316 VALUES (2, 'not reached');
+EXCEPTION
+  WHEN out_of_stock THEN
+    INSERT INTO log316 VALUES (SQLCODE, SQLERRM);
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+0|before the check
+1|User-Defined Exception
+SELECT 2
+
+ok
+DELETE FROM log316
+
+error P0001 20000
+BEGIN
+  RAISE_APPLICATION_ERROR(-20000, 'stopped');
+END;
+
+error P0002 1403
+DECLARE
+  v NUMBER;
+BEGIN
+  SELECT sal INTO v FROM emp316 WHERE empno = 1;
+END;
+
+error P0001 6510
+DECLARE
+  e EXCEPTION;
+BEGIN
+  RAISE e;
+END;
+
+chapter "PL/SQL Language Reference": "PL/SQL Subprograms", "CREATE PROCEDURE Statement", "CREATE FUNCTION Statement" (part 3.16)
+ok
+CREATE OR REPLACE PROCEDURE raise_salary316 (p_empno IN NUMBER, p_amount IN NUMBER, p_new_sal OUT NUMBER) IS
+BEGIN
+  UPDATE emp316 SET sal = sal + p_amount WHERE empno = p_empno;
+  SELECT sal INTO p_new_sal FROM emp316 WHERE empno = p_empno;
+END raise_salary316;
+
+ok
+DECLARE
+  v_sal NUMBER;
+BEGIN
+  raise_salary316(7369, 200, v_sal);
+  INSERT INTO log316 VALUES (v_sal, 'raised');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+1000|raised
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+CREATE OR REPLACE FUNCTION annual316 (p_sal NUMBER, p_months NUMBER DEFAULT 12) RETURN NUMBER IS
+BEGIN
+  RETURN p_sal * p_months;
+END annual316;
+
+rows
+SELECT ename, annual316(sal) AS annual FROM emp316 WHERE deptno = 30 ORDER BY empno
+----
+ENAME|ANNUAL
+ALLEN|19200
+WARD|15000
+SELECT 2
+
+rows
+SELECT annual316(p_sal => 100, p_months => 3) AS quarter FROM dual
+----
+QUARTER
+300
+SELECT 1
+
+ok
+CREATE PROCEDURE note316 (p_msg IN VARCHAR2, p_n IN NUMBER DEFAULT 0) IS
+BEGIN
+  INSERT INTO log316 VALUES (p_n, p_msg);
+END;
+
+ok
+CALL note316('called')
+
+ok
+BEGIN
+  note316(p_n => 5, p_msg => 'named');
+END;
+
+ok
+ALTER PROCEDURE note316 COMPILE
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+0|called
+5|named
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  total NUMBER := 0;
+  f NUMBER;
+  PROCEDURE add_to_total (n NUMBER) IS
+  BEGIN
+    total := total + n;
+  END add_to_total;
+  FUNCTION factorial (n PLS_INTEGER) RETURN PLS_INTEGER IS
+  BEGIN
+    IF n <= 1 THEN
+      RETURN 1;
+    END IF;
+    RETURN n * factorial(n - 1);
+  END factorial;
+BEGIN
+  f := factorial(5);
+  add_to_total(f);
+  add_to_total(1);
+  INSERT INTO log316 VALUES (total, 'factorial plus one');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+121|factorial plus one
+SELECT 1
+
+ok
+DELETE FROM log316
+
+error 42704 6550
+CREATE PROCEDURE broken316 IS
+BEGIN
+  missing_variable316 := 1;
+END;
+
+error 42710 955
+CREATE PROCEDURE emp316 IS
+BEGIN
+  NULL;
+END;
+
+chapter "PL/SQL Language Reference": "PL/SQL Packages", "CREATE PACKAGE Statement", "CREATE PACKAGE BODY Statement" (part 3.16)
+ok
+CREATE OR REPLACE PACKAGE emp_mgmt316 AS
+  hired NUMBER := 0;
+  PROCEDURE hire (p_empno NUMBER, p_ename VARCHAR2, p_sal NUMBER);
+  FUNCTION total_sal RETURN NUMBER;
+END emp_mgmt316;
+
+ok
+CREATE OR REPLACE PACKAGE BODY emp_mgmt316 AS
+  PROCEDURE hire (p_empno NUMBER, p_ename VARCHAR2, p_sal NUMBER) IS
+  BEGIN
+    INSERT INTO emp316 VALUES (p_empno, p_ename, p_sal, 40);
+    hired := hired + 1;
+  END hire;
+  FUNCTION total_sal RETURN NUMBER IS
+    v_total NUMBER;
+  BEGIN
+    SELECT SUM(sal) INTO v_total FROM emp316;
+    RETURN v_total;
+  END total_sal;
+END emp_mgmt316;
+
+ok
+BEGIN
+  emp_mgmt316.hire(8001, 'NEW1', 1000);
+  emp_mgmt316.hire(8002, 'NEW2', 1500);
+  INSERT INTO log316 VALUES (emp_mgmt316.hired, 'hired');
+END;
+
+rows
+SELECT emp_mgmt316.total_sal() AS total FROM dual
+----
+TOTAL
+11350
+SELECT 1
+
+ok
+BEGIN
+  emp_mgmt316.hire(8003, 'NEW3', 900);
+  INSERT INTO log316 VALUES (emp_mgmt316.hired, 'hired again');
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+2|hired
+3|hired again
+SELECT 2
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "Static SQL", "Explicit Cursors", "Cursor FOR LOOP Statement", "SQL Cursor" (part 3.16)
+ok
+DECLARE
+  CURSOR c_emp IS SELECT ename FROM emp316 WHERE deptno = 30 ORDER BY empno;
+  v_name emp316.ename%TYPE;
+BEGIN
+  OPEN c_emp;
+  LOOP
+    FETCH c_emp INTO v_name;
+    EXIT WHEN c_emp%NOTFOUND;
+    INSERT INTO log316 VALUES (c_emp%ROWCOUNT, v_name);
+  END LOOP;
+  CLOSE c_emp;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|ALLEN
+2|WARD
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+BEGIN
+  FOR r IN (SELECT ename, sal FROM emp316 WHERE sal >= 1600 ORDER BY sal) LOOP
+    INSERT INTO log316 VALUES (r.sal, r.ename);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1600|ALLEN
+5000|KING
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  CURSOR c_dept (p_dept NUMBER) IS SELECT ename FROM emp316 WHERE deptno = p_dept ORDER BY empno;
+  k NUMBER := 0;
+BEGIN
+  FOR r IN c_dept(40) LOOP
+    k := k + 1;
+    INSERT INTO log316 VALUES (k, r.ename);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|NEW1
+2|NEW2
+3|NEW3
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+BEGIN
+  UPDATE emp316 SET sal = sal WHERE deptno = 40;
+  INSERT INTO log316 VALUES (SQL%ROWCOUNT, 'rows in dept 40');
+  UPDATE emp316 SET sal = sal WHERE empno = 1;
+  IF SQL%NOTFOUND THEN
+    INSERT INTO log316 VALUES (0, 'no employee 1');
+  END IF;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+0|no employee 1
+3|rows in dept 40
+SELECT 2
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Collections and Records", "Bulk SQL and Bulk Binding" (part 3.16)
+ok
+DECLARE
+  TYPE population IS TABLE OF NUMBER INDEX BY VARCHAR2(64);
+  city_population population;
+  i VARCHAR2(64);
+  k NUMBER := 0;
+BEGIN
+  city_population('Smallville') := 2000;
+  city_population('Midland') := 750000;
+  city_population('Megalopolis') := 1000000;
+  city_population('Smallville') := 2001;
+  i := city_population.FIRST;
+  WHILE i IS NOT NULL LOOP
+    k := k + 1;
+    INSERT INTO log316 VALUES (k, i || ' ' || city_population(i));
+    i := city_population.NEXT(i);
+  END LOOP;
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+1|Megalopolis 1000000
+2|Midland 750000
+3|Smallville 2001
+SELECT 3
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE names_t IS TABLE OF VARCHAR2(15);
+  names names_t := names_t('D Caruso', 'J Hamil', 'D Piro', 'R Singh');
+BEGIN
+  names.EXTEND;
+  names(5) := 'K Patel';
+  names.DELETE(2);
+  INSERT INTO log316 VALUES (names.COUNT, names(1) || ', ' || names(5));
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+4|D Caruso, K Patel
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE team_t IS VARRAY(4) OF VARCHAR2(15);
+  team team_t := team_t('John', 'Mary');
+BEGIN
+  team.EXTEND(2);
+  team(3) := 'Pierre';
+  team(4) := 'Yvonne';
+  INSERT INTO log316 VALUES (team.LIMIT, team(1) || ', ' || team(4));
+  team.EXTEND;
+EXCEPTION
+  WHEN SUBSCRIPT_OUTSIDE_LIMIT THEN
+    INSERT INTO log316 VALUES (SQLCODE, 'outside the limit');
+END;
+
+rows
+SELECT n, msg FROM log316 ORDER BY n
+----
+N|MSG
+-6532|outside the limit
+4|John, Yvonne
+SELECT 2
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE name_list IS TABLE OF VARCHAR2(20);
+  names name_list;
+BEGIN
+  SELECT ename BULK COLLECT INTO names FROM emp316 WHERE deptno = 40 ORDER BY empno;
+  INSERT INTO log316 VALUES (names.COUNT, names(1) || ' ' || names(3));
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+3|NEW1 NEW3
+SELECT 1
+
+ok
+DELETE FROM log316
+
+ok
+DECLARE
+  TYPE id_list IS TABLE OF NUMBER;
+  ids id_list := id_list(8001, 8002);
+BEGIN
+  FORALL i IN 1..ids.COUNT
+    UPDATE emp316 SET sal = sal + 10 WHERE empno = ids(i);
+  INSERT INTO log316 VALUES (SQL%ROWCOUNT, 'forall');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+2|forall
+SELECT 1
+
+rows
+SELECT empno, sal FROM emp316 WHERE deptno = 40 ORDER BY empno
+----
+EMPNO|SAL
+8001|1010
+8002|1510
+8003|900
+SELECT 3
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Dynamic SQL", "EXECUTE IMMEDIATE Statement" (part 3.16)
+ok
+DECLARE
+  v_count NUMBER;
+  v_table VARCHAR2(30) := 'emp316';
+BEGIN
+  EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || v_table || ' WHERE deptno = :d' INTO v_count USING 30;
+  INSERT INTO log316 VALUES (v_count, 'dynamic');
+END;
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+2|dynamic
+SELECT 1
+
+ok
+DELETE FROM log316
+
+chapter "PL/SQL Language Reference": "PL/SQL Triggers", "CREATE TRIGGER Statement" (part 3.16)
+ok
+CREATE OR REPLACE TRIGGER emp_sal_floor316
+BEFORE INSERT OR UPDATE OF sal ON emp316
+FOR EACH ROW
+WHEN (new.sal < 0)
+BEGIN
+  :new.sal := 0;
+END;
+
+ok
+INSERT INTO emp316 VALUES (9001, 'NEG', -5, 50)
+
+rows
+SELECT sal FROM emp316 WHERE empno = 9001
+----
+SAL
+0
+SELECT 1
+
+ok
+CREATE OR REPLACE TRIGGER emp_audit316
+AFTER DELETE ON emp316
+FOR EACH ROW
+BEGIN
+  INSERT INTO log316 VALUES (:old.empno, 'deleted ' || :old.ename);
+END;
+
+ok
+DELETE FROM emp316 WHERE deptno = 50
+
+rows
+SELECT n, msg FROM log316
+----
+N|MSG
+9001|deleted NEG
+SELECT 1
+
+ok
+ALTER TRIGGER emp_audit316 DISABLE
+
+ok
+DELETE FROM emp316 WHERE empno = 8003
+
+rows
+SELECT COUNT(*) AS logged FROM log316
+----
+LOGGED
+1
+SELECT 1
+
+chapter "PL/SQL Language Reference": the data dictionary's "USER_OBJECTS" and "USER_SOURCE" for PL/SQL units (part 3.16)
+rows
+SELECT object_name, object_type FROM user_objects WHERE object_name IN ('RAISE_SALARY316', 'ANNUAL316', 'NOTE316', 'EMP_MGMT316', 'EMP_SAL_FLOOR316', 'EMP_AUDIT316') ORDER BY object_name, object_type
+----
+OBJECT_NAME|OBJECT_TYPE
+ANNUAL316|FUNCTION
+EMP_AUDIT316|TRIGGER
+EMP_MGMT316|PACKAGE
+EMP_MGMT316|PACKAGE BODY
+EMP_SAL_FLOOR316|TRIGGER
+NOTE316|PROCEDURE
+RAISE_SALARY316|PROCEDURE
+SELECT 7
+
+rows
+SELECT COUNT(*) AS lines FROM user_source WHERE name = 'RAISE_SALARY316'
+----
+LINES
+5
+SELECT 1
+
+ok
+DROP TRIGGER emp_audit316
+
+ok
+DROP TRIGGER emp_sal_floor316
+
+ok
+DROP PACKAGE emp_mgmt316
+
+ok
+DROP PROCEDURE raise_salary316
+
+ok
+DROP PROCEDURE note316
+
+ok
+DROP FUNCTION annual316
+
+error 42704 4043
+DROP PROCEDURE raise_salary316
+
+ok
+DROP TABLE log316
+
+ok
+DROP TABLE emp316

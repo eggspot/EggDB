@@ -91,6 +91,55 @@ expect_exit 0 "$eggdb" stats app.db --format json
 grep -q '"page_size":4096,' last.out || fail "stats reported $(cat last.out)"
 pass "check and stats"
 
+expect_output '{"key":"user:1","value":"Ada"}' "$eggdb" get app.db user:1 --json
+expect_exit 3 "$eggdb" get missing.db user:1 --json
+grep -q '^{"error":{"code":"not_found","category":"not_found","message":"cannot open missing.db: no such file' last.err ||
+  fail "a JSON error read $(cat last.err)"
+expect_exit 3 "$eggdb" get missing.db user:1
+grep -q '^eggdb: cannot open missing.db: no such file' last.err || fail "a text error read $(cat last.err)"
+expect_exit 0 "$eggdb" help --json
+grep -q '^{"version":"' last.out || fail "help --json printed $(cat last.out)"
+grep -q '"name":"kv_scan","command":\["scan"\]' last.out || fail "help --json has no kv_scan: $(cat last.out)"
+expect_exit 0 "$eggdb" sql --create sql-json.db --json -c "CREATE TABLE t (id integer PRIMARY KEY); INSERT INTO t VALUES (7); SELECT id FROM t"
+[ "$(tail -n 1 last.out)" = '{"tag":"SELECT 1","columns":[{"name":"id","type":"integer"}],"rows":[[7]],"row_count":1}' ] ||
+  fail "sql --json printed $(cat last.out)"
+pass "--json, JSON errors, help --json and sql --json"
+
+expect_exit 0 "$eggdb" table list sql-json.db --json
+[ "$(cat last.out)" = '{"schema":"public","name":"t","kind":"table","columns":1}' ] ||
+  fail "table list printed $(cat last.out)"
+expect_exit 0 "$eggdb" table show sql-json.db t --json
+grep -q '"primary_key":\["id"\]' last.out || fail "table show printed $(cat last.out)"
+expect_exit 0 "$eggdb" table sample sql-json.db t --json
+grep -q '"rows":\[\[7\]\],"row_count":1,"truncated":false' last.out || fail "table sample printed $(cat last.out)"
+expect_exit 1 "$eggdb" table show sql-json.db nowhere --json
+grep -q '"code":"table_not_found"' last.err || fail "a missing table read $(cat last.err)"
+expect_exit 0 "$eggdb" explain sql-json.db --json -c "SELECT * FROM t WHERE id = 7"
+grep -q '^{"tag":"EXPLAIN"' last.out || fail "explain printed $(cat last.out)"
+expect_exit 3 "$eggdb" sql sql-json.db --read-only --json -c "INSERT INTO t VALUES (8)"
+grep -q '"code":"read_only"' last.err || fail "a read-only write read $(cat last.err)"
+expect_exit 0 "$eggdb" version --json
+grep -q '^{"version":"' last.out || fail "version --json printed $(cat last.out)"
+pass "table list, show and sample, explain, sql --read-only and version --json"
+
+expect_exit 0 "$eggdb" sql sql-json.db -c "INSERT INTO t VALUES (8), (9); CREATE TABLE u (id integer PRIMARY KEY)"
+expect_exit 0 "$eggdb" row list sql-json.db t --limit 2 --json
+[ "$(head -n 2 last.out | tr '\n' ' ')" = '{"id":7} {"id":8} ' ] || fail "row list printed $(cat last.out)"
+grep -q '^{"truncated":true,"next_cursor":"r1\.[0-9a-f]*"}$' last.out || fail "row list printed no cursor: $(cat last.out)"
+cursor=$(tail -n 1 last.out | sed 's/.*"next_cursor":"\([^"]*\)".*/\1/')
+expect_output '{"id":9}' "$eggdb" row list sql-json.db t --json --after "$cursor"
+expect_exit 2 "$eggdb" row list sql-json.db t --after 42
+grep -q -- '--after needs the cursor printed at the end of the page before' last.err || fail "a bad cursor said $(cat last.err)"
+expect_exit 0 "$eggdb" table list sql-json.db --limit 1 --json
+expect_output '{"schema":"public","name":"u","kind":"table","columns":1}' "$eggdb" table list sql-json.db --json --after "$(tail -n 1 last.out | sed 's/.*"next_cursor":"\([^"]*\)".*/\1/')"
+printf 'INSERT INTO t VALUES (10);\n' > more-t.sql
+cp sql-json.db before-dry-run.db
+expect_exit 0 "$eggdb" restore sql-json.db more-t.sql --dry-run --json
+grep -q '"created":false,"dry_run":true,' last.out || fail "restore --dry-run reported $(cat last.out)"
+cmp -s sql-json.db before-dry-run.db || fail "restore --dry-run changed the file"
+[ ! -e sql-json.db.restoring ] || fail "restore --dry-run left its copy"
+pass "row list and table list pages, restore --dry-run"
+
 expect_exit 0 "$eggdb" export app.db app.jsonl
 expect_exit 0 "$eggdb" import --create copy.db app.jsonl
 expect_exit 0 "$eggdb" export copy.db copy.jsonl
@@ -102,6 +151,72 @@ cmp -s last.out large.bin || fail "the imported large value differs"
 expect_exit 3 "$eggdb" import copy.db app.jsonl
 expect_exit 0 "$eggdb" import copy.db app.jsonl --on-conflict skip
 pass "export and import round trip"
+
+expect_exit 0 "$eggdb" collection add app.db sessions
+expect_exit 1 "$eggdb" collection add app.db sessions
+expect_exit 0 "$eggdb" put app.db -C sessions s:1 alice
+expect_exit 0 "$eggdb" put --create app.db -C cache c:1 hot
+expect_output alice "$eggdb" get app.db -C sessions s:1
+expect_exit 1 "$eggdb" get app.db -C orders s:1
+grep -q 'try: eggdb collection add app.db orders' last.err || fail "a missing collection said $(cat last.err)"
+expect_output '{"file":"app.db","collections":["cache","sessions"]}' "$eggdb" collection list app.db
+expect_exit 0 "$eggdb" scan app.db --keys-only --format json
+[ "$(wc -l < last.out | tr -d ' ')" = 5 ] || fail "the default key space showed a collection's keys: $(cat last.out)"
+expect_exit 0 "$eggdb" export app.db collections.jsonl
+head -n 1 collections.jsonl | grep -q '"version":2' || fail "an export with collections is not version 2"
+expect_exit 0 "$eggdb" import --create restored.db collections.jsonl
+expect_output alice "$eggdb" get restored.db -C sessions s:1
+expect_exit 0 "$eggdb" collection delete app.db cache
+expect_exit 1 "$eggdb" get app.db -C cache c:1
+expect_exit 0 "$eggdb" check app.db --format json
+grep -q '"leaked_pages":0}' last.out || fail "check after collections found $(cat last.out)"
+pass "collections: add, put, get, list, export, import and delete"
+
+expect_exit 0 "$eggdb" put --create expiry.db s:1 alice --ttl 1h
+expect_exit 0 "$eggdb" ttl expiry.db s:1 --format text
+case "$(cat last.out)" in
+  59m5[0-9]s|1h) ;;
+  *) fail "eggdb ttl printed '$(cat last.out)', expected about 1h" ;;
+esac
+expect_exit 0 "$eggdb" persist expiry.db s:1
+expect_output never "$eggdb" ttl expiry.db s:1 --format text
+expect_exit 0 "$eggdb" expire expiry.db s:1 7d
+expect_exit 1 "$eggdb" ttl expiry.db nobody
+expect_exit 2 "$eggdb" expire expiry.db s:1 30
+expect_output 1 "$eggdb" incr expiry.db hits --format text
+expect_output 11 "$eggdb" incr expiry.db hits 10 --format text
+expect_output 9 "$eggdb" decr expiry.db hits 2 --format text
+expect_exit 3 "$eggdb" incr expiry.db s:1
+expect_exit 0 "$eggdb" cas expiry.db lock --if-absent worker-7
+expect_exit 1 "$eggdb" cas expiry.db lock --if-absent worker-8
+grep -q 'holding worker-7' last.err || fail "a refused cas said $(cat last.err)"
+expect_exit 0 "$eggdb" cas expiry.db lock worker-7 --delete
+expect_exit 1 "$eggdb" get expiry.db lock
+expect_exit 0 "$eggdb" collection add expiry.db stats
+expect_output 3 "$eggdb" incr expiry.db -C stats page 3 --format text
+expect_exit 0 "$eggdb" check expiry.db --format json
+grep -q '"leaked_pages":0}' last.out || fail "check after expiring keys found $(cat last.out)"
+pass "expiring keys and counters: put --ttl, ttl, expire, persist, incr, decr and cas"
+
+expect_exit 0 "$eggdb" backup expiry.db expiry.bak --format json
+grep -q '^{"ok":true,"file":"expiry.db","copy":"expiry.bak",' last.out || fail "backup reported $(cat last.out)"
+[ ! -e expiry.bak.backing-up ] || fail "backup left its staging file"
+expect_output 3 "$eggdb" get expiry.bak -C stats page
+expect_output 9 "$eggdb" get expiry.bak hits
+expect_exit 0 "$eggdb" ttl expiry.bak s:1 --format text
+expect_exit 3 "$eggdb" backup expiry.db expiry.bak
+grep -q 'never replaces a file' last.err || fail "a backup over a file said $(cat last.err)"
+expect_exit 2 "$eggdb" backup expiry.db -
+expect_exit 0 "$eggdb" compact app.db --format json
+grep -q '^{"ok":true,"file":"app.db",' last.out || fail "compact reported $(cat last.out)"
+[ ! -e app.db.compacting ] || fail "compact left its staging file"
+expect_output alice "$eggdb" get app.db -C sessions s:1
+expect_output Ada "$eggdb" get app.db user:1
+expect_exit 0 "$eggdb" check app.db --format json
+grep -q '"leaked_pages":0}' last.out || fail "check after compact found $(cat last.out)"
+expect_exit 0 "$eggdb" check expiry.bak --format json
+grep -q '"leaked_pages":0}' last.out || fail "check of a backup found $(cat last.out)"
+pass "backup and compact"
 
 expect_exit 0 "$eggdb" sql --create shop.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL, price double precision)"
 printf '%s\n' "INSERT INTO items VALUES (1, 'egg', 0.25), (2, 'bread', 2.5);" "UPDATE items SET price = price * 2 WHERE id = 1;" > shop.sql
@@ -133,10 +248,11 @@ grep -q 'CONTEXT:  COPY loaded, line 1, column id: "id"' last.err || fail "a bad
 pass "copy: a script with inline data, COPY TO STDOUT, import --csv and an error's context"
 
 expect_exit 0 "$eggdb" restore --create bakery.db "$samples/pg_dump-sample.sql" --format text
-grep -q '^ok: every table and row of the dump is in bakery.db; ' last.out || fail "restore said $(cat last.out)"
-grep -q 'function bakery.touch_order()' last.out || fail "restore did not list the skipped function: $(cat last.out)"
+grep -q '^ok: every table and row of the dump is in bakery.db\.$' last.out || fail "restore said $(cat last.out)"
 expect_output "$(printf 'rye\t2\t7\nsourdough\t2\t3')" "$eggdb" sql bakery.db -c "COPY (SELECT b.name, count(*), sum(o.quantity) FROM bakery.breads b JOIN bakery.orders o ON o.bread_id = b.id GROUP BY b.name ORDER BY b.name) TO STDOUT"
 expect_output "$(printf 'rye\t7')" "$eggdb" sql bakery.db -c "COPY (SELECT * FROM bakery.best_sellers ORDER BY 1 LIMIT 1) TO STDOUT"
+expect_exit 0 "$eggdb" sql bakery.db -c "INSERT INTO bakery.orders (id, bread_id, quantity) OVERRIDING SYSTEM VALUE VALUES (5, 1, 1)"
+expect_output "$(printf '5\tt')" "$eggdb" sql bakery.db -c "COPY (SELECT id, note = '' FROM bakery.orders WHERE id = 5) TO STDOUT"
 expect_exit 3 "$eggdb" restore bakery.db "$samples/pg_dump-sample.sql" --format text
 grep -q 'failed: line ' last.out || fail "a second restore into the same file said $(cat last.out)"
 printf 'PGDMP\001\016\000\004\010' > bakery.dump
@@ -147,16 +263,35 @@ printf 'CREATE TABLE t (id integer PRIMARY KEY);\nCOPY t (id) FROM stdin;\n1\n1\
 expect_exit 3 "$eggdb" restore --create broken.db broken.sql
 grep -q 'line 4: duplicate key value' last.err || fail "a broken restore said $(cat last.err)"
 [ ! -e broken.db ] && [ ! -e broken.db.restoring ] || fail "a failed restore with --create left a file"
-pass "restore: a pg_dump sample with its report, a second restore stopped, an archive refused, a failed --create leaves no file"
+pass "restore: a pg_dump sample with its report and its running trigger function, a second restore stopped, an archive refused, a failed --create leaves no file"
 
 expect_exit 0 "$eggdb" restore --dialect sqlserver --create ssms.db "$samples/ssms-sample.sql" --format text
-grep -q '^ok: every table and row of the script is in ssms.db; ' last.out || fail "the SQL Server restore said $(cat last.out)"
-grep -q 'procedure dbo.RyeCount' last.out || fail "the SQL Server restore did not list the skipped procedure: $(cat last.out)"
+grep -q '^ok: every table and row of the script is in ssms.db\.$' last.out || fail "the SQL Server restore said $(cat last.out)"
+if grep -q 'procedure dbo.RyeCount' last.out; then fail "the SQL Server restore skipped the procedure: $(cat last.out)"; fi
 expect_output "$(printf '4\t3\t2')" "$eggdb" sql ssms.db -c "COPY (SELECT count(*), count(DISTINCT l.kind), count(DISTINCT b.id) FROM loaves l JOIN bakers b ON b.id = l.bakerid) TO STDOUT"
 printf 'TAPE\000\000\003\000' > shop.bak
 expect_exit 2 "$eggdb" restore --dialect sqlserver --create shop.db shop.bak
 grep -q 'a SQL Server backup (it starts with TAPE)' last.err || fail "a SQL Server backup said $(cat last.err)"
-pass "restore: an SSMS Generate Scripts sample (UTF-16) with its report, and a SQL Server backup routed"
+pass "restore: an SSMS Generate Scripts sample (UTF-16) with its stored procedure and its report, and a SQL Server backup routed"
+
+expect_exit 0 "$eggdb" sql --create --dialect sqlserver bcp.db "$samples/sqlserver/bcp/items.sql"
+expect_exit 0 "$eggdb" import --dialect sqlserver bcp.db --csv "$samples/sqlserver/bcp/items.dat" --table dbo.items_imported
+expect_output "$(printf '6\t2')" "$eggdb" sql bcp.db -c "COPY (SELECT count(*), count(*) - count(code) FROM items_imported) TO STDOUT"
+pass "import: a bcp character-format file loaded with --dialect sqlserver"
+
+expect_exit 0 "$eggdb" restore --dialect oracle --create ora.db "$samples/oracle-sample.sql" --format text
+grep -q '^ok: every table and row of the script is in ora.db\.$' last.out || fail "the Oracle restore said $(cat last.out)"
+if grep -q 'procedure rye_count' last.out; then fail "the Oracle restore skipped the procedure: $(cat last.out)"; fi
+expect_exit 0 "$eggdb" sql --dialect oracle ora.db -c "DECLARE n NUMBER; BEGIN rye_count(n); DBMS_OUTPUT.PUT_LINE('rye loaves: ' || n); END;"
+grep -q '^rye loaves: 2$' last.out || fail "the restored PL/SQL procedure printed $(cat last.out)"
+expect_exit 0 "$eggdb" sql --dialect oracle ora.db -c "SELECT COUNT(*) n FROM loaves l JOIN bakers b ON b.baker_id = l.baker_id WHERE b.name = 'Ada & Co'"
+grep -q '^ *2$' last.out || fail "the Oracle query printed $(cat last.out)"
+expect_output "$(printf '2')" "$eggdb" sql ora.db -c "COPY (SELECT count(*) FROM loaves l JOIN bakers b ON b.baker_id = l.baker_id WHERE b.name = 'Ada & Co') TO STDOUT"
+printf '\003\000\001\000EXPORT:V19\000' > hr.dmp
+expect_exit 2 "$eggdb" restore --dialect oracle --create hr.db hr.dmp
+grep -q 'an Oracle Data Pump or exp dump file' last.err || fail "a Data Pump file said $(cat last.err)"
+grep -q 'impdp' last.err || fail "a Data Pump file did not give the impdp route: $(cat last.err)"
+pass "restore: an Oracle SQL*Plus sample with its report and its running PL/SQL procedure, the same data in Oracle and PostgreSQL SQL, and a Data Pump file routed"
 
 expect_exit 0 "$eggdb" sql --dialect sqlite shop.db -c "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('a'), ('b'); INSERT OR REPLACE INTO notes VALUES (1, 'c')"
 expect_output '2|b' sh -c "\"$eggdb\" sql --dialect sqlite shop.db -c 'SELECT id, body FROM notes WHERE NOT id - 2' | sed -n 3p | tr -d ' '"
@@ -174,6 +309,10 @@ expect_exit 0 "$eggdb" sql --dialect oracle shop.db -c "ALTER SESSION SET NLS_TE
 expect_output '1|17-JUN-2013' sh -c "\"$eggdb\" sql --dialect oracle shop.db -c \"SELECT id, TO_CHAR(hired, 'DD-MON-YYYY') d FROM hires ORDER BY id\" | sed -n 3p | tr -d ' '"
 expect_output '2|29-FEB-2024' sh -c "\"$eggdb\" sql --dialect oracle shop.db -c \"SELECT id, TO_CHAR(hired, 'DD-MON-YYYY') d FROM hires ORDER BY id\" | sed -n 4p | tr -d ' '"
 pass "sql --dialect oracle: ALTER SESSION, TO_DATE with a format model, MERGE and TO_CHAR of a date"
+
+expect_output 'rows 2' sh -c "printf 'SET PAGESIZE 50\\nDEFINE n = 2\\nPROMPT rows &n\\nSELECT COUNT(*) AS n FROM hires WHERE id <= &n;\\n' | \"$eggdb\" sql --dialect oracle shop.db | sed -n 1p"
+grep -q '1 SQL\*Plus command had no effect: SET 1' last.err || fail "eggdb sql --dialect oracle SQL*Plus notice said $(cat last.err)"
+pass "sql --dialect oracle: a SQL*Plus script with DEFINE, PROMPT and a counted SET"
 
 expect_exit 2 env -u EGGDB_PASSWORD "$eggdb" serve shop.db
 grep -q 'serve needs a password' last.err || fail "eggdb serve without a password said $(cat last.err)"
@@ -356,9 +495,15 @@ SELECT CONVERT(varchar(10), [at], 103) + '|' + CONVERT(varchar(36), [guid]) + '|
     run_sqlcmd pg-secret -h -1 -W -N disable -i "$samples/ssms-sample.sql" > sqlcmd.out 2> sqlcmd.err || true
     run_sqlcmd pg-secret -b -h -1 -W -Q "SELECT COUNT(*) FROM dbo.Loaves WHERE Kind = N'rye'" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd after the SSMS sample failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
     grep -qx '2' sqlcmd.out || fail "sqlcmd -i of the SSMS sample left $(cat sqlcmd.out) server: $(cat serve.err)"
+    run_sqlcmd pg-secret -b -h -1 -W -Q "EXEC dbo.RyeCount" > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd's EXEC of the sample's procedure failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
+    grep -qx '2' sqlcmd.out || fail "sqlcmd's EXEC dbo.RyeCount printed $(cat sqlcmd.out) server: $(cat serve.err)"
+    printf '%s\n' "DECLARE @i int = 0, @total int = 0" "WHILE @i < 5" "BEGIN" "    SET @i += 1" "    IF @i = 3 CONTINUE" "    SET @total += @i" "END" "PRINT N'loop total ' + CAST(@total AS nvarchar(10))" "BEGIN TRY" "    SELECT 1 / 0" "END TRY" "BEGIN CATCH" "    SELECT ERROR_NUMBER()" "END CATCH" "GO" > logic.sql
+    run_sqlcmd pg-secret -b -h -1 -W -N disable -i logic.sql > sqlcmd.out 2> sqlcmd.err || fail "sqlcmd's batch logic failed: $(cat sqlcmd.out sqlcmd.err) server: $(cat serve.err)"
+    grep -q 'loop total 12' sqlcmd.out sqlcmd.err || fail "sqlcmd's batch logic printed $(cat sqlcmd.out sqlcmd.err)"
+    grep -qx '8134' sqlcmd.out || fail "sqlcmd's TRY ... CATCH printed $(cat sqlcmd.out sqlcmd.err)"
     run_sqlcmd wrong -b -Q "SELECT 1" > sqlcmd.out 2>&1 && fail "sqlcmd connected with a wrong password"
     grep -q "Login failed for user 'eggdb'" sqlcmd.out || fail "a wrong sqlcmd password said $(cat sqlcmd.out)"
-    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types, an -i script with GO and the UTF-16 SSMS sample; errors and a wrong password are refused"
+    pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types, an -i script with GO, the UTF-16 SSMS sample with its stored procedure and batch logic with a loop, PRINT and TRY ... CATCH; errors and a wrong password are refused"
   else
     echo "skip sqlcmd: EGGDB_SMOKE_SQLCMD names no go-sqlcmd binary (CI's Linux job downloads one; a sqlcmd on PATH is never used)"
   fi
@@ -423,6 +568,20 @@ grep -q 'needs_confirmation' last.out || fail "eggdb mcp --allow-write's delete 
 expect_exit 0 "$eggdb" sql shell.db -c 'select count(*) from t'
 tr -d '\r' < last.out | grep -qx ' *3' || fail "after write_sql, t holds $(cat last.out)"
 pass "mcp --allow-write: write_sql commits, and a destructive statement waits for confirmation"
+
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"kv_get","arguments":{"key":"a"}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"select count(*) from t"}}}' > mcp-tables.in
+expect_exit 0 "$eggdb" mcp shell.db --tables t --call-gap 0 < mcp-tables.in
+[ "$(wc -l < last.out | tr -d ' ')" = 4 ] || fail "eggdb mcp --tables answered $(cat last.out)"
+sed -n 2p last.out | grep -q '"name":"kv_get"' && fail "eggdb mcp --tables offered kv_get: $(sed -n 2p last.out)"
+sed -n 3p last.out | grep -q 'limited_to_tables' || fail "eggdb mcp --tables's kv_get answered $(sed -n 3p last.out)"
+sed -n 4p last.out | grep -q '"isError":false' || fail "eggdb mcp --tables's run_sql answered $(sed -n 4p last.out)"
+expect_exit 1 "$eggdb" mcp shell.db --tables no_such_table < /dev/null
+grep -q "no table, view or sequence" last.err || fail "eggdb mcp --tables no_such_table said $(cat last.err)"
+pass "mcp --tables: only the listed tables, the key-value tools withdrawn, unknown names refused at start"
 
 expect_exit 0 "$eggdb" ui --help
 grep -q '^Usage: eggdb ui <file>' last.out || fail "eggdb ui --help printed $(cat last.out)"

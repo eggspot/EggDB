@@ -178,3 +178,140 @@ fn backslashes_and_tabs_in_sql_reach_the_table_unchanged() {
         text(&ran.stdout)
     );
 }
+
+#[test]
+fn collection_chooses_the_key_space_of_the_key_value_commands() {
+    let directory = TempDirectory::new("shell-collection");
+    let file = created(&directory);
+    let added = run_with(
+        &["collection", "add", &file, "sessions"],
+        b"",
+        Terminal::default(),
+    );
+    assert_eq!(added.exit, 0, "{}", text(&added.stderr));
+    let script = "put k default\n\
+        .collection\n\
+        .collection sessions\n\
+        put k in-sessions\n\
+        get k\n\
+        get -C sessions k\n\
+        scan -k\n\
+        .collection\n\
+        .collection -\n\
+        get k\n\
+        put --create -C cache c:1 hot\n\
+        .collection\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "* default key space\n  sessions\n\
+         collection: sessions\n\
+         in-sessions\n\
+         in-sessions\n\
+         k\n\
+         \u{20} default key space\n* sessions\n\
+         collection: default key space\n\
+         default\n\
+         * default key space\n  cache\n  sessions\n"
+    );
+}
+
+#[test]
+fn collection_mistakes_name_the_problem() {
+    let directory = TempDirectory::new("shell-collection-errors");
+    let file = created(&directory);
+    let missing = shell(&file, &[], ".collection orders\n");
+    assert_eq!(missing.exit, 1);
+    assert!(
+        text(&missing.stderr).contains("no collection named orders in")
+            && text(&missing.stderr).contains("try: .collection"),
+        "{}",
+        text(&missing.stderr)
+    );
+    let two = shell(&file, &[], ".collection a b\n");
+    assert_eq!(two.exit, 2);
+    assert!(
+        text(&two.stderr).contains(".collection takes one name, or - for the default key space"),
+        "{}",
+        text(&two.stderr)
+    );
+    let none = shell(&file, &[], ".collection\n");
+    assert_eq!(none.exit, 0);
+    assert_eq!(text(&none.stdout), "* default key space\nno collections\n");
+}
+
+#[test]
+fn the_oracle_shell_ends_plsql_units_at_a_slash_line_and_prints_server_output() {
+    let directory = TempDirectory::new("shell-plsql");
+    let file = created(&directory);
+    let script = "create table emp (id number(4), sal number(8));\n\
+        insert into emp values (1, 100);\n\
+        create or replace procedure raise_sal(p_pct number) as\n\
+        begin\n  \
+          update emp set sal = sal * (1 + p_pct / 100);\n  \
+          dbms_output.put_line(sql%rowcount || ' rows raised');\n\
+        end;\n\
+        /\n\
+        exec raise_sal(10)\n\
+        set serveroutput off;\n\
+        execute raise_sal(10);\n\
+        SET SERVEROUT ON SIZE UNLIMITED\n\
+        begin\n  \
+          dbms_output.put_line('a;b');\n\
+        end;\n\
+        /\n\
+        /\n";
+    let ran = shell(&file, &["--dialect", "oracle"], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "CREATE TABLE\n\
+         INSERT 0 1\n\
+         CREATE PROCEDURE\n\
+         1 rows raised\n\
+         PL/SQL BLOCK\n\
+         PL/SQL BLOCK\n\
+         a;b\n\
+         PL/SQL BLOCK\n"
+    );
+    assert_eq!(
+        text(&ran.stderr),
+        "eggdb: nothing to run: / ends a PL/SQL unit here; Up then Enter repeats the last statement\n"
+    );
+}
+
+#[test]
+fn the_oracle_shell_refuses_a_bad_set_serveroutput_and_prints_lines_before_an_error() {
+    let directory = TempDirectory::new("shell-serveroutput");
+    let file = created(&directory);
+    let refused = shell(
+        &file,
+        &["--dialect", "oracle"],
+        "set serveroutput on size 10\n",
+    );
+    assert_eq!(refused.exit, 3);
+    let stderr = text(&refused.stderr);
+    assert!(
+        stderr.contains("SET SERVEROUTPUT SIZE 10 is out of range"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("line 1:"), "{stderr}");
+    let failed = shell(
+        &file,
+        &[
+            "--dialect",
+            "oracle",
+            "-c",
+            "begin dbms_output.put_line('first'); raise_application_error(-20005, 'then this'); end;",
+        ],
+        "",
+    );
+    assert_eq!(failed.exit, 3);
+    assert_eq!(text(&failed.stdout), "first\n");
+    assert!(
+        text(&failed.stderr).contains("ORA-20005: then this"),
+        "{}",
+        text(&failed.stderr)
+    );
+}

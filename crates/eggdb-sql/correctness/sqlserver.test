@@ -70,7 +70,7 @@ SELECT 1
 error 42P10 544
 INSERT INTO Products (ProductID, Name, Price) VALUES (9, N'Salt', 0.50)
 
-error 0A000 40517
+ok
 CREATE TABLE Seeded (id INT IDENTITY(100, 5) PRIMARY KEY)
 
 error 42P16 40517
@@ -283,11 +283,15 @@ COMMIT
 error 25P01 3903
 ROLLBACK TRANSACTION
 
-error 0A000 40517
+error 25P01 628
 SAVE TRANSACTION point
 
-error 0A000 40517
-BEGIN DELETE FROM Products END
+rows
+BEGIN SELECT count(*) AS n FROM Products END
+----
+n
+5
+SELECT 1
 
 ok
 BEGIN TRAN; COMMIT WORK
@@ -314,8 +318,14 @@ SET DATEFORMAT mdy
 error 0A000 40517
 SET ANSI_PADDING OFF
 
-error 0A000 40517
+ok
 SET XACT_ABORT ON
+
+ok
+SET XACT_ABORT OFF
+
+error 0A000 40517
+SET NOEXEC ON
 
 error 42601 195
 SET NOT_AN_OPTION ON
@@ -762,7 +772,7 @@ SELECT 2
 error 0A000 40517
 CREATE VIEW vSecret40 WITH ENCRYPTION AS SELECT SaleID FROM Sales40
 
-error 0A000 40517
+ok
 CREATE VIEW vEast40 AS SELECT SaleID FROM Sales40 WHERE Region = N'East' WITH CHECK OPTION
 
 error 42601 111
@@ -1067,7 +1077,7 @@ id|qty|bin
 4|1|A1
 SELECT 2
 
-error 0A000 40517
+ok
 ALTER TABLE Stock40 ADD DEFAULT (abs(-5)) FOR PartID
 
 ok
@@ -1265,3 +1275,1062 @@ DROP TABLE Parts40
 
 ok
 DROP TABLE Customers40, Tools40, Plain40
+
+chapter "DECLARE @local_variable (Transact-SQL)", "SET @local_variable (Transact-SQL)", "SELECT @local_variable (Transact-SQL)"
+ok
+CREATE TABLE Bakes47 (id INT PRIMARY KEY, name NVARCHAR(20) NOT NULL, qty INT NOT NULL)
+
+ok
+INSERT INTO Bakes47 VALUES (1, N'rye', 4), (2, N'spelt', 0), (3, N'oat', 7)
+
+rows
+DECLARE @find varchar(30) = 'Man%', @count int;
+SET @count = (SELECT count(*) FROM Bakes47);
+SELECT @find AS find, @count AS bakes
+----
+find|bakes
+Man%|3
+SELECT 1
+
+rows
+DECLARE @name nvarchar(20), @total int = 0;
+SELECT @name = name FROM Bakes47 ORDER BY id;
+SELECT @total += qty FROM Bakes47;
+SELECT @name AS last_name, @total AS total
+----
+last_name|total
+oat|11
+SELECT 1
+
+rows
+DECLARE @short varchar(3) = 'abcdef';
+SET @short += 'x';
+SELECT @short AS short
+----
+short
+abc
+SELECT 1
+
+error 42P02 137
+DECLARE @a int;
+SELECT @b AS b
+
+error 42710 134
+DECLARE @a int, @a int
+
+chapter "IF...ELSE (Transact-SQL)", "BEGIN...END (Transact-SQL)"
+rows
+IF (SELECT count(*) FROM Bakes47 WHERE qty = 0) > 0
+BEGIN
+    SELECT 'some bakes are sold out' AS stock
+END
+ELSE
+    SELECT 'all in stock' AS stock
+----
+stock
+some bakes are sold out
+SELECT 1
+
+rows
+DECLARE @n int = 7;
+IF @n < 5 SELECT 'small' AS size
+ELSE IF @n < 10 SELECT 'medium' AS size
+ELSE SELECT 'large' AS size
+----
+size
+medium
+SELECT 1
+
+rows
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Guard47]') AND type in (N'U'))
+CREATE TABLE [dbo].[Guard47] ([Id] [int] NOT NULL PRIMARY KEY)
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Guard47]') AND type in (N'U'))
+CREATE TABLE [dbo].[Guard47] ([Id] [int] NOT NULL PRIMARY KEY)
+SELECT count(*) AS guarded FROM Guard47
+----
+guarded
+0
+SELECT 1
+
+error 42601 102
+IF 1 = 1
+BEGIN
+    SELECT 1 AS one
+
+chapter "WHILE (Transact-SQL)", "BREAK (Transact-SQL)", "CONTINUE (Transact-SQL)"
+rows
+DECLARE @i int = 0, @odd int = 0;
+WHILE @i < 10
+BEGIN
+    SET @i = @i + 1;
+    IF @i % 2 = 0 CONTINUE;
+    IF @i > 7 BREAK;
+    SET @odd = @odd + @i;
+END;
+SELECT @i AS i, @odd AS odd_sum
+----
+i|odd_sum
+9|16
+SELECT 1
+
+rows
+WHILE (SELECT min(qty) FROM Bakes47) < 2
+    UPDATE Bakes47 SET qty = qty + 1 WHERE qty < 2;
+SELECT name, qty FROM Bakes47 ORDER BY id
+----
+name|qty
+rye|4
+spelt|2
+oat|7
+SELECT 3
+
+error 42601 135
+BREAK
+
+chapter "TRY...CATCH (Transact-SQL)", "ERROR_NUMBER (Transact-SQL)", "ERROR_MESSAGE (Transact-SQL)", "@@ERROR (Transact-SQL)"
+rows
+BEGIN TRY
+    SELECT 1/0 AS impossible;
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS ErrorNumber, ERROR_SEVERITY() AS ErrorSeverity, ERROR_STATE() AS ErrorState, ERROR_MESSAGE() AS ErrorMessage;
+END CATCH
+----
+errornumber|errorseverity|errorstate|errormessage
+8134|16|1|Divide by zero error encountered.
+SELECT 1
+
+rows
+BEGIN TRY
+    INSERT INTO Bakes47 VALUES (1, N'again', 1);
+    SELECT 'not here' AS reached;
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS n, @@TRANCOUNT AS trancount;
+END CATCH
+----
+n|trancount
+2627|0
+SELECT 1
+
+rows
+BEGIN TRY
+    INSERT INTO Bakes47 VALUES (2, N'dup', 1);
+END TRY
+BEGIN CATCH
+    SELECT @@ERROR AS error_at_catch;
+END CATCH
+----
+error_at_catch
+2627
+SELECT 1
+
+rows
+SELECT ERROR_NUMBER() AS outside_catch
+----
+outside_catch
+NULL
+SELECT 1
+
+chapter "THROW (Transact-SQL)", "RAISERROR (Transact-SQL)", "PRINT (Transact-SQL)"
+error P0001 50001
+THROW 50001, 'The record does not exist.', 1;
+
+rows
+BEGIN TRY
+    THROW 50002, N'thrown inside', 5;
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS n, ERROR_STATE() AS s, ERROR_MESSAGE() AS m;
+END CATCH
+----
+n|s|m
+50002|5|thrown inside
+SELECT 1
+
+error P0001 50003
+BEGIN TRY
+    THROW 50003, N'again', 1;
+END TRY
+BEGIN CATCH
+    THROW;
+END CATCH
+
+error 42601 10704
+THROW;
+
+error 22023 35100
+THROW 40000, N'too low', 1;
+
+error P0001 50000
+RAISERROR (N'This is message %s %d.', 16, 1, N'number', 5);
+
+rows
+RAISERROR (N'<<%7.3s>>', 10, 1, N'abcde');
+SELECT 'continued' AS after
+----
+after
+continued
+SELECT 1
+
+rows
+BEGIN TRY
+    RAISERROR (N'Error raised in TRY block.', 16, 1);
+END TRY
+BEGIN CATCH
+    SELECT ERROR_MESSAGE() AS m, ERROR_SEVERITY() AS sev, ERROR_STATE() AS st;
+END CATCH
+----
+m|sev|st
+Error raised in TRY block.|16|1
+SELECT 1
+
+rows
+PRINT N'printed';
+SELECT 'after print' AS x
+----
+x
+after print
+SELECT 1
+
+chapter "@@ROWCOUNT (Transact-SQL)", "RETURN (Transact-SQL)"
+rows
+UPDATE Bakes47 SET qty = qty WHERE qty > 3;
+IF @@ROWCOUNT = 2 SELECT 'two updated' AS r
+----
+r
+two updated
+SELECT 1
+
+rows
+SELECT 'before' AS x;
+RETURN;
+SELECT 'after' AS x
+----
+x
+before
+SELECT 1
+
+chapter "EXECUTE (Transact-SQL)", "sp_executesql (Transact-SQL)"
+rows
+DECLARE @sql nvarchar(200) = N'SELECT name FROM Bakes47 WHERE id = 3';
+EXEC (@sql)
+----
+name
+oat
+SELECT 1
+
+rows
+DECLARE @qty int;
+EXECUTE sp_executesql N'SELECT @q = qty FROM Bakes47 WHERE name = @n', N'@n nvarchar(20), @q int OUTPUT', @n = N'rye', @q = @qty OUTPUT;
+SELECT @qty AS rye_qty
+----
+rye_qty
+4
+SELECT 1
+
+error 42P02 137
+DECLARE @outer int = 1;
+EXEC (N'SELECT @outer AS x')
+
+chapter "table (Transact-SQL)"
+rows
+DECLARE @t TABLE (id int, label nvarchar(10));
+INSERT INTO @t VALUES (1, N'one'), (2, N'two');
+INSERT INTO @t SELECT id + 10, name FROM Bakes47 WHERE id = 1;
+UPDATE @t SET label = N'TWO' WHERE id = 2;
+DELETE FROM @t WHERE id = 1;
+SELECT id, label FROM @t ORDER BY id
+----
+id|label
+2|TWO
+11|rye
+SELECT 2
+
+ok
+DROP TABLE Bakes47, Guard47
+
+chapter "MERGE (Transact-SQL)"
+ok
+CREATE TABLE Blogs48 ([Id] int NOT NULL IDENTITY, [Name] nvarchar(100) NOT NULL, [Url] nvarchar(max) NULL, CONSTRAINT [PK_Blogs48] PRIMARY KEY ([Id]))
+
+rows
+SET IMPLICIT_TRANSACTIONS OFF;
+SET NOCOUNT ON;
+MERGE [Blogs48] USING (
+VALUES (N'Kitchen', N'https://example.com/kitchen', 0),
+(N'Garden', NULL, 1)) AS i ([Name], [Url], _Position) ON 1=0
+WHEN NOT MATCHED THEN
+INSERT ([Name], [Url])
+VALUES (i.[Name], i.[Url])
+OUTPUT INSERTED.[Id], i._Position;
+----
+id|_position
+1|0
+2|1
+MERGE 2
+
+rows
+MERGE INTO Blogs48 AS t USING (VALUES (1, N'Kitchen and Bakery'), (3, N'Attic')) AS s (id, name) ON t.Id = s.id
+WHEN MATCHED THEN UPDATE SET Name = s.name
+WHEN NOT MATCHED BY TARGET THEN INSERT (Name) VALUES (s.name)
+OUTPUT inserted.Id, inserted.Name, deleted.Name AS old_name;
+----
+id|name|old_name
+1|Kitchen and Bakery|Kitchen
+3|Attic|NULL
+MERGE 2
+
+rows
+MERGE Blogs48 USING (VALUES (2)) AS s (id) ON Blogs48.Id = s.id
+WHEN MATCHED THEN DELETE
+OUTPUT deleted.Id, deleted.Name;
+----
+id|name
+2|Garden
+MERGE 1
+
+rows
+MERGE Blogs48 AS t USING (VALUES (1, N'x'), (3, N'y')) AS s (id, name) ON t.Id = s.id
+WHEN MATCHED AND s.name = N'y' THEN UPDATE SET Url = s.name;
+SELECT Id, Name, Url FROM Blogs48 ORDER BY Id
+----
+id|name|url
+1|Kitchen and Bakery|https://example.com/kitchen
+3|Attic|y
+SELECT 2
+
+error 42601 10713
+MERGE Blogs48 USING (VALUES (1)) AS s (id) ON 1=0;
+
+error 0A000 40517
+MERGE Blogs48 USING (VALUES (1)) AS s (id) ON Blogs48.Id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE;
+
+chapter "INSERT (Transact-SQL)"
+rows
+INSERT INTO Blogs48 (Name) OUTPUT inserted.Name SELECT N'Copy of ' + Name FROM Blogs48 WHERE Id = 1
+----
+name
+Copy of Kitchen and Bakery
+INSERT 0 1
+
+chapter "SAVE TRANSACTION (Transact-SQL)"
+rows
+BEGIN TRAN;
+INSERT INTO Blogs48 (Name) VALUES (N'Shed');
+SAVE TRANSACTION before_more;
+SELECT @@TRANCOUNT AS depth
+----
+depth
+1
+SELECT 1
+
+ok
+ROLLBACK TRANSACTION before_more
+
+rows
+ROLLBACK;
+SELECT count(*) AS n FROM Blogs48 WHERE Name = N'Shed'
+----
+n
+0
+SELECT 1
+
+chapter "OPENJSON (Transact-SQL)"
+rows
+SELECT Name FROM Blogs48 WHERE Id IN (SELECT [c].[value] FROM OPENJSON(N'[1,3,5]') WITH ([value] int '$') AS [c]) ORDER BY Id
+----
+name
+Kitchen and Bakery
+Attic
+SELECT 2
+
+rows
+SELECT j.id, j.name, j.tag FROM OPENJSON(N'{"items":[{"id":1,"name":"rye","tags":["a"]},{"id":2,"name":"pie"}]}', '$.items') WITH (id int, name nvarchar(20) '$.name', tag nvarchar(10) '$.tags[0]') AS j
+----
+id|name|tag
+1|rye|a
+2|pie|NULL
+SELECT 2
+
+rows
+SELECT o.a, o.b FROM OPENJSON(N'{"a":7,"b":{"c":true}}') WITH (a int, b nvarchar(max) AS JSON) AS o
+----
+a|b
+7|{"c":true}
+SELECT 1
+
+error 0A000 40517
+SELECT * FROM OPENJSON(N'[1]')
+
+error 22023 13607
+SELECT * FROM OPENJSON(N'[1]') WITH (a int 'a') AS o
+
+error 22023 13609
+SELECT * FROM OPENJSON(N'7') WITH (a int '$') AS o
+
+ok
+DROP TABLE Blogs48
+
+chapter "SUBSTRING (Transact-SQL)", "LEFT (Transact-SQL)", "RIGHT (Transact-SQL)", "REVERSE (Transact-SQL)"
+rows
+SELECT SUBSTRING('abcdef', 2, 3) AS x, SUBSTRING('abcdef', 0, 3) AS early, LEFT('abcdefg', 2) AS l, RIGHT('abcdefg', 2) AS r, REVERSE('abc') AS rev
+----
+x|early|l|r|rev
+bcd|ab|ab|fg|cba
+SELECT 1
+
+rows
+SELECT SUBSTRING(0x0102030405, 2, 2) AS b, LEFT(NULL, 2) AS n
+----
+b|n
+0x0203|NULL
+SELECT 1
+
+error 22011 537
+SELECT SUBSTRING('abc', 1, -1) AS x
+
+error 22011 536
+SELECT RIGHT('abc', -1) AS x
+
+chapter "REPLACE (Transact-SQL)", "STUFF (Transact-SQL)", "REPLICATE (Transact-SQL)", "SPACE (Transact-SQL)"
+rows
+SELECT REPLACE('abcdefghicde', 'cde', 'xxx') AS r, STUFF('abcdef', 2, 3, 'ijklmn') AS s, REPLICATE('0', 4) + '12' AS padded, 'a' + SPACE(2) + 'b' AS spaced
+----
+r|s|padded|spaced
+abxxxfghixxx|aijklmnef|000012|a  b
+SELECT 1
+
+rows
+SELECT LEN(REPLICATE('ab', 5000)) AS short, LEN(REPLICATE(CAST('ab' AS varchar(max)), 5000)) AS long, STUFF('abc', 5, 1, 'x') AS outside, REPLICATE('a', -1) AS negative
+----
+short|long|outside|negative
+8000|10000|NULL|NULL
+SELECT 1
+
+chapter "TRIM (Transact-SQL)", "LTRIM (Transact-SQL)", "RTRIM (Transact-SQL)"
+rows
+SELECT TRIM('     test    ') AS t, TRIM('.,! ' FROM '     #     test    .') AS chars, LTRIM('  a  ') + '#' AS l, '#' + RTRIM('  a  ') AS r
+----
+t|chars|l|r
+test|#     test|a  #|#  a
+SELECT 1
+
+chapter "CONCAT (Transact-SQL)", "CONCAT_WS (Transact-SQL)", "DATALENGTH (Transact-SQL)"
+rows
+SELECT CONCAT('Happy ', 'Birthday ', 11, '/', '25') AS result, CONCAT('a', NULL, 'b') AS skipped
+----
+result|skipped
+Happy Birthday 11/25|ab
+SELECT 1
+
+rows
+SELECT CONCAT_WS(',', '1 Microsoft Way', NULL, NULL, 'Redmond', 'WA', 98052) AS address
+----
+address
+1 Microsoft Way,Redmond,WA,98052
+SELECT 1
+
+error 42883 189
+SELECT CONCAT('a') AS x
+
+rows
+SELECT DATALENGTH('abc') AS a, DATALENGTH(N'abc') AS n, DATALENGTH(CAST(1 AS int)) AS i, DATALENGTH(0x0102) AS b, DATALENGTH(NULL) AS nothing
+----
+a|n|i|b|nothing
+3|6|4|2|NULL
+SELECT 1
+
+rows
+SELECT ASCII('A') AS a, CHAR(66) AS b, UNICODE(N'é') AS u, NCHAR(233) AS n
+----
+a|b|u|n
+65|B|233|é
+SELECT 1
+
+chapter "IIF (Transact-SQL)", "CHOOSE (Transact-SQL)"
+rows
+SELECT IIF(45 > 40, 'TRUE', 'FALSE') AS result, IIF(NULL > 1, 'yes', 'no') AS unknown
+----
+result|unknown
+TRUE|no
+SELECT 1
+
+rows
+SELECT CHOOSE(3, 'Manager', 'Director', 'Developer', 'Tester') AS result, CHOOSE(5, 'a', 'b') AS outside, CHOOSE(2.9, 'a', 'b') AS truncated
+----
+result|outside|truncated
+Developer|NULL|b
+SELECT 1
+
+chapter "DATEPART (Transact-SQL)", "DATENAME (Transact-SQL)", "YEAR (Transact-SQL)", "MONTH (Transact-SQL)", "DAY (Transact-SQL)"
+rows
+SELECT DATEPART(year, '2007-10-30 12:15:32.1234567 +05:10') AS y, DATEPART(quarter, '2007-10-30 12:15:32.1234567 +05:10') AS q, DATEPART(dayofyear, '2007-10-30 12:15:32.1234567 +05:10') AS dy, DATEPART(week, '2007-10-30 12:15:32.1234567 +05:10') AS wk, DATEPART(weekday, '2007-10-30 12:15:32.1234567 +05:10') AS dw, DATEPART(hour, '2007-10-30 12:15:32.1234567 +05:10') AS hh, DATEPART(millisecond, '2007-10-30 12:15:32.1234567 +05:10') AS ms, DATEPART(microsecond, '2007-10-30 12:15:32.1234567 +05:10') AS mcs, DATEPART(iso_week, '2007-10-30') AS isowk
+----
+y|q|dy|wk|dw|hh|ms|mcs|isowk
+2007|4|303|44|3|12|123|123456|44
+SELECT 1
+
+rows
+SELECT DATENAME(month, '2007-10-30') AS m, DATENAME(weekday, '2007-10-30') AS w, DATENAME(day, '2007-10-30') AS d
+----
+m|w|d
+October|Tuesday|30
+SELECT 1
+
+rows
+SELECT YEAR('2010-04-30T01:01:01.1234567-07:00') AS y, MONTH('2007-04-30T01:01:01.1234567 -07:00') AS m, DAY('2015-04-30 01:01:01.1234567') AS d
+----
+y|m|d
+2010|4|30
+SELECT 1
+
+error 22023 155
+SELECT DATEPART(fortnight, '2007-10-30') AS x
+
+error 22023 155
+SELECT DATEADD(iso_week, 1, '2007-10-30') AS x
+
+error 22023 9810
+SELECT DATEPART(hour, CAST('2007-10-30' AS date)) AS x
+
+chapter "EOMONTH (Transact-SQL)", "DATEDIFF_BIG (Transact-SQL)"
+rows
+SELECT EOMONTH('12/1/2011') AS result, EOMONTH('12/1/2011', 1) AS next_month, EOMONTH('12/1/2011', -1) AS last_month, EOMONTH('2024-02-10') AS leap
+----
+result|next_month|last_month|leap
+2011-12-31|2012-01-31|2011-11-30|2024-02-29
+SELECT 1
+
+error 22008 517
+SELECT EOMONTH('9999-12-01', 1) AS x
+
+rows
+SELECT DATEDIFF_BIG(millisecond, '0001-01-01', '9999-12-31') AS ms
+----
+ms
+315537811200000
+SELECT 1
+
+chapter "TRY_CAST (Transact-SQL)", "TRY_CONVERT (Transact-SQL)"
+rows
+SELECT TRY_CAST('test' AS float) AS f, TRY_CONVERT(int, 'abc') AS a, TRY_CONVERT(int, '12') AS b, TRY_CONVERT(date, '2020-02-30') AS d, TRY_CAST('2020-07-04' AS date) AS ok
+----
+f|a|b|d|ok
+NULL|NULL|12|NULL|2020-07-04
+SELECT 1
+
+error 42846 529
+SELECT TRY_CONVERT(int, CAST('2020-01-01' AS date)) AS n
+
+chapter "CAST and CONVERT (Transact-SQL)"
+rows
+SELECT CONVERT(varchar(30), CAST('2020-07-04 13:05:09' AS datetime), 100) AS s100, CONVERT(varchar(11), CAST('2020-07-04' AS date), 106) AS s106, CONVERT(varchar(12), CAST('2020-07-04' AS date), 107) AS s107, CONVERT(varchar(10), CAST('2020-07-04' AS date), 104) AS s104, CONVERT(varchar(10), CAST('2020-07-04' AS date), 1) AS s1
+----
+s100|s106|s107|s104|s1
+Jul  4 2020  1:05PM|04 Jul 2020|Jul 04, 2020|04.07.2020|07/04/20
+SELECT 1
+
+rows
+SELECT CONVERT(varchar(8), CAST('2020-07-04 13:05:09' AS datetime), 108) AS s108, CONVERT(varchar(30), CAST('2020-07-04 13:05:09.12' AS datetime), 113) AS s113, CONVERT(varchar(12), CAST('2020-07-04 13:05:09.12' AS datetime), 114) AS s114
+----
+s108|s113|s114
+13:05:09|04 Jul 2020 13:05:09:120|13:05:09:120
+SELECT 1
+
+rows
+SELECT CONVERT(datetime, '04 Jul 2020 13:05:09:120', 113) AS e, CONVERT(date, '200704', 12) AS d
+----
+e|d
+2020-07-04 13:05:09.120|2020-07-04
+SELECT 1
+
+rows
+SELECT CONVERT(varchar(10), 0x4E616D65, 1) AS one, CONVERT(varchar(10), 0x4E616D65, 2) AS two, CONVERT(varchar(10), 0x4E616D65, 0) AS zero, CONVERT(varbinary(4), '0x4E616D65', 1) AS back
+----
+one|two|zero|back
+0x4E616D65|4E616D65|Name|0x4E616D65
+SELECT 1
+
+rows
+SELECT CAST(CAST(1234567 AS float) AS varchar(20)) AS g, CONVERT(varchar(20), CAST(1234.5678 AS float), 1) AS s1, CONVERT(varchar(20), CAST(4235.98 AS money), 1) AS m
+----
+g|s1|m
+1.23457e+006|1.2345678e+003|4,235.98
+SELECT 1
+
+error 0A000 40517
+SELECT CONVERT(varchar(30), CAST('2020-07-04' AS date), 130) AS hijri
+
+chapter "FORMAT (Transact-SQL)"
+rows
+SELECT FORMAT(CAST('2020-07-04' AS date), 'd', 'en-US') AS us, FORMAT(CAST('2020-07-04' AS date), 'D', 'en-US') AS long_date, FORMAT(CAST('2020-07-04' AS date), 'yyyy-MM-dd') AS custom
+----
+us|long_date|custom
+7/4/2020|Saturday, July 4, 2020|2020-07-04
+SELECT 1
+
+rows
+SELECT FORMAT(123456789, '###-##-####') AS custom, FORMAT(1234.5, 'N', 'en-US') AS n, FORMAT(1234.5, 'C', 'en-US') AS c, FORMAT(42, 'D5') AS d
+----
+custom|n|c|d
+123-45-6789|1,234.50|$1,234.50|00042
+SELECT 1
+
+rows
+SELECT FORMAT(CAST('07:35' AS time), N'hh\:mm') AS escaped, FORMAT(CAST('07:35' AS time), N'hh:mm') AS unescaped
+----
+escaped|unescaped
+07:35|NULL
+SELECT 1
+
+error 42804 8116
+SELECT FORMAT('abc', 'N') AS x
+
+chapter "ROUND (Transact-SQL)", "CEILING (Transact-SQL)", "FLOOR (Transact-SQL)"
+rows
+SELECT ROUND(123.9994, 3) AS a, ROUND(123.9995, 3) AS b, ROUND(150.75, 0) AS r, ROUND(150.75, 0, 1) AS t, ROUND(748, -2) AS i
+----
+a|b|r|t|i
+123.9990|124.0000|151.00|150.00|700
+SELECT 1
+
+error 22003 8115
+SELECT ROUND(748.58, -3) AS r
+
+rows
+SELECT CEILING(123.45) AS a, CEILING(-123.45) AS b, CEILING(0.0) AS c, FLOOR(123.45) AS d, FLOOR(-123.45) AS e
+----
+a|b|c|d|e
+124|-123|0|123|-124
+SELECT 1
+
+chapter "SUM (Transact-SQL)", "AVG (Transact-SQL)", "COUNT_BIG (Transact-SQL)", "/ (Divide) (Transact-SQL)", "Precision, scale, and length (Transact-SQL)"
+ok
+CREATE TABLE T39b (id INT PRIMARY KEY, name NVARCHAR(20) NULL, qty INT NOT NULL, price DECIMAL(10,2) NOT NULL)
+
+ok
+INSERT INTO T39b VALUES (1, N'Tea', 1, 2.50), (2, N'Bread', 2, 3.25), (3, NULL, 2, 1.00)
+
+rows
+SELECT SUM(qty) AS s, AVG(qty) AS a, SUM(price) AS total, AVG(price) AS average, COUNT_BIG(*) AS n FROM T39b
+----
+s|a|total|average|n
+5|1|6.75|2.250000|3
+SELECT 1
+
+rows
+SELECT qty, SUM(price) AS total FROM T39b GROUP BY qty ORDER BY qty
+----
+qty|total
+1|2.50
+2|4.25
+SELECT 2
+
+rows
+SELECT 2 / 3.0 AS q, 10.0 / 4 AS r, 7 / 2 AS i
+----
+q|r|i
+0.666666|2.500000000000|3
+SELECT 1
+
+error 22012 8134
+SELECT 1.0 / 0 AS z
+
+chapter "STRING_AGG (Transact-SQL)", "STRING_SPLIT (Transact-SQL)"
+rows
+SELECT STRING_AGG(name, ', ') WITHIN GROUP (ORDER BY name) AS names, STRING_AGG(qty, '-') WITHIN GROUP (ORDER BY id) AS quantities FROM T39b
+----
+names|quantities
+Bread, Tea|1-2-2
+SELECT 1
+
+rows
+SELECT value FROM STRING_SPLIT('Lorem ipsum dolor', ' ')
+----
+value
+Lorem
+ipsum
+dolor
+SELECT 3
+
+rows
+SELECT * FROM STRING_SPLIT('Austin,Texas,Seattle,Washington,Denver,Colorado', ',', 1) WHERE ordinal % 2 = 0
+----
+value|ordinal
+Texas|2
+Washington|4
+Colorado|6
+SELECT 3
+
+rows
+SELECT id FROM T39b WHERE name IN (SELECT value FROM STRING_SPLIT('Tea,Bread', ',')) ORDER BY id
+----
+id
+1
+2
+SELECT 2
+
+error 22023 214
+SELECT value FROM STRING_SPLIT('a', '--')
+
+ok
+DROP TABLE T39b
+
+chapter "CREATE TABLE (Transact-SQL) IDENTITY (Property)", "Specify default values for columns"
+ok
+CREATE TABLE [dbo].[Coupons40b] ([Id] INT IDENTITY(1000, 10) NOT NULL, [Code] VARCHAR(20) NOT NULL, [Created] DATETIME2(7) NOT NULL CONSTRAINT [DF_Coupons40b_Created] DEFAULT (dateadd(day,(30),getdate())), [Year] INT NULL DEFAULT (datepart(year,getdate())), [Tag] VARCHAR(20) NULL DEFAULT (CONCAT('c-', 2024)), CONSTRAINT [PK_Coupons40b] PRIMARY KEY CLUSTERED ([Id] ASC))
+
+ok
+INSERT INTO Coupons40b (Code) VALUES ('A'), ('B')
+
+rows
+SELECT Id AS id, Code AS code, Tag AS tag, CASE WHEN [Year] = YEAR(GETDATE()) THEN 1 ELSE 0 END AS this_year, CASE WHEN DATEDIFF(day, GETDATE(), Created) BETWEEN 29 AND 30 THEN 1 ELSE 0 END AS in_30_days FROM Coupons40b ORDER BY Id
+----
+id|code|tag|this_year|in_30_days
+1000|A|c-2024|1|1
+1010|B|c-2024|1|1
+SELECT 2
+
+ok
+SET IDENTITY_INSERT Coupons40b ON
+
+ok
+INSERT INTO Coupons40b (Id, Code, Tag) VALUES (1055, 'C', 'x')
+
+ok
+SET IDENTITY_INSERT Coupons40b OFF
+
+ok
+INSERT INTO Coupons40b (Code) VALUES ('D')
+
+ok
+UPDATE Coupons40b SET Tag = DEFAULT WHERE Code = 'C'
+
+rows
+SELECT Id AS id, Tag AS tag FROM Coupons40b WHERE Code IN ('C', 'D') ORDER BY Id
+----
+id|tag
+1055|c-2024
+1065|c-2024
+SELECT 2
+
+rows
+SELECT COLUMN_NAME AS col, COLUMN_DEFAULT AS def FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'coupons40b' AND COLUMN_DEFAULT IS NOT NULL ORDER BY ORDINAL_POSITION
+----
+col|def
+created|(dateadd(day,(30),getdate()))
+year|(datepart(year,getdate()))
+tag|(CONCAT('c-', 2024))
+SELECT 3
+
+ok
+CREATE TABLE Down40b (Id SMALLINT IDENTITY(-1, -5) PRIMARY KEY, Note NVARCHAR(10) NULL)
+
+ok
+INSERT INTO Down40b (Note) VALUES (N'a'), (N'b'), (N'c')
+
+rows
+SELECT Id AS id, Note AS note FROM Down40b ORDER BY Id DESC
+----
+id|note
+-1|a
+-6|b
+-11|c
+SELECT 3
+
+rows
+SELECT CAST(seed_value AS int) AS seed, CAST(increment_value AS int) AS step FROM sys.identity_columns WHERE object_id = OBJECT_ID('Down40b')
+----
+seed|step
+-1|-5
+SELECT 1
+
+error 22023
+CREATE TABLE Bad40b (Id INT IDENTITY(1, 0) PRIMARY KEY)
+
+error 22023
+CREATE TABLE Bad40b (Id SMALLINT IDENTITY(40000, 1) PRIMARY KEY)
+
+error 0A000
+CREATE TABLE Bad40b (Id INT PRIMARY KEY, n INT DEFAULT ((SELECT 1)))
+
+error 0A000
+CREATE TABLE Bad40b (Id INT PRIMARY KEY, n INT, m INT DEFAULT (n + 1))
+
+ok
+DROP TABLE Coupons40b, Down40b
+
+chapter "CREATE PROCEDURE (Transact-SQL)", "EXECUTE (Transact-SQL)", "RETURN (Transact-SQL)"
+ok
+CREATE TABLE Staff315 (Id INT PRIMARY KEY, FirstName NVARCHAR(50) NOT NULL, LastName NVARCHAR(50) NOT NULL, Department NVARCHAR(50) NOT NULL, SalesYTD DECIMAL(12,2) NULL)
+
+ok
+INSERT INTO Staff315 VALUES (1, N'Pilar', N'Ackerman', N'Shipping', NULL), (2, N'Michael', N'Blythe', N'Sales', 3763178.18), (3, N'Linda', N'Mitchell', N'Sales', 4251368.55), (4, N'Ken', N'Dobney', N'Production', NULL)
+
+ok
+CREATE PROCEDURE dbo.uspGetEmployees315
+    @LastName nvarchar(50),
+    @FirstName nvarchar(50)
+AS
+    SET NOCOUNT ON;
+    SELECT FirstName AS first_name, LastName AS last_name, Department AS department
+    FROM Staff315
+    WHERE FirstName = @FirstName AND LastName = @LastName;
+
+rows
+EXECUTE dbo.uspGetEmployees315 N'Ackerman', N'Pilar'
+----
+first_name|last_name|department
+Pilar|Ackerman|Shipping
+SELECT 1
+
+rows
+EXEC dbo.uspGetEmployees315 @FirstName = N'Pilar', @LastName = N'Ackerman'
+----
+first_name|last_name|department
+Pilar|Ackerman|Shipping
+SELECT 1
+
+error 42P02 201
+EXECUTE dbo.uspGetEmployees315 N'Ackerman'
+
+error 42710 2714
+CREATE PROCEDURE dbo.uspGetEmployees315 AS SELECT 1 AS one
+
+ok
+CREATE PROCEDURE dbo.uspGetEmployees2_315
+    @LastName nvarchar(50) = N'D%',
+    @FirstName nvarchar(50) = N'%'
+AS
+    SET NOCOUNT ON;
+    SELECT FirstName AS first_name, LastName AS last_name, Department AS department
+    FROM Staff315
+    WHERE FirstName LIKE @FirstName AND LastName LIKE @LastName
+    ORDER BY Id;
+
+rows
+EXECUTE dbo.uspGetEmployees2_315
+----
+first_name|last_name|department
+Ken|Dobney|Production
+SELECT 1
+
+rows
+EXECUTE dbo.uspGetEmployees2_315 N'M%'
+----
+first_name|last_name|department
+Linda|Mitchell|Sales
+SELECT 1
+
+rows
+EXECUTE dbo.uspGetEmployees2_315 N'%', N'%a%'
+----
+first_name|last_name|department
+Pilar|Ackerman|Shipping
+Michael|Blythe|Sales
+Linda|Mitchell|Sales
+SELECT 3
+
+ok
+CREATE PROCEDURE dbo.usp_GetSalesYTD315
+    @SalesPerson nvarchar(50) = NULL,
+    @SalesYTD decimal(12,2) = NULL OUTPUT
+AS
+    IF @SalesPerson IS NULL
+    BEGIN
+        PRINT 'ERROR: You must specify a last name for the sales person.'
+        RETURN(1)
+    END
+    ELSE
+    BEGIN
+        IF (SELECT COUNT(*) FROM Staff315 WHERE LastName = @SalesPerson) = 0
+            RETURN(2)
+    END
+    SELECT @SalesYTD = SalesYTD FROM Staff315 WHERE LastName = @SalesPerson;
+    IF @@ERROR <> 0
+    BEGIN
+        RETURN(3)
+    END
+    ELSE
+    BEGIN
+        IF @SalesYTD IS NULL
+            RETURN(4)
+        ELSE
+            RETURN(0)
+    END
+
+rows
+DECLARE @SalesYTDForSalesPerson decimal(12,2), @ret_code int;
+EXECUTE @ret_code = dbo.usp_GetSalesYTD315 N'Blythe', @SalesYTD = @SalesYTDForSalesPerson OUTPUT;
+SELECT @ret_code AS ret_code, @SalesYTDForSalesPerson AS sales_ytd
+----
+ret_code|sales_ytd
+0|3763178.18
+SELECT 1
+
+rows
+DECLARE @no_name int, @missing_person int, @no_sales int;
+EXECUTE @no_name = dbo.usp_GetSalesYTD315;
+EXECUTE @missing_person = dbo.usp_GetSalesYTD315 N'Nobody';
+EXECUTE @no_sales = dbo.usp_GetSalesYTD315 N'Dobney';
+SELECT @no_name AS no_name, @missing_person AS missing_person, @no_sales AS no_sales
+----
+no_name|missing_person|no_sales
+1|2|4
+SELECT 1
+
+ok
+CREATE TABLE Products315 (Id INT PRIMARY KEY, Name NVARCHAR(50) NOT NULL, Category NVARCHAR(50) NOT NULL, ListPrice DECIMAL(10,2) NOT NULL)
+
+ok
+INSERT INTO Products315 VALUES (1, N'Road-750', N'Road Bikes', 539.99), (2, N'Mountain-500', N'Mountain Bikes', 564.99), (3, N'Touring-3000', N'Touring Bikes', 742.35), (4, N'Helmet', N'Helmets', 34.99)
+
+ok
+CREATE PROCEDURE dbo.uspGetList315 @Product varchar(40)
+    , @MaxPrice decimal(10,2)
+    , @ComparePrice decimal(10,2) OUTPUT
+    , @ListPrice decimal(10,2) OUT
+AS
+    SET NOCOUNT ON;
+    SELECT Name AS product, ListPrice AS list_price
+    FROM Products315
+    WHERE Category LIKE @Product AND ListPrice < @MaxPrice
+    ORDER BY Id;
+    SET @ListPrice = (SELECT MAX(ListPrice) FROM Products315 WHERE Category LIKE @Product AND ListPrice < @MaxPrice);
+    SET @ComparePrice = @MaxPrice;
+
+rows
+DECLARE @ComparePrice decimal(10,2), @Cost decimal(10,2);
+EXECUTE dbo.uspGetList315 '%Bikes%', 700, @ComparePrice OUT, @Cost OUTPUT
+IF @Cost <= @ComparePrice
+    SELECT 'These products can be purchased for less than $' + RTRIM(CAST(@ComparePrice AS varchar(20))) + '.' AS message
+ELSE
+    SELECT 'The prices for all products in this category exceed $' + RTRIM(CAST(@ComparePrice AS varchar(20))) + '.' AS message
+----
+message
+These products can be purchased for less than $700.00.
+SELECT 1
+
+ok
+ALTER PROCEDURE dbo.uspGetEmployees315 @LastName nvarchar(50), @FirstName nvarchar(50) AS SET NOCOUNT ON; SELECT Department AS department FROM Staff315 WHERE FirstName = @FirstName AND LastName = @LastName;
+
+rows
+EXEC dbo.uspGetEmployees315 @LastName = N'Mitchell', @FirstName = N'Linda'
+----
+department
+Sales
+SELECT 1
+
+error 42883 2812
+EXECUTE dbo.uspNothing315
+
+error 42883 3701
+DROP PROCEDURE dbo.uspNothing315
+
+ok
+DROP PROCEDURE IF EXISTS dbo.uspNothing315
+
+chapter "CREATE FUNCTION (Transact-SQL)"
+ok
+CREATE TABLE Inventory315 (ProductID INT NOT NULL, LocationID INT NOT NULL, Quantity INT NOT NULL, PRIMARY KEY (ProductID, LocationID))
+
+ok
+INSERT INTO Inventory315 VALUES (1, 6, 10), (1, 7, 5), (2, 6, 3), (3, 7, 8)
+
+ok
+CREATE FUNCTION dbo.ufnGetInventoryStock315(@ProductID int)
+RETURNS int
+AS
+BEGIN
+    DECLARE @ret int;
+    SELECT @ret = SUM(p.Quantity)
+    FROM Inventory315 p
+    WHERE p.ProductID = @ProductID
+        AND p.LocationID = '6';
+    IF (@ret IS NULL)
+        SET @ret = 0;
+    RETURN @ret;
+END;
+
+rows
+SELECT Name AS name, dbo.ufnGetInventoryStock315(Id) AS current_supply FROM Products315 ORDER BY Id
+----
+name|current_supply
+Road-750|10
+Mountain-500|3
+Touring-3000|0
+Helmet|0
+SELECT 4
+
+error 42P02 313
+SELECT dbo.ufnGetInventoryStock315()
+
+error 54000 8144
+SELECT dbo.ufnGetInventoryStock315(1, 2)
+
+ok
+CREATE FUNCTION dbo.ufn_StockByCategory315 (@category nvarchar(50))
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT P.Id AS product_id, P.Name AS name, SUM(I.Quantity) AS total
+    FROM Products315 AS P
+    JOIN Inventory315 AS I ON I.ProductID = P.Id
+    WHERE P.Category LIKE @category
+    GROUP BY P.Id, P.Name
+)
+
+rows
+SELECT product_id, name, total FROM dbo.ufn_StockByCategory315 (N'%Bikes') ORDER BY product_id
+----
+product_id|name|total
+1|Road-750|15
+2|Mountain-500|3
+3|Touring-3000|8
+SELECT 3
+
+ok
+CREATE FUNCTION dbo.ufn_Restock315 (@below int)
+RETURNS @restock TABLE (product_id int PRIMARY KEY NOT NULL, name nvarchar(50) NOT NULL, on_hand int NOT NULL)
+AS
+BEGIN
+    INSERT INTO @restock
+    SELECT P.Id, P.Name, COALESCE(SUM(I.Quantity), 0)
+    FROM Products315 AS P
+    LEFT JOIN Inventory315 AS I ON I.ProductID = P.Id
+    GROUP BY P.Id, P.Name;
+    DELETE FROM @restock WHERE on_hand >= @below;
+    RETURN
+END
+
+rows
+SELECT product_id, name, on_hand FROM dbo.ufn_Restock315(5) ORDER BY product_id
+----
+product_id|name|on_hand
+2|Mountain-500|3
+4|Helmet|0
+SELECT 2
+
+error 42P13 443
+CREATE FUNCTION dbo.ufnBad315 () RETURNS int AS BEGIN INSERT INTO Inventory315 VALUES (9, 9, 9); RETURN 1 END
+
+rows
+SELECT type_desc, COUNT(*) AS objects FROM sys.objects WHERE name LIKE '%315' AND type_desc LIKE 'SQL%' GROUP BY type_desc ORDER BY type_desc
+----
+type_desc|objects
+SQL_INLINE_TABLE_VALUED_FUNCTION|1
+SQL_SCALAR_FUNCTION|1
+SQL_STORED_PROCEDURE|4
+SQL_TABLE_VALUED_FUNCTION|1
+SELECT 4
+
+ok
+DROP FUNCTION dbo.ufnGetInventoryStock315, dbo.ufn_StockByCategory315, dbo.ufn_Restock315
+
+ok
+DROP PROCEDURE dbo.uspGetEmployees315, dbo.uspGetEmployees2_315, dbo.usp_GetSalesYTD315, dbo.uspGetList315
+
+ok
+DROP TABLE Staff315, Products315, Inventory315

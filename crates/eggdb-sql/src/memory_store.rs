@@ -29,12 +29,23 @@ pub(crate) fn use_seeded_random_bytes() {
     crate::set_random_source(seeded_random_bytes);
 }
 
-#[derive(Default)]
 pub(crate) struct MemoryStore {
     committed: RefCell<Rc<Map>>,
     commits: Cell<u64>,
     writing: Cell<bool>,
     reads: Rc<Cell<u64>>,
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        use_seeded_random_bytes();
+        Self {
+            committed: RefCell::default(),
+            commits: Cell::default(),
+            writing: Cell::default(),
+            reads: Rc::default(),
+        }
+    }
 }
 
 pub(crate) struct MemoryRead {

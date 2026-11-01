@@ -274,6 +274,7 @@ pub(crate) fn translate(error: SqlError, text: &str, database: &str) -> SqlError
             SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
             message.to_owned(),
         ),
+        code if code.starts_with("45") => translated(1644, error.state(), message.to_owned()),
         _ => general(1105),
     };
     keep_position(result, position)

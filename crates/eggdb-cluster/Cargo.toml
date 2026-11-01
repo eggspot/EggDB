@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-cluster"
+description = "EggDB's cluster layer: shard maps by hash, range, time or region, routing with epochs, rebalancing, online shard moves, and two-phase commit for transactions across shards."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

@@ -7,6 +7,8 @@ pub const POSTGRESQL_COMPATIBLE_VERSION: &str = "16.0";
 
 const POSTGRESQL_COMPATIBLE_VERSION_NUMBER: &str = "160000";
 
+pub(crate) const DIALECT_SETTING: &str = "eggdb.dialect";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Change {
     Free,
@@ -56,7 +58,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("on"),
         change: Change::Free,
         reported: false,
-        description: "Remembered; EggDB does not run function bodies yet.",
+        description: "Checks the bodies of PL/pgSQL functions and procedures at CREATE.",
     },
     Known {
         name: "client_encoding",
@@ -171,11 +173,32 @@ const KNOWN: &[Known] = &[
         description: "Remembered, not applied yet: a second writer waits the database's write timeout.",
     },
     Known {
+        name: "log_min_duration_statement",
+        default: fixed_text!("-1"),
+        change: Change::Free,
+        reported: false,
+        description: "Sets the minimum execution time above which statements are logged by the server.",
+    },
+    Known {
         name: "max_identifier_length",
         default: fixed_text!("63"),
         change: Change::Fixed,
         reported: false,
         description: "Shows the maximum identifier length.",
+    },
+    Known {
+        name: "max_index_keys",
+        default: fixed_text!("32"),
+        change: Change::Fixed,
+        reported: false,
+        description: "Shows the maximum number of index keys.",
+    },
+    Known {
+        name: "max_function_args",
+        default: fixed_text!("100"),
+        change: Change::Fixed,
+        reported: false,
+        description: "Shows the maximum number of function arguments.",
     },
     Known {
         name: "row_security",
@@ -231,7 +254,7 @@ const KNOWN: &[Known] = &[
         default: fixed_text!("0"),
         change: Change::Free,
         reported: false,
-        description: "Remembered, not applied yet.",
+        description: "Sets the maximum allowed duration of any statement.",
     },
     Known {
         name: "synchronize_seqscans",
@@ -283,6 +306,16 @@ fn known(name: &str) -> Option<&'static Known> {
         .find(|known| known.name.eq_ignore_ascii_case(name))
 }
 
+fn setting_zone(value: &str) -> Option<crate::time_zones::TimeZone> {
+    match value.trim().parse::<f64>() {
+        Ok(hours) if hours.is_finite() && hours.abs() < 16.0 => {
+            crate::time_zones::TimeZone::fixed((hours * 3600.0).round() as i32)
+        }
+        Ok(_) => None,
+        Err(_) => crate::time_zones::TimeZone::named(value),
+    }
+}
+
 fn is_custom(name: &str) -> bool {
     name.contains('.') && !name.starts_with('.') && !name.ends_with('.')
 }
@@ -299,10 +332,13 @@ pub(crate) struct Settings {
     values: BTreeMap<&'static str, String>,
     custom: BTreeMap<String, String>,
     pub(crate) database: String,
-    pub(crate) time_zone_offset: i32,
+    pub(crate) time_zone: crate::time_zones::TimeZone,
     pub(crate) mysql: crate::mysql_variables::MySqlVariables,
     pub(crate) sqlite: SqliteState,
     pub(crate) sqlserver: SqlServerState,
+    pub(crate) oracle_user_schema: Option<String>,
+    pub(crate) checked_role: Option<String>,
+    pub(crate) database_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -310,6 +346,10 @@ pub(crate) struct SqlServerState {
     pub(crate) connection_id: u32,
     pub(crate) transaction_count: u32,
     pub(crate) no_count: bool,
+    pub(crate) implicit_transactions: bool,
+    pub(crate) format_only: bool,
+    pub(crate) xact_abort: bool,
+    pub(crate) uncommittable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -346,10 +386,13 @@ impl Default for Settings {
                 .collect(),
             custom: BTreeMap::new(),
             database: "eggdb".to_owned(),
-            time_zone_offset: 0,
+            time_zone: crate::time_zones::TimeZone::UTC,
             mysql: crate::mysql_variables::MySqlVariables::default(),
             sqlite: SqliteState::default(),
             sqlserver: SqlServerState::default(),
+            oracle_user_schema: None,
+            checked_role: None,
+            database_names: Vec::new(),
         }
     }
 }
@@ -417,9 +460,18 @@ impl Settings {
                 }
             },
         };
-        if known.name == "TimeZone" {
-            self.time_zone_offset = crate::datetime::time_zone_offset(&value).unwrap_or(0);
-        }
+        let value = if known.name == "TimeZone" {
+            let zone = setting_zone(&value).ok_or_else(|| {
+                SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    format!("invalid value for parameter \"TimeZone\": \"{value}\""),
+                )
+            })?;
+            self.time_zone = zone;
+            zone.region_name().map_or(value, str::to_owned)
+        } else {
+            value
+        };
         self.values.insert(known.name, value);
         Ok(())
     }
@@ -436,8 +488,12 @@ impl Settings {
             }
         }
         self.custom.clear();
-        self.time_zone_offset = 0;
+        self.time_zone = crate::time_zones::TimeZone::UTC;
         self.set_session_user(&user);
+    }
+
+    pub(crate) fn changeable(name: &str) -> bool {
+        known(name).is_none_or(|known| !matches!(known.change, Change::Fixed))
     }
 
     pub(crate) fn name_of(name: &str) -> String {

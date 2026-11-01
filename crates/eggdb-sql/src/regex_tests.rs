@@ -168,13 +168,85 @@ fn malformed_patterns_are_2201b_with_postgresqls_reason() {
 }
 
 #[test]
-fn constructs_not_run_yet_are_0a000() {
-    for pattern in [
-        "(a)\\1", "(?=a)", "(?!a)", "(?<=a)", "(?<!a)", "\\ma", "a\\M", "\\ya", "\\Ya", "(?i)A",
-        "***=a",
-    ] {
-        assert_eq!(refusal(pattern).0, "0A000", "{pattern}");
+fn back_references_lookaround_constraint_escapes_and_options_match_as_documented() {
+    let cases = [
+        ("aa", "(a)\\1", true),
+        ("ab", "(a)\\1", false),
+        ("abcabc", "^(abc)\\1$", true),
+        ("xyzxyzxyz", "^(x(y)z)\\1\\2?", true),
+        ("Aa", "(?i)(a)\\1", true),
+        ("foobar", "foo(?=bar)", true),
+        ("foobaz", "foo(?=bar)", false),
+        ("foobaz", "foo(?!bar)", true),
+        ("barfoo", "(?<=bar)foo", true),
+        ("bazfoo", "(?<=bar)foo", false),
+        ("bazfoo", "(?<!bar)foo", true),
+        ("a cat", "\\mcat", true),
+        ("concat", "\\mcat", false),
+        ("cat s", "cat\\M", true),
+        ("cats", "cat\\M", false),
+        ("a b", "a\\y", true),
+        ("ab", "a\\Y", true),
+        ("abc", "\\Aabc\\Z", true),
+        ("xabc", "\\Aabc", false),
+        ("ABC", "(?i)abc", true),
+        ("ABC", "(?c)abc", false),
+        ("a.c", "***=a.c", true),
+        ("abc", "***=a.c", false),
+        ("a\nb", "(?n)^b", true),
+        ("a\nb", "^b", false),
+        ("a\nb", "(?n)a.b", false),
+        ("a\nb", "(?p)a$", false),
+        ("a\nb", "(?w)a$", true),
+        ("abc", "(?x) a b  c # comment", true),
+        ("a b", "(?x)a\\ b", true),
+    ];
+    for (text, pattern, expected) in cases {
+        assert_eq!(matches(text, pattern), expected, "{text:?} ~ {pattern}");
     }
+}
+
+#[test]
+fn the_other_flavours_bad_back_references_and_options_are_refused() {
+    assert_eq!(refusal("(?b)a").0, "0A000");
+    assert_eq!(refusal("(?e)a").0, "0A000");
+    assert_eq!(refusal("(a)\\2").0, "2201B");
+    assert_eq!(refusal("(a\\1)").0, "2201B");
+    assert_eq!(refusal("(?=(a)\\1)").0, "2201B");
+    assert_eq!(refusal("(?z)a").0, "2201B");
+    assert_eq!(refusal("a(?i)b").0, "2201B");
+    assert_eq!(refusal("(?=a)*").0, "2201B");
+}
+
+#[test]
+fn matches_report_the_leftmost_then_preferred_length_and_their_groups() {
+    let spans = |text: &str, pattern: &str| {
+        let regex = Regex::compile(pattern, CaseSensitivity::Sensitive).unwrap();
+        let characters: Vec<char> = text.chars().collect();
+        regex.finder(&characters).find(0).unwrap()
+    };
+    assert_eq!(spans("abcd", "a|ab").unwrap()[0], Some((0, 2)));
+    assert_eq!(spans("xabcabc", "(abc)+").unwrap()[0], Some((1, 7)));
+    assert_eq!(spans("XY1234Z", "Y*([0-9]{1,3})").unwrap()[1], Some((2, 5)));
+    assert_eq!(
+        spans("XY1234Z", "Y*?([0-9]{1,3})").unwrap()[1],
+        Some((2, 3))
+    );
+    assert_eq!(
+        spans("abc", "(x)|(b)").unwrap(),
+        vec![Some((1, 2)), None, Some((1, 2))]
+    );
+    assert!(spans("abc", "d").is_none());
+}
+
+#[test]
+fn back_references_stop_at_the_step_budget() {
+    let regex = Regex::compile("^(a*)*\\1b$", CaseSensitivity::Sensitive).unwrap();
+    let text = "a".repeat(40);
+    let started = std::time::Instant::now();
+    let found = regex.is_match(&text, &mut StepBudget::new(2_000_000));
+    assert!(found.is_err() || found == Ok(false));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }
 
 #[test]
@@ -371,4 +443,45 @@ fn collating_elements_take_posix_names_for_the_portable_characters() {
     for (text, pattern, expected) in cases {
         assert_eq!(matches(text, pattern), expected, "{text:?} ~ {pattern}");
     }
+}
+
+fn first_refusal_over_every_match(finder: &mut crate::regex::Finder<'_, '_>) -> String {
+    let mut at = 0;
+    loop {
+        match finder.find(at) {
+            Ok(Some(spans)) => {
+                let end = spans.first().copied().flatten().map_or(at, |(_, end)| end);
+                at = end.max(at + 1);
+            }
+            Ok(None) => panic!("every match fitted the budget"),
+            Err(error) => return error.state().code().to_owned(),
+        }
+    }
+}
+
+#[test]
+fn every_match_of_one_call_shares_one_step_budget() {
+    let regex = Regex::compile("(a*b)|a", CaseSensitivity::Sensitive).unwrap();
+    let text: Vec<char> = "a".repeat(400).chars().collect();
+    assert!(
+        regex
+            .finder(&text)
+            .with_steps(20_000)
+            .find(0)
+            .unwrap()
+            .is_some()
+    );
+    let mut finder = regex.finder(&text).with_steps(20_000);
+    assert_eq!(first_refusal_over_every_match(&mut finder), "54000");
+}
+
+#[test]
+fn a_raised_cancel_signal_stops_a_long_running_match() {
+    let signal = crate::CancelSignal::default();
+    signal.cancel();
+    let _entered = crate::cancel::enter(&signal);
+    let regex = Regex::compile("(a*b)|a", CaseSensitivity::Sensitive).unwrap();
+    let text: Vec<char> = "a".repeat(2_000).chars().collect();
+    let mut finder = regex.finder(&text);
+    assert_eq!(first_refusal_over_every_match(&mut finder), "57014");
 }

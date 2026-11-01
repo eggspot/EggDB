@@ -4,6 +4,7 @@ use eggdb_sql::{Dialect, OutputColumn, SqlType, Value};
 const MAX_FIXED_NVARCHAR_UNITS: usize = 4000;
 const MAX_FIXED_VARBINARY_BYTES: usize = 8000;
 const MAX_DECIMAL_PRECISION: u16 = 38;
+const LONGEST_DECIMAL_BYTES: u8 = 17;
 const DAYS_FROM_YEAR_ONE_TO_2000: i64 = 730_119;
 const LAST_DAY_FROM_YEAR_ONE: i64 = 3_652_058;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
@@ -69,7 +70,7 @@ impl WireType {
             Self::Float(width) => out.extend_from_slice(&[0x6D, width]),
             Self::Bit => out.extend_from_slice(&[0x68, 1]),
             Self::Decimal { precision, scale } => {
-                out.extend_from_slice(&[0x6A, decimal_bytes(precision), precision, scale]);
+                out.extend_from_slice(&[0x6A, LONGEST_DECIMAL_BYTES, precision, scale]);
             }
             Self::DateTime2 { scale } => out.extend_from_slice(&[0x2A, scale]),
             Self::Date => out.push(0x28),
@@ -384,6 +385,38 @@ pub(crate) fn wire_columns(columns: &[OutputColumn], rows: &[Vec<Value>]) -> Vec
         .collect()
 }
 
+/// How each column of a result described without rows (`SET FMTONLY ON`) goes to a TDS
+/// client: by its declared type alone, unbounded text and binary as `nvarchar(max)` and
+/// `varbinary(max)`, so a client such as `SqlBulkCopy` that sends values of these types sends
+/// every length. A type no TDS type of this version holds goes as Unicode text.
+pub(crate) fn declared_wire_columns(columns: &[OutputColumn]) -> Vec<WireColumn> {
+    columns
+        .iter()
+        .map(|column| {
+            let declared = match column.sql_type {
+                Some(SqlType::Text | SqlType::Varchar(None) | SqlType::Bpchar(None)) => {
+                    Some(WireType::NVarCharMax)
+                }
+                Some(SqlType::Bytea) => Some(WireType::VarBinaryMax),
+                Some(SqlType::Numeric(None)) | None => None,
+                Some(sql_type) => candidate(sql_type, &[]),
+            };
+            match declared {
+                Some(kind) => WireColumn {
+                    name: column.name.clone(),
+                    kind,
+                    as_text: false,
+                },
+                None => WireColumn {
+                    name: column.name.clone(),
+                    kind: WireType::NVarCharMax,
+                    as_text: true,
+                },
+            }
+        })
+        .collect()
+}
+
 fn push_utf16(out: &mut Vec<u8>, text: &str) {
     for unit in text.encode_utf16() {
         out.extend_from_slice(&unit.to_le_bytes());
@@ -518,7 +551,7 @@ pub(crate) fn push_value(out: &mut Vec<u8>, column: &WireColumn, value: &Value) 
 
 #[cfg(test)]
 mod tests {
-    use super::{WireType, push_value, wire_columns};
+    use super::{WireType, declared_wire_columns, push_value, wire_columns};
     use eggdb_sql::{OutputColumn, SqlType, Value};
 
     fn column(sql_type: Option<SqlType>) -> Vec<OutputColumn> {
@@ -666,6 +699,46 @@ mod tests {
         );
         let midnight = encoded(Some(SqlType::Time(Some(6))), Value::Time(86_400_000_000));
         assert!(midnight.1);
+    }
+
+    #[test]
+    fn declared_columns_take_their_declared_sizes_and_unbounded_ones_go_as_max() {
+        let columns = vec![
+            OutputColumn {
+                name: "id".into(),
+                sql_type: Some(SqlType::Integer),
+            },
+            OutputColumn {
+                name: "name".into(),
+                sql_type: Some(SqlType::Varchar(Some(40))),
+            },
+            OutputColumn {
+                name: "notes".into(),
+                sql_type: Some(SqlType::Text),
+            },
+            OutputColumn {
+                name: "data".into(),
+                sql_type: Some(SqlType::Bytea),
+            },
+            OutputColumn {
+                name: "amount".into(),
+                sql_type: Some(SqlType::Numeric(None)),
+            },
+        ];
+        let kinds: Vec<(WireType, bool)> = declared_wire_columns(&columns)
+            .iter()
+            .map(|column| (column.kind, column.as_text))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (WireType::Int(4), false),
+                (WireType::NVarChar { units: 40 }, false),
+                (WireType::NVarCharMax, false),
+                (WireType::VarBinaryMax, false),
+                (WireType::NVarCharMax, true),
+            ]
+        );
     }
 
     #[test]

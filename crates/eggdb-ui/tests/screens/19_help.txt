@@ -1,10 +1,12 @@
- EggDB ui help                                                          1–22/26
+ EggDB ui help                                                          1–22/28
 
  Move        ↑↓ or j/k   PgUp/PgDn   Home/End or g/G   ←→ scroll
  Panes       Tab or Shift-Tab switch   Enter open the value   Esc back to keys
  Find        /  filter keys by prefix (bytes; \xNN for a byte)   Esc restores
  View        v  text > json > hex > auto      w  wrap long lines (text)
  Change      e  edit value   a  add key   d  delete key (asks d again)
+ Expire      t  time to live: 30s, 5m, 1h30m, 7d, or empty for never
+ Counter     +  add to a counter   -  subtract (asks how much, 1 if empty)
  Check       c  verify every page and show stats     r  re-read
  Messages    m  show the last message in full
  Quit        q, or Ctrl-C (asks before discarding an edit)
@@ -20,5 +22,3 @@
  Query       s  SQL screen   F5 or Ctrl-R run   Tab editor/grid   Esc back
              Ctrl-P/Ctrl-N previous/next query   Enter is a line break
              A run holds nothing after it: BEGIN and COMMIT in one run, or roll…
-
- Terminal    at least 40x10; two panes from 80 columns

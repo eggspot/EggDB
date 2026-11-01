@@ -5,13 +5,19 @@
 //!
 //! - [`Server`] speaks the protocol versions that start with `initialize`
 //!   ([`PROTOCOL_VERSIONS`]) and offers the tools `list_tables`, `describe_table`, `run_sql`,
-//!   `explain_query`, `sample_rows`, `kv_get` and `kv_scan`, and the resource `eggdb://schema`.
+//!   `explain_query`, `sample_rows`, `kv_get`, `kv_scan` and `row_list`, which pages through a
+//!   table's rows with a cursor (D145), and the resource `eggdb://schema`.
 //! - Those are read-only: each call opens the database read-only through a
 //!   [`DatabaseOpener`] and closes it after, and the store the call runs on has no writer.
 //! - With [`ServerConfig::allow_write`] it also offers `write_sql`, which opens the database
 //!   read-write for its one statement. A destructive statement runs only once the user
 //!   confirmed it, through the client (`elicitation/create`) when the client can ask, and
 //!   otherwise through the agent's `confirm: true`.
+//! - With [`ServerConfig::tables`] a read-only server shows only the listed tables and views:
+//!   every other table, view and sequence reads as missing under the SQL engine, in every
+//!   dialect and catalog, and `kv_get` and `kv_scan` are withdrawn (D156).
+//! - [`ServerConfig::call_gap`] spaces the calls that open the file, so the user's own
+//!   programs get it between an agent's calls.
 //! - Every call has limits: one SQL statement, at most a number of rows and 1 MiB of result,
 //!   256 MiB of change, and a time limit, past which reads fail and, a second later, a watchdog
 //!   ends the process, never once a commit has started.
@@ -19,6 +25,9 @@
 //!   before it runs.
 //! - Results are structured data marked as data, never instructions, and every message out is
 //!   one line of ASCII, so stored text cannot change the protocol.
+//! - The tools (names, descriptions, input schemas, annotations) and the `instructions` come from
+//!   EggDB's command registry, `eggdb-commands` (D143), and every error carries its code's
+//!   category shared with EggOS.
 //!
 //! The guide is `docs/mcp.md` in the repository.
 
@@ -27,6 +36,7 @@ mod call_store;
 mod confirmation;
 mod json_out;
 mod jsonrpc;
+mod prompts;
 mod results;
 mod server;
 mod tools;

@@ -14,6 +14,8 @@
 \d measurements
 \d log_lines
 \d ledger
+\d tickets
+\d visits
 \d shop.warehouses
 \d shop.stock
 \d order_totals
@@ -25,6 +27,8 @@
 \d orders_id_seq
 \d events_id_seq
 \d ledger_id_seq
+\d tickets_id_seq
+\d visits_id_seq
 \d customers_pkey
 \d customers_email_key
 \d products_pkey
@@ -39,12 +43,18 @@
 \d events_pkey
 \d measurements_pkey
 \d ledger_pkey
+\d tickets_pkey
+\d visits_pkey
 \d orders_customer_idx
 \d orders_placed_idx
 \d events_happened_idx
 \d ledger_account_invoice_idx
 \d log_lines_level_idx
 \d shop.stock_product_idx
+\d tickets_code_idx
+\d tickets_opened_idx
+\d tickets_priority_idx
+\d visits_page_idx
 \dt shop.*
 \d cust*
 \l :database

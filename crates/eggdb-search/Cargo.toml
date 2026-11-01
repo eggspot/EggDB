@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-search"
+description = "EggDB's full-text search: analyzers with an English stemmer written from the published Snowball algorithm description, text-search vectors and queries with phrases, and BM25 ranking."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+exclude = ["tests/data/oracle/hr"]
 
 [lints]
 workspace = true
@@ -13,12 +14,43 @@ workspace = true
 name = "eggdb"
 path = "src/main.rs"
 
+[features]
+egg-allocator = []
+
 [dependencies]
+eggdb-amqp = { path = "../eggdb-amqp" }
+eggdb-auth = { path = "../eggdb-auth" }
+eggdb-bolt = { path = "../eggdb-bolt" }
+eggdb-commands = { path = "../eggdb-commands" }
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }
+eggdb-memcached = { path = "../eggdb-memcached" }
+eggdb-esrest = { path = "../eggdb-esrest" }
+eggdb-kafka = { path = "../eggdb-kafka" }
+eggdb-documents = { path = "../eggdb-documents" }
+eggdb-mongowire = { path = "../eggdb-mongowire" }
+eggdb-mqtt = { path = "../eggdb-mqtt" }
+eggdb-nats = { path = "../eggdb-nats" }
+eggdb-sqs = { path = "../eggdb-sqs" }
+eggdb-stomp = { path = "../eggdb-stomp" }
+eggdb-cql = { path = "../eggdb-cql" }
+eggdb-s3 = { path = "../eggdb-s3" }
+eggdb-dynamodb = { path = "../eggdb-dynamodb" }
+eggdb-observability = { path = "../eggdb-observability" }
+eggdb-api = { path = "../eggdb-api" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-kql = { path = "../eggdb-kql" }
+eggdb-queues = { path = "../eggdb-queues" }
+eggdb-parquet = { path = "../eggdb-parquet" }
+eggdb-arrow = { path = "../eggdb-arrow" }
 eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }
+eggdb-resp = { path = "../eggdb-resp" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-sql = { path = "../eggdb-sql" }
+eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }
 eggdb-storage = { path = "../eggdb-storage" }
 eggdb-tdswire = { path = "../eggdb-tdswire" }
+eggdb-tls = { path = "../eggdb-tls" }
 eggdb-ui = { path = "../eggdb-ui" }

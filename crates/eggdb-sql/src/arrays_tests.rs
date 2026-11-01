@@ -4,13 +4,13 @@ use crate::tests::{fuzz, render};
 use crate::types::Value;
 use crate::{Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<String, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs.pop().unwrap_or_default())
 }
 
-fn state(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn state(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(output) => panic!("{sql} succeeded: {output}"),
         Err(error) => error.state().code().to_owned(),
@@ -137,26 +137,30 @@ fn arrays_compare_element_by_element_with_nulls_last() {
 }
 
 #[test]
-fn arrays_are_values_of_expressions_and_intermediate_results_but_not_of_tables() {
+fn arrays_are_values_of_expressions_columns_views_and_intermediate_results() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     assert_eq!(
-        state(&mut session, "CREATE TABLE stored (a integer[])"),
-        "0A000"
+        run(&mut session, "CREATE TABLE stored (a integer[])").unwrap(),
+        "CREATE TABLE"
     );
     assert_eq!(
-        state(&mut session, "CREATE TABLE stored (a text ARRAY)"),
-        "0A000"
+        run(&mut session, "CREATE TABLE stored_text (a text ARRAY)").unwrap(),
+        "CREATE TABLE"
+    );
+    assert_eq!(
+        run(&mut session, "ALTER TABLE stored ADD COLUMN tags text[]").unwrap(),
+        "ALTER TABLE"
+    );
+    assert_eq!(
+        state(&mut session, "CREATE TABLE stored_names (a name[])"),
+        "42704"
     );
     run(
         &mut session,
         "CREATE TABLE plain (id integer PRIMARY KEY, n integer, t text)",
     )
     .unwrap();
-    assert_eq!(
-        state(&mut session, "ALTER TABLE plain ADD COLUMN tags text[]"),
-        "0A000"
-    );
     assert_eq!(
         state(&mut session, "INSERT INTO plain VALUES (1, ARRAY[1], NULL)"),
         "42804"
@@ -171,11 +175,12 @@ fn arrays_are_values_of_expressions_and_intermediate_results_but_not_of_tables()
         "t\n{a,\"b c\"}\nSELECT 1"
     );
     assert_eq!(
-        state(
+        run(
             &mut session,
             "CREATE VIEW arrays_view AS SELECT ARRAY[1, 2] AS a"
-        ),
-        "0A000"
+        )
+        .unwrap(),
+        "CREATE VIEW"
     );
     assert_eq!(
         run(
@@ -204,8 +209,7 @@ fn arrays_are_values_of_expressions_and_intermediate_results_but_not_of_tables()
     assert_eq!(state(&mut session, "SELECT '{{1}}'::int[]"), "0A000");
     assert_eq!(state(&mut session, "SELECT ARRAY[ARRAY[1]]"), "0A000");
     assert_eq!(state(&mut session, "SELECT (ARRAY[1, 2])[1:2]"), "0A000");
-    assert_eq!(state(&mut session, "SELECT ARRAY[now()]"), "0A000");
-    assert_eq!(state(&mut session, "SELECT '{1}'::date[]"), "0A000");
+    assert_eq!(state(&mut session, "SELECT '{1}'::date[]"), "22007");
 }
 
 #[test]

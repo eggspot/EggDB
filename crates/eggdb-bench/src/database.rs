@@ -11,6 +11,7 @@ use eggdb_storage::{
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const READ_ENTRIES: u64 = 100_000;
 const COUNTED_READS: u64 = 100_000;
@@ -211,5 +212,141 @@ pub(crate) fn open(_allocator: &CountingAllocator) -> Result<Vec<Metric>, String
         Metric::ratio(OPEN, "ratio_to_store_open", measured.ratio),
         Metric::reported(OPEN, "ns_per_open", measured.subject_ns),
         Metric::reported(OPEN, "reference_ns_per_open", measured.reference_ns),
+    ])
+}
+
+pub(crate) const READ_EXPIRING: &str = "database.read_expiring";
+pub(crate) const INCREMENT: &str = "database.increment";
+const LONG_TIME_TO_LIVE: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+fn expiring_database_with(path: &Path, entries: u64) -> Result<Database, String> {
+    let options = Options::new()
+        .cache_bytes(CACHE_BYTES)
+        .durability(Durability::Off);
+    let db = Database::open_with(path, options).map_err(failed("open"))?;
+    db.write(|tx| {
+        for index in 0..entries {
+            tx.put_with_expiry(key(index), value(index), LONG_TIME_TO_LIVE)?;
+        }
+        Ok(())
+    })
+    .map_err(failed("fill"))?;
+    Ok(db)
+}
+
+pub(crate) fn read_expiring(_allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
+    let subject_file = BenchFile::new("database-read-expiring")?;
+    let reference_file = BenchFile::new("database-read-expiring-reference")?;
+    let expiring = expiring_database_with(&subject_file.path, READ_ENTRIES)?;
+    let plain = database_with(&reference_file.path, READ_ENTRIES, Durability::Off)?;
+    black_box(read_from_database(&expiring, READ_ENTRIES)?);
+    black_box(read_from_database(&plain, READ_ENTRIES)?);
+    let measured = measure::paired(
+        &mut |iterations| {
+            black_box(read_from_database(&expiring, iterations)?);
+            Ok(())
+        },
+        &mut |iterations| {
+            black_box(read_from_database(&plain, iterations)?);
+            Ok(())
+        },
+    )?;
+    Ok(vec![
+        Metric::ratio(READ_EXPIRING, "ratio_to_plain_read", measured.ratio),
+        Metric::reported(READ_EXPIRING, "ns_per_op", measured.subject_ns),
+        Metric::reported(READ_EXPIRING, "reference_ns_per_op", measured.reference_ns),
+    ])
+}
+
+fn increment_in_database(db: &Database, commits: u64) -> Result<(), String> {
+    for round in 0..commits {
+        db.increment(key(round % WRITE_ENTRIES), 1)
+            .map_err(failed("increment"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn increment(_allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
+    let subject_file = BenchFile::new("database-increment")?;
+    let reference_file = BenchFile::new("database-increment-reference")?;
+    let counters = Database::open_with(
+        &subject_file.path,
+        Options::new()
+            .cache_bytes(CACHE_BYTES)
+            .durability(Durability::Off),
+    )
+    .map_err(failed("open"))?;
+    let plain = database_with(&reference_file.path, WRITE_ENTRIES, Durability::Off)?;
+    increment_in_database(&counters, COUNTED_COMMITS)?;
+    commit_to_database(&plain, COUNTED_COMMITS)?;
+    let measured = measure::paired(
+        &mut |iterations| increment_in_database(&counters, iterations),
+        &mut |iterations| commit_to_database(&plain, iterations),
+    )?;
+    Ok(vec![
+        Metric::ratio(INCREMENT, "ratio_to_put_commit", measured.ratio),
+        Metric::reported(INCREMENT, "ns_per_increment", measured.subject_ns),
+        Metric::reported(INCREMENT, "reference_ns_per_commit", measured.reference_ns),
+    ])
+}
+
+pub(crate) const BACKUP: &str = "database.backup";
+const BACKUP_ENTRIES: u64 = 10_000;
+
+fn per_entry<'a>(
+    round: &'a mut dyn FnMut() -> Result<Duration, String>,
+) -> impl FnMut(u64) -> Result<Duration, String> + 'a {
+    move |entries| {
+        let rounds = entries.div_ceil(BACKUP_ENTRIES).max(1);
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..rounds {
+            elapsed += round()?;
+        }
+        Ok(elapsed.mul_f64(entries as f64 / (rounds * BACKUP_ENTRIES) as f64))
+    }
+}
+
+fn backup_once(db: &Database, copy: &Path) -> Result<Duration, String> {
+    let start = Instant::now();
+    db.backup_to(copy).map_err(failed("backup"))?;
+    let elapsed = start.elapsed();
+    std::fs::remove_file(copy).map_err(failed("remove the backup"))?;
+    Ok(elapsed)
+}
+
+fn fill_once(path: &Path) -> Result<Duration, String> {
+    let start = Instant::now();
+    let options = Options::new()
+        .cache_bytes(CACHE_BYTES)
+        .durability(Durability::Normal);
+    let db = Database::open_with(path, options).map_err(failed("open"))?;
+    db.write(|tx| {
+        for index in 0..BACKUP_ENTRIES {
+            tx.put(key(index), value(index))?;
+        }
+        Ok(())
+    })
+    .map_err(failed("fill"))?;
+    db.close().map_err(failed("close"))?;
+    let elapsed = start.elapsed();
+    std::fs::remove_file(path).map_err(failed("remove the filled file"))?;
+    Ok(elapsed)
+}
+
+pub(crate) fn backup(_allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
+    let source_file = BenchFile::new("database-backup")?;
+    let copy_file = BenchFile::new("database-backup-copy")?;
+    let reference_file = BenchFile::new("database-backup-reference")?;
+    let source = database_with(&source_file.path, BACKUP_ENTRIES, Durability::Off)?;
+    let mut backup_round = || backup_once(&source, &copy_file.path);
+    let mut fill_round = || fill_once(&reference_file.path);
+    let measured = measure::paired_timed(
+        &mut per_entry(&mut backup_round),
+        &mut per_entry(&mut fill_round),
+    )?;
+    Ok(vec![
+        Metric::ratio(BACKUP, "ratio_to_fill", measured.ratio),
+        Metric::reported(BACKUP, "ns_per_entry", measured.subject_ns),
+        Metric::reported(BACKUP, "reference_ns_per_entry", measured.reference_ns),
     ])
 }

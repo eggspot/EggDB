@@ -12,6 +12,7 @@ eggdb = { path = "../eggdb" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-storage = { path = "../eggdb-storage" }
+eggdb-tls = { path = "../eggdb-tls" }
 
 [lints]
 workspace = true

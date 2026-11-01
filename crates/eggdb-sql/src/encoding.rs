@@ -3,11 +3,23 @@ use crate::datetime;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
-use crate::types::{NumericModifier, SqlType, Value};
+use crate::types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 
 mod catalog;
+mod defined;
+mod packages;
+mod partitions;
+mod routines;
+mod triggers;
 
 pub(crate) use catalog::*;
+pub(crate) use defined::*;
+pub(crate) use packages::{decode_package, encode_package, package_key, packages_prefix};
+pub(crate) use partitions::{
+    decode_partitioning, encode_partitioning, partition_key, partitions_prefix,
+};
+pub(crate) use routines::{decode_routines, encode_routines, routine_key, routines_prefix};
+pub(crate) use triggers::{decode_triggers, encode_triggers, trigger_key, triggers_prefix};
 
 pub(crate) const NAMESPACE: &[u8] = &[0xFF, b'S', b'Q', b'L', 0x00];
 const META_SPACE: u8 = 0x01;
@@ -22,12 +34,22 @@ const MORE_TYPES_FORMAT_VERSION: u8 = 5;
 const CONSTRAINTS_FORMAT_VERSION: u8 = 6;
 const SCHEMA_FORMAT_VERSION: u8 = 7;
 pub(crate) const VIEW_FORMAT_VERSION: u8 = 8;
+const IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION: u8 = 9;
+const DEFINED_TYPES_FORMAT_VERSION: u8 = 10;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = DEFINED_TYPES_FORMAT_VERSION;
+const CONSTRAINT_NOT_VALIDATED: u8 = 1;
+const CONSTRAINT_INITIALLY_DEFERRED: u8 = 2;
+const FIRST_USER_TYPE_OID: u32 = 16_384;
+const MAX_NESTING: usize = 32;
+const UNIQUE_INDEX_WITHOUT_CONSTRAINT: u8 = 1;
 const SEQUENCE_SPACE: u8 = 0x05;
 const REFERENCE_SPACE: u8 = 0x06;
 const NO_PRECISION: u8 = 0xFF;
 const DEFAULT_ABSENT: u8 = 0;
 const DEFAULT_EXPRESSION: u8 = 1;
 const DEFAULT_AUTO_INCREMENT: u8 = 2;
+const DEFAULT_EXPRESSION_IN_DIALECT: u8 = 3;
+const DEFAULT_IDENTITY_SEED: u8 = 4;
 pub(crate) const PRESENT: u8 = 0x01;
 pub(crate) const NULL_IN_KEY: u8 = 0x02;
 pub(crate) const MAX_COLUMNS: usize = 1600;
@@ -97,6 +119,109 @@ pub(crate) fn index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
     key
 }
 
+const TEMPORARY_ACTION_SPACE: u8 = 0x0F;
+
+pub(crate) fn temporary_action_key(name: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(TEMPORARY_ACTION_SPACE);
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+pub(crate) fn temporary_actions_prefix() -> Vec<u8> {
+    temporary_action_key("")
+}
+
+fn split_length_prefixed(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut length = 0u64;
+    for (at, byte) in bytes.iter().enumerate().take(10) {
+        length |= u64::from(byte & 0x7F) << (7 * at);
+        if byte & 0x80 == 0 {
+            let start = at + 1;
+            let end = start.checked_add(usize::try_from(length).ok()?)?;
+            return Some((bytes.get(start..end)?, bytes.get(end..)?));
+        }
+    }
+    None
+}
+
+fn names_temporary_object(name: &[u8]) -> bool {
+    std::str::from_utf8(name).is_ok_and(crate::temporary::is_temporary_name)
+}
+
+fn has_temporary_id(rest: &[u8]) -> bool {
+    rest.get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .is_some_and(|bytes| crate::temporary::is_temporary_id(u32::from_be_bytes(bytes)))
+}
+
+pub(crate) fn is_temporary_key(key: &[u8]) -> bool {
+    let Some(rest) = key.strip_prefix(NAMESPACE) else {
+        return false;
+    };
+    let Some((&space, rest)) = rest.split_first() else {
+        return false;
+    };
+    match space {
+        TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE | partitions::PARTITION_SPACE => {
+            names_temporary_object(rest)
+        }
+        ROW_SPACE | INDEX_SPACE => has_temporary_id(rest),
+        TEMPORARY_ACTION_SPACE => true,
+        REFERENCE_SPACE | catalog::DEPENDENCY_SPACE => {
+            split_length_prefixed(rest).is_some_and(|(owner, tail)| {
+                names_temporary_object(owner) || names_temporary_object(tail)
+            })
+        }
+        catalog::COMMENT_SPACE => {
+            split_length_prefixed(rest).is_some_and(|(owner, _)| names_temporary_object(owner))
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyOwner<'k> {
+    Everyone,
+    Relation(&'k [u8]),
+    Table(u32),
+    Relations(&'k [u8], &'k [u8]),
+    CommentOn(&'k [u8]),
+    Unreadable,
+}
+
+pub(crate) fn key_owner(key: &[u8]) -> KeyOwner<'_> {
+    if is_temporary_key(key) {
+        return KeyOwner::Everyone;
+    }
+    let Some(rest) = key.strip_prefix(NAMESPACE) else {
+        return KeyOwner::Everyone;
+    };
+    let Some((&space, rest)) = rest.split_first() else {
+        return KeyOwner::Everyone;
+    };
+    match space {
+        TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE | partitions::PARTITION_SPACE => {
+            KeyOwner::Relation(rest)
+        }
+        ROW_SPACE | INDEX_SPACE => rest
+            .get(..4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map_or(KeyOwner::Unreadable, |bytes| {
+                KeyOwner::Table(u32::from_be_bytes(bytes))
+            }),
+        REFERENCE_SPACE | catalog::DEPENDENCY_SPACE => split_length_prefixed(rest)
+            .map_or(KeyOwner::Unreadable, |(first, second)| {
+                KeyOwner::Relations(first, second)
+            }),
+        catalog::COMMENT_SPACE => split_length_prefixed(rest)
+            .map_or(KeyOwner::Unreadable, |(owner, _)| {
+                KeyOwner::CommentOn(owner)
+            }),
+        _ => KeyOwner::Everyone,
+    }
+}
+
 pub(crate) fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     let mut end = prefix.to_vec();
     while let Some(last) = end.pop() {
@@ -156,6 +281,25 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Bpchar(_) => 20,
         SqlType::Array(_) => 21,
         SqlType::Catalog(_) => 22,
+        SqlType::Defined(_) => 23,
+        SqlType::Dynamic => 24,
+    }
+}
+
+fn is_version_10_type(sql_type: SqlType) -> bool {
+    matches!(
+        sql_type,
+        SqlType::Array(_) | SqlType::Defined(_) | SqlType::Dynamic
+    )
+}
+
+const STORAGE_CLASS_TAGS: [u8; 4] = [3, 5, 7, 18];
+
+fn column_holds_tag(sql_type: SqlType, tag: u8) -> bool {
+    if sql_type == SqlType::Dynamic {
+        STORAGE_CLASS_TAGS.contains(&tag)
+    } else {
+        tag == value_tag(sql_type)
     }
 }
 
@@ -188,6 +332,11 @@ fn put_type(out: &mut Vec<u8>, sql_type: SqlType) {
             out.push(precision.unwrap_or(NO_PRECISION));
         }
         SqlType::Bpchar(length) => out.extend_from_slice(&length.unwrap_or(0).to_le_bytes()),
+        SqlType::Array(element) => out.push(element.code()),
+        SqlType::Defined(defined) => {
+            out.push(defined_kind_code(defined.kind));
+            out.extend_from_slice(&defined.oid.to_le_bytes());
+        }
         _ => {}
     }
 }
@@ -201,12 +350,192 @@ pub(crate) struct Column {
     pub(crate) auto_increment: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct IndexDefinition {
     pub(crate) id: u32,
     pub(crate) name: String,
     pub(crate) unique: bool,
     pub(crate) columns: Vec<usize>,
+    pub(crate) method: IndexMethod,
+    pub(crate) sort_options: SortOptions,
+    pub(crate) backs_unique_constraint: bool,
+}
+
+impl IndexDefinition {
+    fn needs_options_version(&self) -> bool {
+        self.method != IndexMethod::BTree
+            || !self.sort_options.is_default()
+            || (self.unique && !self.backs_unique_constraint)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum IndexMethod {
+    #[default]
+    BTree,
+    Hash,
+}
+
+impl IndexMethod {
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        [Self::BTree, Self::Hash]
+            .into_iter()
+            .find(|method| name.eq_ignore_ascii_case(method.name()))
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::BTree => "btree",
+            Self::Hash => "hash",
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::BTree => 0,
+            Self::Hash => 1,
+        }
+    }
+
+    fn of_code(code: u8) -> Option<Self> {
+        [Self::BTree, Self::Hash]
+            .into_iter()
+            .find(|method| method.code() == code)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SortOptions {
+    descending: u32,
+    nulls_first: u32,
+}
+
+impl SortOptions {
+    fn bit(position: usize) -> u32 {
+        u32::try_from(position)
+            .ok()
+            .and_then(|position| 1u32.checked_shl(position))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn with_column(
+        mut self,
+        position: usize,
+        descending: bool,
+        nulls_first: bool,
+    ) -> Self {
+        let bit = Self::bit(position);
+        if descending {
+            self.descending |= bit;
+        }
+        if nulls_first {
+            self.nulls_first |= bit;
+        }
+        self
+    }
+
+    pub(crate) fn is_descending(self, position: usize) -> bool {
+        self.descending & Self::bit(position) != 0
+    }
+
+    pub(crate) fn has_nulls_first(self, position: usize) -> bool {
+        self.nulls_first & Self::bit(position) != 0
+    }
+
+    pub(crate) fn is_default(self) -> bool {
+        self == Self::default()
+    }
+
+    fn fits(self, width: usize) -> bool {
+        let mask = u32::try_from(width)
+            .ok()
+            .and_then(|width| 1u32.checked_shl(width))
+            .map_or(u32::MAX, |bit| bit - 1);
+        (self.descending | self.nulls_first) & !mask == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentityGeneration {
+    Always,
+    ByDefault,
+}
+
+impl IdentityGeneration {
+    fn code(self) -> u8 {
+        match self {
+            Self::Always => 1,
+            Self::ByDefault => 2,
+        }
+    }
+
+    fn of_code(code: u8) -> Option<Self> {
+        [Self::Always, Self::ByDefault]
+            .into_iter()
+            .find(|generation| generation.code() == code)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdentityColumn {
+    pub(crate) column: usize,
+    pub(crate) generation: IdentityGeneration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdentitySeed {
+    pub(crate) seed: i64,
+    pub(crate) increment: i64,
+}
+
+impl IdentitySeed {
+    pub(crate) const ONE_BY_ONE: Self = Self {
+        seed: 1,
+        increment: 1,
+    };
+
+    pub(crate) fn scans_backward(self) -> bool {
+        self.increment > 0
+    }
+
+    pub(crate) fn next_after(self, last: Option<i64>) -> Option<i64> {
+        let Some(last) = last else {
+            return Some(self.seed);
+        };
+        let before_seed = self.seed.saturating_sub(self.increment);
+        let from = if self.increment > 0 {
+            last.max(before_seed)
+        } else {
+            last.min(before_seed)
+        };
+        from.checked_add(self.increment)
+    }
+
+    pub(crate) fn is_beyond(self, candidate: i64, next: i64) -> bool {
+        if self.increment > 0 {
+            candidate > next
+        } else {
+            candidate < next
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DefaultDialect {
+    pub(crate) column: usize,
+    pub(crate) dialect: crate::Dialect,
+}
+
+fn identity_generation(
+    column: &Column,
+    stored: Option<IdentityGeneration>,
+) -> Option<IdentityGeneration> {
+    match (column.auto_increment, stored) {
+        (true, Some(IdentityGeneration::Always)) => Some(IdentityGeneration::Always),
+        (true, _) => Some(IdentityGeneration::ByDefault),
+        (false, Some(generation)) if column.default.is_some() => Some(generation),
+        (false, _) => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,6 +556,32 @@ pub(crate) struct ForeignKey {
     pub(crate) deferrable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColumnDomain {
+    pub(crate) column: usize,
+    pub(crate) oid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConstraintStatus {
+    pub(crate) name: String,
+    pub(crate) validated: bool,
+    pub(crate) initially_deferred: bool,
+}
+
+impl ConstraintStatus {
+    fn flags(&self) -> u8 {
+        let mut flags = 0;
+        if !self.validated {
+            flags |= CONSTRAINT_NOT_VALIDATED;
+        }
+        if self.initially_deferred {
+            flags |= CONSTRAINT_INITIALLY_DEFERRED;
+        }
+        flags
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct TableDefinition {
     pub(crate) id: u32,
@@ -239,6 +594,11 @@ pub(crate) struct TableDefinition {
     pub(crate) foreign_keys: Vec<ForeignKey>,
     pub(crate) referenced: bool,
     pub(crate) owns_sequence: bool,
+    pub(crate) identities: Vec<IdentityColumn>,
+    pub(crate) identity_seed: Option<IdentitySeed>,
+    pub(crate) default_dialects: Vec<DefaultDialect>,
+    pub(crate) domains: Vec<ColumnDomain>,
+    pub(crate) constraint_statuses: Vec<ConstraintStatus>,
 }
 
 fn dialect_code(dialect: crate::Dialect) -> u8 {
@@ -271,6 +631,202 @@ impl TableDefinition {
         self.columns.iter().position(|column| column.auto_increment)
     }
 
+    pub(crate) fn identity_seed(&self) -> IdentitySeed {
+        self.stored_identity_seed()
+            .unwrap_or(IdentitySeed::ONE_BY_ONE)
+    }
+
+    fn stored_identity_seed(&self) -> Option<IdentitySeed> {
+        self.identity_seed.filter(|seed| {
+            *seed != IdentitySeed::ONE_BY_ONE && self.auto_increment_column().is_some()
+        })
+    }
+
+    pub(crate) fn default_dialect(&self, column: usize) -> crate::Dialect {
+        self.default_dialects
+            .iter()
+            .find(|entry| entry.column == column)
+            .map_or(crate::Dialect::PostgreSql, |entry| entry.dialect)
+    }
+
+    pub(crate) fn set_default_dialect(&mut self, column: usize, dialect: crate::Dialect) {
+        self.default_dialects.retain(|entry| entry.column != column);
+        if dialect != crate::Dialect::PostgreSql {
+            self.default_dialects
+                .push(DefaultDialect { column, dialect });
+            self.default_dialects.sort_by_key(|entry| entry.column);
+        }
+    }
+
+    pub(crate) fn default_dialects_without_column(&self, removed: usize) -> Vec<DefaultDialect> {
+        self.default_dialects
+            .iter()
+            .filter(|entry| entry.column != removed)
+            .map(|entry| DefaultDialect {
+                column: if entry.column > removed {
+                    entry.column - 1
+                } else {
+                    entry.column
+                },
+                dialect: entry.dialect,
+            })
+            .collect()
+    }
+
+    fn stored_default_dialect(&self, column: usize) -> crate::Dialect {
+        match self.columns.get(column) {
+            Some(found) if found.default.is_some() && !found.auto_increment => {
+                self.default_dialect(column)
+            }
+            _ => crate::Dialect::PostgreSql,
+        }
+    }
+
+    fn has_default_in_another_dialect(&self) -> bool {
+        (0..self.columns.len())
+            .any(|column| self.stored_default_dialect(column) != crate::Dialect::PostgreSql)
+    }
+
+    pub(crate) fn domain_of(&self, column: usize) -> Option<u32> {
+        self.domains
+            .iter()
+            .find(|entry| entry.column == column)
+            .map(|entry| entry.oid)
+    }
+
+    pub(crate) fn set_domain(&mut self, column: usize, oid: Option<u32>) {
+        self.domains.retain(|entry| entry.column != column);
+        if let Some(oid) = oid {
+            self.domains.push(ColumnDomain { column, oid });
+            self.domains.sort_by_key(|entry| entry.column);
+        }
+    }
+
+    pub(crate) fn domains_without_column(&self, removed: usize) -> Vec<ColumnDomain> {
+        self.domains
+            .iter()
+            .filter(|entry| entry.column != removed)
+            .map(|entry| ColumnDomain {
+                column: if entry.column > removed {
+                    entry.column - 1
+                } else {
+                    entry.column
+                },
+                oid: entry.oid,
+            })
+            .collect()
+    }
+
+    pub(crate) fn is_validated(&self, constraint: &str) -> bool {
+        self.constraint_statuses
+            .iter()
+            .find(|status| status.name == constraint)
+            .is_none_or(|status| status.validated)
+    }
+
+    pub(crate) fn is_initially_deferred(&self, constraint: &str) -> bool {
+        self.constraint_statuses
+            .iter()
+            .find(|status| status.name == constraint)
+            .is_some_and(|status| status.initially_deferred)
+    }
+
+    pub(crate) fn set_status(
+        &mut self,
+        constraint: &str,
+        validated: bool,
+        initially_deferred: bool,
+    ) {
+        self.constraint_statuses
+            .retain(|status| status.name != constraint);
+        if !validated || initially_deferred {
+            self.constraint_statuses.push(ConstraintStatus {
+                name: constraint.to_owned(),
+                validated,
+                initially_deferred,
+            });
+            self.constraint_statuses
+                .sort_by(|left, right| left.name.cmp(&right.name));
+        }
+    }
+
+    pub(crate) fn rename_status(&mut self, from: &str, to: &str) {
+        if let Some(status) = self
+            .constraint_statuses
+            .iter_mut()
+            .find(|status| status.name == from)
+        {
+            status.name = to.to_owned();
+        }
+        self.constraint_statuses
+            .sort_by(|left, right| left.name.cmp(&right.name));
+    }
+
+    pub(crate) fn forget_missing_statuses(&mut self) {
+        let checks = &self.checks;
+        let keys = &self.foreign_keys;
+        self.constraint_statuses.retain(|status| {
+            checks.iter().any(|check| check.name == status.name)
+                || keys.iter().any(|key| key.name == status.name)
+        });
+    }
+
+    fn needs_defined_version(&self) -> bool {
+        !self.domains.is_empty()
+            || !self.constraint_statuses.is_empty()
+            || self
+                .columns
+                .iter()
+                .any(|column| is_version_10_type(column.sql_type))
+    }
+
+    fn encode_defined(&self, out: &mut Vec<u8>) {
+        put_varint(out, self.domains.len() as u64);
+        for entry in &self.domains {
+            put_varint(out, entry.column as u64);
+            out.extend_from_slice(&entry.oid.to_le_bytes());
+        }
+        put_varint(out, self.constraint_statuses.len() as u64);
+        for status in &self.constraint_statuses {
+            put_bytes(out, status.name.as_bytes());
+            out.push(status.flags());
+        }
+    }
+
+    fn defined_parts_fit(&self) -> bool {
+        let domains_fit = self.domains.iter().enumerate().all(|(at, entry)| {
+            entry.column < self.columns.len()
+                && entry.oid >= FIRST_USER_TYPE_OID
+                && at
+                    .checked_sub(1)
+                    .and_then(|previous| self.domains.get(previous))
+                    .is_none_or(|previous| previous.column < entry.column)
+                && self.columns[entry.column]
+                    .sql_type
+                    .defined()
+                    .is_none_or(|defined| defined.kind != DefinedKind::Domain)
+        });
+        let statuses_fit = self
+            .constraint_statuses
+            .iter()
+            .enumerate()
+            .all(|(at, status)| {
+                let key = self.foreign_keys.iter().find(|key| key.name == status.name);
+                let names_constraint =
+                    key.is_some() || self.checks.iter().any(|check| check.name == status.name);
+                let deferral_fits =
+                    !status.initially_deferred || key.is_some_and(|key| key.deferrable);
+                names_constraint
+                    && deferral_fits
+                    && status.flags() != 0
+                    && at
+                        .checked_sub(1)
+                        .and_then(|previous| self.constraint_statuses.get(previous))
+                        .is_none_or(|previous| previous.name < status.name)
+            });
+        domains_fit && statuses_fit
+    }
+
     pub(crate) fn index_named(&self, name: &str) -> Option<&IndexDefinition> {
         self.indexes.iter().find(|index| index.name == name)
     }
@@ -296,8 +852,101 @@ impl TableDefinition {
             || (!self.primary_key.is_empty() && self.primary_key_constraint_name() == name)
     }
 
+    pub(crate) fn identity_of(&self, column: usize) -> Option<IdentityGeneration> {
+        let found = self.columns.get(column)?;
+        let stored = self
+            .identities
+            .iter()
+            .find(|identity| identity.column == column)
+            .map(|identity| identity.generation);
+        identity_generation(found, stored)
+    }
+
+    pub(crate) fn has_stored_identity(&self, column: usize) -> bool {
+        self.stored_identities()
+            .iter()
+            .any(|identity| identity.column == column)
+    }
+
+    pub(crate) fn is_generated_always(&self, column: usize) -> bool {
+        self.identity_of(column) == Some(IdentityGeneration::Always)
+    }
+
+    pub(crate) fn set_identity(&mut self, column: usize, generation: Option<IdentityGeneration>) {
+        self.identities.retain(|identity| identity.column != column);
+        if let Some(generation) = generation {
+            self.identities.push(IdentityColumn { column, generation });
+            self.identities.sort_by_key(|identity| identity.column);
+        }
+    }
+
+    pub(crate) fn identities_without_column(&self, removed: usize) -> Vec<IdentityColumn> {
+        self.identities
+            .iter()
+            .filter(|identity| identity.column != removed)
+            .map(|identity| IdentityColumn {
+                column: if identity.column > removed {
+                    identity.column - 1
+                } else {
+                    identity.column
+                },
+                generation: identity.generation,
+            })
+            .collect()
+    }
+
+    fn stored_identities(&self) -> Vec<IdentityColumn> {
+        self.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(column, found)| {
+                let stored = self
+                    .identities
+                    .iter()
+                    .find(|identity| identity.column == column)?
+                    .generation;
+                let generation = identity_generation(found, Some(stored))?;
+                (!found.auto_increment || generation == IdentityGeneration::Always)
+                    .then_some(IdentityColumn { column, generation })
+            })
+            .collect()
+    }
+
+    fn needs_options_version(&self) -> bool {
+        !self.stored_identities().is_empty()
+            || self.stored_identity_seed().is_some()
+            || self.has_default_in_another_dialect()
+            || self
+                .indexes
+                .iter()
+                .any(IndexDefinition::needs_options_version)
+    }
+
+    fn encode_options(&self, out: &mut Vec<u8>) {
+        let identities = self.stored_identities();
+        put_varint(out, identities.len() as u64);
+        for identity in &identities {
+            put_varint(out, identity.column as u64);
+            out.push(identity.generation.code());
+        }
+        for index in &self.indexes {
+            out.push(index.method.code());
+            out.push(if index.unique && !index.backs_unique_constraint {
+                UNIQUE_INDEX_WITHOUT_CONSTRAINT
+            } else {
+                0
+            });
+            out.extend_from_slice(&index.sort_options.descending.to_le_bytes());
+            out.extend_from_slice(&index.sort_options.nulls_first.to_le_bytes());
+        }
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if crate::schemas::is_qualified(&self.name) {
+        let version = if self.needs_defined_version() {
+            DEFINED_TYPES_FORMAT_VERSION
+        } else if self.needs_options_version() {
+            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+        } else if crate::schemas::is_qualified(&self.name) {
             SCHEMA_FORMAT_VERSION
         } else if self.has_constraints() {
             CONSTRAINTS_FORMAT_VERSION
@@ -323,17 +972,30 @@ impl TableDefinition {
         let mut out = vec![version];
         out.extend_from_slice(&self.id.to_le_bytes());
         put_varint(&mut out, self.columns.len() as u64);
-        for column in &self.columns {
+        let seed = self.stored_identity_seed();
+        for (at, column) in self.columns.iter().enumerate() {
             put_bytes(&mut out, column.name.as_bytes());
             put_type(&mut out, column.sql_type);
             out.push(u8::from(column.not_null));
-            match &column.default {
-                _ if column.auto_increment => out.push(DEFAULT_AUTO_INCREMENT),
-                Some(text) => {
-                    out.push(DEFAULT_EXPRESSION);
-                    put_bytes(&mut out, text.as_bytes());
+            match (&column.default, seed) {
+                (_, Some(seed)) if column.auto_increment => {
+                    out.push(DEFAULT_IDENTITY_SEED);
+                    out.extend_from_slice(&seed.seed.to_le_bytes());
+                    out.extend_from_slice(&seed.increment.to_le_bytes());
                 }
-                None => out.push(DEFAULT_ABSENT),
+                _ if column.auto_increment => out.push(DEFAULT_AUTO_INCREMENT),
+                (Some(text), _) => match self.stored_default_dialect(at) {
+                    crate::Dialect::PostgreSql => {
+                        out.push(DEFAULT_EXPRESSION);
+                        put_bytes(&mut out, text.as_bytes());
+                    }
+                    dialect => {
+                        out.push(DEFAULT_EXPRESSION_IN_DIALECT);
+                        out.push(dialect_code(dialect));
+                        put_bytes(&mut out, text.as_bytes());
+                    }
+                },
+                (None, _) => out.push(DEFAULT_ABSENT),
             }
         }
         put_varint(&mut out, self.primary_key.len() as u64);
@@ -354,6 +1016,12 @@ impl TableDefinition {
         }
         if version >= CONSTRAINTS_FORMAT_VERSION {
             self.encode_constraints(&mut out);
+        }
+        if version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
+            self.encode_options(&mut out);
+        }
+        if version == DEFINED_TYPES_FORMAT_VERSION {
+            self.encode_defined(&mut out);
         }
         out
     }
@@ -392,16 +1060,24 @@ impl TableDefinition {
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(VIEW_FORMAT_VERSION)?;
+        let version = reader.version_up_to(NEWEST_TABLE_FORMAT_VERSION)?;
         if version == VIEW_FORMAT_VERSION {
             return Err(crate::views::not_a_table(name));
         }
-        if (version == SCHEMA_FORMAT_VERSION) != crate::schemas::is_qualified(name)
-            || !crate::schemas::is_well_formed(name)
-        {
+        let qualified = crate::schemas::is_qualified(name);
+        let name_fits_version = match version {
+            SCHEMA_FORMAT_VERSION => qualified,
+            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION | DEFINED_TYPES_FORMAT_VERSION => true,
+            _ => !qualified,
+        };
+        if !name_fits_version || !crate::schemas::is_well_formed(name) {
             return Err(reader.damaged());
         }
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
+        let options_allowed = version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
+        let defined_allowed = version == DEFINED_TYPES_FORMAT_VERSION;
+        let mut identity_seed = None;
+        let mut default_dialects = Vec::new();
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
         let more_types_allowed = version >= MORE_TYPES_FORMAT_VERSION;
         let id = reader.u32()?;
@@ -415,7 +1091,15 @@ impl TableDefinition {
             if name.contains(crate::schemas::QUALIFIER) {
                 return Err(reader.damaged());
             }
-            let sql_type = reader.sql_type(new_types_allowed, more_types_allowed)?;
+            let sql_type =
+                reader.sql_type(new_types_allowed, more_types_allowed, defined_allowed)?;
+            if sql_type
+                .defined()
+                .is_some_and(|defined| defined.kind == DefinedKind::Domain)
+                || matches!(sql_type, SqlType::Array(element) if !element.is_storable())
+            {
+                return Err(reader.damaged());
+            }
             let not_null = match reader.byte()? {
                 0 => false,
                 1 => true,
@@ -425,6 +1109,34 @@ impl TableDefinition {
                 DEFAULT_ABSENT => (None, false),
                 DEFAULT_EXPRESSION => (Some(reader.text()?), false),
                 DEFAULT_AUTO_INCREMENT if auto_allowed => (None, true),
+                DEFAULT_EXPRESSION_IN_DIALECT if options_allowed => {
+                    let dialect = dialect_of(reader.byte()?)
+                        .filter(|dialect| *dialect != crate::Dialect::PostgreSql)
+                        .ok_or_else(|| reader.damaged())?;
+                    let text = reader.text()?;
+                    if text.trim().is_empty() {
+                        return Err(reader.damaged());
+                    }
+                    default_dialects.push(DefaultDialect {
+                        column: columns.len(),
+                        dialect,
+                    });
+                    (Some(text), false)
+                }
+                DEFAULT_IDENTITY_SEED if options_allowed => {
+                    let seed = IdentitySeed {
+                        seed: i64::from_le_bytes(reader.array()?),
+                        increment: i64::from_le_bytes(reader.array()?),
+                    };
+                    if seed.increment == 0
+                        || seed == IdentitySeed::ONE_BY_ONE
+                        || identity_seed.is_some()
+                    {
+                        return Err(reader.damaged());
+                    }
+                    identity_seed = Some(seed);
+                    (None, true)
+                }
                 _ => return Err(reader.damaged()),
             };
             if columns.iter().any(|column: &Column| column.name == name) {
@@ -447,18 +1159,30 @@ impl TableDefinition {
             }
             primary_key.push(index);
         }
-        let indexes = match version {
+        let mut indexes = match version {
             INDEXES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), false)?,
             TYPES_FORMAT_VERSION
             | MORE_TYPES_FORMAT_VERSION
             | CONSTRAINTS_FORMAT_VERSION
-            | SCHEMA_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            | SCHEMA_FORMAT_VERSION
+            | IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+            | DEFINED_TYPES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
             Some(decode_constraints(&mut reader, &columns, &indexes)?)
         } else {
             None
+        };
+        let identities = if version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
+            decode_options(&mut reader, columns.len(), &mut indexes)?
+        } else {
+            Vec::new()
+        };
+        let (domains, constraint_statuses) = if version == DEFINED_TYPES_FORMAT_VERSION {
+            decode_defined(&mut reader)?
+        } else {
+            (Vec::new(), Vec::new())
         };
         reader.finish()?;
         let newest_type_needed = if more_types_allowed {
@@ -513,12 +1237,112 @@ impl TableDefinition {
             foreign_keys,
             referenced,
             owns_sequence,
+            identities,
+            identity_seed,
+            default_dialects,
+            domains,
+            constraint_statuses,
         };
         if version == CONSTRAINTS_FORMAT_VERSION && !table.has_constraints() {
             return Err(reader.damaged());
         }
+        if version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+            && table.stored_identities() != table.identities
+        {
+            return Err(reader.damaged());
+        }
+        if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION && !table.needs_options_version() {
+            return Err(reader.damaged());
+        }
+        if version == DEFINED_TYPES_FORMAT_VERSION
+            && (!table.needs_defined_version() || !table.defined_parts_fit())
+        {
+            return Err(reader.damaged());
+        }
         Ok(table)
     }
+}
+
+type DefinedParts = (Vec<ColumnDomain>, Vec<ConstraintStatus>);
+
+fn decode_defined(reader: &mut Reader<'_>) -> SqlResult<DefinedParts> {
+    let count = reader.count()?;
+    if count > MAX_COLUMNS {
+        return Err(reader.damaged());
+    }
+    let mut domains = Vec::with_capacity(count);
+    for _ in 0..count {
+        let column = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+        let oid = reader.u32()?;
+        domains.push(ColumnDomain { column, oid });
+    }
+    let count = reader.count()?;
+    if count > 2 * MAX_CONSTRAINTS {
+        return Err(reader.damaged());
+    }
+    let mut statuses = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = reader.plain_name()?;
+        let flags = reader.byte()?;
+        if flags & !(CONSTRAINT_NOT_VALIDATED | CONSTRAINT_INITIALLY_DEFERRED) != 0 {
+            return Err(reader.damaged());
+        }
+        statuses.push(ConstraintStatus {
+            name,
+            validated: flags & CONSTRAINT_NOT_VALIDATED == 0,
+            initially_deferred: flags & CONSTRAINT_INITIALLY_DEFERRED != 0,
+        });
+    }
+    Ok((domains, statuses))
+}
+
+fn decode_options(
+    reader: &mut Reader<'_>,
+    column_count: usize,
+    indexes: &mut [IndexDefinition],
+) -> SqlResult<Vec<IdentityColumn>> {
+    let count = reader.count()?;
+    if count > column_count {
+        return Err(reader.damaged());
+    }
+    let mut identities: Vec<IdentityColumn> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let column = usize::try_from(reader.varint()?).map_err(|_| reader.damaged())?;
+        let generation =
+            IdentityGeneration::of_code(reader.byte()?).ok_or_else(|| reader.damaged())?;
+        if column >= column_count
+            || identities
+                .last()
+                .is_some_and(|previous| previous.column >= column)
+        {
+            return Err(reader.damaged());
+        }
+        identities.push(IdentityColumn { column, generation });
+    }
+    for index in indexes.iter_mut() {
+        let method = IndexMethod::of_code(reader.byte()?).ok_or_else(|| reader.damaged())?;
+        let without_constraint = match reader.byte()? {
+            0 => false,
+            UNIQUE_INDEX_WITHOUT_CONSTRAINT => true,
+            _ => return Err(reader.damaged()),
+        };
+        let sort_options = SortOptions {
+            descending: u32::from_le_bytes(reader.array()?),
+            nulls_first: u32::from_le_bytes(reader.array()?),
+        };
+        let hash_misused = method == IndexMethod::Hash
+            && (index.unique || index.columns.len() != 1 || !sort_options.is_default());
+        if (without_constraint && !index.unique)
+            || !sort_options.fits(index.columns.len())
+            || hash_misused
+        {
+            return Err(reader.damaged());
+        }
+        index.method = method;
+        index.sort_options = sort_options;
+        index.backs_unique_constraint = index.unique && !without_constraint;
+    }
+    Ok(identities)
 }
 
 #[derive(Default)]
@@ -788,6 +1612,8 @@ fn decode_indexes(
             name,
             unique,
             columns,
+            backs_unique_constraint: unique,
+            ..IndexDefinition::default()
         });
     }
     Ok(indexes)
@@ -928,6 +1754,15 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
             let number = crate::pg_catalog::oid_number(value).unwrap_or(0);
             out.extend_from_slice(&((number as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
         }
+        Value::Defined(defined) => {
+            out.push(PRESENT);
+            match defined.as_ref() {
+                DefinedValue::Enum(label) => {
+                    out.extend_from_slice(&ordered_double(label.sort_order));
+                }
+                other => push_escaped_text(out, other.to_text().as_bytes()),
+            }
+        }
     }
 }
 
@@ -951,104 +1786,225 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
     out.push(FORMAT_VERSION);
     put_varint(out, values.len() as u64);
     for value in values {
-        match value {
-            Value::Null => out.push(0),
-            Value::SmallInt(number) => {
-                out.push(1);
-                out.extend_from_slice(&number.to_le_bytes());
+        encode_row_value(out, value);
+    }
+}
+
+const ENUM_TAG: u8 = 24;
+const RECORD_TAG: u8 = 25;
+const RANGE_TAG: u8 = 26;
+const RANGE_EMPTY: u8 = 1;
+const RANGE_LOWER: u8 = 2;
+const RANGE_LOWER_INCLUSIVE: u8 = 4;
+const RANGE_UPPER: u8 = 8;
+const RANGE_UPPER_INCLUSIVE: u8 = 16;
+
+fn put_record(out: &mut Vec<u8>, record: &crate::records::RecordValue) {
+    put_varint(out, record.fields.len() as u64);
+    if record.names.is_empty() {
+        out.push(0);
+    } else {
+        out.push(1);
+        for name in &record.names {
+            put_bytes(out, name.as_bytes());
+        }
+    }
+    for field in &record.fields {
+        put_nested(out, field);
+    }
+}
+
+fn put_range(out: &mut Vec<u8>, range: &crate::ranges::RangeValue) {
+    use crate::ranges::RangeBound;
+    let Some(bounds) = &range.bounds else {
+        out.push(RANGE_EMPTY);
+        return;
+    };
+    let mut flags = 0;
+    for (bound, present, inclusive) in [
+        (&bounds.lower, RANGE_LOWER, RANGE_LOWER_INCLUSIVE),
+        (&bounds.upper, RANGE_UPPER, RANGE_UPPER_INCLUSIVE),
+    ] {
+        match bound {
+            RangeBound::Unbounded => {}
+            RangeBound::Inclusive(_) => flags |= present | inclusive,
+            RangeBound::Exclusive(_) => flags |= present,
+        }
+    }
+    out.push(flags);
+    for bound in [&bounds.lower, &bounds.upper] {
+        if let RangeBound::Inclusive(value) | RangeBound::Exclusive(value) = bound {
+            put_nested(out, value);
+        }
+    }
+}
+
+fn put_nested(out: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Array(array) => {
+            out.push(21);
+            out.push(array.element.code());
+            put_bytes(out, &crate::arrays::encode_stored(array));
+        }
+        Value::Defined(defined) => match defined.as_ref() {
+            DefinedValue::Enum(label) => {
+                out.push(ENUM_TAG);
+                out.extend_from_slice(&label.type_oid.to_le_bytes());
+                out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
             }
-            Value::Integer(number) => {
-                out.push(2);
-                out.extend_from_slice(&number.to_le_bytes());
+            DefinedValue::Record(record) => {
+                out.push(RECORD_TAG);
+                out.extend_from_slice(&record.type_oid.to_le_bytes());
+                put_record(out, record);
             }
-            Value::BigInt(number) => {
-                out.push(3);
-                out.extend_from_slice(&number.to_le_bytes());
+            DefinedValue::Range(range) => {
+                out.push(RANGE_TAG);
+                out.extend_from_slice(&range.type_oid.to_le_bytes());
+                put_range(out, range);
             }
-            Value::Real(number) => {
-                out.push(4);
-                out.extend_from_slice(&number.to_bits().to_le_bytes());
+        },
+        other => encode_row_value(out, other),
+    }
+}
+
+fn ordered_double(number: f64) -> [u8; 8] {
+    let canonical = if number.is_nan() {
+        f64::NAN
+    } else if number == 0.0 {
+        0.0
+    } else {
+        number
+    };
+    let bits = canonical.to_bits();
+    let ordered = if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | 1 << 63
+    };
+    ordered.to_be_bytes()
+}
+
+fn double_of_ordered(ordered: u64) -> f64 {
+    let bits = if ordered >> 63 == 1 {
+        ordered & !(1 << 63)
+    } else {
+        !ordered
+    };
+    f64::from_bits(bits)
+}
+
+fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Defined(defined) => match defined.as_ref() {
+            DefinedValue::Enum(label) => {
+                out.push(ENUM_TAG);
+                out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
             }
-            Value::Double(number) => {
-                out.push(5);
-                out.extend_from_slice(&number.to_bits().to_le_bytes());
+            DefinedValue::Record(record) => {
+                out.push(RECORD_TAG);
+                put_record(out, record);
             }
-            Value::Boolean(flag) => {
-                out.push(6);
-                out.push(u8::from(*flag));
+            DefinedValue::Range(range) => {
+                out.push(RANGE_TAG);
+                put_range(out, range);
             }
-            Value::Text(text) => {
-                out.push(7);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Numeric(number) => {
-                out.push(9);
-                number.encode_row(out);
-            }
-            Value::Date(days) => {
-                out.push(10);
-                out.extend_from_slice(&days.to_le_bytes());
-            }
-            Value::Timestamp(micros) => {
-                out.push(11);
-                out.extend_from_slice(&micros.to_le_bytes());
-            }
-            Value::TimestampTz(micros) => {
-                out.push(12);
-                out.extend_from_slice(&micros.to_le_bytes());
-            }
-            Value::Json(text) => {
-                out.push(13);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Jsonb(text) => {
-                out.push(14);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Time(micros) => {
-                out.push(15);
-                out.extend_from_slice(&micros.to_le_bytes());
-            }
-            Value::TimeTz {
-                micros,
-                offset_seconds,
-            } => {
-                out.push(16);
-                out.extend_from_slice(&micros.to_le_bytes());
-                out.extend_from_slice(&offset_seconds.to_le_bytes());
-            }
-            Value::Interval(interval) => {
-                out.push(17);
-                out.extend_from_slice(&interval.months.to_le_bytes());
-                out.extend_from_slice(&interval.days.to_le_bytes());
-                out.extend_from_slice(&interval.micros.to_le_bytes());
-            }
-            Value::Bytea(bytes) => {
-                out.push(18);
-                put_bytes(out, bytes);
-            }
-            Value::Uuid(bytes) => {
-                out.push(19);
-                out.extend_from_slice(bytes);
-            }
-            Value::Bpchar(text) => {
-                out.push(20);
-                put_bytes(out, text.as_bytes());
-            }
-            Value::Array(array) => {
-                out.push(21);
-                put_bytes(out, &crate::arrays::encode_stored(array));
-            }
-            Value::Oid(oid) => {
-                out.push(OID_TAG);
-                out.extend_from_slice(&oid.to_le_bytes());
-            }
-            Value::Reg(reg) => {
-                out.push(REG_TAG);
-                out.push(reg_kind_code(reg.kind));
-                out.extend_from_slice(&reg.oid.to_le_bytes());
-                put_bytes(out, reg.name.as_bytes());
-            }
+        },
+        Value::Null => out.push(0),
+        Value::SmallInt(number) => {
+            out.push(1);
+            out.extend_from_slice(&number.to_le_bytes());
+        }
+        Value::Integer(number) => {
+            out.push(2);
+            out.extend_from_slice(&number.to_le_bytes());
+        }
+        Value::BigInt(number) => {
+            out.push(3);
+            out.extend_from_slice(&number.to_le_bytes());
+        }
+        Value::Real(number) => {
+            out.push(4);
+            out.extend_from_slice(&number.to_bits().to_le_bytes());
+        }
+        Value::Double(number) => {
+            out.push(5);
+            out.extend_from_slice(&number.to_bits().to_le_bytes());
+        }
+        Value::Boolean(flag) => {
+            out.push(6);
+            out.push(u8::from(*flag));
+        }
+        Value::Text(text) => {
+            out.push(7);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Numeric(number) => {
+            out.push(9);
+            number.encode_row(out);
+        }
+        Value::Date(days) => {
+            out.push(10);
+            out.extend_from_slice(&days.to_le_bytes());
+        }
+        Value::Timestamp(micros) => {
+            out.push(11);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::TimestampTz(micros) => {
+            out.push(12);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::Json(text) => {
+            out.push(13);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Jsonb(text) => {
+            out.push(14);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Time(micros) => {
+            out.push(15);
+            out.extend_from_slice(&micros.to_le_bytes());
+        }
+        Value::TimeTz {
+            micros,
+            offset_seconds,
+        } => {
+            out.push(16);
+            out.extend_from_slice(&micros.to_le_bytes());
+            out.extend_from_slice(&offset_seconds.to_le_bytes());
+        }
+        Value::Interval(interval) => {
+            out.push(17);
+            out.extend_from_slice(&interval.months.to_le_bytes());
+            out.extend_from_slice(&interval.days.to_le_bytes());
+            out.extend_from_slice(&interval.micros.to_le_bytes());
+        }
+        Value::Bytea(bytes) => {
+            out.push(18);
+            put_bytes(out, bytes);
+        }
+        Value::Uuid(bytes) => {
+            out.push(19);
+            out.extend_from_slice(bytes);
+        }
+        Value::Bpchar(text) => {
+            out.push(20);
+            put_bytes(out, text.as_bytes());
+        }
+        Value::Array(array) => {
+            out.push(21);
+            put_bytes(out, &crate::arrays::encode_stored(array));
+        }
+        Value::Oid(oid) => {
+            out.push(OID_TAG);
+            out.extend_from_slice(&oid.to_le_bytes());
+        }
+        Value::Reg(reg) => {
+            out.push(REG_TAG);
+            out.push(reg_kind_code(reg.kind));
+            out.extend_from_slice(&reg.oid.to_le_bytes());
+            put_bytes(out, reg.name.as_bytes());
         }
     }
 }
@@ -1090,7 +2046,7 @@ pub(crate) fn decode_row_into(
     }
     for (index, column) in columns[..count].iter().enumerate() {
         let tag = reader.byte()?;
-        if tag != 0 && tag != value_tag(column.sql_type) {
+        if tag != 0 && !column_holds_tag(column.sql_type, tag) {
             return Err(reader.damaged());
         }
         let wanted = needed.is_none_or(|needed| needed.get(index).copied().unwrap_or(true));
@@ -1129,10 +2085,35 @@ pub(crate) fn decode_row_into(
                 reader.skip_text()?;
                 Value::Null
             }
+            ENUM_TAG => {
+                let SqlType::Defined(defined) = column.sql_type else {
+                    return Err(reader.damaged());
+                };
+                let sort_order = reader.sort_order()?;
+                if wanted {
+                    crate::enums::decoded(defined.oid, sort_order)?
+                } else {
+                    Value::Null
+                }
+            }
+            RECORD_TAG => {
+                let SqlType::Defined(defined) = column.sql_type else {
+                    return Err(reader.damaged());
+                };
+                let record = reader.record_body(defined.oid, 0)?;
+                if wanted { record } else { Value::Null }
+            }
+            RANGE_TAG => {
+                let SqlType::Defined(defined) = column.sql_type else {
+                    return Err(reader.damaged());
+                };
+                let range = reader.range_body(defined.oid, 0)?;
+                if wanted { range } else { Value::Null }
+            }
             9 => Value::Numeric(reader.numeric()?),
             15 => {
                 let micros = i64::from_le_bytes(reader.array()?);
-                if !datetime::valid_time(micros) {
+                if !datetime::valid_stored_time(micros) {
                     return Err(reader.damaged());
                 }
                 Value::Time(micros)
@@ -1193,6 +2174,18 @@ pub(crate) fn decode_row_into(
 
 fn value_tag(sql_type: SqlType) -> u8 {
     match sql_type {
+        SqlType::Defined(DefinedType {
+            kind: DefinedKind::Enum,
+            ..
+        }) => ENUM_TAG,
+        SqlType::Defined(DefinedType {
+            kind: DefinedKind::Composite,
+            ..
+        }) => RECORD_TAG,
+        SqlType::Defined(DefinedType {
+            kind: DefinedKind::Range,
+            ..
+        }) => RANGE_TAG,
         SqlType::Varchar(_) => type_tag(SqlType::Text),
         SqlType::Catalog(
             crate::pg_catalog::CatalogType::Oid | crate::pg_catalog::CatalogType::Xid,
@@ -1319,6 +2312,7 @@ impl<'b> Reader<'b> {
         &mut self,
         new_types_allowed: bool,
         more_types_allowed: bool,
+        defined_allowed: bool,
     ) -> SqlResult<SqlType> {
         Ok(match self.byte()? {
             1 => SqlType::SmallInt,
@@ -1348,6 +2342,20 @@ impl<'b> Reader<'b> {
                 length if length <= MAX_CHARACTER_LENGTH => SqlType::Bpchar(Some(length)),
                 _ => return Err(self.damaged()),
             },
+            21 if defined_allowed => SqlType::Array(
+                crate::arrays::ArrayElement::of_code(self.byte()?).ok_or_else(|| self.damaged())?,
+            ),
+            23 if defined_allowed => {
+                let kind = defined_kind_of(self.byte()?).ok_or_else(|| self.damaged())?;
+                let oid = self.u32()?;
+                let builtin = oid == crate::records::RECORD_OID
+                    || (kind == DefinedKind::Range && crate::ranges::builtin(oid).is_some());
+                if oid < FIRST_USER_TYPE_OID && !builtin {
+                    return Err(self.damaged());
+                }
+                SqlType::Defined(DefinedType { kind, oid })
+            }
+            24 if defined_allowed => SqlType::Dynamic,
             _ => return Err(self.damaged()),
         })
     }
@@ -1430,7 +2438,13 @@ impl<'b> Reader<'b> {
             | SqlType::Time(_) => 8,
             SqlType::TimeTz(_) => 12,
             SqlType::Interval { .. } | SqlType::Uuid => 16,
-            SqlType::Array(_) | SqlType::Catalog(_) => return Err(self.damaged()),
+            SqlType::Defined(DefinedType {
+                kind: DefinedKind::Enum,
+                ..
+            }) => 8,
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
+                return Err(self.damaged());
+            }
             SqlType::Numeric(_) => {
                 let rest = self.bytes.get(self.at..).unwrap_or(&[]);
                 Numeric::key_length(rest).ok_or_else(|| self.damaged())?
@@ -1517,7 +2531,7 @@ impl<'b> Reader<'b> {
             }
             SqlType::Time(_) => {
                 let micros = (u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64;
-                if !datetime::valid_time(micros) {
+                if !datetime::valid_stored_time(micros) {
                     return Err(self.damaged());
                 }
                 Value::Time(micros)
@@ -1543,7 +2557,19 @@ impl<'b> Reader<'b> {
                 Value::Interval(Interval::from_span(span).ok_or_else(|| self.damaged())?)
             }
             SqlType::Uuid => Value::Uuid(self.array()?),
-            SqlType::Array(_) | SqlType::Catalog(_) => return Err(self.damaged()),
+            SqlType::Defined(DefinedType {
+                kind: DefinedKind::Enum,
+                oid,
+            }) => {
+                let sort_order = double_of_ordered(u64::from_be_bytes(self.array()?));
+                if !sort_order.is_finite() {
+                    return Err(self.damaged());
+                }
+                crate::enums::decoded(oid, sort_order)?
+            }
+            SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
+                return Err(self.damaged());
+            }
             SqlType::Text
             | SqlType::Varchar(_)
             | SqlType::Json
@@ -1575,6 +2601,187 @@ impl<'b> Reader<'b> {
         })
     }
 
+    fn sort_order(&mut self) -> SqlResult<f64> {
+        let sort_order = f64::from_bits(u64::from_le_bytes(self.array()?));
+        if sort_order.is_finite() {
+            Ok(sort_order)
+        } else {
+            Err(self.damaged())
+        }
+    }
+
+    fn record_body(&mut self, type_oid: u32, depth: usize) -> SqlResult<Value> {
+        let count = self.count()?;
+        if count > MAX_COLUMNS || depth > MAX_NESTING {
+            return Err(self.damaged());
+        }
+        let names = match self.byte()? {
+            0 => Vec::new(),
+            1 => {
+                let mut names = Vec::with_capacity(count);
+                for _ in 0..count {
+                    names.push(self.text()?);
+                }
+                names
+            }
+            _ => return Err(self.damaged()),
+        };
+        if names.is_empty() == (type_oid == crate::records::RECORD_OID) && count > 0 {
+            return Err(self.damaged());
+        }
+        let mut fields = Vec::with_capacity(count);
+        for _ in 0..count {
+            fields.push(self.nested_value(depth + 1)?);
+        }
+        Ok(crate::records::record_value(type_oid, fields, names))
+    }
+
+    fn range_body(&mut self, type_oid: u32, depth: usize) -> SqlResult<Value> {
+        use crate::ranges::{RangeBound, RangeBounds, RangeValue};
+        if depth > MAX_NESTING {
+            return Err(self.damaged());
+        }
+        let flags = self.byte()?;
+        let known =
+            RANGE_EMPTY | RANGE_LOWER | RANGE_LOWER_INCLUSIVE | RANGE_UPPER | RANGE_UPPER_INCLUSIVE;
+        if flags & !known != 0
+            || (flags & RANGE_EMPTY != 0 && flags != RANGE_EMPTY)
+            || (flags & RANGE_LOWER_INCLUSIVE != 0 && flags & RANGE_LOWER == 0)
+            || (flags & RANGE_UPPER_INCLUSIVE != 0 && flags & RANGE_UPPER == 0)
+        {
+            return Err(self.damaged());
+        }
+        let bounds = if flags & RANGE_EMPTY != 0 {
+            None
+        } else {
+            let mut bound = |present: u8, inclusive: u8| -> SqlResult<RangeBound> {
+                if flags & present == 0 {
+                    return Ok(RangeBound::Unbounded);
+                }
+                let value = self.nested_value(depth + 1)?;
+                if value.is_null() {
+                    return Err(self.damaged());
+                }
+                Ok(if flags & inclusive != 0 {
+                    RangeBound::Inclusive(value)
+                } else {
+                    RangeBound::Exclusive(value)
+                })
+            };
+            let lower = bound(RANGE_LOWER, RANGE_LOWER_INCLUSIVE)?;
+            let upper = bound(RANGE_UPPER, RANGE_UPPER_INCLUSIVE)?;
+            Some(RangeBounds { lower, upper })
+        };
+        Ok(Value::Defined(Box::new(DefinedValue::Range(RangeValue {
+            type_oid,
+            bounds,
+        }))))
+    }
+
+    fn nested_value(&mut self, depth: usize) -> SqlResult<Value> {
+        if depth > MAX_NESTING {
+            return Err(self.damaged());
+        }
+        let tag = self.byte()?;
+        Ok(match tag {
+            0 => Value::Null,
+            1 => Value::SmallInt(i16::from_le_bytes(self.array()?)),
+            2 => Value::Integer(i32::from_le_bytes(self.array()?)),
+            3 => Value::BigInt(i64::from_le_bytes(self.array()?)),
+            4 => Value::Real(f32::from_bits(u32::from_le_bytes(self.array()?))),
+            5 => Value::Double(f64::from_bits(u64::from_le_bytes(self.array()?))),
+            6 => match self.byte()? {
+                0 => Value::Boolean(false),
+                1 => Value::Boolean(true),
+                _ => return Err(self.damaged()),
+            },
+            7 => Value::Text(self.text()?),
+            9 => Value::Numeric(self.numeric()?),
+            10 => {
+                let days = i32::from_le_bytes(self.array()?);
+                if !datetime::valid_date(days) {
+                    return Err(self.damaged());
+                }
+                Value::Date(days)
+            }
+            11 | 12 => {
+                let micros = i64::from_le_bytes(self.array()?);
+                if !datetime::valid_timestamp(micros) {
+                    return Err(self.damaged());
+                }
+                if tag == 11 {
+                    Value::Timestamp(micros)
+                } else {
+                    Value::TimestampTz(micros)
+                }
+            }
+            13 => Value::Json(self.json(false)?),
+            14 => Value::Jsonb(self.json(true)?),
+            15 => {
+                let micros = i64::from_le_bytes(self.array()?);
+                if !datetime::valid_stored_time(micros) {
+                    return Err(self.damaged());
+                }
+                Value::Time(micros)
+            }
+            16 => {
+                let micros = i64::from_le_bytes(self.array()?);
+                let offset_seconds = i32::from_le_bytes(self.array()?);
+                if !datetime::valid_time(micros) || !datetime::valid_offset(offset_seconds) {
+                    return Err(self.damaged());
+                }
+                Value::TimeTz {
+                    micros,
+                    offset_seconds,
+                }
+            }
+            17 => Value::Interval(Interval {
+                months: i32::from_le_bytes(self.array()?),
+                days: i32::from_le_bytes(self.array()?),
+                micros: i64::from_le_bytes(self.array()?),
+            }),
+            18 => {
+                let length = self.count()?;
+                Value::Bytea(self.take(length)?.to_vec())
+            }
+            19 => Value::Uuid(self.array()?),
+            20 => Value::Bpchar(self.text()?),
+            21 => {
+                let element = crate::arrays::ArrayElement::of_code(self.byte()?)
+                    .ok_or_else(|| self.damaged())?;
+                let length = self.count()?;
+                let bytes = self.take(length)?;
+                match crate::arrays::decode_stored(bytes, element) {
+                    Some(array) => Value::Array(Box::new(array)),
+                    None => return Err(self.damaged()),
+                }
+            }
+            OID_TAG => Value::Oid(u32::from_le_bytes(self.array()?)),
+            REG_TAG => {
+                let kind = *REG_KINDS
+                    .get(usize::from(self.byte()?))
+                    .ok_or_else(|| self.damaged())?;
+                let oid = u32::from_le_bytes(self.array()?);
+                let name = self.text()?;
+                Value::Reg(Box::new(crate::pg_catalog::RegValue { kind, oid, name }))
+            }
+            ENUM_TAG => {
+                let oid = self.u32()?;
+                let sort_order = self.sort_order()?;
+                crate::enums::decoded(oid, sort_order)?
+            }
+            RECORD_TAG => {
+                let oid = self.u32()?;
+                self.record_body(oid, depth)?
+            }
+            RANGE_TAG => {
+                let oid = self.u32()?;
+                self.range_body(oid, depth)?
+            }
+            _ => return Err(self.damaged()),
+        })
+    }
+
     fn finish(&self) -> SqlResult<()> {
         if self.at == self.bytes.len() {
             Ok(())
@@ -1587,8 +2794,9 @@ impl<'b> Reader<'b> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexDefinition, MAX_CHARACTER_LENGTH, TableDefinition, decode_key_values, decode_row,
-        encode_key_value, encode_row, prefix_end, skip_key_values,
+        IdentityGeneration, IdentitySeed, IndexDefinition, IndexMethod, MAX_CHARACTER_LENGTH,
+        SortOptions, TableDefinition, decode_key_values, decode_row, encode_key_value, encode_row,
+        prefix_end, skip_key_values,
     };
     use crate::encoding::Column;
     use crate::interval::{Interval, IntervalFields};
@@ -1825,10 +3033,10 @@ mod tests {
     #[test]
     fn a_newer_table_definition_version_is_refused_by_name() {
         let mut newer = with_indexes([true, false]).encode();
-        newer[0] = 9;
+        newer[0] = 250;
         let error = TableDefinition::decode("t", &newer).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
-        assert!(error.message().contains("format version 9"), "{error}");
+        assert!(error.message().contains("format version 250"), "{error}");
     }
 
     fn with_indexes(auto: [bool; 2]) -> TableDefinition {
@@ -1839,12 +3047,15 @@ mod tests {
                 name: "t_name_idx".into(),
                 unique: false,
                 columns: vec![1],
+                ..IndexDefinition::default()
             },
             IndexDefinition {
                 id: 2,
                 name: "both".into(),
                 unique: true,
                 columns: vec![1, 0],
+                backs_unique_constraint: true,
+                ..IndexDefinition::default()
             },
         ];
         table
@@ -2019,6 +3230,7 @@ mod tests {
                     name: "typed_day".into(),
                     unique: false,
                     columns: vec![3, 1],
+                    ..IndexDefinition::default()
                 }]
             } else {
                 Vec::new()
@@ -2236,6 +3448,7 @@ mod tests {
                 name: "more_span".into(),
                 unique: false,
                 columns: vec![3, 6],
+                ..IndexDefinition::default()
             }],
             ..TableDefinition::default()
         }
@@ -2333,11 +3546,17 @@ mod tests {
         for cut in 0..encoded.len() {
             assert!(decode_row(&encoded[..cut], &columns).is_err());
         }
+        let mut mysql_range = values.clone();
+        mysql_range[1] = Value::Time(-crate::datetime::MYSQL_TIME_LIMIT);
+        assert_eq!(
+            decode_row(&encode_row(&mysql_range), &columns),
+            Ok(mysql_range.clone())
+        );
         let mut late = values.clone();
-        late[1] = Value::Time(crate::datetime::MICROS_PER_DAY + 1);
+        late[1] = Value::Time(crate::datetime::MYSQL_TIME_LIMIT + 1);
         assert!(decode_row(&encode_row(&late), &columns).is_err());
         let mut early = values.clone();
-        early[1] = Value::Time(-1);
+        early[1] = Value::Time(-crate::datetime::MYSQL_TIME_LIMIT - 1);
         assert!(decode_row(&encode_row(&early), &columns).is_err());
         let mut far = values.clone();
         far[2] = Value::TimeTz {
@@ -2677,5 +3896,330 @@ mod tests {
             changed[at] = random.next() as u8;
             let _ = super::SequenceDefinition::decode(&changed);
         }
+    }
+
+    fn with_options() -> TableDefinition {
+        let mut table = with_indexes([true, false]);
+        table.set_identity(0, Some(IdentityGeneration::Always));
+        table.indexes[0].method = IndexMethod::Hash;
+        table.indexes[1].backs_unique_constraint = false;
+        table.indexes[1].sort_options = SortOptions::default()
+            .with_column(0, true, true)
+            .with_column(1, false, true);
+        table
+    }
+
+    #[test]
+    fn identities_and_index_options_are_version_9_and_round_trip() {
+        let table = with_options();
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 9);
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(table.clone()));
+        for cut in 0..encoded.len() {
+            assert!(damaged(&encoded[..cut]), "cut at {cut}");
+        }
+        let decoded = TableDefinition::decode("t", &encoded).unwrap();
+        assert!(decoded.is_generated_always(0));
+        assert_eq!(decoded.identity_of(1), None);
+        assert!(decoded.indexes[1].sort_options.is_descending(0));
+        assert!(decoded.indexes[1].sort_options.has_nulls_first(1));
+        assert!(!decoded.indexes[1].sort_options.is_descending(1));
+        let mut qualified = table;
+        qualified.name = "app\0t".into();
+        let encoded = qualified.encode();
+        assert_eq!(encoded[0], 9);
+        assert_eq!(TableDefinition::decode("app\0t", &encoded), Ok(qualified));
+    }
+
+    #[test]
+    fn version_9_pins_its_options_after_the_constraints() {
+        let plain = with_indexes([true, false]).encode();
+        assert_eq!(plain[0], 3);
+        let encoded = with_options().encode();
+        assert_eq!(encoded[1..plain.len()], plain[1..]);
+        assert_eq!(
+            encoded[plain.len()..],
+            [
+                0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 3, 0, 0, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_without_identities_or_index_options_keeps_its_older_version() {
+        assert_eq!(with_indexes([true, false]).encode()[0], 3);
+        let mut by_default = with_indexes([true, false]);
+        by_default.set_identity(0, Some(IdentityGeneration::ByDefault));
+        assert_eq!(by_default.encode()[0], 3);
+        let mut without_default = two_columns([false, false], vec![0]);
+        without_default.set_identity(0, Some(IdentityGeneration::Always));
+        let encoded = without_default.encode();
+        assert_eq!(encoded[0], 1);
+        assert_eq!(without_default.identity_of(0), None);
+        assert!(
+            TableDefinition::decode("t", &encoded)
+                .unwrap()
+                .identities
+                .is_empty()
+        );
+        let mut restored = two_columns([false, false], vec![0]);
+        restored.set_identity(1, Some(IdentityGeneration::ByDefault));
+        let encoded = restored.encode();
+        assert_eq!(encoded[0], 9);
+        assert_eq!(TableDefinition::decode("t", &encoded), Ok(restored.clone()));
+        assert_eq!(restored.identity_of(1), Some(IdentityGeneration::ByDefault));
+        restored.columns[1].default = None;
+        assert_eq!(restored.identity_of(1), None);
+        assert_eq!(restored.encode()[0], 1);
+    }
+
+    #[test]
+    fn damaged_version_9_options_are_errors() {
+        let good = with_options().encode();
+        let tail = with_indexes([true, false]).encode().len() + 4;
+        let changed = |at: usize, byte: u8| {
+            let mut bytes = good.clone();
+            bytes[at] = byte;
+            bytes
+        };
+        for (at, byte) in [
+            (tail, 4),
+            (tail + 1, 2),
+            (tail + 2, 0),
+            (tail + 2, 2),
+            (tail + 2, 3),
+            (tail + 3, 2),
+            (tail + 4, 1),
+            (tail + 4, 2),
+            (tail + 5, 1),
+            (tail + 9, 1),
+            (tail + 13, 1),
+            (tail + 14, 2),
+            (tail + 15, 4),
+            (tail + 19, 4),
+        ] {
+            assert!(damaged(&changed(at, byte)), "byte {at} set to {byte}");
+        }
+        let still_needed = changed(tail + 3, 0);
+        let decoded = TableDefinition::decode("t", &still_needed).unwrap();
+        assert_eq!(decoded.indexes[0].method, IndexMethod::BTree);
+        let plain = with_indexes([false, false]).encode();
+        let mut nothing_needed = plain.clone();
+        nothing_needed[0] = 9;
+        nothing_needed.extend_from_slice(&[0, 0, 0, 0, 0]);
+        nothing_needed.extend_from_slice(&[0; 20]);
+        assert!(damaged(&nothing_needed));
+        let mut two_identities = with_options();
+        two_identities.columns[1].default = Some("'x'".into());
+        two_identities.set_identity(1, Some(IdentityGeneration::ByDefault));
+        let encoded = two_identities.encode();
+        assert_eq!(
+            TableDefinition::decode("t", &encoded),
+            Ok(two_identities.clone())
+        );
+        let identities_at = tail;
+        assert_eq!(encoded[identities_at..identities_at + 5], [2, 0, 1, 1, 2]);
+        let mut unsorted = encoded.clone();
+        unsorted[identities_at + 1] = 1;
+        unsorted[identities_at + 3] = 0;
+        assert!(damaged(&unsorted));
+        let mut repeated = encoded;
+        repeated[identities_at + 3] = 0;
+        assert!(damaged(&repeated));
+    }
+
+    #[test]
+    fn hostile_version_9_definitions_are_errors_never_panics() {
+        let mut random = Seeded(0x0009_0B71_0A5E_D00D);
+        let good = with_options().encode();
+        for _ in 0..20_000 {
+            let mut bytes = good.clone();
+            let flips = 1 + random.next() % 4;
+            for _ in 0..flips {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            if random.next().is_multiple_of(3) {
+                let keep = (random.next() as usize) % bytes.len();
+                bytes.truncate(keep);
+            }
+            if let Ok(table) = TableDefinition::decode("t", &bytes) {
+                for index in &table.indexes {
+                    assert!(index.sort_options.fits(index.columns.len()));
+                    assert!(!index.backs_unique_constraint || index.unique);
+                }
+            }
+        }
+    }
+
+    fn with_transact_sql_defaults() -> TableDefinition {
+        let mut table = two_columns([true, false], vec![0]);
+        table.identity_seed = Some(IdentitySeed {
+            seed: 1000,
+            increment: 10,
+        });
+        table.columns[1].default = Some("getdate()".into());
+        table.set_default_dialect(1, crate::Dialect::SqlServer);
+        table
+    }
+
+    #[test]
+    fn transact_sql_defaults_and_identity_seeds_are_version_9_with_pinned_bytes() {
+        let table = with_transact_sql_defaults();
+        let encoded = table.encode();
+        let mut expected = vec![9, 7, 0, 0, 0, 2, 2, b'i', b'd', 3, 1, 4];
+        expected.extend_from_slice(&1000i64.to_le_bytes());
+        expected.extend_from_slice(&10i64.to_le_bytes());
+        expected.extend_from_slice(&[4, b'n', b'a', b'm', b'e', 8, 20, 0, 0, 0, 0, 3, 4, 9]);
+        expected.extend_from_slice(b"getdate()");
+        expected.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(encoded, expected);
+        let decoded = TableDefinition::decode("t", &encoded).unwrap();
+        assert_eq!(decoded, table);
+        assert_eq!(decoded.default_dialect(1), crate::Dialect::SqlServer);
+        assert_eq!(decoded.default_dialect(0), crate::Dialect::PostgreSql);
+        assert_eq!(
+            decoded.identity_seed(),
+            IdentitySeed {
+                seed: 1000,
+                increment: 10
+            }
+        );
+        for cut in 0..encoded.len() {
+            assert!(damaged(&encoded[..cut]), "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn a_seed_of_one_by_one_and_a_postgresql_default_keep_the_older_version() {
+        let mut table = with_transact_sql_defaults();
+        table.identity_seed = Some(IdentitySeed::ONE_BY_ONE);
+        table.set_default_dialect(1, crate::Dialect::PostgreSql);
+        let encoded = table.encode();
+        assert_eq!(encoded[0], 2);
+        let decoded = TableDefinition::decode("t", &encoded).unwrap();
+        assert_eq!(decoded.identity_seed, None);
+        assert!(decoded.default_dialects.is_empty());
+        let mut only_seed = with_transact_sql_defaults();
+        only_seed.set_default_dialect(1, crate::Dialect::PostgreSql);
+        assert_eq!(only_seed.encode()[0], 9);
+        assert_eq!(
+            TableDefinition::decode("t", &only_seed.encode()),
+            Ok(only_seed)
+        );
+        let mut only_default = with_transact_sql_defaults();
+        only_default.identity_seed = None;
+        assert_eq!(only_default.encode()[0], 9);
+        assert_eq!(
+            TableDefinition::decode("t", &only_default.encode()),
+            Ok(only_default)
+        );
+        let mut seed_without_identity = with_transact_sql_defaults();
+        seed_without_identity.columns[0].auto_increment = false;
+        seed_without_identity.set_default_dialect(1, crate::Dialect::PostgreSql);
+        assert_eq!(seed_without_identity.encode()[0], 1);
+        assert_eq!(
+            seed_without_identity.identity_seed(),
+            IdentitySeed::ONE_BY_ONE
+        );
+    }
+
+    #[test]
+    fn damaged_default_tags_and_identity_seeds_are_errors() {
+        let good = with_transact_sql_defaults().encode();
+        let seed_at = 12;
+        let increment_at = seed_at + 8;
+        let dialect_at = increment_at + 8 + 12;
+        assert_eq!(good[dialect_at], 4);
+        let changed = |at: usize, byte: u8| {
+            let mut bytes = good.clone();
+            bytes[at] = byte;
+            bytes
+        };
+        for byte in [0, 5, 9, 0xFF] {
+            assert!(damaged(&changed(dialect_at, byte)), "dialect {byte}");
+        }
+        assert!(damaged(&changed(dialect_at - 1, 5)));
+        assert!(damaged(&changed(seed_at - 1, 5)));
+        let mut zero_increment = good.clone();
+        zero_increment[increment_at] = 0;
+        assert!(damaged(&zero_increment));
+        let mut one_by_one = good.clone();
+        one_by_one[seed_at..seed_at + 8].copy_from_slice(&1i64.to_le_bytes());
+        one_by_one[increment_at..increment_at + 8].copy_from_slice(&1i64.to_le_bytes());
+        assert!(damaged(&one_by_one));
+        let mut blank = with_transact_sql_defaults();
+        blank.columns[1].default = Some("  ".into());
+        assert!(damaged(&blank.encode()));
+        let mut older = two_columns([true, false], vec![0]).encode();
+        assert_eq!(older[0], 2);
+        let tag_at = 11;
+        assert_eq!(older[tag_at], 2);
+        older[tag_at] = 4;
+        older.splice(tag_at + 1..tag_at + 1, [5u8; 16]);
+        assert!(damaged(&older));
+        let mut older_default = two_columns([false, false], vec![0]).encode();
+        let default_at = older_default.len() - 7;
+        assert_eq!(older_default[default_at], 1);
+        older_default[default_at] = 3;
+        older_default.insert(default_at + 1, 4);
+        assert!(damaged(&older_default));
+    }
+
+    #[test]
+    fn hostile_transact_sql_defaults_and_seeds_are_errors_never_panics() {
+        let mut random = Seeded(0x0040_B5EE_D0FF_05E7);
+        let good = with_transact_sql_defaults().encode();
+        for _ in 0..20_000 {
+            let mut bytes = good.clone();
+            let flips = 1 + random.next() % 4;
+            for _ in 0..flips {
+                let at = (random.next() as usize) % bytes.len();
+                bytes[at] = random.next() as u8;
+            }
+            if random.next().is_multiple_of(3) {
+                let keep = (random.next() as usize) % bytes.len();
+                bytes.truncate(keep);
+            }
+            if let Ok(table) = TableDefinition::decode("t", &bytes) {
+                assert_ne!(table.identity_seed().increment, 0);
+                for entry in &table.default_dialects {
+                    assert_ne!(entry.dialect, crate::Dialect::PostgreSql);
+                    assert!(table.columns[entry.column].default.is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identity_seeds_count_from_the_seed_by_the_increment() {
+        let up = IdentitySeed {
+            seed: 1000,
+            increment: 10,
+        };
+        assert_eq!(up.next_after(None), Some(1000));
+        assert_eq!(up.next_after(Some(1010)), Some(1020));
+        assert_eq!(up.next_after(Some(5)), Some(1000));
+        assert!(up.scans_backward());
+        assert!(up.is_beyond(1030, 1020));
+        assert!(!up.is_beyond(1015, 1020));
+        let down = IdentitySeed {
+            seed: -1,
+            increment: -1,
+        };
+        assert_eq!(down.next_after(None), Some(-1));
+        assert_eq!(down.next_after(Some(-7)), Some(-8));
+        assert_eq!(down.next_after(Some(3)), Some(-1));
+        assert!(!down.scans_backward());
+        assert!(down.is_beyond(-9, -8));
+        assert_eq!(IdentitySeed::ONE_BY_ONE.next_after(Some(-5)), Some(1));
+        assert_eq!(IdentitySeed::ONE_BY_ONE.next_after(Some(0)), Some(1));
+        assert_eq!(IdentitySeed::ONE_BY_ONE.next_after(Some(i64::MAX)), None);
+        let from_minimum = IdentitySeed {
+            seed: i64::MIN,
+            increment: 1,
+        };
+        assert_eq!(from_minimum.next_after(None), Some(i64::MIN));
+        assert_eq!(from_minimum.next_after(Some(i64::MIN)), Some(i64::MIN + 1));
     }
 }

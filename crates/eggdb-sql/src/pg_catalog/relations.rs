@@ -1,16 +1,19 @@
 use super::oids::{self, BuiltinType};
 use super::snapshot::{
-    CatalogSnapshot, ConstraintSource, IndexSource, RelationKind, RelationSource,
+    CatalogSnapshot, ConstraintSource, IndexSource, RelationKind, RelationSource, RoutineEntry,
 };
-use super::{CatalogRelation, deparse};
+use super::{CatalogRelation, deparse, routines};
 use crate::arrays::{ArrayElement, ArrayValue};
 use crate::ast::ReferentialAction;
-use crate::encoding::{CommentKind, TableDefinition};
+use crate::encoding::{CommentKind, IdentityGeneration, IndexMethod, SortOptions, TableDefinition};
 use crate::error::SqlResult;
 use crate::memory::WorkMemory;
 use crate::session::OutputColumn;
 use crate::set_returning::GeneratedRows;
 use crate::store::KeyValueRead;
+use crate::triggers::{
+    TriggerAction, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming,
+};
 use crate::types::{SqlType, Value};
 use std::collections::HashSet;
 
@@ -18,6 +21,8 @@ const PG_CLASS: u32 = 1259;
 const PG_CONSTRAINT: u32 = 2606;
 const PG_NAMESPACE: u32 = 2615;
 const HASH: u32 = 405;
+const INDOPTION_DESC: i64 = 1;
+const INDOPTION_NULLS_FIRST: i64 = 2;
 
 pub(crate) fn generated_rows(
     reader: &dyn KeyValueRead,
@@ -113,10 +118,14 @@ fn smallints(items: &[usize]) -> Value {
 }
 
 fn regproc_none() -> Value {
+    regproc(0, "-")
+}
+
+fn regproc(function: u32, name: &str) -> Value {
     Value::Reg(Box::new(super::RegValue {
         kind: super::RegKind::Proc,
-        oid: 0,
-        name: "-".to_owned(),
+        oid: function,
+        name: name.to_owned(),
     }))
 }
 
@@ -151,28 +160,42 @@ pub(crate) fn build(
     Ok(match relation {
         CatalogRelation::Class => class_rows(snapshot),
         CatalogRelation::Attribute => attribute_rows(snapshot),
-        CatalogRelation::Type => type_rows(),
+        CatalogRelation::Type => type_rows(snapshot),
         CatalogRelation::Namespace => namespace_rows(snapshot),
         CatalogRelation::Index => index_rows(snapshot),
         CatalogRelation::Constraint => constraint_rows(snapshot),
         CatalogRelation::AttrDef => attrdef_rows(snapshot),
         CatalogRelation::Description => description_rows(snapshot),
-        CatalogRelation::Database => vec![database_row(snapshot)],
+        CatalogRelation::Database => database_rows(snapshot),
         CatalogRelation::Roles => role_rows(snapshot),
         CatalogRelation::Am => am_rows(),
         CatalogRelation::Collation => collation_rows(),
         CatalogRelation::Sequence => sequence_rows(snapshot),
         CatalogRelation::Depend => depend_rows(snapshot),
         CatalogRelation::Tablespace => tablespace_rows(),
-        CatalogRelation::Inherits
-        | CatalogRelation::Policy
+        CatalogRelation::Trigger => trigger_rows(snapshot),
+        CatalogRelation::Inherits => inherits_rows(snapshot),
+        CatalogRelation::Policy
         | CatalogRelation::StatisticExt
         | CatalogRelation::Publication
         | CatalogRelation::PublicationRel
         | CatalogRelation::PublicationNamespace
-        | CatalogRelation::Trigger
         | CatalogRelation::Rewrite
-        | CatalogRelation::AuthMembers => Vec::new(),
+        | CatalogRelation::AuthMembers
+        | CatalogRelation::Opclass => Vec::new(),
+        CatalogRelation::Enum => enum_rows(snapshot),
+        CatalogRelation::Range => range_rows(snapshot),
+        CatalogRelation::Proc => proc_rows(snapshot),
+        CatalogRelation::Language => language_rows(),
+        CatalogRelation::Settings => setting_rows(snapshot),
+        CatalogRelation::TimezoneNames => time_zone_name_rows(),
+        CatalogRelation::Information(relation) => {
+            crate::information_schema::rows(snapshot, relation)
+        }
+        CatalogRelation::SqlServer(relation) => crate::sqlserver_catalog::rows(snapshot, relation),
+        CatalogRelation::Oracle(relation) => crate::oracle_dictionary::rows(snapshot, relation),
+        CatalogRelation::Monitoring(relation) => super::monitoring::rows(snapshot, relation),
+        CatalogRelation::MySql(relation) => crate::mysql_catalog::rows(snapshot, relation),
     })
 }
 
@@ -202,10 +225,94 @@ pub(crate) fn index_is_unique(table: &TableDefinition, index: IndexSource) -> bo
     }
 }
 
+pub(crate) fn index_method(table: &TableDefinition, index: IndexSource) -> IndexMethod {
+    match index {
+        IndexSource::Primary => IndexMethod::BTree,
+        IndexSource::Secondary(at) => table
+            .indexes
+            .get(at)
+            .map_or(IndexMethod::BTree, |found| found.method),
+    }
+}
+
+pub(crate) fn index_sort_options(table: &TableDefinition, index: IndexSource) -> SortOptions {
+    match index {
+        IndexSource::Primary => SortOptions::default(),
+        IndexSource::Secondary(at) => table
+            .indexes
+            .get(at)
+            .map_or(SortOptions::default(), |found| found.sort_options),
+    }
+}
+
+fn access_method_oid(method: IndexMethod) -> u32 {
+    match method {
+        IndexMethod::BTree => oids::BTREE,
+        IndexMethod::Hash => HASH,
+    }
+}
+
+fn identity_code(generation: Option<IdentityGeneration>) -> &'static str {
+    match generation {
+        Some(IdentityGeneration::Always) => "a",
+        Some(IdentityGeneration::ByDefault) => "d",
+        None => "",
+    }
+}
+
+fn table_oid(snapshot: &CatalogSnapshot, internal: &str) -> Option<u32> {
+    snapshot
+        .table_named(internal)
+        .and_then(|at| snapshot.relations.get(at))
+        .map(|entry| entry.oid)
+}
+
+fn inherits_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (child, record) in snapshot.partitions.every() {
+        let Some((parent, _)) = &record.parent else {
+            continue;
+        };
+        let (Some(child), Some(parent)) = (table_oid(snapshot, child), table_oid(snapshot, parent))
+        else {
+            continue;
+        };
+        rows.push(
+            Row::new(CatalogRelation::Inherits)
+                .set("inhrelid", oid(child))
+                .set("inhparent", oid(parent))
+                .set("inhseqno", int(1))
+                .set("inhdetachpending", flag(false))
+                .done(),
+        );
+    }
+    rows
+}
+
+pub(crate) fn partitioned_table_rows(snapshot: &CatalogSnapshot) -> Vec<(u32, &'static str, i64)> {
+    snapshot
+        .partitions
+        .every()
+        .filter_map(|(table, record)| {
+            let key = record.key.as_ref()?;
+            let strategy = match key.strategy {
+                crate::partitions::PartitionStrategy::Range => "r",
+                crate::partitions::PartitionStrategy::List => "l",
+                crate::partitions::PartitionStrategy::Hash => "h",
+            };
+            Some((
+                table_oid(snapshot, table)?,
+                strategy,
+                key.columns.len() as i64,
+            ))
+        })
+        .collect()
+}
+
 fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let referenced = referenced_tables(snapshot);
     let mut rows = Vec::with_capacity(snapshot.relations.len());
-    for entry in &snapshot.relations {
+    for (at, entry) in snapshot.relations.iter().enumerate() {
         let mut kind = entry.kind.code();
         let natts;
         let mut has_index = false;
@@ -217,14 +324,26 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         let mut tuples: f32 = -1.0;
         let mut pages = 0;
         let mut file_node = entry.oid;
+        let mut partition_bound = None;
+        let mut has_subclass = false;
         match &entry.source {
             RelationSource::Table(table) => {
+                if snapshot.partitions.key_of(&table.name).is_some() {
+                    kind = "p";
+                    file_node = 0;
+                    has_subclass = !snapshot.partitions.children_of(&table.name).is_empty();
+                }
+                partition_bound = snapshot.partition_bound_definition(table);
+                if let Some(&rows) = snapshot.row_counts.get(&table.name) {
+                    tuples = rows as f32;
+                }
                 natts = table.columns.len();
                 has_index = !table.primary_key.is_empty() || !table.indexes.is_empty();
                 checks = table.checks.len();
                 has_triggers = !table.foreign_keys.is_empty()
                     || table.referenced
-                    || referenced.contains(&table.name);
+                    || referenced.contains(&table.name)
+                    || snapshot.has_triggers(at);
                 am = oids::HEAP;
                 replident = "d";
             }
@@ -239,12 +358,14 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 pages = 1;
             }
             RelationSource::Index { table, index } => {
-                natts = snapshot
+                let owner = snapshot
                     .relations
                     .get(*table)
-                    .and_then(|owner| owner.table())
-                    .map_or(0, |owner| index_columns(owner, *index).len());
-                am = oids::BTREE;
+                    .and_then(|owner| owner.table());
+                natts = owner.map_or(0, |owner| index_columns(owner, *index).len());
+                am = access_method_oid(
+                    owner.map_or(IndexMethod::BTree, |owner| index_method(owner, *index)),
+                );
                 tuples = 0.0;
                 pages = 1;
             }
@@ -282,12 +403,16 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("relchecks", small(checks as i64))
                 .set("relhasrules", flag(has_rules))
                 .set("relhastriggers", flag(has_triggers))
-                .set("relhassubclass", flag(false))
+                .set("relhassubclass", flag(has_subclass))
                 .set("relrowsecurity", flag(false))
                 .set("relforcerowsecurity", flag(false))
                 .set("relispopulated", flag(true))
                 .set("relreplident", text(replident))
-                .set("relispartition", flag(false))
+                .set("relispartition", flag(partition_bound.is_some()))
+                .set(
+                    "relpartbound",
+                    partition_bound.map_or(Value::Null, Value::Text),
+                )
                 .set("relrewrite", oid(0))
                 .set("relfrozenxid", oid(0))
                 .set("relminmxid", oid(0))
@@ -346,10 +471,15 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         relation,
                         name: &column.name,
                         number: at + 1,
-                        sql_type: column.sql_type,
+                        sql_type: table.domain_of(at).map_or(column.sql_type, |domain| {
+                            SqlType::Defined(crate::types::DefinedType {
+                                kind: crate::types::DefinedKind::Domain,
+                                oid: domain,
+                            })
+                        }),
                         not_null: column.not_null || table.primary_key.contains(&at),
-                        has_default: column.default.is_some(),
-                        identity: if column.auto_increment { "d" } else { "" },
+                        has_default: column.default.is_some() && table.identity_of(at).is_none(),
+                        identity: identity_code(table.identity_of(at)),
                     }));
                 }
             }
@@ -394,6 +524,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 else {
                     continue;
                 };
+                let hashed = index_method(owner, *index) == IndexMethod::Hash;
                 for (at, column_at) in index_columns(owner, *index).iter().enumerate() {
                     let Some(column) = owner.columns.get(*column_at) else {
                         continue;
@@ -402,7 +533,11 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         relation,
                         name: &column.name,
                         number: at + 1,
-                        sql_type: column.sql_type,
+                        sql_type: if hashed {
+                            SqlType::Integer
+                        } else {
+                            column.sql_type
+                        },
                         not_null: false,
                         has_default: false,
                         identity: "",
@@ -427,7 +562,151 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
-fn type_rows() -> Vec<Vec<Value>> {
+fn user_type_row(snapshot: &CatalogSnapshot, found: &crate::user_types::UserType) -> Vec<Value> {
+    use crate::user_types::TypeBody;
+    let namespace = snapshot
+        .schema_named(crate::schemas::schema_of(&found.name))
+        .map_or(oids::PUBLIC, |schema| schema.oid);
+    let base = match &found.body {
+        TypeBody::Domain(domain) => Some(domain.base),
+        _ => None,
+    };
+    let base_facts = base.map(facts);
+    let (kind, category, length, by_value, align, storage) = match &found.body {
+        TypeBody::Enum(_) => ('e', 'E', 4, true, 'i', 'p'),
+        TypeBody::Composite(_) => ('c', 'C', -1, false, 'd', 'x'),
+        TypeBody::Range { .. } => ('r', 'R', -1, false, 'd', 'x'),
+        TypeBody::Domain(_) => {
+            let builtin = base_facts
+                .as_ref()
+                .and_then(|facts| oids::builtin_type(facts.oid));
+            (
+                'd',
+                builtin.map_or('U', |builtin| builtin.category),
+                base_facts.as_ref().map_or(-1, |facts| facts.length),
+                base_facts.as_ref().is_some_and(|facts| facts.by_value),
+                base_facts.as_ref().map_or('i', |facts| facts.align),
+                base_facts.as_ref().map_or('x', |facts| facts.storage),
+            )
+        }
+    };
+    let mut row = Row::new(CatalogRelation::Type)
+        .set("oid", oid(found.oid))
+        .set("typname", text(crate::schemas::base_name(&found.name)))
+        .set("typnamespace", oid(namespace))
+        .set("typowner", oid(oids::SESSION_USER))
+        .set("typlen", small(i64::from(length)))
+        .set("typbyval", flag(by_value))
+        .set("typtype", Value::Text(kind.to_string()))
+        .set("typcategory", Value::Text(category.to_string()))
+        .set("typispreferred", flag(false))
+        .set("typisdefined", flag(true))
+        .set("typdelim", text(","))
+        .set("typrelid", oid(0))
+        .set("typelem", oid(0))
+        .set("typarray", oid(0))
+        .set("typalign", Value::Text(align.to_string()))
+        .set("typstorage", Value::Text(storage.to_string()))
+        .set(
+            "typnotnull",
+            flag(found.domain().is_some_and(|domain| domain.not_null)),
+        )
+        .set(
+            "typbasetype",
+            oid(base_facts.as_ref().map_or(0, |facts| facts.oid)),
+        )
+        .set(
+            "typtypmod",
+            int(i64::from(
+                base_facts.as_ref().map_or(-1, |facts| facts.modifier),
+            )),
+        )
+        .set("typndims", int(0))
+        .set(
+            "typcollation",
+            oid(base_facts.as_ref().map_or(0, |facts| facts.collation)),
+        );
+    if let Some(default) = found.domain().and_then(|domain| domain.default.as_deref()) {
+        row = row.set("typdefault", text(default));
+    }
+    for name in [
+        "typsubscript",
+        "typinput",
+        "typoutput",
+        "typreceive",
+        "typsend",
+        "typmodin",
+        "typmodout",
+        "typanalyze",
+    ] {
+        row = row.set(name, regproc_none());
+    }
+    row.done()
+}
+
+fn enum_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut requests = Vec::new();
+    let mut labels = Vec::new();
+    for found in snapshot.user_types.types() {
+        for label in found.labels() {
+            requests.push(oids::OidRequest {
+                kind: b'e',
+                owner: found.name.clone(),
+                name: label.label.clone(),
+            });
+            labels.push((found.oid, label));
+        }
+    }
+    let label_oids = oids::assign(oids::Space::Constraint, &requests);
+    labels
+        .into_iter()
+        .zip(label_oids)
+        .map(|((type_oid, label), label_oid)| {
+            Row::new(CatalogRelation::Enum)
+                .set("oid", oid(label_oid))
+                .set("enumtypid", oid(type_oid))
+                .set("enumsortorder", Value::Real(label.sort_order as f32))
+                .set("enumlabel", text(&label.label))
+                .done()
+        })
+        .collect()
+}
+
+fn range_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .user_types
+        .types()
+        .iter()
+        .filter_map(|found| match &found.body {
+            crate::user_types::TypeBody::Range { subtype } => Some(
+                Row::new(CatalogRelation::Range)
+                    .set("rngtypid", oid(found.oid))
+                    .set("rngsubtype", oid(oids::type_oid(*subtype)))
+                    .set("rngmultitypid", oid(0))
+                    .set("rngcollation", oid(0))
+                    .set("rngsubopc", oid(0))
+                    .set("rngcanonical", regproc_none())
+                    .set("rngsubdiff", regproc_none())
+                    .done(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn type_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = builtin_type_rows();
+    rows.extend(
+        snapshot
+            .user_types
+            .types()
+            .iter()
+            .map(|found| user_type_row(snapshot, found)),
+    );
+    rows
+}
+
+fn builtin_type_rows() -> Vec<Vec<Value>> {
     oids::BUILTIN_TYPES
         .iter()
         .map(|found| {
@@ -465,7 +744,192 @@ fn type_rows() -> Vec<Vec<Value>> {
             ] {
                 row = row.set(name, regproc_none());
             }
+            if found.category == 'A' && found.element != 0 && !matches!(found.oid, 22 | 30) {
+                for (column, function) in [
+                    ("typinput", oids::ARRAY_IN),
+                    ("typoutput", oids::ARRAY_OUT),
+                    ("typreceive", oids::ARRAY_RECV),
+                    ("typsend", oids::ARRAY_SEND),
+                ] {
+                    let name = oids::BUILTIN_FUNCTIONS
+                        .iter()
+                        .find(|builtin| builtin.oid == function)
+                        .map_or("-", |builtin| builtin.name);
+                    row = row.set(column, regproc(function, name));
+                }
+            }
             row.done()
+        })
+        .collect()
+}
+
+fn proc_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = builtin_proc_rows();
+    rows.extend(
+        snapshot
+            .routines
+            .iter()
+            .map(|routine| routine_proc_row(snapshot, routine)),
+    );
+    rows
+}
+
+fn routine_proc_row(snapshot: &CatalogSnapshot, routine: &RoutineEntry) -> Vec<Value> {
+    let definition = &routine.definition;
+    let inputs: Vec<Value> = definition
+        .input_types()
+        .into_iter()
+        .map(|sql_type| oid(oids::type_oid(sql_type)))
+        .collect();
+    let mut row = Row::new(CatalogRelation::Proc)
+        .set("oid", oid(routine.oid))
+        .set("proname", text(&routine.name))
+        .set("pronamespace", oid(routine.namespace))
+        .set("proowner", oid(oids::SESSION_USER))
+        .set("prolang", oid(routines::language_oid(definition.language)))
+        .set("procost", Value::Real(routines::ROUTINE_COST))
+        .set("prorows", Value::Real(routines::estimated_rows(definition)))
+        .set(
+            "provariadic",
+            oid(routines::variadic_element_oid(definition)),
+        )
+        .set("prosupport", regproc_none())
+        .set("prokind", text(routines::kind_code(definition.kind)))
+        .set("prosecdef", flag(definition.security_definer))
+        .set("proleakproof", flag(false))
+        .set("proisstrict", flag(definition.strict))
+        .set("proretset", flag(definition.returns.is_set()))
+        .set("provolatile", text(definition.volatility.code()))
+        .set("proparallel", text("u"))
+        .set(
+            "pronargs",
+            small(routines::argument_count(definition) as i64),
+        )
+        .set(
+            "pronargdefaults",
+            small(routines::default_count(definition) as i64),
+        )
+        .set(
+            "prorettype",
+            oid(routines::result_type_oid(snapshot, definition)),
+        )
+        .set("proargtypes", vector(ArrayElement::OidVector, inputs))
+        .set("prosrc", text(&definition.body));
+    let listed = routines::every_parameter(definition);
+    if routines::lists_every_parameter(definition) {
+        row = row
+            .set(
+                "proallargtypes",
+                list(
+                    ArrayElement::Oid,
+                    listed
+                        .iter()
+                        .map(|parameter| oid(oids::type_oid(parameter.sql_type)))
+                        .collect(),
+                ),
+            )
+            .set(
+                "proargmodes",
+                list(
+                    ArrayElement::InternalChar,
+                    listed
+                        .iter()
+                        .map(|parameter| text(parameter.mode))
+                        .collect(),
+                ),
+            );
+    }
+    if listed.iter().any(|parameter| !parameter.name.is_empty()) {
+        row = row.set(
+            "proargnames",
+            list(
+                ArrayElement::Text,
+                listed
+                    .iter()
+                    .map(|parameter| text(&parameter.name))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(defaults) = routines::defaults_text(definition) {
+        row = row.set("proargdefaults", Value::Text(defaults));
+    }
+    if !definition.settings.is_empty() {
+        row = row.set(
+            "proconfig",
+            list(
+                ArrayElement::Text,
+                definition
+                    .settings
+                    .iter()
+                    .map(|(name, value)| Value::Text(format!("{name}={value}")))
+                    .collect(),
+            ),
+        );
+    }
+    row.done()
+}
+
+fn list(element: ArrayElement, items: Vec<Value>) -> Value {
+    Value::Array(Box::new(ArrayValue::new(element, items)))
+}
+
+fn language_rows() -> Vec<Vec<Value>> {
+    routines::LANGUAGES
+        .iter()
+        .map(|language| {
+            Row::new(CatalogRelation::Language)
+                .set("oid", oid(language.oid))
+                .set("lanname", text(language.name))
+                .set("lanowner", oid(oids::SESSION_USER))
+                .set("lanispl", flag(language.procedural))
+                .set("lanpltrusted", flag(language.trusted))
+                .set("lanplcallfoid", oid(0))
+                .set("laninline", oid(0))
+                .set("lanvalidator", oid(0))
+                .done()
+        })
+        .collect()
+}
+
+fn builtin_proc_rows() -> Vec<Vec<Value>> {
+    oids::BUILTIN_FUNCTIONS
+        .iter()
+        .map(|function| {
+            let arguments = function.argument_types.len() as i64;
+            Row::new(CatalogRelation::Proc)
+                .set("oid", oid(function.oid))
+                .set("proname", text(function.name))
+                .set("pronamespace", oid(oids::PG_CATALOG))
+                .set("proowner", oid(oids::SESSION_USER))
+                .set("prolang", oid(routines::INTERNAL_LANGUAGE))
+                .set("procost", Value::Real(1.0))
+                .set("prorows", Value::Real(0.0))
+                .set("provariadic", oid(0))
+                .set("prosupport", regproc_none())
+                .set("prokind", text("f"))
+                .set("prosecdef", flag(false))
+                .set("proleakproof", flag(false))
+                .set("proisstrict", flag(true))
+                .set("proretset", flag(false))
+                .set("provolatile", text("s"))
+                .set("proparallel", text("s"))
+                .set("pronargs", small(arguments))
+                .set("pronargdefaults", small(0))
+                .set("prorettype", oid(function.result_type))
+                .set(
+                    "proargtypes",
+                    vector(
+                        ArrayElement::OidVector,
+                        function
+                            .argument_types
+                            .iter()
+                            .map(|&found| oid(found))
+                            .collect(),
+                    ),
+                )
+                .set("prosrc", text(function.name))
+                .done()
         })
         .collect()
 }
@@ -491,6 +955,109 @@ fn collation_of(table: &TableDefinition, column: usize) -> Value {
         .map_or(0, |column| facts(column.sql_type).collation))
 }
 
+fn trigger_function_oid(snapshot: &CatalogSnapshot, definition: &TriggerDefinition) -> u32 {
+    match &definition.action {
+        TriggerAction::Function { name, .. } => snapshot.trigger_function_oid(name),
+        TriggerAction::Statements(_) | TriggerAction::Batch(_) | TriggerAction::PlSql { .. } => 0,
+    }
+}
+
+fn trigger_type(definition: &TriggerDefinition) -> i64 {
+    let mut bits = 0;
+    if definition.level == TriggerLevel::Row {
+        bits |= 1;
+    }
+    match definition.timing {
+        TriggerTiming::Before => bits |= 2,
+        TriggerTiming::InsteadOf => bits |= 64,
+        TriggerTiming::After => {}
+    }
+    for (event, bit) in [
+        (TriggerEvent::Insert, 4),
+        (TriggerEvent::Delete, 8),
+        (TriggerEvent::Update, 16),
+        (TriggerEvent::Truncate, 32),
+    ] {
+        if definition.events.contains(event) {
+            bits |= bit;
+        }
+    }
+    bits
+}
+
+fn trigger_arguments(definition: &TriggerDefinition) -> Vec<String> {
+    match &definition.action {
+        TriggerAction::Function { arguments, .. } => arguments.clone(),
+        TriggerAction::Statements(_) | TriggerAction::Batch(_) | TriggerAction::PlSql { .. } => {
+            Vec::new()
+        }
+    }
+}
+
+fn trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for trigger in &snapshot.triggers {
+        let Some(owner) = snapshot.relations.get(trigger.relation) else {
+            continue;
+        };
+        let definition = &trigger.definition;
+        let column_numbers: Vec<Value> = owner
+            .table()
+            .map(|table| {
+                definition
+                    .columns
+                    .iter()
+                    .filter_map(|name| {
+                        table
+                            .columns
+                            .iter()
+                            .position(|column| column.name.eq_ignore_ascii_case(name))
+                    })
+                    .map(|at| small(at as i64 + 1))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let arguments = trigger_arguments(definition);
+        let mut packed = Vec::new();
+        for argument in &arguments {
+            packed.extend_from_slice(argument.as_bytes());
+            packed.push(0);
+        }
+        rows.push(
+            Row::new(CatalogRelation::Trigger)
+                .set("oid", oid(trigger.oid))
+                .set("tgrelid", oid(owner.oid))
+                .set("tgparentid", oid(0))
+                .set("tgname", text(&definition.name))
+                .set("tgfoid", oid(trigger_function_oid(snapshot, definition)))
+                .set("tgtype", small(trigger_type(definition)))
+                .set(
+                    "tgenabled",
+                    text(if definition.enabled { "O" } else { "D" }),
+                )
+                .set("tgisinternal", flag(false))
+                .set("tgconstrrelid", oid(0))
+                .set("tgconstrindid", oid(0))
+                .set("tgconstraint", oid(0))
+                .set("tgdeferrable", flag(false))
+                .set("tginitdeferred", flag(false))
+                .set("tgnargs", small(arguments.len() as i64))
+                .set("tgattr", vector(ArrayElement::Int2Vector, column_numbers))
+                .set("tgargs", Value::Bytea(packed))
+                .set(
+                    "tgoldtable",
+                    definition.old_table.as_deref().map_or(Value::Null, text),
+                )
+                .set(
+                    "tgnewtable",
+                    definition.new_table.as_deref().map_or(Value::Null, text),
+                )
+                .done(),
+        );
+    }
+    rows
+}
+
 fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let mut rows = Vec::new();
     for entry in &snapshot.relations {
@@ -505,6 +1072,7 @@ fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         };
         let columns = index_columns(owner, *index);
         let count = columns.len() as i64;
+        let sort_options = index_sort_options(owner, *index);
         rows.push(
             Row::new(CatalogRelation::Index)
                 .set("indexrelid", oid(entry.oid))
@@ -547,7 +1115,18 @@ fn index_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     "indoption",
                     vector(
                         ArrayElement::Int2Vector,
-                        columns.iter().map(|_| small(0)).collect(),
+                        (0..columns.len())
+                            .map(|position| {
+                                let mut option = 0;
+                                if sort_options.is_descending(position) {
+                                    option |= INDOPTION_DESC;
+                                }
+                                if sort_options.has_nulls_first(position) {
+                                    option |= INDOPTION_NULLS_FIRST;
+                                }
+                                small(option)
+                            })
+                            .collect(),
                     ),
                 )
                 .done(),
@@ -623,6 +1202,12 @@ fn constraint_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             .set("conislocal", flag(true))
             .set("coninhcount", small(0))
             .set("connoinherit", flag(true));
+        row = row
+            .set(
+                "condeferred",
+                flag(table.is_initially_deferred(&constraint.name)),
+            )
+            .set("convalidated", flag(table.is_validated(&constraint.name)));
         match constraint.source {
             ConstraintSource::Primary => {
                 row = row.set("conkey", smallints(&table.primary_key));
@@ -766,10 +1351,27 @@ fn description_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
-fn database_row(snapshot: &CatalogSnapshot) -> Vec<Value> {
+fn other_database_oid(name: &str) -> u32 {
+    let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    0x3000_0000 + hash % 0x1000_0000
+}
+
+fn database_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = vec![database_row(&snapshot.database, oids::DATABASE)];
+    for name in &snapshot.settings.database_names {
+        if name != &snapshot.database {
+            rows.push(database_row(name, other_database_oid(name)));
+        }
+    }
+    rows
+}
+
+fn database_row(name: &str, database: u32) -> Vec<Value> {
     Row::new(CatalogRelation::Database)
-        .set("oid", oid(oids::DATABASE))
-        .set("datname", text(&snapshot.database))
+        .set("oid", oid(database))
+        .set("datname", text(name))
         .set("datdba", oid(oids::SESSION_USER))
         .set("encoding", int(i64::from(oids::UTF8_ENCODING)))
         .set("datlocprovider", text("c"))
@@ -801,11 +1403,37 @@ fn role_row(name: &str, role: u32, everything: bool) -> Vec<Value> {
 }
 
 fn role_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
-    let mut rows = vec![role_row(&snapshot.user, oids::SESSION_USER, true)];
+    let stored = |name: &str| snapshot.stored_roles.iter().any(|role| role.name == name);
+    let mut rows = Vec::new();
+    if !stored(&snapshot.user) {
+        rows.push(role_row(&snapshot.user, oids::SESSION_USER, true));
+    }
     for (role, name) in oids::PREDEFINED_ROLES {
-        if name != snapshot.user {
+        if name != snapshot.user && !stored(name) {
             rows.push(role_row(name, role, false));
         }
+    }
+    for role in &snapshot.stored_roles {
+        let oid_of_role = if role.name == snapshot.user {
+            oids::SESSION_USER
+        } else {
+            crate::roles::role_oid(&role.name)
+        };
+        rows.push(
+            Row::new(CatalogRelation::Roles)
+                .set("rolname", text(&role.name))
+                .set("rolsuper", flag(role.superuser))
+                .set("rolinherit", flag(true))
+                .set("rolcreaterole", flag(role.superuser))
+                .set("rolcreatedb", flag(role.superuser))
+                .set("rolcanlogin", flag(role.login))
+                .set("rolreplication", flag(false))
+                .set("rolconnlimit", int(-1))
+                .set("rolpassword", text("********"))
+                .set("rolbypassrls", flag(role.superuser))
+                .set("oid", oid(oid_of_role))
+                .done(),
+        );
     }
     rows
 }
@@ -888,7 +1516,14 @@ fn depend_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             let (table, column) = sequence.owned_by.as_ref()?;
             let owner_at = snapshot.table_named(table)?;
             let owner = snapshot.relations.get(owner_at)?;
-            let number = owner.table()?.column_index(column)? + 1;
+            let owner_table = owner.table()?;
+            let position = owner_table.column_index(column)?;
+            let number = position + 1;
+            let dependency = if owner_table.identity_of(position).is_some() {
+                "i"
+            } else {
+                "a"
+            };
             Some(
                 Row::new(CatalogRelation::Depend)
                     .set("classid", oid(PG_CLASS))
@@ -897,7 +1532,7 @@ fn depend_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .set("refclassid", oid(PG_CLASS))
                     .set("refobjid", oid(owner.oid))
                     .set("refobjsubid", int(number as i64))
-                    .set("deptype", text("a"))
+                    .set("deptype", text(dependency))
                     .done(),
             )
         })
@@ -918,4 +1553,59 @@ fn tablespace_rows() -> Vec<Vec<Value>> {
             .done()
     })
     .collect()
+}
+
+fn time_zone_name_rows() -> Vec<Vec<Value>> {
+    let now = crate::datetime::statement_now();
+    crate::time_zones::region_names()
+        .into_iter()
+        .filter_map(|name| {
+            let zone = crate::time_zones::TimeZone::region(name)?;
+            let offset = zone.offset_at(now);
+            Some(
+                Row::new(CatalogRelation::TimezoneNames)
+                    .set("name", text(name))
+                    .set(
+                        "abbrev",
+                        text(&zone.abbreviation_at(now).unwrap_or_default()),
+                    )
+                    .set(
+                        "utc_offset",
+                        Value::Interval(crate::interval::Interval {
+                            months: 0,
+                            days: 0,
+                            micros: i64::from(offset) * crate::datetime::MICROS_PER_SECOND,
+                        }),
+                    )
+                    .set("is_dst", flag(zone.is_dst_at(now)))
+                    .done(),
+            )
+        })
+        .collect()
+}
+
+fn setting_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .settings
+        .all()
+        .into_iter()
+        .map(|(name, setting, description)| {
+            let context = if crate::settings::Settings::changeable(&name) {
+                "user"
+            } else {
+                "internal"
+            };
+            Row::new(CatalogRelation::Settings)
+                .set("name", text(&name))
+                .set("setting", text(&setting))
+                .set("short_desc", text(&description))
+                .set("context", text(context))
+                .set("vartype", text("string"))
+                .set("source", text("default"))
+                .set("boot_val", text(&setting))
+                .set("reset_val", text(&setting))
+                .set("pending_restart", flag(false))
+                .done()
+        })
+        .collect()
 }

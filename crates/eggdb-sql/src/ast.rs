@@ -21,6 +21,16 @@ pub(crate) enum Statement {
     },
     Commit,
     Rollback,
+    Savepoint(SavepointCommand),
+    Analyze(Vec<Name>),
+    Role(crate::roles::RoleStatement),
+    RowSecurity(crate::row_security::RowSecurityStatement),
+    Listen(Name),
+    Unlisten(Option<Name>),
+    Notify {
+        channel: Name,
+        payload: Option<String>,
+    },
     Set {
         name: String,
         value: Option<String>,
@@ -71,9 +81,311 @@ pub(crate) enum Statement {
         tag: &'static str,
         notice: Option<String>,
     },
+    InstallExtension {
+        name: &'static str,
+        if_not_exists: bool,
+    },
+    MaterializedView(MaterializedViewCommand),
     SqlServer(SqlServerStatement),
     Merge(Box<MergeStatement>),
     AlterSession(Vec<(String, String)>),
+    Discard(DiscardTarget),
+    With(Box<WithStatement>),
+    CreateType(Box<CreateType>),
+    CreateDomain(Box<CreateDomain>),
+    DropType {
+        names: Vec<Name>,
+        if_exists: bool,
+        cascade: bool,
+        domain: bool,
+    },
+    AlterType(Box<AlterType>),
+    AlterDomain(Box<AlterDomain>),
+    SetConstraints {
+        names: Option<Vec<Name>>,
+        deferred: bool,
+    },
+    CreateTrigger(Box<CreateTrigger>),
+    DropTrigger(DropTrigger),
+    EnableTrigger(EnableTrigger),
+    AlterTrigger(AlterTrigger),
+    CreateRoutine(Box<CreateRoutine>),
+    DropRoutine(DropRoutine),
+    AlterRoutine(AlterRoutine),
+    Call(CallRoutine),
+    Do(DoBlock),
+    PlsqlBlock(Box<PlsqlBlock>),
+    CreatePackage(Box<CreatePackage>),
+    DropPackage(DropPackage),
+    AlterPackage(AlterPackage),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlsqlBlock {
+    pub(crate) code: String,
+    pub(crate) program: crate::plpgsql::Program,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreatePackage {
+    pub(crate) replace: bool,
+    pub(crate) text: String,
+    pub(crate) package: crate::plsql::PlsqlPackage,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DropPackage {
+    pub(crate) name: Name,
+    pub(crate) body: bool,
+    pub(crate) if_exists: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackagePart {
+    Whole,
+    Specification,
+    Body,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterPackage {
+    pub(crate) name: Name,
+    pub(crate) part: PackagePart,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MaterializedViewCommand {
+    Create {
+        name: Name,
+        query: String,
+        with_data: bool,
+        if_not_exists: bool,
+    },
+    Refresh {
+        name: Name,
+        with_data: bool,
+    },
+    Drop {
+        names: Vec<Name>,
+        if_exists: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CallRoutine {
+    pub(crate) name: Name,
+    pub(crate) arguments: Vec<Expr>,
+    pub(crate) argument_names: Vec<Option<String>>,
+    pub(crate) user_variables: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DoBlock {
+    pub(crate) code: String,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateRoutine {
+    pub(crate) name: Name,
+    pub(crate) replace: bool,
+    pub(crate) must_exist: bool,
+    pub(crate) definition: crate::routines::RoutineDefinition,
+    pub(crate) body_position: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RoutineTarget {
+    pub(crate) name: Name,
+    pub(crate) arguments: Option<Vec<SqlType>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DropRoutine {
+    pub(crate) kind: Option<crate::routines::RoutineKind>,
+    pub(crate) targets: Vec<RoutineTarget>,
+    pub(crate) if_exists: bool,
+    pub(crate) cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterRoutine {
+    pub(crate) kind: Option<crate::routines::RoutineKind>,
+    pub(crate) target: RoutineTarget,
+    pub(crate) action: AlterRoutineAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterRoutineAction {
+    RenameTo(Name),
+    SetSchema(Name),
+    Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateTrigger {
+    pub(crate) name: Name,
+    pub(crate) table: Name,
+    pub(crate) replace: bool,
+    pub(crate) if_not_exists: bool,
+    pub(crate) placement: Option<TriggerPlacement>,
+    pub(crate) definition: crate::triggers::TriggerDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TriggerPlacement {
+    pub(crate) follows: bool,
+    pub(crate) other: Name,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TriggerName {
+    pub(crate) schema: Option<String>,
+    pub(crate) name: Name,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DropTrigger {
+    pub(crate) names: Vec<TriggerName>,
+    pub(crate) table: Option<Name>,
+    pub(crate) if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterTrigger {
+    pub(crate) name: TriggerName,
+    pub(crate) action: AlterTriggerAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterTriggerAction {
+    Enable,
+    Disable,
+    Compile,
+    RenameTo(Name),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EnableTrigger {
+    pub(crate) names: Option<Vec<Name>>,
+    pub(crate) table: Name,
+    pub(crate) enable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateType {
+    pub(crate) name: Name,
+    pub(crate) body: TypeSpec,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TypeSpec {
+    Enum(Vec<String>),
+    Composite(Vec<(Name, SqlType)>),
+    Range { subtype: SqlType, position: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DomainConstraintSpec {
+    pub(crate) name: Option<Name>,
+    pub(crate) expr: Expr,
+    pub(crate) text: String,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateDomain {
+    pub(crate) name: Name,
+    pub(crate) base: SqlType,
+    pub(crate) default: Option<(Expr, String)>,
+    pub(crate) not_null: bool,
+    pub(crate) checks: Vec<DomainConstraintSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterType {
+    pub(crate) name: Name,
+    pub(crate) action: AlterTypeAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterTypeAction {
+    AddValue {
+        label: String,
+        if_not_exists: bool,
+        neighbor: Option<(String, bool)>,
+    },
+    RenameValue {
+        from: String,
+        to: String,
+    },
+    RenameTo(Name),
+    SetSchema(Name),
+    Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlterDomain {
+    pub(crate) name: Name,
+    pub(crate) action: AlterDomainAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlterDomainAction {
+    SetDefault(Option<(Expr, String)>),
+    SetNotNull(bool),
+    AddCheck {
+        spec: DomainConstraintSpec,
+        not_valid: bool,
+    },
+    DropConstraint {
+        name: Name,
+        if_exists: bool,
+    },
+    ValidateConstraint(Name),
+    RenameConstraint {
+        from: Name,
+        to: Name,
+    },
+    RenameTo(Name),
+    SetSchema(Name),
+    Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WithStatement {
+    pub(crate) tables: Vec<WithTable>,
+    pub(crate) recursive: bool,
+    pub(crate) body: Statement,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WithTable {
+    Query(Box<CommonTable>),
+    Modifying {
+        name: Name,
+        column_names: Vec<Name>,
+        statement: Box<Statement>,
+    },
+}
+
+impl WithTable {
+    pub(crate) fn name(&self) -> &Name {
+        match self {
+            Self::Query(table) => &table.name,
+            Self::Modifying { name, .. } => name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiscardTarget {
+    All,
+    Plans,
+    Sequences,
+    Temporary,
+    PreparedStatement(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +396,7 @@ pub(crate) struct MergeStatement {
     pub(crate) on: Expr,
     pub(crate) update: Option<MergeUpdate>,
     pub(crate) insert: Option<MergeInsert>,
+    pub(crate) output: Option<Vec<SelectItem>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,7 +417,111 @@ pub(crate) struct MergeInsert {
 pub(crate) enum SqlServerStatement {
     Use(Name),
     NoCount(bool),
-    IdentityInsert { table: Name, on: bool },
+    ImplicitTransactions(bool),
+    IdentityInsert {
+        table: Name,
+        on: bool,
+    },
+    Execute(ProcedureCall),
+    DeclareTable {
+        name: Name,
+        columns: Vec<(Name, SqlType)>,
+        rules: crate::table_variables::TableVariableRules,
+    },
+    InsertVariable {
+        variable: Name,
+        columns: Option<Vec<Name>>,
+        source: VariableSource,
+    },
+    UpdateVariable {
+        variable: Name,
+        assignments: Vec<(Name, Expr)>,
+        filter: Option<Expr>,
+    },
+    DeleteVariable {
+        variable: Name,
+        filter: Option<Expr>,
+    },
+    FormatOnly(bool),
+    XactAbort(bool),
+    InsertBulk(crate::bulk_load::InsertBulk),
+    Declare(Vec<VariableDeclaration>),
+    SetVariable {
+        variable: Name,
+        value: Expr,
+    },
+    SelectAssign {
+        targets: Vec<AssignmentTarget>,
+        query: Box<Statement>,
+    },
+    Condition(Expr),
+    Print(Expr),
+    RaiseError(RaiseError),
+    Throw(Option<ThrowArguments>),
+    ExecuteDynamic(DynamicSql),
+    SaveTransaction(Name),
+    RollbackTo(Name),
+    Return(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VariableDeclaration {
+    pub(crate) name: Name,
+    pub(crate) declared: crate::sqlserver_types::SqlServerType,
+    pub(crate) initial: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssignmentTarget {
+    pub(crate) variable: Name,
+    pub(crate) operator: Option<BinaryOperator>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum VariableSource {
+    Values(Vec<Vec<InsertValue>>),
+    Query(Box<Statement>),
+    Execute(ProcedureCall),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RaiseError {
+    pub(crate) message: Expr,
+    pub(crate) severity: Expr,
+    pub(crate) state: Expr,
+    pub(crate) arguments: Vec<Expr>,
+    pub(crate) set_error: bool,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ThrowArguments {
+    pub(crate) number: Expr,
+    pub(crate) message: Expr,
+    pub(crate) state: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DynamicSql {
+    pub(crate) statement: Expr,
+    pub(crate) declarations: Option<Expr>,
+    pub(crate) arguments: Vec<ProcedureArgument>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcedureCall {
+    pub(crate) procedure: Name,
+    pub(crate) routine: String,
+    pub(crate) arguments: Vec<ProcedureArgument>,
+    pub(crate) status_variable: Option<Name>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcedureArgument {
+    pub(crate) name: Option<String>,
+    pub(crate) value: Option<Expr>,
+    pub(crate) output_variable: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +529,7 @@ pub(crate) struct CopyStatement {
     pub(crate) source: CopySource,
     pub(crate) direction: CopyDirection,
     pub(crate) options: crate::copy::CopyOptions,
+    pub(crate) condition: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +553,8 @@ pub(crate) struct CreateView {
     pub(crate) columns: Vec<Name>,
     pub(crate) query: Query,
     pub(crate) text: String,
+    pub(crate) check_option: Option<crate::encoding::CheckOption>,
+    pub(crate) temporary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +663,7 @@ pub(crate) struct ForeignKeySpec {
     pub(crate) on_delete: ReferentialAction,
     pub(crate) on_update: ReferentialAction,
     pub(crate) deferrable: bool,
+    pub(crate) initially_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -259,6 +680,8 @@ pub(crate) struct ConstraintSpec {
     pub(crate) kind: ConstraintKind,
     pub(crate) position: usize,
     pub(crate) column: Option<Name>,
+    pub(crate) using_index: Option<Name>,
+    pub(crate) not_valid: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -311,15 +734,36 @@ pub(crate) enum AlterAction {
     SetSchema(Name),
     AddIdentity {
         column: Name,
+        generation: crate::encoding::IdentityGeneration,
         sequence: Option<Name>,
         options: SequenceOptions,
     },
     AddDefault {
         column: Name,
         default: Expr,
+        source: String,
         position: usize,
     },
     EnableConstraint(Name),
+    ValidateConstraint(Name),
+    RenameConstraint {
+        from: Name,
+        to: Name,
+    },
+    AlterIdentity {
+        column: Name,
+        generation: Option<crate::encoding::IdentityGeneration>,
+        options: SequenceOptions,
+    },
+    DropIdentity {
+        column: Name,
+        if_exists: bool,
+    },
+    AttachPartition {
+        partition: Name,
+        bound: PartitionBoundSpec,
+    },
+    DetachPartition(Name),
     Accepted,
 }
 
@@ -329,6 +773,8 @@ pub(crate) struct IndexSpec {
     pub(crate) unique: bool,
     pub(crate) columns: Vec<Name>,
     pub(crate) position: usize,
+    pub(crate) method: crate::encoding::IndexMethod,
+    pub(crate) sort_options: crate::encoding::SortOptions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -354,6 +800,7 @@ pub(crate) enum ExplainStyle {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Explain {
     pub(crate) style: ExplainStyle,
+    pub(crate) analyze: bool,
     pub(crate) statement: Box<Statement>,
 }
 
@@ -380,11 +827,19 @@ pub(crate) enum MySqlStatement {
     },
     ShowCreateTable(Name),
     ShowCreateView(Name),
+    ShowCreateTrigger(Name),
+    ShowTriggers {
+        like: Option<String>,
+    },
     ShowIndex(Name),
     ShowVariables {
         like: Option<String>,
     },
     ShowStatus,
+    ShowServerFacts {
+        view: crate::mysql_catalog::MySqlRelation,
+        like: Option<String>,
+    },
     ShowWarnings {
         errors_only: bool,
     },
@@ -421,9 +876,24 @@ pub(crate) struct Name {
     pub(crate) position: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnCommit {
+    PreserveRows,
+    DeleteRows,
+    Drop,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SavepointCommand {
+    Set(Name),
+    RollbackTo(Name),
+    Release(Name),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateTable {
     pub(crate) name: Name,
+    pub(crate) temporary: Option<OnCommit>,
     pub(crate) if_not_exists: bool,
     pub(crate) columns: Vec<ColumnDefinition>,
     pub(crate) primary_key: Option<(Vec<Name>, usize)>,
@@ -431,6 +901,64 @@ pub(crate) struct CreateTable {
     pub(crate) indexes: Vec<IndexSpec>,
     pub(crate) constraints: Vec<ConstraintSpec>,
     pub(crate) comment: Option<String>,
+    pub(crate) partition_by: Option<PartitionBy>,
+    pub(crate) partition_of: Option<PartitionOf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartitionStrategy {
+    Range,
+    List,
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PartitionBoundValue {
+    Value(Expr),
+    MinValue,
+    MaxValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PartitionBoundSpec {
+    Range {
+        from: Vec<PartitionBoundValue>,
+        to: Vec<PartitionBoundValue>,
+    },
+    List(Vec<PartitionBoundValue>),
+    Hash {
+        modulus: u32,
+        remainder: u32,
+    },
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PartitionBy {
+    pub(crate) strategy: PartitionStrategy,
+    pub(crate) columns: Vec<Name>,
+    pub(crate) partitions: Vec<NamedPartition>,
+    pub(crate) hash_partitions: Option<u32>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NamedPartition {
+    pub(crate) name: Name,
+    pub(crate) bound: NamedPartitionBound,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NamedPartitionBound {
+    LessThan(Vec<PartitionBoundValue>),
+    In(Vec<PartitionBoundValue>),
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PartitionOf {
+    pub(crate) parent: Name,
+    pub(crate) bound: PartitionBoundSpec,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -440,7 +968,10 @@ pub(crate) struct ColumnDefinition {
     pub(crate) not_null: bool,
     pub(crate) primary_key: bool,
     pub(crate) default: Option<(Expr, String)>,
+    pub(crate) default_dialect: Dialect,
     pub(crate) auto_increment: bool,
+    pub(crate) identity_seed: Option<crate::encoding::IdentitySeed>,
+    pub(crate) generated_always: bool,
     pub(crate) unique: Option<Option<Name>>,
     pub(crate) constraints: Vec<ConstraintSpec>,
     pub(crate) comment: Option<String>,
@@ -471,6 +1002,7 @@ pub(crate) enum GeneratedTable {
     Function(TableFunction),
     Expansion(Box<SelectListExpansion>),
     Catalog(crate::pg_catalog::CatalogRelation),
+    Variable(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -492,12 +1024,39 @@ pub(crate) struct TableFunction {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SelectListExpansion {
     pub(crate) query: Query,
-    pub(crate) function: String,
-    pub(crate) arguments: usize,
-    pub(crate) before_columns: Option<usize>,
-    pub(crate) after_columns: Option<usize>,
-    pub(crate) output_name: String,
+    pub(crate) items: Vec<ExpandedItem>,
+    pub(crate) order: Vec<(ExpansionKey, crate::types::SortDirection)>,
+    pub(crate) hidden: usize,
     pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpansionKey {
+    Ordinal { number: i64, position: usize },
+    Output { item: usize, offset: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ExpandedItem {
+    Columns(Option<usize>),
+    SetReturning {
+        function: String,
+        arguments: usize,
+        output_name: String,
+        position: usize,
+        field: Option<String>,
+    },
+    Window {
+        spec: crate::window::WindowSpec,
+        keys: usize,
+        output_name: String,
+    },
+    Computed {
+        expr: Expr,
+        inputs: usize,
+        windows: Vec<(crate::window::WindowSpec, usize)>,
+        output_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -505,6 +1064,7 @@ pub(crate) struct DerivedTable {
     pub(crate) query: Query,
     pub(crate) column_names: Vec<Name>,
     pub(crate) dialect: Dialect,
+    pub(crate) lateral: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -635,6 +1195,8 @@ pub(crate) enum SubqueryState {
     Correlated {
         template: usize,
         sql_type: Option<SqlType>,
+        reads: Arc<[usize]>,
+        grouped: Option<Arc<[(usize, usize)]>>,
     },
 }
 
@@ -647,10 +1209,12 @@ impl PartialEq for SubqueryState {
                 Self::Correlated {
                     template: left,
                     sql_type: left_type,
+                    ..
                 },
                 Self::Correlated {
                     template: right,
                     sql_type: right_type,
+                    ..
                 },
             ) => left == right && left_type == right_type,
             _ => false,
@@ -670,6 +1234,7 @@ pub(crate) struct SubqueryRows {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum InsertSource {
     Values(Vec<Vec<InsertValue>>),
+    Query(Box<Query>),
     DefaultValues,
 }
 
@@ -686,7 +1251,15 @@ pub(crate) struct Insert {
     pub(crate) source: InsertSource,
     pub(crate) returning: Option<Vec<SelectItem>>,
     pub(crate) on_duplicate: OnDuplicate,
+    pub(crate) conflict_target: Option<Vec<Name>>,
     pub(crate) rollback_on_conflict: bool,
+    pub(crate) overriding: Option<Overriding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Overriding {
+    SystemValue,
+    UserValue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -800,6 +1373,15 @@ pub(crate) enum BinaryOperator {
     RegexMatchFolded,
     RegexNoMatch,
     RegexNoMatchFolded,
+    JsonHasKey,
+    JsonHasAnyKey,
+    JsonHasAllKeys,
+    JsonDeletePath,
+    TextSearchMatch,
+    VectorL2Distance,
+    VectorCosineDistance,
+    VectorNegativeInnerProduct,
+    VectorL1Distance,
 }
 
 impl BinaryOperator {
@@ -828,6 +1410,15 @@ impl BinaryOperator {
             Self::RegexMatchFolded => "~*",
             Self::RegexNoMatch => "!~",
             Self::RegexNoMatchFolded => "!~*",
+            Self::JsonHasKey => "?",
+            Self::JsonHasAnyKey => "?|",
+            Self::JsonHasAllKeys => "?&",
+            Self::JsonDeletePath => "#-",
+            Self::TextSearchMatch => "@@",
+            Self::VectorL2Distance => "<->",
+            Self::VectorCosineDistance => "<=>",
+            Self::VectorNegativeInnerProduct => "<#>",
+            Self::VectorL1Distance => "<+>",
         }
     }
 }
@@ -840,9 +1431,58 @@ pub(crate) enum AggregateFunction {
     Min,
     Max,
     StringAgg,
+    JsonAgg,
+    JsonbAgg,
+    JsonObjectAgg,
+    JsonbObjectAgg,
+    ArrayAgg,
+    BoolAnd,
+    BoolOr,
+    Every,
+    PercentileCont,
+    PercentileDisc,
+    Mode,
+    ApproxCountDistinct,
 }
 
 impl AggregateFunction {
+    pub(crate) const ALL: [Self; 18] = [
+        Self::Count,
+        Self::Sum,
+        Self::Avg,
+        Self::Min,
+        Self::Max,
+        Self::StringAgg,
+        Self::JsonAgg,
+        Self::JsonbAgg,
+        Self::JsonObjectAgg,
+        Self::JsonbObjectAgg,
+        Self::ArrayAgg,
+        Self::BoolAnd,
+        Self::BoolOr,
+        Self::Every,
+        Self::PercentileCont,
+        Self::PercentileDisc,
+        Self::Mode,
+        Self::ApproxCountDistinct,
+    ];
+
+    pub(crate) fn ordered_set_named(name: &str) -> Option<Self> {
+        Some(match name {
+            "percentile_cont" => Self::PercentileCont,
+            "percentile_disc" => Self::PercentileDisc,
+            "mode" => Self::Mode,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_ordered_set(self) -> bool {
+        matches!(
+            self,
+            Self::PercentileCont | Self::PercentileDisc | Self::Mode
+        )
+    }
+
     pub(crate) fn named(name: &str) -> Option<Self> {
         Some(match name {
             "count" => Self::Count,
@@ -850,6 +1490,21 @@ impl AggregateFunction {
             "avg" => Self::Avg,
             "min" => Self::Min,
             "max" => Self::Max,
+            "approx_count_distinct" => Self::ApproxCountDistinct,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn postgresql_named(name: &str) -> Option<Self> {
+        Some(match name {
+            "json_agg" => Self::JsonAgg,
+            "jsonb_agg" => Self::JsonbAgg,
+            "json_object_agg" => Self::JsonObjectAgg,
+            "jsonb_object_agg" => Self::JsonbObjectAgg,
+            "array_agg" => Self::ArrayAgg,
+            "bool_and" => Self::BoolAnd,
+            "bool_or" => Self::BoolOr,
+            "every" => Self::Every,
             _ => return None,
         })
     }
@@ -862,7 +1517,38 @@ impl AggregateFunction {
             Self::Min => "min",
             Self::Max => "max",
             Self::StringAgg => "string_agg",
+            Self::JsonAgg => "json_agg",
+            Self::JsonbAgg => "jsonb_agg",
+            Self::JsonObjectAgg => "json_object_agg",
+            Self::JsonbObjectAgg => "jsonb_object_agg",
+            Self::ArrayAgg => "array_agg",
+            Self::BoolAnd => "bool_and",
+            Self::BoolOr => "bool_or",
+            Self::Every => "every",
+            Self::ApproxCountDistinct => "approx_count_distinct",
+            Self::PercentileCont => "percentile_cont",
+            Self::PercentileDisc => "percentile_disc",
+            Self::Mode => "mode",
         }
+    }
+
+    pub(crate) fn keeps_nulls(self) -> bool {
+        self.builds_json() || self == Self::ArrayAgg
+    }
+
+    pub(crate) fn builds_json(self) -> bool {
+        matches!(
+            self,
+            Self::JsonAgg | Self::JsonbAgg | Self::JsonObjectAgg | Self::JsonbObjectAgg
+        )
+    }
+
+    pub(crate) fn builds_object(self) -> bool {
+        matches!(self, Self::JsonObjectAgg | Self::JsonbObjectAgg)
+    }
+
+    pub(crate) fn builds_jsonb(self) -> bool {
+        matches!(self, Self::JsonbAgg | Self::JsonbObjectAgg)
     }
 }
 
@@ -979,6 +1665,7 @@ pub(crate) enum ExprKind {
     OuterColumn {
         index: usize,
         sql_type: Option<SqlType>,
+        depth: usize,
     },
     Constant {
         value: Value,

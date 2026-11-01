@@ -1,0 +1,16 @@
+[package]
+name = "eggdb-format"
+description = "EggDB's file format building blocks (checksums, header slots, page headers) and pages on raw flash, usable without the standard library."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true
+
+[dependencies]

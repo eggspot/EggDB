@@ -84,18 +84,19 @@ accepts (below).
 
 ### Wide terminals
 The list grows with the terminal up to 60 columns and the viewer takes everything else; nothing
-else changes at 100 or 200 columns. When collections exist (later release) and the database has
-more than one, a sidebar of `clamp(cols / 6, 16, 24)` columns appears on the left at
-`cols ≥ 110`, and `Tab` cycles sidebar → keys → value. v0.2.0 draws no sidebar, but the layout
-function already takes `sidebar_cols` (0 today), so adding it moves no other region.
+else changes at 100 or 200 columns. When the database has at least one collection (item 26,
+its section below), a sidebar of `clamp(cols / 6, 20, 24)` columns appears on the left at
+`cols ≥ 110`, and `Tab` cycles sidebar → keys → value. Without collections the layout is the one
+above at every width: the layout function takes `sidebar_cols` (0 then), so the sidebar moves no
+other region.
 
 ```
  Collections        │ Keys /user:              1–18 of 1,204│ Value  json · 1.2 K                          line 1–18/41 
- > default          │> user:1                             58│ user:5                                                    
+ > default key space│> user:1                             58│ user:5                                                    
    sessions         │  user:2                             61│───────────────────────────────────────────────────────────
    …                │  user:3                             55│ {                                                         
 ```
-(120 columns, a later release; shown so the v0.2.0 regions leave it room.)
+(120 columns, with collections; the minimum width of 20 is what ` > default key space` needs.)
 
 ### Small terminals
 - `cols < 80` and `cols ≥ 40` (a phone over SSH, a split pane): one pane fills the width; the
@@ -543,6 +544,301 @@ screen's hints bar at 80 columns reads as stated above.
 3. `Ctrl-P` from a just-run text skips the history entry equal to it, so the first press shows
    the run before.
 4. A page (`PgUp`/`PgDn`) is the grid's visible rows.
+
+## Collections (item 26)
+Roadmap item 26, designed by Claude Fable (D15). A database has its default key space (what every
+screen above shows) and any number of named collections, each an ordered key space of its own
+(`Database::collection(name)`, `collection_names`, `create_collection`, `drop_collection` in
+[embedded.md](../embedded.md)). The UI shows one key space at a time; everything a user does
+(`/`, `e`, `a`, `d`, `v`, the count, the check) acts on the one shown, and the screens above keep
+their meaning. Nothing changes for a file without collections: no new hint, no sidebar, the same
+golden screens.
+
+### Vocabulary and labels
+- A **collection** is named by its name, as it is (`users`); a name is 1 to 128 bytes of UTF-8
+  with no whitespace or control characters, so it is shown as text and never needs escaping.
+- The **default key space** is labelled `default key space` wherever key spaces are listed (the
+  picker, the sidebar, the shell). The label holds spaces, and a collection name cannot, so no
+  collection can be confused with it, including one literally named `default`.
+- The key list's title says which space is shown: ` Keys` for the default key space (unchanged),
+  ` Keys in users` for a collection, then the filter and the position as before:
+  ` Keys in users /s:   1–20 of 312`. The name is cut with `…` so the title keeps its position
+  and at least 8 cells of the filter. The header stays about the file (name, size, pages, the
+  key count `stats` reports, the last commit); the title's `of 312` is the shown space's count.
+
+### The picker (`C`)
+`C` (capital, for Collections; `c` stays the check, as `g`/`G` already pair) opens the picker from
+the key list or the viewer, at every width; in an editor or the filter line `C` types. The picker
+is a modal: the default key space first, then every collection in byte order of its name, read
+with `collection_names` when it opens, so it is always current. `>` marks the highlighted row,
+which starts on the space shown now.
+
+```
+ EggDB  app.db                 1.2 MiB · 312 pages · 1,204 keys · 09:14:03Z  RW 
+ Keys in users /s:   1–20 of 312│ Value  json · 61 B                 line 1–3/3 
+> s:1                         61│ s:1                                           
+  s:2                         61│───────────────────────────────────────────────
+  s:3                         60│ {                                             
+  s:4                         61│   "user": 1,                                  
+  s:5                         59│   "ttl": 3600                                 
+  s:6            ┌ Collections ───────────────────────────────┐                 
+  s:7            │   default key space                        │                 
+  s:8            │ > users                                    │                 
+  s:9            │   sessions                                 │                 
+  s:10           │   cache                                    │                 
+  s:11           │                                            │                 
+  s:12           │ Delete one after quitting, with            │                 
+  s:13           │ eggdb collection delete app.db <name>      │                 
+  s:14           │                                            │                 
+  s:15           │         Enter show   a add   Esc back      │                 
+  s:16           └────────────────────────────────────────────┘                 
+  s:17                        60│                                               
+  s:18                        61│                                               
+  s:19                        60│                                               
+  s:20                        61│                                               
+                                                                                
+ ↑↓ move  / filter  e edit  a add  d delete  s sql  C collection  ? help  q quit
+```
+
+Keys in the picker: `↑` `↓` `j` `k`, `PgUp` `PgDn`, `Home` `End` move the highlight; typing
+letters narrows the rows to names that start with what was typed (`Backspace` removes a letter;
+the default key space always stays); `Enter` shows the highlighted space; `Esc` or `C` closes
+with nothing changed; `Enter` on the space already shown only closes. The modal follows the
+"question waits to be seen" rule like every modal, and `q`/`Ctrl-C` quit as everywhere.
+
+**Switching.** Choosing a space redraws from a fresh read of it: the prefix filter is cleared
+(a filter describes one space's keys), the first key is selected and its value shown, the count
+worker restarts for that space (`1–20 of 312+` until it ends), the viewer's mode goes back to
+`auto`. The toast says `Showing collection users` or `Showing the default key space`. The
+choice lives as long as the UI runs; `eggdb ui` always opens on the default key space. An empty
+collection shows one dimmed row `collection users is empty — press a to add a key` (the default
+key space keeps `empty database — press a to add a key`).
+
+**Hints bar.** When the database has at least one collection, or a collection is shown, the bar
+gains `C collection` after `s sql`; at 80 columns that is one entry too many, and the bar's
+existing drop rule removes the entry before `? help`, so `c check` leaves the bar (it stays in
+the help) and the line reads as in the mock. From 89 columns both show. A file without
+collections keeps today's bar.
+
+**Adding a collection (`a` in the picker).** The UI holds the file open for writing, so "add it
+from the command line" would mean quitting first; the picker therefore adds. `a` turns the
+picker's title into ` Add collection: █`, the single-line editor taking the name as typed (no
+escapes: names are text; a space is not typed). `Enter` checks the name before any transaction:
+too long, empty or holding a control character shows the toast `Collection names are 1 to 128
+bytes with no spaces or control characters` and keeps the editor; a name already in the list
+shows `Collection cache already exists`. A good name runs `try_begin_write`, `create_collection`,
+`commit` (the commit-failure table applies unchanged), closes the picker, shows the new, empty
+collection and toasts `Added collection cache at 09:14:05Z`. No confirm modal: an empty
+collection is harmless to add. `Esc` in the editor returns to the list. Deleting and renaming
+collections stay with the CLI this release (`eggdb collection delete`): deleting removes every
+key in one commit, which the command line states and asks nothing about, and the UI would need a
+typed confirmation to be as safe as its `d`.
+
+**Empty state.** With no collections the picker still opens, so `C` always answers:
+```
+┌ Collections ───────────────────────────────┐
+│ > default key space                        │
+│                                            │
+│ app.db has no collections yet. Press a to  │
+│ add one.                                   │
+│                                            │
+│         Enter show   a add   Esc back      │
+└────────────────────────────────────────────┘
+```
+Read-only (`--read-only`): the picker opens and switching works (it only reads); `a` is dimmed
+and pressing it shows the read-only toast of the Starting section; the empty-state text reads
+`app.db has no collections. Quit, then add one with eggdb collection add app.db <name>.` (a
+read-only UI holds a shared lock that keeps a writer out, section 2 of cli.md).
+
+### Editing in a collection
+`e`, `a` and `d` act on the shown space through `WriteTransaction::collection(name)`. The confirm
+modals (`Replace value`, `Add key`, `Delete key`) gain a line `In     collection users` under
+`Key` when a collection is shown, so the user sees where the change goes; the default key space
+adds no line. Toasts (`Committed s:1 (61 B) at …`, `Deleted …`) are unchanged; a key added
+outside the filter says so as before.
+
+### The sidebar (`cols ≥ 110`)
+The reserved sidebar (Wide terminals) appears when the database has at least one collection,
+titled ` Collections`, `clamp(cols / 6, 20, 24)` columns, the default key space first and then
+the names in byte order, a window like the key list when there are more rows than fit (the shown
+one kept visible). `>` marks the shown space. `Tab` cycles keys → value → sidebar → keys and
+`Shift-Tab` the reverse; the focused pane's title takes the focus style. In the sidebar `↑` `↓`
+`j` `k` `Home` `End` **switch at once** (the sidebar's selection is what is shown, as the key
+list's selection is what the viewer shows), with the same redraw and toast as the picker;
+`Enter`, `→` and `Esc` move focus to the key list; `a` adds a collection through the picker's
+editor (the sidebar's title row becomes ` Add collection: █`); `C` opens the picker as anywhere.
+The sidebar's hints: ` ↑↓ switch  a add  Enter keys  C collection  ? help  q quit`. Below 110
+columns, and in narrow mode, there is no sidebar and `C` is the way; the title ` Keys in users`
+says which space is shown at every width.
+
+### When the collection disappears
+Another program may drop the shown collection between two key presses. A redraw whose scan
+fails with `CollectionNotFound` switches to the default key space, redraws, and shows the
+warning toast `Warning: collection users is gone (deleted by another program); showing the
+default key space`. A commit that fails with `CollectionNotFound` gets a row in the
+commit-failure table: modal with the engine's message and `Try: eggdb collection add app.db
+users to make it again`; `Esc` closes it and the UI shows the default key space, the edit
+discarded (nothing was committed). The picker and the sidebar read the names afresh at each open
+and redraw, so a collection added elsewhere appears on the next `r` or redraw.
+
+### Help screen
+A line pair after `Find`:
+```
+ Collections C  pick the collection shown (default key space first); a adds one
+             Tab reaches the sidebar from 110 columns; the CLI deletes one
+```
+
+### Scenarios for the tests
+33. `C` on a file without collections opens the empty-state picker; `Enter` closes it and nothing
+    changes; the hints bar is today's.
+34. With `users`, `sessions` and `cache`: `C`, `↓`, `Enter` shows `users`: the title reads
+    `Keys in users`, the filter is cleared, the first key is selected, the toast matches; the
+    bar at 80 columns reads as in the mock.
+35. `a` in the picker adds `cache` and the UI shows it empty; a name with a space, an empty name
+    and an existing name show their toasts and keep the editor; `--read-only` dims `a`.
+36. At 120 × 40 the sidebar appears only when a collection exists; `Tab` cycles the three panes;
+    `↓` in the sidebar switches at once.
+37. A test hook drops the shown collection between key presses: the warning toast, the default
+    key space shown; a commit into a dropped collection shows the modal with its `Try:` line.
+38. Edit, add and delete in a collection: the modals carry the `In` line, a scan of that
+    collection agrees with the model, and the default key space is untouched.
+39. At 60 × 20 the picker is at most `cols − 4` wide and the title reads `Keys in users`.
+
+### Decided by this design
+1. `C` opens the picker at every width; the sidebar at ≥ 110 columns is a shortcut, not the only
+   way, so one habit works everywhere.
+2. The default key space is labelled `default key space`: a label with spaces can never be a
+   collection's name.
+3. The shown space is named in the key list's title (` Keys in users`), not in the header, so
+   narrow mode and the reference size show it alike and the header stays about the file.
+4. Switching clears the filter and restarts the count; the mode returns to `auto`.
+5. The picker adds collections (`a`, no confirm) because the UI holds the file's lock; deleting
+   stays with the CLI.
+6. The sidebar's selection is the shown space: arrows switch at once, like the key list.
+7. The hints bar gains `C collection` only when collections exist; `c check` leaves the bar at 80
+   columns by the existing drop rule.
+
+### As built (item 26, D139)
+- The picker's letters are commands (`j`/`k` move, `g`/`G` jump, `a` adds, `C` closes, `q`
+  quits), so typing to narrow the list is left out; with many collections, `PgUp`/`PgDn` and
+  `Home`/`End` move quickly.
+- "When the collection disappears" is left out: the UI holds the file's lock (writing excludes
+  every other open, read-only excludes writers), so no other program can drop a collection while
+  it is shown.
+- The two help lines and `C collection` in the hints appear only when the database has a
+  collection (or one is shown), so a file without collections keeps every golden screen.
+
+## Expiring keys and counters (item 27)
+Roadmap item 27, designed by Claude Fable (D15). A key may have a time to live and a value may be
+a counter (cli.md section 21). The UI shows the time left, sets and clears it, and changes
+counters; compare-and-set stays with the CLI (a form with two values is a script's tool). Nothing
+changes for a file that has never held an expiring key (the header's `EXPIRING_KEYS` bit, D140,
+given to the UI as `Summary::expiring_keys`): the same golden screens and bar, except that `t`,
+`+` and `-` work and the help screen lists them.
+
+### Showing the time left
+- **Key list.** An expiring key's row shows its time left in the size column instead of the
+  size, in the dim style: `29s`, `12m`, `1h`, `7d`, `412ms` (the largest unit alone, rounded
+  down; `>27y` beyond 9999 days). A size has a space before `K`, `M`, `G` or is bare digits; a
+  time ends in a lower-case unit, so the two read apart without colour. Permanent keys keep their
+  size. The row carries `KeyRow::time_to_live: Option<Duration>`, as of the redraw's read.
+- **Viewer.** The key line (the viewer's first row) gets, right-aligned and dim, `expires in
+  1h4m12s` in the full form of cli.md section 21; a long key is cut to leave room for it. The
+  title keeps the size.
+- **Counting down** (design): the time left computed from the deadline on every frame, with a
+  one-second tick while a visible key has under a minute left. See "As built".
+
+### When the shown key expires
+A redraw whose scan no longer returns the selected key (`r`, or any commit) selects the next
+key. `d` or `t` on a key that is gone between frames keeps today's message: the commit fails
+with `… is no longer in app.db; nothing was committed. Press r to re-read`; `+` and `-` count an
+expired key from 0, as `eggdb incr` does.
+
+### Set or clear the time to live (`t`)
+`t` (in the list and the viewer) acts on the selected key. The list's title row becomes
+` Expire user:1 in: █`, the single-line editor taking a time in the CLI's grammar. `Enter`
+checks the text before any transaction: a bad time keeps the editor with the toast `Not a time:
+'30'; use 30s, 5m, 1h30m, 7d or 1500ms`; `0` with `0 is not a time to live; d deletes the key`.
+A good time, or an empty line on an expiring key, opens the confirm modal:
+```
+┌ Set time to live ────────────────────────────────┐
+│ Key    user:1 (6 B)                              │
+│ In     collection sessions                       │
+│ TTL    never → 30s                               │
+│                                                  │
+│ One commit, written to disk before you continue. │
+│                                                  │
+│              Enter commit     Esc back           │
+└──────────────────────────────────────────────────┘
+```
+The `In` line appears only in a collection, as in the other modals. Changing shows `TTL    29s
+→ 5m`; an empty line on an expiring key titles the modal `Clear time to live` with `TTL    29s →
+never`; an empty line on a permanent key only toasts `user:1 has no time to live` and closes the
+editor. `Enter` commits `Change::Expire { key, time_to_live }` or `Change::Persist { key }`
+through `Source::write`, redraws from a fresh read and toasts `Committed user:1 (expires in 30s)
+at 09:14:37Z` or `Committed user:1 (never expires) at 09:14:40Z`. The commit-failure table
+applies unchanged. `--read-only` refuses `t` with the read-only toast.
+
+### Counters (`+`, `-`)
+`+` and `-` (in the list and the viewer) act on the selected key. The list's title row becomes
+` Increment hits by: █` or ` Decrement hits by: █`; `Enter` on a whole number from 0 to
+9223372036854775807, or on an empty line for 1, commits `Change::Increment { key, by }` (`by`
+negative for `-`) at once, with no second modal: the typed amount and `Enter` are the
+confirmation, and the opposite key undoes it (unlike `d`, which has no undo). The toast says
+`Committed hits 41 → 42 at 09:14:37Z`. `abc` keeps the editor with `Not a whole number: 'abc'`.
+A value that is not a whole number, or an overflow, is the engine's error as a toast,
+`Error (NotAnInteger): …` with `Try: e to store a whole number`; nothing is committed. The time
+to live is kept and the row still shows it. `--read-only` refuses both.
+
+### Hints bar and help screen
+In a file with expiring keys the list's bar gains `t expire` after `d delete`; at 80 columns the
+existing drop rule removes the entry before `? help`, so the bar reads
+` ↑↓ move  / filter  e edit  a add  d delete  t expire  s sql  ? help  q quit`. While the `t`
+editor is open the bar reads ` Enter continue  Esc cancel  30s 5m 1h30m 7d times  empty: never`,
+and while the `+`/`-` editor is open ` Enter commit  Esc cancel  empty: 1`. The help screen gains,
+after `Change`, in every file:
+```
+ Expire      t  time to live: 30s, 5m, 1h30m, 7d, or empty for never
+ Counter     +  add to a counter   -  subtract (asks how much, 1 if empty)
+```
+and the read-only line reads `Opened read-only: e, a, d, t, + and - are off; start without
+--read-only.` The `Source` trait gains the three `Change` variants, `KeyRow::time_to_live`,
+`Summary::expiring_keys` and `ErrorKind::NotAnInteger`.
+
+### Scenarios for the tests
+40. A file without expiring keys keeps every golden screen; `t` on `user:1`, `30s`, `Enter`,
+    `Enter`: the modal reads `TTL    never → 30s`, the toast matches, the row shows `30s`, the
+    viewer's key line `expires in 30s`, and the bar now has `t expire`.
+41. `t` with `30`, then `0s`: each toast, the editor kept; `Esc` changes nothing.
+42. `t` and an empty line on a permanent key only toasts; on an expiring key `Clear time to
+    live`, `TTL    1h30m → never`, and after `Enter` the row shows its size again.
+43. `+` on `hits` (`41`): `Enter` gives `Committed hits 41 → 42`; `-` with `5` gives `42 → 37`;
+    `+` with `abc` keeps the editor; `+` on `user:1` (text) shows the `NotAnInteger` toast and the
+    value is unchanged.
+44. `--read-only` refuses `t`, `+` and `-` with the read-only toast and writes nothing.
+45. In a collection the modal carries the `In` line, and only that collection's key gets the
+    time to live.
+
+### Decided by this design
+1. The time left replaces the size in the list only for expiring keys; the viewer's key line
+   shows the full form. No new column, no changed golden screens elsewhere.
+2. `t` for time to live, `+`/`-` for counters; `t expire` joins the bar only with expiring keys,
+   `+`/`-` live in the help.
+3. Setting and clearing go through a confirm modal (`TTL    never → 30s`); a counter step commits
+   on the prompt's `Enter`, since the opposite key undoes it.
+4. Compare-and-set is not in the UI.
+
+### As built (item 27, D140)
+- **No live countdown.** The time left is the one the last read returned; `r`, any commit or a
+  move that re-reads the window refreshes it. The UI reads no clock of its own, so the golden
+  screens stay deterministic, and an expired key leaves the list at the next re-read without an
+  `Expired … at` toast. The one-second tick of the design is left for later.
+- The modal's `TTL` line has no `(until 09:15:07Z)` for the same reason.
+- The `+`/`-` editor starts empty, and an empty line means 1, rather than holding a selected `1`:
+  the one-line editor has no selection.
+- When the counter's old value was not loaded (a value above 64 MiB), the toast reads
+  `Committed hits = 42 at …`.
+- The two help lines are shortened to fit 80 columns.
 
 ## Resize
 The terminal layer delivers a `Resize` event; the UI recomputes the layout and redraws. The

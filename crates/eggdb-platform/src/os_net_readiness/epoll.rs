@@ -181,7 +181,7 @@ struct SockaddrIn6 {
 
 const _: () = assert!(size_of::<SockaddrIn>() == 16 && size_of::<SockaddrIn6>() == 28);
 
-pub(super) fn connect_without_waiting(address: SocketAddr) -> io::Result<Connecting> {
+pub(crate) fn connect_without_waiting(address: SocketAddr) -> io::Result<Connecting> {
     let domain = if address.is_ipv4() { AF_INET } else { AF_INET6 };
     // SAFETY: socket takes no pointers; a negative result is reported as an error.
     let fd = unsafe { socket(domain, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0) };

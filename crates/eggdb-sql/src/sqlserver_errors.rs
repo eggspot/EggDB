@@ -2,7 +2,7 @@ use crate::error::SqlError;
 
 const GENERIC_ERROR: u16 = 50000;
 
-const SEVERITIES: [(u16, u8); 74] = [
+const SEVERITIES: [(u16, u8); 82] = [
     (102, 15),
     (103, 15),
     (105, 15),
@@ -76,6 +76,14 @@ const SEVERITIES: [(u16, u8); 74] = [
     (9809, 16),
     (9810, 16),
     (10741, 15),
+    (134, 15),
+    (135, 15),
+    (136, 15),
+    (141, 15),
+    (178, 15),
+    (191, 15),
+    (4145, 15),
+    (10704, 15),
     (GENERIC_ERROR, 16),
 ];
 
@@ -467,6 +475,11 @@ pub(crate) fn translate(error: SqlError, text: &str, statement: &str, database: 
         ),
         "0A000" => (40517, not_supported(&message)),
         "55P03" => (1222, "Lock request time out period exceeded.".to_owned()),
+        "54001" => (
+            217,
+            "Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32)."
+                .to_owned(),
+        ),
         "54000" => (
             7119,
             format!("Attempting to grow LOB beyond maximum allowed size: {message}"),

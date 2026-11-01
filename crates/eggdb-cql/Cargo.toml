@@ -1,0 +1,14 @@
+[package]
+name = "eggdb-cql"
+description = "EggDB's server for Cassandra's CQL native protocol v4, written from the public protocol and CQL documentation: keyspaces and tables mapped onto EggDB's SQL schemas and tables."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-sql = { path = "../eggdb-sql" }

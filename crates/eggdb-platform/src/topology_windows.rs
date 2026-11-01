@@ -130,6 +130,7 @@ fn build(records: Records) -> CpuTopology {
         numa_nodes: (!records.numa_conflict && every_cpu_has_a_node).then_some(records.numa_nodes),
         last_level_caches: last_level_caches(&records.caches, &cpus).and_then(number_groups),
         cache_line_size: records.cache_line_size,
+        kinds: None,
         cpus,
     }
     .into_topology()

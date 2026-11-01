@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-gui"
+description = "EggDB's own GUI toolkit and desktop client: a software rasterizer, TrueType text from the system's fonts, and the client's screens as designed in docs/ux/gui.md."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-platform = { path = "../eggdb-platform" }

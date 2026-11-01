@@ -1,5 +1,6 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::numeric::Numeric;
+use crate::time_zones::TimeZone;
 use std::cell::Cell;
 
 pub(crate) const MICROS_PER_SECOND: i64 = 1_000_000;
@@ -15,7 +16,7 @@ const MAX_OFFSET_SECONDS: i64 = 15 * 3600 + 59 * 60 + 59;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StatementClock {
     pub(crate) now: Option<i64>,
-    pub(crate) offset_seconds: i32,
+    pub(crate) zone: TimeZone,
 }
 
 thread_local! {
@@ -30,11 +31,8 @@ impl Drop for StatementClockGuard {
     }
 }
 
-pub(crate) fn enter_statement(offset_seconds: i32) -> StatementClockGuard {
-    let clock = StatementClock {
-        now: None,
-        offset_seconds,
-    };
+pub(crate) fn enter_statement(zone: TimeZone) -> StatementClockGuard {
+    let clock = StatementClock { now: None, zone };
     StatementClockGuard(CURRENT.with(|current| current.replace(Some(clock))))
 }
 
@@ -62,8 +60,16 @@ pub(crate) fn statement_now() -> i64 {
     })
 }
 
-pub(crate) fn session_offset() -> i32 {
-    CURRENT.with(|current| current.get().map_or(0, |clock| clock.offset_seconds))
+pub(crate) fn session_zone() -> TimeZone {
+    CURRENT.with(|current| current.get().map_or(TimeZone::UTC, |clock| clock.zone))
+}
+
+pub(crate) fn session_offset_at(utc: i64) -> i32 {
+    session_zone().offset_at(utc)
+}
+
+pub(crate) fn session_offset_now() -> i32 {
+    session_offset_at(statement_now())
 }
 
 pub(crate) fn time_zone_offset(name: &str) -> Option<i32> {
@@ -285,7 +291,7 @@ fn parse_parts(text: &str) -> Result<Parsed, Failure> {
         micros = parse_time(&mut scan)?;
         scan.spaces();
     }
-    let offset_seconds = parse_zone(&mut scan)?;
+    let zone = parse_zone(&mut scan)?;
     scan.spaces();
     if scan.word("bc") {
         bc = true;
@@ -303,11 +309,46 @@ fn parse_parts(text: &str) -> Result<Parsed, Failure> {
     if day < 1 || day > days_in_month(year, month) {
         return Err(Failure::Field);
     }
+    let days = days_from_civil(year, month, day);
+    let offset_seconds = match zone {
+        WrittenZone::Absent => None,
+        WrittenZone::Offset(seconds) => Some(seconds),
+        WrittenZone::Region(zone) => {
+            let local = days.saturating_mul(MICROS_PER_DAY).saturating_add(micros);
+            Some(i64::from(zone.offset_of_local(local)))
+        }
+    };
     Ok(Parsed {
-        days: days_from_civil(year, month, day),
+        days,
         micros,
         offset_seconds,
     })
+}
+
+enum WrittenZone {
+    Absent,
+    Offset(i64),
+    Region(TimeZone),
+}
+
+fn region_at(scan: &mut Scanner<'_>) -> Option<TimeZone> {
+    if !scan.peek().is_some_and(|byte| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    let start = scan.at;
+    let mut end = start;
+    while scan.bytes.get(end).is_some_and(|&byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'/' | b'-' | b'+')
+    }) {
+        end += 1;
+    }
+    let word = std::str::from_utf8(scan.bytes.get(start..end)?).ok()?;
+    if word.eq_ignore_ascii_case("bc") || word.eq_ignore_ascii_case("ad") {
+        return None;
+    }
+    let zone = TimeZone::region(word)?;
+    scan.at = end;
+    Some(zone)
 }
 
 fn parse_time(scan: &mut Scanner<'_>) -> Result<i64, Failure> {
@@ -349,14 +390,17 @@ fn parse_time(scan: &mut Scanner<'_>) -> Result<i64, Failure> {
     Ok(((hour * 60 + minute) * 60 + second) * MICROS_PER_SECOND + fraction)
 }
 
-fn parse_zone(scan: &mut Scanner<'_>) -> Result<Option<i64>, Failure> {
+fn parse_zone(scan: &mut Scanner<'_>) -> Result<WrittenZone, Failure> {
+    if let Some(zone) = region_at(scan) {
+        return Ok(WrittenZone::Region(zone));
+    }
     if scan.word("utc") || scan.word("gmt") || scan.take(b'Z') || scan.take(b'z') {
-        return Ok(Some(0));
+        return Ok(WrittenZone::Offset(0));
     }
     let sign = match scan.peek() {
         Some(b'+') => 1,
         Some(b'-') => -1,
-        _ => return Ok(None),
+        _ => return Ok(WrittenZone::Absent),
     };
     scan.at += 1;
     let start = scan.at;
@@ -368,7 +412,7 @@ fn parse_zone(scan: &mut Scanner<'_>) -> Result<Option<i64>, Failure> {
     }
     let written = std::str::from_utf8(&scan.bytes[start..scan.at]).map_err(|_| Failure::Syntax)?;
     let seconds = clock_offset(written).ok_or(Failure::Field)?;
-    Ok(Some(sign * seconds))
+    Ok(WrittenZone::Offset(sign * seconds))
 }
 
 fn input_error(kind: DateTimeKind, text: &str, failure: Failure) -> SqlError {
@@ -438,10 +482,16 @@ pub(crate) fn parse_timestamp(text: &str, with_zone: bool) -> SqlResult<i64> {
     let parsed = parse_parts(text).map_err(|failure| input_error(kind, text, failure))?;
     let local = i128::from(parsed.days) * i128::from(MICROS_PER_DAY) + i128::from(parsed.micros);
     let micros = if with_zone {
-        let offset = parsed
-            .offset_seconds
-            .unwrap_or_else(|| i64::from(session_offset()));
-        local - i128::from(offset) * i128::from(MICROS_PER_SECOND)
+        match parsed.offset_seconds {
+            Some(offset) => local - i128::from(offset) * i128::from(MICROS_PER_SECOND),
+            None => {
+                let clamped =
+                    i64::try_from(local).unwrap_or(if local < 0 { i64::MIN } else { i64::MAX });
+                local
+                    - i128::from(session_zone().offset_of_local(clamped))
+                        * i128::from(MICROS_PER_SECOND)
+            }
+        }
     } else {
         local
     };
@@ -499,7 +549,11 @@ fn clock_parts(text: &str) -> Result<(i64, Option<i64>), Failure> {
         }
     }
     scan.spaces();
-    let offset = parse_zone(&mut scan)?;
+    let offset = match parse_zone(&mut scan)? {
+        WrittenZone::Absent => None,
+        WrittenZone::Offset(seconds) => Some(seconds),
+        WrittenZone::Region(zone) => Some(i64::from(zone.offset_at(statement_now()))),
+    };
     scan.spaces();
     if !scan.done() {
         return Err(Failure::Syntax);
@@ -521,23 +575,120 @@ pub(crate) fn parse_time_of_day(text: &str, with_zone: bool) -> SqlResult<(i64, 
     if !valid_time(micros) {
         return Err(time_input_error(with_zone, text, Failure::Field));
     }
-    let offset = offset.map_or_else(session_offset, |offset| offset as i32);
+    let offset = offset.map_or_else(session_offset_now, |offset| offset as i32);
     Ok((micros, offset))
+}
+
+fn mysql_time_error(text: &str) -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_DATETIME_FORMAT,
+        format!("Incorrect TIME value: '{text}'"),
+    )
+}
+
+fn mysql_fraction(digits: &str) -> Option<i64> {
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut value = 0i64;
+    for position in 0..7 {
+        let digit = digits
+            .as_bytes()
+            .get(position)
+            .map_or(0, |digit| i64::from(digit - b'0'));
+        value = value * 10 + digit;
+    }
+    Some((value + 5) / 10)
+}
+
+fn small_number(text: &str, longest: usize) -> Option<i64> {
+    if text.is_empty() || text.len() > longest || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+fn mysql_clock(days: i64, clock: &str) -> Option<i64> {
+    let (whole, fraction) = match clock.split_once('.') {
+        Some((whole, fraction)) => (whole, mysql_fraction(fraction)?),
+        None => (clock, 0),
+    };
+    let (hours, minutes, seconds) = if whole.contains(':') {
+        let parts: Vec<&str> = whole.split(':').collect();
+        match parts.as_slice() {
+            [hours, minutes] => (small_number(hours, 3)?, small_number(minutes, 2)?, 0),
+            [hours, minutes, seconds] => (
+                small_number(hours, 3)?,
+                small_number(minutes, 2)?,
+                small_number(seconds, 2)?,
+            ),
+            _ => return None,
+        }
+    } else if days != 0 {
+        (small_number(whole, 3)?, 0, 0)
+    } else {
+        let digits = small_number(whole, 7)?;
+        (digits / 10_000, digits / 100 % 100, digits % 100)
+    };
+    if minutes > 59 || seconds > 59 {
+        return None;
+    }
+    let total_seconds = (days * 24 + hours) * 3600 + minutes * 60 + seconds;
+    Some(total_seconds * MICROS_PER_SECOND + fraction)
+}
+
+pub(crate) fn parse_mysql_time(text: &str) -> SqlResult<i64> {
+    let trimmed = text.trim();
+    let year_digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if year_digits >= 4 && trimmed.as_bytes().get(year_digits) == Some(&b'-') {
+        return parse_time_of_day(text, false).map(|(micros, _)| micros);
+    }
+    let (negative, body) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, trimmed),
+    };
+    let (days, clock) = match body.split_once(' ') {
+        Some((days, clock)) => (
+            small_number(days, 2).ok_or_else(|| mysql_time_error(text))?,
+            clock.trim(),
+        ),
+        None => (0, body),
+    };
+    let micros = mysql_clock(days, clock).ok_or_else(|| mysql_time_error(text))?;
+    if micros > MYSQL_TIME_LIMIT {
+        return Err(SqlError::new(
+            SqlState::DATETIME_FIELD_OVERFLOW,
+            format!("Incorrect TIME value: '{text}'"),
+        ));
+    }
+    Ok(if negative { -micros } else { micros })
 }
 
 pub(crate) fn round_time(micros: i64, precision: u8) -> i64 {
     if precision >= 6 {
         return micros;
     }
+    if micros < 0 {
+        return -round_time(micros.saturating_neg(), precision);
+    }
     let unit = 10i64.pow(u32::from(6 - precision));
     (micros + unit / 2) / unit * unit
 }
 
+pub(crate) const MYSQL_TIME_LIMIT: i64 = (838 * 3600 + 59 * 60 + 59) * MICROS_PER_SECOND;
+
+pub(crate) fn valid_stored_time(micros: i64) -> bool {
+    (-MYSQL_TIME_LIMIT..=MYSQL_TIME_LIMIT).contains(&micros)
+}
+
 pub(crate) fn format_time(micros: i64) -> String {
-    let seconds = micros / MICROS_PER_SECOND;
-    let fraction = micros % MICROS_PER_SECOND;
+    let sign = if micros < 0 { "-" } else { "" };
+    let magnitude = micros.unsigned_abs();
+    let micros_per_second = MICROS_PER_SECOND.unsigned_abs();
+    let seconds = magnitude / micros_per_second;
+    let fraction = magnitude % micros_per_second;
     let mut out = format!(
-        "{:02}:{:02}:{:02}",
+        "{sign}{:02}:{:02}:{:02}",
         seconds / 3600,
         seconds / 60 % 60,
         seconds % 60
@@ -665,7 +816,11 @@ pub(crate) fn format_timestamp(micros: i64) -> String {
 }
 
 pub(crate) fn format_timestamptz(micros: i64) -> String {
-    format_timestamptz_at(micros, session_offset())
+    format_timestamptz_in(micros, session_zone())
+}
+
+pub(crate) fn format_timestamptz_in(micros: i64, zone: TimeZone) -> String {
+    format_timestamptz_at(micros, zone.offset_at(micros))
 }
 
 pub(crate) fn format_timestamptz_at(micros: i64, offset: i32) -> String {
@@ -677,15 +832,11 @@ pub(crate) fn to_local(micros: i64, offset: i32) -> i64 {
 }
 
 pub(crate) fn local_to_utc(micros: i64) -> SqlResult<i64> {
-    checked_timestamp(
-        i128::from(micros) - i128::from(session_offset()) * i128::from(MICROS_PER_SECOND),
-    )
+    checked_timestamp(session_zone().utc_of_local(micros))
 }
 
 pub(crate) fn utc_to_local(micros: i64) -> SqlResult<i64> {
-    checked_timestamp(
-        i128::from(micros) + i128::from(session_offset()) * i128::from(MICROS_PER_SECOND),
-    )
+    checked_timestamp(session_zone().local_of_utc(micros))
 }
 
 pub(crate) fn round_to_precision(micros: i64, precision: u8) -> SqlResult<i64> {
@@ -794,7 +945,7 @@ pub(crate) fn unknown_unit(name: &str, kind: DateTimeKind) -> SqlError {
     )
 }
 
-fn iso_week(days: i64) -> (i64, i64) {
+pub(crate) fn iso_week(days: i64) -> (i64, i64) {
     let weekday = (days + 5).rem_euclid(7) + 1;
     let thursday = days - weekday + 4;
     let (iso_year, _, _) = civil_from_days(thursday);
@@ -1143,8 +1294,8 @@ mod tests {
 
     #[test]
     fn the_session_time_zone_reads_and_shows_time_stamps() {
-        let _guard = enter_statement(time_zone_offset("UTC-05:30").unwrap_or(0));
-        assert_eq!(session_offset(), 5 * 3600 + 1800);
+        let _guard = enter_statement(TimeZone::named("UTC-05:30").unwrap_or_default());
+        assert_eq!(session_offset_at(0), 5 * 3600 + 1800);
         let micros = parse_timestamp("2024-01-01 10:00:00", true).unwrap();
         assert_eq!(format_timestamptz(micros), "2024-01-01 10:00:00+05:30");
         assert_eq!(
@@ -1153,7 +1304,7 @@ mod tests {
             "stored as UTC"
         );
         drop(_guard);
-        assert_eq!(session_offset(), 0);
+        assert_eq!(session_offset_at(0), 0);
         assert_eq!(time_zone_offset("+03"), Some(-3 * 3600));
         assert_eq!(time_zone_offset("EST5"), Some(-5 * 3600));
         assert_eq!(time_zone_offset("Etc/UTC"), Some(0));

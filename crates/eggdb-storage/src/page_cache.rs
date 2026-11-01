@@ -109,9 +109,32 @@ pub struct PageCache<F: File> {
     commit_order: Vec<usize>,
     images: RefCell<BeforeImages>,
     new_chains: RefCell<BTreeMap<u64, Box<[u8]>>>,
+    value_compression: Cell<crate::compression::ValueCompression>,
+    compressed_written: Cell<bool>,
 }
 
 impl<F: File> PageCache<F> {
+    /// Sets whether large values written from now on are compressed (see
+    /// [`ValueCompression`](crate::ValueCompression)). Values already written keep their form.
+    pub fn set_value_compression(&self, compression: crate::compression::ValueCompression) {
+        self.value_compression.set(compression);
+    }
+
+    /// Whether large values written from now on are compressed.
+    pub fn value_compression(&self) -> crate::compression::ValueCompression {
+        self.value_compression.get()
+    }
+
+    pub(crate) fn note_compressed_value(&self) {
+        self.compressed_written.set(true);
+    }
+
+    /// Keeps the cache's memory in RAM, never swapped out, for as long as the cache lives.
+    /// Fails with the platform's error when the process may not lock that much memory.
+    pub fn lock_in_memory(&mut self) -> Result<(), StorageError> {
+        self.frames.lock_in_memory().map_err(StorageError::from)
+    }
+
     /// Puts `file` behind a cache of `size`, taking its memory from `memory` now and never
     /// again. A size of no pages, or of more pages than [`u32::MAX`], is refused with
     /// [`StorageError::InvalidCacheSize`], and memory that can't be had fails with the
@@ -144,12 +167,19 @@ impl<F: File> PageCache<F> {
             commit_order: cells::reserved(frames)?,
             images: RefCell::new(BeforeImages::new(frames)),
             new_chains: RefCell::new(BTreeMap::new()),
+            value_compression: Cell::new(crate::compression::ValueCompression::Off),
+            compressed_written: Cell::new(false),
         })
     }
 
     /// The page size of the file.
     pub fn page_size(&self) -> PageSize {
         self.file.borrow().page_size()
+    }
+
+    /// The cipher the file's pages are encrypted with, once its key was given (D187).
+    pub fn page_cipher(&self) -> Option<crate::page_cipher::PageCipher> {
+        self.file.borrow().page_cipher().cloned()
     }
 
     /// The superblock of the last commit.
@@ -341,7 +371,16 @@ impl<F: File> PageCache<F> {
         );
         order.sort_unstable_by_key(|&frame| (self.pages[frame].get(), frame));
         order.dedup();
-        let committed = self.write_and_commit(&order, stamp, update);
+        let compressed = self.compressed_written.get();
+        let committed = self.write_and_commit(&order, stamp, |superblock| {
+            update(superblock);
+            if compressed {
+                superblock.features.incompatible |= crate::format::Features::COMPRESSED_VALUES;
+            }
+        });
+        if committed.is_ok() {
+            self.compressed_written.set(false);
+        }
         if committed.is_ok() {
             self.images.get_mut().commit();
             self.new_chains.get_mut().clear();
@@ -369,6 +408,7 @@ impl<F: File> PageCache<F> {
     /// commit.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.new_chains.get_mut().clear();
+        self.compressed_written.set(false);
         self.drop_changes();
         self.images.get_mut().discard_pending();
         self.file.get_mut().rollback()
@@ -1221,10 +1261,21 @@ mod tests {
         let memory = SimMemory::new();
         memory.set_budget(1 << 20);
         let file = PageFile::open(&fs, Path::new(DB), Access::ReadOnly).unwrap();
-        assert!(matches!(
-            PageCache::new(file, &memory, CacheSize::Pages(u32::MAX as usize)),
-            Err(StorageError::Io(error)) if error.kind() == ErrorKind::OutOfMemory
-        ));
+        let fits_the_address_space = (u32::MAX as usize)
+            .checked_mul(file.page_size().bytes())
+            .is_some();
+        let refused = PageCache::new(file, &memory, CacheSize::Pages(u32::MAX as usize));
+        if fits_the_address_space {
+            assert!(matches!(
+                refused,
+                Err(StorageError::Io(error)) if error.kind() == ErrorKind::OutOfMemory
+            ));
+        } else {
+            assert!(matches!(
+                refused,
+                Err(StorageError::InvalidCacheSize { .. })
+            ));
+        }
     }
 
     #[test]

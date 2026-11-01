@@ -2,20 +2,20 @@ use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{Dialect, Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
@@ -33,7 +33,7 @@ impl Seeded {
     }
 }
 
-fn numbered(session: &mut Session<'_, MemoryStore>, rows: u64) {
+fn numbered(session: &mut Session<'_>, rows: u64) {
     last(
         session,
         "CREATE TABLE t (id integer PRIMARY KEY, b integer, c text)",
@@ -588,7 +588,9 @@ fn hostile_index_statements_return_errors_and_never_panic() {
         "DESC",
         "ASC",
         "NULLS FIRST",
+        "NULLS LAST",
         "USING btree",
+        "USING hash",
         "USING gist",
         "WHERE",
         "DROP INDEX",
@@ -1095,4 +1097,88 @@ fn unique_indexes_follow_the_equality_of_intervals_and_characters() {
             .code(),
         "23505"
     );
+}
+
+#[test]
+fn descending_and_hash_indexes_keep_their_options_and_find_the_same_rows() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    numbered(&mut session, 500);
+    last(
+        &mut session,
+        "CREATE INDEX t_b_desc ON t (b DESC, c NULLS FIRST); \
+         CREATE INDEX t_c_hash ON t USING hash (c); \
+         CREATE UNIQUE INDEX t_id_c ON t (id DESC, c)",
+    );
+    for (query, expected) in [
+        ("SELECT count(*) FROM t WHERE b = 7", "count\n5\nSELECT 1"),
+        (
+            "SELECT count(*) FROM t WHERE c = 'c3'",
+            "count\n71\nSELECT 1",
+        ),
+        (
+            "SELECT id FROM t WHERE b >= 98 ORDER BY b DESC, id LIMIT 3",
+            "id\n99\n199\n299\nSELECT 3",
+        ),
+    ] {
+        assert_eq!(last(&mut session, query), expected, "{query}");
+    }
+    let check = session.check_indexes().unwrap();
+    assert_eq!((check.indexes, check.entries), (3, 1_500));
+    let mut reopened = Session::new(&store);
+    let tables = reopened.tables().unwrap();
+    let t = tables.iter().find(|table| table.name == "t").unwrap();
+    type Shown<'a> = Vec<(&'a str, &'a str, Vec<(bool, bool)>)>;
+    let shown: Shown<'_> = t
+        .indexes
+        .iter()
+        .map(|index| {
+            (
+                index.name.as_str(),
+                index.method.as_str(),
+                index
+                    .orders
+                    .iter()
+                    .map(|order| (order.descending, order.nulls_first))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("t_b_desc", "btree", vec![(true, true), (false, true)]),
+            ("t_c_hash", "hash", vec![(false, false)]),
+            ("t_id_c", "btree", vec![(true, true), (false, false)]),
+        ]
+    );
+    assert_eq!(
+        t.index_statements_in(Dialect::PostgreSql),
+        "CREATE INDEX t_b_desc ON t (b DESC, c NULLS FIRST);\n\
+         CREATE INDEX t_c_hash ON t USING hash (c);\n\
+         CREATE UNIQUE INDEX t_id_c ON t (id DESC, c);\n"
+    );
+    assert_eq!(
+        t.index_statements_in(Dialect::MySql),
+        "CREATE INDEX `t_b_desc` ON `t` (`b` DESC, `c`);\n\
+         CREATE INDEX `t_c_hash` ON `t` (`c`);\n\
+         CREATE UNIQUE INDEX `t_id_c` ON `t` (`id` DESC, `c`);\n"
+    );
+    let copy = MemoryStore::default();
+    let mut restored = Session::new(&copy);
+    last(
+        &mut restored,
+        "CREATE TABLE t (id integer PRIMARY KEY, b integer, c text)",
+    );
+    last(&mut restored, &t.index_statements_in(Dialect::PostgreSql));
+    assert_eq!(restored.tables().unwrap()[0].indexes, t.indexes);
+    let mut mysql = Session::with_dialect(&store, Dialect::MySql);
+    let shown = last(&mut mysql, "SHOW INDEX FROM t");
+    let collations: Vec<&str> = shown
+        .lines()
+        .skip(1)
+        .filter(|line| line.contains("|t_b_desc|") || line.contains("|t_id_c|"))
+        .map(|line| line.split('|').nth(5).unwrap_or_default())
+        .collect();
+    assert_eq!(collations, ["D", "A", "D", "A"]);
 }

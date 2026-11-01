@@ -61,6 +61,10 @@ pub enum ErrorKind {
     /// A read transaction's snapshot expired: the writer changed more pages since it began
     /// than the snapshot memory holds. Begin a new read transaction.
     SnapshotTooOld,
+    /// A [`ConcurrentTransaction`](crate::ConcurrentTransaction) could not commit: a
+    /// transaction that committed after it began changed what it read or wrote. Nothing was
+    /// written; run it again.
+    Conflict,
     /// The write transaction failed earlier and was rolled back then; begin a new one.
     TransactionFailed,
     /// An earlier write or sync failed, so the database refuses everything until it is
@@ -71,6 +75,25 @@ pub enum ErrorKind {
     DatabaseFull,
     /// An [`Options`](crate::Options) value is outside what EggDB accepts.
     InvalidOption,
+    /// There is no collection of that name (see
+    /// [`Database::create_collection`](crate::Database::create_collection)).
+    CollectionNotFound,
+    /// The name can't name a collection: names are 1 to 128 bytes of text without whitespace or
+    /// control characters.
+    InvalidCollectionName,
+    /// The key starts with the bytes EggDB keeps for collections, `0xff 'C' 'O' 'L' 0x00`, which
+    /// the default key space refuses. Nothing changed, and the transaction stays open.
+    ReservedKey,
+    /// A file is already where a new one would go: a backup never replaces a file (see
+    /// [`Database::backup_to`](crate::Database::backup_to)), and the file a backup or a
+    /// compaction builds beside its destination is left by one that did not finish, or by
+    /// one still running.
+    AlreadyExists,
+    /// The value is not a counter (see
+    /// [`WriteTransaction::increment`](crate::WriteTransaction::increment)): not a decimal
+    /// integer from `i64::MIN` to `i64::MAX`, or adding the step would take it out of that
+    /// range. Nothing changed, and the transaction stays open.
+    NotAnInteger,
     /// Any other failure.
     Other,
 }
@@ -105,7 +128,9 @@ impl Error {
         }
     }
 
-    pub(crate) fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self {
+    /// An error of `kind` with `message`, for code that builds on the embedded API and reports
+    /// its own failures as EggDB errors.
+    pub fn new(kind: ErrorKind, message: impl Into<Box<str>>) -> Self {
         Self {
             kind,
             detail: Detail::Message(message.into(), None),
@@ -144,6 +169,7 @@ fn kind_of(error: &StorageError) -> ErrorKind {
             eggdb_platform::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
             eggdb_platform::ErrorKind::Locked => ErrorKind::Locked,
             eggdb_platform::ErrorKind::OutOfMemory => ErrorKind::OutOfMemory,
+            eggdb_platform::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
             _ => ErrorKind::Io,
         },
         StorageError::Format(error) => kind_of_format(error),
@@ -164,6 +190,8 @@ fn kind_of(error: &StorageError) -> ErrorKind {
         StorageError::WriterActive | StorageError::UncommittedChanges => ErrorKind::WriterActive,
         StorageError::TransactionFailed => ErrorKind::TransactionFailed,
         StorageError::SnapshotTooOld => ErrorKind::SnapshotTooOld,
+        StorageError::NeedsKey | StorageError::WrongKey => ErrorKind::PermissionDenied,
+        StorageError::NotEncrypted => ErrorKind::InvalidOption,
         _ => ErrorKind::Other,
     }
 }
@@ -221,7 +249,13 @@ impl From<Error> for std::io::Error {
             ErrorKind::NotADatabase | ErrorKind::Incompatible | ErrorKind::Corrupt => {
                 std::io::ErrorKind::InvalidData
             }
-            ErrorKind::TooLarge | ErrorKind::InvalidOption => std::io::ErrorKind::InvalidInput,
+            ErrorKind::CollectionNotFound => std::io::ErrorKind::NotFound,
+            ErrorKind::AlreadyExists => std::io::ErrorKind::AlreadyExists,
+            ErrorKind::TooLarge
+            | ErrorKind::InvalidOption
+            | ErrorKind::InvalidCollectionName
+            | ErrorKind::ReservedKey
+            | ErrorKind::NotAnInteger => std::io::ErrorKind::InvalidInput,
             ErrorKind::OutOfMemory => std::io::ErrorKind::OutOfMemory,
             ErrorKind::DatabaseFull => std::io::ErrorKind::StorageFull,
             _ => std::io::ErrorKind::Other,

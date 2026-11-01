@@ -1,11 +1,14 @@
-use super::Parser;
+use super::{Parameters, Parser};
 use crate::ast::{
-    ColumnDefinition, Expr, ExprKind, Literal, Name, Query, SetExpr, SqlServerStatement, Statement,
-    TableReference,
+    AlterSequence, ColumnDefinition, Comment, CommentTarget, CreateSequence, Expr, ExprKind,
+    Literal, Name, ProcedureCall, Query, RelationKind, SequenceOptions, SetExpr,
+    SqlServerStatement, Statement, TableReference,
 };
+use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope};
-use crate::lexer::TokenKind;
+use crate::lexer::{Token, TokenKind, tokenize_in};
+use crate::session::sqlserver::ParameterDeclaration;
 use crate::settings::Settings;
 use crate::sqlserver_functions::Function;
 use crate::sqlserver_types::{
@@ -19,7 +22,7 @@ use crate::types::Value;
 /// read it from `@@VERSION` and the TDS login acknowledgement.
 pub const SQLSERVER_COMPATIBLE_VERSION: &str = "16.0.1000";
 
-const RESERVED: [&str; 185] = [
+const RESERVED: [&str; 184] = [
     "add",
     "all",
     "alter",
@@ -140,7 +143,6 @@ const RESERVED: [&str; 185] = [
     "percent",
     "pivot",
     "plan",
-    "precision",
     "primary",
     "print",
     "proc",
@@ -239,30 +241,14 @@ const STATEMENT_WORDS: [&str; 29] = [
     "with",
 ];
 
-const NOT_SUPPORTED_STATEMENTS: [&str; 22] = [
-    "declare",
-    "print",
-    "if",
-    "while",
-    "exec",
-    "execute",
-    "return",
-    "raiserror",
-    "throw",
-    "goto",
-    "waitfor",
-    "merge",
-    "grant",
-    "revoke",
-    "deny",
-    "backup",
-    "restore",
-    "dbcc",
-    "kill",
-    "open",
-    "fetch",
-    "bulk",
+const NOT_SUPPORTED_STATEMENTS: [&str; 12] = [
+    "goto", "waitfor", "grant", "revoke", "deny", "backup", "restore", "dbcc", "kill", "open",
+    "fetch", "bulk",
 ];
+
+const BATCH_LOGIC_STATEMENTS: [&str; 5] = ["if", "while", "break", "continue", "return"];
+
+const BLOCK_ENDS: [&str; 4] = ["end", "else", "break", "continue"];
 
 const NOT_TRANSACT_SQL_STATEMENTS: [&str; 20] = [
     "start",
@@ -301,8 +287,20 @@ const ON_ONLY_OPTIONS: [&str; 7] = [
     "ansi_null_dflt_on",
 ];
 
-const NOT_SUPPORTED_OPTIONS: [&str; 5] =
-    ["xact_abort", "rowcount", "fmtonly", "parseonly", "noexec"];
+const NOT_SUPPORTED_OPTIONS: [&str; 3] = ["rowcount", "parseonly", "noexec"];
+
+const EXTENDED_PROPERTY_PARAMETERS: [&str; 8] = [
+    "@name",
+    "@value",
+    "@level0type",
+    "@level0name",
+    "@level1type",
+    "@level1name",
+    "@level2type",
+    "@level2name",
+];
+
+const DESCRIPTION_PROPERTY: &str = "ms_description";
 
 const SWITCHED_INDEX_OPTIONS: [&str; 8] = [
     "pad_index",
@@ -362,6 +360,14 @@ pub(crate) fn starts_statement(word: &str) -> bool {
     STATEMENT_WORDS.contains(&word)
 }
 
+pub(crate) fn ends_a_block(word: &str) -> bool {
+    BLOCK_ENDS.contains(&word)
+}
+
+pub(super) fn outside_a_batch(what: &str) -> SqlError {
+    not_supported(&format!("{what} outside a Transact-SQL batch"))
+}
+
 pub(crate) fn not_supported(what: &str) -> SqlError {
     SqlError::new(
         SqlState::FEATURE_NOT_SUPPORTED,
@@ -378,7 +384,24 @@ pub(crate) fn version_text() -> String {
     )
 }
 
-fn undeclared_variable(name: &str, position: usize) -> SqlError {
+fn microsoft_version() -> i64 {
+    let mut parts = SQLSERVER_COMPATIBLE_VERSION
+        .split('.')
+        .map(|part| part.parse::<i64>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let build = parts.next().unwrap_or(0);
+    (major << 24) | (minor << 16) | build
+}
+
+pub(super) fn login_text(name: &'static str, value: String, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::SessionValue { name, value },
+        position,
+    }
+}
+
+pub(super) fn undeclared_variable(name: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_PARAMETER,
         format!("Must declare the scalar variable \"{name}\"."),
@@ -481,7 +504,7 @@ fn folded_default(expr: &Expr, column_type: SqlType) -> Option<String> {
     postgresql_literal(&value)
 }
 
-pub(crate) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String> {
+fn default_source(expr: &Expr, column_type: SqlType) -> Option<String> {
     match &expr.kind {
         ExprKind::Cast {
             expr: clock,
@@ -504,8 +527,105 @@ pub(crate) fn default_source(expr: &Expr, column_type: SqlType) -> Option<String
     }
 }
 
+pub(crate) fn kept_default(
+    expr: &Expr,
+    written: &str,
+    column_type: SqlType,
+) -> SqlResult<(String, Dialect)> {
+    if let Some(folded) = default_source(expr, column_type) {
+        return Ok((folded, Dialect::PostgreSql));
+    }
+    let kept = without_outer_parentheses(written);
+    if !reads_alone_as_expression(kept) {
+        return Err(not_supported(
+            "A DEFAULT expression that cannot be read again on its own",
+        ));
+    }
+    Ok((kept.to_owned(), Dialect::SqlServer))
+}
+
+fn without_outer_parentheses(written: &str) -> &str {
+    let trimmed = written.trim();
+    let Ok(tokens) = tokenize_in(trimmed, Dialect::SqlServer) else {
+        return trimmed;
+    };
+    let meaningful: Vec<&Token<'_>> = tokens
+        .iter()
+        .filter(|token| token.kind != TokenKind::End)
+        .collect();
+    let partners = closing_partners(&meaningful);
+    let (mut first, mut last) = (0, meaningful.len());
+    while last - first >= 3
+        && meaningful[first].kind == TokenKind::LeftParen
+        && partners[first] == Some(last - 1)
+    {
+        first += 1;
+        last -= 1;
+    }
+    if first == 0 {
+        return trimmed;
+    }
+    trimmed
+        .get(meaningful[first - 1].end..meaningful[last].start)
+        .map_or(trimmed, str::trim)
+}
+
+fn closing_partners(tokens: &[&Token<'_>]) -> Vec<Option<usize>> {
+    let mut partners = vec![None; tokens.len()];
+    let mut open = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LeftParen => open.push(at),
+            TokenKind::RightParen => {
+                if let Some(opened) = open.pop() {
+                    partners[opened] = Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    partners
+}
+
+fn reads_alone_as_expression(text: &str) -> bool {
+    let Ok(tokens) = tokenize_in(text, Dialect::SqlServer) else {
+        return false;
+    };
+    let names_a_local_variable = tokens
+        .iter()
+        .any(|token| matches!(&token.kind, TokenKind::Variable(name) if !name.starts_with("@@")));
+    if names_a_local_variable {
+        return false;
+    }
+    let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);
+    parser.expression().is_ok() && parser.at_end()
+}
+
+const GENERIC_ERROR: u16 = 50000;
+
+#[cold]
+#[inline(never)]
+fn invalid_identity_argument(
+    column: &str,
+    column_type: SqlType,
+    rule: &str,
+    position: usize,
+) -> SqlError {
+    let type_name = match column_type {
+        SqlType::SmallInt => "smallint",
+        SqlType::Integer => "int",
+        _ => "bigint",
+    };
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        format!("The IDENTITY {rule} of column '{column}' must be a whole number within the range of {type_name}."),
+    )
+    .with_sqlserver_code(GENERIC_ERROR)
+    .at(position)
+}
+
 impl<'t> Parser<'t> {
-    fn sqlserver_settings<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
+    pub(super) fn sqlserver_settings<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
         match self.settings {
             Some(settings) => read(settings),
             None => read(&Settings::default()),
@@ -533,23 +653,79 @@ impl<'t> Parser<'t> {
             "commit" | "rollback" => {
                 let commit = word == "commit";
                 self.at += 1;
-                if !self.take_word("work")
+                let name = if !self.take_word("work")
                     && (self.take_word("tran") || self.take_word("transaction"))
                 {
-                    self.optional_transaction_name();
-                }
-                if commit {
-                    Statement::Commit
+                    self.transaction_name()?
                 } else {
-                    Statement::Rollback
+                    None
+                };
+                match (commit, name) {
+                    (true, _) => Statement::Commit,
+                    (false, Some(name)) => {
+                        Statement::SqlServer(SqlServerStatement::RollbackTo(name))
+                    }
+                    (false, None) => Statement::Rollback,
                 }
             }
-            "save" => return Err(not_supported("SAVE TRANSACTION").at(position)),
+            "save" => {
+                self.at += 1;
+                if !self.take_word("tran") {
+                    self.expect_word("transaction")?;
+                }
+                match self.transaction_name()? {
+                    Some(name) => Statement::SqlServer(SqlServerStatement::SaveTransaction(name)),
+                    None => return Err(self.unexpected()),
+                }
+            }
+            "return" => {
+                self.at += 1;
+                if self.at_statement_end() {
+                    return Err(outside_a_batch("RETURN").at(position));
+                }
+                Statement::SqlServer(SqlServerStatement::Return(self.expression()?))
+            }
+            word if BATCH_LOGIC_STATEMENTS.contains(&word) => {
+                return Err(outside_a_batch(&self.keyword_text()).at(position));
+            }
+            "exec" | "execute" => self.sqlserver_execute()?,
+            "declare" => self.sqlserver_declare()?,
+            "print" => self.sqlserver_print()?,
+            "raiserror" => self.sqlserver_raiserror()?,
+            "throw" => self.sqlserver_throw()?,
+            "select" if self.select_assigns_variables() => self.sqlserver_select_assignment()?,
+            "insert" if self.at_insert_into_variable() => self.sqlserver_insert_variable()?,
+            "update" if self.at_variable(1) => self.sqlserver_update_variable()?,
+            "delete"
+                if self.at_variable(1) || (self.is_word_at(1, "from") && self.at_variable(2)) =>
+            {
+                self.sqlserver_delete_variable()?
+            }
+            word if self.first_in_batch()
+                && crate::sqlserver_catalog::CatalogProcedure::named(word).is_some() =>
+            {
+                self.sqlserver_bare_procedure()?
+            }
             "create" | "alter"
                 if self.is_word_at(1, "view")
                     || (self.is_word_at(1, "or") && self.is_word_at(3, "view")) =>
             {
                 self.sqlserver_view()?
+            }
+            "create" | "alter" | "drop" if self.at_sqlserver_routine() => {
+                self.sqlserver_routine()?
+            }
+            "create" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.sqlserver_create_sequence()?
+            }
+            "alter" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.sqlserver_alter_sequence()?
+            }
+            "drop" if self.is_word_at(1, "sequence") => {
+                self.at += 1;
+                self.drop_sequence()?
             }
             "use" => {
                 self.at += 1;
@@ -566,6 +742,8 @@ impl<'t> Parser<'t> {
             "update" | "delete" if self.is_word_at(1, "top") => {
                 return Err(not_supported("TOP in UPDATE and DELETE").at(position));
             }
+            "insert" if self.is_word_at(1, "bulk") => self.sqlserver_insert_bulk()?,
+            "merge" => self.sqlserver_merge()?,
             "insert" if self.is_word_at(1, "top") => {
                 return Err(not_supported("TOP in INSERT").at(position));
             }
@@ -576,6 +754,107 @@ impl<'t> Parser<'t> {
             _ => return Ok(None),
         };
         Ok(Some(statement))
+    }
+
+    pub(super) fn variable_reference(&mut self, name: &str, position: usize) -> SqlResult<Expr> {
+        let constant = match self.batch.and_then(|batch| batch.variable(name)) {
+            Some(variable) => Some(variable.constant(position)),
+            None => self
+                .declared_variables
+                .iter()
+                .find(|variable| variable.name == name)
+                .map(|variable| variable.constant(position)),
+        };
+        if let Some(constant) = constant {
+            self.variables_read.push(name.to_owned());
+            return Ok(constant);
+        }
+        self.bound_parameter(name, position)
+    }
+
+    fn bound_parameter(&self, name: &str, position: usize) -> SqlResult<Expr> {
+        let Parameters::Named(parameters) = self.parameters else {
+            return Err(undeclared_variable(name, position));
+        };
+        let Some(parameter) = parameters
+            .iter()
+            .find(|parameter| parameter.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(undeclared_variable(name, position));
+        };
+        let constant = Expr {
+            kind: ExprKind::Constant {
+                value: parameter.value.clone(),
+                sql_type: parameter.value.sql_type().or(parameter.declared_type),
+            },
+            position,
+        };
+        Ok(match parameter.declared_type {
+            Some(sql_type) if !parameter.value.is_null() => Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(constant),
+                    sql_type,
+                },
+                position,
+            },
+            _ => constant,
+        })
+    }
+
+    fn parameter_declaration_list(&mut self) -> SqlResult<Vec<ParameterDeclaration>> {
+        let mut declarations: Vec<ParameterDeclaration> = Vec::new();
+        if self.at_end() {
+            return Ok(declarations);
+        }
+        loop {
+            let position = self.position();
+            let name = match self.peek_kind() {
+                TokenKind::Variable(name) if !name.starts_with("@@") => name.as_ref().to_owned(),
+                _ => return Err(self.unexpected()),
+            };
+            self.at += 1;
+            self.take_word("as");
+            let sql_type = self.sqlserver_type()?;
+            let output = self.take_word("output") || self.take_word("out");
+            self.take_word("readonly");
+            if declarations
+                .iter()
+                .any(|declaration| declaration.name == name)
+            {
+                return Err(SqlError::new(
+                    SqlState::DUPLICATE_OBJECT,
+                    format!(
+                        "The variable name '{name}' has already been declared. Variable names must be unique within a query batch or stored procedure."
+                    ),
+                )
+                .with_sqlserver_code(134)
+                .at(position));
+            }
+            declarations.push(ParameterDeclaration {
+                name,
+                sql_type,
+                output,
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        if !self.at_end() {
+            return Err(self.unexpected());
+        }
+        Ok(declarations)
+    }
+
+    fn transaction_name(&mut self) -> SqlResult<Option<Name>> {
+        let named = matches!(
+            self.peek_kind(),
+            TokenKind::Word(word) if !is_reserved(word) && !starts_statement(word)
+        ) || matches!(self.peek_kind(), TokenKind::QuotedIdentifier(_));
+        if named {
+            Ok(Some(self.name()?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn optional_transaction_name(&mut self) {
@@ -598,21 +877,25 @@ impl<'t> Parser<'t> {
             self.optional_transaction_name();
             return Ok(Statement::Begin { read_only: false });
         }
+        if self.is_word("distributed") {
+            return Err(not_supported("BEGIN DISTRIBUTED TRANSACTION").at(position));
+        }
+        if self.is_word("dialog") || self.is_word("conversation") {
+            return Err(not_supported("BEGIN DIALOG CONVERSATION").at(position));
+        }
         let what = if self.is_word("try") {
             "BEGIN TRY"
-        } else if self.is_word("distributed") {
-            "BEGIN DISTRIBUTED TRANSACTION"
         } else {
-            "BEGIN ... END blocks"
+            "BEGIN ... END"
         };
-        Err(not_supported(what).at(position))
+        Err(outside_a_batch(what).at(position))
     }
 
     fn sqlserver_set(&mut self) -> SqlResult<Statement> {
         self.at += 1;
         let position = self.position();
-        if let TokenKind::Variable(name) = self.peek_kind() {
-            return Err(undeclared_variable(name, position));
+        if matches!(self.peek_kind(), TokenKind::Variable(_)) {
+            return self.sqlserver_set_variable();
         }
         if self.take_word("transaction") {
             self.expect_word("isolation")?;
@@ -629,6 +912,24 @@ impl<'t> Parser<'t> {
             }
             return Ok(accepted_set());
         }
+        if self.is_word("eggdb")
+            && self.peek_kind_at(1) == &TokenKind::Dot
+            && self.is_word_at(2, "dialect")
+        {
+            self.at += 3;
+            self.take_operator("=");
+            let value = match self.peek_kind() {
+                TokenKind::Word(word) => word.as_ref().to_owned(),
+                TokenKind::String(text) => text.as_ref().to_owned(),
+                TokenKind::QuotedIdentifier(name) => name.clone(),
+                _ => return Err(self.unexpected()),
+            };
+            self.at += 1;
+            return Ok(Statement::Set {
+                name: crate::settings::DIALECT_SETTING.to_owned(),
+                value: Some(value),
+            });
+        }
         let option = match self.peek_kind() {
             TokenKind::Word(word) => word.as_ref().to_owned(),
             _ => return Err(self.unexpected()),
@@ -640,7 +941,21 @@ impl<'t> Parser<'t> {
                 let on = self.on_or_off()?;
                 Ok(Statement::SqlServer(SqlServerStatement::NoCount(on)))
             }
-            "implicit_transactions" | "numeric_roundabort" => {
+            "implicit_transactions" => {
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(
+                    SqlServerStatement::ImplicitTransactions(on),
+                ))
+            }
+            "fmtonly" => {
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::FormatOnly(on)))
+            }
+            "xact_abort" => {
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::XactAbort(on)))
+            }
+            "numeric_roundabort" => {
                 if self.on_or_off()? {
                     return Err(not_supported(&format!("SET {shown} ON")).at(position));
                 }
@@ -985,29 +1300,170 @@ impl<'t> Parser<'t> {
     pub(super) fn sqlserver_identity(&mut self, column: &mut ColumnDefinition) -> SqlResult<()> {
         let position = self.position();
         self.at += 1;
-        if self.take(&TokenKind::LeftParen) {
-            let seed = self.signed_type_argument()?;
+        let arguments = if self.take(&TokenKind::LeftParen) {
+            let seed = self.identity_argument()?;
             self.expect(&TokenKind::Comma)?;
-            let increment = self.signed_type_argument()?;
+            let increment = self.identity_argument()?;
             self.expect(&TokenKind::RightParen)?;
-            if seed != 1 || increment != 1 {
-                return Err(
-                    not_supported("an IDENTITY seed or increment other than (1, 1)").at(position),
-                );
-            }
-        }
-        if !matches!(
-            column.sql_type,
-            SqlType::SmallInt | SqlType::Integer | SqlType::BigInt
-        ) {
+            Some((seed, increment))
+        } else {
+            None
+        };
+        let Some((lowest, highest)) = crate::encoding::integer_type_range(column.sql_type) else {
             return Err(
                 not_supported("IDENTITY on a column that is not int, bigint or smallint")
                     .at(position),
             );
+        };
+        if let Some((seed, increment)) = arguments {
+            let fits =
+                |value: Option<i64>| value.filter(|value| (lowest..=highest).contains(value));
+            let invalid = |rule: &str| {
+                invalid_identity_argument(&column.name.text, column.sql_type, rule, position)
+            };
+            let seed = fits(seed).ok_or_else(|| invalid("seed"))?;
+            let increment = fits(increment)
+                .filter(|&increment| increment != 0)
+                .ok_or_else(|| invalid("increment, other than zero,"))?;
+            let given = crate::encoding::IdentitySeed { seed, increment };
+            column.identity_seed =
+                (given != crate::encoding::IdentitySeed::ONE_BY_ONE).then_some(given);
         }
         column.auto_increment = true;
         column.not_null = true;
         Ok(())
+    }
+
+    fn identity_argument(&mut self) -> SqlResult<Option<i64>> {
+        let negative = self.take_operator("-");
+        if !negative {
+            self.take_operator("+");
+        }
+        let TokenKind::Integer(digits) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let magnitude = digits.parse::<i128>().ok();
+        self.at += 1;
+        Ok(magnitude
+            .map(|magnitude| if negative { -magnitude } else { magnitude })
+            .and_then(|value| i64::try_from(value).ok()))
+    }
+
+    fn sqlserver_create_sequence(&mut self) -> SqlResult<Statement> {
+        self.expect_word("sequence")?;
+        let name = self.table_name()?;
+        let (mut options, range) = self.sqlserver_sequence_options(true)?;
+        let (low, high) = range.unwrap_or((i64::MIN, i64::MAX));
+        let min = match options.min {
+            Some(Some(min)) => min,
+            _ => low,
+        };
+        let max = match options.max {
+            Some(Some(max)) => max,
+            _ => high,
+        };
+        options.min = Some(Some(min));
+        options.max = Some(Some(max));
+        if options.start.is_none() {
+            let descending = options.increment.is_some_and(|increment| increment < 0);
+            options.start = Some(if descending { max } else { min });
+        }
+        Ok(Statement::CreateSequence(CreateSequence {
+            name,
+            if_not_exists: false,
+            options,
+        }))
+    }
+
+    fn sqlserver_alter_sequence(&mut self) -> SqlResult<Statement> {
+        self.expect_word("sequence")?;
+        let name = self.table_name()?;
+        let (options, _) = self.sqlserver_sequence_options(false)?;
+        Ok(Statement::AlterSequence(AlterSequence {
+            name,
+            if_exists: false,
+            options,
+            rename: None,
+        }))
+    }
+
+    fn sqlserver_sequence_options(
+        &mut self,
+        creating: bool,
+    ) -> SqlResult<(SequenceOptions, Option<(i64, i64)>)> {
+        let mut options = SequenceOptions::default();
+        let mut range = None;
+        loop {
+            let position = self.position();
+            if creating && self.take_word("as") {
+                let declared = self.sqlserver_declared_type(false)?;
+                let Some((sql_type, low, high)) = sequence_type(declared) else {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        "Sequence objects can only be of type tinyint, smallint, int, bigint, or decimal and numeric with a scale of 0 and a precision of 18 or less in this version of EggDB.",
+                    )
+                    .with_sqlserver_code(11702)
+                    .at(position));
+                };
+                options.sql_type = Some((sql_type, position));
+                range = Some((low, high));
+            } else if self.take_word("start") {
+                self.expect_word("with")?;
+                options.start = Some(self.sequence_constant()?);
+            } else if !creating && self.take_word("restart") {
+                options.restart = Some(if self.take_word("with") {
+                    Some(self.sequence_constant()?)
+                } else {
+                    None
+                });
+            } else if self.take_word("increment") {
+                self.expect_word("by")?;
+                options.increment = Some(self.sequence_constant()?);
+            } else if self.take_word("minvalue") {
+                options.min = Some(self.optional_sequence_constant()?);
+            } else if self.take_word("maxvalue") {
+                options.max = Some(self.optional_sequence_constant()?);
+            } else if self.is_word("no") && self.is_word_at(1, "minvalue") {
+                self.at += 2;
+                options.min = Some(None);
+            } else if self.is_word("no") && self.is_word_at(1, "maxvalue") {
+                self.at += 2;
+                options.max = Some(None);
+            } else if self.is_word("no") && self.is_word_at(1, "cycle") {
+                self.at += 2;
+                options.cycle = Some(false);
+            } else if self.is_word("no") && self.is_word_at(1, "cache") {
+                self.at += 2;
+            } else if self.take_word("cycle") {
+                options.cycle = Some(true);
+            } else if self.take_word("cache") {
+                if matches!(self.peek_kind(), TokenKind::Integer(_)) {
+                    self.at += 1;
+                }
+            } else {
+                return Ok((options, range));
+            }
+        }
+    }
+
+    fn optional_sequence_constant(&mut self) -> SqlResult<Option<i64>> {
+        let signed = self.is_operator("-") || self.is_operator("+");
+        if signed || matches!(self.peek_kind(), TokenKind::Integer(_)) {
+            return self.sequence_constant().map(Some);
+        }
+        Ok(None)
+    }
+
+    fn sequence_constant(&mut self) -> SqlResult<i64> {
+        let position = self.position();
+        self.identity_argument()?.ok_or_else(|| {
+            SqlError::new(
+                SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
+                "The sequence option value is out of the range of bigint.",
+            )
+            .with_sqlserver_code(GENERIC_ERROR)
+            .at(position)
+        })
     }
 
     pub(super) fn sqlserver_top(&mut self) -> SqlResult<Option<Expr>> {
@@ -1261,9 +1717,13 @@ impl<'t> Parser<'t> {
         position: usize,
     ) -> SqlResult<Option<Expr>> {
         let expr = match kind {
-            TokenKind::Variable(name) => {
+            TokenKind::Variable(name) if name.starts_with("@@") => {
                 self.at += 1;
                 self.system_variable(name, position)?
+            }
+            TokenKind::Variable(name) => {
+                self.at += 1;
+                self.variable_reference(name, position)?
             }
             TokenKind::Binary(digits) => {
                 self.at += 1;
@@ -1276,9 +1736,55 @@ impl<'t> Parser<'t> {
                 "convert" if self.peek_kind_at(1) == &TokenKind::LeftParen => {
                     self.sqlserver_convert(position)?
                 }
+                "left" | "right" | "try_convert"
+                    if self.peek_kind_at(1) == &TokenKind::LeftParen =>
+                {
+                    let name = Name {
+                        text: word.as_ref().to_owned(),
+                        position,
+                    };
+                    self.at += 1;
+                    match self.sqlserver_call(&name)? {
+                        Some(expr) => expr,
+                        None => return Err(unknown_function(&name.text, position)),
+                    }
+                }
+                "next" if self.is_word_at(1, "value") && self.is_word_at(2, "for") => {
+                    self.at += 3;
+                    let sequence = self.table_name()?;
+                    if self.is_word("over") {
+                        return Err(not_supported("NEXT VALUE FOR ... OVER (ORDER BY ...)")
+                            .at(self.position()));
+                    }
+                    Expr {
+                        kind: ExprKind::Function {
+                            name: "oracle_nextval".to_owned(),
+                            arguments: vec![Expr {
+                                kind: ExprKind::Literal(Literal::String(sequence.text)),
+                                position: sequence.position,
+                            }],
+                        },
+                        position,
+                    }
+                }
                 "current_timestamp" => {
                     self.at += 1;
                     clock(3, position)
+                }
+                "current_user" | "session_user" | "user"
+                    if self.peek_kind_at(1) != &TokenKind::LeftParen =>
+                {
+                    self.at += 1;
+                    login_text(
+                        "current_user",
+                        crate::sqlserver_catalog::DBO.to_owned(),
+                        position,
+                    )
+                }
+                "system_user" if self.peek_kind_at(1) != &TokenKind::LeftParen => {
+                    self.at += 1;
+                    let login = self.sqlserver_login();
+                    login_text("system_user", login, position)
                 }
                 "true" | "false" | "current_date" | "current_time" | "localtimestamp"
                 | "localtime" => {
@@ -1320,10 +1826,33 @@ impl<'t> Parser<'t> {
             "@@spid" => integer(i64::from(state.connection_id), position),
             "@@servername" => session_text("EggDB".to_owned(), position),
             "@@trancount" => integer(i64::from(state.transaction_count), position),
+            "@@error" => integer(
+                i64::from(self.batch.map_or(0, |batch| batch.last_error)),
+                position,
+            ),
             "@@language" => session_text("us_english".to_owned(), position),
+            "@@microsoftversion" => integer(microsoft_version(), position),
+            "@@servicename" => session_text("MSSQLSERVER".to_owned(), position),
+            "@@max_precision" => integer(38, position),
+            "@@datefirst" => integer(7, position),
+            "@@nestlevel" => integer(
+                i64::from(self.batch.map_or(0, |batch| batch.nest_level)),
+                position,
+            ),
+            "@@langid" | "@@procid" => integer(0, position),
+            "@@lock_timeout" => integer(-1, position),
+            "@@textsize" => integer(i64::from(i32::MAX), position),
+            "@@max_connections" => integer(32_767, position),
             "@@rowcount" => Expr {
                 kind: ExprKind::SqlServerFunction {
                     function: crate::sqlserver_functions::Function::RowCount,
+                    arguments: Vec::new(),
+                },
+                position,
+            },
+            "@@identity" => Expr {
+                kind: ExprKind::SqlServerFunction {
+                    function: crate::sqlserver_functions::Function::ScopeIdentity,
                     arguments: Vec::new(),
                 },
                 position,
@@ -1352,12 +1881,78 @@ impl<'t> Parser<'t> {
         Err(unknown_function(&name.text, name.position))
     }
 
-    pub(super) fn sqlserver_qualified_name(&mut self, schema: Name) -> SqlResult<Name> {
-        if schema.text == "dbo" {
+    pub(super) fn sqlserver_login(&self) -> String {
+        self.sqlserver_settings(|settings| {
+            settings.get("session_authorization").unwrap_or_default()
+        })
+    }
+
+    pub(super) fn sqlserver_qualified_name(&mut self, first: Name) -> SqlResult<Name> {
+        if self.take(&TokenKind::Dot) {
+            self.check_sqlserver_database(&first)?;
             return self.name();
         }
-        self.qualified_part(&schema)
+        let second = self.name()?;
+        if self.take(&TokenKind::Dot) {
+            self.check_sqlserver_database(&first)?;
+            let object = self.name()?;
+            return self.sqlserver_schema_object(second, object);
+        }
+        self.sqlserver_schema_object(first, second)
     }
+
+    fn sqlserver_schema_object(&self, schema: Name, object: Name) -> SqlResult<Name> {
+        if schema.text == "dbo" {
+            return Ok(object);
+        }
+        if schema.text.contains(crate::schemas::QUALIFIER)
+            || object.text.contains(crate::schemas::QUALIFIER)
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_NAME,
+                format!("invalid name \"{}\"", object.text.escape_default()),
+            )
+            .at(object.position));
+        }
+        Ok(Name {
+            text: crate::schemas::written_qualified(&schema.text, &object.text),
+            position: schema.position,
+        })
+    }
+
+    fn check_sqlserver_database(&self, database: &Name) -> SqlResult<()> {
+        let current = self.settings_or_default(|settings| settings.database.clone());
+        let system = ["master", "tempdb", "msdb", "model"]
+            .iter()
+            .any(|name| database.text.eq_ignore_ascii_case(name));
+        if system || database.text.eq_ignore_ascii_case(&current) {
+            return Ok(());
+        }
+        Err(SqlError::new(
+            SqlState::INVALID_CATALOG_NAME,
+            format!(
+                "Database '{}' does not exist. Make sure that the name is entered correctly.",
+                database.text
+            ),
+        )
+        .at(database.position))
+    }
+}
+
+pub(crate) fn parameter_declarations(text: &str) -> SqlResult<Vec<ParameterDeclaration>> {
+    let tokens = tokenize_in(text, Dialect::SqlServer)?;
+    let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);
+    parser.parameter_declaration_list()
+}
+
+pub(crate) fn procedure_routine_name(text: &str) -> SqlResult<String> {
+    let tokens = tokenize_in(text, Dialect::SqlServer)?;
+    let mut parser = Parser::new(text, &tokens).in_dialect(Dialect::SqlServer);
+    let (_, routine) = parser.procedure_name()?;
+    if !parser.at_end() {
+        return Err(parser.unexpected());
+    }
+    Ok(routine)
 }
 
 fn accepted_set() -> Statement {
@@ -1393,6 +1988,201 @@ fn unknown_option(shown: &str, position: usize) -> SqlError {
     )
     .with_sqlserver_code(195)
     .at(position)
+}
+
+fn sequence_type(declared: SqlServerType) -> Option<(SqlType, i64, i64)> {
+    Some(match declared {
+        SqlServerType::TinyInt => (SqlType::SmallInt, 0, i64::from(u8::MAX)),
+        SqlServerType::SmallInt => (SqlType::SmallInt, i64::from(i16::MIN), i64::from(i16::MAX)),
+        SqlServerType::Int => (SqlType::Integer, i64::from(i32::MIN), i64::from(i32::MAX)),
+        SqlServerType::BigInt => (SqlType::BigInt, i64::MIN, i64::MAX),
+        SqlServerType::Decimal {
+            precision,
+            scale: 0,
+        } if u32::from(precision) <= 18 => {
+            let largest = 10i64.pow(u32::from(precision)) - 1;
+            (SqlType::BigInt, -largest, largest)
+        }
+        _ => return None,
+    })
+}
+
+pub(super) fn extended_property_comment(
+    call: ProcedureCall,
+    position: usize,
+) -> SqlResult<Statement> {
+    let dropping = call.procedure.text == "sp_dropextendedproperty";
+    let procedure = call.procedure.text.clone();
+    let mut values: [Option<String>; 8] = Default::default();
+    for (index, argument) in call.arguments.iter().enumerate() {
+        let slot = match &argument.name {
+            Some(name) => EXTENDED_PROPERTY_PARAMETERS
+                .iter()
+                .position(|known| known.eq_ignore_ascii_case(name))
+                .filter(|&slot| !(dropping && slot == 1)),
+            None if dropping => Some(if index == 0 { 0 } else { index + 1 }),
+            None => Some(index),
+        };
+        let Some(slot) = slot.filter(|&slot| slot < EXTENDED_PROPERTY_PARAMETERS.len()) else {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_PARAMETER,
+                format!(
+                    "{} is not a parameter for procedure {procedure}.",
+                    argument.name.as_deref().unwrap_or("A parameter")
+                ),
+            )
+            .with_sqlserver_code(8145)
+            .at(position));
+        };
+        values[slot] = match &argument.value {
+            Some(expr) => property_text(expr)?,
+            None => None,
+        };
+    }
+    let [
+        name,
+        value,
+        level0_type,
+        level0_name,
+        level1_type,
+        level1_name,
+        level2_type,
+        level2_name,
+    ] = values;
+    if !name
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(DESCRIPTION_PROPERTY))
+    {
+        return Err(not_supported("Extended properties other than MS_Description").at(position));
+    }
+    let named = |text: Option<String>, what: &str| -> SqlResult<Name> {
+        let Some(text) = text.filter(|text| !text.is_empty()) else {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!("An invalid parameter or option was specified for procedure '{procedure}': {what} is missing."),
+            )
+            .with_sqlserver_code(15600)
+            .at(position));
+        };
+        let folded = text.to_lowercase();
+        if folded.contains(crate::schemas::QUALIFIER) {
+            return Err(SqlError::new(
+                SqlState::INVALID_NAME,
+                format!("invalid name \"{}\"", folded.escape_default()),
+            )
+            .at(position));
+        }
+        Ok(Name {
+            text: folded,
+            position,
+        })
+    };
+    let level0_type = level0_type.map(|kind| kind.to_ascii_lowercase());
+    match level0_type.as_deref() {
+        Some("schema") => {}
+        None => {
+            return Err(not_supported("An extended property of the database").at(position));
+        }
+        Some(other) => {
+            return Err(not_supported(&format!(
+                "An extended property on a {}",
+                other.to_ascii_uppercase()
+            ))
+            .at(position));
+        }
+    }
+    let schema = named(level0_name, "@level0name")?;
+    let schema_text = if schema.text == "dbo" {
+        crate::schemas::DEFAULT_SCHEMA.to_owned()
+    } else {
+        schema.text.clone()
+    };
+    let level1_type = level1_type.map(|kind| kind.to_ascii_lowercase());
+    let kind = match level1_type.as_deref() {
+        None => {
+            return Ok(described(
+                CommentTarget::Schema(Name {
+                    text: schema_text,
+                    position,
+                }),
+                value,
+                dropping,
+            ));
+        }
+        Some("table") => RelationKind::Table,
+        Some("view") => RelationKind::View,
+        Some(other) => {
+            return Err(not_supported(&format!(
+                "An extended property on a {}",
+                other.to_ascii_uppercase()
+            ))
+            .at(position));
+        }
+    };
+    let object = named(level1_name, "@level1name")?;
+    let relation = Name {
+        text: if schema.text == "dbo" {
+            object.text
+        } else {
+            crate::schemas::written_qualified(&schema.text, &object.text)
+        },
+        position,
+    };
+    let level2_type = level2_type.map(|kind| kind.to_ascii_lowercase());
+    let target = match level2_type.as_deref() {
+        None => CommentTarget::Relation {
+            kind,
+            name: relation,
+        },
+        Some("column") => CommentTarget::Column {
+            table: relation,
+            column: named(level2_name, "@level2name")?,
+        },
+        Some("constraint") => CommentTarget::Constraint {
+            table: relation,
+            name: named(level2_name, "@level2name")?,
+        },
+        Some("index") => {
+            let index = named(level2_name, "@level2name")?;
+            CommentTarget::Index(Name {
+                text: if schema.text == "dbo" {
+                    index.text
+                } else {
+                    crate::schemas::written_qualified(&schema.text, &index.text)
+                },
+                position,
+            })
+        }
+        Some(other) => {
+            return Err(not_supported(&format!(
+                "An extended property on a {}",
+                other.to_ascii_uppercase()
+            ))
+            .at(position));
+        }
+    };
+    Ok(described(target, value, dropping))
+}
+
+fn described(target: CommentTarget, value: Option<String>, dropping: bool) -> Statement {
+    Statement::Comment(Comment {
+        target,
+        text: if dropping { None } else { value },
+    })
+}
+
+fn property_text(expr: &Expr) -> SqlResult<Option<String>> {
+    let evaluator = Evaluator {
+        scope: Scope::empty(),
+        row: &[],
+        correlation: None,
+    };
+    let value = evaluator.eval(expr, None)?;
+    Ok(if value.is_null() {
+        None
+    } else {
+        value.to_text()
+    })
 }
 
 #[cfg(test)]

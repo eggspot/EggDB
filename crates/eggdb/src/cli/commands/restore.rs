@@ -8,10 +8,14 @@ use crate::cli::render::{self, JsonObject};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb::{Database, Durability, Options};
 use eggdb_platform::{FileSystem, OsFileSystem};
-use eggdb_sql::{Dialect, RestoreOptions, RestoreProgress, RestoreReport};
+use eggdb_sql::{
+    Dialect, IncludeBase, IncludeOpener, IncludeRequest, RestoreOptions, RestoreProgress,
+    RestoreReport, SqlError, SqlResult, SqlState,
+};
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -51,6 +55,67 @@ const SQLSERVER_FILE_WORDS: [(&str, &str); 7] = [
 
 const SCRIPT_ROUTE: &str = "Restore it into a SQL Server you run, script it from there (SSMS: Tasks, Generate Scripts, Schema and data), then restore the script (docs/migrate.md).";
 
+const ORACLE_ROUTE: &str = "Write its DDL with impdp ... SQLFILE= and its rows with SQLcl's UNLOAD, then restore the DDL and import the CSV (docs/migrate.md#oracle).";
+
+pub(super) struct FileIncludes {
+    scripts: RefCell<Vec<Option<PathBuf>>>,
+}
+
+impl FileIncludes {
+    pub(super) fn new(main: Option<PathBuf>) -> Self {
+        Self {
+            scripts: RefCell::new(vec![main]),
+        }
+    }
+
+    fn base(&self, relative_to: IncludeBase) -> Option<PathBuf> {
+        let IncludeBase::IncludingScript(index) = relative_to else {
+            return None;
+        };
+        let scripts = self.scripts.borrow();
+        let script = scripts.get(usize::try_from(index).ok()?)?.as_ref()?;
+        script
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    }
+}
+
+impl IncludeOpener for FileIncludes {
+    fn open<'s>(&'s self, request: &IncludeRequest<'_>) -> SqlResult<Box<dyn BufRead + 's>> {
+        let path = match self.base(request.relative_to) {
+            Some(directory) => directory.join(request.name),
+            None => PathBuf::from(request.name),
+        };
+        let failure = |what: String| {
+            SqlError::new(
+                SqlState::IO_ERROR,
+                format!(
+                    "line {}: cannot include {}: {what}",
+                    request.line, request.name
+                ),
+            )
+        };
+        let file = File::open(&path).map_err(|error| failure(error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| failure(error.to_string()))?;
+        if !metadata.is_file() {
+            return Err(failure(
+                "it is not a regular file (EggDB includes only script files)".to_owned(),
+            ));
+        }
+        let mut scripts = self.scripts.borrow_mut();
+        if let Ok(index) = usize::try_from(request.script) {
+            if scripts.len() <= index {
+                scripts.resize(index + 1, None);
+            }
+            scripts[index] = Some(path);
+        }
+        Ok(Box::new(BufReader::with_capacity(READ_BUFFER_BYTES, file)))
+    }
+}
+
 struct Outcome<'r> {
     report: &'r RestoreReport,
     file: &'r str,
@@ -60,6 +125,7 @@ struct Outcome<'r> {
     dialect: Dialect,
     created: bool,
     left_nothing: bool,
+    dry_run: bool,
     elapsed: Duration,
 }
 
@@ -81,6 +147,33 @@ impl Session<'_> {
             }
             Some(ExportFile::Standard) | None => (None, "stdin".to_owned(), "-".to_owned()),
         };
+        if let Some(path) = &path
+            && path.extension().is_some_and(|extension| extension == "aof")
+        {
+            return self.restore_aof(path);
+        }
+        if let Some(url) = path
+            .as_ref()
+            .and_then(|path| path.to_str())
+            .filter(|text| text.starts_with(super::archive::BUCKET_SCHEME))
+        {
+            let at = self.request.restore.at.clone();
+            return self.restore_from_bucket(url, at.as_deref());
+        }
+        if let Some(path) = &path
+            && path.join(super::archive::MANIFEST).is_file()
+        {
+            let at = self.request.restore.at.clone();
+            return self.restore_from_archive(path, at.as_deref());
+        }
+        if self.request.restore.at.is_some() {
+            return Err(usage("--at picks a copy from a directory eggdb backup archived into; give that directory".to_owned()));
+        }
+        if let Some(path) = &path
+            && let Some(layout) = super::restore_mongodump::layout_of(path)
+        {
+            return self.restore_mongodump(path, layout);
+        }
         let mut file = None;
         let mut size = 0;
         if let Some(path) = &path {
@@ -92,6 +185,7 @@ impl Session<'_> {
                         true,
                         None,
                         &self.file,
+                        self.request.dialect,
                     ));
                 }
                 return Err(usage(format!(
@@ -125,29 +219,43 @@ impl Session<'_> {
                 path.is_some(),
                 extension.as_deref(),
                 &self.file,
+                dialect,
             ));
         }
         let mut input = BufReader::with_capacity(READ_BUFFER_BYTES, Cursor::new(head).chain(raw));
         let target = self.request.file.clone();
         let exists = std::fs::symlink_metadata(&target).is_ok();
+        let dry_run = self.request.dry_run;
         if !exists && !self.request.create {
+            let flag = if dry_run { " --dry-run" } else { "" };
             return Err(Failure::Database {
                 message: format!(
                     "cannot open {}: no such file. Pass --create to restore into a new file.",
                     self.file
                 ),
                 try_command: Some(format!(
-                    "eggdb restore --create {} {}",
+                    "eggdb restore --create {} {}{flag}",
                     self.file, dump_shown
                 )),
                 exit: Exit::DatabaseError,
+                code: "not_found",
             });
         }
-        let staging = (!exists).then(|| staging_path(&target));
+        let staging = (!exists || dry_run).then(|| staging_path(&target));
         if let Some(staging) = &staging
             && std::fs::symlink_metadata(staging).is_ok()
         {
             let staging_shown = render::text(staging.display().to_string().as_bytes());
+            if exists {
+                return Err(Failure::coded(
+                    "already_exists",
+                    format!(
+                        "cannot copy {} for the dry run: {staging_shown} exists, left by a restore that did not finish or one still running. Remove it and try again.",
+                        self.file
+                    ),
+                    Exit::DatabaseError,
+                ));
+            }
             return Err(Failure::database(
                 format!(
                     "cannot create {}: {staging_shown} exists, left by a restore that did not finish or one still running. Remove it and restore again.",
@@ -156,43 +264,63 @@ impl Session<'_> {
                 Exit::DatabaseError,
             ));
         }
+        if let Some(staging) = staging.as_ref().filter(|_| exists) {
+            copy_for_dry_run(
+                &self.file,
+                &self.file_display,
+                &target,
+                self.request.cache_bytes,
+                staging,
+            )?;
+        }
         let open_path = staging.clone().unwrap_or_else(|| target.clone());
         let cache = self.request.cache_bytes.unwrap_or_else(|| bulk_cache(size));
         let options = Options::new()
             .cache_bytes(cache)
             .durability(Durability::Normal)
-            .create_if_missing(staging.is_some());
+            .create_if_missing(!exists);
         let db = Database::open_with(&open_path, options).map_err(|error| {
+            if exists && let Some(staging) = &staging {
+                let _ = std::fs::remove_file(staging);
+            }
             let display = open_path.display().to_string();
             open_failure(
                 &render::text(display.as_bytes()),
                 &display,
                 &error,
-                Access::Write {
-                    create: staging.is_some(),
-                },
+                Access::Write { create: !exists },
             )
         })?;
         let started = Instant::now();
         let mut progress = Progress::new(self.stderr_is_terminal, &dump_shown);
+        let includes = FileIncludes::new(path.clone());
+        let defines = self.request.restore.defines.clone();
+        let options = RestoreOptions {
+            keep_going: self.request.restore.keep_going,
+            includes: Some(&includes),
+            defines: &defines,
+        };
         let mut report = run_restore(
             &db,
             &mut input,
             dialect,
-            self.request.restore.keep_going,
+            options,
             &mut progress,
             &mut self.messages,
         );
-        report.scripts = vec![dump_display.clone()];
+        match report.scripts.first_mut() {
+            Some(first) => first.clone_from(&dump_display),
+            None => report.scripts.push(dump_display.clone()),
+        }
         progress.clear(&mut self.messages);
         let elapsed = started.elapsed();
         let stopped = report.error.is_some();
         let closed = db.close();
-        let mut left_nothing = false;
+        let unfinished = stopped || closed.is_err();
+        let left_nothing = !exists && unfinished;
         if let Some(staging) = &staging {
-            if stopped || closed.is_err() {
+            if dry_run || unfinished {
                 let _ = std::fs::remove_file(staging);
-                left_nothing = true;
             } else {
                 self.move_into_place(staging, &target)?;
             }
@@ -212,13 +340,34 @@ impl Session<'_> {
             dump_shown: &dump_shown,
             dump_display: &dump_display,
             dialect,
-            created: staging.is_some(),
+            created: !exists,
             left_nothing,
+            dry_run,
             elapsed,
         };
         self.print_report(&outcome)?;
         if let Some(error) = &report.error {
             error_block(&mut self.messages, &error.error);
+            if dry_run {
+                let after = if exists {
+                    format!(
+                        "A real run would leave the {} before it in {} and run nothing after it.",
+                        statements(error.statements_before),
+                        self.file
+                    )
+                } else {
+                    "A real run would create nothing.".to_owned()
+                };
+                return Err(Failure::database(
+                    format!(
+                        "cannot restore {dump_shown} into {} (dry run): line {}: {}. {after} Fix the dump, or add --keep-going to run on and list every error.",
+                        self.file,
+                        render::count(error.line),
+                        error.error.message()
+                    ),
+                    exit_for(&error.error),
+                ));
+            }
             let after = if left_nothing {
                 format!(
                     "Nothing was created; {} does not exist. Fix the dump, or add --keep-going to run on and list every error.",
@@ -242,10 +391,14 @@ impl Session<'_> {
             ));
         }
         if report.error_count() > 0 {
+            let into = match (dry_run, exists) {
+                (false, _) => self.file.clone(),
+                (true, true) => format!("a copy of {}", self.file),
+                (true, false) => format!("a scratch file for {}", self.file),
+            };
             return Err(Failure::database(
                 format!(
-                    "restored {dump_shown} into {} with {} ignored (--keep-going); the report lists them.",
-                    self.file,
+                    "restored {dump_shown} into {into} with {} ignored (--keep-going); the report lists them.",
                     counted(report.error_count(), "error", "errors")
                 ),
                 Exit::DatabaseError,
@@ -323,11 +476,37 @@ impl Session<'_> {
     }
 }
 
+fn copy_for_dry_run(
+    file: &str,
+    file_display: &str,
+    source: &Path,
+    cache_bytes: Option<usize>,
+    copy: &Path,
+) -> Result<(), Failure> {
+    let mut options = Options::new().read_only(true).create_if_missing(false);
+    if let Some(cache_bytes) = cache_bytes {
+        options = options.cache_bytes(cache_bytes);
+    }
+    let db = Database::open_with(source, options)
+        .map_err(|error| open_failure(file, file_display, &error, Access::ReadOnly))?;
+    let copied = db.backup_to(copy);
+    let _ = db.close();
+    copied.map(|_| ()).map_err(|error| {
+        let _ = std::fs::remove_file(copy);
+        Failure::database(
+            format!(
+                "cannot copy {file} for the dry run: {error}. Free space next to the file, or check the directory's permissions."
+            ),
+            Exit::for_error(error.kind()),
+        )
+    })
+}
+
 fn run_restore(
     db: &Database,
     input: &mut dyn std::io::BufRead,
     dialect: Dialect,
-    keep_going: bool,
+    options: RestoreOptions<'_>,
     progress: &mut Progress,
     messages: &mut Output<'_>,
 ) -> RestoreReport {
@@ -336,7 +515,7 @@ fn run_restore(
     let report = eggdb_sql::restore_dump(
         &mut session,
         input,
-        RestoreOptions { keep_going },
+        options,
         &mut |step: &RestoreProgress| progress.tick(messages, step),
     );
     let _ = session.close();
@@ -420,6 +599,23 @@ fn sqlserver_file_words(extension: Option<&str>) -> Option<&'static str> {
         .map(|(_, words)| *words)
 }
 
+fn oracle_binary_failure(shown: &str, extension: Option<&str>, file: &str) -> Failure {
+    let what = match extension {
+        Some("dmp") => "an Oracle Data Pump or exp dump file",
+        _ => "a binary file, perhaps an RMAN backup",
+    };
+    Failure::Database {
+        message: format!(
+            "cannot restore {shown}: it is {what}, which eggdb restore does not read. {ORACLE_ROUTE}"
+        ),
+        try_command: Some(format!(
+            "impdp system DIRECTORY=dp DUMPFILE=<file.dmp> SCHEMAS=<schema> SQLFILE=tables.sql EXCLUDE=REF_CONSTRAINT,STATISTICS, then eggdb restore --dialect oracle --create {file} tables.sql"
+        )),
+        exit: Exit::Usage,
+        code: crate::cli::failure::USAGE_CODE,
+    }
+}
+
 fn binary_failure(
     kind: BinaryKind,
     shown: &str,
@@ -466,6 +662,7 @@ fn binary_failure(
         ),
         try_command,
         exit: Exit::Usage,
+        code: crate::cli::failure::USAGE_CODE,
     }
 }
 
@@ -475,9 +672,13 @@ fn archive_failure(
     named: bool,
     extension: Option<&str>,
     file: &str,
+    dialect: Dialect,
 ) -> Failure {
     let target = if named { shown } else { "<archive>" };
     let (what, try_command) = match archive {
+        Archive::Binary { .. } if dialect == Dialect::Oracle => {
+            return oracle_binary_failure(shown, extension, file);
+        }
         Archive::Binary { kind } => return binary_failure(kind, shown, named, extension, file),
         Archive::Utf16Text => {
             let target = if named { shown } else { "<script.sql>" };
@@ -489,6 +690,7 @@ fn archive_failure(
                     "eggdb restore --dialect sqlserver --create {file} {target}"
                 )),
                 exit: Exit::Usage,
+                code: crate::cli::failure::USAGE_CODE,
             };
         }
         Archive::Custom => (
@@ -522,6 +724,7 @@ fn archive_failure(
         ),
         try_command: Some(try_command),
         exit: Exit::Usage,
+        code: crate::cli::failure::USAGE_CODE,
     }
 }
 
@@ -638,7 +841,14 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
     let report = outcome.report;
     let file = outcome.file;
     if let Some(error) = &report.error {
-        let after = if outcome.left_nothing {
+        let after = if outcome.dry_run && outcome.created {
+            format!("A real run would create nothing; {file} does not exist.")
+        } else if outcome.dry_run {
+            format!(
+                "A real run would leave the {} before it in {file} and run nothing after it.",
+                statements(error.statements_before)
+            )
+        } else if outcome.left_nothing {
             format!("Nothing was created; {file} does not exist.")
         } else {
             format!(
@@ -667,11 +877,16 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
         } else {
             String::new()
         };
+        let holds = if outcome.dry_run {
+            "would hold"
+        } else {
+            "holds"
+        };
         return (
             "errors ignored:",
             Style::Red,
             format!(
-                "{} failed and {} skipped (--keep-going), listed above; {file} holds everything else{not_restored}.",
+                "{} failed and {} skipped (--keep-going), listed above; {file} {holds} everything else{not_restored}.",
                 statements(count),
                 if count == 1 { "was" } else { "were" }
             ),
@@ -695,18 +910,23 @@ fn verdict(outcome: &Outcome<'_>) -> (&'static str, Style, String) {
             counted(consequences, "consequence", "consequences")
         )
     };
+    let (are, is) = if outcome.dry_run {
+        ("would be", "would be")
+    } else {
+        ("are", "is")
+    };
     let text = if report.tables_skipped > 0 || report.rows_skipped > 0 {
         format!(
-            "{} of {} tables and {} of {} rows are in {file}; {listed}",
+            "{} of {} tables and {} of {} rows {are} in {file}; {listed}",
             render::count(report.tables),
             render::count(total_tables(report)),
             render::count(report.rows),
             render::count(total_rows(report)),
         )
     } else if skipped > 0 || consequences > 0 || differences > 0 {
-        format!("every table and row of the {source} is in {file}; {listed}")
+        format!("every table and row of the {source} {is} in {file}; {listed}")
     } else {
-        format!("every table and row of the {source} is in {file}.")
+        format!("every table and row of the {source} {is} in {file}.")
     };
     ("ok:", Style::Green, text)
 }
@@ -732,10 +952,26 @@ fn fact(out: &mut Output<'_>, label: &str, value: &str) {
     out.text(&format!("  {label:<16}{value}\n"));
 }
 
-fn listed_lines(out: &mut Output<'_>, rows: &[(u64, String, String)], more: u64, what: &str) {
+fn place(report: &RestoreReport, script: u32, line: u64) -> String {
+    let at = if line == 0 {
+        "end".to_owned()
+    } else {
+        format!("line {}", render::count(line))
+    };
+    match usize::try_from(script)
+        .ok()
+        .filter(|&index| index > 0)
+        .and_then(|index| report.scripts.get(index))
+    {
+        Some(name) => format!("{} {at}", render::text(name.as_bytes())),
+        None => at,
+    }
+}
+
+fn listed_lines(out: &mut Output<'_>, rows: &[(String, String, String)], more: u64, what: &str) {
     let number_width = rows
         .iter()
-        .map(|(line, _, _)| render::count(*line).len())
+        .map(|(place, _, _)| place.chars().count())
         .max()
         .unwrap_or(1);
     let description_width = rows
@@ -744,12 +980,11 @@ fn listed_lines(out: &mut Output<'_>, rows: &[(u64, String, String)], more: u64,
         .max()
         .unwrap_or(0)
         .min(SHOWN_DESCRIPTION_CHARS);
-    for (line, description, note) in rows {
+    for (place, description, note) in rows {
         let description = cut(description, SHOWN_DESCRIPTION_CHARS);
         let fill = description_width.saturating_sub(description.chars().count());
         out.text(&format!(
-            "  line {:<number_width$}  {description}{}   {note}\n",
-            render::count(*line),
+            "  {place:<number_width$}  {description}{}   {note}\n",
             " ".repeat(fill)
         ));
     }
@@ -764,10 +999,14 @@ fn listed_lines(out: &mut Output<'_>, rows: &[(u64, String, String)], more: u64,
 
 fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
     let report = outcome.report;
+    let into = match (outcome.dry_run, outcome.created) {
+        (false, _) => outcome.file.to_owned(),
+        (true, false) => format!("a copy of {}, then removed the copy", outcome.file),
+        (true, true) => format!("a scratch file for {}, then removed it", outcome.file),
+    };
     out.text(&format!(
-        "restored {} into {} ({}, {})\n",
+        "restored {} into {into} ({}, {})\n",
         outcome.dump_shown,
-        outcome.file,
         statements(report.statements),
         seconds(outcome.elapsed)
     ));
@@ -865,7 +1104,7 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
     }
     if !report.skipped.is_empty() {
         out.text("skipped (not in EggDB yet; docs/roadmap.md)\n");
-        let rows: Vec<(u64, String, String)> = report
+        let rows: Vec<(String, String, String)> = report
             .skipped
             .iter()
             .map(|object| {
@@ -878,19 +1117,23 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
                 if let Some(rows) = object.rows.filter(|&rows| rows > 0) {
                     description.push_str(&format!(", {}", counted(rows, "row", "rows")));
                 }
-                (object.line, description, object.reason.clone())
+                (
+                    place(report, object.script, object.line),
+                    description,
+                    object.reason.clone(),
+                )
             })
             .collect();
         listed_lines(out, &rows, report.skipped_not_listed, "objects");
     }
     if !report.consequences.is_empty() {
         out.text("consequences (fail only because of a skipped object)\n");
-        let rows: Vec<(u64, String, String)> = report
+        let rows: Vec<(String, String, String)> = report
             .consequences
             .iter()
             .map(|consequence| {
                 (
-                    consequence.line,
+                    place(report, consequence.script, consequence.line),
                     consequence.statement.clone(),
                     format!("uses {}", consequence.uses),
                 )
@@ -900,12 +1143,12 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
     }
     if !report.differences.is_empty() {
         out.text("known differences (restored, but not as the source had it)\n");
-        let rows: Vec<(u64, String, String)> = report
+        let rows: Vec<(String, String, String)> = report
             .differences
             .iter()
             .map(|difference| {
                 (
-                    difference.line,
+                    place(report, difference.script, difference.line),
                     difference.object.clone(),
                     difference.difference.clone(),
                 )
@@ -913,13 +1156,13 @@ fn text_report(out: &mut Output<'_>, outcome: &Outcome<'_>) {
             .collect();
         listed_lines(out, &rows, report.differences_not_listed, "differences");
     }
-    let failures: Vec<(u64, String, String)> = report
+    let failures: Vec<(String, String, String)> = report
         .errors
         .iter()
         .chain(report.error.iter())
         .map(|error| {
             (
-                error.line,
+                place(report, error.script, error.line),
                 error.statement.clone(),
                 error.error.message().to_owned(),
             )
@@ -968,21 +1211,31 @@ fn ignored_lines(out: &mut Output<'_>, report: &RestoreReport, dialect: Dialect)
     for (kind, count) in &ignored.other {
         lines.push((kind.clone(), statements(*count)));
     }
-    let mut commands: Vec<(&str, Vec<u64>, &str)> = Vec::new();
+    let mut commands: Vec<(&str, u32, Vec<u64>, &str)> = Vec::new();
     for note in &ignored.meta_commands {
-        match commands
-            .iter_mut()
-            .find(|(command, _, reason)| *command == note.command && *reason == note.reason)
-        {
-            Some((_, lines, _)) => lines.push(note.line),
-            None => commands.push((note.command.as_str(), vec![note.line], note.reason.as_str())),
+        match commands.iter_mut().find(|(command, script, _, reason)| {
+            *command == note.command && *script == note.script && *reason == note.reason
+        }) {
+            Some((_, _, lines, _)) => lines.push(note.line),
+            None => commands.push((
+                note.command.as_str(),
+                note.script,
+                vec![note.line],
+                note.reason.as_str(),
+            )),
         }
     }
-    for (command, numbers, reason) in commands {
+    for (command, script, numbers, reason) in commands {
         let shown: Vec<String> = numbers.iter().take(10).map(|n| render::count(*n)).collect();
         let more = if numbers.len() > 10 { ", …" } else { "" };
+        let in_script = usize::try_from(script)
+            .ok()
+            .filter(|&index| index > 0)
+            .and_then(|index| report.scripts.get(index))
+            .map(|name| format!("{} ", render::text(name.as_bytes())))
+            .unwrap_or_default();
         let where_ = format!(
-            "{} {}{more}",
+            "{in_script}{} {}{more}",
             if numbers.len() == 1 { "line" } else { "lines" },
             shown.join(", ")
         );
@@ -1136,12 +1389,16 @@ fn json_report(outcome: &Outcome<'_>) -> String {
         })
         .collect();
     let (_, _, verdict_text) = verdict(outcome);
-    JsonObject::new()
+    let mut object = JsonObject::new()
         .boolean("ok", report.succeeded())
         .string("file", outcome.file_display)
         .string("dump", outcome.dump_display)
         .raw("scripts", &json_string_list(&report.scripts))
-        .boolean("created", outcome.created && !outcome.left_nothing)
+        .boolean("created", outcome.created && !outcome.left_nothing);
+    if outcome.dry_run {
+        object = object.boolean("dry_run", true);
+    }
+    object
         .string("dialect", outcome.dialect.name())
         .number("statements", report.statements)
         .number(

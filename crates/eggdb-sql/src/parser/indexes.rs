@@ -1,7 +1,31 @@
 use super::Parser;
 use crate::ast::{CreateIndex, DropIndex, Explain, ExplainStyle, IndexSpec, Name, Statement};
-use crate::error::SqlResult;
+use crate::encoding::{IndexMethod, SortOptions};
+use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
+
+pub(super) struct IndexColumns {
+    pub(super) names: Vec<Name>,
+    pub(super) sort_options: SortOptions,
+    order_written: bool,
+    nulls_order_written: bool,
+}
+
+impl IndexColumns {
+    fn hash_refusal(&self, unique: bool) -> Option<&'static str> {
+        if unique {
+            Some("unique indexes")
+        } else if self.names.len() > 1 {
+            Some("multicolumn indexes")
+        } else if self.order_written {
+            Some("ASC/DESC options")
+        } else if self.nulls_order_written {
+            Some("NULLS FIRST/LAST options")
+        } else {
+            None
+        }
+    }
+}
 
 impl Parser<'_> {
     pub(super) fn at_index_definition(&self) -> bool {
@@ -47,36 +71,75 @@ impl Parser<'_> {
             self.take_word("only");
         }
         let table = self.table_name()?;
-        if postgresql {
-            self.index_method()?;
+        let method = if postgresql {
+            self.index_method()?
+        } else {
+            IndexMethod::BTree
+        };
+        let columns = self.ordered_index_column_list(unique)?;
+        if method == IndexMethod::Hash
+            && let Some(refused) = columns.hash_refusal(unique)
+        {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                format!("access method \"hash\" does not support {refused}"),
+            ));
         }
-        let columns = self.index_column_list(unique)?;
         if self.sqlserver() {
-            self.sqlserver_index_tail(unique, &columns)?;
+            self.sqlserver_index_tail(unique, &columns.names)?;
+        } else if self.oracle() {
+            self.skip_physical_properties()?;
         } else {
             self.index_tail()?;
         }
+        let name = match name {
+            Some(name) if self.oracle() => Some(self.oracle_index_name(name, &table)?),
+            name => name,
+        };
         Ok(Statement::CreateIndex(CreateIndex {
             index: IndexSpec {
                 name,
                 unique,
-                columns,
+                columns: columns.names,
                 position,
+                method,
+                sort_options: columns.sort_options,
             },
             table,
             if_not_exists,
         }))
     }
 
-    fn index_method(&mut self) -> SqlResult<()> {
+    fn oracle_index_name(&self, name: Name, table: &Name) -> SqlResult<Name> {
+        if !crate::schemas::is_qualified(&name.text) {
+            return Ok(name);
+        }
+        let schema = crate::schemas::schema_of(&name.text);
+        let table_schema = if crate::schemas::is_qualified(&table.text) {
+            Some(crate::schemas::schema_of(&table.text))
+        } else {
+            None
+        };
+        if table_schema.is_some_and(|table_schema| table_schema != schema) {
+            return Err(self
+                .not_supported("an index in another schema than its table's")
+                .at(name.position));
+        }
+        Ok(Name {
+            text: crate::schemas::base_name(&name.text).to_owned(),
+            position: name.position,
+        })
+    }
+
+    fn index_method(&mut self) -> SqlResult<IndexMethod> {
         if !self.take_word("using") {
-            return Ok(());
+            return Ok(IndexMethod::BTree);
         }
         let method = self.label()?.to_ascii_lowercase();
-        if method != "btree" && method != "hash" {
-            return Err(self.not_supported(&format!("index method {method}")));
+        match IndexMethod::named(&method) {
+            Some(known) => Ok(known),
+            None => Err(self.not_supported(&format!("index method {method}"))),
         }
-        Ok(())
     }
 
     fn index_tail(&mut self) -> SqlResult<()> {
@@ -87,24 +150,6 @@ impl Parser<'_> {
                 self.at += 1;
                 self.take_operator("=");
                 self.label()?;
-            } else if self.oracle()
-                && [
-                    "online",
-                    "logging",
-                    "nologging",
-                    "noparallel",
-                    "compress",
-                    "nocompress",
-                ]
-                .iter()
-                .any(|word| self.is_word(word))
-            {
-                self.at += 1;
-            } else if self.oracle() && self.take_word("tablespace") {
-                self.name()?;
-            } else if self.oracle() && self.is_word("compute") {
-                self.at += 1;
-                self.expect_word("statistics")?;
             } else if self.is_word("where") && !self.mysql() && !self.oracle() {
                 return Err(self.not_supported("partial indexes (CREATE INDEX ... WHERE)"));
             } else if !self.mysql()
@@ -135,8 +180,15 @@ impl Parser<'_> {
     }
 
     pub(super) fn index_column_list(&mut self, unique: bool) -> SqlResult<Vec<Name>> {
+        Ok(self.ordered_index_column_list(unique)?.names)
+    }
+
+    pub(super) fn ordered_index_column_list(&mut self, unique: bool) -> SqlResult<IndexColumns> {
         self.expect(&TokenKind::LeftParen)?;
         let mut columns = Vec::new();
+        let mut sort_options = SortOptions::default();
+        let mut order_written = false;
+        let mut nulls_order_written = false;
         loop {
             if self.peek_kind() == &TokenKind::LeftParen {
                 return Err(self.not_supported("indexes on expressions"));
@@ -168,13 +220,22 @@ impl Parser<'_> {
                     return Err(self.not_supported("index columns with a collation"));
                 }
             }
-            let _ = self.take_word("asc") || self.take_word("desc");
-            if postgresql && self.take_word("nulls") && !self.take_word("first") {
-                self.expect_word("last")?;
+            let descending = self.take_word("desc");
+            if descending || self.take_word("asc") {
+                order_written = true;
             }
+            let mut nulls_first = descending;
+            if postgresql && self.take_word("nulls") {
+                nulls_order_written = true;
+                nulls_first = self.take_word("first");
+                if !nulls_first {
+                    self.expect_word("last")?;
+                }
+            }
+            sort_options = sort_options.with_column(columns.len(), descending, nulls_first);
             if columns.iter().any(|known: &Name| known.text == column.text) {
-                return Err(crate::error::SqlError::new(
-                    crate::error::SqlState::DUPLICATE_COLUMN,
+                return Err(SqlError::new(
+                    SqlState::DUPLICATE_COLUMN,
                     format!(
                         "column \"{}\" appears twice in index definition",
                         column.text
@@ -184,8 +245,8 @@ impl Parser<'_> {
             }
             columns.push(column);
             if columns.len() > crate::encoding::MAX_INDEX_COLUMNS {
-                return Err(crate::error::SqlError::new(
-                    crate::error::SqlState::TOO_MANY_COLUMNS,
+                return Err(SqlError::new(
+                    SqlState::TOO_MANY_COLUMNS,
                     format!(
                         "cannot use more than {} columns in an index",
                         crate::encoding::MAX_INDEX_COLUMNS
@@ -197,7 +258,12 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(columns)
+        Ok(IndexColumns {
+            names: columns,
+            sort_options,
+            order_written,
+            nulls_order_written,
+        })
     }
 
     pub(super) fn drop_index(&mut self) -> SqlResult<Statement> {
@@ -267,8 +333,41 @@ impl Parser<'_> {
         }))
     }
 
+    fn explain_options(&mut self) -> SqlResult<bool> {
+        let mut analyze = false;
+        loop {
+            if self.take_word("analyze") || self.take_word("analyse") {
+                analyze = !(self.take_word("false") || self.take_word("off"));
+                let _ = self.take_word("true") || self.take_word("on");
+            } else if self.take_word("format") {
+                if !self.take_word("text") {
+                    return Err(self.not_supported("EXPLAIN formats other than TEXT"));
+                }
+            } else if [
+                "verbose", "costs", "timing", "buffers", "summary", "settings", "wal",
+            ]
+            .iter()
+            .any(|word| self.is_word(word))
+            {
+                self.at += 1;
+                let _ = self.take_word("true")
+                    || self.take_word("false")
+                    || self.take_word("on")
+                    || self.take_word("off");
+            } else {
+                return Err(self.unexpected());
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(analyze)
+    }
+
     pub(super) fn explain(&mut self) -> SqlResult<Statement> {
         self.expect_word("explain")?;
+        let mut analyze = false;
         let style = if self.sqlite() {
             if !(self.is_word("query") && self.is_word_at(1, "plan")) {
                 return Err(self.not_supported("EXPLAIN without QUERY PLAN (bytecode listings)"));
@@ -279,7 +378,11 @@ impl Parser<'_> {
             if self.oracle() {
                 return Err(self.not_supported("EXPLAIN PLAN"));
             }
-            if self.peek_kind() == &TokenKind::LeftParen
+            if self.postgresql() && (self.take_word("analyze") || self.take_word("analyse")) {
+                analyze = true;
+            } else if self.postgresql() && self.take(&TokenKind::LeftParen) {
+                analyze = self.explain_options()?;
+            } else if self.peek_kind() == &TokenKind::LeftParen
                 || self.is_word("analyze")
                 || self.is_word("verbose")
                 || self.is_word("format")
@@ -297,6 +400,7 @@ impl Parser<'_> {
         let statement = self.statement_body()?;
         Ok(Statement::Explain(Explain {
             style,
+            analyze,
             statement: Box::new(statement),
         }))
     }

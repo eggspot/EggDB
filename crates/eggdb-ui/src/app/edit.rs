@@ -337,14 +337,12 @@ impl<S: Source> Ui<S> {
     fn committed(&mut self, pending: Pending, time: &str) {
         let key = pending.change.key().to_vec();
         let shown = key.starts_with(&self.filter);
-        let (delta, verb, bytes) = match &pending.change {
-            Change::Put { value, .. } => (
-                i64::from(pending.replaced_bytes.is_none()),
-                "Committed",
-                value.len() as u64,
-            ),
-            Change::Delete { .. } => (-1, "Deleted", pending.replaced_bytes.unwrap_or(0)),
+        let delta = match &pending.change {
+            Change::Put { .. } => i64::from(pending.replaced_bytes.is_none()),
+            Change::Delete { .. } => -1,
+            Change::Expire { .. } | Change::Persist { .. } | Change::Increment { .. } => 0,
         };
+        let before = self.shown_value_text(&key);
         if shown && delta != 0 {
             if self.counting {
                 self.restart_count();
@@ -354,12 +352,36 @@ impl<S: Source> Ui<S> {
         }
         self.modal = None;
         self.close_edit();
+        self.close_prompt();
         self.show_after_commit(&key, delta < 0);
-        let mut message = format!(
-            "{verb} {} ({}) at {time}",
-            text::escaped(&key),
-            text::value_size(bytes)
-        );
+        let escaped_key = text::escaped(&key);
+        let mut message = match &pending.change {
+            Change::Put { value, .. } => format!(
+                "Committed {escaped_key} ({}) at {time}",
+                text::value_size(value.len() as u64)
+            ),
+            Change::Delete { .. } => format!(
+                "Deleted {escaped_key} ({}) at {time}",
+                text::value_size(pending.replaced_bytes.unwrap_or(0))
+            ),
+            Change::Expire { time_to_live, .. } => format!(
+                "Committed {escaped_key} (expires in {}) at {time}",
+                crate::time_to_live::format_time_left(*time_to_live)
+            ),
+            Change::Persist { .. } => {
+                format!("Committed {escaped_key} (never expires) at {time}")
+            }
+            Change::Increment { .. } => {
+                let arrow = self.theme.symbol(Symbol::RightArrow);
+                match (before, self.shown_value_text(&key)) {
+                    (Some(before), Some(after)) => {
+                        format!("Committed {escaped_key} {before} {arrow} {after} at {time}")
+                    }
+                    (None, Some(after)) => format!("Committed {escaped_key} = {after} at {time}"),
+                    (_, None) => format!("Committed {escaped_key} at {time}"),
+                }
+            }
+        };
         if !shown {
             message.push_str(&format!(
                 "; not shown by filter /{}",
@@ -367,6 +389,11 @@ impl<S: Source> Ui<S> {
             ));
         }
         self.toast(ToastKind::Success, message);
+    }
+
+    fn shown_value_text(&self, key: &[u8]) -> Option<String> {
+        let viewer = self.viewer.as_ref().filter(|viewer| viewer.key == key)?;
+        viewer.bytes.as_deref().map(text::escaped)
     }
 
     fn show_after_commit(&mut self, key: &[u8], deleted: bool) {

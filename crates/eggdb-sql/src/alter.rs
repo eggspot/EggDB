@@ -6,8 +6,9 @@ use crate::constraints::{self, PreparedChecks};
 use crate::dialect::Dialect;
 use crate::encoding::CommentKind;
 use crate::encoding::{
-    Column, MAX_COLUMNS, TableDefinition, decode_meta, decode_row, encode_meta, encode_row,
-    meta_key, prefix_end, reference_key, rows_prefix, table_key,
+    Column, IdentityGeneration, IndexMethod, MAX_COLUMNS, SortOptions, TableDefinition,
+    decode_meta, decode_row, encode_meta, encode_row, meta_key, prefix_end, reference_key,
+    rows_prefix, table_key,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
@@ -165,7 +166,24 @@ fn apply(
             *name = target.text;
             Ok(None)
         }
+        AlterAction::AttachPartition { partition, bound } => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_ddl::attach(writer, tables, &parent, partition, bound)?;
+            Ok(None)
+        }
+        AlterAction::DetachPartition(partition) => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_ddl::detach(writer, tables, &parent, partition)?;
+            Ok(None)
+        }
         AlterAction::SetSchema(schema) => {
+            if crate::temporary::is_temporary_name(name) || schema.text == crate::temporary::SCHEMA
+            {
+                return Err(SqlError::not_supported(
+                    "cannot move objects into or out of temporary schemas",
+                )
+                .at(schema.position));
+            }
             if !crate::schemas::schema_exists(writer, &schema.text)? {
                 return Err(
                     crate::schemas::missing_schema(&schema.text, dialect).at(schema.position)
@@ -182,14 +200,35 @@ fn apply(
             *name = target.text;
             Ok(None)
         }
-        AlterAction::SetDefault { column, default } => {
-            set_default(writer, tables, name, column, default.as_ref(), dialect).map(|()| None)
-        }
+        AlterAction::SetDefault { column, default } => set_default(
+            writer,
+            tables,
+            name,
+            column,
+            default
+                .as_ref()
+                .map(|default| (default, Dialect::PostgreSql)),
+            dialect,
+        )
+        .map(|()| None),
         AlterAction::AddDefault {
             column,
             default,
+            source,
             position,
-        } => add_default(writer, tables, name, column, default, *position, dialect).map(|()| None),
+        } => add_default(
+            writer,
+            tables,
+            name,
+            column,
+            WrittenDefault {
+                expr: default,
+                source,
+                position: *position,
+            },
+            dialect,
+        )
+        .map(|()| None),
         AlterAction::EnableConstraint(constraint) => {
             if current(writer, tables, name)?.constraint_name_taken(&constraint.text) {
                 return Ok(None);
@@ -206,15 +245,19 @@ fn apply(
         }
         AlterAction::AddIdentity {
             column,
+            generation,
             sequence,
             options,
         } => add_identity(
             writer,
             tables,
             name,
-            column,
-            sequence.as_ref(),
-            options,
+            IdentityRequest {
+                column,
+                generation: *generation,
+                sequence: sequence.as_ref(),
+                options,
+            },
             dialect,
         )
         .map(|()| None),
@@ -234,6 +277,21 @@ fn apply(
         } => drop_constraint(
             writer, tables, name, constraint, *if_exists, *cascade, dialect,
         ),
+        AlterAction::ValidateConstraint(constraint) => {
+            validate_constraint(writer, tables, name, constraint).map(|()| None)
+        }
+        AlterAction::RenameConstraint { from, to } => {
+            rename_constraint(writer, tables, name, from, to).map(|()| None)
+        }
+        AlterAction::AlterIdentity {
+            column,
+            generation,
+            options,
+        } => alter_identity(writer, tables, name, column, *generation, options, dialect)
+            .map(|()| None),
+        AlterAction::DropIdentity { column, if_exists } => {
+            drop_identity(writer, tables, name, column, *if_exists, dialect)
+        }
         AlterAction::DropPrimaryKey(position) => {
             let table = current(writer, tables, name)?;
             if table.primary_key.is_empty() {
@@ -280,11 +338,15 @@ fn rebuild(
     map: &mut RowMap<'_>,
     duplicate_name: Option<String>,
 ) -> SqlResult<TableDefinition> {
-    new.id = next_table_id(writer)?;
+    new.id = if crate::temporary::is_temporary_name(&new.name) {
+        crate::temporary::next_id(writer)?
+    } else {
+        next_table_id(writer)?
+    };
     if has_rows(writer, &new)? {
         return Err(crate::encoding::corrupt("table numbering"));
     }
-    let checks = PreparedChecks::of(&new)?;
+    let checks = PreparedChecks::of_validated(&new)?;
     let prefix = rows_prefix(old.id);
     let end = prefix_end(&prefix);
     let mut memory = WorkMemory::new();
@@ -462,9 +524,15 @@ fn add_column(
     if let Some((expr, _)) = &definition.default {
         execute::check_default_expr(expr)?;
     }
-    let column = column_of(definition);
+    let (stored_type, domain) =
+        execute::column_storage(definition.sql_type, definition.name.position)?;
+    let mut column = column_of(definition);
+    column.sql_type = stored_type;
     let old_columns = table.columns.clone();
     table.columns.push(column.clone());
+    let added = table.columns.len() - 1;
+    table.set_default_dialect(added, definition.default_dialect);
+    table.set_domain(added, domain);
     let fills = column.default.is_some() && has_rows(writer, &table)?;
     if column.not_null && !fills && has_rows(writer, &table)? {
         return Err(SqlError::new(
@@ -485,7 +553,7 @@ fn add_column(
             crate::sequences::load_all(writer)?;
         }
         let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
-            let value = execute::default_of(&column)?;
+            let value = execute::default_of(&table, added)?;
             if value.is_null() && column.not_null {
                 return Err(SqlError::new(
                     SqlState::NOT_NULL_VIOLATION,
@@ -511,6 +579,8 @@ fn add_column(
                 kind: ConstraintKind::Unique(vec![definition.name.clone()]),
                 position: definition.name.position,
                 column: Some(definition.name.clone()),
+                using_index: None,
+                not_valid: false,
             },
             dialect,
         )?;
@@ -787,6 +857,12 @@ fn drop_column(
             column.auto_increment = false;
         }
     }
+    new.identities = table.identities_without_column(index);
+    new.default_dialects = table.default_dialects_without_column(index);
+    new.domains = table.domains_without_column(index);
+    if new.auto_increment_column().is_none() {
+        new.identity_seed = None;
+    }
     new.indexes = table
         .indexes
         .iter()
@@ -810,6 +886,7 @@ fn drop_column(
             })
         })
         .collect();
+    new.forget_missing_statuses();
     constraints::unregister_references(writer, tables, &table)?;
     let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
         if index < row.len() {
@@ -819,7 +896,7 @@ fn drop_column(
     };
     let rebuilt = rebuild(writer, &table, new, &mut map, None)?;
     constraints::register_references(writer, tables, &rebuilt)?;
-    crate::sequences::drop_owned_by(writer, tables, &table.name, Some(&column.text))?;
+    crate::sequences::drop_owned_by(writer, tables, &table.name, Some(column.text.as_str()))?;
     Ok(notices.into_iter().next())
 }
 
@@ -1030,6 +1107,9 @@ fn rename_table(
     }
     crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
     crate::comments::move_owner(writer, &old_name, &to.text)?;
+    crate::triggers::move_table_triggers(writer, &old_name, &to.text)?;
+    crate::partitions::rename(writer, &old_name, &to.text)?;
+    crate::statistics::rename(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)
 }
 
@@ -1038,19 +1118,47 @@ fn set_default(
     tables: &mut TableCache,
     name: &str,
     column: &Name,
-    default: Option<&(crate::ast::Expr, String)>,
+    default: Option<(&(crate::ast::Expr, String), Dialect)>,
     dialect: Dialect,
 ) -> SqlResult<()> {
     let mut table = current(writer, tables, name)?;
     let index = column_index(&table, column, dialect)?;
-    if let Some((expr, text)) = default {
+    if dialect == Dialect::PostgreSql && table.has_stored_identity(index) {
+        let error = SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            format!(
+                "column \"{}\" of relation \"{}\" is an identity column",
+                column.text,
+                crate::schemas::base_name(name)
+            ),
+        );
+        return Err(match default {
+            Some(_) => error,
+            None => error.with_hint("Use ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY instead."),
+        });
+    }
+    if let Some(((expr, text), _)) = default {
         execute::check_default_expr(expr)?;
         crate::sequences::check_default_sequences(writer, text)?;
     }
     let target = &mut table.columns[index];
-    target.default = default.map(|(_, text)| text.clone());
-    target.auto_increment = false;
+    target.default = default.map(|((_, text), _)| text.clone());
+    if target.auto_increment {
+        target.auto_increment = false;
+        table.identity_seed = None;
+    }
+    table.set_default_dialect(
+        index,
+        default.map_or(Dialect::PostgreSql, |(_, written_in)| written_in),
+    );
+    table.set_identity(index, None);
     save(writer, &table)
+}
+
+struct WrittenDefault<'a> {
+    expr: &'a crate::ast::Expr,
+    source: &'a str,
+    position: usize,
 }
 
 fn add_default(
@@ -1058,8 +1166,7 @@ fn add_default(
     tables: &mut TableCache,
     name: &str,
     column: &Name,
-    default: &crate::ast::Expr,
-    position: usize,
+    default: WrittenDefault<'_>,
     dialect: Dialect,
 ) -> SqlResult<()> {
     let table = current(writer, tables, name)?;
@@ -1076,30 +1183,39 @@ fn add_default(
         .with_sqlserver_code(1754)
         .at(column.position));
     }
-    let source =
-        crate::parser::sqlserver_default_source(default, target.sql_type).ok_or_else(|| {
-            crate::parser::sqlserver_not_supported("A DEFAULT other than a constant or GETDATE()")
-                .at(position)
-        })?;
+    let (source, written_in) =
+        crate::parser::sqlserver_kept_default(default.expr, default.source, target.sql_type)
+            .map_err(|error| error.at(default.position))?;
     set_default(
         writer,
         tables,
         name,
         column,
-        Some(&(default.clone(), source)),
+        Some((&(default.expr.clone(), source), written_in)),
         dialect,
     )
+}
+
+struct IdentityRequest<'a> {
+    column: &'a Name,
+    generation: IdentityGeneration,
+    sequence: Option<&'a Name>,
+    options: &'a SequenceOptions,
 }
 
 fn add_identity(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     name: &str,
-    column: &Name,
-    sequence: Option<&Name>,
-    options: &SequenceOptions,
+    request: IdentityRequest<'_>,
     dialect: Dialect,
 ) -> SqlResult<()> {
+    let IdentityRequest {
+        column,
+        generation,
+        sequence,
+        options,
+    } = request;
     let table = current(writer, tables, name)?;
     let index = column_index(&table, column, dialect)?;
     let target = &table.columns[index];
@@ -1120,7 +1236,7 @@ fn add_identity(
         let shown = crate::schemas::display(name);
         return Err(SqlError::new(
             SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
-            if target.auto_increment {
+            if table.identity_of(index).is_some() {
                 format!(
                     "column \"{}\" of relation \"{shown}\" is already an identity column",
                     column.text
@@ -1186,6 +1302,8 @@ fn add_identity(
     let target = &mut table.columns[index];
     target.default = Some(default);
     target.auto_increment = false;
+    table.set_default_dialect(index, Dialect::PostgreSql);
+    table.set_identity(index, Some(generation));
     save(writer, &table)
 }
 
@@ -1259,9 +1377,10 @@ fn set_type(
     sql_type: SqlType,
     dialect: Dialect,
 ) -> SqlResult<()> {
+    let (sql_type, domain) = execute::column_storage(sql_type, column.position)?;
     let table = current(writer, tables, name)?;
     let index = column_index(&table, column, dialect)?;
-    if table.columns[index].sql_type == sql_type {
+    if table.columns[index].sql_type == sql_type && table.domain_of(index) == domain {
         return Ok(());
     }
     if table.columns[index].auto_increment
@@ -1284,6 +1403,7 @@ fn set_type(
     }
     let mut new = table.clone();
     new.columns[index].sql_type = sql_type;
+    new.set_domain(index, domain);
     let target = new.columns[index].clone();
     let mut map = |mut row: Vec<Value>| -> SqlResult<Vec<Value>> {
         if let Some(value) = row.get_mut(index) {
@@ -1457,7 +1577,9 @@ fn redefine(
     target.not_null = column.not_null || in_key;
     if !target.auto_increment {
         target.default = column.default.as_ref().map(|(_, text)| text.clone());
+        table.set_default_dialect(index, column.default_dialect);
     }
+    table.set_identity(index, None);
     save(writer, &table)?;
     if column.unique.is_some() {
         add_constraint(
@@ -1469,6 +1591,8 @@ fn redefine(
                 kind: ConstraintKind::Unique(vec![column.name.clone()]),
                 position: column.name.position,
                 column: Some(column.name.clone()),
+                using_index: None,
+                not_valid: false,
             },
             dialect,
         )?;
@@ -1483,6 +1607,8 @@ fn redefine(
                 kind: ConstraintKind::PrimaryKey(vec![column.name.clone()]),
                 position: column.name.position,
                 column: Some(column.name.clone()),
+                using_index: None,
+                not_valid: false,
             },
             dialect,
         )?;
@@ -1500,6 +1626,12 @@ fn add_constraint(
     spec: &ConstraintSpec,
     dialect: Dialect,
 ) -> SqlResult<()> {
+    if dialect == Dialect::Oracle
+        && let Some(given) = &spec.name
+        && take_over_index(writer, tables, name, spec, given, dialect)?
+    {
+        return Ok(());
+    }
     let mut table = current(writer, tables, name)?;
     if let Some(given) = &spec.name
         && table.constraint_name_taken(&given.text)
@@ -1525,16 +1657,44 @@ fn add_constraint(
         }
         .at(given.position));
     }
+    if dialect == Dialect::Oracle
+        && let Some(using) = &spec.using_index
+        && drop_index_taken_over(writer, tables, name, spec, using, dialect)?
+    {
+        table = current(writer, tables, name)?;
+    }
+    if spec.not_valid
+        && !matches!(
+            spec.kind,
+            ConstraintKind::Check { .. } | ConstraintKind::ForeignKey(_)
+        )
+    {
+        return Err(SqlError::not_supported(
+            "only CHECK and FOREIGN KEY constraints can be marked NOT VALID",
+        )
+        .at(spec.position));
+    }
     match &spec.kind {
         ConstraintKind::Check { expr, text } => {
             let position = constraints::define_check(&mut table, spec, expr, text, dialect)?;
-            constraints::validate_existing(writer, tables, &table, Some(position), None)?;
+            if spec.not_valid {
+                let name = table.checks[position].name.clone();
+                table.set_status(&name, false, false);
+            } else {
+                constraints::validate_existing(writer, tables, &table, Some(position), None)?;
+            }
             save(writer, &table)
         }
         ConstraintKind::ForeignKey(key) => {
             let position =
                 constraints::define_foreign_key(writer, tables, &mut table, spec, key, dialect)?;
-            constraints::validate_existing(writer, tables, &table, None, Some(position))?;
+            if spec.not_valid {
+                let name = table.foreign_keys[position].name.clone();
+                let deferred = table.is_initially_deferred(&name);
+                table.set_status(&name, false, deferred);
+            } else {
+                constraints::validate_existing(writer, tables, &table, None, Some(position))?;
+            }
             save(writer, &table)?;
             constraints::register_references(writer, tables, &table)
         }
@@ -1545,6 +1705,8 @@ fn add_constraint(
                     unique: true,
                     columns: columns.clone(),
                     position: spec.position,
+                    method: IndexMethod::BTree,
+                    sort_options: SortOptions::default(),
                 },
                 table: Name {
                     text: table.name.clone(),
@@ -1610,6 +1772,123 @@ fn add_constraint(
     }
 }
 
+fn take_over_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    spec: &ConstraintSpec,
+    given: &Name,
+    dialect: Dialect,
+) -> SqlResult<bool> {
+    let table = current(writer, tables, name)?;
+    let Some(index) = table.index_named(&given.text).cloned() else {
+        return Ok(false);
+    };
+    let (ConstraintKind::PrimaryKey(columns) | ConstraintKind::Unique(columns)) = &spec.kind else {
+        return Ok(false);
+    };
+    let mut wanted = Vec::with_capacity(columns.len());
+    for column in columns {
+        wanted.push(column_index(&table, column, dialect)?);
+    }
+    let same_columns = index.columns == wanted;
+    match &spec.kind {
+        ConstraintKind::Unique(_) if !index.unique => Err(SqlError::new(
+            SqlState::DUPLICATE_TABLE,
+            "name is already used by an existing object",
+        )
+        .with_oracle_code(955)
+        .at(given.position)),
+        ConstraintKind::Unique(_) if same_columns && !index.backs_unique_constraint => {
+            let mut table = table;
+            if let Some(found) = table
+                .indexes
+                .iter_mut()
+                .find(|found| found.name == index.name)
+            {
+                found.backs_unique_constraint = true;
+            }
+            save(writer, &table)?;
+            Ok(true)
+        }
+        ConstraintKind::Unique(_) => Ok(same_columns),
+        ConstraintKind::PrimaryKey(_) if same_columns => {
+            let drop = crate::ast::DropIndex {
+                names: vec![given.clone()],
+                table: Some(Name {
+                    text: table.name.clone(),
+                    position: given.position,
+                }),
+                if_exists: false,
+            };
+            indexes::drop_index(writer, tables, &drop, dialect)?;
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn drop_index_taken_over(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    spec: &ConstraintSpec,
+    using: &Name,
+    dialect: Dialect,
+) -> SqlResult<bool> {
+    let index_name = crate::schemas::base_name(&using.text);
+    if spec
+        .name
+        .as_ref()
+        .is_some_and(|given| given.text == index_name)
+    {
+        return Ok(false);
+    }
+    let (ConstraintKind::PrimaryKey(columns) | ConstraintKind::Unique(columns)) = &spec.kind else {
+        return Ok(false);
+    };
+    let table = current(writer, tables, name)?;
+    let Some(index) = table.index_named(index_name).cloned() else {
+        return Err(
+            SqlError::new(SqlState::UNDEFINED_OBJECT, "specified index does not exist")
+                .with_oracle_code(1418)
+                .at(using.position),
+        );
+    };
+    let mut wanted = Vec::with_capacity(columns.len());
+    for column in columns {
+        wanted.push(column_index(&table, column, dialect)?);
+    }
+    let enforces = index
+        .columns
+        .get(..wanted.len())
+        .is_some_and(|leading| wanted.iter().all(|column| leading.contains(column)));
+    if !enforces {
+        return Err(SqlError::new(
+            SqlState::INVALID_TABLE_DEFINITION,
+            "specified index cannot be used to enforce the constraint",
+        )
+        .with_oracle_code(14196)
+        .at(using.position));
+    }
+    if index.columns.len() != wanted.len() || index.backs_unique_constraint {
+        return Ok(false);
+    }
+    let drop = crate::ast::DropIndex {
+        names: vec![Name {
+            text: index_name.to_owned(),
+            position: using.position,
+        }],
+        table: Some(Name {
+            text: table.name.clone(),
+            position: using.position,
+        }),
+        if_exists: false,
+    };
+    indexes::drop_index(writer, tables, &drop, dialect)?;
+    Ok(true)
+}
+
 fn drop_primary_key(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -1661,6 +1940,7 @@ fn drop_constraint(
         .position(|check| check.name == constraint.text)
     {
         table.checks.remove(position);
+        table.forget_missing_statuses();
         save(writer, &table)?;
         return Ok(None);
     }
@@ -1671,6 +1951,7 @@ fn drop_constraint(
     {
         constraints::unregister_references(writer, tables, &table)?;
         table.foreign_keys.remove(position);
+        table.forget_missing_statuses();
         save(writer, &table)?;
         constraints::register_references(writer, tables, &table)?;
         return Ok(None);
@@ -1685,7 +1966,10 @@ fn drop_constraint(
     if let Some(index) = table
         .indexes
         .iter()
-        .find(|index| index.name == constraint.text)
+        .find(|index| {
+            index.name == constraint.text
+                && (dialect != Dialect::PostgreSql || index.backs_unique_constraint)
+        })
         .cloned()
     {
         let columns: Vec<String> = index
@@ -1744,4 +2028,260 @@ fn drop_constraint(
         ),
     }
     .at(constraint.position))
+}
+
+fn missing_constraint(table: &TableDefinition, constraint: &Name) -> SqlError {
+    SqlError::new(
+        SqlState::UNDEFINED_OBJECT,
+        format!(
+            "constraint \"{}\" of relation \"{}\" does not exist",
+            constraint.text,
+            crate::schemas::display(&table.name)
+        ),
+    )
+    .at(constraint.position)
+}
+
+fn validate_constraint(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    constraint: &Name,
+) -> SqlResult<()> {
+    let mut table = current(writer, tables, name)?;
+    let check = table
+        .checks
+        .iter()
+        .position(|check| check.name == constraint.text);
+    let key = table
+        .foreign_keys
+        .iter()
+        .position(|key| key.name == constraint.text);
+    if check.is_none() && key.is_none() {
+        if table.constraint_name_taken(&constraint.text) {
+            return Err(SqlError::new(
+                SqlState::WRONG_OBJECT_TYPE,
+                format!(
+                    "constraint \"{}\" of relation \"{}\" is not a foreign key or check constraint",
+                    constraint.text,
+                    crate::schemas::display(&table.name)
+                ),
+            )
+            .at(constraint.position));
+        }
+        return Err(missing_constraint(&table, constraint));
+    }
+    if table.is_validated(&constraint.text) {
+        return Ok(());
+    }
+    constraints::validate_existing(writer, tables, &table, check, key)?;
+    let deferred = table.is_initially_deferred(&constraint.text);
+    table.set_status(&constraint.text, true, deferred);
+    save(writer, &table)
+}
+
+fn rename_constraint(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    from: &Name,
+    to: &Name,
+) -> SqlResult<()> {
+    constraints::check_identifier(to)?;
+    let mut table = current(writer, tables, name)?;
+    if !table.constraint_name_taken(&from.text) {
+        return Err(missing_constraint(&table, from));
+    }
+    if table.constraint_name_taken(&to.text) {
+        return Err(SqlError::new(
+            SqlState::DUPLICATE_OBJECT,
+            format!(
+                "constraint \"{}\" for relation \"{}\" already exists",
+                to.text,
+                crate::schemas::display(&table.name)
+            ),
+        )
+        .at(to.position));
+    }
+    if let Some(check) = table
+        .checks
+        .iter_mut()
+        .find(|check| check.name == from.text)
+    {
+        check.name = to.text.clone();
+    } else if let Some(key) = table
+        .foreign_keys
+        .iter_mut()
+        .find(|key| key.name == from.text)
+    {
+        key.name = to.text.clone();
+    } else if !table.primary_key.is_empty() && table.primary_key_constraint_name() == from.text {
+        table.primary_key_name = (to.text
+            != format!("{}_pkey", crate::schemas::base_name(&table.name)))
+        .then(|| to.text.clone());
+    } else {
+        let schema = crate::schemas::schema_of(&table.name).to_owned();
+        check_index_name_free(writer, &schema, &to.text, to.position)?;
+        if let Some(index) = table
+            .indexes
+            .iter_mut()
+            .find(|index| index.name == from.text)
+        {
+            index.name = to.text.clone();
+        }
+    }
+    table.rename_status(&from.text, &to.text);
+    save(writer, &table)?;
+    crate::comments::move_part(writer, name, CommentKind::Constraint, &from.text, &to.text)
+}
+
+fn check_index_name_free(
+    writer: &mut dyn KeyValueWrite,
+    schema: &str,
+    index: &str,
+    position: usize,
+) -> SqlResult<()> {
+    let taken = indexes::every_table(writer)?.iter().any(|other| {
+        crate::schemas::schema_of(&other.name) == schema
+            && (other.index_named(index).is_some()
+                || crate::schemas::base_name(&other.name) == index)
+    });
+    if taken {
+        return Err(SqlError::new(
+            SqlState::DUPLICATE_TABLE,
+            format!("relation \"{index}\" already exists"),
+        )
+        .at(position));
+    }
+    Ok(())
+}
+
+fn not_an_identity(table: &TableDefinition, column: &Name) -> SqlError {
+    SqlError::new(
+        SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        format!(
+            "column \"{}\" of relation \"{}\" is not an identity column",
+            column.text,
+            crate::schemas::display(&table.name)
+        ),
+    )
+    .at(column.position)
+}
+
+fn owned_sequence(
+    writer: &mut dyn KeyValueWrite,
+    table: &str,
+    column: &str,
+) -> SqlResult<Option<String>> {
+    let table = crate::schemas::normalized(table);
+    Ok(crate::sequences::every_sequence(writer)?
+        .into_iter()
+        .find(|(_, sequence)| {
+            sequence
+                .owned_by
+                .as_ref()
+                .is_some_and(|(owner, owner_column)| {
+                    crate::schemas::normalized(owner) == table && owner_column == column
+                })
+        })
+        .map(|(name, _)| name))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn alter_identity(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    generation: Option<IdentityGeneration>,
+    options: &SequenceOptions,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let mut table = current(writer, tables, name)?;
+    let index = column_index(&table, column, dialect)?;
+    if table.identity_of(index).is_none() {
+        return Err(not_an_identity(&table, column));
+    }
+    if let Some(generation) = generation {
+        table.set_identity(index, Some(generation));
+    }
+    let changes_sequence = *options != SequenceOptions::default();
+    if changes_sequence && table.columns[index].auto_increment {
+        if options.min.is_some()
+            || options.max.is_some()
+            || options.cycle.is_some()
+            || options.restart.is_some()
+            || options.sql_type.is_some()
+        {
+            return Err(SqlError::not_supported(
+                "MINVALUE, MAXVALUE, CYCLE, RESTART and AS for an identity column of a CREATE TABLE",
+            )
+            .with_hint("START WITH and INCREMENT BY can change; the next value follows the table's highest stored one."));
+        }
+        let current_seed = table.identity_seed();
+        let seed = crate::encoding::IdentitySeed {
+            seed: options.start.unwrap_or(current_seed.seed),
+            increment: options.increment.unwrap_or(current_seed.increment),
+        };
+        if seed.increment == 0 {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                "INCREMENT must not be zero",
+            ));
+        }
+        table.identity_seed = Some(seed);
+    }
+    save(writer, &table)?;
+    if changes_sequence && !table.columns[index].auto_increment {
+        let Some(sequence) = owned_sequence(writer, &table.name, &column.text)? else {
+            return Err(not_an_identity(&table, column));
+        };
+        let alter = crate::ast::AlterSequence {
+            name: Name {
+                text: sequence,
+                position: column.position,
+            },
+            if_exists: false,
+            options: options.clone(),
+            rename: None,
+        };
+        crate::sequences::alter_sequence(writer, tables, &alter, dialect)?;
+    }
+    Ok(())
+}
+
+fn drop_identity(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    if_exists: bool,
+    dialect: Dialect,
+) -> SqlResult<Option<String>> {
+    let mut table = current(writer, tables, name)?;
+    let index = column_index(&table, column, dialect)?;
+    if table.identity_of(index).is_none() {
+        if if_exists {
+            return Ok(Some(format!(
+                "NOTICE:  column \"{}\" of relation \"{}\" is not an identity column, skipping",
+                column.text,
+                crate::schemas::display(&table.name)
+            )));
+        }
+        return Err(not_an_identity(&table, column));
+    }
+    let sequence_backed = !table.columns[index].auto_increment;
+    table.set_identity(index, None);
+    if sequence_backed {
+        table.columns[index].default = None;
+        table.set_default_dialect(index, Dialect::PostgreSql);
+    } else {
+        table.columns[index].auto_increment = false;
+        table.identity_seed = None;
+    }
+    save(writer, &table)?;
+    if sequence_backed {
+        crate::sequences::drop_owned_by(writer, tables, &table.name, Some(column.text.as_str()))?;
+    }
+    Ok(None)
 }

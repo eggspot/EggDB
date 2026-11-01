@@ -46,24 +46,44 @@
 //! - [`WriteTransaction`]: the one writer, from [`begin_write`](Database::begin_write) or
 //!   [`write`](Database::write), committed atomically or rolled back.
 //! - [`Scan`]: the entries of a [`KeyRange`] or a prefix, in key order or reversed.
+//! - Collections: named key spaces in the same file beside the default one, each its own
+//!   ordered map. [`Database::create_collection`], [`Database::drop_collection`] and
+//!   [`Database::collection_names`] manage them; [`Database::collection`] gives a
+//!   [`Collection`] for one-step reads and writes, and [`ReadTransaction::collection`] and
+//!   [`WriteTransaction::collection`] a [`ReadCollection`] or [`WriteCollection`] inside a
+//!   transaction. One transaction can change several collections and the default key space
+//!   together.
+//! - Expiring keys and counters: [`WriteTransaction::put_with_expiry`],
+//!   [`set_expiry`](WriteTransaction::set_expiry), [`clear_expiry`](WriteTransaction::clear_expiry)
+//!   and [`time_to_live`](ReadTransaction::time_to_live) give keys a time to live, after which
+//!   no read sees them and commits remove them; [`WriteTransaction::increment`] adds to a
+//!   counter and [`WriteTransaction::compare_and_set`] changes a value only when it is the one
+//!   expected, each atomic. [`Database`] and [`Collection`] have one-step versions of each, and
+//!   [`Options::clock`] sets the clock time is read from, a [`SimClock`] in tests.
 //! - [`Error`], with an [`ErrorKind`] to match on.
 //! - [`sql`]: SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, from
 //!   [`Database::sql_store`].
 
+mod collection;
+mod concurrent;
 mod database;
 mod error;
+mod expiry;
 mod options;
 mod scan;
 pub mod sql;
 mod transaction;
 mod writer_slot;
 
-pub use database::{CheckReport, Database, Stats};
+pub use collection::{Collection, ReadCollection, WriteCollection};
+pub use concurrent::{ConcurrentTransaction, Isolation};
+pub use database::{BackupReport, CheckReport, CompactReport, Database, Stats};
+pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};
 pub use scan::{KeyRange, Scan};
-pub use transaction::{ReadTransaction, WriteTransaction};
+pub use transaction::{ReadTransaction, ValueReader, WriteTransaction};
 
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/embedded.md")]

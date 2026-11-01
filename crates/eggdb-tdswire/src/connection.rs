@@ -1,17 +1,23 @@
+use crate::bulk::{BulkInput, BulkLoadError, BulkReader};
 use crate::messages::{
-    ATTENTION, BULK_LOAD, LOGIN7, Login7, PRELOGIN, PreLogin, RPC, SQL_BATCH, TABULAR_RESULT,
-    TDS_7_4, TRANSACTION_MANAGER, parse_login7, parse_prelogin, parse_sql_batch, prelogin_response,
+    ATTENTION, BULK_LOAD, ENCRYPT_CLIENT_CERT, ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON,
+    ENCRYPT_REQ, LOGIN7, Login7, PRELOGIN, PreLogin, RESET_CONNECTION,
+    RESET_CONNECTION_SKIP_TRANSACTION, RPC, SQL_BATCH, TABULAR_RESULT, TDS_7_4, TDS_8_0,
+    TRANSACTION_MANAGER, TransactionRequest, parse_login7, parse_prelogin, parse_sql_batch,
+    parse_transaction_manager_request, prelogin_response,
 };
+use crate::procedures::PreparedBatches;
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::tokens::{
     self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
     ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE, ENV_ROLLBACK_TRANSACTION,
     ServerMessage,
 };
-use crate::types::{push_value, wire_columns};
-use crate::wire::{DEFAULT_PACKET_SIZE, POLL_INTERVAL, Wire, WireError};
+use crate::types::{declared_wire_columns, push_value, wire_columns};
+use crate::wire::{DEFAULT_PACKET_SIZE, Message, POLL_INTERVAL, Packet, Wire, WireError};
 use eggdb_sql::{
-    BatchStep, Dialect, KeyValueStore, QueryResult, SQLSERVER_COMPATIBLE_VERSION, Session, SqlError,
+    BatchStep, BulkRows, Dialect, InfoMessage, KeyValueStore, NamedParameter, QueryResult,
+    SQLSERVER_COMPATIBLE_VERSION, Session, SqlError, SqlResult, SqlState, Value,
 };
 use std::time::{Duration, Instant};
 
@@ -27,14 +33,18 @@ const SELECT_COMMAND: u16 = 0xC1;
 const INSERT_COMMAND: u16 = 0xC3;
 const DELETE_COMMAND: u16 = 0xC4;
 const UPDATE_COMMAND: u16 = 0xC5;
+const MERGE_COMMAND: u16 = 0x117;
 const LOGIN_FAILED: u32 = 18_456;
 const CANNOT_OPEN_DATABASE: u32 = 4060;
 const TOO_MANY_CONNECTIONS: u32 = 17_809;
-const NOT_SUPPORTED: u32 = 40_517;
+pub(crate) const NOT_SUPPORTED: u32 = 40_517;
 const PROTOCOL_ERROR: u32 = 4002;
-const LOGGED_BATCH_CHARACTERS: usize = 200;
+pub(crate) const LOGGED_BATCH_CHARACTERS: usize = 200;
 const MAX_RESULT_COLUMNS: usize = 4096;
 const TOO_MANY_RESULT_COLUMNS: u32 = 1056;
+const BULK_DATA_INCORRECT: u16 = 4804;
+const BULK_COLUMN_LENGTH: u16 = 4815;
+const BULK_COLUMN_TYPE: u16 = 4816;
 
 pub(crate) fn printable(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
@@ -64,12 +74,17 @@ pub(crate) fn printable(text: &str) -> String {
     shown
 }
 
+fn bracketed(name: &str) -> String {
+    format!("[{}]", name.replace(']', "]]"))
+}
+
 fn changed_rows(tag: &str) -> Option<(u16, u64)> {
     let mut words = tag.split_whitespace();
     let command = match words.next()? {
         "INSERT" => INSERT_COMMAND,
         "UPDATE" => UPDATE_COMMAND,
         "DELETE" => DELETE_COMMAND,
+        "MERGE" => MERGE_COMMAND,
         _ => return None,
     };
     Some((command, words.last()?.parse().ok()?))
@@ -146,10 +161,10 @@ fn login_failed(user: &str) -> String {
     format!("Login failed for user '{user}'.")
 }
 
-fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError) {
+pub(crate) fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError) {
     match error {
         WireError::Tls => (shared.log)(&format!(
-            "{}  client requires TLS (TDS 8 / encrypt=strict); EggDB has no TLS yet",
+            "{}  client requires TLS (TDS 8 / encrypt=strict); EggDB is not set up for TLS (give it a certificate)",
             wire.peer()
         )),
         WireError::Malformed(reason) => {
@@ -181,14 +196,62 @@ fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError
     }
 }
 
-fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<PreLogin> {
-    let message = match wire.read_message(MAX_LOGIN_BYTES) {
-        Ok(message) => message,
-        Err(error) => {
-            report_wire_error(shared, wire, &error);
-            return None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encryption {
+    None,
+    LoginOnly,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncryptionOutcome {
+    Plain,
+    Tls(Encryption),
+    ClientWillEnd(&'static str),
+}
+
+const TDS_8_APPLICATION_PROTOCOL: &[u8] = b"tds/8.0";
+
+fn negotiate_encryption(
+    prelogin: &PreLogin,
+    tls_configured: bool,
+    loopback: bool,
+) -> (u8, EncryptionOutcome) {
+    let requested = prelogin.encryption.unwrap_or(ENCRYPT_NOT_SUP);
+    if requested & ENCRYPT_CLIENT_CERT != 0 {
+        return (
+            ENCRYPT_NOT_SUP,
+            EncryptionOutcome::ClientWillEnd("client certificate authentication is not supported"),
+        );
+    }
+    match (tls_configured, requested & 0x7F) {
+        (false, ENCRYPT_OFF | ENCRYPT_NOT_SUP) => (ENCRYPT_NOT_SUP, EncryptionOutcome::Plain),
+        (false, _) => (
+            ENCRYPT_NOT_SUP,
+            EncryptionOutcome::ClientWillEnd(
+                "client requires encryption; EggDB is not set up for TLS (give it a certificate, or connect with encrypt=false or sqlcmd -N disable)",
+            ),
+        ),
+        (true, ENCRYPT_OFF) if loopback => {
+            (ENCRYPT_OFF, EncryptionOutcome::Tls(Encryption::LoginOnly))
         }
-    };
+        (true, ENCRYPT_OFF) => (ENCRYPT_REQ, EncryptionOutcome::Tls(Encryption::Full)),
+        (true, ENCRYPT_NOT_SUP) if loopback => (ENCRYPT_NOT_SUP, EncryptionOutcome::Plain),
+        (true, ENCRYPT_NOT_SUP) => (
+            ENCRYPT_REQ,
+            EncryptionOutcome::ClientWillEnd(
+                "the client cannot encrypt, and connections from other machines must use TLS",
+            ),
+        ),
+        (true, _) => (ENCRYPT_ON, EncryptionOutcome::Tls(Encryption::Full)),
+    }
+}
+
+fn parse_prelogin_message(
+    shared: &Shared<'_>,
+    wire: &Wire<'_>,
+    message: &Message,
+) -> Option<PreLogin> {
     if message.kind != PRELOGIN {
         (shared.log)(&format!(
             "{}  protocol error: the first message is not PRELOGIN",
@@ -196,35 +259,102 @@ fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<PreLogin> {
         ));
         return None;
     }
-    let prelogin = match parse_prelogin(&message.body) {
-        Ok(prelogin) => prelogin,
+    match parse_prelogin(&message.body) {
+        Ok(prelogin) => Some(prelogin),
         Err(error) => {
             (shared.log)(&format!("{}  protocol error: {error}", wire.peer()));
+            None
+        }
+    }
+}
+
+fn start_tls(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    config: &eggdb_tls::ServerConfig,
+    framed: bool,
+) -> bool {
+    match wire.start_tls(config, framed) {
+        Ok(()) => true,
+        Err(error) => {
+            (shared.log)(&format!("{}  TLS handshake failed: {error}", wire.peer()));
+            false
+        }
+    }
+}
+
+fn read_strict_prelogin(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    config: &eggdb_tls::ServerConfig,
+) -> Option<Encryption> {
+    if !start_tls(shared, wire, config, false) {
+        return None;
+    }
+    let negotiated = wire
+        .tls()
+        .and_then(|info| info.application_protocol.as_deref());
+    if negotiated != Some(TDS_8_APPLICATION_PROTOCOL) {
+        (shared.log)(&format!(
+            "{}  TDS 8 connection refused: the client did not ask for tds/8.0 with ALPN",
+            wire.peer()
+        ));
+        return None;
+    }
+    let message = match wire.read_message(MAX_LOGIN_BYTES) {
+        Ok(message) => message,
+        Err(error) => {
+            report_wire_error(shared, wire, &error);
             return None;
         }
     };
-    let answer = prelogin_response(&prelogin, version_bytes());
+    let prelogin = parse_prelogin_message(shared, wire, &message)?;
+    let answer = prelogin_response(&prelogin, version_bytes(), ENCRYPT_NOT_SUP);
+    wire.send_message(TABULAR_RESULT, &answer).ok()?;
+    Some(Encryption::Full)
+}
+
+fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<Encryption> {
+    let tls_config = shared.config.tls.as_deref();
+    let message = match (wire.read_message(MAX_LOGIN_BYTES), tls_config) {
+        (Ok(message), _) => message,
+        (Err(WireError::Tls), Some(config)) => return read_strict_prelogin(shared, wire, config),
+        (Err(error), _) => {
+            report_wire_error(shared, wire, &error);
+            return None;
+        }
+    };
+    let prelogin = parse_prelogin_message(shared, wire, &message)?;
+    let (response, outcome) =
+        negotiate_encryption(&prelogin, tls_config.is_some(), wire.peer_is_loopback());
+    let answer = prelogin_response(&prelogin, version_bytes(), response);
     if wire.send_message(TABULAR_RESULT, &answer).is_err() {
         return None;
     }
-    if prelogin.wants_encryption() {
-        (shared.log)(&format!(
-            "{}  client requires encryption; EggDB has no TLS yet (connect with encrypt=false or sqlcmd -N disable)",
-            wire.peer()
-        ));
-        wire.close_after_refusal();
-        return None;
+    match (outcome, tls_config) {
+        (EncryptionOutcome::Plain, _) => Some(Encryption::None),
+        (EncryptionOutcome::Tls(encryption), Some(config)) => {
+            start_tls(shared, wire, config, true).then_some(encryption)
+        }
+        (EncryptionOutcome::Tls(_), None) => None,
+        (EncryptionOutcome::ClientWillEnd(reason), _) => {
+            (shared.log)(&format!("{}  {reason}", wire.peer()));
+            wire.close_after_refusal();
+            None
+        }
     }
-    Some(prelogin)
 }
 
 pub(crate) fn refuse_too_many(shared: &Shared<'_>, wire: &mut Wire<'_>) {
-    if read_prelogin(shared, wire).is_none() {
+    let Some(encryption) = read_prelogin(shared, wire) else {
         return;
-    }
+    };
     let Ok(mut message) = wire.read_message(MAX_LOGIN_BYTES) else {
         return;
     };
+    if encryption == Encryption::LoginOnly {
+        wire.end_tls_after_login();
+    }
     message.body.fill(0);
     std::hint::black_box(&message.body);
     let text = format!(
@@ -248,7 +378,7 @@ fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &
     refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(user))]);
 }
 
-fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Login {
+fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>, encryption: Encryption) -> Login {
     let mut message = match wire.read_message(MAX_LOGIN_BYTES) {
         Ok(message) => message,
         Err(error) => {
@@ -256,6 +386,9 @@ fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Login {
             return Login::Refused;
         }
     };
+    if encryption == Encryption::LoginOnly {
+        wire.end_tls_after_login();
+    }
     if message.kind != LOGIN7 {
         message.body.fill(0);
         std::hint::black_box(&message.body);
@@ -289,9 +422,9 @@ fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Login {
 
 fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login {
     let user = login.user_name.clone();
-    if login.tds_version < TDS_7_4 {
+    if login.tds_version < TDS_7_4 && login.tds_version != TDS_8_0 {
         let reason = format!(
-            "the client speaks TDS {:#010x}; EggDB needs TDS 7.4",
+            "the client speaks TDS {:#010x}; EggDB needs TDS 7.4 or 8.0",
             login.tds_version
         );
         login_refusal(shared, wire, &user, &reason);
@@ -419,10 +552,10 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         refuse_too_many(shared, &mut wire);
         return;
     };
-    if read_prelogin(shared, &mut wire).is_none() {
+    let Some(encryption) = read_prelogin(shared, &mut wire) else {
         return;
-    }
-    let Login::Accepted { user, packet_size } = log_in(shared, &mut wire) else {
+    };
+    let Login::Accepted { user, packet_size } = log_in(shared, &mut wire, encryption) else {
         return;
     };
     drop(login_slot);
@@ -442,34 +575,52 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let mut session = Session::with_dialect(store, Dialect::SqlServer);
     session.identify(&user, &config.database);
     session.set_connection_id(connection_id);
+    shared.register(connection_id, session.cancel_signal());
     let mut connection = Connection {
         wire,
         shared,
         next_transaction: 1,
         transaction: None,
+        prepared: PreparedBatches::default(),
+        acknowledge_reset: false,
     };
     connection.run(&mut session);
+    shared.unregister(connection_id);
     let _ = session.close();
 }
 
-struct Connection<'a> {
-    wire: Wire<'a>,
-    shared: &'a Shared<'a>,
+pub(crate) struct Connection<'a> {
+    pub(crate) wire: Wire<'a>,
+    pub(crate) shared: &'a Shared<'a>,
     next_transaction: u64,
     transaction: Option<u64>,
+    pub(crate) prepared: PreparedBatches,
+    acknowledge_reset: bool,
 }
 
-struct PendingDone {
-    status: u16,
-    command: u16,
-    rows: u64,
+pub(crate) struct PendingDone {
+    pub(crate) status: u16,
+    pub(crate) command: u16,
+    pub(crate) rows: u64,
+}
+
+pub(crate) struct Ran {
+    pub(crate) last: Option<PendingDone>,
+    pub(crate) wrote_error: bool,
+    pub(crate) failed_write: bool,
 }
 
 impl Connection<'_> {
-    fn run<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>) {
+    fn run(&mut self, session: &mut Session<'_>) {
         loop {
-            let message = match self.wire.read_message(MAX_BATCH_BYTES) {
-                Ok(message) => message,
+            let message = match self.next_message() {
+                Ok(Incoming::Message(message)) => message,
+                Ok(Incoming::BulkLoad { first, body }) => {
+                    if !self.bulk_load(session, first, body) {
+                        return;
+                    }
+                    continue;
+                }
                 Err(WireError::Stopping) => {
                     self.shared
                         .ended_by_stop
@@ -481,17 +632,16 @@ impl Connection<'_> {
                     return;
                 }
             };
+            if matches!(message.kind, SQL_BATCH | RPC | TRANSACTION_MANAGER)
+                && message.status & (RESET_CONNECTION | RESET_CONNECTION_SKIP_TRANSACTION) != 0
+            {
+                self.reset(session, message.status & RESET_CONNECTION == 0);
+            }
             let keep_going = match message.kind {
                 SQL_BATCH => self.batch(session, &message.body),
+                RPC => self.rpc(session, &message.body),
+                TRANSACTION_MANAGER => self.transaction_request(session, &message.body),
                 ATTENTION => self.send_done(DONE_ATTENTION),
-                RPC | TRANSACTION_MANAGER | BULK_LOAD => {
-                    let what = match message.kind {
-                        RPC => "Remote procedure calls (RPC requests, such as sp_executesql)",
-                        TRANSACTION_MANAGER => "Transaction manager requests",
-                        _ => "Bulk load",
-                    };
-                    self.send_not_supported(what)
-                }
                 _ => {
                     report_wire_error(
                         self.shared,
@@ -507,25 +657,201 @@ impl Connection<'_> {
         }
     }
 
+    fn next_message(&mut self) -> Result<Incoming, WireError> {
+        let mut body = Vec::new();
+        let first = self.wire.read_first_packet(&mut body, MAX_BATCH_BYTES)?;
+        if first.kind == BULK_LOAD {
+            return Ok(Incoming::BulkLoad { first, body });
+        }
+        if let Err(error) = self
+            .wire
+            .read_rest_of_message(&first, &mut body, MAX_BATCH_BYTES)
+        {
+            body.fill(0);
+            std::hint::black_box(&body);
+            return Err(error);
+        }
+        Ok(Incoming::Message(Message {
+            kind: first.kind,
+            status: first.status,
+            body,
+        }))
+    }
+
+    fn bulk_load(&mut self, session: &mut Session<'_>, first: Packet, body: Vec<u8>) -> bool {
+        let pending = session.bulk_load_pending();
+        let mut steps: Vec<BatchStep> = Vec::new();
+        let (outcome, refused, wire_failure) = {
+            let mut input = WireBulkInput {
+                wire: &mut self.wire,
+                ended: first.last,
+                failure: None,
+            };
+            let mut rows = TdsBulkRows {
+                reader: BulkReader::new(body, &mut input),
+                started: false,
+                refused: None,
+            };
+            let outcome = if pending {
+                session.execute_bulk_load(&mut rows, &mut |step| {
+                    steps.push(step);
+                    true
+                })
+            } else {
+                Ok(())
+            };
+            let refused = rows.refused.take();
+            drop(rows);
+            input.discard_rest();
+            (outcome, refused, input.failure.take())
+        };
+        if let Some(error) = wire_failure {
+            report_wire_error(self.shared, &mut self.wire, &error);
+            return false;
+        }
+        if !pending {
+            (self.shared.log)(&format!(
+                "{}  protocol error: bulk load data without an INSERT BULK before it",
+                self.wire.peer()
+            ));
+            return self.send_error(
+                PROTOCOL_ERROR,
+                16,
+                "Bulk load data was sent without an INSERT BULK statement before it.",
+            );
+        }
+        if let Some(refused) = refused {
+            (self.shared.log)(&format!(
+                "{}  bulk load data refused: {refused:?}",
+                self.wire.peer()
+            ));
+        }
+        if self.shared.config.log_batches {
+            (self.shared.log)(&format!("{}  bulk load data", self.wire.peer()));
+        }
+        self.send_steps(session, steps, outcome)
+    }
+
+    fn send_steps(
+        &mut self,
+        session: &mut Session<'_>,
+        steps: Vec<BatchStep>,
+        outcome: SqlResult<()>,
+    ) -> bool {
+        if !self.begin_response() {
+            return false;
+        }
+        let database = session.database().to_owned();
+        let ran = self.write_steps("", database, DONE, |on_step| {
+            for step in steps {
+                if !on_step(step) {
+                    break;
+                }
+            }
+            outcome
+        });
+        self.finish_batch(session, ran)
+    }
+
+    fn reset(&mut self, session: &mut Session<'_>, keep_transaction: bool) {
+        let keep_transaction = keep_transaction && self.transaction.is_some();
+        if let Err(error) = session.reset_connection(keep_transaction) {
+            (self.shared.log)(&format!(
+                "{}  the connection reset could not roll back: {}",
+                self.wire.peer(),
+                error.message()
+            ));
+        }
+        if !keep_transaction {
+            self.transaction = None;
+        }
+        self.acknowledge_reset = true;
+    }
+
+    pub(crate) fn begin_response(&mut self) -> bool {
+        self.wire.begin_message(TABULAR_RESULT);
+        if std::mem::take(&mut self.acknowledge_reset) {
+            return self
+                .wire
+                .write(&tokens::env_change_reset_acknowledged())
+                .is_ok();
+        }
+        true
+    }
+
+    fn send_response(&mut self, body: &[u8]) -> bool {
+        self.begin_response() && self.wire.write(body).is_ok() && self.wire.end_message().is_ok()
+    }
+
     fn send_done(&mut self, status: u16) -> bool {
-        self.wire
-            .send_message(TABULAR_RESULT, &tokens::done(DONE, status, 0, 0))
-            .is_ok()
+        self.send_response(&tokens::done(DONE, status, 0, 0))
+    }
+
+    pub(crate) fn send_error(&mut self, number: u32, severity: u8, text: &str) -> bool {
+        let mut body = tokens::error(&ServerMessage {
+            number,
+            severity,
+            text,
+            line: 1,
+        });
+        body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
+        self.send_response(&body)
     }
 
     fn send_not_supported(&mut self, what: &str) -> bool {
         let text = format!("{what} are not supported in this version of EggDB.");
-        let mut body = tokens::error(&ServerMessage {
-            number: NOT_SUPPORTED,
-            severity: 16,
-            text: &text,
-            line: 1,
-        });
-        body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
-        self.wire.send_message(TABULAR_RESULT, &body).is_ok()
+        self.send_error(NOT_SUPPORTED, 16, &text)
     }
 
-    fn batch<S: KeyValueStore>(&mut self, session: &mut Session<'_, S>, body: &[u8]) -> bool {
+    fn transaction_request(&mut self, session: &mut Session<'_>, body: &[u8]) -> bool {
+        let request = match parse_transaction_manager_request(body) {
+            Ok(request) => request,
+            Err(error) => {
+                report_wire_error(
+                    self.shared,
+                    &mut self.wire,
+                    &WireError::Malformed(error.reason),
+                );
+                return false;
+            }
+        };
+        let text = match &request.request {
+            TransactionRequest::Begin { .. } => "BEGIN TRANSACTION".to_owned(),
+            TransactionRequest::Commit {
+                begin_next: None, ..
+            } => "COMMIT TRANSACTION".to_owned(),
+            TransactionRequest::Commit {
+                begin_next: Some(_),
+                ..
+            } => "COMMIT TRANSACTION BEGIN TRANSACTION".to_owned(),
+            TransactionRequest::Rollback { name, begin_next } => {
+                let mut text = "ROLLBACK TRANSACTION".to_owned();
+                if !name.is_empty() {
+                    text.push(' ');
+                    text.push_str(&bracketed(name));
+                }
+                if begin_next.is_some() {
+                    text.push_str(" BEGIN TRANSACTION");
+                }
+                text
+            }
+            TransactionRequest::Save { name } => {
+                format!("SAVE TRANSACTION {}", bracketed(name))
+            }
+            TransactionRequest::Distributed(_) => {
+                return self.send_not_supported("Distributed transactions");
+            }
+        };
+        if self.shared.config.log_batches {
+            (self.shared.log)(&format!(
+                "{}  transaction manager: {text}",
+                self.wire.peer()
+            ));
+        }
+        session.in_connection_dialect(|session| self.run_batch_text(session, &text))
+    }
+
+    fn batch(&mut self, session: &mut Session<'_>, body: &[u8]) -> bool {
         let batch = match parse_sql_batch(body) {
             Ok(batch) => batch,
             Err(error) => {
@@ -545,28 +871,70 @@ impl Connection<'_> {
                 printable(&shown)
             ));
         }
-        let text = batch.text;
-        self.wire.begin_message(TABULAR_RESULT);
+        self.run_batch_text(session, &batch.text)
+    }
+
+    pub(crate) fn run_statements(
+        &mut self,
+        session: &mut Session<'_>,
+        text: &str,
+        parameters: Option<&[NamedParameter]>,
+        done_token: u8,
+    ) -> Ran {
+        let database = session.database().to_owned();
+        let ran = self.write_steps(text, database, done_token, |on_step| match parameters {
+            None => session.execute_batch(text, on_step),
+            Some(parameters) => session.execute_parameterized_batch(text, parameters, on_step),
+        });
+        self.forget_unprepared(session);
+        ran
+    }
+
+    fn write_steps(
+        &mut self,
+        text: &str,
+        database: String,
+        done_token: u8,
+        execute: impl FnOnce(&mut dyn FnMut(BatchStep) -> bool) -> SqlResult<()>,
+    ) -> Ran {
         let mut pending: Option<PendingDone> = None;
         let mut failed_write = false;
-        let database = session.database().to_owned();
         let mut writer = StepWriter {
             connection: self,
-            text: &text,
+            text,
             lines: LineCursor::new(),
             database,
             pending: &mut pending,
             failed_write: &mut failed_write,
+            done_token,
+            wrote_error: false,
         };
-        let outcome = session.execute_batch(&text, &mut |step| writer.step(step));
+        let outcome = execute(&mut |step| writer.step(step));
         if let Err(error) = outcome {
             writer.error(&error, 0);
         }
-        let in_transaction = session.transaction_status() != eggdb_sql::TransactionStatus::Idle;
-        if failed_write {
+        let wrote_error = writer.wrote_error;
+        Ran {
+            last: pending,
+            wrote_error,
+            failed_write,
+        }
+    }
+
+    fn run_batch_text(&mut self, session: &mut Session<'_>, text: &str) -> bool {
+        if !self.begin_response() {
             return false;
         }
-        let last = pending.take().unwrap_or(PendingDone {
+        let ran = self.run_statements(session, text, None, DONE);
+        self.finish_batch(session, ran)
+    }
+
+    fn finish_batch(&mut self, session: &Session<'_>, ran: Ran) -> bool {
+        let in_transaction = session.transaction_status() != eggdb_sql::TransactionStatus::Idle;
+        if ran.failed_write {
+            return false;
+        }
+        let last = ran.last.unwrap_or(PendingDone {
             status: if in_transaction {
                 DONE_IN_TRANSACTION
             } else {
@@ -592,6 +960,129 @@ impl Connection<'_> {
     }
 }
 
+enum Incoming {
+    Message(Message),
+    BulkLoad { first: Packet, body: Vec<u8> },
+}
+
+struct WireBulkInput<'w, 'a> {
+    wire: &'w mut Wire<'a>,
+    ended: bool,
+    failure: Option<WireError>,
+}
+
+impl WireBulkInput<'_, '_> {
+    fn read_packet(&mut self, buffer: &mut Vec<u8>) -> bool {
+        if self.ended {
+            return false;
+        }
+        let before = buffer.len();
+        match self.wire.read_packet(buffer, usize::MAX, false) {
+            Ok(packet) if packet.kind == BULK_LOAD => {
+                self.ended = packet.last;
+                true
+            }
+            Ok(_) => {
+                buffer.truncate(before);
+                self.failure = Some(WireError::Malformed(
+                    "the packets of one message have different types",
+                ));
+                self.ended = true;
+                false
+            }
+            Err(error) => {
+                buffer.truncate(before);
+                self.failure = Some(error);
+                self.ended = true;
+                false
+            }
+        }
+    }
+
+    fn discard_rest(&mut self) {
+        let mut scratch = Vec::new();
+        while !self.ended {
+            scratch.clear();
+            self.read_packet(&mut scratch);
+        }
+    }
+}
+
+impl BulkInput for WireBulkInput<'_, '_> {
+    fn read_more(&mut self, buffer: &mut Vec<u8>) -> bool {
+        self.read_packet(buffer)
+    }
+}
+
+fn bulk_error(error: BulkLoadError) -> SqlError {
+    match error {
+        BulkLoadError::Malformed(malformed) => SqlError::new(
+            SqlState::PROTOCOL_VIOLATION,
+            format!("The bulk load data is incorrect: {}.", malformed.reason),
+        )
+        .with_sqlserver_code(BULK_DATA_INCORRECT),
+        BulkLoadError::UnsupportedType(kind) => SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            format!(
+                "Invalid column type from bcp client: EggDB does not read TDS type 0x{kind:02X} yet."
+            ),
+        )
+        .with_sqlserver_code(BULK_COLUMN_TYPE),
+        BulkLoadError::EncryptedColumn => SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "Always Encrypted columns are not supported in this version of EggDB.",
+        )
+        .with_sqlserver_code(NOT_SUPPORTED as u16),
+        BulkLoadError::RowTooLarge => SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!(
+                "A bulk load row is larger than the {} bytes EggDB accepts.",
+                crate::bulk::MAX_BULK_ROW_BYTES
+            ),
+        )
+        .with_sqlserver_code(BULK_COLUMN_LENGTH),
+    }
+}
+
+struct TdsBulkRows<I: BulkInput> {
+    reader: BulkReader<I>,
+    started: bool,
+    refused: Option<BulkLoadError>,
+}
+
+impl<I: BulkInput> TdsBulkRows<I> {
+    fn refuse(&mut self, error: BulkLoadError) -> SqlError {
+        self.refused = Some(error);
+        bulk_error(error)
+    }
+}
+
+impl<I: BulkInput> BulkRows for TdsBulkRows<I> {
+    fn next_row(&mut self, columns: usize, row: &mut Vec<Value>) -> SqlResult<bool> {
+        if !self.started {
+            self.started = true;
+            let described = self.reader.read_metadata().map(<[_]>::len);
+            let count = match described {
+                Ok(count) => count,
+                Err(error) => return Err(self.refuse(error)),
+            };
+            if count != columns {
+                return Err(SqlError::new(
+                    SqlState::BAD_COPY_FILE_FORMAT,
+                    format!(
+                        "The bulk load data describes {count} columns, but the INSERT BULK statement takes {columns}."
+                    ),
+                )
+                .with_sqlserver_code(BULK_COLUMN_LENGTH));
+            }
+        }
+        match self.reader.next_row(row) {
+            Ok(more) => Ok(more),
+            Err(error) => Err(self.refuse(error)),
+        }
+    }
+}
+
 struct StepWriter<'w, 'a> {
     connection: &'w mut Connection<'a>,
     text: &'w str,
@@ -599,6 +1090,8 @@ struct StepWriter<'w, 'a> {
     database: String,
     pending: &'w mut Option<PendingDone>,
     failed_write: &'w mut bool,
+    done_token: u8,
+    wrote_error: bool,
 }
 
 impl StepWriter<'_, '_> {
@@ -615,7 +1108,12 @@ impl StepWriter<'_, '_> {
             return true;
         };
         let status = pending.status | DONE_MORE;
-        self.write(&tokens::done(DONE, status, pending.command, pending.rows))
+        self.write(&tokens::done(
+            self.done_token,
+            status,
+            pending.command,
+            pending.rows,
+        ))
     }
 
     fn transaction_change(&mut self, in_transaction: bool, committed: bool) -> bool {
@@ -643,15 +1141,19 @@ impl StepWriter<'_, '_> {
         let line = self
             .lines
             .line_at(self.text, error.position().unwrap_or(statement_start));
-        let number = error.vendor_code().map_or(50_000, u32::from);
+        let number = error.sqlserver_number().unwrap_or(50_000);
         let severity = error.severity().unwrap_or(16);
-        let token = tokens::error(&ServerMessage {
-            number,
-            severity,
-            text: error.message(),
-            line,
-        });
+        let token = tokens::error_in_state(
+            &ServerMessage {
+                number,
+                severity,
+                text: error.message(),
+                line,
+            },
+            error.sqlserver_state().unwrap_or(1),
+        );
         if self.write(&token) {
+            self.wrote_error = true;
             *self.pending = Some(PendingDone {
                 status: DONE_ERROR,
                 command: 0,
@@ -665,10 +1167,12 @@ impl StepWriter<'_, '_> {
             return false;
         }
         let committed = matches!(&step.outcome, Ok(result) if result.tag == "COMMIT");
+        let line = self.lines.line_at(self.text, step.statement_start);
         let written = match step.outcome {
             Ok(result) => {
-                self.transaction_change(step.in_transaction, committed)
-                    && self.result(&result, step.no_count)
+                self.messages(&result.info_messages, line)
+                    && self.transaction_change(step.in_transaction, committed)
+                    && self.result(&result, step.no_count, step.format_only)
             }
             Err(error) => {
                 self.error(&error, step.statement_start);
@@ -683,7 +1187,23 @@ impl StepWriter<'_, '_> {
         written
     }
 
-    fn result(&mut self, result: &QueryResult, no_count: bool) -> bool {
+    fn messages(&mut self, messages: &[InfoMessage], line: u32) -> bool {
+        let mut body = Vec::new();
+        for message in messages {
+            body.extend(tokens::info_in_state(
+                &ServerMessage {
+                    number: message.number,
+                    severity: message.severity,
+                    text: &message.text,
+                    line,
+                },
+                message.state,
+            ));
+        }
+        body.is_empty() || self.write(&body)
+    }
+
+    fn result(&mut self, result: &QueryResult, no_count: bool, format_only: bool) -> bool {
         let count = if no_count { 0 } else { DONE_COUNT };
         if let Some(database) = result.tag.strip_prefix("USE ") {
             let old = std::mem::replace(&mut self.database, database.to_owned());
@@ -722,7 +1242,11 @@ impl StepWriter<'_, '_> {
                 });
                 return true;
             }
-            let wire_columns = wire_columns(columns, &result.rows);
+            let wire_columns = if format_only {
+                declared_wire_columns(columns)
+            } else {
+                wire_columns(columns, &result.rows)
+            };
             if !self.write(&tokens::column_metadata(&wire_columns)) {
                 return false;
             }
@@ -753,6 +1277,7 @@ impl StepWriter<'_, '_> {
             Some("INSERT") => INSERT_COMMAND,
             Some("UPDATE") => UPDATE_COMMAND,
             Some("DELETE") => DELETE_COMMAND,
+            Some("MERGE") => MERGE_COMMAND,
             _ => 0,
         };
         let rows = if command == 0 {

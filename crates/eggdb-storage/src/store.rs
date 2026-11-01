@@ -1,11 +1,14 @@
 use crate::btree::{AppendHint, BTree, TreeReport};
 use crate::cursor::{Cursor, KeyAndValue, KeyAndValueLen};
 use crate::error::StorageError;
-use crate::format::{NO_PAGE, Superblock};
+use crate::format::{Features, NO_PAGE, PageSize, Superblock};
 use crate::hybrid_clock::{CommitStamp, HybridClock};
 use crate::log::{Durability, LogStats};
+use crate::lsm::{LsmCursor, LsmReport, LsmTree};
+use crate::overflow::{ChainReader, ChainWriter};
 use crate::page_cache::{CacheSize, CacheStats, PageCache, PageSource, Snapshot};
 use crate::page_set::PageSet;
+use crate::tree_page::StoredValue;
 use eggdb_platform::{Clock, File};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -86,11 +89,14 @@ impl<F: File> Store<F> {
     pub fn begin_read(&self) -> Result<ReadTransaction<'_, F>, StorageError> {
         let mut state = self.lock()?;
         let version = state.cache.begin_snapshot()?;
+        let superblock = state.cache.superblock();
         Ok(ReadTransaction {
             store: self,
             version,
             stamp: state.last_commit,
-            catalog_root: state.cache.superblock().catalog_root,
+            catalog_root: superblock.catalog_root,
+            features: superblock.features,
+            page_size: state.cache.page_size(),
         })
     }
 
@@ -111,6 +117,7 @@ impl<F: File> Store<F> {
             finished: false,
             began_after: state.last_commit,
             catalog_root: state.cache.superblock().catalog_root,
+            features: Features::default(),
             append_hint: AppendHint::default(),
         })
     }
@@ -238,9 +245,11 @@ pub struct ReadTransaction<'s, F: File> {
     version: u64,
     stamp: CommitStamp,
     catalog_root: u64,
+    features: Features,
+    page_size: PageSize,
 }
 
-impl<F: File> ReadTransaction<'_, F> {
+impl<'s, F: File> ReadTransaction<'s, F> {
     /// The stamp of the commit this transaction sees, or [`CommitStamp::NONE`] when no
     /// transaction has committed to the file yet.
     pub fn stamp(&self) -> CommitStamp {
@@ -252,6 +261,22 @@ impl<F: File> ReadTransaction<'_, F> {
         self.catalog_root
     }
 
+    /// The file's feature flags as of the snapshot.
+    pub fn features(&self) -> Features {
+        self.features
+    }
+
+    /// The file's page size.
+    pub fn page_size(&self) -> PageSize {
+        self.page_size
+    }
+
+    /// The cipher the file's pages are encrypted with, which a copy of an encrypted file
+    /// keeps (D187).
+    pub fn page_cipher(&self) -> Result<Option<crate::page_cipher::PageCipher>, StorageError> {
+        Ok(self.store.lock()?.cache.page_cipher())
+    }
+
     /// Opens the tree whose root is page `root` as of the snapshot (see [`BTree::open`]).
     pub fn open_tree(&self, root: u64) -> Result<BTree, StorageError> {
         let state = self.store.lock()?;
@@ -260,6 +285,75 @@ impl<F: File> ReadTransaction<'_, F> {
             version: self.version,
         };
         BTree::open_in(&snapshot, root)
+    }
+
+    /// Opens the LSM tree whose manifest's root is page `root` as of the snapshot.
+    pub fn open_lsm_tree(&self, root: u64) -> Result<LsmTree, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        LsmTree::open_in(&snapshot, root)
+    }
+
+    /// The value stored under `key` in the LSM tree as of the snapshot, or `None`.
+    pub fn lsm_get(&self, tree: &LsmTree, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        tree.get_in(&snapshot, key)
+    }
+
+    /// A cursor over the LSM tree's live entries as of the snapshot, holding no page between
+    /// calls.
+    pub fn lsm_scan(
+        &self,
+        tree: &LsmTree,
+        start: std::ops::Bound<&[u8]>,
+        end: std::ops::Bound<&[u8]>,
+        order: crate::cursor::ScanOrder,
+    ) -> Result<LsmCursor, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        tree.scan_in(&snapshot, start, end, order)
+    }
+
+    /// The next live entry of an LSM cursor, as of the snapshot.
+    pub fn lsm_next<'c>(
+        &self,
+        cursor: &'c mut LsmCursor,
+    ) -> Result<Option<crate::lsm::EntryRef<'c>>, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        cursor.next_in(&snapshot)
+    }
+
+    /// A reader of the value stored under `key` in `tree` as of the snapshot, or `None`. A
+    /// value on overflow pages is read a page at a time as the reader is read, so a large value
+    /// is never held whole in memory; the store is taken for each read only.
+    pub fn value_reader(
+        &self,
+        tree: &BTree,
+        key: &[u8],
+    ) -> Result<Option<ValueReader<'_, 's, F>>, StorageError> {
+        let state = self.store.lock()?;
+        let snapshot = Snapshot {
+            cache: &state.cache,
+            version: self.version,
+        };
+        let stored = tree.stored_value_in(&snapshot, key)?;
+        stored
+            .map(|stored| ValueReader::new(&snapshot, ValueSource::Read(self), stored))
+            .transpose()
     }
 
     /// The value stored under `key` in `tree` as of the snapshot, copied out, or `None`.
@@ -362,10 +456,11 @@ pub struct WriteTransaction<'s, F: File> {
     finished: bool,
     began_after: CommitStamp,
     catalog_root: u64,
+    features: Features,
     append_hint: AppendHint,
 }
 
-impl<F: File> WriteTransaction<'_, F> {
+impl<'s, F: File> WriteTransaction<'s, F> {
     /// The stamp of the last commit before this transaction began.
     pub fn began_after(&self) -> CommitStamp {
         self.began_after
@@ -382,6 +477,12 @@ impl<F: File> WriteTransaction<'_, F> {
         self.catalog_root = root;
     }
 
+    /// Adds `features` to the feature flags this transaction's commit writes, beside the
+    /// file's own; a flag once committed stays set.
+    pub fn add_features(&mut self, features: Features) {
+        self.features = self.features.union(features);
+    }
+
     /// Creates an empty tree (see [`BTree::create`]).
     pub fn create_tree(&mut self) -> Result<BTree, StorageError> {
         self.change(|cache| BTree::create(cache))
@@ -393,6 +494,141 @@ impl<F: File> WriteTransaction<'_, F> {
         self.check_open()?;
         let state = self.store.lock()?;
         BTree::open(&state.cache, root)
+    }
+
+    /// Creates an empty LSM tree (see [`LsmTree::create`]).
+    pub fn create_lsm_tree(&mut self) -> Result<LsmTree, StorageError> {
+        self.change(|cache| LsmTree::create(cache))
+    }
+
+    /// Opens the LSM tree whose manifest's root is page `root`, this transaction's changes
+    /// included.
+    pub fn open_lsm_tree(&self, root: u64) -> Result<LsmTree, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        LsmTree::open(&state.cache, root)
+    }
+
+    /// The value stored under `key` in the LSM tree, this transaction's changes included.
+    pub fn lsm_get(&self, tree: &LsmTree, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        tree.get(&state.cache, key)
+    }
+
+    /// Stores `value` under `key` in the LSM tree (see [`LsmTree::put`]). An error other than
+    /// a refused key or value rolls the transaction back.
+    pub fn lsm_put(
+        &mut self,
+        tree: &LsmTree,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), StorageError> {
+        self.change(|cache| tree.put(cache, key, value))
+    }
+
+    /// Removes `key` from the LSM tree and returns whether it held a value.
+    pub fn lsm_delete(&mut self, tree: &LsmTree, key: &[u8]) -> Result<bool, StorageError> {
+        self.change(|cache| tree.delete(cache, key))
+    }
+
+    /// Finishes the LSM tree's merge in this transaction (see [`LsmTree::finish_merges`]).
+    pub fn lsm_finish_merges(&mut self, tree: &LsmTree) -> Result<(), StorageError> {
+        self.change(|cache| tree.finish_merges(cache))
+    }
+
+    /// A cursor over the LSM tree's live entries, this transaction's changes included.
+    pub fn lsm_scan(
+        &self,
+        tree: &LsmTree,
+        start: std::ops::Bound<&[u8]>,
+        end: std::ops::Bound<&[u8]>,
+        order: crate::cursor::ScanOrder,
+    ) -> Result<LsmCursor, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        tree.scan(&state.cache, start, end, order)
+    }
+
+    /// The next live entry of an LSM cursor, this transaction's changes included.
+    pub fn lsm_next<'c>(
+        &self,
+        cursor: &'c mut LsmCursor,
+    ) -> Result<Option<crate::lsm::EntryRef<'c>>, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        cursor.next(&state.cache)
+    }
+
+    /// Checks the LSM tree (see [`LsmTree::check`]).
+    pub fn lsm_check(&self, tree: &LsmTree) -> Result<LsmReport, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        tree.check(&state.cache)
+    }
+
+    /// A reader of the value stored under `key` in `tree`, this transaction's changes
+    /// included, or `None` (see [`ReadTransaction::value_reader`]).
+    pub fn value_reader(
+        &self,
+        tree: &BTree,
+        key: &[u8],
+    ) -> Result<Option<ValueReader<'_, 's, F>>, StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        let stored = tree.stored_value_in(&state.cache, key)?;
+        stored
+            .map(|stored| ValueReader::new(&state.cache, ValueSource::Write(self), stored))
+            .transpose()
+    }
+
+    /// Stores the `value_bytes` bytes read from `source` under `key` in `tree`, as
+    /// [`WriteTransaction::put`] stores a value in hand. A value that goes to overflow pages is
+    /// written a page at a time as it is read, so it is never held whole in memory, and the
+    /// store is taken for each page only. The limits are those of [`BTree::check_fits_len`],
+    /// checked before anything is read. A source that ends early or fails, or gives more than
+    /// `value_bytes`, rolls the transaction back.
+    pub fn put_from_reader(
+        &mut self,
+        tree: &BTree,
+        key: &[u8],
+        value_bytes: u64,
+        source: &mut dyn std::io::Read,
+    ) -> Result<(), StorageError> {
+        self.check_open()?;
+        let page_size = {
+            let state = self.store.lock()?;
+            let length = usize::try_from(value_bytes).unwrap_or(usize::MAX);
+            BTree::check_fits_len(&state.cache, key, length)?;
+            state.cache.page_size()
+        };
+        if value_bytes as usize + key.len() <= BTree::max_inline_entry_bytes(page_size) {
+            let mut value = vec![0; value_bytes as usize];
+            let read = read_exactly(source, &mut value).and_then(|()| source_ended(source));
+            if let Err(error) = read {
+                return self.change(|_| Err(error));
+            }
+            return self.put(tree, key, &value);
+        }
+        let mut writer = self.change(|cache| ChainWriter::start(cache, key, value_bytes))?;
+        let mut buffer = vec![0; crate::overflow::data_bytes_per_page(page_size)];
+        while writer.written() < value_bytes {
+            let wanted = (value_bytes - writer.written()).min(buffer.len() as u64) as usize;
+            if let Err(error) = read_exactly(source, &mut buffer[..wanted]) {
+                return self.change(|_| Err(error));
+            }
+            self.change(|cache| writer.write(cache, &buffer[..wanted]))?;
+        }
+        if let Err(error) = source_ended(source) {
+            return self.change(|_| Err(error));
+        }
+        let mut hint = std::mem::take(&mut self.append_hint);
+        let stored = self.change(|cache| {
+            let reference = writer.finish(cache)?;
+            tree.put_written_hinted(cache, key, reference, &mut hint)
+        });
+        self.append_hint = hint;
+        stored
     }
 
     /// The value stored under `key` in `tree`, this transaction's changes included.
@@ -436,6 +672,14 @@ impl<F: File> WriteTransaction<'_, F> {
         self.check_open()?;
         let state = self.store.lock()?;
         cursor.next_key_and_value_len_in(&state.cache)
+    }
+
+    /// Checks that [`WriteTransaction::put_from_reader`] would accept `key` and a value of
+    /// `value_bytes` bytes, as [`BTree::check_fits_len`] does, without changing anything.
+    pub fn check_fits_len(&self, key: &[u8], value_bytes: usize) -> Result<(), StorageError> {
+        self.check_open()?;
+        let state = self.store.lock()?;
+        BTree::check_fits_len(&state.cache, key, value_bytes)
     }
 
     /// Checks that [`WriteTransaction::put`] would accept `key` and `value`, as
@@ -498,8 +742,10 @@ impl<F: File> WriteTransaction<'_, F> {
             }
         };
         let catalog_root = self.catalog_root;
+        let features = self.features;
         let committed = state.cache.commit_stamped(stamp.bits(), |superblock| {
             superblock.catalog_root = catalog_root;
+            superblock.features = superblock.features.union(features);
             superblock.clock_high_water = stamp.bits();
         });
         match committed {
@@ -586,5 +832,133 @@ impl<F: File> Store<F> {
     pub(crate) fn with_cache<R>(&self, use_cache: impl FnOnce(&PageCache<F>) -> R) -> R {
         let state = self.state.lock().unwrap();
         use_cache(&state.cache)
+    }
+}
+
+fn read_exactly(source: &mut dyn std::io::Read, into: &mut [u8]) -> Result<(), StorageError> {
+    source
+        .read_exact(into)
+        .map_err(|error| StorageError::Io(error.into()))
+}
+
+fn source_ended(source: &mut dyn std::io::Read) -> Result<(), StorageError> {
+    let mut extra = [0u8; 1];
+    loop {
+        match source.read(&mut extra) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {
+                return Err(StorageError::Io(eggdb_platform::Error::new(
+                    eggdb_platform::ErrorKind::InvalidInput,
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(StorageError::Io(error.into())),
+        }
+    }
+}
+
+enum ValueSource<'t, 's, F: File> {
+    Read(&'t ReadTransaction<'s, F>),
+    Write(&'t WriteTransaction<'s, F>),
+}
+
+enum ValueState {
+    Inline { bytes: Vec<u8>, offset: usize },
+    Chain(ChainReader),
+}
+
+/// A value read a piece at a time from a transaction (see [`ReadTransaction::value_reader`] and
+/// [`WriteTransaction::value_reader`]). It implements [`std::io::Read`]; a damaged page fails a
+/// read with the [`StorageError`] inside the [`std::io::Error`].
+pub struct ValueReader<'t, 's, F: File> {
+    source: ValueSource<'t, 's, F>,
+    state: ValueState,
+}
+
+impl<'t, 's, F: File> ValueReader<'t, 's, F> {
+    fn new(
+        pages: &impl PageSource,
+        source: ValueSource<'t, 's, F>,
+        stored: StoredValue,
+    ) -> Result<Self, StorageError> {
+        let state = match stored {
+            StoredValue::Inline(bytes) => ValueState::Inline { bytes, offset: 0 },
+            StoredValue::Overflow(reference)
+                if crate::overflow::chain_layout(pages, &reference)?
+                    == crate::overflow::COMPRESSED_LAYOUT =>
+            {
+                let mut bytes = Vec::new();
+                crate::overflow::read_value(pages, &reference, &mut bytes)?;
+                ValueState::Inline { bytes, offset: 0 }
+            }
+            StoredValue::Overflow(reference) => {
+                ValueState::Chain(ChainReader::start(pages, reference)?)
+            }
+        };
+        Ok(Self { source, state })
+    }
+
+    /// The value's length in bytes.
+    pub fn len(&self) -> u64 {
+        match &self.state {
+            ValueState::Inline { bytes, .. } => bytes.len() as u64,
+            ValueState::Chain(chain) => chain.value_bytes(),
+        }
+    }
+
+    /// Whether the value is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The bytes not read yet.
+    pub fn remaining(&self) -> u64 {
+        match &self.state {
+            ValueState::Inline { bytes, offset } => (bytes.len() - offset) as u64,
+            ValueState::Chain(chain) => chain.remaining(),
+        }
+    }
+
+    /// Reads the next bytes of the value into `out`, and returns how many: zero at the end.
+    pub fn read_into(&mut self, out: &mut [u8]) -> Result<usize, StorageError> {
+        match &mut self.state {
+            ValueState::Inline { bytes, offset } => {
+                let taken = (bytes.len() - *offset).min(out.len());
+                out[..taken].copy_from_slice(&bytes[*offset..*offset + taken]);
+                *offset += taken;
+                Ok(taken)
+            }
+            ValueState::Chain(chain) => match &self.source {
+                ValueSource::Read(transaction) => {
+                    let state = transaction.store.lock()?;
+                    let snapshot = Snapshot {
+                        cache: &state.cache,
+                        version: transaction.version,
+                    };
+                    chain.read(&snapshot, out)
+                }
+                ValueSource::Write(transaction) => {
+                    transaction.check_open()?;
+                    let state = transaction.store.lock()?;
+                    chain.read(&state.cache, out)
+                }
+            },
+        }
+    }
+}
+
+impl<F: File> std::io::Read for ValueReader<'_, '_, F> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.read_into(out).map_err(std::io::Error::other)
+    }
+}
+
+impl<F: File> fmt::Debug for ValueReader<'_, '_, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ValueReader")
+            .field("len", &self.len())
+            .field("remaining", &self.remaining())
+            .finish_non_exhaustive()
     }
 }

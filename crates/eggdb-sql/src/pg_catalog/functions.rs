@@ -1,5 +1,6 @@
 use super::oids;
-use super::relations::{index_columns, index_is_unique};
+use super::relations::{index_columns, index_is_unique, index_method, index_sort_options};
+use super::routines::ArgumentList;
 use super::snapshot::{self, CatalogSnapshot, ConstraintSource, RelationSource};
 use super::types::oid_number;
 use super::{CatalogRelation, CatalogType, RegKind, deparse};
@@ -14,6 +15,8 @@ const NODE_TREE: Option<SqlType> = Some(SqlType::Catalog(CatalogType::NodeTree))
 const REGCLASS: Option<SqlType> = Some(SqlType::Catalog(CatalogType::Reg(RegKind::Class)));
 const INTEGER: Option<SqlType> = Some(SqlType::Integer);
 const BOOLEAN: Option<SqlType> = Some(SqlType::Boolean);
+const TEXT: Option<SqlType> = Some(SqlType::Text);
+const NOT_FOUND: [&str; 3] = ["42P01", "3F000", "42704"];
 const PG_CLASS: u32 = 1259;
 const PG_NAMESPACE: u32 = 2615;
 const PG_CONSTRAINT: u32 = 2606;
@@ -21,7 +24,15 @@ const PG_CONSTRAINT: u32 = 2606;
 pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     Some(match name {
         "format_type" => &[OID, INTEGER],
-        "pg_get_userbyid" | "pg_table_is_visible" | "pg_type_is_visible" => &[OID],
+        "pg_get_userbyid"
+        | "pg_table_is_visible"
+        | "pg_type_is_visible"
+        | "pg_function_is_visible"
+        | "pg_get_functiondef"
+        | "pg_get_function_arguments"
+        | "pg_get_function_identity_arguments"
+        | "pg_get_function_result"
+        | "pg_get_partkeydef" => &[OID],
         "pg_get_statisticsobjdef_columns" => &[OID],
         "pg_get_expr" => &[NODE_TREE, OID, BOOLEAN],
         "pg_get_constraintdef" | "pg_get_viewdef" | "pg_get_triggerdef" | "pg_get_ruledef" => {
@@ -32,6 +43,8 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "pg_encoding_to_char" => &[INTEGER],
         "obj_description" | "shobj_description" => &[OID, NAME],
         "col_description" => &[OID, INTEGER],
+        "pg_get_serial_sequence" => &[TEXT, TEXT],
+        "to_regclass" | "to_regtype" => &[TEXT],
         _ => return None,
     })
 }
@@ -39,9 +52,10 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "pg_get_userbyid" | "pg_encoding_to_char" => SqlType::Catalog(CatalogType::Name),
-        "pg_table_is_visible" | "pg_type_is_visible" | "pg_relation_is_publishable" => {
-            SqlType::Boolean
-        }
+        "pg_table_is_visible"
+        | "pg_type_is_visible"
+        | "pg_function_is_visible"
+        | "pg_relation_is_publishable" => SqlType::Boolean,
         "format_type"
         | "pg_get_expr"
         | "pg_get_constraintdef"
@@ -52,7 +66,15 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_get_statisticsobjdef_columns"
         | "obj_description"
         | "shobj_description"
-        | "col_description" => SqlType::Text,
+        | "col_description"
+        | "pg_get_serial_sequence"
+        | "pg_get_functiondef"
+        | "pg_get_function_arguments"
+        | "pg_get_function_identity_arguments"
+        | "pg_get_function_result"
+        | "pg_get_partkeydef" => SqlType::Text,
+        "to_regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
+        "to_regtype" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
         _ => return None,
     })
 }
@@ -129,20 +151,77 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             }
             .to_owned(),
         )),
-        ("pg_type_is_visible", [_]) => Ok(match first.and_then(oids::builtin_type) {
-            Some(_) => Value::Boolean(true),
+        ("pg_type_is_visible", [_]) => Ok(match first {
+            Some(type_oid) if oids::builtin_type(type_oid).is_some() => Value::Boolean(true),
+            Some(type_oid) => {
+                crate::user_types::is_visible(type_oid).map_or(Value::Null, Value::Boolean)
+            }
             None => Value::Null,
         }),
         ("pg_get_expr", [tree, ..]) => Ok(match tree {
             Value::Text(text) => Value::Text(text.clone()),
             _ => Value::Null,
         }),
-        ("pg_get_triggerdef" | "pg_get_ruledef" | "pg_get_statisticsobjdef_columns", _) => {
-            Ok(Value::Null)
-        }
+        ("pg_get_ruledef" | "pg_get_statisticsobjdef_columns", _) => Ok(Value::Null),
         ("shobj_description", _) => Ok(Value::Null),
+        ("pg_get_serial_sequence", [table, column]) => serial_sequence(table, column),
+        ("to_regclass", [text]) => registered(RegKind::Class, text),
+        ("to_regtype", [text]) => registered(RegKind::Type, text),
         _ => with_snapshot(name, values, first),
     })
+}
+
+fn registered(kind: RegKind, text: &Value) -> SqlResult<Value> {
+    let Some(text) = text.to_text() else {
+        return Ok(Value::Null);
+    };
+    match snapshot::reg_from_text(kind, &text) {
+        Ok(found) => Ok(Value::Reg(Box::new(found))),
+        Err(error) if NOT_FOUND.contains(&error.state().code()) => Ok(Value::Null),
+        Err(error) => Err(error),
+    }
+}
+
+fn serial_sequence(table: &Value, column: &Value) -> SqlResult<Value> {
+    let (Some(table), Some(column)) = (table.to_text(), column.to_text()) else {
+        return Ok(Value::Null);
+    };
+    let snapshot = snapshot::require()?;
+    let (schema, name) = super::types::split_object_name(&table, RegKind::Class)?;
+    let owner = snapshot
+        .find_relation(schema.as_deref(), &name)
+        .and_then(|at| snapshot.relations.get(at))
+        .ok_or_else(|| {
+            crate::error::SqlError::new(
+                crate::error::SqlState::UNDEFINED_TABLE,
+                format!("relation \"{table}\" does not exist"),
+            )
+        })?;
+    if owner
+        .table()
+        .is_some_and(|definition| definition.column_index(&column).is_none())
+    {
+        return Err(crate::error::SqlError::new(
+            crate::error::SqlState::UNDEFINED_COLUMN,
+            format!(
+                "column \"{column}\" of relation \"{}\" does not exist",
+                owner.name
+            ),
+        ));
+    }
+    let sequence = snapshot.relations.iter().find(|entry| {
+        matches!(&entry.source, RelationSource::Sequence(sequence)
+        if sequence.owned_by.as_ref().is_some_and(|(owner_table, owner_column)| {
+            *owner_table == owner.internal && *owner_column == column
+        }))
+    });
+    Ok(sequence.map_or(Value::Null, |entry| {
+        Value::Text(format!(
+            "{}.{}",
+            quote_ident(&entry.schema),
+            quote_ident(&entry.name)
+        ))
+    }))
 }
 
 fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<Value> {
@@ -165,6 +244,35 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
             object,
             pretty(rest.first()),
         )),
+        ("pg_get_partkeydef", [_]) => text(snapshot.partition_key_definition(object)),
+        ("pg_get_triggerdef", _) => text(
+            snapshot
+                .trigger(object)
+                .map(|trigger| trigger.definition.text.clone()),
+        ),
+        ("pg_function_is_visible", [_]) => match snapshot.routine(object) {
+            Some(routine) => Value::Boolean(snapshot.routine_is_visible(routine)),
+            None if builtin_function(object).is_some() => Value::Boolean(true),
+            None => Value::Null,
+        },
+        ("pg_get_functiondef", [_]) => text(
+            snapshot
+                .routine(object)
+                .map(super::routines::function_definition),
+        ),
+        ("pg_get_function_arguments", [_]) => text(routine_arguments(
+            &snapshot,
+            object,
+            ArgumentList::WithDefaults,
+        )),
+        ("pg_get_function_identity_arguments", [_]) => {
+            text(routine_arguments(&snapshot, object, ArgumentList::Identity))
+        }
+        ("pg_get_function_result", [_]) => text(match snapshot.routine(object) {
+            Some(routine) => super::routines::function_result(&routine.definition),
+            None => builtin_function(object)
+                .map(|function| oids::format_type(function.result_type, None)),
+        }),
         ("pg_get_indexdef", [_]) => text(index_definition(&snapshot, object, 0, false)),
         ("pg_get_indexdef", [_, column, rest @ ..]) => text(index_definition(
             &snapshot,
@@ -197,6 +305,29 @@ fn with_snapshot(name: &str, values: &[Value], first: Option<u32>) -> SqlResult<
         },
         _ => Value::Null,
     })
+}
+
+fn builtin_function(oid: u32) -> Option<&'static oids::BuiltinFunction> {
+    oids::BUILTIN_FUNCTIONS
+        .iter()
+        .find(|function| function.oid == oid)
+}
+
+fn routine_arguments(snapshot: &CatalogSnapshot, oid: u32, list: ArgumentList) -> Option<String> {
+    match snapshot.routine(oid) {
+        Some(routine) => Some(super::routines::function_arguments(
+            &routine.definition,
+            list,
+        )),
+        None => builtin_function(oid).map(|function| {
+            function
+                .argument_types
+                .iter()
+                .map(|&argument| oids::format_type(argument, None))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }),
+    }
 }
 
 fn description(
@@ -289,8 +420,17 @@ pub(crate) fn constraint_definition(
             if key.deferrable {
                 shown.push_str(" DEFERRABLE");
             }
+            if table.is_initially_deferred(&key.name) {
+                shown.push_str(" INITIALLY DEFERRED");
+            }
             shown
         }
+    })
+    .map(|mut shown| {
+        if !table.is_validated(&constraint.name) {
+            shown.push_str(" NOT VALID");
+        }
+        shown
     })
 }
 
@@ -316,14 +456,35 @@ pub(crate) fn index_definition(
     } else {
         snapshot.qualified_name(*table)
     };
+    let sort_options = index_sort_options(owner, *index);
+    let keys: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(position, at)| {
+            let column = owner.columns.get(*at)?;
+            let descending = sort_options.is_descending(position);
+            let nulls_first = sort_options.has_nulls_first(position);
+            let order = match (descending, nulls_first) {
+                (false, false) | (true, true) => "",
+                (false, true) => " NULLS FIRST",
+                (true, false) => " NULLS LAST",
+            };
+            Some(format!(
+                "{}{}{order}",
+                quote_ident(&column.name),
+                if descending { " DESC" } else { "" }
+            ))
+        })
+        .collect();
     Some(format!(
-        "CREATE {}INDEX {} ON {table_name} USING btree ({})",
+        "CREATE {}INDEX {} ON {table_name} USING {} ({})",
         if index_is_unique(owner, *index) {
             "UNIQUE "
         } else {
             ""
         },
         quote_ident(&entry.name),
-        column_list(owner, columns)
+        index_method(owner, *index).name(),
+        keys.join(", ")
     ))
 }

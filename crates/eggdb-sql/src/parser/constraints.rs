@@ -3,8 +3,103 @@ use crate::ast::{
     AlterAction, AlterSequence, AlterTable, ColumnDefinition, ConstraintKind, ConstraintSpec,
     CreateSequence, ForeignKeySpec, Name, ReferentialAction, SequenceOptions, Statement,
 };
+use crate::encoding::{IdentityGeneration, IdentitySeed, integer_type_range};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
+use crate::types::SqlType;
+
+#[derive(Default)]
+pub(super) struct ConstraintTail {
+    pub(super) using_index: Option<Name>,
+    pub(super) not_valid: bool,
+    pub(super) deferrable: Option<bool>,
+    pub(super) initially_deferred: bool,
+}
+
+impl ConstraintTail {
+    fn apply_to(&self, kind: &mut ConstraintKind) {
+        if let ConstraintKind::ForeignKey(key) = kind {
+            if let Some(deferrable) = self.deferrable {
+                key.deferrable = deferrable;
+            }
+            if self.initially_deferred {
+                key.initially_deferred = true;
+                key.deferrable = true;
+            }
+        }
+    }
+}
+
+pub(super) fn postgresql_identity_seed(
+    options: &SequenceOptions,
+    sql_type: SqlType,
+) -> SqlResult<Option<IdentitySeed>> {
+    let invalid = |message: String| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message);
+    let (low, high) = integer_type_range(sql_type).unwrap_or((i64::MIN, i64::MAX));
+    let increment = options.increment.unwrap_or(1);
+    if increment == 0 {
+        return Err(invalid("INCREMENT must not be zero".to_owned()));
+    }
+    if let Some(cache) = options.cache
+        && cache <= 0
+    {
+        return Err(invalid(format!(
+            "CACHE ({cache}) must be greater than zero"
+        )));
+    }
+    let ascending = increment > 0;
+    let min = options.min.flatten();
+    let max = options.max.flatten();
+    for (bound, name) in [(min, "MINVALUE"), (max, "MAXVALUE")] {
+        if let Some(bound) = bound
+            && (bound < low || bound > high)
+        {
+            return Err(invalid(format!(
+                "{name} ({bound}) is out of range for sequence data type {}",
+                sql_type.name()
+            )));
+        }
+    }
+    if let (Some(min), Some(max)) = (min, max)
+        && min >= max
+    {
+        return Err(invalid(format!(
+            "MINVALUE ({min}) must be less than MAXVALUE ({max})"
+        )));
+    }
+    let start = options.start.unwrap_or(if ascending {
+        min.unwrap_or(1)
+    } else {
+        max.unwrap_or(-1)
+    });
+    let floor = min.unwrap_or(if ascending { 1 } else { low });
+    let ceiling = max.unwrap_or(if ascending { high } else { -1 });
+    if start < floor {
+        return Err(invalid(format!(
+            "START value ({start}) cannot be less than MINVALUE ({floor})"
+        )));
+    }
+    if start > ceiling {
+        return Err(invalid(format!(
+            "START value ({start}) cannot be greater than MAXVALUE ({ceiling})"
+        )));
+    }
+    let limited = if ascending {
+        max.is_some_and(|max| max < high)
+    } else {
+        min.is_some_and(|min| min > low)
+    };
+    if limited || options.cycle == Some(true) || options.restart.is_some() {
+        return Err(SqlError::not_supported(
+            "identity options that end or cycle the identity before its type's range (MAXVALUE, MINVALUE, CYCLE) are not supported yet",
+        ));
+    }
+    let seed = IdentitySeed {
+        seed: start,
+        increment,
+    };
+    Ok((seed != IdentitySeed::ONE_BY_ONE).then_some(seed))
+}
 
 const MAX_ALTER_ACTIONS: usize = 1024;
 
@@ -41,33 +136,52 @@ impl Parser<'_> {
             ConstraintKind::PrimaryKey(columns)
         } else if self.is_word("unique") {
             let spec = self.unique_constraint(None, position)?;
+            let tail = if self.oracle() || self.postgresql() {
+                self.constraint_tail()?
+            } else {
+                ConstraintTail::default()
+            };
             return Ok(ConstraintSpec {
                 name: name.or(spec.name),
                 kind: ConstraintKind::Unique(spec.columns),
                 position,
                 column: None,
+                using_index: tail.using_index,
+                not_valid: tail.not_valid,
             });
         } else {
             return Err(self.unexpected());
         };
-        self.constraint_tail()?;
+        let tail = self.constraint_tail()?;
+        let mut kind = kind;
+        tail.apply_to(&mut kind);
         Ok(ConstraintSpec {
             name,
             kind,
             position,
             column: None,
+            using_index: tail.using_index,
+            not_valid: tail.not_valid,
         })
     }
 
-    fn constraint_tail(&mut self) -> SqlResult<()> {
+    pub(super) fn constraint_tail(&mut self) -> SqlResult<ConstraintTail> {
+        let mut tail = ConstraintTail::default();
         loop {
             if self.is_word("not") && self.is_word_at(1, "deferrable") {
                 self.at += 2;
+                tail.deferrable = Some(false);
             } else if self.take_word("deferrable") {
+                tail.deferrable = Some(true);
             } else if self.take_word("initially") {
-                if !self.take_word("deferred") {
+                if self.take_word("deferred") {
+                    tail.initially_deferred = true;
+                } else {
                     self.expect_word("immediate")?;
                 }
+            } else if self.postgresql() && self.is_word("not") && self.is_word_at(1, "valid") {
+                self.at += 2;
+                tail.not_valid = true;
             } else if self.is_word("not") && self.is_word_at(1, "valid") {
                 return Err(self.not_supported("NOT VALID constraints"));
             } else if self.is_word("no") && self.is_word_at(1, "inherit") {
@@ -76,21 +190,52 @@ impl Parser<'_> {
             } else if self.mysql() && self.is_word("not") && self.is_word_at(1, "enforced") {
                 return Err(self.not_supported("NOT ENFORCED constraints"));
             } else if self.oracle()
-                && (self.take_word("enable")
-                    || self.take_word("validate")
-                    || self.take_word("novalidate")
-                    || self.take_word("rely")
-                    || self.take_word("norely"))
+                && (self.is_word("enable")
+                    || self.is_word("disable")
+                    || self.is_word("validate")
+                    || self.is_word("novalidate")
+                    || self.is_word("rely")
+                    || self.is_word("norely")
+                    || (self.is_word("using") && self.is_word_at(1, "index")))
             {
-            } else if self.oracle() && self.is_word("disable") {
-                return Err(self.not_supported("disabled constraints"));
+                let states = self.oracle_constraint_state_list()?;
+                if !states.enabled {
+                    return Err(self.not_supported("disabled constraints"));
+                }
+                tail.using_index = states.using_index.or(tail.using_index);
             } else if self.sqlite() && self.is_word("on") && self.is_word_at(1, "conflict") {
                 self.sqlite_conflict_clause()?;
             } else if self.skip_not_for_replication() {
             } else {
-                return Ok(());
+                if tail.initially_deferred && tail.deferrable == Some(false) {
+                    return Err(SqlError::syntax(
+                        "constraint declared INITIALLY DEFERRED must be DEFERRABLE",
+                        self.position(),
+                    ));
+                }
+                return Ok(tail);
             }
         }
+    }
+
+    pub(super) fn identity_options(&mut self) -> SqlResult<SequenceOptions> {
+        let mut options = SequenceOptions::default();
+        if !self.take(&TokenKind::LeftParen) {
+            return Ok(options);
+        }
+        while !self.take(&TokenKind::RightParen) {
+            if self.is_word("sequence") && self.is_word_at(1, "name") {
+                self.at += 2;
+                self.table_name()?;
+                continue;
+            }
+            let more = self.sequence_options(false)?;
+            if more == SequenceOptions::default() || more.owned_by.is_some() {
+                return Err(self.unexpected());
+            }
+            options = merged_options(options, more);
+        }
+        Ok(options)
     }
 
     fn check_body(&mut self) -> SqlResult<ConstraintKind> {
@@ -118,6 +263,7 @@ impl Parser<'_> {
             on_delete: ReferentialAction::NoAction,
             on_update: ReferentialAction::NoAction,
             deferrable: false,
+            initially_deferred: false,
         };
         loop {
             if self.take_word("match") {
@@ -145,7 +291,10 @@ impl Parser<'_> {
             } else if self.take_word("deferrable") {
                 spec.deferrable = true;
             } else if self.take_word("initially") {
-                if !self.take_word("deferred") {
+                if self.take_word("deferred") {
+                    spec.initially_deferred = true;
+                    spec.deferrable = true;
+                } else {
                     self.expect_word("immediate")?;
                 }
             } else {
@@ -191,12 +340,16 @@ impl Parser<'_> {
         } else {
             return Ok(false);
         };
-        self.constraint_tail()?;
+        let tail = self.constraint_tail()?;
+        let mut kind = kind;
+        tail.apply_to(&mut kind);
         column.constraints.push(ConstraintSpec {
             name,
             kind,
             position,
             column: Some(column.name.clone()),
+            using_index: None,
+            not_valid: tail.not_valid,
         });
         Ok(true)
     }
@@ -233,7 +386,7 @@ impl Parser<'_> {
         }
     }
 
-    fn sequence_options(&mut self, alter: bool) -> SqlResult<SequenceOptions> {
+    pub(super) fn sequence_options(&mut self, alter: bool) -> SqlResult<SequenceOptions> {
         let mut options = SequenceOptions::default();
         loop {
             if !self.oracle() && self.take_word("as") {
@@ -270,6 +423,9 @@ impl Parser<'_> {
                 options.cycle = Some(false);
             } else if self.take_word("start") {
                 self.take_word("with");
+                if self.oracle() && self.is_word("limit") {
+                    return Err(self.not_supported("START WITH LIMIT VALUE"));
+                }
                 options.start = Some(self.signed_integer()?);
             } else if alter && self.take_word("restart") {
                 let with = self.take_word("with");
@@ -297,9 +453,15 @@ impl Parser<'_> {
                     || self.take_word("keep")
                     || self.take_word("nokeep")
                     || self.take_word("noscale")
+                    || self.take_word("scale")
+                    || self.take_word("extend")
+                    || self.take_word("noextend")
+                    || self.take_word("noshard")
                     || self.take_word("global")
                     || self.take_word("session"))
             {
+            } else if self.oracle() && self.is_word("shard") {
+                return Err(self.not_supported("sharded sequences (SHARD)"));
             } else if !self.oracle() && self.take_word("owned") {
                 self.expect_word("by")?;
                 if self.take_word("none") {
@@ -538,11 +700,14 @@ impl Parser<'_> {
         self.expect_word("default")?;
         let start = self.position();
         let default = self.binary_operand()?;
+        let end = self.tokens[self.at.saturating_sub(1)].end;
+        let source = self.text.get(start..end).unwrap_or("").to_owned();
         self.expect_word("for")?;
         let column = self.name()?;
         actions.push(AlterAction::AddDefault {
             column,
             default,
+            source,
             position: start,
         });
         Ok(())
@@ -608,6 +773,27 @@ impl Parser<'_> {
             actions.push(AlterAction::Accepted);
             return Ok(());
         }
+        if self.postgresql() && self.is_word("attach") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let partition = self.table_name()?;
+            let bound = self.partition_bound()?;
+            actions.push(AlterAction::AttachPartition { partition, bound });
+            return Ok(());
+        }
+        if self.postgresql() && self.is_word("detach") && self.is_word_at(1, "partition") {
+            self.at += 2;
+            let partition = self.table_name()?;
+            if !self.take_word("concurrently") {
+                self.take_word("finalize");
+            }
+            actions.push(AlterAction::DetachPartition(partition));
+            return Ok(());
+        }
+        if self.postgresql() && self.take_word("validate") {
+            self.expect_word("constraint")?;
+            actions.push(AlterAction::ValidateConstraint(self.name()?));
+            return Ok(());
+        }
         if self.postgresql() && self.is_word("set") && self.is_word_at(1, "schema") {
             self.at += 2;
             let schema = self.name()?;
@@ -662,6 +848,7 @@ impl Parser<'_> {
         if !self.is_word("default")
             && !self.is_word("not")
             && !self.is_word("null")
+            && !self.is_word("constraint")
             && matches!(self.peek_kind(), TokenKind::Word(_))
         {
             let sql_type = self.sql_type()?;
@@ -681,13 +868,18 @@ impl Parser<'_> {
                     column: column.clone(),
                     default: Some((expr, source)),
                 });
+            } else if self.take_word("constraint") {
+                self.name()?;
+                continue;
             } else if self.take_word("not") {
                 self.expect_word("null")?;
+                let enabled = self.oracle_constraint_states()?;
                 actions.push(AlterAction::SetNotNull {
                     column: column.clone(),
-                    not_null: true,
+                    not_null: enabled,
                 });
             } else if self.take_word("null") {
+                self.oracle_constraint_states()?;
                 actions.push(AlterAction::SetNotNull {
                     column: column.clone(),
                     not_null: false,
@@ -704,6 +896,13 @@ impl Parser<'_> {
     fn rename_action(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<()> {
         if self.take_word("to") || (self.mysql() && self.take_word("as")) {
             actions.push(AlterAction::RenameTable(self.table_name()?));
+            return Ok(());
+        }
+        if self.postgresql() && self.take_word("constraint") {
+            let from = self.name()?;
+            self.expect_word("to")?;
+            let to = self.name()?;
+            actions.push(AlterAction::RenameConstraint { from, to });
             return Ok(());
         }
         if self.is_word("constraint") {
@@ -763,11 +962,28 @@ impl Parser<'_> {
         }
         if self.oracle() && self.take(&TokenKind::LeftParen) {
             loop {
-                let column = self.column_definition()?;
-                actions.push(AlterAction::AddColumn {
-                    column,
-                    if_not_exists: false,
-                });
+                check_action_count(actions)?;
+                let element = self.position();
+                if self.is_word("constraint")
+                    || self.is_word("primary")
+                    || self.is_word("unique")
+                    || self.is_word("foreign")
+                    || self.is_word("check")
+                {
+                    let name = if self.take_word("constraint") {
+                        Some(self.name()?)
+                    } else {
+                        None
+                    };
+                    let spec = self.table_constraint_body(name, element)?;
+                    actions.push(AlterAction::AddConstraint(spec));
+                } else {
+                    let column = self.column_definition()?;
+                    actions.push(AlterAction::AddColumn {
+                        column,
+                        if_not_exists: false,
+                    });
+                }
                 if !self.take(&TokenKind::Comma) {
                     break;
                 }
@@ -913,6 +1129,9 @@ impl Parser<'_> {
                 self.expect_word("type")?;
                 return self.set_type_action(column);
             }
+            if self.postgresql() && self.at_identity_option() {
+                return self.alter_identity_action(column, true);
+            }
             return Err(self.unexpected());
         }
         if self.take_word("drop") {
@@ -929,7 +1148,19 @@ impl Parser<'_> {
                     not_null: false,
                 });
             }
+            if self.postgresql() && self.take_word("identity") {
+                let if_exists = if self.take_word("if") {
+                    self.expect_word("exists")?;
+                    true
+                } else {
+                    false
+                };
+                return Ok(AlterAction::DropIdentity { column, if_exists });
+            }
             return Err(self.unexpected());
+        }
+        if self.postgresql() && self.is_word("restart") {
+            return self.alter_identity_action(column, false);
         }
         if self.postgresql() && self.take_word("type") {
             return self.set_type_action(column);
@@ -942,10 +1173,13 @@ impl Parser<'_> {
     }
 
     fn add_identity_action(&mut self, column: Name) -> SqlResult<AlterAction> {
-        if !self.take_word("always") {
+        let generation = if self.take_word("always") {
+            IdentityGeneration::Always
+        } else {
             self.expect_word("by")?;
             self.expect_word("default")?;
-        }
+            IdentityGeneration::ByDefault
+        };
         self.expect_word("as")?;
         if self.peek_kind() == &TokenKind::LeftParen {
             return Err(self.not_supported("generated columns"));
@@ -969,7 +1203,89 @@ impl Parser<'_> {
         }
         Ok(AlterAction::AddIdentity {
             column,
+            generation,
             sequence,
+            options,
+        })
+    }
+
+    fn at_identity_option(&self) -> bool {
+        [
+            "generated",
+            "increment",
+            "start",
+            "minvalue",
+            "maxvalue",
+            "cache",
+            "cycle",
+        ]
+        .iter()
+        .any(|word| self.is_word(word))
+            || (self.is_word("no")
+                && ["minvalue", "maxvalue", "cycle"]
+                    .iter()
+                    .any(|word| self.is_word_at(1, word)))
+    }
+
+    fn at_set_identity_option(&mut self) -> bool {
+        if !self.is_word("set") {
+            return false;
+        }
+        let at = self.at;
+        self.at += 1;
+        let option = self.at_identity_option();
+        self.at = at;
+        option
+    }
+
+    fn alter_identity_action(&mut self, column: Name, after_set: bool) -> SqlResult<AlterAction> {
+        let mut generation = None;
+        let mut options = SequenceOptions::default();
+        let mut pending_set = after_set;
+        loop {
+            let set_option = !pending_set && self.at_set_identity_option();
+            if pending_set || set_option {
+                if set_option {
+                    self.at += 1;
+                }
+                pending_set = false;
+                if self.take_word("generated") {
+                    generation = Some(if self.take_word("always") {
+                        IdentityGeneration::Always
+                    } else {
+                        self.expect_word("by")?;
+                        self.expect_word("default")?;
+                        IdentityGeneration::ByDefault
+                    });
+                } else {
+                    let more = self.sequence_options(false)?;
+                    if more == SequenceOptions::default() {
+                        return Err(self.unexpected());
+                    }
+                    options = merged_options(options, more);
+                }
+            } else if self.take_word("restart") {
+                let with = self.take_word("with");
+                options.restart = Some(
+                    if with
+                        || matches!(self.peek_kind(), TokenKind::Integer(_))
+                        || self.is_operator("-")
+                    {
+                        Some(self.signed_integer()?)
+                    } else {
+                        None
+                    },
+                );
+            } else {
+                break;
+            }
+        }
+        if generation.is_none() && options == SequenceOptions::default() {
+            return Err(self.unexpected());
+        }
+        Ok(AlterAction::AlterIdentity {
+            column,
+            generation,
             options,
         })
     }

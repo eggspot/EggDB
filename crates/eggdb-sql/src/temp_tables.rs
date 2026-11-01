@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub(crate) const TEMP_TABLE_MARKER: char = '\u{1}';
+pub(crate) const HIDDEN_COLUMN_MARKER: char = '\u{2}';
 const MOST_TEMP_TABLES: u32 = 1 << 20;
 const ID_SPACE: u64 = 1 << 24;
 const ENTRY_OVERHEAD: usize = 64;
@@ -65,6 +66,10 @@ pub(crate) fn temp_definition_and_catalog_need(name: &str) -> Option<(Arc<TableD
         let registered = definitions.get(name)?;
         Some((Arc::clone(&registered.definition), registered.needs_catalog))
     })
+}
+
+pub(crate) fn is_hidden_column(name: &str) -> bool {
+    name.starts_with(HIDDEN_COLUMN_MARKER)
 }
 
 pub(crate) fn display_name(name: &str) -> &str {
@@ -329,6 +334,52 @@ fn value_type(rows: &[Vec<Value>], index: usize) -> SqlType {
     found.unwrap_or(SqlType::Text)
 }
 
+pub(crate) fn merged_scan(
+    own: &BTreeMap<Vec<u8>, Vec<u8>>,
+    base: &dyn KeyValueRead,
+    start: &[u8],
+    end: &[u8],
+    direction: ScanDirection,
+    visit: &mut EntryVisitor<'_>,
+) -> SqlResult<()> {
+    if start >= end {
+        return Ok(());
+    }
+    let range = own.range(start.to_vec()..end.to_vec());
+    let mut own: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = match direction {
+        ScanDirection::Forward => Box::new(range),
+        ScanDirection::Backward => Box::new(range.rev()),
+    };
+    let mut pending = own.next();
+    if pending.is_none() {
+        return base.scan(start, end, direction, visit);
+    }
+    let mut going = true;
+    base.scan(start, end, direction, &mut |key, value| {
+        while let Some((own_key, own_value)) = pending {
+            let first = match direction {
+                ScanDirection::Forward => own_key.as_slice() < key,
+                ScanDirection::Backward => own_key.as_slice() > key,
+            };
+            if !first {
+                break;
+            }
+            if !visit(own_key, own_value)? {
+                going = false;
+                return Ok(false);
+            }
+            pending = own.next();
+        }
+        going = visit(key, value)?;
+        Ok(going)
+    })?;
+    while going && let Some((key, value)) = pending {
+        going = visit(key, value)?;
+        pending = own.next();
+    }
+    Ok(())
+}
+
 pub(crate) struct Overlay<'a> {
     base: &'a dyn KeyValueRead,
     temp: &'a TempTables,
@@ -366,42 +417,7 @@ impl KeyValueRead for Overlay<'_> {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()> {
-        if start >= end {
-            return Ok(());
-        }
-        let range = self.temp.entries.range(start.to_vec()..end.to_vec());
-        let mut own: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = match direction {
-            ScanDirection::Forward => Box::new(range),
-            ScanDirection::Backward => Box::new(range.rev()),
-        };
-        let mut pending = own.next();
-        if pending.is_none() {
-            return self.base.scan(start, end, direction, visit);
-        }
-        let mut going = true;
-        self.base.scan(start, end, direction, &mut |key, value| {
-            while let Some((own_key, own_value)) = pending {
-                let first = match direction {
-                    ScanDirection::Forward => own_key.as_slice() < key,
-                    ScanDirection::Backward => own_key.as_slice() > key,
-                };
-                if !first {
-                    break;
-                }
-                if !visit(own_key, own_value)? {
-                    going = false;
-                    return Ok(false);
-                }
-                pending = own.next();
-            }
-            going = visit(key, value)?;
-            Ok(going)
-        })?;
-        while going && let Some((key, value)) = pending {
-            going = visit(key, value)?;
-            pending = own.next();
-        }
-        Ok(())
+        merged_scan(&self.temp.entries, self.base, start, end, direction, visit)
     }
 
     fn committed_version(&self) -> Option<u64> {

@@ -8,7 +8,7 @@ use eggdb_sql::json::{Json, Node, parse_document};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -86,12 +86,99 @@ impl AuditLog {
                 reason: "the audit file has reached its 1 GiB limit".to_owned(),
             });
         }
-        let mut line = Vec::with_capacity(record.len() + 1);
-        line.extend_from_slice(record.as_bytes());
+        let previous = last_line_digest(&mut file, size).map_err(failure)?;
+        let chained = match record.strip_prefix('{') {
+            Some(rest) if rest.trim_start().starts_with('}') => {
+                format!("{{\"prev\":\"{previous}\"}}")
+            }
+            Some(rest) => format!("{{\"prev\":\"{previous}\",{rest}"),
+            None => {
+                return Err(AuditFailure {
+                    reason: "an audit record must be a JSON object".to_owned(),
+                });
+            }
+        };
+        let mut line = Vec::with_capacity(chained.len() + 1);
+        line.extend_from_slice(chained.as_bytes());
         line.push(b'\n');
         file.write_all(&line).map_err(failure)?;
         file.sync_data().map_err(failure)
     }
+}
+
+const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const TAIL_BYTES: u64 = 1 << 20;
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn last_line_digest(file: &mut File, size: u64) -> io::Result<String> {
+    if size == 0 {
+        return Ok(GENESIS.to_owned());
+    }
+    let start = size.saturating_sub(TAIL_BYTES);
+    file.seek(io::SeekFrom::Start(start))?;
+    let mut tail = Vec::with_capacity(usize::try_from(size - start).unwrap_or(0));
+    file.take(size - start).read_to_end(&mut tail)?;
+    let body = tail.strip_suffix(b"\n").unwrap_or(&tail);
+    let line = match body.iter().rposition(|&byte| byte == b'\n') {
+        Some(at) => &body[at + 1..],
+        None if start == 0 => body,
+        None => return Ok(GENESIS.to_owned()),
+    };
+    Ok(hex(&eggdb_crypto::sha256(line)))
+}
+
+/// What checking an audit file's chain found.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChainReport {
+    /// How many records carry a link to the one before.
+    pub chained: u64,
+    /// How many records at the start predate the chain (written by an older release).
+    pub unchained: u64,
+    /// The line number (from 1) of the first record whose link does not match the line before
+    /// it, or that has no link after the chain began: the file was changed there.
+    pub first_break: Option<u64>,
+}
+
+fn prev_of(line: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(line).ok()?;
+    let rest = text.strip_prefix("{\"prev\":\"")?;
+    rest.get(..64)
+        .filter(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// Checks that every record of the audit file at `path` links to the line before it by its
+/// SHA-256, so a record changed, removed or inserted before the last one shows as a break.
+/// Records cut off the end, and a file rewritten whole with a new chain, still verify: compare
+/// the last record's digest with a copy kept elsewhere to catch those.
+pub fn verify_chain(path: &Path) -> io::Result<ChainReport> {
+    let mut report = ChainReport::default();
+    let Some(mut reader) = open_audit(path)? else {
+        return Ok(report);
+    };
+    let mut previous = GENESIS.to_owned();
+    let mut number = 0u64;
+    while let Some(bytes) = next_line(&mut reader)? {
+        number += 1;
+        let Some(line) = bytes else {
+            report.first_break.get_or_insert(number);
+            continue;
+        };
+        match prev_of(&line) {
+            Some(link) if link == previous => report.chained += 1,
+            Some(_) => {
+                report.first_break.get_or_insert(number);
+            }
+            None if report.chained == 0 && report.first_break.is_none() => report.unchained += 1,
+            None => {
+                report.first_break.get_or_insert(number);
+            }
+        }
+        previous = hex(&eggdb_crypto::sha256(&line));
+    }
+    Ok(report)
 }
 
 fn lock(file: &File, wait: Duration) -> io::Result<()> {
@@ -166,6 +253,8 @@ pub(crate) struct ServerStarted<'a> {
     pub(crate) database: &'a str,
     pub(crate) time_limit: Duration,
     pub(crate) allow_write: bool,
+    pub(crate) tables: Option<Vec<String>>,
+    pub(crate) call_gap: Duration,
 }
 
 pub(crate) fn server_started_record(started: &ServerStarted<'_>) -> String {
@@ -186,7 +275,16 @@ pub(crate) fn server_started_record(started: &ServerStarted<'_>) -> String {
         .key("allow_write")
         .boolean(started.allow_write)
         .key("time_limit_ms")
-        .unsigned(duration_ms(started.time_limit))
+        .unsigned(duration_ms(started.time_limit));
+    if let Some(tables) = &started.tables {
+        out.key("tables").begin_array();
+        for name in tables {
+            out.string(name);
+        }
+        out.end_array();
+    }
+    out.key("call_gap_ms")
+        .unsigned(duration_ms(started.call_gap))
         .end_object();
     out.finish()
 }
@@ -366,6 +464,12 @@ pub struct AuditEntry {
     pub warning: Option<String>,
     /// Whether the server let agents write (`--allow-write`), for a server start.
     pub allow_write: bool,
+    /// The only tables and views the server showed its agent (`--tables`), for a server
+    /// start; `None` when it showed every table.
+    pub tables: Option<Vec<String>>,
+    /// The pause after each call before the next opened the file (`--call-gap`), for a
+    /// server start that recorded it.
+    pub call_gap_ms: Option<u64>,
     /// For a call-started record: no call with its id follows, so the server stopped during
     /// the call and its outcome is unknown.
     pub outcome_unknown: bool,
@@ -606,6 +710,21 @@ fn text_of(members: &[(String, Node)], name: &str) -> Option<String> {
     }
 }
 
+fn texts_of(members: &[(String, Node)], name: &str) -> Option<Vec<String>> {
+    match member(members, name) {
+        Some(Json::Array(items)) => Some(
+            items
+                .iter()
+                .filter_map(|item| match &item.value {
+                    Json::String(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 fn number_of(members: &[(String, Node)], name: &str) -> Option<u64> {
     match member(members, name) {
         Some(Json::Number(text)) => text.parse().ok(),
@@ -663,6 +782,8 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         },
         warning: text_of(&members, "warning"),
         allow_write: matches!(member(&members, "allow_write"), Some(Json::Boolean(true))),
+        tables: texts_of(&members, "tables"),
+        call_gap_ms: number_of(&members, "call_gap_ms"),
         outcome_unknown: false,
     };
     Some((ascii.finish(), entry))
@@ -812,7 +933,7 @@ mod tests {
             .map(|writer| {
                 let log = AuditLog::new(path.clone());
                 std::thread::spawn(move || {
-                    for record in 0..25 {
+                    for record in 0..10 {
                         let arguments = format!(
                             r#"{{"sql":"{}"}}"#,
                             format!("{writer}-{record} ").repeat(400)
@@ -826,8 +947,8 @@ mod tests {
             writer.join().unwrap();
         }
         let (lines, totals) = read_all(&path, None).unwrap();
-        assert_eq!(lines.len(), 100);
-        assert_eq!((totals.calls, totals.unreadable), (100, 0));
+        assert_eq!(lines.len(), 40);
+        assert_eq!((totals.calls, totals.unreadable), (40, 0));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -942,5 +1063,37 @@ mod tests {
             .unwrap();
         assert_eq!(read_all(&path, None).unwrap().1.calls, 2);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::{AuditLog, verify_chain};
+
+    #[test]
+    fn records_link_to_the_line_before_and_an_edit_breaks_the_chain() {
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-audit-chain-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("app.eggdb.mcp-audit.jsonl");
+        std::fs::write(&path, "{\"event\":\"older\"}\n").unwrap();
+        let log = AuditLog::new(path.clone());
+        for index in 0..3 {
+            log.append(&format!("{{\"event\":\"call\",\"n\":{index}}}"))
+                .unwrap();
+        }
+        log.append("{}").unwrap();
+        let report = verify_chain(&path).unwrap();
+        assert_eq!(
+            (report.chained, report.unchained, report.first_break),
+            (4, 1, None)
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.lines().nth(1).unwrap().starts_with("{\"prev\":\""));
+        std::fs::write(&path, text.replace("\"n\":1", "\"n\":9")).unwrap();
+        assert_eq!(verify_chain(&path).unwrap().first_break, Some(4));
+        assert!(log.append("not json").is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 }

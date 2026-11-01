@@ -153,7 +153,7 @@ impl CopyChannel for CopiedOut {
     }
 }
 
-fn outcome(session: &mut Session<'_, MemoryStore>, sql: &str) -> Expected {
+fn outcome(session: &mut Session<'_>, sql: &str) -> Expected {
     let mut last = None;
     let dialect = session.dialect();
     let mut copied = CopiedOut::default();
@@ -188,7 +188,7 @@ fn agrees(expected: &Expected, found: &Expected) -> bool {
     }
 }
 
-fn session_for<'s>(dialect: &str, store: &'s MemoryStore) -> Option<Session<'s, MemoryStore>> {
+fn session_for<'s>(dialect: &str, store: &'s MemoryStore) -> Option<Session<'s>> {
     Dialect::named(dialect)
         .filter(|found| found.name() == dialect)
         .map(|found| Session::with_dialect(store, found))

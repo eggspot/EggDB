@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-geo"
+description = "Geometry for EggDB from the OGC Simple Features specification: WKT, WKB and EWKB, GeoJSON output, and planar measures and predicates, plus great-circle distance."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

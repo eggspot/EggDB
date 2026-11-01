@@ -36,7 +36,7 @@ pub(super) struct Readiness {
     pub(super) write: bool,
 }
 
-pub(super) enum Connecting {
+pub(crate) enum Connecting {
     Connected(TcpStream),
     #[cfg_attr(
         any(
@@ -356,7 +356,7 @@ fn connected(socket: TcpStream) -> Result<NetOutput<OsStream>> {
     Ok(NetOutput::Connected(OsStream::set_up_non_blocking(socket)))
 }
 
-fn finished_connecting(socket: &TcpStream) -> io::Result<bool> {
+pub(crate) fn finished_connecting(socket: &TcpStream) -> io::Result<bool> {
     if let Some(error) = socket.take_error()? {
         return Err(error);
     }

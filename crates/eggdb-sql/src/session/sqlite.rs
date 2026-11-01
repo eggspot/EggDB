@@ -6,7 +6,7 @@ use crate::ast::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
 use crate::schema::{ColumnSchema, TableSchema, read_tables};
-use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
+use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -88,7 +88,8 @@ pub(crate) fn sqlite_type_name(sql_type: SqlType) -> &'static str {
         SqlType::Time(_) | SqlType::TimeTz(_) => "TIME",
         SqlType::Interval { .. } => "INTERVAL",
         SqlType::Uuid => "UUID",
-        SqlType::Array(_) | SqlType::Catalog(_) => "TEXT",
+        SqlType::Dynamic => "BLOB",
+        SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => "TEXT",
     }
 }
 
@@ -249,7 +250,7 @@ fn single(name: &str, sql_type: SqlType, value: Value) -> QueryResult {
     rows_result(vec![column(name, Some(sql_type))], vec![vec![value]])
 }
 
-impl<'s, S: KeyValueStore + 's> Session<'s, S> {
+impl<'s> Session<'s> {
     pub(super) fn pragma_columns(&self, pragma: &Pragma) -> Option<Vec<OutputColumn>> {
         match pragma.name.as_str() {
             "table_info" if pragma.argument.is_some() => Some(table_info_columns()),
@@ -426,16 +427,24 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             ));
         };
         let temporary = from.first.name.text.starts_with("sqlite_temp");
-        let tables = if temporary {
-            Vec::new()
+        let (tables, triggers) = if temporary {
+            (Vec::new(), Vec::new())
         } else {
-            self.read(|reader, _| read_tables(reader))?
+            self.read(|reader, _| {
+                Ok((
+                    read_tables(reader)?,
+                    crate::triggers::every_trigger(reader)?,
+                ))
+            })?
         };
         let name = from.first.name.text.clone();
         let mut scratch = Scratch::default();
         let mut cache = TableCache::default();
         let create = CreateTable {
             comment: None,
+            partition_by: None,
+            partition_of: None,
+            temporary: None,
             name: Name {
                 text: name.clone(),
                 position: 0,
@@ -452,7 +461,10 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     not_null: false,
                     primary_key: false,
                     default: None,
+                    default_dialect: crate::Dialect::PostgreSql,
                     auto_increment: false,
+                    identity_seed: None,
+                    generated_always: false,
                     unique: None,
                     constraints: Vec::new(),
                     comment: None,
@@ -469,7 +481,7 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
             &create,
             crate::Dialect::PostgreSql,
         )?;
-        if !tables.is_empty() {
+        if !tables.is_empty() || !triggers.is_empty() {
             let mut rootpage = 1;
             let mut rows = Vec::new();
             for table in &tables {
@@ -499,6 +511,17 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                     ]);
                 }
             }
+            for listed in &triggers {
+                for trigger in &listed.triggers {
+                    rows.push(vec![
+                        text_literal("trigger".to_owned()),
+                        text_literal(trigger.name.clone()),
+                        text_literal(listed.table.clone()),
+                        integer_literal(0),
+                        text_literal(trigger.text.clone()),
+                    ]);
+                }
+            }
             let insert = Insert {
                 table: TableReference::named(
                     Name {
@@ -511,7 +534,9 @@ impl<'s, S: KeyValueStore + 's> Session<'s, S> {
                 source: InsertSource::Values(rows),
                 returning: None,
                 on_duplicate: OnDuplicate::Fail,
+                conflict_target: None,
                 rollback_on_conflict: false,
+                overriding: None,
             };
             execute::insert(&mut scratch, &mut cache, &insert)?;
         }

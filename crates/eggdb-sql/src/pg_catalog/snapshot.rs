@@ -8,15 +8,23 @@ use crate::encoding::{
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind};
 use crate::pg_keywords::quote_ident;
+use crate::routines::{NamedRoutines, ReturnType, RoutineDefinition, RoutineReturns};
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, ScanDirection};
-use crate::types::Value;
-use std::cell::RefCell;
+use crate::types::{SqlType, Value};
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const SNAPSHOT_FUNCTIONS: [&str; 13] = [
+const SNAPSHOT_FUNCTIONS: [&str; 22] = [
+    "pg_get_serial_sequence",
+    "pg_get_functiondef",
+    "pg_get_function_arguments",
+    "pg_get_function_identity_arguments",
+    "pg_get_function_result",
+    "pg_function_is_visible",
+    "to_regclass",
     "pg_table_is_visible",
     "pg_relation_is_publishable",
     "pg_type_is_visible",
@@ -24,6 +32,8 @@ const SNAPSHOT_FUNCTIONS: [&str; 13] = [
     "pg_get_constraintdef",
     "pg_get_indexdef",
     "pg_get_viewdef",
+    "pg_get_triggerdef",
+    "pg_get_partkeydef",
     "obj_description",
     "col_description",
     "regtype",
@@ -90,6 +100,7 @@ struct Frame {
     wanted: bool,
     user: String,
     database: String,
+    settings: Arc<Settings>,
     snapshot: Option<Rc<CatalogSnapshot>>,
 }
 
@@ -117,11 +128,12 @@ impl Drop for EnteredStatement {
     }
 }
 
-pub(crate) fn enter_statement(wanted: bool, settings: &Settings) -> EnteredStatement {
+pub(crate) fn enter_statement(wanted: bool, settings: &Arc<Settings>) -> EnteredStatement {
     let frame = Frame {
         wanted,
         user: settings.get("session_authorization").unwrap_or_default(),
         database: settings.database.clone(),
+        settings: Arc::clone(settings),
         snapshot: None,
     };
     let depth = FRAMES.with(|frames| match frames.try_borrow_mut() {
@@ -133,6 +145,17 @@ pub(crate) fn enter_statement(wanted: bool, settings: &Settings) -> EnteredState
         Err(_) => usize::MAX,
     });
     EnteredStatement { depth }
+}
+
+pub(crate) fn statement_settings() -> Arc<Settings> {
+    FRAMES
+        .with(|frames| {
+            frames
+                .try_borrow()
+                .ok()
+                .and_then(|frames| frames.last().map(|frame| Arc::clone(&frame.settings)))
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn load_if_wanted(reader: &dyn KeyValueRead) -> SqlResult<()> {
@@ -168,13 +191,23 @@ pub(crate) fn snapshot_for(reader: &dyn KeyValueRead) -> SqlResult<Rc<CatalogSna
     }
     let identity = FRAMES.with(|frames| {
         frames.try_borrow().ok().and_then(|frames| {
-            frames
-                .last()
-                .map(|frame| (frame.user.clone(), frame.database.clone()))
+            frames.last().map(|frame| {
+                (
+                    frame.user.clone(),
+                    frame.database.clone(),
+                    Arc::clone(&frame.settings),
+                )
+            })
         })
     });
-    let (user, database) = identity.unwrap_or_else(|| ("eggdb".to_owned(), "eggdb".to_owned()));
-    let loaded = Rc::new(CatalogSnapshot::load(reader, user, database)?);
+    let (user, database, settings) = identity.unwrap_or_else(|| {
+        (
+            "eggdb".to_owned(),
+            "eggdb".to_owned(),
+            Arc::new(Settings::default()),
+        )
+    });
+    let loaded = Rc::new(CatalogSnapshot::load(reader, user, database, settings)?);
     FRAMES.with(|frames| {
         if let Ok(mut frames) = frames.try_borrow_mut()
             && let Some(frame) = frames.last_mut()
@@ -302,15 +335,41 @@ pub(crate) struct SchemaEntry {
     pub(crate) owner: u32,
 }
 
+pub(crate) struct TriggerEntry {
+    pub(crate) oid: u32,
+    pub(crate) relation: usize,
+    pub(crate) definition: crate::triggers::TriggerDefinition,
+}
+
+pub(crate) struct RoutineEntry {
+    pub(crate) oid: u32,
+    pub(crate) namespace: u32,
+    pub(crate) schema: String,
+    pub(crate) name: String,
+    pub(crate) definition: Arc<RoutineDefinition>,
+}
+
+pub(crate) struct PackageEntry {
+    pub(crate) oid: u32,
+    pub(crate) body_oid: u32,
+    pub(crate) schema: String,
+    pub(crate) name: String,
+    pub(crate) stored: crate::plsql::StoredPackage,
+}
+
 pub(crate) struct CatalogSnapshot {
     pub(crate) user: String,
     pub(crate) database: String,
+    pub(crate) settings: Arc<Settings>,
     pub(crate) path: Vec<String>,
     pub(crate) schemas: Vec<SchemaEntry>,
     pub(crate) relations: Vec<RelationEntry>,
     pub(crate) constraints: Vec<ConstraintEntry>,
     pub(crate) defaults: Vec<DefaultEntry>,
     pub(crate) comments: Vec<StoredComment>,
+    pub(crate) triggers: Vec<TriggerEntry>,
+    pub(crate) routines: Vec<RoutineEntry>,
+    pub(crate) packages: Vec<PackageEntry>,
     relation_oids: HashMap<u32, usize>,
     relation_names: HashMap<(String, String), usize>,
     constraint_oids: HashMap<u32, usize>,
@@ -318,6 +377,11 @@ pub(crate) struct CatalogSnapshot {
     tables: HashMap<String, usize>,
     index_entries: HashMap<(usize, IndexSource), usize>,
     rows: RefCell<HashMap<CatalogRelation, Rc<Vec<Vec<Value>>>>>,
+    sqlserver: OnceCell<crate::sqlserver_catalog::SqlServerObjects>,
+    pub(crate) user_types: Arc<crate::user_types::Registry>,
+    pub(crate) partitions: crate::partitions::PartitionCatalog,
+    pub(crate) row_counts: std::collections::HashMap<String, u64>,
+    pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -358,11 +422,77 @@ struct PendingRelation {
     source: RelationSource,
 }
 
+fn implicit_identity_sequences(pending: &[PendingRelation]) -> Vec<PendingRelation> {
+    let mut implicit: Vec<PendingRelation> = Vec::new();
+    if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
+        return implicit;
+    }
+    for entry in pending {
+        let RelationSource::Table(table) = &entry.source else {
+            continue;
+        };
+        for (index, column) in table.columns.iter().enumerate() {
+            if table.identity_of(index).is_none() {
+                continue;
+            }
+            let owned = (table.name.clone(), column.name.clone());
+            let name = crate::sequences::implicit_sequence_name(&entry.name, &column.name);
+            let taken = pending.iter().chain(implicit.iter()).any(|other| {
+                other.schema == entry.schema && other.name == name
+                    || matches!(&other.source, RelationSource::Sequence(sequence)
+                        if sequence.owned_by.as_ref() == Some(&owned))
+            });
+            if taken {
+                continue;
+            }
+            let sql_type = match column.sql_type {
+                SqlType::SmallInt | SqlType::Integer => column.sql_type,
+                _ => SqlType::BigInt,
+            };
+            let (low, high) =
+                crate::encoding::integer_type_range(sql_type).unwrap_or((i64::MIN, i64::MAX));
+            let seed = table.identity_seed();
+            let (min, max) = if seed.increment < 0 {
+                (low, -1)
+            } else {
+                (1, high)
+            };
+            implicit.push(PendingRelation {
+                schema: entry.schema.clone(),
+                internal: crate::schemas::qualified(&entry.schema, &name),
+                name,
+                kind: RelationKind::Sequence,
+                owner: String::new(),
+                source: RelationSource::Sequence(Box::new(SequenceDefinition {
+                    sql_type,
+                    start: seed.seed,
+                    increment: seed.increment,
+                    min,
+                    max,
+                    cache: 1,
+                    cycle: false,
+                    last_value: seed.seed,
+                    is_called: false,
+                    owned_by: Some(owned),
+                })),
+            });
+        }
+    }
+    implicit
+}
+
 impl CatalogSnapshot {
-    fn load(reader: &dyn KeyValueRead, user: String, database: String) -> SqlResult<Self> {
+    fn load(
+        reader: &dyn KeyValueRead,
+        user: String,
+        database: String,
+        settings: Arc<Settings>,
+    ) -> SqlResult<Self> {
         #[cfg(test)]
         LOADS.with(|loads| loads.set(loads.get() + 1));
         let path = crate::schemas::relation_path(reader)?;
+        crate::user_types::ensure_loaded(reader)?;
+        let user_types = crate::user_types::every_type(reader)?;
         let mut schema_names: Vec<String> = user_schema_names(reader)?;
         schema_names.sort();
         let schema_oids = oids::assign(
@@ -468,6 +598,8 @@ impl CatalogSnapshot {
                 source: RelationSource::Sequence(Box::new(sequence)),
             });
         }
+        let implicit = implicit_identity_sequences(&pending);
+        pending.extend(implicit);
         let assigned = oids::assign(
             Space::Relation,
             &pending
@@ -494,13 +626,14 @@ impl CatalogSnapshot {
                 source: entry.source,
             })
             .collect();
-        for relation in CatalogRelation::ALL {
+        for relation in CatalogRelation::every() {
+            let schema = relation.schema();
             relations.push(RelationEntry {
                 oid: relation.oid(),
-                namespace: oids::PG_CATALOG,
-                schema: crate::schemas::CATALOG_SCHEMA.to_owned(),
+                namespace: namespace_of(schema),
+                schema: schema.to_owned(),
                 name: relation.name().to_owned(),
-                internal: relation.name().to_owned(),
+                internal: crate::schemas::qualified(schema, relation.name()),
                 kind: RelationKind::Catalog,
                 source: RelationSource::Catalog(relation),
             });
@@ -508,12 +641,16 @@ impl CatalogSnapshot {
         let mut snapshot = Self {
             user,
             database,
+            settings,
             path,
             schemas,
             relations,
             constraints: Vec::new(),
             defaults: Vec::new(),
             comments: crate::comments::every_comment(reader)?,
+            triggers: Vec::new(),
+            routines: Vec::new(),
+            packages: Vec::new(),
             relation_oids: HashMap::new(),
             relation_names: HashMap::new(),
             constraint_oids: HashMap::new(),
@@ -521,10 +658,105 @@ impl CatalogSnapshot {
             tables: HashMap::new(),
             index_entries: HashMap::new(),
             rows: RefCell::new(HashMap::new()),
+            sqlserver: OnceCell::new(),
+            user_types,
+            partitions: crate::partitions::load(reader)?,
+            row_counts: crate::statistics::every_row_count(reader)?,
+            stored_roles: crate::roles::stored_roles(reader)?,
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();
+        snapshot.add_triggers(crate::triggers::every_trigger(reader)?);
+        snapshot.add_routines(crate::routines::every_routine(reader)?);
+        snapshot.add_packages(crate::plsql::every_package(reader)?);
         Ok(snapshot)
+    }
+
+    fn add_packages(&mut self, stored: Vec<(String, crate::plsql::StoredPackage)>) {
+        let requests: Vec<OidRequest> = stored
+            .iter()
+            .flat_map(|(internal, _)| {
+                b"PB".map(|kind| OidRequest {
+                    kind,
+                    owner: String::new(),
+                    name: internal.clone(),
+                })
+            })
+            .collect();
+        let mut assigned = oids::assign(Space::Package, &requests).into_iter();
+        for (internal, stored) in stored {
+            let oid = assigned.next().unwrap_or(0);
+            let body_oid = assigned.next().unwrap_or(0);
+            let schema = crate::schemas::schema_of(&internal).to_owned();
+            if self.schema_named(&schema).is_none() {
+                continue;
+            }
+            self.packages.push(PackageEntry {
+                oid,
+                body_oid,
+                schema,
+                name: crate::schemas::base_name(&internal).to_owned(),
+                stored,
+            });
+        }
+    }
+
+    fn add_routines(&mut self, named: Vec<NamedRoutines>) {
+        let mut assigned = oids::assign(Space::Routine, &routine_requests(&named)).into_iter();
+        for listed in named {
+            let schema = crate::schemas::schema_of(&listed.name).to_owned();
+            let namespace = self.schema_named(&schema).map(|entry| entry.oid);
+            for definition in listed.routines {
+                let oid = assigned.next().unwrap_or(0);
+                let Some(namespace) = namespace else {
+                    continue;
+                };
+                self.routines.push(RoutineEntry {
+                    oid,
+                    namespace,
+                    schema: schema.clone(),
+                    name: crate::schemas::base_name(&listed.name).to_owned(),
+                    definition,
+                });
+            }
+        }
+    }
+
+    fn add_triggers(&mut self, stored: Vec<crate::triggers::TableTriggers>) {
+        let owners: HashMap<&str, usize> = self
+            .relations
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches!(entry.kind, RelationKind::Table | RelationKind::View))
+            .map(|(at, entry)| (entry.internal.as_str(), at))
+            .collect();
+        let mut pending = Vec::new();
+        for listed in stored {
+            let Some(&relation) = owners.get(listed.table.as_str()) else {
+                continue;
+            };
+            for definition in listed.triggers {
+                pending.push((relation, definition));
+            }
+        }
+        let requests: Vec<OidRequest> = pending
+            .iter()
+            .map(|(relation, definition)| OidRequest {
+                kind: b'T',
+                owner: self.relations[*relation].internal.clone(),
+                name: definition.name.clone(),
+            })
+            .collect();
+        let assigned = oids::assign(Space::Trigger, &requests);
+        self.triggers = pending
+            .into_iter()
+            .zip(assigned)
+            .map(|((relation, definition), oid)| TriggerEntry {
+                oid,
+                relation,
+                definition,
+            })
+            .collect();
     }
 
     fn index_relations(&mut self) {
@@ -576,7 +808,7 @@ impl CatalogSnapshot {
                 );
             }
             for (position, index) in table.indexes.iter().enumerate() {
-                if index.unique {
+                if index.unique && index.backs_unique_constraint {
                     add(
                         b'u',
                         index.name.clone(),
@@ -602,7 +834,7 @@ impl CatalogSnapshot {
                 );
             }
             for (column_at, column) in table.columns.iter().enumerate() {
-                if column.default.is_some() {
+                if column.default.is_some() && table.identity_of(column_at).is_none() {
                     defaults.push((
                         OidRequest {
                             kind: b'd',
@@ -664,6 +896,79 @@ impl CatalogSnapshot {
 
     pub(crate) fn relation_index(&self, oid: u32) -> Option<usize> {
         self.relation_oids.get(&oid).copied()
+    }
+
+    pub(crate) fn trigger(&self, oid: u32) -> Option<&TriggerEntry> {
+        self.triggers.iter().find(|trigger| trigger.oid == oid)
+    }
+
+    pub(crate) fn routine(&self, oid: u32) -> Option<&RoutineEntry> {
+        self.routines.iter().find(|routine| routine.oid == oid)
+    }
+
+    pub(crate) fn routine_is_visible(&self, routine: &RoutineEntry) -> bool {
+        self.search_order()
+            .find(|schema| {
+                self.routines
+                    .iter()
+                    .any(|other| other.name == routine.name && other.schema == *schema)
+            })
+            .is_some_and(|schema| schema == routine.schema)
+    }
+
+    pub(crate) fn routines_named(&self, schema: Option<&str>, name: &str) -> Vec<&RoutineEntry> {
+        match schema {
+            Some(schema) => self.routines_in(schema, name),
+            None => self
+                .search_order()
+                .map(|schema| self.routines_in(schema, name))
+                .find(|found| !found.is_empty())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn routines_in(&self, schema: &str, name: &str) -> Vec<&RoutineEntry> {
+        self.routines
+            .iter()
+            .filter(|routine| routine.name == name && routine.schema == schema)
+            .collect()
+    }
+
+    pub(crate) fn trigger_function_oid(&self, written: &str) -> u32 {
+        let (schema, name) = match written.split_once('.') {
+            Some((schema, name)) => (Some(schema), name),
+            None => (None, written),
+        };
+        self.routines_named(schema, name)
+            .into_iter()
+            .find(|routine| {
+                routine.definition.input_types().is_empty()
+                    && routine.definition.returns == RoutineReturns::One(ReturnType::Trigger)
+            })
+            .map_or(0, |routine| routine.oid)
+    }
+
+    pub(crate) fn has_triggers(&self, relation: usize) -> bool {
+        self.triggers
+            .iter()
+            .any(|trigger| trigger.relation == relation)
+    }
+
+    pub(crate) fn partition_key_definition(&self, oid: u32) -> Option<String> {
+        let table = self.relation(oid)?.table()?;
+        let key = self.partitions.key_of(&table.name)?;
+        Some(crate::partitions::key_definition(key))
+    }
+
+    pub(crate) fn partition_bound_definition(&self, table: &TableDefinition) -> Option<String> {
+        let (parent, bound) = self.partitions.parent_of(&table.name)?;
+        let parent = self
+            .table_named(parent)
+            .and_then(|at| self.relations.get(at))
+            .and_then(RelationEntry::table)?;
+        let key = self.partitions.key_of(&parent.name)?;
+        let numeric = crate::partitions::numeric_key_columns(parent, key);
+        Some(crate::partitions::bound_definition(bound, &numeric))
     }
 
     pub(crate) fn table_named(&self, internal: &str) -> Option<usize> {
@@ -759,6 +1064,11 @@ impl CatalogSnapshot {
             .map(|(_, name)| (*name).to_owned())
     }
 
+    pub(crate) fn sqlserver_objects(&self) -> &crate::sqlserver_catalog::SqlServerObjects {
+        self.sqlserver
+            .get_or_init(|| crate::sqlserver_catalog::SqlServerObjects::build(self))
+    }
+
     pub(crate) fn rows(&self, relation: CatalogRelation) -> SqlResult<Rc<Vec<Vec<Value>>>> {
         if let Some(found) = self
             .rows
@@ -776,6 +1086,36 @@ impl CatalogSnapshot {
         }
         Ok(built)
     }
+}
+
+fn routine_requests(named: &[NamedRoutines]) -> Vec<OidRequest> {
+    named
+        .iter()
+        .flat_map(|listed| {
+            listed.routines.iter().map(|routine| OidRequest {
+                kind: b'P',
+                owner: listed.name.clone(),
+                name: routine.identity(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn routine_oid(
+    reader: &dyn KeyValueRead,
+    definition: &RoutineDefinition,
+) -> SqlResult<u32> {
+    let named = crate::routines::every_routine(reader)?;
+    let assigned = oids::assign(Space::Routine, &routine_requests(&named));
+    let identity = definition.identity();
+    Ok(named
+        .iter()
+        .flat_map(|listed| listed.routines.iter().map(move |routine| (listed, routine)))
+        .zip(assigned)
+        .find(|((listed, routine), _)| {
+            listed.name == definition.name && routine.identity() == identity
+        })
+        .map_or(0, |(_, oid)| oid))
 }
 
 fn missing(state: SqlState, what: &str, text: &str) -> SqlError {
@@ -816,9 +1156,18 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
     let reg = match kind {
         RegKind::Type => found(super::types::regtype_oid(text)?),
         RegKind::Proc => {
-            return Err(SqlError::not_supported(
-                "regproc values naming a function are not supported yet",
-            ));
+            let (schema, name) = split_object_name(text, kind)?;
+            let known = schema
+                .as_deref()
+                .is_none_or(|schema| schema == crate::schemas::CATALOG_SCHEMA);
+            let builtin = oids::BUILTIN_FUNCTIONS
+                .iter()
+                .find(|function| known && function.name == name)
+                .map(|function| function.oid);
+            match builtin {
+                Some(oid) => found(oid),
+                None => found(user_routine_oid(schema.as_deref(), &name, text)?),
+            }
         }
         RegKind::Class | RegKind::Namespace | RegKind::Role => {
             let (schema, name) = split_object_name(text, kind)?;
@@ -861,6 +1210,35 @@ pub(crate) fn reg_from_text(kind: RegKind, text: &str) -> SqlResult<RegValue> {
     Ok(reg_from_oid(kind, reg.oid))
 }
 
+fn user_routine_oid(schema: Option<&str>, name: &str, text: &str) -> SqlResult<u32> {
+    let snapshot = current();
+    let named = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.routines_named(schema, name))
+        .unwrap_or_default();
+    match named.as_slice() {
+        [only] => Ok(only.oid),
+        [] => Err(missing(SqlState::UNDEFINED_FUNCTION, "function", text)),
+        _ => Err(SqlError::new(
+            SqlState::AMBIGUOUS_FUNCTION,
+            format!("more than one function named \"{text}\""),
+        )),
+    }
+}
+
+fn routine_display_name(snapshot: &CatalogSnapshot, oid: u32) -> Option<String> {
+    let routine = snapshot.routine(oid)?;
+    Some(if snapshot.routine_is_visible(routine) {
+        quote_ident(&routine.name)
+    } else {
+        format!(
+            "{}.{}",
+            quote_ident(&routine.schema),
+            quote_ident(&routine.name)
+        )
+    })
+}
+
 pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
     if oid == 0 {
         return RegValue {
@@ -898,7 +1276,15 @@ pub(crate) fn reg_from_oid(kind: RegKind, oid: u32) -> RegValue {
                     .map(|(_, name)| (*name).to_owned())
             })
             .map(|name| quote_ident(&name)),
-        RegKind::Proc => None,
+        RegKind::Proc => oids::BUILTIN_FUNCTIONS
+            .iter()
+            .find(|function| function.oid == oid)
+            .map(|function| function.name.to_owned())
+            .or_else(|| {
+                snapshot
+                    .as_ref()
+                    .and_then(|snapshot| routine_display_name(snapshot, oid))
+            }),
     };
     RegValue {
         kind,

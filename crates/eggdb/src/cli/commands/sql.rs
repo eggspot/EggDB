@@ -1,31 +1,93 @@
 use super::copy_io::{StreamCopy, script_cache};
+use super::restore::FileIncludes;
 use super::{Access, Session};
-use crate::cli::args::{CommandName, ResultMode, SqlSource};
+use crate::cli::args::{CommandName, Format, ResultMode, SqlSource};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
+use crate::cli::render::{JsonObject, json_string};
 use eggdb::sql::Store as DatabaseStore;
-use eggdb_sql::{Dialect, QueryResult, SqlError, SqlState, TransactionStatus, Value};
+use eggdb_commands::Category;
+use eggdb_sql::{
+    CopyChannel, Dialect, IncludeOpener, QueryResult, ServerOutputSetting, SqlError,
+    SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlState, TransactionStatus, Value,
+};
 use std::cell::{Cell, RefCell};
 use std::io::Read;
 
 impl Session<'_> {
     pub(super) fn sql(&mut self) -> Result<Exit, Failure> {
-        let text = self.sql_text()?;
+        super::foreign::allow_from_environment();
+        if let Some(url) = self
+            .request
+            .file
+            .to_str()
+            .filter(|text| text.starts_with(super::archive::BUCKET_SCHEME))
+            .map(str::to_owned)
+        {
+            let at = self.request.restore.at.clone();
+            self.request.file =
+                super::archive::edge_copy(&url, at.as_deref()).map_err(|message| {
+                    Failure::usage(message, Some(crate::cli::args::CommandName::Sql))
+                })?;
+            self.request.read_only = true;
+        } else if self.request.file.join(super::archive::MANIFEST).is_file() {
+            let directory = self.request.file.clone();
+            let at = self.request.restore.at.clone();
+            let copy =
+                super::archive::archived_copy(&directory, at.as_deref()).map_err(|message| {
+                    Failure::usage(message, Some(crate::cli::args::CommandName::Sql))
+                })?;
+            self.request.file = copy;
+            self.request.read_only = true;
+        } else if self.request.restore.at.is_some() {
+            return Err(Failure::usage(
+                "--at reads a past point from a directory eggdb backup archived into; give that directory".to_owned(),
+                Some(crate::cli::args::CommandName::Sql),
+            ));
+        }
+        let mut text = self.sql_text()?;
+        if self.request.kql && self.request.dialect != eggdb_sql::Dialect::PostgreSql {
+            return Err(Failure::usage(
+                "--kql translates into PostgreSQL's SQL: give it without --dialect".to_owned(),
+                Some(CommandName::Sql),
+            ));
+        }
+        if self.request.kql {
+            text = eggdb_kql::translate(&text).map_err(|error| {
+                Failure::usage(
+                    format!("the KQL query is not valid: {}", error.0),
+                    Some(CommandName::Sql),
+                )
+            })?;
+        }
+        let json = self.format == Format::Json;
         let script = !matches!(self.request.sql, Some(SqlSource::Command(_)));
-        let db = self.open(
+        let access = if self.request.read_only {
+            Access::ReadOnly
+        } else {
             Access::Write {
                 create: self.request.create,
-            },
-            Some(script_cache(&text)),
-        )?;
+            }
+        };
+        let db = self.open(access, Some(script_cache(&text)))?;
         let store = DatabaseStore(&db);
         let dialect = self.request.dialect;
         let mut session = eggdb_sql::Session::with_dialect(&store, dialect);
-        let mut printed = Ok(());
+        if dialect == Dialect::Oracle && !script {
+            session.enable_server_output(None);
+        }
+        let server_output = session.server_output_reader();
+        let printed = RefCell::new(Ok(()));
+        let mut failed_batch: Option<String> = None;
         let copied_out = Cell::new(false);
+        let includes = FileIncludes::new(match &self.request.sql {
+            Some(SqlSource::Script(path)) => Some(path.clone()),
+            _ => None,
+        });
+        let defines = self.request.restore.defines.clone();
         let outcome = {
             let out = RefCell::new(&mut self.out);
-            let messages = &mut self.messages;
+            let messages = RefCell::new(&mut self.messages);
             let input: Option<&mut dyn Read> = if script { None } else { Some(&mut *self.stdin) };
             let mut copy = StreamCopy {
                 input,
@@ -33,24 +95,93 @@ impl Session<'_> {
                 copied_out: &copied_out,
             };
             let mut on_result = |result: QueryResult| {
-                for notice in &result.notices {
-                    messages.text(notice);
-                    messages.text("\n");
-                }
-                for warning in &result.warnings {
-                    messages.text(&format!(
-                        "{} {}: {}\n",
-                        warning.level, warning.code, warning.message
-                    ));
+                if !json {
+                    let mut messages = messages.borrow_mut();
+                    for notice in &result.notices {
+                        messages.text(notice);
+                        messages.text("\n");
+                    }
+                    for warning in &result.warnings {
+                        messages.text(&format!(
+                            "{} {}: {}\n",
+                            warning.level, warning.code, warning.message
+                        ));
+                    }
                 }
                 let mut out = out.borrow_mut();
-                if !(copied_out.replace(false) && result.tag.starts_with("COPY ")) {
-                    print_result(&mut out, &result, dialect);
+                if dialect == Dialect::Oracle {
+                    let lines = server_output.take_lines();
+                    if !lines.is_empty() {
+                        out.text(&server_output_text(&lines, json));
+                        if let Err(error) = out.line_done() {
+                            *printed.borrow_mut() = Err(error);
+                            return false;
+                        }
+                    }
                 }
-                printed = out.line_done();
-                printed.is_ok()
+                if !(copied_out.replace(false) && result.tag.starts_with("COPY ")) {
+                    if json {
+                        out.text(&statement_json(&result, dialect));
+                    } else {
+                        print_result(&mut out, &result, dialect);
+                    }
+                }
+                let done = out.line_done();
+                let more = done.is_ok();
+                *printed.borrow_mut() = done;
+                more
             };
-            if script {
+            if dialect == Dialect::SqlServer {
+                run_sqlserver_batches(
+                    &mut session,
+                    &text,
+                    script,
+                    &mut on_result,
+                    &mut copy,
+                    &mut failed_batch,
+                )
+            } else if dialect == Dialect::Oracle && script {
+                let mut on_event = |event: ScriptEvent| {
+                    let done = if json {
+                        let mut out = out.borrow_mut();
+                        out.text(&event_json(&event));
+                        out.line_done()
+                    } else {
+                        match event {
+                            ScriptEvent::Prompt(text) => {
+                                let mut out = out.borrow_mut();
+                                out.text(&text);
+                                out.text("\n");
+                                out.line_done()
+                            }
+                            ScriptEvent::Notice(notice) => {
+                                let mut messages = messages.borrow_mut();
+                                messages.styled(Style::Bold, "NOTICE:");
+                                messages.text("  ");
+                                messages.text(&notice);
+                                messages.text("\n");
+                                Ok(())
+                            }
+                        }
+                    };
+                    if done.is_err() {
+                        *printed.borrow_mut() = done;
+                    }
+                };
+                let mut input = text.as_bytes();
+                let opener: &dyn IncludeOpener = &includes;
+                match SqlPlusScript::new(&mut input, Some(opener), &defines) {
+                    Ok(mut steps) => run_sqlplus_script(
+                        &mut session,
+                        &mut steps,
+                        &mut on_result,
+                        &mut on_event,
+                        &mut copy,
+                        &mut failed_batch,
+                    ),
+                    Err(error) => Err(error),
+                }
+            } else if script {
                 session.execute_script(&text, &mut on_result, &mut copy)
             } else {
                 session.execute_with_copy(&text, &mut on_result, &mut copy)
@@ -59,22 +190,31 @@ impl Session<'_> {
         let exit = match outcome {
             Ok(()) => Exit::Done,
             Err(error) => {
-                print_error(&mut self.messages, &error, &text);
+                let lines = server_output.take_lines();
+                if !lines.is_empty() {
+                    self.out.text(&server_output_text(&lines, json));
+                    let done = self.out.line_done();
+                    if done.is_err() {
+                        *printed.borrow_mut() = done;
+                    }
+                }
+                let shown = failed_batch.as_deref().unwrap_or(&text);
+                report_error(&mut self.messages, &error, shown, json);
                 exit_for(&error)
             }
         };
         if let Err(error) = commit_on_exit(&mut session) {
-            print_error(&mut self.messages, &error, &text);
+            report_error(&mut self.messages, &error, &text, json);
         }
         match session.close() {
             Ok(true) if exit == Exit::Done => self.messages.text(
                 "WARNING:  the SQL ended inside a transaction block (BEGIN without COMMIT); it was rolled back\n",
             ),
             Ok(_) => {}
-            Err(error) => print_error(&mut self.messages, &error, &text),
+            Err(error) => report_error(&mut self.messages, &error, &text, json),
         }
         self.close(db)?;
-        printed?;
+        printed.into_inner()?;
         Ok(exit)
     }
 
@@ -111,9 +251,260 @@ impl Session<'_> {
     }
 }
 
-pub(super) fn commit_on_exit(
-    session: &mut eggdb_sql::Session<'_, DatabaseStore<'_>>,
+fn run_sqlserver_batches(
+    session: &mut eggdb_sql::Session<'_>,
+    text: &str,
+    script: bool,
+    on_result: &mut dyn FnMut(QueryResult) -> bool,
+    copy: &mut dyn CopyChannel,
+    failed_batch: &mut Option<String>,
 ) -> Result<(), SqlError> {
+    let batches = eggdb_sql::sqlserver_batches(text)?;
+    let stopped = Cell::new(false);
+    let mut forward = |result: QueryResult| {
+        let more = on_result(result);
+        if !more {
+            stopped.set(true);
+        }
+        more
+    };
+    for batch in &batches {
+        for _ in 0..batch.repeat {
+            let outcome = if script {
+                session.execute_script(&batch.text, &mut forward, copy)
+            } else {
+                session.execute_with_copy(&batch.text, &mut forward, copy)
+            };
+            if let Err(error) = outcome {
+                *failed_batch = Some(batch.text.clone());
+                return Err(error);
+            }
+            if stopped.get() {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+enum ScriptEvent {
+    Prompt(String),
+    Notice(String),
+}
+
+fn server_output_text(lines: &[String], json: bool) -> String {
+    if json {
+        let quoted: Vec<String> = lines.iter().map(|line| json_string(line)).collect();
+        return JsonObject::new()
+            .raw("server_output", &format!("[{}]", quoted.join(",")))
+            .line();
+    }
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
+fn event_json(event: &ScriptEvent) -> String {
+    match event {
+        ScriptEvent::Prompt(text) => JsonObject::new().string("prompt", text).line(),
+        ScriptEvent::Notice(notice) => JsonObject::new()
+            .raw("notices", &format!("[{}]", json_string(notice)))
+            .line(),
+    }
+}
+
+const MOST_COUNTED_KINDS_SHOWN: usize = 8;
+
+#[derive(Default)]
+struct CommandsWithoutEffect {
+    total: u64,
+    kinds: Vec<(String, u64)>,
+}
+
+impl CommandsWithoutEffect {
+    fn add(&mut self, kind: String) {
+        self.total += 1;
+        match self.kinds.iter_mut().find(|(known, _)| *known == kind) {
+            Some((_, count)) => *count += 1,
+            None => self.kinds.push((kind, 1)),
+        }
+    }
+
+    fn notice(&self) -> Option<String> {
+        if self.total == 0 {
+            return None;
+        }
+        let mut list: Vec<String> = self
+            .kinds
+            .iter()
+            .take(MOST_COUNTED_KINDS_SHOWN)
+            .map(|(kind, count)| format!("{kind} {count}"))
+            .collect();
+        let more = self.kinds.len().saturating_sub(MOST_COUNTED_KINDS_SHOWN);
+        if more > 0 {
+            list.push(format!(
+                "… and {more} more {}",
+                if more == 1 { "kind" } else { "kinds" }
+            ));
+        }
+        let commands = if self.total == 1 {
+            "command"
+        } else {
+            "commands"
+        };
+        Some(format!(
+            "{} SQL*Plus {commands} had no effect: {} (eggdb sql runs the SQL only)",
+            self.total,
+            list.join(", ")
+        ))
+    }
+}
+
+fn command_notice(command: &SqlPlusCommand) -> Option<String> {
+    let place = &command.place;
+    match command.name.as_str() {
+        "host" => Some(format!(
+            "{place}: {} never runs a program; eggdb sql runs the SQL only",
+            command.shown
+        )),
+        "spool" => {
+            let file = command.argument.split_whitespace().next()?;
+            if file.eq_ignore_ascii_case("off") {
+                return None;
+            }
+            Some(format!(
+                "{place}: SPOOL {file} never writes a file; redirect stdout instead (eggdb sql ... > {file})"
+            ))
+        }
+        "whenever" => {
+            let mut words = command.argument.split_whitespace();
+            let condition = words.next()?;
+            let action = words.next()?;
+            let continues = condition.eq_ignore_ascii_case("sqlerror")
+                && action.eq_ignore_ascii_case("continue");
+            continues.then(|| {
+                format!(
+                    "{place}: WHENEVER SQLERROR CONTINUE has no effect: eggdb sql stops at the first error (eggdb restore --keep-going runs on)"
+                )
+            })
+        }
+        "." => Some(format!("{place}: the statement before . was not run")),
+        "unterminated" => Some(format!(
+            "the text from {place} was not run: no ; or / ends it"
+        )),
+        "unknown" => Some(format!(
+            "{place}: {} is not SQL or a SQL*Plus command EggDB knows; the line was not run",
+            command.shown
+        )),
+        _ => None,
+    }
+}
+
+fn counted_kind(command: &SqlPlusCommand) -> Option<String> {
+    match command.name.as_str() {
+        "define" | "undefine" | "set define" | "accept" | "include" | "whenever" | "spool"
+        | "host" | "." | "unterminated" | "unknown" => None,
+        "/" => Some("/ after ;".to_owned()),
+        _ => Some(
+            command
+                .shown
+                .split_whitespace()
+                .next()
+                .unwrap_or(&command.shown)
+                .to_owned(),
+        ),
+    }
+}
+
+fn run_sqlplus_script(
+    session: &mut eggdb_sql::Session<'_>,
+    script: &mut SqlPlusScript<'_>,
+    on_result: &mut dyn FnMut(QueryResult) -> bool,
+    on_event: &mut dyn FnMut(ScriptEvent),
+    copy: &mut dyn CopyChannel,
+    failed_statement: &mut Option<String>,
+) -> Result<(), SqlError> {
+    let mut without_effect = CommandsWithoutEffect::default();
+    let outcome = run_sqlplus_steps(
+        session,
+        script,
+        on_result,
+        on_event,
+        copy,
+        failed_statement,
+        &mut without_effect,
+    );
+    if let Some(notice) = without_effect.notice() {
+        on_event(ScriptEvent::Notice(notice));
+    }
+    outcome
+}
+
+fn run_sqlplus_steps(
+    session: &mut eggdb_sql::Session<'_>,
+    script: &mut SqlPlusScript<'_>,
+    on_result: &mut dyn FnMut(QueryResult) -> bool,
+    on_event: &mut dyn FnMut(ScriptEvent),
+    copy: &mut dyn CopyChannel,
+    failed_statement: &mut Option<String>,
+    without_effect: &mut CommandsWithoutEffect,
+) -> Result<(), SqlError> {
+    let stopped = Cell::new(false);
+    let mut forward = |result: QueryResult| {
+        let more = on_result(result);
+        if !more {
+            stopped.set(true);
+        }
+        more
+    };
+    while let Some(step) = script.next_step()? {
+        match step {
+            SqlPlusStep::Statement { text, .. } => {
+                if let Err(error) = session.execute_with_copy(&text, &mut forward, copy) {
+                    *failed_statement = Some(text);
+                    return Err(error);
+                }
+                if stopped.get() {
+                    return Ok(());
+                }
+            }
+            SqlPlusStep::Prompt(text) => on_event(ScriptEvent::Prompt(text)),
+            SqlPlusStep::ServerOutput(ServerOutputSetting::On { buffer_bytes }) => {
+                session.enable_server_output(buffer_bytes);
+            }
+            SqlPlusStep::ServerOutput(ServerOutputSetting::Off) => session.disable_server_output(),
+            SqlPlusStep::Connect { statement } => session.execute(&statement, &mut |_| {})?,
+            SqlPlusStep::Exit {
+                rollback,
+                status,
+                place,
+            } => {
+                if let Some(status) = status {
+                    on_event(ScriptEvent::Notice(format!(
+                        "{place}: EXIT {status}: the exit code stays 0; eggdb sql's exit codes mean what eggdb help sql says"
+                    )));
+                }
+                if rollback {
+                    session.execute("ROLLBACK", &mut |_| {})?;
+                }
+                return Ok(());
+            }
+            SqlPlusStep::Command(command) => {
+                if let Some(notice) = command_notice(&command) {
+                    on_event(ScriptEvent::Notice(notice));
+                } else if let Some(kind) = counted_kind(&command) {
+                    without_effect.add(kind);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn commit_on_exit(session: &mut eggdb_sql::Session<'_>) -> Result<(), SqlError> {
     if session.dialect() == Dialect::Oracle
         && session.transaction_status() == TransactionStatus::InBlock
     {
@@ -127,6 +518,107 @@ pub(super) fn exit_for(error: &SqlError) -> Exit {
         SqlState::DATA_CORRUPTED => Exit::Damaged,
         SqlState::LOCK_NOT_AVAILABLE => Exit::Busy,
         _ => Exit::DatabaseError,
+    }
+}
+
+pub(super) fn report_error(messages: &mut Output<'_>, error: &SqlError, text: &str, json: bool) {
+    if json {
+        messages.text(&error_json(error));
+    } else {
+        print_error(messages, error, text);
+    }
+}
+
+pub(crate) fn error_json(error: &SqlError) -> String {
+    let code = match exit_for(error) {
+        Exit::Damaged => "damaged",
+        Exit::Busy => "database_busy",
+        _ if error.state() == SqlState::READ_ONLY_SQL_TRANSACTION => "read_only",
+        _ => "sql_error",
+    };
+    let category = eggdb_commands::category_of(code).unwrap_or(Category::Failed);
+    let mut object = JsonObject::new()
+        .string("code", code)
+        .string("category", category.name())
+        .string("message", error.message())
+        .string("sqlstate", error.state().code());
+    if let Some(detail) = error.detail() {
+        object = object.string("detail", detail);
+    }
+    if let Some(hint) = error.hint() {
+        object = object.string("hint", hint);
+    }
+    if let Some(position) = error.position() {
+        object = object.number("position", position as u64);
+    }
+    JsonObject::new().raw("error", &object.object()).line()
+}
+
+const LARGEST_EXACT_INTEGER: u64 = (1 << 53) - 1;
+
+pub(crate) fn statement_json(result: &QueryResult, dialect: Dialect) -> String {
+    statement_object(result, dialect).line()
+}
+
+pub(crate) fn statement_object(result: &QueryResult, dialect: Dialect) -> JsonObject {
+    let mut object = JsonObject::new().string("tag", &result.tag);
+    if let Some(columns) = &result.columns {
+        let columns: Vec<String> = columns
+            .iter()
+            .map(|column| {
+                let kind = column.sql_type.map_or_else(
+                    || "null".to_owned(),
+                    |sql_type| json_string(&sql_type.name()),
+                );
+                JsonObject::new()
+                    .string("name", &column.name)
+                    .raw("type", &kind)
+                    .object()
+            })
+            .collect();
+        let rows: Vec<String> = result
+            .rows
+            .iter()
+            .map(|row| {
+                let cells: Vec<String> = row.iter().map(|cell| value_json(cell, dialect)).collect();
+                format!("[{}]", cells.join(","))
+            })
+            .collect();
+        object = object
+            .raw("columns", &format!("[{}]", columns.join(",")))
+            .raw("rows", &format!("[{}]", rows.join(",")))
+            .number("row_count", result.rows.len() as u64);
+    }
+    let notices: Vec<String> = result
+        .notices
+        .iter()
+        .cloned()
+        .chain(
+            result
+                .warnings
+                .iter()
+                .map(|warning| format!("{} {}: {}", warning.level, warning.code, warning.message)),
+        )
+        .map(|notice| json_string(&notice))
+        .collect();
+    if !notices.is_empty() {
+        object = object.raw("notices", &format!("[{}]", notices.join(",")));
+    }
+    object
+}
+
+pub(super) fn value_json(value: &Value, dialect: Dialect) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Boolean(flag) => flag.to_string(),
+        Value::SmallInt(number) => number.to_string(),
+        Value::Integer(number) => number.to_string(),
+        Value::BigInt(number) if number.unsigned_abs() <= LARGEST_EXACT_INTEGER => {
+            number.to_string()
+        }
+        other => dialect
+            .value_text(other)
+            .map_or_else(|| "null".to_owned(), |shown| json_string(&shown)),
     }
 }
 
@@ -208,8 +700,12 @@ fn line_of(text: &str, position: usize) -> (usize, &str, usize) {
     (number, line, column)
 }
 
-fn print_result(out: &mut Output<'_>, result: &QueryResult, dialect: Dialect) {
+pub(super) fn print_result(out: &mut Output<'_>, result: &QueryResult, dialect: Dialect) {
     out.text(&result_text(result, ResultMode::Table, None, dialect));
+}
+
+pub(super) fn rows_text(result: &QueryResult, dialect: Dialect) -> String {
+    result_cells(result, dialect).map_or_else(String::new, |cells| table_text(&cells))
 }
 
 pub(crate) struct ResultCells {
@@ -408,6 +904,8 @@ fn right_aligned(sql_type: eggdb_sql::SqlType) -> bool {
             | eggdb_sql::SqlType::TimeTz(_)
             | eggdb_sql::SqlType::Interval { .. }
             | eggdb_sql::SqlType::Array(_)
+            | eggdb_sql::SqlType::Defined(_)
+            | eggdb_sql::SqlType::Dynamic
     )
 }
 
@@ -437,7 +935,7 @@ mod tests {
     use eggdb_sql::{QueryResult, Session};
     use std::collections::BTreeMap;
 
-    fn rows_of(session: &mut Session<'_, DatabaseStore<'_>>, sql: &str) -> Vec<String> {
+    fn rows_of(session: &mut Session<'_>, sql: &str) -> Vec<String> {
         let mut rows = Vec::new();
         session
             .execute(sql, &mut |result: QueryResult| {

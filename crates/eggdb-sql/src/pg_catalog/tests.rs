@@ -4,26 +4,26 @@ use crate::tests::render;
 use crate::{Dialect, Session, SqlError};
 use std::time::{Duration, Instant};
 
-fn session(store: &MemoryStore) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);
     session.identify("eggdb", "shapes");
     session
 }
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
@@ -746,4 +746,470 @@ fn changing_a_catalog_relation_is_refused_as_postgresql_refuses_it() {
     }
     last(&mut session, "CREATE TABLE public.pg_class (a integer)");
     last(&mut session, "DROP TABLE public.pg_class");
+}
+
+#[test]
+fn client_driver_catalog_functions_settings_and_subscripts_answer() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(&mut session, "CREATE SCHEMA app");
+    last(
+        &mut session,
+        "CREATE TABLE app.orders (id serial PRIMARY KEY, note text)",
+    );
+    last(&mut session, "CREATE TABLE plain (id integer)");
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT pg_get_serial_sequence('app.orders', 'id'), \
+             pg_get_serial_sequence('app.orders', 'note'), pg_get_serial_sequence('plain', 'id')"
+        )),
+        ["app.orders_id_seq|NULL|NULL"]
+    );
+    assert_eq!(
+        fails(&mut session, "SELECT pg_get_serial_sequence('nope', 'id')")
+            .state()
+            .code(),
+        "42P01"
+    );
+    assert_eq!(
+        fails(
+            &mut session,
+            "SELECT pg_get_serial_sequence('plain', 'nope')"
+        )
+        .state()
+        .code(),
+        "42703"
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT to_regclass('app.orders') IS NOT NULL, to_regclass('nope'), \
+             to_regtype('integer'), to_regtype('nope')"
+        )),
+        ["t|NULL|integer|NULL"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT setting, context FROM pg_catalog.pg_settings WHERE name = 'max_index_keys'"
+        )),
+        ["32|internal"]
+    );
+    assert_eq!(rows_of(&last(&mut session, "SHOW max_index_keys")), ["32"]);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT (SELECT count(*) FROM pg_opclass), (SELECT count(*) FROM pg_enum), \
+             (SELECT relkind FROM pg_class WHERE relname = 'pg_settings')"
+        )),
+        ["0|0|v"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT s FROM generate_subscripts('{7,8,9}'::int[], 1) s"
+        )),
+        ["1", "2", "3"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT s FROM generate_subscripts('3 4'::int2vector, 1, true) s"
+        )),
+        ["1", "0"]
+    );
+}
+
+#[test]
+fn array_types_name_array_in_as_their_input_function() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT typname, typinput = 'pg_catalog.array_in'::regproc, typinput::text \
+             FROM pg_type WHERE oid IN (23, 1007) ORDER BY oid"
+        )),
+        ["int4|f|-", "_int4|t|array_in"]
+    );
+    assert_eq!(
+        rows_of(&last(&mut session, "SELECT 'array_in'::regproc::oid")),
+        ["750"]
+    );
+    assert_eq!(
+        fails(&mut session, "SELECT 'no_such_function'::regproc")
+            .state()
+            .code(),
+        "42883"
+    );
+}
+
+#[test]
+fn npgsql_loads_every_type_with_arrays_found_by_their_receive_function() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    let outputs = match run(
+        &mut session,
+        include_str!("../../../eggdb/tests/data/npgsql/load-types.sql"),
+    ) {
+        Ok(outputs) => outputs,
+        Err(error) => panic!("Npgsql's type-loading queries failed: {error}"),
+    };
+    assert_eq!(outputs.len(), 4, "{outputs:?}");
+    assert!(outputs[0].contains("PostgreSQL 16"), "{}", outputs[0]);
+    let types = rows_of(&outputs[1]);
+    for expected in [
+        "pg_catalog|16|bool|b|f|NULL",
+        "pg_catalog|23|int4|b|f|NULL",
+        "pg_catalog|25|text|b|f|NULL",
+        "pg_catalog|1007|_int4|a|f|23",
+        "pg_catalog|1009|_text|a|f|25",
+    ] {
+        assert!(types.contains(&expected), "{expected} in {types:?}");
+    }
+    let first_array = types
+        .iter()
+        .position(|row| row.split('|').nth(3) == Some("a"))
+        .expect("an array type");
+    assert!(
+        types[first_array..]
+            .iter()
+            .all(|row| row.split('|').nth(3) == Some("a")),
+        "{types:?}"
+    );
+    assert!(rows_of(&outputs[2]).is_empty(), "{}", outputs[2]);
+    assert!(rows_of(&outputs[3]).is_empty(), "{}", outputs[3]);
+}
+
+#[test]
+fn array_types_name_their_receive_function_in_pg_proc() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT t.typname, p.proname, p.pronargs, p.prorettype \
+             FROM pg_type t JOIN pg_proc p ON p.oid = t.typreceive \
+             WHERE t.oid IN (23, 1007) ORDER BY t.oid"
+        )),
+        ["_int4|array_recv|3|2277"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT typoutput::text, typsend::text FROM pg_type WHERE oid = 1009"
+        )),
+        ["array_out|array_send"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT (SELECT count(*) FROM pg_range), (SELECT count(*) FROM pg_proc)"
+        )),
+        ["0|4"]
+    );
+}
+
+const SEQUENCE_OWNER_QUERY: &str = "SELECT pg_catalog.quote_ident(nspname) || '.' ||
+   pg_catalog.quote_ident(relname) || '.' ||
+   pg_catalog.quote_ident(attname),
+   d.deptype
+FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid
+INNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+INNER JOIN pg_catalog.pg_attribute a ON (
+ a.attrelid=c.oid AND
+ a.attnum=d.refobjsubid)
+WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass
+ AND d.objid='TABLE'::regclass
+ AND d.deptype IN ('a', 'i')";
+
+const INDEX_FOOTER_QUERY: &str = "SELECT i.indisunique, i.indisprimary, a.amname, c2.relname
+FROM pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+WHERE i.indexrelid = c.oid AND c.oid = 'TABLE'::regclass AND c.relam = a.oid AND i.indrelid = c2.oid";
+
+#[test]
+fn index_methods_orders_unique_indexes_and_identities_show_as_postgresql_16_shows_them() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(
+        &mut session,
+        "CREATE TABLE tickets (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code text NOT NULL, \
+         priority integer, opened timestamptz NOT NULL, closed timestamptz); \
+         CREATE TABLE visits (id bigint NOT NULL, page text NOT NULL, seen timestamptz); \
+         ALTER TABLE visits ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY ( \
+           SEQUENCE NAME public.visits_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1); \
+         ALTER TABLE ONLY visits ADD CONSTRAINT visits_pkey PRIMARY KEY (id); \
+         CREATE SEQUENCE notes_id_seq; \
+         CREATE TABLE notes (id integer NOT NULL DEFAULT nextval('notes_id_seq'::regclass), body text); \
+         ALTER SEQUENCE notes_id_seq OWNED BY notes.id; \
+         CREATE UNIQUE INDEX tickets_code_idx ON tickets USING btree (code); \
+         CREATE INDEX tickets_opened_idx ON tickets USING btree (opened DESC); \
+         CREATE INDEX tickets_priority_idx ON tickets USING btree (priority NULLS FIRST, closed DESC NULLS LAST); \
+         CREATE INDEX visits_page_idx ON visits USING hash (page)",
+    );
+    assert_eq!(
+        rows_of(&last(&mut session, &for_table(INDEX_QUERY, "tickets"))),
+        [
+            "tickets_pkey|t|t|f|t|CREATE UNIQUE INDEX tickets_pkey ON tickets USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0",
+            "tickets_code_idx|f|t|f|t|CREATE UNIQUE INDEX tickets_code_idx ON tickets USING btree (code)|NULL|NULL|NULL|NULL|f|0",
+            "tickets_opened_idx|f|f|f|t|CREATE INDEX tickets_opened_idx ON tickets USING btree (opened DESC)|NULL|NULL|NULL|NULL|f|0",
+            "tickets_priority_idx|f|f|f|t|CREATE INDEX tickets_priority_idx ON tickets USING btree (priority NULLS FIRST, closed DESC NULLS LAST)|NULL|NULL|NULL|NULL|f|0",
+        ]
+    );
+    assert_eq!(
+        rows_of(&last(&mut session, &for_table(INDEX_QUERY, "visits"))),
+        [
+            "visits_pkey|t|t|f|t|CREATE UNIQUE INDEX visits_pkey ON visits USING btree (id)|PRIMARY KEY (id)|p|f|f|f|0",
+            "visits_page_idx|f|f|f|t|CREATE INDEX visits_page_idx ON visits USING hash (page)|NULL|NULL|NULL|NULL|f|0",
+        ]
+    );
+    assert_eq!(
+        rows_of(&last(&mut session, &for_table(COLUMN_QUERY, "tickets"))),
+        [
+            "id|integer|NULL|t|NULL|a|",
+            "code|text|NULL|t|NULL||",
+            "priority|integer|NULL|f|NULL||",
+            "opened|timestamp with time zone|NULL|t|NULL||",
+            "closed|timestamp with time zone|NULL|f|NULL||",
+        ]
+    );
+    assert_eq!(
+        rows_of(&last(&mut session, &for_table(COLUMN_QUERY, "visits"))),
+        [
+            "id|bigint|NULL|t|NULL|d|",
+            "page|text|NULL|t|NULL||",
+            "seen|timestamp with time zone|NULL|f|NULL||",
+        ]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT indexrelid::regclass::text, indoption FROM pg_index \
+             WHERE indrelid = 'tickets'::regclass ORDER BY 1"
+        )),
+        [
+            "tickets_code_idx|0",
+            "tickets_opened_idx|3",
+            "tickets_pkey|0",
+            "tickets_priority_idx|2 1",
+        ]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            &for_table(INDEX_FOOTER_QUERY, "tickets_code_idx")
+        )),
+        ["t|f|btree|tickets"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            &for_table(INDEX_FOOTER_QUERY, "visits_page_idx")
+        )),
+        ["f|f|hash|visits"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), \
+             pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) \
+             FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'visits_page_idx'::regclass"
+        )),
+        ["page|integer|page"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            &for_table(SEQUENCE_OWNER_QUERY, "visits_id_seq")
+        )),
+        ["public.visits.id|i"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            &for_table(SEQUENCE_OWNER_QUERY, "notes_id_seq")
+        )),
+        ["public.notes.id|a"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT conname, contype FROM pg_constraint \
+             WHERE conrelid IN ('tickets'::regclass, 'visits'::regclass) ORDER BY 1"
+        )),
+        ["tickets_pkey|p", "visits_pkey|p"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT count(*) FROM pg_attrdef WHERE adrelid = 'visits'::regclass"
+        )),
+        ["0"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT table_name, column_name, column_default, is_identity, identity_generation, \
+             identity_start, identity_increment, identity_maximum, identity_minimum, identity_cycle \
+             FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'id' \
+             ORDER BY table_name"
+        )),
+        [
+            "notes|id|nextval('notes_id_seq'::regclass)|NO|NULL|NULL|NULL|NULL|NULL|NO",
+            "tickets|id|NULL|YES|ALWAYS|1|1|2147483647|1|NO",
+            "visits|id|NULL|YES|BY DEFAULT|1|1|9223372036854775807|1|NO",
+        ]
+    );
+}
+
+#[test]
+fn unique_indexes_are_not_constraints_and_identity_defaults_stay_put() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(
+        &mut session,
+        "CREATE TABLE t (id integer NOT NULL, code text, n integer); \
+         ALTER TABLE t ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY; \
+         CREATE UNIQUE INDEX t_code_idx ON t (code); \
+         ALTER TABLE t ADD CONSTRAINT t_n_key UNIQUE (n)",
+    );
+    let missing = fails(&mut session, "ALTER TABLE t DROP CONSTRAINT t_code_idx");
+    assert_eq!(missing.state().code(), "42704");
+    assert_eq!(
+        missing.message(),
+        "constraint \"t_code_idx\" of relation \"t\" does not exist"
+    );
+    let refused = fails(&mut session, "ALTER TABLE t ALTER COLUMN id SET DEFAULT 5");
+    assert_eq!(refused.state().code(), "42601");
+    assert_eq!(
+        refused.message(),
+        "column \"id\" of relation \"t\" is an identity column"
+    );
+    assert_eq!(refused.hint(), None);
+    let refused = fails(&mut session, "ALTER TABLE t ALTER COLUMN id DROP DEFAULT");
+    assert_eq!(
+        refused.hint(),
+        Some("Use ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY instead.")
+    );
+    let twice = fails(
+        &mut session,
+        "ALTER TABLE t ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY",
+    );
+    assert_eq!(
+        twice.message(),
+        "column \"id\" of relation \"t\" is already an identity column"
+    );
+    let given = fails(&mut session, "INSERT INTO t (id, code) VALUES (7, 'a')");
+    assert_eq!(given.state().code(), "428C9");
+    assert_eq!(
+        given.message(),
+        "cannot insert a non-DEFAULT value into column \"id\""
+    );
+    assert_eq!(
+        given.detail(),
+        Some("Column \"id\" is an identity column defined as GENERATED ALWAYS.")
+    );
+    assert_eq!(
+        given.hint(),
+        Some("Use OVERRIDING SYSTEM VALUE to override.")
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "INSERT INTO t (id, code) VALUES (DEFAULT, 'a') RETURNING id"
+        )),
+        ["1"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "INSERT INTO t (id, code) OVERRIDING USER VALUE VALUES (70, 'b') RETURNING id"
+        )),
+        ["2"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "INSERT INTO t (id, code) OVERRIDING SYSTEM VALUE VALUES (70, 'c') RETURNING id"
+        )),
+        ["70"]
+    );
+    let updated = fails(&mut session, "UPDATE t SET id = 9 WHERE code = 'a'");
+    assert_eq!(updated.state().code(), "428C9");
+    assert_eq!(
+        updated.message(),
+        "column \"id\" can only be updated to DEFAULT"
+    );
+    let selected = fails(&mut session, "INSERT INTO t (id, code) SELECT 8, 'd'");
+    assert_eq!(selected.state().code(), "428C9");
+    let duplicate = fails(&mut session, "INSERT INTO t (code) VALUES ('a')");
+    assert_eq!(duplicate.state().code(), "23505");
+    last(&mut session, "ALTER TABLE t DROP CONSTRAINT t_n_key");
+    last(&mut session, "DROP INDEX t_code_idx");
+    last(&mut session, "INSERT INTO t (code) VALUES ('a')");
+}
+
+#[test]
+fn administration_tools_find_their_statistics_views_extensions_and_functions() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    run(
+        &mut session,
+        "CREATE TABLE items (id integer PRIMARY KEY, name text)",
+    )
+    .unwrap();
+    assert!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM pg_stat_activity WHERE state = 'active'"
+        )
+        .contains('1')
+    );
+    assert!(last(&mut session, "SELECT datname FROM pg_stat_database").contains("shapes"));
+    assert!(last(&mut session, "SELECT extname, extversion FROM pg_extension").contains("plpgsql"));
+    assert!(last(&mut session, "SELECT has_database_privilege(current_database(), 'CREATE'), has_table_privilege('items', 'SELECT'), has_schema_privilege('public', 'USAGE')").contains('t'));
+    assert!(last(&mut session, "SELECT pg_is_in_recovery()").contains('f'));
+    assert!(last(&mut session, "SELECT pg_size_pretty(10240::bigint)").contains("10 kB"));
+    for relation in [
+        "pg_locks",
+        "pg_prepared_xacts",
+        "pg_event_trigger",
+        "pg_foreign_data_wrapper",
+        "pg_foreign_server",
+        "pg_foreign_table",
+        "pg_user_mapping",
+        "pg_cast",
+        "pg_aggregate",
+        "pg_operator",
+        "pg_shdescription",
+        "pg_replication_slots",
+        "pg_stat_replication",
+        "pg_partitioned_table",
+        "pg_subscription",
+        "pg_stat_user_tables",
+        "pg_stat_user_indexes",
+        "pg_ts_config",
+        "pg_ts_dict",
+        "pg_ts_parser",
+        "pg_ts_template",
+        "pg_conversion",
+        "pg_opfamily",
+    ] {
+        run(
+            &mut session,
+            &format!("SELECT * FROM pg_catalog.{relation}"),
+        )
+        .unwrap_or_else(|error| panic!("{relation}: {error:?}"));
+    }
+    assert!(last(&mut session, "SELECT usename, usesuper FROM pg_user").contains('t'));
+    assert!(
+        last(
+            &mut session,
+            "SELECT count(*) FROM pg_class WHERE relname = 'pg_stat_activity' AND relkind = 'v'"
+        )
+        .contains('1')
+    );
 }

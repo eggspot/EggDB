@@ -33,19 +33,25 @@
 //! to inject faults and crashes reproducibly from a seed (D9).
 
 mod aligned;
+mod allocator;
 mod cache;
 mod clock;
 mod cpus;
+mod database_file;
 mod error;
+pub mod fonts;
 mod fs;
 mod io;
+pub mod local_socket;
 mod memory;
+mod memory_file;
 mod net;
 mod os_cpus;
 mod os_fs;
 mod os_io;
 mod os_io_uring;
 mod os_iocp;
+mod os_iocp_net;
 mod os_memory;
 mod os_net;
 mod os_net_readiness;
@@ -122,13 +128,16 @@ mod uncached;
 pub mod user_files;
 
 pub use aligned::AlignedBuffer;
+pub use allocator::EggAllocator;
 pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};
+pub use database_file::DatabaseFile;
 pub use error::{Error, ErrorKind, Result};
 pub use fs::{File, FileLock, FileSystem, OpenMode};
 pub use io::{IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp};
 pub use memory::{Memory, MemoryRegion, PageMode};
+pub use memory_file::MemoryFile;
 pub use net::{
     Address, NetBackend, NetCompletion, NetListener, NetOp, NetOutput, NetQueue, NetQueueOptions,
     NetStream, Network, RejectedNetOp,
@@ -145,5 +154,5 @@ pub use sim_memory::SimMemory;
 pub use sim_net::{SimHost, SimListener, SimNetQueue, SimNetwork, SimStream};
 pub use threads::{SpawnedThread, ThreadOptions};
 pub use topology::{
-    CacheId, CoreId, CpuLocation, CpuTopology, NumaNodeId, PackageId, SiblingNumbering,
+    CacheId, CoreId, CoreKind, CpuLocation, CpuTopology, NumaNodeId, PackageId, SiblingNumbering,
 };

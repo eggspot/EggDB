@@ -22,6 +22,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: actions/cache@v5
@@ -34,13 +37,13 @@ jobs:
       - name: Check the shipped crates are only our own
         run: |
           set -o pipefail
-          shipped=$(cargo tree -p eggdb -e normal,build --target all --prefix none --format '{p}' \
+          shipped=$(cargo tree -p eggdb -p eggdb-capi -e normal,build --target all --prefix none --format '{p}' \
             | awk '{print $1}' | sort -u)
           if [ -z "$shipped" ]; then
             echo "::error::cargo tree listed no crates for eggdb"
             exit 1
           fi
-          foreign=$(echo "$shipped" | grep -v -E '^eggdb(-[a-z]+)?$' || true)
+          foreign=$(echo "$shipped" | grep -v -E '^eggdb(-[a-z0-9]+)*$' || true)
           if [ -n "$foreign" ]; then
             echo "::error::third-party crates in what ships (D1): $foreign"
             exit 1
@@ -71,6 +74,12 @@ jobs:
           echo "EGGDB_SMOKE_SQLCMD=$tool" >> "$GITHUB_ENV"
       - name: Smoke test the eggdb command
         run: cargo build -p eggdb && scripts/smoke-test.sh target/debug/eggdb
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Check the C API from C, C++ and Python, and the Python, .NET and Java drivers
+        run: cargo build -p eggdb-capi && scripts/c-api/check.sh target/debug "$RUNNER_TEMP/c-api"
       - name: Docs
         run: cargo doc --workspace --no-deps
         env:
@@ -109,6 +118,11 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
           cargo build -p eggdb
           scripts/smoke-test.sh "target/debug/eggdb$exe"
+      - name: Check the C API from C, C++ and Python (from Python alone on Windows)
+        run: |
+          cargo build -p eggdb-capi
+          if [ "$RUNNER_OS" = Windows ]; then export NO_C_COMPILER=1 PYTHON=python; fi
+          scripts/c-api/check.sh target/debug "$(mktemp -d)"
 
   musl:
     runs-on: ubuntu-latest
@@ -131,6 +145,439 @@ jobs:
       - name: Test against musl, as the default Linux release is built
         run: cargo test --workspace --target x86_64-unknown-linux-musl
 
+  kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain and the musl target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-linux-musl
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-musl-release-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build the static binary and the image
+        run: |
+          cargo build --release -p eggdb --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/eggdb deploy/eggdb
+          docker build -t eggdb:local deploy
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: eggdb
+      - name: Install the chart and query the database through it
+        run: |
+          kind load docker-image eggdb:local --name eggdb
+          helm lint deploy/helm/eggdb --set password=ci-password
+          helm install db deploy/helm/eggdb --set password=ci-password --set image.repository=eggdb --set image.tag=local --wait --timeout 5m
+          kubectl rollout status statefulset/db --timeout=3m
+          kubectl port-forward service/db 15432:5432 19187:9187 &
+          sleep 3
+          PGPASSWORD=ci-password psql "host=127.0.0.1 port=15432 user=eggdb dbname=eggdb sslmode=require" \
+            -c "CREATE TABLE t (n integer)" -c "INSERT INTO t VALUES (1)" -c "SELECT count(*) FROM t"
+          curl -fsS http://127.0.0.1:19187/metrics | grep -q '^eggdb_up 1'
+          kubectl delete pod db-0 --wait
+          kubectl rollout status statefulset/db --timeout=3m
+          kubectl port-forward service/db 15433:5432 &
+          sleep 3
+          PGPASSWORD=ci-password psql "host=127.0.0.1 port=15433 user=eggdb dbname=eggdb sslmode=require" \
+            -tAc "SELECT count(*) FROM t" | grep -qx 1
+
+  resp-clients:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3, nats-py, stomp.py, python-qpid-proton, cassandra-driver and influxdb-client (test tools only, never shipped)
+        run: |
+          command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
+          python3 -m venv "$RUNNER_TEMP/resp"
+          "$RUNNER_TEMP/resp/bin/pip" install --quiet redis==5.0.8 pymemcache==4.0.0 opensearch-py==2.6.0 pymongo==4.8.0 neo4j==5.20.0 confluent-kafka==2.5.0 pika==1.3.2 paho-mqtt==2.1.0 boto3==1.35.0 nats-py==2.9.0 stomp.py==8.1.2 python-qpid-proton==0.39.0 cassandra-driver==3.29.2 influxdb-client==1.45.0
+      - name: Serve a database over RESP and talk to it with redis-cli and redis-py
+        run: |
+          cargo build -p eggdb
+          export EGGDB_PASSWORD=ci-resp-password
+          target/debug/eggdb serve "$RUNNER_TEMP/resp.eggdb" --create --resp-listen 127.0.0.1:6380 --memcached-listen 127.0.0.1:11212 --es-listen 127.0.0.1:9201 --mongo-listen 127.0.0.1:27018 --bolt-listen 127.0.0.1:7688 --kafka-listen 127.0.0.1:9093 --amqp-listen 127.0.0.1:5673 --mqtt-listen 127.0.0.1:1884 --sqs-listen 127.0.0.1:9325 --nats-listen 127.0.0.1:4223 --stomp-listen 127.0.0.1:61614 --cql-listen 127.0.0.1:9043 --s3-listen 127.0.0.1:9001 --dynamodb-listen 127.0.0.1:8001 --observability-listen 127.0.0.1:8087 &
+          for _ in $(seq 1 50); do redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning PING && break; sleep 0.2; done
+          cli() { redis-cli -p 6380 -a "$EGGDB_PASSWORD" --no-auth-warning "$@"; }
+          test "$(cli SET greeting hello)" = OK
+          test "$(cli GET greeting)" = hello
+          test "$(cli INCRBY visits 5)" = 5
+          cli HSET user:1 name Ada lang Rust
+          test "$(cli HGET user:1 name)" = Ada
+          cli RPUSH queue a b c
+          test "$(cli LRANGE queue 0 -1 | tr '\n' ' ')" = "a b c "
+          cli ZADD board 10 ada 20 grace
+          test "$(cli ZRANGE board 0 -1 | tr '\n' ' ')" = "ada grace "
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import redis
+          r = redis.Redis(port=6380, password="ci-resp-password", protocol=3)
+          assert r.set("k", "v", ex=60)
+          assert r.get("k") == b"v"
+          assert 0 < r.ttl("k") <= 60
+          assert r.hgetall("user:1") == {b"name": b"Ada", b"lang": b"Rust"}
+          assert r.smembers("nothing") == set()
+          pipe = r.pipeline(transaction=False)
+          pipe.incr("n").incr("n").get("n")
+          assert pipe.execute() == [1, 2, b"2"]
+          print("redis-py over RESP3: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from pymemcache.client.base import Client
+          client = Client(("127.0.0.1", 11212), default_noreply=False)
+          assert client.set("greeting", b"hello", expire=60)
+          assert client.get("greeting") == b"hello"
+          assert client.add("greeting", b"x") is False
+          client.set("count", b"41")
+          assert client.incr("count", 1) == 42
+          value, token = client.gets("greeting")
+          assert client.cas("greeting", b"bye", token)
+          assert client.get_many(["greeting", "missing"]) == {"greeting": b"bye"}
+          assert client.delete("greeting")
+          print("pymemcache: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from opensearchpy import OpenSearch, helpers
+          client = OpenSearch(hosts=[{"host": "127.0.0.1", "port": 9201}], http_auth=("eggdb", "ci-resp-password"), use_ssl=False)
+          assert client.info()["version"]["number"]
+          client.indices.create(index="books", body={"mappings": {"properties": {"title": {"type": "text"}}}})
+          assert client.indices.exists(index="books")
+          client.index(index="books", id="1", body={"title": "The quick brown fox", "genre": "fable", "pages": 120})
+          helpers.bulk(client, [
+              {"_index": "books", "_id": "2", "_source": {"title": "Foxes running quickly", "genre": "nature", "pages": 300}},
+              {"_index": "books", "_id": "3", "_source": {"title": "A slow turtle", "genre": "fable", "pages": 80}},
+          ])
+          assert client.get(index="books", id="1")["_source"]["pages"] == 120
+          found = client.search(index="books", body={"query": {"match": {"title": "fox"}}})
+          assert [hit["_id"] for hit in found["hits"]["hits"]] == ["1"], found
+          totals = client.search(index="books", body={"size": 0, "aggs": {"genres": {"terms": {"field": "genre"}}}})
+          assert totals["aggregations"]["genres"]["buckets"][0] == {"key": "fable", "doc_count": 2}, totals
+          assert client.count(index="books")["count"] == 3
+          client.delete(index="books", id="3")
+          client.indices.delete(index="books")
+          assert not client.indices.exists(index="books")
+          print("opensearch-py: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from pymongo import MongoClient, ASCENDING, DESCENDING
+          client = MongoClient("mongodb://eggdb:ci-resp-password@127.0.0.1:27018/?authSource=admin&directConnection=true")
+          db = client.app
+          assert client.admin.command("ping")["ok"] == 1.0
+          people = db.people
+          result = people.insert_many([{"name": "Ada", "age": 36, "tags": ["math"]}, {"name": "Grace", "age": 45, "tags": ["navy", "code"]}, {"name": "Linus", "age": 28}])
+          assert len(result.inserted_ids) == 3
+          assert people.find_one({"name": "Ada"})["age"] == 36
+          assert [p["name"] for p in people.find({"age": {"$gte": 30}}).sort("age", DESCENDING)] == ["Grace", "Ada"]
+          assert people.count_documents({"tags": "code"}) == 1
+          assert people.update_one({"name": "Linus"}, {"$inc": {"age": 1}, "$push": {"tags": "kernel"}}).modified_count == 1
+          assert people.find_one({"name": "Linus"}, {"_id": 0, "age": 1}) == {"age": 29}
+          totals = list(people.aggregate([{"$group": {"_id": None, "total": {"$sum": "$age"}}}]))
+          assert totals[0]["total"] == 110, totals
+          people.create_index([("name", ASCENDING)])
+          assert "name_1" in people.index_information()
+          assert people.delete_many({"age": {"$lt": 40}}).deleted_count == 2
+          assert sorted(db.list_collection_names()) == ["people"]
+          db.drop_collection("people")
+          print("pymongo: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from neo4j import GraphDatabase
+          driver = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=("eggdb", "ci-resp-password"))
+          with driver.session() as session:
+              session.run("CREATE (a:Person {name: 'Ada'})-[:KNOWS]->(g:Person {name: 'Grace'})").consume()
+              names = [record["name"] for record in session.run("MATCH (:Person {name: $name})-[:KNOWS]->(p) RETURN p.name AS name", name="Ada")]
+              assert names == ["Grace"], names
+              node = session.run("MATCH (p:Person {name: 'Ada'}) RETURN p").single()["p"]
+              assert "Person" in node.labels and node["name"] == "Ada"
+              assert session.run("MATCH (p:Person) RETURN count(p) AS people").single()["people"] == 2
+          driver.close()
+          print("neo4j driver over Bolt: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from confluent_kafka import Consumer, Producer, TopicPartition, OFFSET_BEGINNING
+          producer = Producer({"bootstrap.servers": "127.0.0.1:9093", "api.version.request": True})
+          for n in range(5):
+              producer.produce("events", value=f"event {n}".encode())
+          assert producer.flush(10) == 0
+          consumer = Consumer({"bootstrap.servers": "127.0.0.1:9093", "group.id": "ci", "enable.auto.commit": False})
+          consumer.assign([TopicPartition("events", 0, OFFSET_BEGINNING)])
+          values = []
+          while len(values) < 5:
+              message = consumer.poll(10)
+              assert message is not None, values
+              assert message.error() is None, message.error()
+              values.append(message.value().decode())
+          assert values == [f"event {n}" for n in range(5)], values
+          consumer.close()
+          print("confluent-kafka: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import pika
+          parameters = pika.ConnectionParameters("127.0.0.1", 5673, credentials=pika.PlainCredentials("eggdb", "ci-resp-password"))
+          connection = pika.BlockingConnection(parameters)
+          channel = connection.channel()
+          channel.confirm_delivery()
+          channel.queue_declare(queue="jobs")
+          for n in range(3):
+              channel.basic_publish(exchange="", routing_key="jobs", body=f"job {n}".encode())
+          received = []
+          for method, properties, body in channel.consume("jobs", inactivity_timeout=2):
+              if method is None:
+                  break
+              received.append(body.decode())
+              channel.basic_ack(method.delivery_tag)
+              if len(received) == 3:
+                  break
+          assert received == ["job 0", "job 1", "job 2"], received
+          channel.cancel()
+          connection.close()
+          print("pika over AMQP 0-9-1: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import paho.mqtt.publish as publish
+          import paho.mqtt.subscribe as subscribe
+          auth = {"username": "eggdb", "password": "ci-resp-password"}
+          publish.single("home/kitchen/temp", "21.5", qos=1, retain=True, hostname="127.0.0.1", port=1884, auth=auth)
+          message = subscribe.simple("home/+/temp", qos=1, hostname="127.0.0.1", port=1884, auth=auth)
+          assert message.payload == b"21.5" and message.retain, message.payload
+          print("paho-mqtt: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import boto3
+          sqs = boto3.client("sqs", endpoint_url="http://127.0.0.1:9325", region_name="us-east-1", aws_access_key_id="eggdb", aws_secret_access_key="ci-resp-password")
+          url = sqs.create_queue(QueueName="orders")["QueueUrl"]
+          sqs.send_message(QueueUrl=url, MessageBody="order 1")
+          messages = sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10).get("Messages", [])
+          assert [m["Body"] for m in messages] == ["order 1"], messages
+          sqs.delete_message(QueueUrl=url, ReceiptHandle=messages[0]["ReceiptHandle"])
+          assert url in sqs.list_queues()["QueueUrls"]
+          print("boto3 over the SQS JSON protocol: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import boto3
+          import urllib.request
+          s3 = boto3.client("s3", endpoint_url="http://127.0.0.1:9001", region_name="us-east-1", aws_access_key_id="eggdb", aws_secret_access_key="ci-resp-password")
+          s3.create_bucket(Bucket="eggs")
+          s3.put_object(Bucket="eggs", Key="2026/first egg.txt", Body=b"hello object", ContentType="text/plain", Metadata={"farm": "eggspot"})
+          got = s3.get_object(Bucket="eggs", Key="2026/first egg.txt")
+          assert got["Body"].read() == b"hello object" and got["Metadata"] == {"farm": "eggspot"}, got
+          assert s3.get_object(Bucket="eggs", Key="2026/first egg.txt", Range="bytes=6-")["Body"].read() == b"object"
+          listed = s3.list_objects_v2(Bucket="eggs", Delimiter="/")
+          assert [p["Prefix"] for p in listed["CommonPrefixes"]] == ["2026/"], listed
+          upload = s3.create_multipart_upload(Bucket="eggs", Key="big")["UploadId"]
+          parts = [{"PartNumber": n, "ETag": s3.upload_part(Bucket="eggs", Key="big", UploadId=upload, PartNumber=n, Body=body)["ETag"]} for n, body in [(1, b"a" * (5 << 20)), (2, b"tail")]]
+          s3.complete_multipart_upload(Bucket="eggs", Key="big", UploadId=upload, MultipartUpload={"Parts": parts})
+          assert s3.head_object(Bucket="eggs", Key="big")["ContentLength"] == (5 << 20) + 4
+          url = s3.generate_presigned_url("get_object", Params={"Bucket": "eggs", "Key": "2026/first egg.txt"}, ExpiresIn=60)
+          assert urllib.request.urlopen(url).read() == b"hello object"
+          print("boto3 over S3: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import boto3
+          from boto3.dynamodb.conditions import Key
+          dynamodb = boto3.resource("dynamodb", endpoint_url="http://127.0.0.1:8001", region_name="us-east-1", aws_access_key_id="eggdb", aws_secret_access_key="ci-resp-password")
+          table = dynamodb.create_table(TableName="readings", KeySchema=[{"AttributeName": "sensor", "KeyType": "HASH"}, {"AttributeName": "at", "KeyType": "RANGE"}], AttributeDefinitions=[{"AttributeName": "sensor", "AttributeType": "S"}, {"AttributeName": "at", "AttributeType": "N"}], BillingMode="PAY_PER_REQUEST")
+          for at, value in [(1, 20), (2, 21), (3, 23)]:
+              table.put_item(Item={"sensor": "kitchen", "at": at, "celsius": value})
+          found = table.query(KeyConditionExpression=Key("sensor").eq("kitchen") & Key("at").gte(2))["Items"]
+          assert [int(item["celsius"]) for item in found] == [21, 23], found
+          print("boto3 over DynamoDB: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import asyncio
+          import nats
+          async def main():
+              nc = await nats.connect("nats://127.0.0.1:4223", user="eggdb", password="ci-resp-password")
+              sub = await nc.subscribe("greet.*")
+              await nc.publish("greet.ada", b"hello")
+              message = await sub.next_msg(timeout=2)
+              assert message.data == b"hello"
+              async def answer(request):
+                  await request.respond(b"pong")
+              await nc.subscribe("service.ping", cb=answer)
+              response = await nc.request("service.ping", b"ping", timeout=2)
+              assert response.data == b"pong"
+              await nc.close()
+          asyncio.run(main())
+          print("nats-py: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import time
+          import stomp
+          received = []
+          class Listener(stomp.ConnectionListener):
+              def on_message(self, frame):
+                  received.append(frame.body)
+          conn = stomp.Connection([("127.0.0.1", 61614)], heartbeats=(0, 0))
+          conn.set_listener("", Listener())
+          conn.connect("eggdb", "ci-resp-password", wait=True)
+          conn.subscribe("/queue/stomp-jobs", id="1", ack="auto")
+          conn.send("/queue/stomp-jobs", "job 1")
+          for attempt in range(50):
+              if received:
+                  break
+              time.sleep(0.1)
+          assert received == ["job 1"], received
+          conn.disconnect()
+          print("stomp.py: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from proton import Message
+          from proton.utils import BlockingConnection
+          conn = BlockingConnection("amqp://127.0.0.1:5673", user="eggdb", password="ci-resp-password", allowed_mechs="PLAIN")
+          sender = conn.create_sender("amqp1-orders")
+          sender.send(Message(body="order 1.0"))
+          receiver = conn.create_receiver("amqp1-orders", credit=10)
+          message = receiver.receive(timeout=5)
+          receiver.accept()
+          assert bytes(message.body) == b"order 1.0", message.body
+          conn.close()
+          print("python-qpid-proton over AMQP 1.0: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          from cassandra.auth import PlainTextAuthProvider
+          from cassandra.cluster import Cluster
+          cluster = Cluster(["127.0.0.1"], port=9043, protocol_version=4, auth_provider=PlainTextAuthProvider("eggdb", "ci-resp-password"))
+          session = cluster.connect()
+          session.execute("CREATE KEYSPACE IF NOT EXISTS shop WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}")
+          session.set_keyspace("shop")
+          session.execute("CREATE TABLE IF NOT EXISTS events (device text, at int, reading double, PRIMARY KEY (device, at))")
+          insert = session.prepare("INSERT INTO events (device, at, reading) VALUES (?, ?, ?)")
+          for at in range(3):
+              session.execute(insert, ("sensor-1", at, at * 1.5))
+          rows = list(session.execute("SELECT at, reading FROM events WHERE device = %s", ("sensor-1",)))
+          assert [(row.at, row.reading) for row in rows] == [(0, 0.0), (1, 1.5), (2, 3.0)], rows
+          cluster.shutdown()
+          print("cassandra-driver over CQL v4: passed")
+          PY
+          "$RUNNER_TEMP/resp/bin/python" - <<'PY'
+          import base64
+          import json
+          import urllib.request
+          from influxdb_client import InfluxDBClient, Point
+          from influxdb_client.client.write_api import SYNCHRONOUS
+          client = InfluxDBClient(url="http://127.0.0.1:8087", token="ci-resp-password", org="eggs")
+          client.write_api(write_options=SYNCHRONOUS).write(bucket="metrics", record=[Point("temperature").tag("room", "kitchen").field("value", 21.5), Point("temperature").tag("room", "hall").field("value", 19.0)])
+          client.close()
+          authorization = "Basic " + base64.b64encode(b"eggdb:ci-resp-password").decode()
+          request = urllib.request.Request("http://127.0.0.1:8087/api/v1/query?query=sum%28temperature%29", headers={"Authorization": authorization})
+          answer = json.load(urllib.request.urlopen(request))
+          assert answer["data"]["result"][0]["value"][1] == "40.5", answer
+          print("influxdb-client and PromQL: passed")
+          PY
+
+  redis-compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    env:
+      COMPARE_MANIFEST: crates/eggdb-redis-compare/Cargo.toml
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            crates/eggdb-redis-compare/target
+          key: cargo-redis-compare-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'crates/eggdb-redis-compare/Cargo.lock') }}
+      - name: Format and lint
+        run: |
+          cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
+          cargo clippy --manifest-path "$COMPARE_MANIFEST" --release --locked --all-targets -- -D warnings
+      - name: EggDB against Redis
+        run: |
+          mkdir -p compare-results
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- --results compare-results/eggdb-redis-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep the Redis comparison results of this change
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: redis-compare-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: compare-results/
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: warn
+
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the latest release with the one-line installer and time it
+        if: runner.os != 'Windows'
+        run: scripts/install/check.sh >> "$GITHUB_STEP_SUMMARY"
+      - name: Install the latest release with the PowerShell installer and time it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'eggdb-bin'
+          $env:EGGDB_INSTALL_DIR = $dir
+          $installing = [System.Diagnostics.Stopwatch]::StartNew()
+          ./scripts/install/install.ps1
+          $installing.Stop()
+          $starting = [System.Diagnostics.Stopwatch]::StartNew()
+          & (Join-Path $dir 'eggdb.exe') version
+          $starting.Stop()
+          "| Step | Seconds |`n|------|--------:|`n| download and install | $([math]::Round($installing.Elapsed.TotalSeconds, 2)) |`n| first start | $([math]::Round($starting.Elapsed.TotalSeconds, 2)) |" >> $env:GITHUB_STEP_SUMMARY
+
+  egg-allocator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-egg-allocator-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Test the eggdb binary and its library with EggDB's own allocator installed
+        run: |
+          cargo test -p eggdb --features egg-allocator
+          cargo build -p eggdb --features egg-allocator
+          scripts/smoke-test.sh target/debug/eggdb
+
   cross:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -145,7 +592,7 @@ jobs:
       - name: Install the pinned toolchain and the cross targets
         run: |
           rustup show active-toolchain || rustup toolchain install
-          rustup target add $TARGETS
+          echo "$TARGETS" | xargs rustup target add
       - uses: actions/cache@v5
         with:
           path: |
@@ -153,11 +600,15 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-cross-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers and the embedded API for each target
+      - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers, the command registry and the embedded API for each target
         run: |
           for target in $TARGETS; do
-            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-mcp -p eggdb-tdswire -p eggdb --all-targets --target "$target" -- -D warnings
+            cargo clippy -p eggdb-platform -p eggdb-storage -p eggdb-sql -p eggdb-crypto -p eggdb-tls -p eggdb-pgwire -p eggdb-mysqlwire -p eggdb-commands -p eggdb-mcp -p eggdb-tdswire -p eggdb-capi -p eggdb --all-targets --target "$target" -- -D warnings
           done
+      - name: Build the file format without the standard library for a Cortex-M microcontroller
+        run: |
+          rustup target add thumbv7em-none-eabihf
+          cargo clippy -p eggdb-format --no-default-features --target thumbv7em-none-eabihf -- -D warnings
 
   bench:
     runs-on: ubuntu-latest
@@ -190,7 +641,11 @@ jobs:
           if-no-files-found: warn
 
   compare:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
       COMPARE_MANIFEST: crates/eggdb-sqlite-compare/Cargo.toml
@@ -221,7 +676,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sqlite-compare-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          name: sqlite-compare-${{ runner.os }}-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: compare-results/
           retention-days: 90
           overwrite: true
@@ -317,8 +772,660 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  pg-functions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg-functions-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Start the official postgres:17 container (test oracle only, never shipped)
+        run: docker run -d --name pg --network host -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in $(seq 1 60); do
+            docker exec pg pg_isready -h 127.0.0.1 -U postgres -q && break
+            sleep 1
+          done
+          docker exec pg pg_isready -h 127.0.0.1 -U postgres
+      - name: Run the function cases with psql on PostgreSQL 17 and on EggDB and compare the bytes
+        env:
+          PG_CONTAINER: pg
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+        run: scripts/pg-functions/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-functions"
+      - name: Run the query cases (windows, LATERAL, data-modifying WITH, views, temporary tables) the same way
+        if: always()
+        env:
+          PG_CONTAINER: pg
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+        run: scripts/pg-functions/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-queries" scripts/pg-queries/cases.sql
+      - name: Keep both outputs and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-functions-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/pg-functions/*.out
+            ${{ runner.temp }}/pg-functions/*.err
+            ${{ runner.temp }}/pg-functions/output.diff
+            ${{ runner.temp }}/pg-queries/*.out
+            ${{ runner.temp }}/pg-queries/*.err
+            ${{ runner.temp }}/pg-queries/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
+  pg-apps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.nuget/packages
+            target
+          key: cargo-pg-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck/NpgsqlAppCheck.csproj') }}
+      - name: Start the official postgres:17 container (test oracle only, never shipped)
+        run: |
+          docker run -d --name pg --network host -e POSTGRES_USER=eggdb -e POSTGRES_PASSWORD=apps-oracle \
+            -e POSTGRES_DB=eggdb -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" postgres:17
+      - name: Install pgjdbc, psycopg 3, SQLAlchemy and Flyway Community (Apache-2.0) with its jackson jars (test clients only, never shipped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/clients/flyway"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/postgresql.jar" \
+            https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar
+          for jar in \
+            org/flywaydb/flyway-core/10.20.1/flyway-core-10.20.1.jar \
+            org/flywaydb/flyway-database-postgresql/10.20.1/flyway-database-postgresql-10.20.1.jar \
+            com/fasterxml/jackson/dataformat/jackson-dataformat-toml/2.15.2/jackson-dataformat-toml-2.15.2.jar \
+            com/fasterxml/jackson/datatype/jackson-datatype-jsr310/2.15.2/jackson-datatype-jsr310-2.15.2.jar \
+            com/fasterxml/jackson/core/jackson-databind/2.15.2/jackson-databind-2.15.2.jar \
+            com/fasterxml/jackson/core/jackson-core/2.15.2/jackson-core-2.15.2.jar \
+            com/fasterxml/jackson/core/jackson-annotations/2.15.2/jackson-annotations-2.15.2.jar; do
+            curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/flyway/$(basename "$jar")" "https://repo1.maven.org/maven2/$jar"
+          done
+          python3 -m venv "$RUNNER_TEMP/clients/venv"
+          "$RUNNER_TEMP/clients/venv/bin/pip" install --quiet "psycopg[binary]==3.2.3" "SQLAlchemy==2.0.36"
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in $(seq 1 60); do
+            docker exec pg pg_isready -h 127.0.0.1 -U eggdb -q && break
+            sleep 1
+          done
+          docker exec pg pg_isready -h 127.0.0.1 -U eggdb
+      - name: Run pgjdbc, psycopg 3, SQLAlchemy Core and ORM, Npgsql (PostgreSQL License; restored from NuGet, never shipped) and Flyway on PostgreSQL 17 and on EggDB and compare the bytes
+        env:
+          PG_CONTAINER: pg
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: eggdb
+          PGPASSWORD: apps-oracle
+          PGJDBC_JAR: ${{ runner.temp }}/clients/postgresql.jar
+          PYTHON: ${{ runner.temp }}/clients/venv/bin/python
+        run: |
+          FLYWAY_CLASSPATH="$PGJDBC_JAR$(printf ':%s' "$RUNNER_TEMP"/clients/flyway/*.jar)" \
+            scripts/pg-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-apps"
+      - name: Keep both outputs and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-apps-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/pg-apps/*.out
+            ${{ runner.temp }}/pg-apps/*.flyway.err
+            ${{ runner.temp }}/pg-apps/serve.err
+            ${{ runner.temp }}/pg-apps/output.diff
+            ${{ runner.temp }}/pg-apps/dotnet-build.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  tds-apps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.nuget/packages
+            target
+          key: cargo-tds-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/TdsAppCheck/TdsAppCheck.csproj', 'crates/eggdb/tests/clients/dotnet/EfCoreAppCheck/EfCoreAppCheck.csproj') }}
+      - name: Download mssql-jdbc (MIT; test client only, never shipped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/clients"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/mssql-jdbc.jar" \
+            https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.8.1.jre11/mssql-jdbc-12.8.1.jre11.jar
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Run mssql-jdbc, Microsoft.Data.SqlClient and EF Core (MIT; restored from NuGet, never shipped) against eggdb serve --tds-listen
+        env:
+          MSSQL_JDBC_JAR: ${{ runner.temp }}/clients/mssql-jdbc.jar
+        run: scripts/tds-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/tds-apps"
+      - name: Keep the outputs, the server log and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tds-apps-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/tds-apps/*.out
+            ${{ runner.temp }}/tds-apps/serve.err
+            ${{ runner.temp }}/tds-apps/output.diff
+            ${{ runner.temp }}/tds-apps/dotnet-build.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  oracle-apps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-oracle-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Download pgjdbc and pull the postgres:17 image for psql (test clients only, never shipped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/clients"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/clients/postgresql.jar" \
+            https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar
+          docker pull --quiet postgres:17
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Run HR's queries in Oracle's dialect through psql and pgjdbc against eggdb serve
+        env:
+          PSQL: docker run --rm -i --network host -e PGPASSWORD -e PGOPTIONS postgres:17 psql
+          PGJDBC_JAR: ${{ runner.temp }}/clients/postgresql.jar
+        run: scripts/oracle-apps/check.sh target/debug/eggdb "$RUNNER_TEMP/oracle-apps"
+      - name: Keep the outputs, the server log and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: oracle-apps-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/oracle-apps/*.out
+            ${{ runner.temp }}/oracle-apps/serve.err
+            ${{ runner.temp }}/oracle-apps/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
+  tls-clients:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-tls-clients-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Get psql 17 (postgres:17 image), the mysql client and go-sqlcmd v1.10.0 (MIT), checked against its SHA-256 (test clients only, never shipped)
+        run: |
+          docker pull --quiet postgres:17
+          command -v mysql || { sudo apt-get update && sudo apt-get install -y mysql-client; }
+          mkdir -p "$RUNNER_TEMP/go-sqlcmd"
+          cd "$RUNNER_TEMP/go-sqlcmd"
+          curl --retry 3 -fsSL -o sqlcmd-linux-amd64.tar.bz2 https://github.com/microsoft/go-sqlcmd/releases/download/v1.10.0/sqlcmd-linux-amd64.tar.bz2
+          echo "92516d98c63d99b0994de5b61350c91f6915f9b76f139a59039fbcb225c2e987  sqlcmd-linux-amd64.tar.bz2" | sha256sum -c -
+          tar -xjf sqlcmd-linux-amd64.tar.bz2
+          tool=$(find "$PWD" -maxdepth 2 -type f -name sqlcmd | head -n 1)
+          [ -n "$tool" ] || { echo "::error::no sqlcmd in the go-sqlcmd archive"; exit 1; }
+          echo "SQLCMD=$tool" >> "$GITHUB_ENV"
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Connect psql, mysql and sqlcmd to eggdb serve over TLS
+        run: |
+          mkdir -p "$RUNNER_TEMP/tls-clients"
+          PSQL="docker run --rm -i --network host -v $RUNNER_TEMP/tls-clients:$RUNNER_TEMP/tls-clients -e PGPASSWORD postgres:17 psql" \
+            scripts/tls-clients/check.sh target/debug/eggdb "$RUNNER_TEMP/tls-clients"
+      - name: Keep the server log and client outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tls-clients-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/tls-clients/*.out
+            ${{ runner.temp }}/tls-clients/*.err
+          retention-days: 7
+          if-no-files-found: ignore
+
+  pg-follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg-follow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Pull the postgres:17 image (a test source, never shipped)
+        run: docker pull --quiet postgres:17
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Follow a running PostgreSQL 17 while it takes writes, then compare
+        run: scripts/pg-follow/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-follow"
+      - name: Keep the follow log and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-follow-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/pg-follow/*.out
+            ${{ runner.temp }}/pg-follow/*.err
+            ${{ runner.temp }}/pg-follow/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
+  sqlalchemy-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-sqlalchemy-suite-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Run SQLAlchemy's dialect compliance suite (MIT, a test tool, never shipped) against eggdb serve
+        run: scripts/sqlalchemy-suite/check.sh target/debug/eggdb "$RUNNER_TEMP/sqlalchemy-suite"
+      - name: Keep the suite's report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sqlalchemy-suite-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/sqlalchemy-suite/pytest.out
+            ${{ runner.temp }}/sqlalchemy-suite/serve.err
+          retention-days: 7
+          if-no-files-found: ignore
+
+  unix-vms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [freebsd, netbsd, omnios]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Test the platform layer, the storage engine and the embedded API natively in freebsd (a VM through vmactions, MIT, test tooling only)
+        if: matrix.os == 'freebsd'
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y curl bash
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
+      - name: Test the platform layer, the storage engine and the embedded API natively in netbsd (a VM through vmactions, MIT, test tooling only)
+        if: matrix.os == 'netbsd'
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: /usr/sbin/pkg_add curl bash
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
+      - name: Test the platform layer, the storage engine and the embedded API natively in omnios (a VM through vmactions, MIT, test tooling only)
+        if: matrix.os == 'omnios'
+        uses: vmactions/omnios-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install curl gcc13 || true
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+            rustup toolchain install
+            cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain and the WASI target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-wasip1
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-browser-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build EggDB for WebAssembly and run it under Node and in headless Chrome
+        run: |
+          cargo build --release -p eggdb-wasm --target wasm32-wasip1
+          cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb.wasm
+          ls -l web/eggdb.wasm
+          node web/test.mjs web/eggdb.wasm
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory web &
+          for _ in $(seq 1 50); do curl -sf http://127.0.0.1:8000/test.html > /dev/null && break; sleep 0.2; done
+          google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/test.html > "$RUNNER_TEMP/dom.html"
+          cat "$RUNNER_TEMP/dom.html"
+          grep -q "eggdb-browser-test: passed" "$RUNNER_TEMP/dom.html"
+
+  mobile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-mobile-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Check the Kotlin binding (JNI over the C API) on the JVM
+        run: |
+          command -v kotlinc || { echo "::error::kotlinc is not installed on this runner"; exit 1; }
+          cargo build -p eggdb-capi
+          mkdir -p "$RUNNER_TEMP/kotlin"
+          gcc -shared -fPIC -Wall -Werror -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" -Icrates/eggdb-capi/include drivers/kotlin/jni/eggdb_jni.c -Ltarget/debug -leggdb_capi -Wl,-rpath,"$PWD/target/debug" -o "$RUNNER_TEMP/kotlin/libeggdb_jni.so"
+          kotlinc drivers/kotlin/src drivers/kotlin/check/Check.kt -include-runtime -d "$RUNNER_TEMP/kotlin/check.jar"
+          java -Djava.library.path="$RUNNER_TEMP/kotlin" -jar "$RUNNER_TEMP/kotlin/check.jar"
+
+  apple-mobile:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-apple-mobile-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Build the C API as an XCFramework for iOS, the iOS simulator and macOS
+        run: scripts/apple/xcframework.sh "$RUNNER_TEMP/EggDB.xcframework"
+
+  other-cpus:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: i686-unknown-linux-gnu
+            packages: gcc-multilib
+            runner: ""
+          - target: armv7-unknown-linux-gnueabihf
+            packages: gcc-arm-linux-gnueabihf qemu-user
+            runner: qemu-arm -L /usr/arm-linux-gnueabihf
+            linker: arm-linux-gnueabihf-gcc
+          - target: s390x-unknown-linux-gnu
+            packages: gcc-s390x-linux-gnu qemu-user
+            runner: qemu-s390x -L /usr/s390x-linux-gnu
+            linker: s390x-linux-gnu-gcc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain, the target, its linker and QEMU
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+          sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Test the file format, the storage engine, cryptography and columnar encodings on ${{ matrix.target }}
+        env:
+          TARGET_ENV: ${{ matrix.target }}
+          LINKER: ${{ matrix.linker }}
+          RUNNER: ${{ matrix.runner }}
+        run: |
+          upper=$(echo "$TARGET_ENV" | tr 'a-z-' 'A-Z_')
+          if [ -n "$LINKER" ]; then export "CARGO_TARGET_${upper}_LINKER=$LINKER"; fi
+          if [ -n "$RUNNER" ]; then export "CARGO_TARGET_${upper}_RUNNER=$RUNNER"; fi
+          cargo test --target "$TARGET_ENV" -p eggdb-format -p eggdb-storage -p eggdb-crypto -p eggdb-columnar
+
+  deploy-templates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check the AWS, Azure and Google Cloud templates (test tools only, never shipped)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cfn"
+          "$RUNNER_TEMP/cfn/bin/pip" install --quiet cfn-lint==1.20.0
+          "$RUNNER_TEMP/cfn/bin/cfn-lint" deploy/aws/eggdb.yaml
+          az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
+          shellcheck deploy/gcp/deploy.sh scripts/apple/xcframework.sh
+
+  footprint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-footprint-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Measure each build profile against its budget (D6, D34)
+        run: scripts/footprint.sh
+
+  reproducible:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the same commit twice from scratch and compare the binaries
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/eggdb --remap-path-prefix=$HOME=/home"
+          cargo build --release -p eggdb --target-dir "$RUNNER_TEMP/first"
+          cargo build --release -p eggdb --target-dir "$RUNNER_TEMP/second"
+          sha256sum "$RUNNER_TEMP/first/release/eggdb" "$RUNNER_TEMP/second/release/eggdb"
+          cmp "$RUNNER_TEMP/first/release/eggdb" "$RUNNER_TEMP/second/release/eggdb"
+
+  unicode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Check the tables are what the generator makes, and pass Unicode's normalization conformance file
+        run: |
+          mkdir -p "$RUNNER_TEMP/ucd"
+          for file in UnicodeData.txt CompositionExclusions.txt CaseFolding.txt NormalizationTest.txt; do
+            curl --retry 3 -fsSL -o "$RUNNER_TEMP/ucd/$file" "https://www.unicode.org/Public/16.0.0/ucd/$file"
+          done
+          python3 -I scripts/unicode/generate.py "$RUNNER_TEMP/ucd" "$RUNNER_TEMP/tables.rs"
+          rustfmt --edition 2024 "$RUNNER_TEMP/tables.rs"
+          diff -u crates/eggdb-text/src/tables.rs "$RUNNER_TEMP/tables.rs"
+          EGGDB_UNICODE_NORMALIZATION_TEST="$RUNNER_TEMP/ucd/NormalizationTest.txt" cargo test -p eggdb-text
+
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-compatibility-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Install dbt-postgres (test tool only, never shipped)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet dbt-core==1.8.9 dbt-postgres==1.8.2
+      - name: Run third-party tools against eggdb serve and report the matrix (D44, D239)
+        env:
+          EGGDB_PASSWORD: ci-compatibility
+          EGGDB_COMPATIBILITY_STRICT: "1"
+        run: |
+          cargo build -p eggdb
+          scripts/compatibility.sh target/debug/eggdb "$RUNNER_TEMP/tools" "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP"
+
+  arrow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-arrow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Read an exported Arrow stream with pyarrow (test tool only, never shipped)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/arrow"
+          "$RUNNER_TEMP/arrow/bin/pip" install --quiet pyarrow==17.0.0
+          cargo build -p eggdb
+          target/debug/eggdb sql "$RUNNER_TEMP/eggs.eggdb" --create -c "CREATE TABLE eggs (id bigint PRIMARY KEY, name text, fresh boolean, price numeric(9,2), laid timestamptz); INSERT INTO eggs VALUES (1, 'brown', true, 1.50, '2026-10-31T08:00:00Z'), (2, NULL, false, NULL, NULL)"
+          target/debug/eggdb export "$RUNNER_TEMP/eggs.eggdb" --table eggs --arrow "$RUNNER_TEMP/eggs.arrows"
+          "$RUNNER_TEMP/arrow/bin/python" - "$RUNNER_TEMP/eggs.arrows" <<'PY'
+          import sys
+          import pyarrow.ipc
+          table = pyarrow.ipc.open_stream(sys.argv[1]).read_all()
+          assert table.column_names == ["id", "name", "fresh", "price", "laid"], table.schema
+          rows = table.to_pylist()
+          assert rows[0]["id"] == 1 and rows[0]["name"] == "brown" and rows[0]["fresh"] is True, rows
+          assert str(rows[0]["price"]) == "1.50" and rows[1]["name"] is None and rows[1]["price"] is None, rows
+          print("pyarrow read the Arrow stream:", table.schema)
+          PY
+
   check:
-    needs: [lint-and-test, platforms, musl, cross, bench, compare, pg-restore, pg-catalog]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

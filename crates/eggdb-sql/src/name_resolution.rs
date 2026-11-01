@@ -44,6 +44,7 @@ pub(crate) struct Resolver<'a> {
     base_path: Arc<[String]>,
     view_paths: Vec<Arc<[String]>>,
     resolution: Resolution,
+    target_privilege: Option<crate::roles::Privilege>,
 }
 
 fn nested_too_deep(position: usize) -> SqlError {
@@ -118,6 +119,7 @@ impl<'a> Resolver<'a> {
             base_path: path,
             view_paths: Vec::new(),
             resolution: Resolution::default(),
+            target_privilege: None,
         })
     }
 
@@ -143,6 +145,20 @@ impl<'a> Resolver<'a> {
         }
         if crate::temp_tables::is_temp_table(name) {
             return Ok(None);
+        }
+        if self.view_paths.is_empty() && crate::temporary::active() {
+            let temporary = crate::temporary::internal_name(name);
+            if self
+                .reader
+                .get(&crate::encoding::table_key(&temporary))?
+                .is_some()
+                || self
+                    .reader
+                    .get(&crate::encoding::sequence_key(&temporary))?
+                    .is_some()
+            {
+                return Ok(Some(temporary));
+            }
         }
         let path: &[String] = self.view_paths.last().unwrap_or(&self.base_path);
         if schemas::is_default_path(path) {
@@ -189,11 +205,126 @@ impl<'a> Resolver<'a> {
             return Err(crate::pg_catalog::read_only(relation.name()).at(reference.name.position));
         }
         let resolved = self.resolve_name(&reference.name.text)?;
-        if is_qualified(&reference.name.text) && reference.alias.is_none() {
+        if (is_qualified(&reference.name.text) || crate::temporary::is_temporary_name(&resolved))
+            && reference.alias.is_none()
+        {
             reference.alias = Some(base_name(&resolved).to_owned());
+        }
+        if let Some(privilege) = self.target_privilege {
+            self.check_privilege(&resolved, privilege)?;
+            self.check_new_rows(&resolved, privilege)?;
         }
         reference.name.text = resolved;
         Ok(())
+    }
+
+    fn check_conflict_action(&self, table: &str, action: &OnDuplicate) -> SqlResult<()> {
+        if self.target_privilege.is_none() {
+            return Ok(());
+        }
+        let (privilege, command, form) = match action {
+            OnDuplicate::Update(_) => (
+                crate::roles::Privilege::Update,
+                crate::row_security::PolicyCommand::Update,
+                "INSERT ... ON CONFLICT DO UPDATE",
+            ),
+            OnDuplicate::Replace => (
+                crate::roles::Privilege::Delete,
+                crate::row_security::PolicyCommand::Delete,
+                "REPLACE",
+            ),
+            OnDuplicate::Fail | OnDuplicate::Ignore => return Ok(()),
+        };
+        self.check_privilege(table, privilege)?;
+        if self.row_security_filter(table, command)?.is_some() {
+            return Err(SqlError::not_supported(format!(
+                "{form} on a table with row-level security for this role"
+            )));
+        }
+        Ok(())
+    }
+
+    fn check_new_rows(&self, table: &str, privilege: crate::roles::Privilege) -> SqlResult<()> {
+        let command = match privilege {
+            crate::roles::Privilege::Insert => crate::row_security::PolicyCommand::Insert,
+            crate::roles::Privilege::Update => crate::row_security::PolicyCommand::Update,
+            _ => return Ok(()),
+        };
+        match self.settings {
+            Some(settings) if self.stack.is_empty() => {
+                crate::row_security::check_new_rows(self.reader, settings, table, command)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn row_security_filter(
+        &self,
+        table: &str,
+        command: crate::row_security::PolicyCommand,
+    ) -> SqlResult<Option<Expr>> {
+        let Some(settings) = self.settings else {
+            return Ok(None);
+        };
+        crate::row_security::visible_rows(self.reader, settings, table, command)?
+            .map(|text| crate::row_security::condition_expression(&text, settings))
+            .transpose()
+    }
+
+    fn row_security_view(
+        &mut self,
+        reference: &mut TableReference,
+        table: &crate::encoding::TableDefinition,
+    ) -> SqlResult<bool> {
+        let Some(settings) = self.settings else {
+            return Ok(false);
+        };
+        if self.stack.contains(&table.name) {
+            return Ok(false);
+        }
+        let Some(text) = crate::row_security::visible_rows(
+            self.reader,
+            settings,
+            &table.name,
+            crate::row_security::PolicyCommand::Select,
+        )?
+        else {
+            return Ok(false);
+        };
+        let shown: Vec<String> = display(&table.name)
+            .split('.')
+            .map(crate::schema::quoted)
+            .collect();
+        let view = crate::encoding::ViewDefinition {
+            name: table.name.clone(),
+            dialect: Dialect::PostgreSql,
+            query: format!("SELECT * FROM {} WHERE {text}", shown.join(".")),
+            columns: table
+                .columns
+                .iter()
+                .map(|column| crate::encoding::ViewColumn {
+                    name: column.name.clone(),
+                    sql_type: Some(column.sql_type),
+                    source: String::new(),
+                })
+                .collect(),
+            search_path: vec!["public".to_owned()],
+            references: vec![table.name.clone()],
+            expands_wildcard: false,
+            has_column_list: false,
+            check_option: None,
+        };
+        self.expand(reference, Arc::new(view))?;
+        Ok(true)
+    }
+
+    fn check_privilege(&self, table: &str, privilege: crate::roles::Privilege) -> SqlResult<()> {
+        match self.settings {
+            Some(settings) if self.stack.is_empty() => {
+                crate::roles::check_table(self.reader, settings, table, privilege)
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn query(&mut self, query: &mut Query) -> SqlResult<()> {
@@ -283,10 +414,14 @@ impl<'a> Resolver<'a> {
         if self.selects > MAX_QUERIES {
             return Err(too_many_queries(0));
         }
-        if let Some(from) = &mut select.from {
-            self.walk_reference(&mut from.first, ctes)?;
-            for join in &mut from.joins {
-                self.walk_reference(&mut join.table, ctes)?;
+        {
+            let Select { from, filter, .. } = &mut *select;
+            if let Some(from) = from {
+                let filter = filter.as_ref();
+                self.walk_reference(&mut from.first, ctes, filter)?;
+                for join in &mut from.joins {
+                    self.walk_reference(&mut join.table, ctes, filter)?;
+                }
             }
         }
         if !self.walk_expressions {
@@ -365,6 +500,7 @@ impl<'a> Resolver<'a> {
         &mut self,
         reference: &mut TableReference,
         ctes: &mut Vec<String>,
+        filter: Option<&Expr>,
     ) -> SqlResult<()> {
         if let Some(derived) = &mut reference.derived {
             return self.nested_query(&mut derived.query, ctes, reference.name.position);
@@ -393,18 +529,163 @@ impl<'a> Resolver<'a> {
         if let Some(resolved) = self.resolved_name(&reference.name.text)? {
             reference.name.text = resolved;
         }
-        if written_qualified && reference.alias.is_none() {
+        if (written_qualified || crate::temporary::is_temporary_name(&reference.name.text))
+            && reference.alias.is_none()
+        {
             reference.alias = Some(base_name(&reference.name.text).to_owned());
         }
         let relation = self.tables.relation(self.reader, &reference.name.text)?;
+        if relation.is_some() {
+            self.check_privilege(&reference.name.text, crate::roles::Privilege::Select)?;
+        }
+        if let Some(Relation::Table(table)) = &relation
+            && self.row_security_view(reference, table)?
+        {
+            return Ok(());
+        }
         if relation.is_some() && self.recorded_at.is_some() {
             let name = reference.name.text.clone();
             self.record(&name);
         }
         match relation {
             Some(Relation::View(view)) => self.expand(reference, view),
-            _ => Ok(()),
+            Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter),
+            None => Ok(()),
         }
+    }
+
+    fn expand_partitioned(
+        &mut self,
+        reference: &mut TableReference,
+        table: &crate::encoding::TableDefinition,
+        filter: Option<&Expr>,
+    ) -> SqlResult<()> {
+        let catalog = crate::partitions::catalog(self.reader, self.tables)?;
+        if catalog.is_empty() || catalog.key_of(&table.name).is_none() {
+            return Ok(());
+        }
+        let position = reference.name.position;
+        let label = reference
+            .alias
+            .clone()
+            .unwrap_or_else(|| base_name(&reference.name.text).to_owned());
+        let qualifiers = [label.as_str(), base_name(&table.name)];
+        let mut leaves = Vec::new();
+        self.surviving_leaves(&catalog, table, filter, &qualifiers, 0, &mut leaves)?;
+        if leaves.is_empty() {
+            return Ok(());
+        }
+        reference.alias = Some(label);
+        if let [only] = leaves.as_slice() {
+            reference.name.text = only.clone();
+            return Ok(());
+        }
+        let items: Vec<SelectItem> = table
+            .columns
+            .iter()
+            .map(|column| SelectItem::Expr {
+                expr: Expr {
+                    kind: crate::ast::ExprKind::Column {
+                        qualifier: None,
+                        name: column.name.clone(),
+                    },
+                    position,
+                },
+                alias: None,
+            })
+            .collect();
+        let dialect = crate::constraints::current_dialect();
+        let branch = |leaf: &String| {
+            crate::ast::SetExpr::Select(Box::new(Select {
+                distinct: false,
+                items: items.clone(),
+                from: Some(crate::ast::FromClause {
+                    first: TableReference::named(
+                        Name {
+                            text: leaf.clone(),
+                            position,
+                        },
+                        None,
+                    ),
+                    joins: Vec::new(),
+                }),
+                filter: None,
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                source_row_limit: None,
+            }))
+        };
+        let mut body = branch(&leaves[0]);
+        for leaf in &leaves[1..] {
+            body = crate::ast::SetExpr::Operation(Box::new(crate::ast::SetOperation {
+                operator: crate::ast::SetOperator::Union,
+                all: true,
+                left: body,
+                right: branch(leaf),
+                dialect,
+                position,
+            }));
+        }
+        let mut query = Query {
+            with: Vec::new(),
+            recursive: false,
+            body,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            position,
+        };
+        let walk_expressions = std::mem::replace(&mut self.walk_expressions, true);
+        let walked = self.walk_query(&mut query, &mut Vec::new());
+        self.walk_expressions = walk_expressions;
+        walked?;
+        reference.derived = Some(Box::new(DerivedTable {
+            query,
+            column_names: table
+                .columns
+                .iter()
+                .map(|column| Name {
+                    text: column.name.clone(),
+                    position,
+                })
+                .collect(),
+            dialect,
+            lateral: false,
+        }));
+        Ok(())
+    }
+
+    fn surviving_leaves(
+        &mut self,
+        catalog: &crate::partitions::PartitionCatalog,
+        table: &crate::encoding::TableDefinition,
+        filter: Option<&Expr>,
+        qualifiers: &[&str],
+        depth: usize,
+        leaves: &mut Vec<String>,
+    ) -> SqlResult<()> {
+        if depth > MAX_QUERY_NESTING {
+            return Err(crate::encoding::corrupt("partition tree"));
+        }
+        let Some(partitioned) = crate::partitions::Partitioned::of(catalog, table)? else {
+            leaves.push(table.name.clone());
+            return Ok(());
+        };
+        let children: Vec<String> = partitioned
+            .surviving(filter, qualifiers)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for child in children {
+            let Some(child_table) = self.tables.table(self.reader, &child)? else {
+                return Err(crate::encoding::corrupt("partition tree"));
+            };
+            self.surviving_leaves(catalog, &child_table, filter, qualifiers, depth + 1, leaves)?;
+        }
+        Ok(())
     }
 
     fn expand(
@@ -494,6 +775,7 @@ impl<'a> Resolver<'a> {
                 query,
                 column_names,
                 dialect: view.dialect,
+                lateral: false,
             }
         };
         if reference.alias.is_none() {
@@ -525,6 +807,7 @@ impl Resolver<'_> {
                 ),
                 column_names: Vec::new(),
                 dialect: view.dialect,
+                lateral: false,
             }),
             Dialect::Sqlite if view.has_column_list => {
                 let present = self.output_columns(&query)?;
@@ -543,12 +826,14 @@ impl Resolver<'_> {
                     query,
                     column_names,
                     dialect: view.dialect,
+                    lateral: false,
                 })
             }
             Dialect::Sqlite => Ok(DerivedTable {
                 query,
                 column_names: Vec::new(),
                 dialect: view.dialect,
+                lateral: false,
             }),
             Dialect::MySql | Dialect::Oracle | Dialect::SqlServer => {
                 let present = self.output_columns(&query)?;
@@ -561,6 +846,7 @@ impl Resolver<'_> {
                     ),
                     column_names: Vec::new(),
                     dialect: view.dialect,
+                    lateral: false,
                 })
             }
         }
@@ -707,6 +993,7 @@ fn select_from(
                     query,
                     column_names,
                     dialect,
+                    lateral: false,
                 })),
                 generated: None,
             },
@@ -750,9 +1037,26 @@ pub(crate) fn resolve_view_body(
     Ok(resolver.finish())
 }
 
+fn merge_privileges(merge: &MergeStatement) -> Vec<crate::roles::Privilege> {
+    let mut privileges = Vec::new();
+    if let Some(update) = &merge.update {
+        if !update.assignments.is_empty() {
+            privileges.push(crate::roles::Privilege::Update);
+        }
+        if update.delete_condition.is_some() {
+            privileges.push(crate::roles::Privilege::Delete);
+        }
+    }
+    if merge.insert.is_some() {
+        privileges.push(crate::roles::Privilege::Insert);
+    }
+    privileges
+}
+
 pub(crate) struct Binding<'a> {
     pub(crate) settings: &'a Settings,
     pub(crate) walk_expressions: bool,
+    pub(crate) target_privilege: Option<crate::roles::Privilege>,
 }
 
 impl Binding<'_> {
@@ -762,7 +1066,10 @@ impl Binding<'_> {
         tables: &'r mut TableCache,
     ) -> SqlResult<Resolver<'r>> {
         crate::pg_catalog::load_if_wanted(reader)?;
-        Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)
+        let mut resolver =
+            Resolver::new(reader, tables, Some(self.settings), self.walk_expressions)?;
+        resolver.target_privilege = self.target_privilege;
+        Ok(resolver)
     }
 
     pub(crate) fn select(
@@ -801,14 +1108,28 @@ impl Binding<'_> {
         self.resolver(reader, tables)?.target(reference)
     }
 
+    pub(crate) fn condition(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        condition: &mut Expr,
+    ) -> SqlResult<()> {
+        self.resolver(reader, tables)?
+            .expressions(std::iter::once(condition))
+    }
+
     pub(crate) fn insert(
         &self,
         reader: &dyn KeyValueRead,
         tables: &mut TableCache,
         insert: &mut Insert,
     ) -> SqlResult<()> {
+        if let InsertSource::Query(query) = &mut insert.source {
+            self.query(reader, tables, query)?;
+        }
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut insert.table)?;
+        resolver.check_conflict_action(&insert.table.name.text, &insert.on_duplicate)?;
         if !self.walk_expressions {
             return Ok(());
         }
@@ -837,6 +1158,15 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut update.table)?;
+        if let Some(condition) = resolver.row_security_filter(
+            &update.table.name.text,
+            crate::row_security::PolicyCommand::Update,
+        )? {
+            update.filter = Some(crate::row_security::restricted(
+                update.filter.take(),
+                condition,
+            ));
+        }
         if !self.walk_expressions {
             return Ok(());
         }
@@ -861,7 +1191,26 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         self.select(reader, tables, &mut merge.source)?;
         let mut resolver = self.resolver(reader, tables)?;
+        let checked = resolver.target_privilege.take();
         resolver.target(&mut merge.target)?;
+        if checked.is_some() {
+            for privilege in merge_privileges(merge) {
+                resolver.check_privilege(&merge.target.name.text, privilege)?;
+                resolver.check_new_rows(&merge.target.name.text, privilege)?;
+            }
+        }
+        resolver.target_privilege = checked;
+        if resolver
+            .row_security_filter(
+                &merge.target.name.text,
+                crate::row_security::PolicyCommand::Update,
+            )?
+            .is_some()
+        {
+            return Err(SqlError::not_supported(
+                "MERGE into a table with row-level security for this role",
+            ));
+        }
         if !self.walk_expressions {
             return Ok(());
         }
@@ -875,6 +1224,7 @@ impl Binding<'_> {
             exprs.extend(insert.values.iter_mut());
             exprs.extend(insert.condition.iter_mut());
         }
+        exprs.extend(returning_exprs(&mut merge.output));
         resolver.expressions(exprs)
     }
 
@@ -886,6 +1236,15 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut delete.table)?;
+        if let Some(condition) = resolver.row_security_filter(
+            &delete.table.name.text,
+            crate::row_security::PolicyCommand::Delete,
+        )? {
+            delete.filter = Some(crate::row_security::restricted(
+                delete.filter.take(),
+                condition,
+            ));
+        }
         if !self.walk_expressions {
             return Ok(());
         }
@@ -900,7 +1259,25 @@ impl Binding<'_> {
         tables: &mut TableCache,
         create: &mut CreateTable,
     ) -> SqlResult<()> {
-        create.name.text = schemas::creation_name(reader, &create.name)?;
+        let temporary = create.temporary.is_some()
+            || crate::temporary::is_sqlserver_temporary(&create.name.text);
+        if temporary {
+            if is_qualified(&create.name.text)
+                && !crate::temporary::is_temporary_name(&create.name.text)
+            {
+                return Err(SqlError::new(
+                    SqlState::INVALID_TABLE_DEFINITION,
+                    "cannot create temporary relation in non-temporary schema",
+                )
+                .at(create.name.position));
+            }
+            create.name.text = crate::temporary::internal_name(base_name(&create.name.text));
+        } else {
+            create.name.text = schemas::creation_name(reader, &create.name)?;
+        }
+        if crate::temporary::is_temporary_name(&create.name.text) && create.temporary.is_none() {
+            create.temporary = Some(crate::ast::OnCommit::PreserveRows);
+        }
         let mut resolver = self.resolver(reader, tables)?;
         for spec in create
             .columns

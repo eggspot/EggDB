@@ -2,27 +2,27 @@ use crate::memory_store::MemoryStore;
 use crate::tests::{fuzz, render};
 use crate::{Dialect, Session, SqlError};
 
-fn run(session: &mut Session<'_, MemoryStore>, sql: &str) -> Result<Vec<String>, SqlError> {
+fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
     session.execute(sql, &mut |result| outputs.push(render(&result)))?;
     Ok(outputs)
 }
 
-fn last(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn last(session: &mut Session<'_>, sql: &str) -> String {
     match run(session, sql) {
         Ok(outputs) => outputs.last().cloned().unwrap_or_default(),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
 
-fn fails(session: &mut Session<'_, MemoryStore>, sql: &str) -> SqlError {
+fn fails(session: &mut Session<'_>, sql: &str) -> SqlError {
     match run(session, sql) {
         Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
         Err(error) => error,
     }
 }
 
-fn code(session: &mut Session<'_, MemoryStore>, sql: &str) -> String {
+fn code(session: &mut Session<'_>, sql: &str) -> String {
     fails(session, sql).state().code().to_owned()
 }
 
@@ -146,7 +146,7 @@ fn views_answer_as_their_query_and_track_what_they_use() {
     last(&mut session, "ALTER TABLE a DROP COLUMN extra");
     assert_eq!(
         code(&mut session, "INSERT INTO totals VALUES ('z', 1)"),
-        "0A000"
+        "55000"
     );
     assert_eq!(
         code(&mut session, "CREATE VIEW totals AS SELECT 1"),
@@ -273,7 +273,8 @@ fn comments_are_stored_and_removed_with_their_objects() {
 fn a_pg_dump_script_with_schemas_views_and_comments_runs() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
-    let script = "SET statement_timeout = 0;
+    let script = "CREATE ROLE reader;
+SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
 SET client_encoding = 'UTF8';
@@ -333,13 +334,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA app GRANT SELECT ON TABLES 
     );
     assert_eq!(
         code(&mut session, "CREATE MATERIALIZED VIEW m AS SELECT 1"),
-        "0A000"
+        "3F000"
     );
-    assert_eq!(
-        code(&mut session, "CREATE TYPE mood AS ENUM ('a')"),
-        "0A000"
-    );
-    assert_eq!(code(&mut session, "CREATE DOMAIN d AS int"), "0A000");
     assert_eq!(code(&mut session, "CREATE EXTENSION hstore"), "0A000");
 }
 
@@ -350,7 +346,7 @@ fn schema_names_are_postgresql_only() {
     assert!(run(&mut mysql, "SELECT current_schemas(true)").is_err());
     assert!(run(&mut mysql, "SELECT set_config('a.b', 'c', false)").is_err());
     let mut sqlite = Session::with_dialect(&store, Dialect::Sqlite);
-    assert_eq!(code(&mut sqlite, "SELECT * FROM temp.t"), "0A000");
+    assert_eq!(code(&mut sqlite, "SELECT * FROM temp.t"), "42P01");
     assert!(run(&mut sqlite, "CREATE SCHEMA s").is_err());
 }
 
@@ -434,9 +430,10 @@ fn sqlite_views_follow_sqlite() {
         "no such table: v"
     );
     assert_eq!(
-        code(&mut session, "CREATE VIEW temp.w AS SELECT 1"),
-        "0A000"
+        last(&mut session, "CREATE VIEW temp.w AS SELECT 1 AS one"),
+        "CREATE VIEW"
     );
+    assert_eq!(last(&mut session, "SELECT one FROM w"), "one\n1\nSELECT 1");
 }
 
 #[test]
@@ -509,7 +506,7 @@ const VIEW_QUERIES: [&str; 8] = [
     "SELECT * FROM t WHERE a % 2 = 0",
 ];
 
-fn ordered(session: &mut Session<'_, MemoryStore>, from: &str) -> String {
+fn ordered(session: &mut Session<'_>, from: &str) -> String {
     let columns = last(session, &format!("SELECT * FROM {from} LIMIT 0"));
     let width = columns
         .lines()

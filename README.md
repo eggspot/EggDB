@@ -39,7 +39,8 @@ and `eggdb ui`, a full-screen terminal UI, and `eggdb sql` runs the first parts 
 dialect on the same file: tables, joins, `GROUP BY` with aggregates ([docs/sql.md](docs/sql.md)).
 `eggdb serve` serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the
 `mysql` client and MySQL drivers in MySQL's SQL, and with `--tds-listen` to Microsoft's
-`sqlcmd` in Transact-SQL, on loopback only until EggDB has TLS, with one
+`sqlcmd` in Transact-SQL, on loopback without TLS and on any address with EggDB's own TLS
+(`--tls-certificate` and `--tls-key`, or `--tls-self-signed`), with one
 writer at a time. `eggdb sql --dialect sqlite` and the embedded API run SQLite's SQL on the same
 file, and `--dialect oracle` Oracle's (no Oracle wire protocol). `eggdb mcp` lets AI agents
 such as Claude Code read the file over MCP, read-only, every call in an audit log
@@ -49,6 +50,21 @@ what is tested and what is not: [docs/correctness.md](docs/correctness.md); the 
 [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
 
 ### Install: download one file
+
+One line installs the latest release, after checking it against the release's `SHA256SUMS`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/eggspot/EggDB/main/scripts/install/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/eggspot/EggDB/main/scripts/install/install.ps1 | iex
+```
+
+The first puts `eggdb` in `~/.local/bin` (the static musl build on Linux, and macOS), the second
+in `%LOCALAPPDATA%\EggDB\bin`, added to your PATH. `EGGDB_VERSION` picks a release and
+`EGGDB_INSTALL_DIR` another folder. CI runs both on Linux, macOS and Windows against the latest
+release and times the download, the install and the first start.
 
 Each release on the [releases page](https://github.com/eggspot/EggDB/releases) has one archive
 per platform holding the `eggdb` binary, which needs nothing else (the Linux `musl` builds are
@@ -134,6 +150,7 @@ fn main() -> eggdb::Result<()> {
 }
 ```
 
-Transactions, scans, durability, errors and limits: [docs/embedded.md](docs/embedded.md).
+Transactions, scans, durability, errors and limits: [docs/embedded.md](docs/embedded.md). From C, Python
+and any language that calls C: [docs/c-api.md](docs/c-api.md).
 
 Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.

@@ -3,7 +3,7 @@ use crate::{
     Dialect, OneStatementError, OneStatementRefusal, QueryResult, Session, SqlType, Value,
 };
 
-fn session(store: &MemoryStore, dialect: Dialect) -> Session<'_, MemoryStore> {
+fn session(store: &MemoryStore, dialect: Dialect) -> Session<'_> {
     Session::with_dialect(store, dialect)
 }
 

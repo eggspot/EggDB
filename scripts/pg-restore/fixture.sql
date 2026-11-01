@@ -7,6 +7,9 @@ COMMENT ON SCHEMA shop IS 'warehouses and their stock';
 
 CREATE TYPE public.mood AS ENUM ('calm', 'busy');
 CREATE DOMAIN public.positive_amount AS numeric CHECK (VALUE > 0);
+CREATE DOMAIN public.sku_code AS varchar(12) NOT NULL CHECK (VALUE ~ '^[A-Z0-9-]+$');
+CREATE TYPE public.address AS (street text, city text);
+CREATE TYPE public.price_range AS RANGE (subtype = numeric);
 
 CREATE SEQUENCE public.invoice_number_seq START WITH 1000 INCREMENT BY 7;
 
@@ -114,6 +117,20 @@ CREATE TABLE public.tasks (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     feeling public.mood NOT NULL,
     title text
+);
+
+CREATE TABLE public.shipments (
+    id serial PRIMARY KEY,
+    order_id bigint NOT NULL,
+    feeling public.mood,
+    amount public.positive_amount,
+    sku public.sku_code,
+    tags text[],
+    sizes integer[],
+    ship_to public.address,
+    window_days int4range,
+    price public.price_range,
+    stay daterange
 );
 
 INSERT INTO public.customers (name, email, country, active, created_at, note)
@@ -227,6 +244,29 @@ FROM generate_series(1, :rows / 10) AS i;
 INSERT INTO public.tasks (feeling, title)
 SELECT (ARRAY['calm', 'busy']::public.mood[])[1 + i % 2], 'task ' || i
 FROM generate_series(1, greatest(3, :rows / 100)) AS i;
+
+INSERT INTO public.shipments (order_id, feeling, amount, sku, tags, sizes, ship_to, window_days, price, stay)
+SELECT 1 + i % 30,
+       (ARRAY['calm', 'busy']::public.mood[])[1 + i % 2],
+       CASE WHEN i % 9 = 0 THEN NULL ELSE (i * 37 % 2000) + 0.25 END,
+       'SKU-' || i,
+       CASE i % 4 WHEN 0 THEN NULL WHEN 1 THEN '{}'::text[]
+            WHEN 2 THEN ARRAY['fragile', 'a "quoted" tag', 'back\slash', '']
+            ELSE ARRAY['x', NULL, 'Ngọc, Ánh', 'NULL'] END,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE ARRAY[i % 7, i % 11, -i] END,
+       CASE WHEN i % 6 = 0 THEN NULL
+            ELSE ROW('Street ' || i || ', "door" ' || i % 3,
+                     CASE WHEN i % 4 = 0 THEN NULL ELSE 'Huế' END)::public.address END,
+       CASE i % 3 WHEN 0 THEN 'empty'::int4range
+            WHEN 1 THEN int4range(i % 10, i % 10 + 5)
+            ELSE int4range(NULL, i % 20, '(]') END,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE public.price_range(i / 10.0, i / 10.0 + 2.5, '[)') END,
+       daterange(date '2024-01-01' + i % 300, date '2024-01-01' + i % 300 + 1 + i % 9)
+FROM generate_series(1, greatest(30, :rows / 100)) AS i;
+
+ALTER TABLE public.shipments ADD CONSTRAINT shipments_order_fk FOREIGN KEY (order_id)
+    REFERENCES public.orders (id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE public.shipments ADD CONSTRAINT shipments_amount_small CHECK (amount < 1000) NOT VALID;
 
 CREATE INDEX orders_customer_idx ON public.orders (customer_id);
 CREATE INDEX orders_placed_idx ON public.orders (ordered_on DESC, status);

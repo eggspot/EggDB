@@ -1,0 +1,5 @@
+module CEggDB [system] {
+    header "shim.h"
+    link "eggdb_capi"
+    export *
+}

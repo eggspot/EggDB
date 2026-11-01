@@ -430,14 +430,59 @@ fn a_checkpoint_after_a_flush_longer_than_the_recycled_segments_cuts_its_new_seg
             .count(),
         RECYCLED_SEGMENTS
     );
-    assert_older_slot_is_a_copy(&fs, "after cutting segments off");
+    let (newest, older) = header_slots(&fs);
+    assert_eq!(newest, after);
+    assert_ne!(
+        older.unwrap().log_head_page,
+        newest.log_head_page,
+        "a cutting checkpoint writes one slot"
+    );
     drop(cache);
     let cache = open(&fs, Access::ReadOnly).unwrap();
     assert_eq!(cache.superblock().page_count, after.page_count);
     assert_model(&cache, &model, "after cutting segments off");
     drop(cache);
     drop(open(&fs, Access::ReadWrite).unwrap());
+    assert_older_slot_is_a_copy(&fs, "an open for writing copies the header");
     assert_eq!(raw(&fs).size().unwrap(), after.page_count * PAGE);
+}
+
+#[test]
+fn a_data_page_in_the_space_a_checkpoint_cut_off_waits_for_the_header_copy() {
+    let fs = SimFileSystem::new();
+    let (mut cache, mut model) =
+        before_checkpoint(&fs, Durability::Full, LastCommits::OneLongEndingTheFile);
+    cache.checkpoint().unwrap();
+    cache.set_auto_checkpoint_bytes(None);
+    let cut_from = cache.superblock().page_count;
+    let (_, older) = header_slots(&fs);
+    assert_ne!(
+        older.unwrap().log_head_page,
+        cache.superblock().log_head_page
+    );
+    let mut grown = false;
+    for _ in 0..4096 {
+        let mut page = cache.allocate(leaf()).unwrap();
+        page.fill(0x5A);
+        let page_id = page.page_id();
+        drop(page);
+        model.insert(page_id, 0x5A);
+        if page_id >= cut_from {
+            grown = true;
+            assert_older_slot_is_a_copy(&fs, "before the cut space holds data");
+            break;
+        }
+        let (_, older) = header_slots(&fs);
+        assert_ne!(
+            older.unwrap().log_head_page,
+            cache.superblock().log_head_page
+        );
+    }
+    cache.commit(|_| {}).unwrap();
+    assert!(grown, "the file grew into the cut space");
+    drop(cache);
+    let cache = open(&fs, Access::ReadOnly).unwrap();
+    assert_model(&cache, &model, "after growing into the cut space");
 }
 
 #[test]
@@ -523,7 +568,7 @@ fn a_crash_at_any_operation_of_a_flush_longer_than_the_recycled_segments_keeps_o
 }
 
 #[test]
-fn a_crash_between_a_shrinking_checkpoint_s_header_writes_never_opens_a_mixed_state_after_the_newest_slot_is_damaged()
+fn a_crash_during_a_shrinking_checkpoint_never_opens_a_mixed_state_after_the_newest_slot_is_damaged()
  {
     let setup = |fs: &SimFileSystem| {
         before_checkpoint(fs, Durability::Full, LastCommits::OneLongEndingTheFile)
@@ -536,6 +581,8 @@ fn a_crash_between_a_shrinking_checkpoint_s_header_writes_never_opens_a_mixed_st
         let operations = fs.operation_count() - start;
         rewrite_every_page(&mut cache, &mut model, 220);
         drop(cache);
+        assert_refused_or_latest(&file_bytes(&fs), &model, "no crash, before a reopen");
+        drop(open(&fs, Access::ReadWrite).unwrap());
         assert!(assert_refused_or_latest(
             &file_bytes(&fs),
             &model,
@@ -543,22 +590,15 @@ fn a_crash_between_a_shrinking_checkpoint_s_header_writes_never_opens_a_mixed_st
         ));
         operations
     };
-    let mut windows = 0;
     for step in 0..operations {
         for mode in [CrashMode::DropUnsynced, CrashMode::Torn { seed: step }] {
             let context = format!("step {step}, {mode:?}");
             let fs = SimFileSystem::new();
             let (mut cache, mut model) = setup(&fs);
-            let pages_before = cache.superblock().page_count;
             fs.fail_operation(fs.operation_count() + step);
             assert!(cache.checkpoint().is_err(), "{context}");
             drop(cache);
             fs.crash(mode);
-            let (newest, older) = header_slots(&fs);
-            let older = older.unwrap_or(newest);
-            windows += u64::from(
-                older.log_head_page != newest.log_head_page && newest.page_count < pages_before,
-            );
             let file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
             let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(256)).unwrap();
             assert_older_slot_is_a_copy(&fs, &context);
@@ -572,7 +612,6 @@ fn a_crash_between_a_shrinking_checkpoint_s_header_writes_never_opens_a_mixed_st
             assert_refused_or_latest(&file_bytes(&fs), &model, &context);
         }
     }
-    assert!(windows > 0, "no crash fell between the two header writes");
 }
 
 #[test]

@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: eggdb
+type: Opaque
+stringData:
+  password: change-me
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eggdb
+  labels:
+    app.kubernetes.io/name: eggdb
+spec:
+  selector:
+    app.kubernetes.io/name: eggdb
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+    - name: metrics
+      port: 9187
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: eggdb
+  labels:
+    app.kubernetes.io/name: eggdb
+spec:
+  serviceName: eggdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eggdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: eggdb
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: eggdb
+          image: eggdb:local
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - /data/eggdb.eggdb
+            - --create
+            - --listen
+            - 0.0.0.0:5432
+            - --tls-self-signed
+            - --metrics-listen
+            - 0.0.0.0:9187
+            - --password-file
+            - /secrets/password
+          ports:
+            - name: postgresql
+              containerPort: 5432
+            - name: metrics
+              containerPort: 9187
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+          livenessProbe:
+            tcpSocket:
+              port: postgresql
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          secret:
+            secretName: eggdb
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

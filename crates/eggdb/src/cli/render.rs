@@ -173,6 +173,13 @@ impl JsonObject {
         }
     }
 
+    pub(crate) fn string_if_any(self, name: &str, value: Option<&str>) -> Self {
+        match value {
+            Some(value) => self.string(name, value),
+            None => self,
+        }
+    }
+
     pub(crate) fn number(mut self, name: &str, value: u64) -> Self {
         self.name(name);
         let _ = write!(self.out, "{value}");

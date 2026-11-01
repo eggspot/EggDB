@@ -292,6 +292,10 @@
 4	90d6d188-6f4f-ba57-a67f-f5c326fdecee	product 4	1.48	0.5	13	{"new": true, "note": "line\\ntwo", "sizes": [4, 4], "colour": "green"}	{"id": 4,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
 5	cd606c61-d9fb-1c37-599f-1f483621e929	product 5	1.85	0.625	16.25	{"new": false, "note": "line\\ntwo", "sizes": [0, 5], "colour": "blue"}	{"id": 5,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
 6	ef329fbc-031f-8a6e-ecc7-1f2ba8f99f58	product 6	2.22	0.75	19.5	{"new": true, "note": "line\\ntwo", "sizes": [1, 6], "colour": "red"}	{"id": 6,  "spaced" : [1, 2 ,3], "b": "x\\ty"}
+== COPY (SELECT * FROM public.tasks ORDER BY id) TO STDOUT
+1	busy	task 1
+2	calm	task 2
+3	busy	task 3
 == COPY (SELECT * FROM public.texts ORDER BY id) TO STDOUT
 1		label 1
 2	tab\tseparated\tvalue	label 2
@@ -363,3 +367,5 @@ TYO1	Tokyo	09:00:00	19:00:00+09
 31
 == COPY (SELECT nextval('public.products_id_seq')) TO STDOUT
 7
+== COPY (SELECT nextval('public.tasks_id_seq')) TO STDOUT
+4

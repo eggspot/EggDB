@@ -27,6 +27,13 @@ pub(crate) enum Ignored {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToggledConstraint {
+    Named(String),
+    PrimaryKey,
+    Unique,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Effect {
     Schema(String),
     Table {
@@ -36,6 +43,8 @@ pub(crate) enum Effect {
     View(String),
     Sequence(String),
     Index(String),
+    Type(String),
+    Domain(String),
     AlterTable {
         constraints: u64,
         identity_sequences: Vec<String>,
@@ -54,6 +63,29 @@ pub(crate) enum Effect {
     IdentityInsert(String),
     SequenceCall(String),
     Setting,
+    SessionSetting {
+        current_schema: Option<String>,
+    },
+    User(String),
+    AnonymousBlock {
+        statements: Vec<std::ops::Range<usize>>,
+    },
+    PlsqlBlock,
+    ToggleConstraint {
+        table: String,
+        target: ToggledConstraint,
+        enable: bool,
+        novalidate: bool,
+    },
+    DisabledConstraint {
+        table: String,
+        name: String,
+    },
+    Routine {
+        kind: &'static str,
+        name: String,
+    },
+    Drop,
     Data,
     OtherDdl,
     Other,
@@ -68,10 +100,14 @@ impl Effect {
                 | Self::View(_)
                 | Self::Sequence(_)
                 | Self::Index(_)
+                | Self::Type(_)
+                | Self::Domain(_)
                 | Self::AlterTable { .. }
                 | Self::AddConstraint { .. }
                 | Self::SetDefault { .. }
                 | Self::Comment
+                | Self::Routine { .. }
+                | Self::Drop
                 | Self::OtherDdl
         )
     }
@@ -83,6 +119,9 @@ impl Effect {
             Self::View(name) => Some(("view", name)),
             Self::Sequence(name) => Some(("sequence", name)),
             Self::Index(name) if !name.is_empty() => Some(("index", name)),
+            Self::Type(name) => Some(("type", name)),
+            Self::Domain(name) => Some(("domain", name)),
+            Self::Routine { kind, name } => Some((kind, name)),
             _ => None,
         }
     }
@@ -120,13 +159,52 @@ pub(crate) fn classify(text: &str, known_parameter: &dyn Fn(&str) -> bool) -> Ac
             }
             data_statement(words, Effect::Insert)
         }
-        "drop" | "refresh" | "cluster" | "reindex" => Action::Run(Effect::OtherDdl),
+        "drop" => drop_statement(&words.take(6).collect::<Vec<_>>()),
+        "refresh" | "cluster" | "reindex" => Action::Run(Effect::OtherDdl),
+        "update" => {
+            if updates_catalog(words) {
+                Action::Ignore(Ignored::Other("changes to pg_catalog.pg_database"))
+            } else {
+                Action::Run(Effect::Data)
+            }
+        }
         "select" => match sequence_call(text) {
             Some(sequence) => Action::Run(Effect::SequenceCall(sequence)),
             None => Action::Run(Effect::Data),
         },
-        "update" | "delete" | "truncate" | "with" | "values" => Action::Run(Effect::Data),
+        "delete" | "truncate" | "with" | "values" => Action::Run(Effect::Data),
         _ => Action::Run(Effect::Other),
+    }
+}
+
+fn updates_catalog(words: Words<'_>) -> bool {
+    let head: Vec<Token> = words.take(3).collect();
+    head.first()
+        .is_some_and(|token| token.is_word("pg_catalog"))
+        && head.get(1).is_some_and(|token| token.is_symbol(b'.'))
+        && head
+            .get(2)
+            .is_some_and(|token| token.is_word("pg_database"))
+}
+
+fn drop_statement(tokens: &[Token]) -> Action {
+    let mut at = 1;
+    if tokens.get(at).is_some_and(|token| token.is_word("if")) {
+        at += 2;
+    }
+    let named = |word: &str| tokens.get(at).is_some_and(|token| token.is_word(word));
+    match tokens.first() {
+        Some(kind) if kind.is_word("schema") && named("public") => {
+            Action::Ignore(Ignored::Other("DROP SCHEMA public"))
+        }
+        Some(kind) if kind.is_word("extension") && named("plpgsql") => {
+            Action::Ignore(Ignored::Other("DROP EXTENSION plpgsql"))
+        }
+        Some(kind) if kind.is_word("database") => Action::Ignore(Ignored::Other("DROP DATABASE")),
+        Some(kind) if kind.is_word("role") || kind.is_word("user") || kind.is_word("group") => {
+            Action::Ignore(Ignored::Other("DROP ROLE"))
+        }
+        _ => Action::Run(Effect::Drop),
     }
 }
 
@@ -233,6 +311,28 @@ fn routine_name(tokens: &[Token], at: &mut usize) -> String {
     }
 }
 
+fn routine_language(tokens: &[Token]) -> Option<&str> {
+    tokens
+        .windows(2)
+        .find(|pair| pair[0].is_word("language"))
+        .and_then(|pair| match &pair[1] {
+            Token::Word(language) | Token::Quoted(language) => Some(language.as_str()),
+            _ => None,
+        })
+}
+
+fn routine(tokens: &[Token], mut at: usize, kind: &'static str) -> Action {
+    let name = routine_name(tokens, &mut at);
+    match routine_language(tokens) {
+        Some(language) if !matches!(language, "sql" | "plpgsql") => skip(
+            kind,
+            name,
+            "routines in languages other than SQL and PL/pgSQL come later",
+        ),
+        _ => Action::Run(Effect::Routine { kind, name }),
+    }
+}
+
 fn skip(kind: &'static str, name: String, reason: &'static str) -> Action {
     Action::Skip(Skip {
         kind,
@@ -329,22 +429,14 @@ fn create(tokens: &[Token]) -> Action {
                 )
             }
         }
-        "function" => skip(
-            "function",
-            routine_name(tokens, &mut at),
-            "functions come later",
-        ),
-        "procedure" => skip(
-            "procedure",
-            routine_name(tokens, &mut at),
-            "procedures come later",
-        ),
+        "function" => routine(tokens, at, "function"),
+        "procedure" => routine(tokens, at, "procedure"),
         "aggregate" => skip(
             "aggregate",
             routine_name(tokens, &mut at),
             "user-defined aggregates come later",
         ),
-        "trigger" => on_table(tokens, at, "trigger", "on", "triggers come later"),
+        "trigger" => Action::Run(Effect::OtherDdl),
         "constraint" if tokens.get(at).is_some_and(|token| token.is_word("trigger")) => {
             on_table(tokens, at + 1, "trigger", "on", "triggers come later")
         }
@@ -373,12 +465,8 @@ fn create(tokens: &[Token]) -> Action {
                 "materialized views come later",
             )
         }
-        "type" => skip(
-            "type",
-            name_at(tokens, &mut at),
-            "user-defined types come later",
-        ),
-        "domain" => skip("domain", name_at(tokens, &mut at), "domains come later"),
+        "type" => Action::Run(Effect::Type(name_at(tokens, &mut at))),
+        "domain" => Action::Run(Effect::Domain(name_at(tokens, &mut at))),
         "publication" | "subscription" => skip(
             if kind == "publication" {
                 "publication"
@@ -487,14 +575,16 @@ fn create_table(tokens: &[Token], mut at: usize) -> Action {
         .is_some_and(|token| token.is_word("partition"))
         && tokens.get(at + 1).is_some_and(|token| token.is_word("of"))
     {
-        return skipped_table(name, "partition", "partitioned tables come later");
+        return Action::Run(Effect::Table {
+            name,
+            constraints: 0,
+        });
     }
     if tokens.get(at).is_some_and(|token| token.is_word("of")) {
         return skipped_table(name, "typed", "typed tables come later");
     }
     let mut depth = 0u32;
     let mut constraints = 0u64;
-    let mut previous: Option<&Token> = None;
     for token in &tokens[at..] {
         if token.is_symbol(b'(') {
             depth += 1;
@@ -502,16 +592,9 @@ fn create_table(tokens: &[Token], mut at: usize) -> Action {
             depth = depth.saturating_sub(1);
         } else if depth == 1 && token.is_word("constraint") {
             constraints += 1;
-        } else if depth == 0 {
-            if token.is_word("inherits") {
-                return skipped_table(name, "inherited", "table inheritance comes later");
-            }
-            if token.is_word("by") && previous.is_some_and(|previous| previous.is_word("partition"))
-            {
-                return skipped_table(name, "partitioned", "partitioned tables come later");
-            }
+        } else if depth == 0 && token.is_word("inherits") {
+            return skipped_table(name, "inherited", "table inheritance comes later");
         }
-        previous = Some(token);
     }
     Action::Run(Effect::Table { name, constraints })
 }
@@ -631,6 +714,12 @@ fn action_kind(action: &[Token]) -> AlterKind {
     AlterKind::Change
 }
 
+fn drops(action: &[Token]) -> bool {
+    starts_with_words(action, &["drop"])
+        || (action.first().is_some_and(|token| token.is_word("alter"))
+            && starts_with_words(after_column(action), &["drop"]))
+}
+
 fn identity_sequence(action: &[Token]) -> Option<String> {
     let rest = after_column(action);
     if !starts_with_words(rest, &["add", "generated"]) {
@@ -679,9 +768,6 @@ fn alter_table(tokens: &[Token]) -> Action {
             "row-level security policies come later",
         );
     }
-    if kinds.contains(&AlterKind::Partition) {
-        return skip_change("partition", table, "partitioned tables come later");
-    }
     if kinds.contains(&AlterKind::Inheritance) {
         return skip_change("inheritance", table, "table inheritance comes later");
     }
@@ -689,7 +775,16 @@ fn alter_table(tokens: &[Token]) -> Action {
         return Action::Ignore(Ignored::Other("storage settings"));
     }
     if !kinds.is_empty() && kinds.iter().all(|kind| *kind == AlterKind::Trigger) {
+        let toggles_one_trigger = is_table
+            && actions.len() == 1
+            && actions[0].iter().any(|token| token.is_word("trigger"));
+        if toggles_one_trigger {
+            return Action::Run(Effect::OtherDdl);
+        }
         return Action::Ignore(Ignored::Other("ENABLE and DISABLE TRIGGER"));
+    }
+    if is_table && !actions.is_empty() && actions.iter().all(|action| drops(action)) {
+        return Action::Run(Effect::Drop);
     }
     if !is_table {
         return Action::Run(Effect::OtherDdl);

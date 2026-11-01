@@ -3,6 +3,7 @@ use crate::arrays::ArrayElement;
 use crate::interval::IntervalFields;
 use crate::types::{NumericModifier, SqlType};
 use std::collections::HashSet;
+use std::ops::RangeInclusive;
 
 pub(crate) const PG_CATALOG: u32 = 11;
 pub(crate) const PG_TOAST: u32 = 99;
@@ -18,6 +19,7 @@ pub(crate) const C_COLLATION: u32 = 950;
 pub(crate) const DEFAULT_TABLESPACE: u32 = 1663;
 pub(crate) const UTF8_ENCODING: i32 = 6;
 const FIRST_USER_OID: u32 = 16385;
+const FIRST_SQLSERVER_OBJECT_ID: u32 = 1 << 24;
 
 pub(crate) const PREDEFINED_ROLES: [(u32, &str); 14] = [
     (3373, "pg_monitor"),
@@ -34,6 +36,52 @@ pub(crate) const PREDEFINED_ROLES: [(u32, &str); 14] = [
     (6181, "pg_read_all_data"),
     (6182, "pg_write_all_data"),
     (6304, "pg_create_subscription"),
+];
+
+pub(crate) const ARRAY_IN: u32 = 750;
+pub(crate) const ARRAY_OUT: u32 = 751;
+pub(crate) const ARRAY_RECV: u32 = 2400;
+pub(crate) const ARRAY_SEND: u32 = 2401;
+
+const BYTEA_TYPE: u32 = 17;
+const OID_TYPE: u32 = 26;
+const INT4_TYPE: u32 = 23;
+const ANY_ARRAY_TYPE: u32 = 2277;
+const CSTRING_TYPE: u32 = 2275;
+const INTERNAL_TYPE: u32 = 2281;
+
+pub(crate) struct BuiltinFunction {
+    pub(crate) oid: u32,
+    pub(crate) name: &'static str,
+    pub(crate) result_type: u32,
+    pub(crate) argument_types: &'static [u32],
+}
+
+pub(crate) const BUILTIN_FUNCTIONS: [BuiltinFunction; 4] = [
+    BuiltinFunction {
+        oid: ARRAY_IN,
+        name: "array_in",
+        result_type: ANY_ARRAY_TYPE,
+        argument_types: &[CSTRING_TYPE, OID_TYPE, INT4_TYPE],
+    },
+    BuiltinFunction {
+        oid: ARRAY_OUT,
+        name: "array_out",
+        result_type: CSTRING_TYPE,
+        argument_types: &[ANY_ARRAY_TYPE],
+    },
+    BuiltinFunction {
+        oid: ARRAY_RECV,
+        name: "array_recv",
+        result_type: ANY_ARRAY_TYPE,
+        argument_types: &[INTERNAL_TYPE, OID_TYPE, INT4_TYPE],
+    },
+    BuiltinFunction {
+        oid: ARRAY_SEND,
+        name: "array_send",
+        result_type: BYTEA_TYPE,
+        argument_types: &[ANY_ARRAY_TYPE],
+    },
 ];
 
 pub(crate) const SYSTEM_SCHEMAS: [(u32, &str, u32); 4] = [
@@ -1096,6 +1144,8 @@ pub(crate) fn type_oid(sql_type: SqlType) -> u32 {
         SqlType::Bpchar(_) => 1042,
         SqlType::Catalog(kind) => catalog_type_oid(kind),
         SqlType::Array(element) => array_type_oid(element),
+        SqlType::Defined(defined) => defined.oid,
+        SqlType::Dynamic => 25,
     }
 }
 
@@ -1222,7 +1272,7 @@ fn modified_type(oid: u32, modifier: i32) -> Option<SqlType> {
 
 pub(crate) fn format_type(oid: u32, modifier: Option<i32>) -> String {
     let Some(found) = builtin_type(oid) else {
-        return "???".to_owned();
+        return crate::user_types::formatted_type(oid).unwrap_or_else(|| "???".to_owned());
     };
     if oid == 1042 && modifier == Some(-1) {
         return "bpchar".to_owned();
@@ -1255,14 +1305,14 @@ fn fnv1a(parts: &[&[u8]]) -> u32 {
     hash
 }
 
-fn folded(hash: u32) -> u32 {
-    let span = u64::from(u32::MAX) - u64::from(FIRST_USER_OID) + 1;
-    (u64::from(FIRST_USER_OID) + u64::from(hash) % span) as u32
+fn folded(hash: u32, range: &RangeInclusive<u32>) -> u32 {
+    let span = u64::from(*range.end()) - u64::from(*range.start()) + 1;
+    (u64::from(*range.start()) + u64::from(hash) % span) as u32
 }
 
-fn next(oid: u32) -> u32 {
-    if oid == u32::MAX {
-        FIRST_USER_OID
+fn next(oid: u32, range: &RangeInclusive<u32>) -> u32 {
+    if oid >= *range.end() {
+        *range.start()
     } else {
         oid + 1
     }
@@ -1274,6 +1324,10 @@ pub(crate) enum Space {
     Constraint,
     Namespace,
     AttrDef,
+    Trigger,
+    Routine,
+    Package,
+    SqlServerObject,
 }
 
 impl Space {
@@ -1283,6 +1337,17 @@ impl Space {
             Self::Constraint => b"constraint",
             Self::Namespace => b"namespace",
             Self::AttrDef => b"attrdef",
+            Self::Trigger => b"trigger",
+            Self::Routine => b"routine",
+            Self::Package => b"package",
+            Self::SqlServerObject => b"sqlserver object",
+        }
+    }
+
+    fn range(self) -> RangeInclusive<u32> {
+        match self {
+            Self::SqlServerObject => FIRST_SQLSERVER_OBJECT_ID..=i32::MAX as u32,
+            _ => FIRST_USER_OID..=u32::MAX,
         }
     }
 }
@@ -1299,18 +1364,22 @@ pub(crate) fn assign(space: Space, requests: &[OidRequest]) -> Vec<u32> {
         let (left, right) = (&requests[a], &requests[b]);
         (left.kind, &left.owner, &left.name).cmp(&(right.kind, &right.owner, &right.name))
     });
+    let range = space.range();
     let mut taken: HashSet<u32> = HashSet::with_capacity(requests.len());
     let mut assigned = vec![0; requests.len()];
     for index in order {
         let request = &requests[index];
-        let mut oid = folded(fnv1a(&[
-            space.tag(),
-            &[request.kind],
-            request.owner.as_bytes(),
-            request.name.as_bytes(),
-        ]));
+        let mut oid = folded(
+            fnv1a(&[
+                space.tag(),
+                &[request.kind],
+                request.owner.as_bytes(),
+                request.name.as_bytes(),
+            ]),
+            &range,
+        );
         while !taken.insert(oid) {
-            oid = next(oid);
+            oid = next(oid, &range);
         }
         assigned[index] = oid;
     }

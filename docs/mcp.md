@@ -53,6 +53,18 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key |
 | `kv_scan` | keys and values in key order, by prefix or range, a page at a time |
+| `row_list` | the rows of one table in the order they are stored, a page at a time: `limit` rows (100 by default, at most 1,000) and at most 1 MiB, then `next_cursor` to send back as `after`; pages neither repeat nor skip rows while others write (D145) |
+
+The tools, their arguments, descriptions and annotations come from EggDB's command registry
+(D143), the same definitions `eggdb help --json` prints, with each tool's CLI twin: `kv_get` is
+`eggdb get --json`, `kv_scan` is `eggdb scan --json`, `run_sql` is `eggdb sql --read-only
+--json`, `write_sql` is `eggdb sql --json`, `list_tables`, `describe_table` and `sample_rows` are
+`eggdb table list|show|sample --json`, `explain_query` is `eggdb explain --json` (D144), and
+`row_list` is `eggdb row list --json` (D145), so
+what an agent did can be repeated at the command line. Each returns the same values as its twin once its envelope (the data
+notice, the per-call limits and what the call reports about itself) is taken away. The
+`instructions` the server sends at `initialize` are generated from it too: the effects (`read`,
+`change`, `destroy`), what this session may do, and the error categories.
 
 The resource `eggdb://schema` is the whole catalog as one JSON document. Every tool but
 `write_sql` is marked `readOnlyHint`, so a client can let it run without asking each time;
@@ -62,6 +74,13 @@ Results come back as structured JSON (`structuredContent`, with the same JSON as
 names and types, rows, how many rows there were and whether the result was cut (`truncated`,
 `truncated_by`: `max_rows` or `bytes`). Integers are JSON numbers; other values are text as the
 dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..., "bytes": n}`.
+`row_list` answers in pages: `{"columns": [...], "items": [{column: value, ...}], "truncated":
+true, "truncated_by": "limit" | "bytes", "next_cursor": "r1.…"}`, the last two only on a cut
+page; a cursor names the place after the last row, so it stays right while others write. A view
+is refused with `not_a_table` (read it with `sample_rows` or `run_sql`), and an `after` that is
+not a cursor of this table with `invalid_arguments`. Each tool's confirmation check is in
+`eggdb help --json` (`confirm`, `confirm_when`), and the server asks for confirmation exactly as
+that check says.
 
 ## What the agent can't do (yet)
 
@@ -75,9 +94,9 @@ dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..
   `SELECT`.
 - **Build huge values.** A value a statement builds (`||`, `CONCAT`, `REPLACE`, padding) may be
   at most 16 MiB in a call (SQLSTATE `54000`), so a call cannot take gigabytes of memory by
-  doubling a string; stored values of any size are still read. EggDB's own limit for other
-  sessions stays 1 GiB per statement (D100); an engine-wide value limit like PostgreSQL's 1 GB
-  is on the roadmap. Likewise one row a statement builds may be at most 64 MiB, and so may the
+  doubling a string; stored values of any size are still read. Every other session has EggDB's
+  own limits: 1 GiB for one value, as in PostgreSQL, and 2 GiB for one row (D156), besides
+  1 GiB of work memory per statement (D100). Likewise one row a statement builds may be at most 64 MiB, and so may the
   values it holds at once for `GROUP BY` keys, aggregates or a function's arguments, so a
   statement copying a large value many times stops early. One consequence: a single stored value
   over 64 MiB cannot be read through `eggdb mcp`, since the row that holds it is over the limit;
@@ -86,9 +105,44 @@ dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..
   answers `time_limit`. A statement that cannot be stopped (a long computation that reads
   nothing) is still running a second after the limit: the server records it in the audit file
   and exits, and the client starts it again on its next call.
-- **See only some tables.** Limiting the agent to some tables (`--tables`) comes in a later
-  release; today an agent that can use `eggdb mcp` reads every table and key.
+- **See tables you did not list.** With `--tables` the agent sees only the tables and views
+  you named (below); without it, it reads every table, and the keys outside SQL's tables.
 - **Reach it over the network.** MCP inside `eggdb serve` waits for EggDB's own TLS (D102).
+
+## Letting the agent see only some tables
+
+```sh
+claude mcp add mydb -- eggdb mcp /path/to/app.db --tables users,orders,archive.orders
+```
+
+With `--tables` only the tables and views you name exist for the agent. Names are
+comma-separated, `name` or `schema.name` (`public.` and `dbo.` mean the default schema), matched
+exactly as stored; repeat `--tables` to add more. A sequence comes with the table that owns it,
+or is named itself.
+
+- **Everything else is missing, not forbidden.** Every other table, view and sequence is hidden
+  below the SQL engine, where it reads the file: its definition, rows, indexes, comments and
+  the records that tie it to other tables read as absent. So a query that names one fails as it
+  does for a table that does not exist (`relation "salaries" does not exist`, SQLSTATE
+  `42P01`), in every dialect, and no catalog lists it: `list_tables`, `describe_table`,
+  `eggdb://schema`, `pg_catalog`, `information_schema`, SQL Server's `sys` views and
+  `INFORMATION_SCHEMA`, and Oracle's dictionary. The agent cannot tell a hidden table from a
+  missing one.
+- **Views read with the agent's eyes.** A view you list works when every table it reads is
+  listed too; a view over an unlisted table fails as missing, so listing a view never exposes the
+  table behind it.
+- **The keys are off.** `kv_get` and `kv_scan` are not offered, and a call to either answers
+  `limited_to_tables`.
+- **What it still shows.** The names of schemas and of user-defined types, and what a listed
+  table's own definition says: a foreign key or a listed view's text names the table it refers
+  to, though that table stays unreadable. Internal numbers are not renumbered, so gaps in them
+  show that other objects exist.
+- **Checked at start.** Every name must be a table, view or sequence of the file when the server
+  starts (skipped while another program has the file open for writing); otherwise it exits 1
+  with `table_not_found`, naming the stored name when only the letter case differs.
+- **Read-only servers only, for now.** `--tables` with `--allow-write` is a usage error.
+
+The audit's `server_started` record lists the names (`"tables"`), and `eggdb audit` shows them.
 
 ## Letting the agent write
 
@@ -133,11 +187,37 @@ always-true condition that names a column (`WHERE id IS NOT NULL`) runs without 
 client may be set to accept for you. Give `--allow-write` only to agents you would let change the
 data, and keep a backup.
 
+## Over HTTP, from eggdb serve
+
+`eggdb serve app.db --mcp-listen 127.0.0.1:8765 --mcp-token-file mcp-token.txt` also serves MCP
+over its Streamable HTTP transport at `http://127.0.0.1:8765/mcp`, next to the SQL listeners and
+on the same open database (D189). Agents send each JSON-RPC message as a `POST` with
+`Authorization: Bearer <token>`, the first line of the token file (at least 16 characters; `openssl
+rand -hex 32` makes one). The `initialize` answer carries an `Mcp-Session-Id` header that later
+requests send back; `DELETE /mcp` with it ends the session. The endpoint is read-only, answers
+`POST` only (no event streams yet), refuses requests that carry an `Origin` header (web pages),
+keeps up to 64 sessions, and listens only on a loopback address until it has TLS. Every call is
+recorded in the audit log as for `eggdb mcp`.
+
+Each line of the token file can give an agent a role of its own: `reporter 6f1c...` makes the
+agent that sends that token run every call as the stored role `reporter` (D190), so the role's
+`GRANT`s and row-level security policies decide what the agent sees, and `ALTER ROLE reporter
+NOLOGIN` or `REVOKE` takes access away at once, without a restart. A line with a token alone
+runs calls as the database's owner. Agents with a role get no key-value tools, since those read
+beneath SQL's privileges: they are left out of `tools/list`, and a call to one answers
+`limited_to_role`. The server also offers two prompts, `explore_database` and
+`answer_with_sql` (with a `question` argument).
+
 ## Errors
 
 A refused or failed call is a tool result with `isError: true` and
-`structuredContent.error`: a `code`, a `message`, and a `fix` when there is one; SQL errors add
-the `sqlstate`, `detail`, `hint` and `position` in the statement. The codes:
+`structuredContent.error`: a `code`, its `category`, a `message`, and a `fix` when there is one;
+`damaged` adds `fix_command`, the command for the user (`eggdb check <file>`); SQL errors add the
+`sqlstate`, `detail`, `hint` and `position` in the statement. The category is the one EggDB and
+EggOS share (`usage`, `not_found`, `exists`, `busy`, `read_only`, `needs_grant`,
+`needs_confirmation`, `declined`, `refused`, `too_large`, `timeout`, `damaged`, `failed`), so an
+agent can act on it whatever the code; every code's category is in
+[ux/command-model.md](ux/command-model.md). The codes:
 
 | Code | When | Fix |
 |------|------|-----|
@@ -170,9 +250,10 @@ calls `eggdb mcp` holds nothing. So:
   `eggdb` commands, `ErrorKind::Locked` for the Rust API), and is told it may be an `eggdb mcp`
   call; retry. A call holds the file for at most its time limit plus one second (up to 301 s
   with `--time-limit 300`), after which the watchdog ends the server;
-- an agent that calls again and again, without pause, can keep refusing your writers, since
-  EggDB's writers do not wait for a lock; a minimum gap between calls and writers that wait are
-  follow-ups. Stop the agent's server (or its client) to get the file back;
+- after each call the next one waits `--call-gap` milliseconds (100 by default, at most 10,000)
+  before it opens the file, so an agent calling again and again leaves your writers, which do
+  not wait for a lock, that gap to get in; `--call-gap 0` turns it off. The wait is not part of
+  the call's time limit. Writers that wait for the lock are a follow-up;
 - a call made while a program has the file open for writing answers `database_busy` after a
   second of retrying, and the agent is told to try again;
 - other read-only programs (`eggdb get`, `scan`, `ui --read-only`, `serve --read-only`) run beside

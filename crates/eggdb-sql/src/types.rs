@@ -68,6 +68,93 @@ pub enum SqlType {
     /// A type of PostgreSQL's system catalog, such as `oid`, `name` or `regclass`: a value of
     /// expressions and of the catalog's rows, not stored in table columns.
     Catalog(CatalogType),
+    /// A type known by its definition: an enum, a composite type, a range type or a domain.
+    Defined(DefinedType),
+    /// A value of any of SQLite's storage classes (an integer, a real, text or a blob), kept as
+    /// it is given: the type of a SQLite column declared `BLOB`, whose rows may hold different
+    /// classes.
+    Dynamic,
+}
+
+/// A type known by its definition in the catalog rather than by the engine's storage alone:
+/// an enum, a composite (row) type, a range type or a domain, either built in (`int4range`,
+/// `record`) or created with `CREATE TYPE` or `CREATE DOMAIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefinedType {
+    /// What kind of type it is.
+    pub kind: DefinedKind,
+    /// Its PostgreSQL type OID: PostgreSQL's own for a built-in type, the one given when the
+    /// type was created otherwise.
+    pub oid: u32,
+}
+
+/// The kinds of [`DefinedType`], as PostgreSQL's `pg_type.typtype` names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DefinedKind {
+    /// An enum: one of a list of labels, ordered as they were listed.
+    Enum,
+    /// A composite type: a row of named fields, or `record` for a row of any fields.
+    Composite,
+    /// A range of values of a subtype, such as `int4range`.
+    Range,
+    /// A domain: a base type with `NOT NULL`, `CHECK` constraints and a default of its own.
+    Domain,
+}
+
+impl DefinedType {
+    /// The type `record`: a row of any fields.
+    pub const RECORD: Self = Self {
+        kind: DefinedKind::Composite,
+        oid: crate::records::RECORD_OID,
+    };
+
+    pub(crate) fn enumerated(oid: u32) -> SqlType {
+        SqlType::Defined(Self {
+            kind: DefinedKind::Enum,
+            oid,
+        })
+    }
+
+    pub(crate) fn range(oid: u32) -> SqlType {
+        SqlType::Defined(Self {
+            kind: DefinedKind::Range,
+            oid,
+        })
+    }
+}
+
+/// A value of a [`DefinedType`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefinedValue {
+    /// A label of an enum.
+    Enum(crate::enums::EnumValue),
+    /// A row of a composite type or a `record`.
+    Record(crate::records::RecordValue),
+    /// A range.
+    Range(crate::ranges::RangeValue),
+}
+
+impl DefinedValue {
+    /// The value's type.
+    pub fn sql_type(&self) -> SqlType {
+        match self {
+            Self::Enum(value) => DefinedType::enumerated(value.type_oid),
+            Self::Record(record) => SqlType::Defined(DefinedType {
+                kind: DefinedKind::Composite,
+                oid: record.type_oid,
+            }),
+            Self::Range(range) => DefinedType::range(range.type_oid),
+        }
+    }
+
+    /// The value as PostgreSQL prints it in text form.
+    pub fn to_text(&self) -> String {
+        match self {
+            Self::Enum(value) => value.label.clone(),
+            Self::Record(record) => crate::records::format_text(record),
+            Self::Range(range) => crate::ranges::format_text(range),
+        }
+    }
 }
 
 /// The precision and scale of a `numeric(p, s)` column.
@@ -123,6 +210,8 @@ impl SqlType {
             Self::Bpchar(Some(length)) => format!("character({length})"),
             Self::Array(element) => element.type_name(),
             Self::Catalog(kind) => kind.name().to_owned(),
+            Self::Defined(defined) => crate::user_types::type_name(defined),
+            Self::Dynamic => "blob".into(),
         }
     }
 
@@ -150,6 +239,20 @@ impl SqlType {
             Self::Bpchar(_) => "bpchar",
             Self::Array(element) => element.internal_name(),
             Self::Catalog(kind) => kind.internal_name(),
+            Self::Defined(defined) => match defined.kind {
+                DefinedKind::Enum => "anyenum",
+                DefinedKind::Composite => "record",
+                DefinedKind::Range => "anyrange",
+                DefinedKind::Domain => "domain",
+            },
+            Self::Dynamic => "blob",
+        }
+    }
+
+    pub(crate) fn defined(self) -> Option<DefinedType> {
+        match self {
+            Self::Defined(defined) => Some(defined),
+            _ => None,
         }
     }
 
@@ -272,6 +375,8 @@ pub enum Value {
     Oid(u32),
     /// A `reg*` value: an object identifier shown as the object's name.
     Reg(Box<RegValue>),
+    /// A value of an enum, a composite type or a range type.
+    Defined(Box<DefinedValue>),
 }
 
 impl Value {
@@ -301,6 +406,7 @@ impl Value {
             Self::Array(array) => SqlType::Array(array.element),
             Self::Oid(_) => SqlType::Catalog(CatalogType::Oid),
             Self::Reg(reg) => SqlType::Catalog(CatalogType::Reg(reg.kind)),
+            Self::Defined(defined) => defined.sql_type(),
         })
     }
 
@@ -341,13 +447,11 @@ impl Value {
         }
     }
 
-    /// The value as [`Value::to_text`] prints it, with a `timestamp with time zone` shown at
-    /// `offset_seconds` east of UTC instead of the running statement's time zone.
-    pub fn to_text_at(&self, offset_seconds: i32) -> Option<String> {
+    /// The value as [`Value::to_text`] prints it, with a `timestamp with time zone` shown in
+    /// `zone` instead of the running statement's time zone.
+    pub fn to_text_in(&self, zone: crate::time_zones::TimeZone) -> Option<String> {
         match self {
-            Self::TimestampTz(micros) => {
-                Some(datetime::format_timestamptz_at(*micros, offset_seconds))
-            }
+            Self::TimestampTz(micros) => Some(datetime::format_timestamptz_in(*micros, zone)),
             other => other.to_text(),
         }
     }
@@ -384,6 +488,7 @@ impl Value {
             Self::Array(array) => crate::arrays::format_text(array),
             Self::Oid(oid) => oid.to_string(),
             Self::Reg(reg) => reg.name.clone(),
+            Self::Defined(defined) => defined.to_text(),
         })
     }
 
@@ -559,7 +664,11 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
             assign_string(text.to_owned(), sql_type, Conversion::Assignment)
         }
         SqlType::Time(precision) => {
-            let (micros, _) = datetime::parse_time_of_day(text, false)?;
+            let micros = if crate::constraints::current_dialect() == crate::Dialect::MySql {
+                datetime::parse_mysql_time(text)?
+            } else {
+                datetime::parse_time_of_day(text, false)?.0
+            };
             Ok(Value::Time(time_value(micros, precision)))
         }
         SqlType::TimeTz(precision) => {
@@ -590,7 +699,46 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
         SqlType::Array(element) => crate::arrays::parse_array_text(text, element)
             .map(|array| Value::Array(Box::new(array))),
         SqlType::Catalog(kind) => crate::pg_catalog::parse_input(text, kind),
+        SqlType::Defined(defined) => crate::user_types::parse_input(text, defined),
+        SqlType::Dynamic => Ok(Value::Text(text.to_owned())),
     }
+}
+
+pub(crate) fn storage_class_value(value: Value) -> Value {
+    match value {
+        Value::SmallInt(number) => Value::BigInt(i64::from(number)),
+        Value::Integer(number) => Value::BigInt(i64::from(number)),
+        Value::Boolean(flag) => Value::BigInt(i64::from(flag)),
+        Value::Real(number) => Value::Double(f64::from(number)),
+        Value::Numeric(number) => match number.integral_value().map(i64::try_from) {
+            Some(Ok(whole)) => Value::BigInt(whole),
+            _ => Value::Double(number.to_f64()),
+        },
+        Value::Null | Value::BigInt(_) | Value::Double(_) | Value::Text(_) | Value::Bytea(_) => {
+            value
+        }
+        other => other.to_text().map_or(Value::Null, Value::Text),
+    }
+}
+
+fn storage_class_rank(value: &Value) -> Option<u8> {
+    match value {
+        Value::SmallInt(_)
+        | Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Real(_)
+        | Value::Double(_)
+        | Value::Numeric(_) => Some(1),
+        Value::Text(_) | Value::Bpchar(_) => Some(2),
+        Value::Bytea(_) => Some(3),
+        _ => None,
+    }
+}
+
+fn different_storage_classes(left: &Value, right: &Value) -> Option<Ordering> {
+    let (left_rank, right_rank) = (storage_class_rank(left)?, storage_class_rank(right)?);
+    (left_rank != right_rank && crate::constraints::current_dialect() == crate::Dialect::Sqlite)
+        .then(|| left_rank.cmp(&right_rank))
 }
 
 pub(crate) fn numeric_value(value: Numeric, modifier: Option<NumericModifier>) -> SqlResult<Value> {
@@ -638,12 +786,12 @@ fn convert_time(value: &Value, target: SqlType) -> Option<SqlResult<Value>> {
         }),
         (SqlType::TimeTz(precision), Value::Time(micros)) => Ok(Value::TimeTz {
             micros: time_value(*micros, precision),
-            offset_seconds: datetime::session_offset(),
+            offset_seconds: datetime::session_offset_now(),
         }),
         (SqlType::TimeTz(precision), Value::TimestampTz(micros)) => {
             local_time(*micros).map(|local| Value::TimeTz {
                 micros: time_value(local, precision),
-                offset_seconds: datetime::session_offset(),
+                offset_seconds: datetime::session_offset_at(*micros),
             })
         }
         (SqlType::Interval { fields, precision }, Value::Interval(interval)) => interval
@@ -779,6 +927,12 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     if let SqlType::Catalog(kind) = target {
         return crate::pg_catalog::convert(value, kind, conversion);
     }
+    if let SqlType::Defined(defined) = target {
+        return crate::user_types::convert(value, defined, conversion);
+    }
+    if target == SqlType::Dynamic {
+        return Ok(storage_class_value(value));
+    }
     if target.is_character() {
         let text = match value {
             Value::Text(text) => text,
@@ -902,6 +1056,12 @@ pub(crate) fn comparable(left: SqlType, right: SqlType) -> bool {
     if let (SqlType::Array(left), SqlType::Array(right)) = (left, right) {
         return left.comparable(right);
     }
+    if let SqlType::Defined(defined) = left {
+        return crate::user_types::comparable(defined, right);
+    }
+    if let SqlType::Defined(defined) = right {
+        return crate::user_types::comparable(defined, left);
+    }
     let identifier =
         |sql_type: SqlType| matches!(sql_type, SqlType::Catalog(kind) if kind.is_identifier());
     if identifier(left) || identifier(right) {
@@ -935,7 +1095,10 @@ fn instant(value: &Value, zoned: bool) -> i128 {
         _ => 0,
     };
     if zoned {
-        local - i128::from(datetime::session_offset()) * i128::from(datetime::MICROS_PER_SECOND)
+        let clamped = i64::try_from(local).unwrap_or_default();
+        local
+            - i128::from(datetime::session_zone().offset_of_local(clamped))
+                * i128::from(datetime::MICROS_PER_SECOND)
     } else {
         local
     }
@@ -946,6 +1109,66 @@ fn is_exact_number(value: &Value) -> bool {
         value,
         Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Numeric(_)
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SortDirection {
+    pub(crate) descending: bool,
+    pub(crate) nulls_first: bool,
+}
+
+impl SortDirection {
+    pub(crate) fn of(item: &crate::ast::OrderItem) -> Self {
+        Self {
+            descending: item.descending,
+            nulls_first: item.nulls_first.unwrap_or(item.descending),
+        }
+    }
+}
+
+pub(crate) fn encode_directions(directions: &[SortDirection]) -> String {
+    directions
+        .iter()
+        .flat_map(|direction| {
+            [
+                if direction.descending { 'D' } else { 'A' },
+                if direction.nulls_first { 'F' } else { 'L' },
+            ]
+        })
+        .collect()
+}
+
+pub(crate) fn decode_directions(encoded: &str) -> Vec<SortDirection> {
+    encoded
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| SortDirection {
+            descending: pair.first() == Some(&b'D'),
+            nulls_first: pair.get(1) == Some(&b'F'),
+        })
+        .collect()
+}
+
+pub(crate) fn compare_in_directions(
+    directions: &[SortDirection],
+    left: &[Value],
+    right: &[Value],
+) -> Ordering {
+    for ((direction, left), right) in directions.iter().zip(left).zip(right) {
+        let ordering = match (left.is_null(), right.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) if direction.nulls_first => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            (false, true) if direction.nulls_first => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) if direction.descending => compare_values(left, right).reverse(),
+            (false, false) => compare_values(left, right),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
 }
 
 pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
@@ -978,6 +1201,7 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
         ) => time_tz_order(*a, *a_offset).cmp(&time_tz_order(*b, *b_offset)),
         (Value::Interval(a), Value::Interval(b)) => a.compare(*b),
         (Value::Array(a), Value::Array(b)) => crate::arrays::compare(a, b),
+        (Value::Defined(a), Value::Defined(b)) => compare_defined(a, b),
         (Value::Jsonb(a), Value::Jsonb(b)) => crate::json::comparable(a)
             .as_bytes()
             .cmp(crate::json::comparable(b).as_bytes()),
@@ -996,18 +1220,55 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
                 _ => Ordering::Equal,
             }
         }
-        _ => match (left.as_integer(), right.as_integer()) {
-            (Some(a), Some(b)) => a.cmp(&b),
-            _ => compare_floats(
-                left.as_float().unwrap_or(f64::NAN),
-                right.as_float().unwrap_or(f64::NAN),
-            ),
-        },
+        _ => {
+            if let Some(ordering) = different_storage_classes(left, right) {
+                return ordering;
+            }
+            match (left.as_integer(), right.as_integer()) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => compare_floats(
+                    left.as_float().unwrap_or(f64::NAN),
+                    right.as_float().unwrap_or(f64::NAN),
+                ),
+            }
+        }
+    }
+}
+
+fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
+    match (left, right) {
+        (DefinedValue::Enum(a), DefinedValue::Enum(b)) => {
+            compare_floats(a.sort_order, b.sort_order)
+        }
+        (DefinedValue::Record(a), DefinedValue::Record(b)) => crate::records::compare(a, b),
+        (DefinedValue::Range(a), DefinedValue::Range(b)) => crate::ranges::compare(a, b),
+        (DefinedValue::Enum(_), _) => Ordering::Less,
+        (_, DefinedValue::Enum(_)) => Ordering::Greater,
+        (DefinedValue::Record(_), _) => Ordering::Less,
+        (_, DefinedValue::Record(_)) => Ordering::Greater,
     }
 }
 
 pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
     match value {
+        Value::Defined(defined) => match defined.as_ref() {
+            DefinedValue::Enum(label) => {
+                out.push(15);
+                out.extend_from_slice(&label.type_oid.to_le_bytes());
+                out.extend_from_slice(&label.sort_order.to_bits().to_le_bytes());
+            }
+            DefinedValue::Record(record) => {
+                out.push(16);
+                out.extend_from_slice(&(record.fields.len() as u64).to_le_bytes());
+                for field in &record.fields {
+                    equality_key(out, field);
+                }
+            }
+            DefinedValue::Range(range) => {
+                out.push(17);
+                crate::ranges::equality_key_of(out, range);
+            }
+        },
         Value::Null => out.push(0),
         Value::Boolean(flag) => {
             out.push(1);

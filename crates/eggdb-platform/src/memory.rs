@@ -53,6 +53,7 @@ pub struct MemoryRegion {
     len: usize,
     mode: PageMode,
     release: Release,
+    locked: bool,
 }
 
 pub(crate) enum Release {
@@ -112,6 +113,7 @@ impl MemoryRegion {
             len,
             mode,
             release,
+            locked: false,
         }
     }
 
@@ -142,6 +144,32 @@ impl MemoryRegion {
     pub fn mode(&self) -> PageMode {
         self.mode
     }
+
+    /// Keeps the region's pages in memory, never swapped out, until it is dropped or
+    /// [`MemoryRegion::unlock`]ed. Fails with
+    /// [`ErrorKind::OutOfMemory`](crate::ErrorKind::OutOfMemory) when the process's locked-memory
+    /// limit is too small, and with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported)
+    /// where the platform cannot lock memory.
+    pub fn lock(&mut self) -> Result<()> {
+        if !self.locked {
+            crate::os_memory::lock(self.ptr, self.len)?;
+            self.locked = true;
+        }
+        Ok(())
+    }
+
+    /// Lets the region's pages be swapped out again.
+    pub fn unlock(&mut self) {
+        if self.locked {
+            crate::os_memory::unlock(self.ptr, self.len);
+            self.locked = false;
+        }
+    }
+
+    /// Whether the region is locked in memory.
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
 }
 
 impl Deref for MemoryRegion {
@@ -164,6 +192,7 @@ impl DerefMut for MemoryRegion {
 
 impl Drop for MemoryRegion {
     fn drop(&mut self) {
+        self.unlock();
         match &self.release {
             Release::Os => crate::os_memory::release(self.ptr, self.len),
             Release::Heap { layout, accounting } => {

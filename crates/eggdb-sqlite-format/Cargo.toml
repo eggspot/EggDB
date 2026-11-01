@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-sqlite-format"
+description = "EggDB's reader of SQLite's database file format, written from SQLite's published file format description: the header, table b-trees, records, overflow pages, the schema table and write-ahead log frames, safe on hostile files."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "eggdb-commands"
+description = "EggDB's command model: the definitions of the eggdb commands and of the MCP tools, their effects, errors and error categories, as one registry the CLI, its help and the MCP server read (D143)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,59 @@
+//! EggDB's own TLS, written from the RFCs on [`eggdb_crypto`] with no third-party code (D1,
+//! D23, D35), so every protocol EggDB serves can be reached safely beyond loopback. Built so
+//! far:
+//! - [`der`]: a strict DER reader and a DER writer (ITU-T X.690);
+//! - [`oid`]: the object identifiers of certificates and keys;
+//! - [`pem`]: PEM blocks (RFC 7468);
+//! - [`signature`]: signature algorithms, public keys and checking a signature (RFC 4055,
+//!   RFC 5758, RFC 8017);
+//! - [`x509`]: X.509 certificates (RFC 5280);
+//! - [`private_key`]: P-256 and RSA private keys from PKCS#8, SEC 1 and PKCS#1, and signing;
+//! - [`self_signed`]: self-signed P-256 server certificates;
+//! - [`verify`]: chains to trust anchors and server-name matching (RFC 5280, RFC 6125);
+//! - [`codec`]: TLS's presentation language;
+//! - [`alert`]: the alert messages;
+//! - [`cipher_suite`]: the cipher suites, their hashes and their record AEADs;
+//! - [`key_schedule`]: the TLS 1.3 key schedule (RFC 8446 section 7);
+//! - [`record`]: the record layer and record protection for TLS 1.3 and TLS 1.2;
+//! - [`handshake`]: the handshake messages and their extensions;
+//! - [`negotiation`]: signature schemes, groups, application protocols and ephemeral keys;
+//! - [`tls12`]: TLS 1.2's PRF and key derivation;
+//! - [`config`], [`error`], [`session`] and [`stream`]: TLS 1.3 and TLS 1.2 servers and clients
+//!   over any byte stream, as [`TlsStream`], and [`ServerConnection`], a server's TCP
+//!   connection upgraded to TLS when the client asks.
+//!
+//! Nothing here panics on its input: every parser returns an error as a value.
+
+pub mod alert;
+pub mod cipher_suite;
+mod client;
+mod client12;
+pub mod codec;
+pub mod config;
+pub mod der;
+pub mod error;
+pub mod handshake;
+pub mod key_schedule;
+pub mod negotiation;
+pub mod oid;
+pub mod pem;
+pub mod private_key;
+pub mod record;
+mod record_layer;
+pub mod self_signed;
+mod server;
+mod server12;
+pub mod server_connection;
+pub mod session;
+pub mod signature;
+pub mod stream;
+pub mod tls12;
+pub mod verify;
+pub mod x509;
+mod x509_time;
+
+pub use config::{ClientConfig, MaximumVersion, MinimumVersion, ServerConfig, ServerVerification};
+pub use error::TlsError;
+pub use server_connection::ServerConnection;
+pub use session::SessionInfo;
+pub use stream::{PrefixedStream, TlsStream};

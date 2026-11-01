@@ -9,7 +9,7 @@ describes is created in an EggDB file that every dialect and protocol then reads
 | PostgreSQL | `pg_dump` plain SQL, restored by `eggdb restore` or `psql -f` against `eggdb serve` | this page |
 | PostgreSQL CSV, any table | `eggdb import --csv` ([cli.md](cli.md)) | available |
 | SQL Server | SSMS Generate Scripts, `sqlpackage /Action:Script`, restored by `eggdb restore --dialect sqlserver` or `sqlcmd -i` against `eggdb serve` | this page |
-| Oracle | `impdp ... SQLFILE=`, SQLcl and SQL Developer exports | roadmap item 43 |
+| Oracle | SQL Developer and SQLcl exports, `impdp ... SQLFILE=` for the DDL and SQLcl CSV for the rows, installers such as Oracle's sample schemas, restored by `eggdb restore --dialect oracle` | this page |
 
 ## PostgreSQL
 
@@ -68,7 +68,7 @@ psql "host=127.0.0.1 user=eggdb dbname=app" -f app.sql
 
 psql runs the statements one by one and prints an error for each object EggDB cannot create yet,
 then goes on, as it does against PostgreSQL; `eggdb restore` lists the same objects in its report
-instead. When a table cannot be created (a column of an enum type, a partitioned table), psql
+instead. When a table cannot be created (a partitioned table, a typed table), psql
 reads its `COPY` data as SQL and may lose the statements after it, as it would against
 PostgreSQL: restore such a dump with `eggdb restore`, which skips that data, or take it with
 `pg_dump --inserts` for `psql -f`.
@@ -87,15 +87,14 @@ restored app.sql into app.db (1,204 statements, 2.3 s)
   indexes         21
   constraints     17
   comments        4
-  skipped         3 (function 1, trigger 1, materialized view 1)
+  skipped         2 (function 1, materialized view 1)
   consequences    1
   ignored         61 (OWNER TO 38, GRANT 20, SET 3)
 rows per table
   public.orders  1,180,002
   public.users      12,480
 skipped (not in EggDB yet; docs/roadmap.md)
-  line 23     function public.set_updated_at()          functions come later
-  line 310    trigger users_updated on public.users     triggers come later
+  line 23     function public.slugify(text)             routines in languages other than SQL and PL/pgSQL come later
   line 2,114  materialized view public.daily            materialized views come later
 consequences (fail only because of a skipped object)
   line 2,240  REFRESH MATERIALIZED VIEW public.daily;   uses materialized view public.daily
@@ -103,22 +102,24 @@ ignored
   OWNER TO    38 statements (EggDB has no roles yet)
   GRANT       20 statements
   SET         3 statements: default_toast_compression (not EggDB parameters)
-ok: every table and row of the dump is in app.db; 3 objects skipped and 1 consequence, listed above.
+ok: every table and row of the dump is in app.db; 2 objects skipped and 1 consequence, listed above.
 ```
 
 - **Created**: schemas, tables and their rows, views, sequences (identity columns included),
-  indexes, constraints (primary keys, unique, check and foreign keys with their actions) and
-  comments.
+  indexes, constraints (primary keys, unique, check and foreign keys with their actions,
+  `DEFERRABLE INITIALLY DEFERRED` and `NOT VALID` ones kept as such), enum, composite and range
+  types, domains with their checks and defaults, array columns, comments, functions and
+  procedures in `sql` and `plpgsql` (D158), and triggers, which then run as on PostgreSQL.
 - **Skipped**: what EggDB cannot create yet, each with its line in the dump (`sed -n '23p'
-  app.sql` shows it) and the reason: functions, procedures and aggregates, triggers and event
-  triggers, rules, row-level security policies, types (enums, composites, ranges), domains,
-  materialized views, partitioned tables (and their rows; partitions dumped as tables of their
+  app.sql` shows it) and the reason: functions and procedures in other languages (C, Python,
+  Perl), aggregates, constraint and event triggers, rules, row-level security policies, base and shell types (`CREATE TYPE name` and
+  `CREATE TYPE ... (INPUT = ...)`), materialized views, partitioned tables (and their rows; partitions dumped as tables of their
   own are restored), tables with inheritance, publications and subscriptions, extensions other
   than `plpgsql`, collations, text search objects, operators, casts, foreign data, roles and
   tablespaces. They come with later items of the [roadmap](roadmap.md).
 - **Consequences**: statements that failed only because they use a skipped object, such as a
-  table with a column of a skipped enum type (its rows are then counted as not restored) or a
-  `REFRESH` of a skipped materialized view.
+  `REFRESH` of a skipped materialized view or the identity of a skipped partitioned table (a
+  table whose `CREATE TABLE` failed this way has its rows counted as not restored).
 - **Ignored**: `GRANT`, `REVOKE` and `OWNER TO` (EggDB has one user per server and no roles yet),
   `ALTER DEFAULT PRIVILEGES`, `SET` of parameters EggDB does not have, storage settings with no
   meaning in EggDB (`REPLICA IDENTITY`, `SET STATISTICS`, `CLUSTER ON`), and psql meta-commands:
@@ -151,13 +152,37 @@ yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
 
 ### Limits
 
-- Functions, procedures and triggers are not run in this release (D110): a database whose rules
-  live in triggers keeps its data, without the triggers.
-- One database per file: `pg_dumpall`'s roles and several databases are not restored; restore
-  each database's `pg_dump` into its own file.
-- `pg_dump --clean` is not supported (EggDB's `public` schema cannot be dropped); restore into a
-  new file instead.
+- Functions and procedures in languages other than `sql` and `plpgsql`, and constraint and event
+  triggers, are not created (D110, D158): a database whose rules live in them keeps its data,
+  without them.
+- One database per file: a `pg_dumpall` script restores, its globals going to the report
+  (`CREATE ROLE` and `CREATE DATABASE` skipped, `ALTER ROLE` and `ALTER DATABASE` ignored,
+  `\connect` listed as a meta-command), and the tables of all its databases land in the one file;
+  restore each database's `pg_dump` into its own file to keep them apart.
+- `pg_dump --clean` (with or without `--if-exists`) restores, into a new file or over an earlier
+  restore of the same dump: its `DROP` statements and `ALTER TABLE ... DROP CONSTRAINT` run, one
+  naming an object that is not there is ignored as "nothing to drop", and `DROP SCHEMA public`,
+  `DROP EXTENSION plpgsql`, `DROP DATABASE` and `DROP ROLE` are ignored.
 - Large objects (`lo_*`), and dumps in encodings other than UTF-8, are not restored.
+
+### Moving with no downtime: `eggdb follow`
+
+Instead of a dump, `eggdb follow` copies a running PostgreSQL 10 or newer (with
+`wal_level=logical`) and keeps the copy in step with it. It creates a temporary logical
+replication slot, copies the schema and every table from the slot's snapshot, then applies each
+transaction PostgreSQL commits, until you stop it:
+
+```sh
+PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'
+# … point applications at `eggdb serve app.db` when the lag is zero, then Ctrl-C the follow
+```
+
+Every table needs a primary key or `REPLICA IDENTITY FULL`, and the user needs `REPLICATION`
+and a publication: an existing one with `--publication <name>`, or `eggdb_follow`, which the
+follow creates `FOR ALL TABLES` and drops at its stop. Sequence values are copied again at the
+stop, because logical replication does not carry them. `--until caught-up` stops by itself once
+the copy has every change committed so far. Details are in [cli.md](cli.md) under `eggdb follow`,
+and the design is decision D162.
 
 ## SQL Server
 
@@ -170,7 +195,8 @@ one file, as Unicode (SSMS's default, UTF-16 with a byte-order mark) or UTF-8.
 
 `sqlpackage /Action:Script` writes a schema-only script with sqlcmd's `:setvar` lines; take the
 data from Generate Scripts with *Data only* and restore it after the schema. `bcp` files load
-through `eggdb import --csv` with `bcp -c -t,` (item 46 brings `bcp` itself).
+with `eggdb import --dialect sqlserver --csv` (bcp's character format, `bcp ... out -c`), and
+`bcp in` and `SqlBulkCopy` load over TDS (see "Bulk loads with bcp and SqlBulkCopy" in sql.md).
 
 EggDB never reads `.bak` or `.trn` backups, BACPAC or DACPAC packages, or `.mdf`, `.ndf` and
 `.ldf` files: they have no public specification (D13). `eggdb restore` recognises them by their
@@ -210,44 +236,269 @@ but not as SQL Server had it. For each, the script line, the object and the diff
 ```
 known differences (restored, but not as the source had it)
   line 88   sales.Orders.PlacedAt   values are stored in UTC; their offsets are lost
-  line 102  dbo.Coupons.Id          IDENTITY(1000, 10) restored as IDENTITY(1, 1); new values continue after the highest stored one
   line 140  dbo.Products.Margin     computed column not kept
   line 377  FK_OrderLines_Products  not created: existing rows violate it (...)
 ```
 
-Skipped objects (procedures, functions, triggers, synonyms, users and roles, batch logic such as
-SSMS's `IF` blocks) are listed with their line; `USE`, `CREATE DATABASE`, `ALTER DATABASE`,
-`GRANT`, `PRINT`, extended properties and the like are counted as ignored; sqlcmd's commands are
-listed as client commands.
+Triggers are created and enabled or disabled as the script says (DDL triggers `ON DATABASE` are
+skipped), and stored procedures and functions (`CREATE` and `ALTER PROCEDURE` and `FUNCTION`)
+are created and run as on SQL Server (D159); `EXEC` of a user procedure in the script runs it.
+Skipped objects (CLR procedures and functions, routines whose body EggDB cannot compile yet,
+synonyms, users and roles, batch logic other than existence guards) are listed with their line; `USE`, `CREATE DATABASE`, `ALTER DATABASE`,
+`GRANT`, `PRINT`, alias types, extended properties other than `MS_Description` and the like are
+counted as ignored; sqlcmd's commands are listed as client commands. Sequences are counted with
+the other objects created, and `MS_Description` properties with the comments.
 
 ### Limits
 
 - **Never read:** `.bak`, `.trn`, BACPAC, DACPAC, `.mdf`, `.ndf`, `.ldf` (above).
-- **Not run:** procedures, functions, triggers, synonyms and table types; users, logins, roles
+- **Not run:** CLR procedures and functions (`AS EXTERNAL NAME`), procedures and functions whose
+  body uses what EggDB does not have yet (sql.md "Transact-SQL procedures and functions"), DDL
+  triggers, synonyms and table types; users, logins, roles
   and permissions; rules and bound defaults; Service Broker; full-text, XML, spatial and
   columnstore indexes, and XML schema collections; Transact-SQL batch logic (`IF`, `WHILE`,
-  `DECLARE`, `BEGIN ... END`, including SSMS's *Check for object existence* guards, item 47);
+  `DECLARE`, `BEGIN ... END`) other than SSMS's *Check for object existence* guards, which run
+  (`IF [NOT] EXISTS (...)` or `IF OBJECT_ID(...) IS [NOT] NULL` around one statement, and
+  `EXEC sp_executesql N'CREATE VIEW ...'`, counted as the statement they guard; item 47);
   `MERGE`, `DBCC`, `BULK INSERT` and other statements EggDB does not have, which are skipped and
   listed.
-- **Not kept, and listed as known differences:** computed and `rowversion` columns; `IDENTITY`
-  seeds and increments other than (1, 1); `DEFAULT` expressions other than constants,
-  `GETDATE()` and `NEWID()`; `INCLUDE` columns, a non-unique index's filter and `DESC`;
+- **Kept as SQL Server had them:** `IDENTITY(seed, increment)` with any seed and increment, and
+  any `DEFAULT` expression, kept as written and run as Transact-SQL (D147); sequences
+  (`CREATE SEQUENCE`, used by `NEXT VALUE FOR` in defaults and queries); `MS_Description`
+  extended properties on schemas, tables, views, columns, indexes and constraints, kept as
+  comments and shown in `sys.extended_properties` (D148); `SET XACT_ABORT ON`.
+- **Kept with their base type:** columns of an alias type (`CREATE TYPE [dbo].[Phone] FROM
+  [nvarchar](20) NOT NULL`) take the base type, and its `NOT NULL` when the column says neither;
+  each alias type is listed as a known difference (D148).
+- **Not kept, and listed as known differences:** computed and `rowversion` columns; a `DEFAULT`
+  EggDB cannot keep (one that names a column or holds a subquery, which SQL Server refuses too);
+  `xml` columns, kept as `nvarchar(max)` (values as text, no XML methods or schema collections);
+  `IDENTITY` on `numeric(p, 0)` with p up to 18, kept as a `bigint` identity column; `IDENTITY`
+  on a heap, on a column that is not the first column of the primary key or on a wider `numeric`,
+  not kept (the column and its values are, and the table's `SET IDENTITY_INSERT` lines are
+  ignored; new rows must give the value); `INCLUDE` columns, a non-unique index's filter and
+  `DESC`;
   `datetimeoffset` offsets (values are kept in UTC); non-binary collations (text compares by code
   point); constraints disabled with `NOCHECK CONSTRAINT` (enforced here); constraints the restored
   rows violate (not created); an index whose name another table's index already has (EggDB's
   index names are unique per schema, not per table: not created); `SET ANSI_NULLS`,
   `QUOTED_IDENTIFIER` or `ANSI_PADDING OFF`.
-- **Not kept, without a note:** default-constraint names; extended properties (`MS_Description`);
-  filegroups and partitioning (`ON [PRIMARY]`, `ON ps(col)`).
-- **Tables skipped, with their rows counted:** columns of `sql_variant`, `xml`, `hierarchyid` or
-  the spatial types; alias types; tables with `IGNORE_DUP_KEY = ON`, FILESTREAM, sparse, masked,
-  Always Encrypted, memory-optimized, temporal or system-versioned columns; an identity column
-  that is not the first primary-key column, or a heap with one.
-- **Scripts:** UTF-8 or UTF-16LE with its byte-order mark (UTF-16 big-endian is refused with the
-  `iconv` command to convert it); three-part names; a batch holding more than 4 MiB of statements
-  other than one `INSERT` must be split with `GO`; `GO 2` and more only after a batch under 1 MiB;
-  a syntax error in one part of a batch does not stop the batch's earlier parts, as SQL Server's
-  compile-first would.
+- **Not kept, without a note:** default-constraint names; extended properties other than
+  `MS_Description`; filegroups and partitioning (`ON [PRIMARY]`, `ON ps(col)`).
+- **Tables skipped, with their rows counted:** columns of `sql_variant`, `hierarchyid` or the
+  spatial types; tables with `IGNORE_DUP_KEY = ON`, FILESTREAM, sparse, masked, Always
+  Encrypted, memory-optimized, temporal or system-versioned columns.
+- **Scripts:** UTF-8, or UTF-16 of either byte order with its byte-order mark; three-part names;
+  a batch of any size: one over 4 MiB without `GO` is cut at each `;` and before each line that
+  starts `INSERT`, `UPDATE` or `DELETE`, outside `BEGIN ... END` and `CASE`, and one statement
+  over 4 MiB runs whole only when it is an `INSERT`, `UPDATE` or `DELETE` (any other must be cut
+  with `;` or `GO`); `GO 2` and more only after a batch under 1 MiB; a syntax error in one part of
+  a batch does not stop the batch's earlier parts, as SQL Server's compile-first would; a cut
+  falling between `WITH ... AS (...)` and the statement it starts breaks that statement.
 - Behaviour of restored `CHECK`s and views used from another dialect follows that dialect's
   conversions and error numbers (D124).
 
+### Moving with no downtime: `eggdb follow`
+
+`eggdb follow` also copies a running SQL Server database whose change tracking is on
+(`ALTER DATABASE ... SET CHANGE_TRACKING = ON`, and `ENABLE CHANGE_TRACKING` on every table). It
+copies the tables, then asks `CHANGETABLE(CHANGES ...)` for changes every `--poll` seconds
+(default 5), until you stop it:
+
+```sh
+SQLCMDPASSWORD=... eggdb follow --create shop.db 'sqlserver://sa@sql.example.com/Shop?encrypt=strict&sslrootcert=ca.pem'
+```
+
+The changes of one poll are applied together, so the copy is consistent at each poll's change
+version, not at each source transaction. Change data capture (CDC) is not read yet.
+
+## Oracle
+
+### 1. Export with Oracle's own tools
+
+SQL*Plus, SQLcl and SQL Developer cannot connect to EggDB (EggDB has no Oracle wire protocol,
+D10), so a schema moves as a script that `eggdb restore --dialect oracle` reads.
+
+- **SQL Developer:** Tools, **Database Export**: DDL and data, data in *insert* format, one file,
+  encoding UTF-8, *Include Drop Statements* off. Set the NLS date and timestamp formats first
+  (Preferences, Database, NLS: `YYYY-MM-DD HH24:MI:SS` and `YYYY-MM-DD HH24:MI:SS.FF6`), so no
+  time of day or century is lost.
+- **SQLcl:** `ddl` for the schema, then `set sqlformat insert` with `spool` for the rows; or
+  `UNLOAD` per table for CSV, after `ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'`
+  and the timestamp format.
+- **A Data Pump `.dmp` file:** EggDB never reads it (no public specification, D13). Write its DDL
+  with `impdp` and take the rows from the database it came from:
+
+  ```sh
+  impdp system DIRECTORY=dp DUMPFILE=hr.dmp SCHEMAS=hr SQLFILE=hr_tables.sql EXCLUDE=REF_CONSTRAINT,STATISTICS
+  impdp system DIRECTORY=dp DUMPFILE=hr.dmp SCHEMAS=hr SQLFILE=hr_refs.sql INCLUDE=REF_CONSTRAINT
+  ```
+
+  `impdp` writes the file in the database's character set: convert it to UTF-8 if that is not
+  AL32UTF8 (`iconv -f CP1252 -t UTF-8 hr_tables.sql > hr_tables_utf8.sql`). The rows come as CSV
+  from SQLcl's `UNLOAD` (`REGIONS_DATA_TABLE.csv` and so on), or from SQL*Plus with
+  `SET MARKUP CSV ON QUOTE ON`, `SET FEEDBACK OFF`, `SET TERMOUT OFF` and `SPOOL`.
+- **An RMAN backup or a legacy `exp` file:** restore it into an Oracle database first, then use
+  one of the routes above. `eggdb restore` recognises these binary files by their content and
+  prints the `impdp` route.
+
+### 2. Restore into EggDB
+
+```sh
+eggdb restore --dialect oracle --create hr.db hr_export.sql
+```
+
+For the Data Pump route, restore the tables, load each CSV (in any order), then add the foreign
+keys:
+
+```sh
+eggdb restore --dialect oracle --create hr.db hr_tables.sql
+eggdb import --dialect oracle hr.db --csv EMPLOYEES_DATA_TABLE.csv --table hr.employees --header
+eggdb restore --dialect oracle hr.db hr_refs.sql
+```
+
+Installers such as Oracle's HR sample schema (`hr_install.sql`) restore as they are, following
+their `@@` includes: `eggdb restore --dialect oracle --create hr.db hr_install.sql`.
+
+The script is read as SQL*Plus reads it. A statement ends at `;` (outside strings, `q'[...]'`
+quotes, quoted names and comments) or at a line holding only `/`; a PL/SQL unit (`CREATE
+PROCEDURE`, `PACKAGE`, `TRIGGER`, `TYPE`, `DECLARE`, `BEGIN`) ends only at a `/` line, and a line
+holding only `.` ends a statement without running it. Each statement runs in its own transaction;
+an anonymous block of `INSERT`, `UPDATE`, `DELETE`, `MERGE` and `COMMIT` statements (HR loads its
+rows that way) runs as one transaction, all or nothing. In the CSV route, an empty field is NULL
+and dates are read by Oracle's NLS format (`DD-MON-RR`), then as ISO 8601.
+
+SQL*Plus commands:
+
+- `DEFINE`, `UNDEFINE`, `SET DEFINE`, `SET ESCAPE` and `SET CONCAT` work, and `&name`, `&&name`
+  and `&name.` are replaced as SQL*Plus replaces them. `ACCEPT` never prompts: its variable takes
+  its `DEFAULT`, or stays undefined. `--define name=value` defines a variable from the command
+  line. An undefined variable is an error only in a statement that runs, a user or schema name or
+  an included file's name.
+- `@file`, `@@file` and `START file` include another script, with `.sql` added when the name has
+  no extension: `@@` from the including script's folder, `@` from the working directory, regular
+  files only, at most 20 deep and 10,000 in one restore, never a URL.
+- `CONNECT user` puts the objects after it in schema `user` (no login is made, and the password is
+  never stored or shown); `EXIT` and `QUIT` end the restore.
+- `SET SQLTERMINATOR`, `SET BLOCKTERMINATOR`, `SET SQLPREFIX` and `SET SQLBLANKLINES OFF` change
+  how a script is read and are refused. `WHENEVER` is listed: `--keep-going` decides.
+- Every other command (`SET`, `PROMPT`, `SPOOL`, `COLUMN`, `HOST`, ...) is listed and never run.
+
+Users become schemas: `CREATE USER hr`, `CONNECT hr`, `ALTER SESSION SET CURRENT_SCHEMA = hr` and
+`CREATE TABLE hr.t` make schema `hr` when it is missing. Query it in Oracle SQL after `ALTER
+SESSION SET CURRENT_SCHEMA = HR`, or in PostgreSQL SQL as `hr.employees`.
+
+### 3. Read the report
+
+The report is the SQL Server one, in Oracle's words. PL/SQL runs: procedures, functions,
+packages and their bodies and triggers are created (HR's `hr_code.sql` makes `SECURE_DML`,
+`ADD_JOB_HISTORY` and their two triggers), `ALTER TRIGGER ... ENABLE|DISABLE` and `ALTER TABLE ...
+ENABLE|DISABLE ALL TRIGGERS` take effect, `DROP PROCEDURE` and the like drop, and anonymous blocks
+run. **Skipped** lists a unit that does not compile (with Oracle's `ORA-06550`/`PLS-` message:
+Oracle keeps it invalid, EggDB does not create it), a block that uses a substitution variable
+with no value (HR's installer checks its prompted password and tablespace that way; `--define`
+gives them values), a block that calls an Oracle-supplied package EggDB does not have
+(`DBMS_LOGREP_IMP` in Data Pump's files; `DBMS_OUTPUT` is there), object types, Java, synonyms,
+database links, materialized views and the like, each with its script and line. **Ignored**
+counts `GRANT`, users (*schema created, login not*), `COMMIT`, queries, storage settings
+(`ALTER INDEX ... NOPARALLEL` and the like), PL/SQL settings (`ALTER PROCEDURE ... COMPILE`:
+EggDB compiles a unit when it is created) and the `ALTER SESSION` parameters EggDB does not have
+(`EVENTS`). SQL*Plus commands are listed as client commands; a script included with `@@` shows
+as `hr_populate.sql line 61`.
+
+A constraint disabled with `ALTER TABLE ... DISABLE CONSTRAINT` is dropped and added again by the
+matching `ENABLE` (HR loads its departments that way), checking the rows then. A constraint written
+`DISABLE` in `CREATE TABLE` or `ALTER TABLE ... ADD (...)`, at the table level or inside a column
+(`qty NUMBER CONSTRAINT qty_ck CHECK (qty > 0) DISABLE`), is remembered the same way and added at
+its `ENABLE`.
+
+Identity columns are kept with their kind: `GENERATED ALWAYS AS IDENTITY` refuses values given
+after the restore (`ORA-32795`), while the restore itself loads the values the export holds.
+`START WITH` and `INCREMENT BY` are kept; `CACHE`, `ORDER`, `KEEP`, `SCALE` and the default
+`MINVALUE`/`MAXVALUE` that SQL Developer writes have no effect. New rows take the next value after
+the largest one restored, where Oracle continues its sequence. A `PRIMARY KEY` or `UNIQUE`
+constraint added with `USING INDEX other_name` takes that index over when it is on the same
+columns (`user_indexes` then shows the constraint's name), and keeps it beside its own when the
+index has more columns. Known differences:
+
+```
+known differences (restored, but not as the source had it)
+  line 12   emp.emp_boss_fk  existing rows are checked here; Oracle's NOVALIDATE doesn't check them
+  line 13   emp              kept enforced: EggDB doesn't disable keys
+  end       c.c_fk           disabled in the source: not created here, so not enforced
+```
+
+### Limits
+
+- **Never read:** Data Pump `.dmp` and legacy `exp` files, RMAN backups (above).
+- **Not run:** PL/SQL units that do not compile, blocks with substitution variables that have
+  no value or calls to Oracle-supplied packages EggDB does not have (above); object types,
+  synonyms, database links, materialized views, directories, tablespaces, roles,
+  profiles and the other objects EggDB does not have; logins, passwords and grants; queries in
+  scripts.
+- **Not kept:** storage clauses, `ORGANIZATION INDEX`, LOB storage and other physical properties
+  (accepted with no effect); the name of a separate index taken over by a primary key or a
+  unique constraint, by name or by `USING INDEX` (its name becomes the constraint's); collations
+  other than binary; where an identity's sequence had got to (new rows continue after the
+  largest value).
+- **Not kept, and listed as known differences:** constraints left disabled (not created);
+  disabled keys (enforced); `ENABLE NOVALIDATE` (rows are checked); identity columns EggDB cannot
+  keep (a `MAXVALUE` or `MINVALUE` inside the column's range, `CYCLE`, or an identity that is not
+  the first column of the primary key: the column and its values are kept, the identity is not);
+  virtual columns (left out);
+  partitioning (one unpartitioned table); `ROLLBACK` (the statements before it were committed).
+- **SQL*Plus behaviour:** `/` after a statement ended by `;` does not run it again; blank lines
+  never end a statement (SQL*Plus's `SQLBLANKLINES ON`); a `/` line inside a string or a block
+  comment is part of it; `WHENEVER` is decided by `--keep-going`; `ACCEPT` never prompts;
+  `SQLPATH` is not searched; scripts from URLs are never fetched. The same reading runs scripts
+  in `eggdb sql --dialect oracle` (docs/cli.md), not in `eggdb shell`.
+- **Scripts:** UTF-8 or UTF-16LE with its byte-order mark; other encodings are refused with an
+  `iconv` example. An anonymous block is one transaction, so one larger than the page cache fails
+  at its commit.
+- **Taking over an index:** a primary key or unique constraint takes over an index of the same
+  name, or the one its `USING INDEX` names, when it is on the same columns; `USING INDEX` naming a
+  missing index is `ORA-01418`, and one whose leading columns are not the constraint's is
+  `ORA-14196`.
+
+## From MySQL and MariaDB: a `mysqldump` file
+
+`eggdb restore --dialect mysql --create app.eggdb shop.sql` restores what `mysqldump shop >
+shop.sql` writes (D198). The file is read as the `mysql` client reads it: statements end at `;`
+or at the delimiter a `DELIMITER` line sets (as dumps of triggers and routines do), outside
+strings, backquoted names and comments, and the `/*!NNNNN ... */` comments run as MySQL runs
+them. Tables, rows (`INSERT` and `REPLACE`), indexes, views, triggers and the session settings
+the dump makes run in EggDB's MySQL dialect; `LOCK TABLES`, `ALTER TABLE ... DISABLE KEYS`,
+`CREATE DATABASE` and `USE` (one database per file), `GRANT`, and the replication settings of
+a GTID dump (`SET @@GLOBAL.GTID_PURGED`, `SQL_LOG_BIN`) are counted as ignored. `--dialect
+mariadb` reads the same format. The report lists tables, rows per table and anything left out.
+
+Dump with `--skip-extended-insert` only if you need a failing row to name itself; the default
+multi-row `INSERT` is faster to restore. `mysqldump` writes tables in name order, and EggDB does
+not yet defer a foreign key to a table created later the way `FOREIGN_KEY_CHECKS=0` lets MySQL:
+such a table is reported as failed; restore with `--keep-going` and add the constraint
+afterwards with `ALTER TABLE ... ADD CONSTRAINT`.
+
+## From Redis: an append-only file
+
+`eggdb restore app.eggdb appendonly.aof` replays a Redis append-only file (a file of RESP
+commands, its name ending in `.aof`) into the RESP databases of the file (D193): each `SELECT`
+switches databases, each `MULTI`/`EXEC` block runs as one transaction, and the report counts the
+commands and the ones that failed. Serve the result with `eggdb serve app.eggdb --resp-listen`.
+For Redis 7's multi-part AOF, restore the incremental `.aof` files in order. RDB snapshots are
+not read yet: Redis does not publish a specification of the RDB format, so `BGREWRITEAOF` (or
+`appendonly yes`) in the old server is the way to get a file to restore.
+
+## From MongoDB: a `mongodump` directory
+
+`eggdb restore app.eggdb dump/` restores what `mongodump --out dump/` writes (D197): a
+directory per database holding, per collection, a `.bson` file of its documents and a
+`.metadata.json` file of its indexes. Point it at the whole dump, at one database's directory,
+or at one collection's `.bson` file (its database is the directory it sits in). Each collection
+is created, its documents inserted in batches (a document whose `_id` is already there is
+counted as failed, as `mongorestore` reports a duplicate key), and its index definitions
+recorded. The `admin`, `config` and `local` databases and `system.*` collections are left out.
+The report counts databases, collections, documents, failures and indexes. Serve the result
+with `eggdb serve app.eggdb --mongo-listen` and point `mongosh` or your driver at it.
+
+Not read yet: `mongodump --gzip` output (run `gunzip -r dump/` first), `--archive` files (dump
+to a directory instead), and unique indexes other than `_id`, which are reported as left out.

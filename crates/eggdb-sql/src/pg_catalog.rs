@@ -1,25 +1,41 @@
 mod deparse;
 mod functions;
+mod monitoring;
 mod oids;
 mod relations;
+mod routines;
 mod snapshot;
 mod types;
 
 #[cfg(test)]
 mod deparse_tests;
 #[cfg(test)]
+mod routine_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::arrays::ArrayElement;
 use crate::types::SqlType;
 
+use crate::information_schema::InformationRelation;
+use crate::oracle_dictionary::OracleRelation;
+use crate::sqlserver_catalog::SqlServerRelation;
+pub(crate) use deparse::{check_text, default_text};
 pub(crate) use functions::{
     argument_types, function, partition_ancestors_rows, partition_ancestors_type, result_type,
 };
+pub(crate) use monitoring::{
+    function as monitoring_function, result_type as monitoring_result_type,
+};
+pub(crate) use oids::{OidRequest, Space as OidSpace, assign as assign_oids};
+pub(crate) use oids::{builtin_type, builtin_type_named, format_type, type_modifier};
 pub(crate) use relations::generated_rows;
+pub(crate) use relations::{index_columns, index_is_unique, index_sort_options};
 pub(crate) use snapshot::{
-    enter_statement, load_for_stored_expressions, load_if_wanted, mentions_catalog,
-    names_non_sequence_relation, text_needs_catalog,
+    CatalogSnapshot, ConstraintSource, IndexSource, PackageEntry, RelationEntry, RelationKind,
+    RelationSource, RoutineEntry, TriggerEntry, current as current_snapshot, enter_statement,
+    load_for_stored_expressions, load_if_wanted, mentions_catalog, names_non_sequence_relation,
+    routine_oid, session_user, snapshot_for, statement_settings, text_needs_catalog,
 };
 pub use types::{CatalogType, RegKind, RegValue};
 
@@ -44,24 +60,49 @@ pub(crate) fn catalog_reference(
     reader: &dyn crate::store::KeyValueRead,
     name: &str,
 ) -> crate::error::SqlResult<Option<CatalogRelation>> {
-    if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
-        return Ok(None);
+    match crate::constraints::current_dialect() {
+        crate::Dialect::PostgreSql => postgresql_catalog_reference(reader, name),
+        crate::Dialect::SqlServer => {
+            Ok(SqlServerRelation::referenced(name).map(CatalogRelation::SqlServer))
+        }
+        crate::Dialect::Oracle => {
+            Ok(crate::oracle_dictionary::reference(reader, name)?.map(CatalogRelation::Oracle))
+        }
+        crate::Dialect::MySql => {
+            Ok(crate::mysql_catalog::MySqlRelation::referenced(name).map(CatalogRelation::MySql))
+        }
+        crate::Dialect::Sqlite => Ok(None),
     }
+}
+
+fn postgresql_catalog_reference(
+    reader: &dyn crate::store::KeyValueRead,
+    name: &str,
+) -> crate::error::SqlResult<Option<CatalogRelation>> {
     if let Some((schema, base)) = name.split_once(crate::schemas::QUALIFIER) {
-        return Ok(if schema == crate::schemas::CATALOG_SCHEMA {
-            CatalogRelation::named(base)
-        } else {
-            None
-        });
+        return Ok(CatalogRelation::named_in(schema, base));
     }
-    let Some(relation) = CatalogRelation::named(name) else {
+    let in_catalog = CatalogRelation::named_in(crate::schemas::CATALOG_SCHEMA, name);
+    let in_information = InformationRelation::named(name);
+    if in_catalog.is_none() && in_information.is_none() {
         return Ok(None);
-    };
+    }
     let path = crate::schemas::effective_path(reader)?;
-    if let Some(catalog_at) = path
-        .iter()
-        .position(|schema| schema == crate::schemas::CATALOG_SCHEMA)
-    {
+    let (relation, schema) = match (in_catalog, in_information) {
+        (Some(relation), _) => (relation, crate::schemas::CATALOG_SCHEMA),
+        (None, Some(relation))
+            if path
+                .iter()
+                .any(|entry| entry == crate::schemas::INFORMATION_SCHEMA) =>
+        {
+            (
+                CatalogRelation::Information(relation),
+                crate::schemas::INFORMATION_SCHEMA,
+            )
+        }
+        _ => return Ok(None),
+    };
+    if let Some(catalog_at) = path.iter().position(|entry| entry == schema) {
         for schema in &path[..catalog_at] {
             let candidate = crate::schemas::qualified(schema, name);
             if reader
@@ -79,6 +120,9 @@ pub(crate) fn refuse_catalog_change(
     reader: &dyn crate::store::KeyValueRead,
     name: &crate::ast::Name,
 ) -> crate::error::SqlResult<()> {
+    if crate::constraints::current_dialect() == crate::Dialect::Oracle {
+        return Ok(());
+    }
     match catalog_reference(reader, &name.text)? {
         Some(relation) => Err(system_catalog(relation.name())),
         None => Ok(()),
@@ -98,7 +142,11 @@ pub(crate) fn copy_query(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let text = format!("SELECT {list} FROM pg_catalog.{}", relation.name());
+    let text = format!(
+        "SELECT {list} FROM {}.{}",
+        relation.schema(),
+        crate::pg_keywords::quote_ident(relation.name())
+    );
     let tokens = crate::lexer::tokenize(&text)?;
     let mut parser =
         crate::parser::Parser::new(&text, &tokens).in_dialect(crate::Dialect::PostgreSql);
@@ -145,11 +193,50 @@ pub(crate) enum CatalogRelation {
     Trigger,
     Rewrite,
     AuthMembers,
+    Settings,
+    TimezoneNames,
+    Opclass,
+    Enum,
+    Proc,
+    Language,
+    Range,
+    Information(InformationRelation),
+    SqlServer(SqlServerRelation),
+    Oracle(OracleRelation),
+    Monitoring(monitoring::MonitoringRelation),
+    MySql(crate::mysql_catalog::MySqlRelation),
 }
 
 pub(crate) struct CatalogColumn {
     pub(crate) name: &'static str,
     pub(crate) sql_type: SqlType,
+}
+
+pub(crate) struct CatalogRow {
+    columns: &'static [CatalogColumn],
+    values: Vec<crate::types::Value>,
+}
+
+impl CatalogRow {
+    pub(crate) fn new(columns: &'static [CatalogColumn]) -> Self {
+        Self {
+            columns,
+            values: vec![crate::types::Value::Null; columns.len()],
+        }
+    }
+
+    pub(crate) fn set(mut self, name: &str, value: crate::types::Value) -> Self {
+        if let Some(at) = self.columns.iter().position(|column| column.name == name)
+            && let Some(slot) = self.values.get_mut(at)
+        {
+            *slot = value;
+        }
+        self
+    }
+
+    pub(crate) fn done(self) -> Vec<crate::types::Value> {
+        self.values
+    }
 }
 
 const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
@@ -172,7 +259,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 31] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -197,6 +284,13 @@ impl CatalogRelation {
         Self::Trigger,
         Self::Rewrite,
         Self::AuthMembers,
+        Self::Settings,
+        Self::TimezoneNames,
+        Self::Opclass,
+        Self::Enum,
+        Self::Proc,
+        Self::Language,
+        Self::Range,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -225,7 +319,40 @@ impl CatalogRelation {
             Self::Trigger => "pg_trigger",
             Self::Rewrite => "pg_rewrite",
             Self::AuthMembers => "pg_auth_members",
+            Self::Settings => "pg_settings",
+            Self::TimezoneNames => "pg_timezone_names",
+            Self::Opclass => "pg_opclass",
+            Self::Enum => "pg_enum",
+            Self::Proc => "pg_proc",
+            Self::Language => "pg_language",
+            Self::Range => "pg_range",
+            Self::Information(relation) => relation.name(),
+            Self::Monitoring(relation) => relation.name(),
+            Self::MySql(relation) => relation.name(),
+            Self::SqlServer(relation) => relation.name(),
+            Self::Oracle(relation) => relation.name(),
         }
+    }
+
+    pub(crate) fn schema(self) -> &'static str {
+        match self {
+            Self::Information(_) => crate::schemas::INFORMATION_SCHEMA,
+            Self::SqlServer(relation) => relation.schema(),
+            Self::Oracle(relation) => relation.schema(),
+            Self::MySql(_) => crate::schemas::INFORMATION_SCHEMA,
+            _ => crate::schemas::CATALOG_SCHEMA,
+        }
+    }
+
+    pub(crate) fn every() -> impl Iterator<Item = Self> {
+        Self::IN_PG_CATALOG
+            .into_iter()
+            .chain(InformationRelation::ALL.into_iter().map(Self::Information))
+            .chain(
+                monitoring::MonitoringRelation::ALL
+                    .into_iter()
+                    .map(Self::Monitoring),
+            )
     }
 
     pub(crate) fn oid(self) -> u32 {
@@ -254,17 +381,47 @@ impl CatalogRelation {
             Self::Trigger => 2620,
             Self::Rewrite => 2618,
             Self::AuthMembers => 1261,
+            Self::Settings => 12001,
+            Self::TimezoneNames => 12002,
+            Self::Opclass => 2616,
+            Self::Enum => 3501,
+            Self::Proc => 1255,
+            Self::Language => 2612,
+            Self::Range => 3541,
+            Self::Information(relation) => relation.oid(),
+            Self::Monitoring(relation) => relation.oid(),
+            Self::MySql(relation) => relation.oid(),
+            Self::SqlServer(_) | Self::Oracle(_) => 0,
         }
     }
 
     pub(crate) fn is_view(self) -> bool {
-        self == Self::Roles
+        if let Self::Monitoring(relation) = self {
+            return relation.is_view();
+        }
+        matches!(
+            self,
+            Self::Roles
+                | Self::Settings
+                | Self::TimezoneNames
+                | Self::Information(_)
+                | Self::MySql(_)
+                | Self::SqlServer(_)
+                | Self::Oracle(_)
+        )
     }
 
-    pub(crate) fn named(name: &str) -> Option<Self> {
-        Self::ALL
+    pub(crate) fn named_in(schema: &str, name: &str) -> Option<Self> {
+        if schema == crate::schemas::INFORMATION_SCHEMA {
+            return InformationRelation::named(name).map(Self::Information);
+        }
+        if schema != crate::schemas::CATALOG_SCHEMA {
+            return None;
+        }
+        Self::IN_PG_CATALOG
             .into_iter()
             .find(|relation| relation.name() == name)
+            .or_else(|| monitoring::MonitoringRelation::named(name).map(Self::Monitoring))
     }
 
     pub(crate) fn column_named(self, name: &str) -> Option<usize> {
@@ -297,6 +454,18 @@ impl CatalogRelation {
             Self::PublicationRel => &PUBLICATION_REL_COLUMNS,
             Self::PublicationNamespace => &PUBLICATION_NAMESPACE_COLUMNS,
             Self::Roles => &ROLES_COLUMNS,
+            Self::Settings => &SETTINGS_COLUMNS,
+            Self::TimezoneNames => &TIMEZONE_NAMES_COLUMNS,
+            Self::Opclass => &OPCLASS_COLUMNS,
+            Self::Enum => &ENUM_COLUMNS,
+            Self::Proc => &PROC_COLUMNS,
+            Self::Language => &LANGUAGE_COLUMNS,
+            Self::Range => &RANGE_COLUMNS,
+            Self::Information(relation) => relation.columns(),
+            Self::Monitoring(relation) => relation.columns(),
+            Self::MySql(relation) => relation.columns(),
+            Self::SqlServer(relation) => relation.columns(),
+            Self::Oracle(relation) => relation.columns(),
         }
     }
 }
@@ -659,4 +828,111 @@ const ROLES_COLUMNS: [CatalogColumn; 13] = [
     column("rolbypassrls", SqlType::Boolean),
     column("rolconfig", TEXTS),
     column("oid", OID),
+];
+
+const TIMEZONE_NAMES_COLUMNS: [CatalogColumn; 4] = [
+    column("name", SqlType::Text),
+    column("abbrev", SqlType::Text),
+    column(
+        "utc_offset",
+        SqlType::Interval {
+            fields: None,
+            precision: None,
+        },
+    ),
+    column("is_dst", SqlType::Boolean),
+];
+
+const SETTINGS_COLUMNS: [CatalogColumn; 17] = [
+    column("name", SqlType::Text),
+    column("setting", SqlType::Text),
+    column("unit", SqlType::Text),
+    column("category", SqlType::Text),
+    column("short_desc", SqlType::Text),
+    column("extra_desc", SqlType::Text),
+    column("context", SqlType::Text),
+    column("vartype", SqlType::Text),
+    column("source", SqlType::Text),
+    column("min_val", SqlType::Text),
+    column("max_val", SqlType::Text),
+    column("enumvals", TEXTS),
+    column("boot_val", SqlType::Text),
+    column("reset_val", SqlType::Text),
+    column("sourcefile", SqlType::Text),
+    column("sourceline", SqlType::Integer),
+    column("pending_restart", SqlType::Boolean),
+];
+
+const OPCLASS_COLUMNS: [CatalogColumn; 9] = [
+    column("oid", OID),
+    column("opcmethod", OID),
+    column("opcname", NAME),
+    column("opcnamespace", OID),
+    column("opcowner", OID),
+    column("opcfamily", OID),
+    column("opcintype", OID),
+    column("opcdefault", SqlType::Boolean),
+    column("opckeytype", OID),
+];
+
+const ENUM_COLUMNS: [CatalogColumn; 4] = [
+    column("oid", OID),
+    column("enumtypid", OID),
+    column("enumsortorder", SqlType::Real),
+    column("enumlabel", NAME),
+];
+
+const PROC_COLUMNS: [CatalogColumn; 30] = [
+    column("oid", OID),
+    column("proname", NAME),
+    column("pronamespace", OID),
+    column("proowner", OID),
+    column("prolang", OID),
+    column("procost", SqlType::Real),
+    column("prorows", SqlType::Real),
+    column("provariadic", OID),
+    column("prosupport", REGPROC),
+    column("prokind", CHAR),
+    column("prosecdef", SqlType::Boolean),
+    column("proleakproof", SqlType::Boolean),
+    column("proisstrict", SqlType::Boolean),
+    column("proretset", SqlType::Boolean),
+    column("provolatile", CHAR),
+    column("proparallel", CHAR),
+    column("pronargs", SqlType::SmallInt),
+    column("pronargdefaults", SqlType::SmallInt),
+    column("prorettype", OID),
+    column("proargtypes", OID_VECTOR),
+    column("proallargtypes", OIDS),
+    column("proargmodes", CHARS),
+    column("proargnames", TEXTS),
+    column("proargdefaults", NODE_TREE),
+    column("protrftypes", OIDS),
+    column("prosrc", SqlType::Text),
+    column("probin", SqlType::Text),
+    column("prosqlbody", NODE_TREE),
+    column("proconfig", TEXTS),
+    column("proacl", ACL_ITEMS),
+];
+
+const LANGUAGE_COLUMNS: [CatalogColumn; 9] = [
+    column("oid", OID),
+    column("lanname", NAME),
+    column("lanowner", OID),
+    column("lanispl", SqlType::Boolean),
+    column("lanpltrusted", SqlType::Boolean),
+    column("lanplcallfoid", OID),
+    column("laninline", OID),
+    column("lanvalidator", OID),
+    column("lanacl", ACL_ITEMS),
+];
+
+const RANGE_COLUMNS: [CatalogColumn; 7] = [
+    column("rngtypid", OID),
+    column("rngsubtype", OID),
+    column("rngmultitypid", OID),
+    column("rngcollation", OID),
+    column("rngsubopc", OID),
+    column("rngcanonical", REGPROC),
+    column("rngsubdiff", REGPROC),
 ];

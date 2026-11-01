@@ -18,7 +18,6 @@ const LINK_RECORD: usize = RECORD_HEADER + LINK_PAYLOAD;
 const BATCH_PAYLOAD: usize = 8;
 const IMAGE_PAGE_AT: usize = 8;
 pub(crate) const COMMIT_PAYLOAD: usize = 9 * 8;
-const SEGMENT_ROOM_BEYOND_A_PAGE: u64 = 8192;
 const DEFAULT_SEGMENT_BYTES: usize = 64 << 10;
 pub(crate) const SEQUENCE_RESERVATION: u64 = 1 << 16;
 pub(crate) const DEFAULT_AUTO_CHECKPOINT_BYTES: u64 = 1 << 20;
@@ -97,11 +96,6 @@ impl RecordType {
 
 pub(crate) fn default_segment_pages(page_size: PageSize) -> u32 {
     (DEFAULT_SEGMENT_BYTES / page_size.bytes()).max(2) as u32
-}
-
-pub(crate) fn segment_holds_a_page(page_size: PageSize, segment_pages: u32) -> bool {
-    let page_bytes = page_size.bytes() as u64;
-    u64::from(segment_pages) * page_bytes >= page_bytes + SEGMENT_ROOM_BEYOND_A_PAGE
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1198,14 +1192,14 @@ mod tests {
         for log2 in 12..=16 {
             let page_size = PageSize::from_log2(log2).unwrap();
             let default = super::default_segment_pages(page_size);
-            assert!(super::segment_holds_a_page(page_size, default));
+            assert!(crate::format::segment_holds_a_page(page_size, default));
             let bytes = u64::from(default) * page_size.bytes() as u64;
             assert!(bytes >= 64 << 10);
         }
-        assert!(!super::segment_holds_a_page(PageSize::DEFAULT, 2));
-        assert!(super::segment_holds_a_page(PageSize::DEFAULT, 3));
+        assert!(!crate::format::segment_holds_a_page(PageSize::DEFAULT, 2));
+        assert!(crate::format::segment_holds_a_page(PageSize::DEFAULT, 3));
         let large = PageSize::from_log2(16).unwrap();
-        assert!(!super::segment_holds_a_page(large, 1));
+        assert!(!crate::format::segment_holds_a_page(large, 1));
     }
 
     fn committed_states(fs: &SimFileSystem, durability: Durability) -> Vec<u64> {

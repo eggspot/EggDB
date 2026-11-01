@@ -692,10 +692,10 @@ fn a_last_page_that_names_a_next_page_or_holds_bytes_past_the_value_is_refused()
 fn a_chain_leading_to_a_page_of_another_type_or_layout_is_refused() {
     let (fs, model) = damaged(|cache| {
         let chain = chain_of(cache, b"a");
-        let mut page = cache.write(chain[3]).unwrap();
+        let mut page = cache.write(chain[0]).unwrap();
         let header = page.header();
         page.set_header(PageHeader {
-            layout: 2,
+            layout: overflow::COMPRESSED_LAYOUT + 1,
             ..header
         })
         .unwrap();
@@ -705,6 +705,22 @@ fn a_chain_leading_to_a_page_of_another_type_or_layout_is_refused() {
         &model,
         b"a",
         corrupt_overflow("the page has an unknown layout"),
+    );
+    let (fs, model) = damaged(|cache| {
+        let chain = chain_of(cache, b"a");
+        let mut page = cache.write(chain[3]).unwrap();
+        let header = page.header();
+        page.set_header(PageHeader {
+            layout: overflow::COMPRESSED_LAYOUT,
+            ..header
+        })
+        .unwrap();
+    });
+    assert_refused(
+        &fs,
+        &model,
+        b"a",
+        corrupt_overflow("the page's layout differs from its chain's"),
     );
     let (fs, model) = damaged(|cache| {
         let chain = chain_of(cache, b"a");
@@ -1161,5 +1177,47 @@ fn a_large_value_length_longer_than_the_file_is_refused_by_the_length_step() {
             corrupt_overflow("the value is longer than the file could hold")(&error),
             "{order:?}: {error}"
         );
+    }
+}
+
+#[test]
+fn a_damaged_compressed_value_is_an_error_never_a_panic() {
+    let fs = SimFileSystem::new();
+    let options = CreateOptions {
+        page_size: PageSize::DEFAULT,
+        file_id: FILE_ID,
+    };
+    let file = PageFile::create(&fs, Path::new(DB), options).unwrap();
+    let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(256)).unwrap();
+    cache.set_value_compression(crate::ValueCompression::Lz4);
+    let tree = BTree::create(&cache).unwrap();
+    let value: Vec<u8> = b"compressible "
+        .iter()
+        .copied()
+        .cycle()
+        .take(40_000)
+        .collect();
+    tree.put(&cache, b"k", &value).unwrap();
+    cache
+        .commit(|superblock| superblock.catalog_root = tree.root())
+        .unwrap();
+    assert_ne!(
+        cache.superblock().features.incompatible & crate::format::Features::COMPRESSED_VALUES,
+        0
+    );
+    assert_eq!(tree.get(&cache, b"k").unwrap(), Some(value.clone()));
+    let first = chain_of(&cache, b"k")[0];
+    assert_eq!(
+        cache.read(first).unwrap().header().layout,
+        overflow::COMPRESSED_LAYOUT
+    );
+    let mut page = cache.write(first).unwrap();
+    for byte in &mut page[24 + 8..24 + 64] {
+        *byte ^= 0x5A;
+    }
+    drop(page);
+    match tree.get(&cache, b"k") {
+        Err(_) => {}
+        Ok(found) => assert_ne!(found, Some(value)),
     }
 }

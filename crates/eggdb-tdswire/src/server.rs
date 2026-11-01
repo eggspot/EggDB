@@ -1,7 +1,7 @@
 use crate::auth::TdsCredentials;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
-use eggdb_sql::KeyValueStore;
+use eggdb_sql::{CancelSignal, KeyValueStore};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
@@ -40,6 +40,9 @@ pub struct ServerConfig {
     /// Whether to log the first 200 characters of each batch, for finding out what a client
     /// sends. Off unless asked for; the login and its password are never logged.
     pub log_batches: bool,
+    /// The TLS setup, when the server offers encryption (D161): PRELOGIN then negotiates it,
+    /// TDS 8 strict connections are accepted, and connections from other machines must encrypt.
+    pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
 }
 
 /// Why a listener was not opened.
@@ -57,7 +60,7 @@ impl fmt::Display for ListenError {
         match self {
             Self::NotLoopback(address) => write!(
                 f,
-                "{address} is not a loopback address; until EggDB has TLS, it listens only on 127.0.0.1, ::1 or another loopback address, so only this machine can connect"
+                "{address} is not a loopback address; without TLS EggDB listens only on 127.0.0.1, ::1 or another loopback address, so only this machine can connect: give it a certificate (--tls-certificate and --tls-key, or --tls-self-signed) to listen on other addresses"
             ),
             Self::Io(error) => write!(f, "{error}"),
         }
@@ -70,7 +73,13 @@ impl std::error::Error for ListenError {}
 /// `::1`); any other address is refused before anything is bound (D102). Port 0 picks a free
 /// port.
 pub fn listen_on_loopback(address: SocketAddr) -> Result<TcpListener, ListenError> {
-    if !address.ip().is_loopback() {
+    listen(address, false)
+}
+
+/// Opens the listener on `address`: any address when the server has TLS (`tls_configured`),
+/// only loopback addresses without it.
+pub fn listen(address: SocketAddr, tls_configured: bool) -> Result<TcpListener, ListenError> {
+    if !tls_configured && !address.ip().is_loopback() {
         return Err(ListenError::NotLoopback(address));
     }
     TcpListener::bind(address).map_err(ListenError::Io)
@@ -117,6 +126,29 @@ pub(crate) struct Shared<'a> {
     pub(crate) unknown_user: TdsCredentials,
     pub(crate) unauthenticated: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
+    pub(crate) running: Mutex<Vec<(u32, CancelSignal)>>,
+}
+
+impl Shared<'_> {
+    pub(crate) fn register(&self, connection_id: u32, signal: CancelSignal) {
+        if let Ok(mut running) = self.running.lock() {
+            running.push((connection_id, signal));
+        }
+    }
+
+    pub(crate) fn unregister(&self, connection_id: u32) {
+        if let Ok(mut running) = self.running.lock() {
+            running.retain(|(id, _)| *id != connection_id);
+        }
+    }
+
+    fn cancel_running(&self) {
+        if let Ok(running) = self.running.lock() {
+            for (_, signal) in running.iter() {
+                signal.cancel();
+            }
+        }
+    }
 }
 
 pub(crate) struct Slot<'c>(&'c AtomicUsize);
@@ -170,6 +202,7 @@ pub fn serve<S: KeyValueStore + Sync>(
         unknown_user: TdsCredentials::matching_nothing(&secret, config.credentials.iterations()),
         unauthenticated: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
+        running: Mutex::new(Vec::new()),
     };
     let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);
@@ -195,7 +228,9 @@ pub fn serve<S: KeyValueStore + Sync>(
                 Some(slot) => {
                     let started = std::thread::Builder::new()
                         .name(format!("eggdb-tds-{connection_id}"))
+                        .stack_size(eggdb_sql::SESSION_STACK_BYTES)
                         .spawn_scoped(scope, move || {
+                            eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
                             let _slot = slot;
                             run_connection(stream, shared, store, connection_id);
                         });
@@ -223,6 +258,7 @@ pub fn serve<S: KeyValueStore + Sync>(
                 }
             }
         }
+        shared.cancel_running();
     });
     Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }

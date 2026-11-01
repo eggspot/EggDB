@@ -1,5 +1,7 @@
 use crate::error::{Error, ErrorKind, Result};
+use eggdb_platform::{Clock, SystemClock};
 use eggdb_storage::PageSize;
+use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
@@ -69,6 +71,49 @@ pub struct Options {
     pub(crate) auto_checkpoint_log_bytes: Option<u64>,
     pub(crate) page_size_bytes: usize,
     pub(crate) write_timeout: Duration,
+    pub(crate) clock: ClockChoice,
+    pub(crate) lock_cache: bool,
+    pub(crate) compress_values: bool,
+    pub(crate) encryption_key: Option<EncryptionKey>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EncryptionKey(pub(crate) [u8; eggdb_storage::PAGE_KEY_BYTES]);
+
+impl std::fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EncryptionKey(..)")
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ClockChoice(Option<Arc<dyn Clock>>);
+
+impl ClockChoice {
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        match &self.0 {
+            Some(clock) => Arc::clone(clock),
+            None => Arc::new(SystemClock::new()),
+        }
+    }
+}
+
+impl PartialEq for ClockChoice {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ClockChoice {}
+
+impl std::fmt::Debug for ClockChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Given" } else { "System" })
+    }
 }
 
 impl Options {
@@ -86,6 +131,10 @@ impl Options {
             auto_checkpoint_log_bytes: Some(DEFAULT_AUTO_CHECKPOINT_LOG_BYTES),
             page_size_bytes: PageSize::DEFAULT.bytes(),
             write_timeout: DEFAULT_WRITE_TIMEOUT,
+            clock: ClockChoice::default(),
+            lock_cache: false,
+            compress_values: false,
+            encryption_key: None,
         }
     }
 
@@ -124,6 +173,35 @@ impl Options {
         self
     }
 
+    /// Keeps the page cache in RAM, never swapped out (`mlock` on Unix systems, `VirtualLock` on
+    /// Windows), so a busy machine never pages the database's hot data to disk. Off by default.
+    /// When the process may not lock that much memory, the open fails with
+    /// [`ErrorKind::OutOfMemory`](crate::ErrorKind::OutOfMemory); raise `ulimit -l` or the
+    /// working-set size, or lower [`Options::cache_bytes`].
+    pub fn lock_cache(mut self, lock: bool) -> Self {
+        self.lock_cache = lock;
+        self
+    }
+
+    /// Compresses values of 4 KiB or more that are written from now on, when compressing
+    /// saves at least a sixteenth of them, with EggDB's own LZ4-format codec. Off by default.
+    /// The first compressed value marks the file, so a release from before compressed values
+    /// refuses to open it rather than misread it; reading needs no option.
+    pub fn compress_values(mut self, compress: bool) -> Self {
+        self.compress_values = compress;
+        self
+    }
+
+    /// Encrypts the database's pages with `key` (D187): a new file is created encrypted, and an
+    /// encrypted file opens only with the key it was created with. Every page that holds keys
+    /// or values, in place and in the write-ahead log, is encrypted with AES-256 in counter
+    /// mode under a key derived from this one. A file created without a key cannot take one
+    /// yet. Keep the key safe: without it the data cannot be read.
+    pub fn encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.encryption_key = Some(EncryptionKey(key));
+        self
+    }
+
     /// How much memory, in bytes, may keep the pages read transactions' snapshots still need
     /// after the writer changed them; as much as the page cache by default. When the writer
     /// needs more, the oldest snapshots expire, and their transactions fail with
@@ -158,6 +236,33 @@ impl Options {
     /// at once, as [`Database::try_begin_write`](crate::Database::try_begin_write) does.
     pub fn write_timeout(mut self, timeout: Duration) -> Self {
         self.write_timeout = timeout;
+        self
+    }
+
+    /// The clock the database reads time from: for commit stamps and for when keys with a time
+    /// to live expire. The system's clock by default; a [`SimClock`](crate::SimClock) makes
+    /// time move only when a test moves it, so a test can expire a key without waiting.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-clock-{}.db", std::process::id()));
+    /// use eggdb::{Database, Options, SimClock};
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    ///
+    /// let clock = Arc::new(SimClock::new(1_800_000_000_000_000_000));
+    /// let db = Database::open_with(&path, Options::new().clock(clock.clone()))?;
+    /// db.put_with_expiry("session", "abc", Duration::from_secs(30))?;
+    /// clock.advance(Duration::from_secs(29));
+    /// assert_eq!(db.get("session")?, Some(b"abc".to_vec()));
+    /// clock.advance(Duration::from_secs(1));
+    /// assert_eq!(db.get("session")?, None);
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = ClockChoice(Some(clock));
         self
     }
 

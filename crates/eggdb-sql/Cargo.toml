@@ -8,3 +8,13 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+eggdb-auth = { path = "../eggdb-auth" }
+eggdb-content = { path = "../eggdb-content" }
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-ai = { path = "../eggdb-ai" }
+eggdb-geo = { path = "../eggdb-geo" }
+eggdb-search = { path = "../eggdb-search" }
+eggdb-text = { path = "../eggdb-text" }
+eggdb-vector = { path = "../eggdb-vector" }

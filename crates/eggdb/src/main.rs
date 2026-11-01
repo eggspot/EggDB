@@ -7,7 +7,25 @@ mod cli;
 use eggdb_platform::terminal::{StandardStream, is_terminal, wants_color};
 use std::process::ExitCode;
 
+#[cfg(feature = "egg-allocator")]
+#[global_allocator]
+static ALLOCATOR: eggdb_platform::EggAllocator = eggdb_platform::EggAllocator::new();
+
 fn main() -> ExitCode {
+    let on_session_stack = std::thread::Builder::new()
+        .name("eggdb".to_owned())
+        .stack_size(eggdb_sql::SESSION_STACK_BYTES)
+        .spawn(|| {
+            eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
+            run_command()
+        });
+    match on_session_stack {
+        Ok(command) => command.join().unwrap_or(ExitCode::FAILURE),
+        Err(_) => run_command(),
+    }
+}
+
+fn run_command() -> ExitCode {
     eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let terminal = cli::Terminal {

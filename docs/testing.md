@@ -170,9 +170,64 @@ and a client that can be asked, sends 400 destructive `write_sql` calls and answ
 question with mutated, cut, stray or garbled answers, cancels and pings: every line out must be
 JSON and the statement must never run. `crates/eggdb-mcp/tests/server.rs` drives every tool and
 rule over an in-memory store, `crates/eggdb-mcp/tests/writes.rs` the writes, both confirmation
-paths, the wait for an answer and the commits that must never be reported failed, and
+paths, the wait for an answer and the commits that must never be reported failed,
+`crates/eggdb-mcp/tests/tables.rs` a server limited with `--tables` (D156: hidden tables missing
+in every tool, dialect and catalog, the key-value tools refused, the gap between calls), and
 `crates/eggdb/tests/mcp.rs` drives the built binary as a child process, checking that every line
-on its stdout is a JSON-RPC message.
+on its stdout is a JSON-RPC message, `--tables` included. `crates/eggdb-sql/src/visible_tables_tests.rs`
+checks the filter itself: every SQL key read through it, no hidden name, row or comment found.
+
+## Expiring keys and counters (D140)
+`crates/eggdb/tests/expiry.rs` runs the API on a `SimClock` (`Options::clock`): a key expires
+exactly at its deadline, one microsecond after it is still readable, across a crash (a drop
+without `close`) and a reopen, in the default key space and in a collection, in `get`, `get_with`
+and scans both ways; a wall clock set back after a commit never brings an expired key back; a
+read transaction keeps its time; a read-only open hides expired keys without removing them;
+eight threads increment the same counters and the counts come out exact; compare-and-set swaps
+only the value it expects; and the 14-byte key limit holds. `check` counts every key the tree
+holds, deadline records included, so the tests also see what the commit sweep and
+`remove_expired` removed. Seeded fuzzers feed 20,000 hostile inputs each to the time grammar
+(`eggdb-ui`'s `time_to_live.rs`, where every printed time must read back) and to the counter and
+deadline record readers (`expiry.rs`); the key layout is pinned by test vectors, and
+`sample_files.rs` checks that a v0.2.0 file takes expiring keys and then carries the
+`EXPIRING_KEYS` bit. The CLI, the shell and the UI scenarios 40 to 45 are in
+`cli/expiry_tests.rs` and `eggdb-ui/tests/screens.rs`, and the smoke test runs every new command.
+
+The command model (D143) has four checks. The registry test (`crates/eggdb-commands`) checks
+every command's and tool's fields, that every command is a kept name or a noun with core verbs,
+that new tool names join their command's words with `_` and shipped ones come from the list, that
+every tool's MCP annotations follow from its effect, idempotence and reach, and that every
+argument maps onto an option or operand of its CLI twin. `eggdb-mcp` keeps the shipped
+`tools/list` generator as an oracle and checks the registry's output against it byte for byte,
+with and without `--allow-write`. The parity test (`tests/command_model.rs`) runs `eggdb mcp`
+and the `eggdb` commands as real processes on the same files: `kv_get`/`get --json`,
+`kv_scan`/`scan --json`, `run_sql` and `write_sql`/`sql --json` return the same values once the
+tool's envelope is removed, and the same failure (a missing file, a failed statement) has the same
+code and category. From slice 2 (D144) it also runs `list_tables`/`table list`,
+`describe_table`/`table show`, `sample_rows`/`table sample` (with and without more rows than
+asked for), `explain_query`/`explain` in three dialects and with its refusals, and
+`run_sql`/`sql --read-only` with a write refused as `read_only`; a missing table is `not_found`
+from a tool and `table_not_found` from its twin, compared by category. From slice 3 (D145) it
+pages `row_list` and `row list --json` side by side, comparing each page's items with the
+records and the tool's `next_cursor` with the twin's trailer line, and compares their refusals
+(a view, a cursor of another table, a malformed cursor, a missing table). `tests/paging.rs`
+pages a 10,000-row table 1,000 rows at a time while a writer inserts rows before and after the
+cursor and deletes rows ahead of it between pages, and requires no row repeated or skipped,
+rows added ahead read and rows added behind or removed never read; it does the same for
+`table list` while tables are created, follows the text form's next-page command, and pages a
+table without a primary key. `tests/dry_run.rs` runs `restore --dry-run` and a real restore of
+the same dump on two copies of a file and requires the same report, the file unchanged byte for
+byte and its sequence unmoved, and checks `--create` dry runs, failures and a leftover scratch
+file; it does the same for `import --csv --dry-run`. `eggdb-mcp`'s server tests page `row_list`
+with a cursor, cut a page at 1 MiB, and refuse views and bad cursors, and its message fuzzer
+sends `row_list` calls; `eggdb-commands` tests the cursor format against hostile text. A third test runs every
+example of every reading command in the registry against a temporary file and requires exit 0,
+and a unit test parses every example of every command. The registry test also requires every
+command of the parser, a JSON form exactly where `--format` is taken, one exit per error code
+across commands, and a CLI twin for every tool. `cli/command_model_tests.rs` checks `--json` against `--format json`, the
+JSON errors and that a pipe keeps text ones, `sql --json`, that `help --json` lists exactly the
+registry, that the text help comes from it unchanged, and that `docs/ux/command-model.md` lists
+every command, tool, error code and kept name.
 
 ## Files from released versions (D96)
 `crates/eggdb/tests/data` holds files written by released versions, which every later version
@@ -241,6 +296,30 @@ debug build's test thread, runs a 50,000-item `IN` list and 20,000-row subquerie
 bound, stops a runaway recursion and a doubling one by their limits, keeps `MINUS`, `FULL JOIN`,
 `ANY`, `INTERSECT ALL` and parenthesised operands in their dialects, and fuzzes 20,000
 statements built from subquery, `WITH`, set-operation and join fragments in each dialect.
+
+## Triggers (D157)
+`crates/eggdb-sql/src/triggers/tests.rs` runs each dialect's trigger examples (SQLite's `WHEN`,
+`UPDATE OF`, `RAISE`, `INSTEAD OF` views; MySQL's `SET NEW`, compound bodies, `SIGNAL`,
+`PRECEDES` and upserts; SQL Server's `inserted`/`deleted`, `UPDATE(col)`, `INSTEAD OF` and
+`DISABLE TRIGGER`), the catalogs that list them, the trigger record cut at every length and with
+every byte flipped (an error, never a panic), and 20,000 statements built from trigger fragments
+in each dialect. `a_killed_process_keeps_a_triggers_changes_with_its_statement` in
+`crates/eggdb/tests/sql.rs` kills `eggdb sql` while it inserts into a table whose trigger writes a
+log and checks that the table and the log always hold the same rows.
+
+## PL/SQL (D160)
+The Oracle suite's PL/SQL chapters (`crates/eggdb-sql/correctness/oracle.test`) run examples
+written from the PL/SQL Language Reference: blocks and control statements, error handling,
+procedures and functions (also called from SQL), packages with session state, explicit and
+`FOR` cursors with their attributes, collections with `BULK COLLECT` and `FORALL`, dynamic SQL,
+triggers and the dictionary views. `crates/eggdb-sql/src/plsql/` tests the compiler
+(`compile_tests.rs`), the interpreter (`run_tests.rs`, `collection_tests.rs`, `call_tests.rs`),
+packages, `DBMS_OUTPUT`, triggers, DDL, the restore of HR's `hr_code.sql` and more of the
+reference's examples printed through `DBMS_OUTPUT` (`reference_tests.rs`). `hostile_tests.rs`
+compiles 20,000 units built from PL/SQL fragments as blocks, package bodies, procedures and
+trigger bodies (each fails with `ORA-06550`, never a panic), runs 2,000 blocks built from valid
+and broken statements and checks the session still works, and drives runaway recursion,
+failing package initialization, overflowing `DBMS_OUTPUT` and oversized collections to errors.
 
 ## Typed values: numbers, dates and JSON (D111)
 The exact decimal is checked against a schoolbook decimal reference written in its tests (400
@@ -334,7 +413,7 @@ one more than twice its line fails ([benchmarks.md](benchmarks.md)).
 sequences, identity columns, foreign keys with actions, check and unique constraints, views over
 joins, indexes, comments, and awkward values: tabs, newlines, backslashes, `\.`, quotes, `NULL`
 and empty strings, Unicode, large text and every byte value, and one more table with a column of
-an enum type and an identity column, which EggDB skips), with `expected.txt`, each table's sorted
+an enum type and an identity column), with `expected.txt`, each table's sorted
 `COPY` output and each sequence's next value from PostgreSQL itself. They were made with 300 rows by
 `scripts/pg-restore/check.sh target/debug/eggdb <work> --rows 300 --fixtures
 crates/eggdb/tests/data/pg_dump pg16` against PostgreSQL 16.13 and with `pg18` against 18 (`PG_BIN`
@@ -351,22 +430,223 @@ schema, is the smoke test's sample, restored both ways.
 (UTF-16LE with its mark, CRLF) written by us in SSMS's shape: database batches, a user and a role,
 a schema, seven tables (identity with explicit 0 and negative values, `money`, `decimal`,
 `varbinary(max)`, `ROWGUIDCOL`, a computed and a `timestamp` column, an `IDENTITY(1000,10)`
-seed, `datetimeoffset`, a heap with `image` and `sysname`, an `xml` table that is skipped), two
+seed, `datetimeoffset`, a heap with `image` and `sysname`, an `xml` column kept as
+`nvarchar(max)`), two
 views (one with `TOP (100) PERCENT`), data with and without `GO` between rows (a CRLF inside a
 value, `$(document)` as data, Vietnamese text and an emoji), indexes with `INCLUDE` and a filter,
 defaults, `WITH CHECK` and `WITH NOCHECK` constraints over an orphan row, `NOCHECK CONSTRAINT`, a
-`#temp` procedure, a function, a trigger, a synonym, `GRANT` and extended properties; and
+`#temp` procedure, a function, a trigger, a synonym, `GRANT` and `MS_Description` extended
+properties (kept as comments); and
 `shop-sqlpackage.sql`, a sqlpackage script with its `:setvar` header. `shop-expected.txt` holds
 queries and their results written by hand from the scripts' data and Microsoft's documented
 semantics. `crates/eggdb/tests/restore_sqlserver.rs` restores both with the built binary and
-checks the report and every query, then UTF-8, UTF-8 with a mark, LF-only and stdin variants, a
-generated script of 5,000 rows and one 20 MiB value, errors with and without `--create` and
-`--keep-going`, the content routes and sqlcmd's commands (`:r` and `!!` never run). The reader,
-the classifier, the span finder and the column rewrite have unit tests in
+checks the report and every query, then UTF-8, UTF-8 with a mark, LF-only, UTF-16 big-endian
+and stdin variants, a generated script of 5,000 rows and one 20 MiB value, errors with and
+without `--create` and `--keep-going`, the content routes and sqlcmd's commands (`:r` and `!!`
+never run), and the follow-ups of D148 in one big-endian script (an alias type, a sequence used by
+a default, a heap with an identity, an `xml` column, `SET XACT_ABORT ON`, a 6 MiB batch of
+`UPDATE`s without `GO` and a description). The reader, the classifier, the span finder, the
+large-batch scanner, the table rewrites (computed, `rowversion`, `xml`, alias types, `numeric`
+identities, identities refused at run time) and `sqlserver_batches` have unit tests in
 `crates/eggdb-sql/src/restore/tests_sqlserver.rs`, with a seeded fuzz of 3,000 hostile scripts
-(GO lines, quotes, brackets, comments, sqlcmd commands, byte-order marks mid-file, broken UTF-16)
-read one to seven bytes at a time. `crates/eggdb/tests/data/ssms-sample.sql` is the smoke test's
+(GO lines, quotes, brackets, comments, sqlcmd commands, byte-order marks mid-file, broken UTF-16,
+alias types, wide identities, blocks) read one to seven bytes at a time. `XACT_ABORT` and
+uncommittable transactions are tested in `batch_logic_tests.rs`, Transact-SQL sequences and
+`MS_Description` (with hostile statements) in `sqlserver_tests.rs`, and `GO` in `eggdb sql` in
+`crates/eggdb/tests/sql.rs`. `crates/eggdb/tests/data/ssms-sample.sql` is the smoke test's
 sample, restored with `eggdb restore` and with go-sqlcmd's `-i` against `eggdb serve`.
+
+**Restoring Oracle scripts (item 43, D127).** `crates/eggdb/tests/data/oracle/hr/` holds Oracle's
+own HR sample-schema scripts, unchanged (MIT, from `oracle-samples/db-sample-schemas`; the
+folder's README names the commit). `crates/eggdb/tests/restore_oracle.rs` restores
+`hr_install.sql` with the built binary from another working directory, so its `@@` includes are
+found beside it, and checks the documented counts (regions 5, countries 25, locations 23,
+departments 27, jobs 19, employees 107, job_history 10) through Oracle and PostgreSQL SQL, the
+installer's own verification query (`provided` equals `actual` on every row), spot values from
+the scripts (employee 100 hired 2013-06-17, `employees_seq.NEXTVAL` 207, 106 rows in
+`emp_details_view`) and the enforced constraints (ORA-02291, ORA-02290, ORA-00001); then the
+three sub-scripts restored one by one; our own SQL Developer, `impdp SQLFILE=` and SQLcl CSV
+fixtures (`hr-sqldeveloper.sql`, `hr-impdp-tables.sql`, `hr-impdp-refs.sql`, `csv/`), written in
+the tools' documented shapes from HR's values with one value holding `&` and one a newline;
+content routes; all-or-nothing blocks; substitution, includes, `CONNECT` and password redaction.
+The reader, the classifier, the table rewrites and the catalog-built constraint clauses have unit
+tests in `crates/eggdb-sql/src/restore/tests_oracle.rs`, with a seeded fuzz of 2,000 hostile
+scripts (`EGGDB_FUZZ_CASES`, `EGGDB_FUZZ_SEED`) through `MemoryIncludes`, so it never touches the
+disk. `crates/eggdb/tests/data/oracle-sample.sql` is the smoke test's sample.
+
+**Oracle restore follow-ups (item 43b, D150).** `shop-identity-sqldeveloper.sql` (ours, in SQL
+Developer's shape) restores a `GENERATED ALWAYS` identity with SQL Developer's bare options, two
+constraints disabled inside columns and a primary key added `USING INDEX` another index; the test
+checks the identity is kept (`ALL_TAB_IDENTITY_COLS`, `ORA-32795`, the next value 41), the index
+taken over, the foreign key enabled (`ORA-02291`) and the still-disabled `CHECK` listed. Unit
+tests in `tests_oracle.rs` cover the column-level rewrites, `ALTER TABLE ... ADD (...)`, the
+refused-identity retry, a restore with all three and `SqlPlusScript`'s steps; `oracle_tests.rs`
+covers identity options, `ORA-32795`/`ORA-32796` and `USING INDEX` in a session; the hostile
+Oracle fragments gained the identity and `USING INDEX` forms. `crates/eggdb/tests/sql.rs` runs a
+SQL*Plus script through `eggdb sql --dialect oracle` (an `@@` include, `--define`, `PROMPT`,
+`SPOOL`, `HOST`, `/` after `;`, `EXIT`, `--json`, the stopping errors and `-c` left plain), and
+the smoke test pipes a short script with `DEFINE`, `PROMPT` and a counted `SET`.
+
+## Unchanged Java and Python apps (D131)
+`crates/eggdb/tests/clients/java/AppCheck.java` is a pgjdbc program: CRUD through prepared
+statements (run past the driver's threshold, so it switches to named server statements),
+`INSERT ... RETURNING`, a rollback and a commit, a query over the fixture, and
+`DatabaseMetaData`'s `getSchemas`, `getTables`, `getColumns`, `getPrimaryKeys` and
+`getImportedKeys`. `crates/eggdb/tests/clients/python/app_check.py` does CRUD through psycopg 3
+and reflects both schemas with SQLAlchemy Core (`MetaData.reflect()`, the inspector and a Core
+query); its copy section loads and reads rows with psycopg's binary `COPY` (`write_row`,
+`rows()` and the raw bytes in hex), and runs `ON_ERROR ignore` with its notices, `COPY ... WHERE`
+and `LATIN1` and `WIN1252` copies (D154). `scripts/pg-apps/binary-copy.sql` copies a table out
+and back in through psql's `\copy ... (FORMAT binary)` and prints the binary bytes through `od`.
+`scripts/pg-apps/check.sh <eggdb> <work>` loads `scripts/pg-catalog/fixture.sql` into a
+PostgreSQL server, restores its `pg_dump` into EggDB, runs both programs against both servers and
+fails unless each prints the same bytes on both. CI's `pg-apps` job runs it against the official
+`postgres:17` container with pgjdbc 42.7.4, psycopg 3.2.3 and SQLAlchemy 2.0.36, downloaded as test
+tools and never shipped, and keeps both outputs and the difference. `information_schema`, the
+catalog functions, aggregate `ORDER BY`, lock-step set-returning functions and the ranking window
+functions have unit tests in `crates/eggdb-sql/src/information_schema/tests.rs`,
+`pg_catalog/tests.rs`, `set_returning_tests.rs` and `window.rs`, and cases in
+`correctness/postgresql.test`.
+
+## .NET apps through Npgsql (D135)
+`crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck` is a C# program on Npgsql 8.0.5: it opens a
+data source (Npgsql's type loading), then, each step on a connection taken from the pool again
+(so each reuse sends `DISCARD ALL`), does CRUD with typed parameters, reads an `integer[]`
+column, rolls back and commits a transaction, runs an `NpgsqlBatch`, runs a batch whose second
+command fails and checks that nothing of it stayed, and cancels `SELECT pg_sleep(30)` with
+`NpgsqlCommand.Cancel()` after one second. `scripts/pg-apps/check.sh` builds it with the .NET
+SDK (Npgsql restored from NuGet, a test tool never shipped) and runs it against PostgreSQL 17 and
+EggDB next to the Java and Python programs, requiring the same bytes. Below the driver,
+`crates/eggdb-pgwire/tests/transactions_and_cancel.rs` speaks the protocol directly: pipelines
+that commit at `Sync` or leave nothing, one `Query` message's statements as one transaction, a
+`BEGIN` inside a pipeline, portals closed at the end of their transaction, `DISCARD ALL`,
+`CancelRequest` with right and wrong keys and one that rolls back a pipeline, and Npgsql's
+type-loading queries, kept in `crates/eggdb/tests/data/npgsql/load-types.sql`, which
+`pg_catalog/tests.rs` also runs through a session. `implicit_transaction_tests.rs` and
+`cancel.rs` in `eggdb-sql`, and `backend_keys.rs` in `eggdb-pgwire`, test the pieces.
+
+## ORMs and migration tools (D138)
+The ORM section of `crates/eggdb/tests/clients/python/app_check.py` is an unchanged SQLAlchemy 2.0
+ORM app: two declarative models with a one-to-many relationship, `create_all()` and `drop_all()`,
+a session inserting several objects at once, joined, `selectinload` and grouped queries, a page
+with `limit`/`offset`, updates, a bulk `update()`, a flush rolled back, a duplicate key and a
+cascading delete. `crates/eggdb/tests/clients/java/FlywayCheck.java` runs Flyway 10.20.1
+(Community, Apache-2.0) through its Java API with the migrations in
+`crates/eggdb/tests/clients/java/flyway/base` and `later`: `migrate`, `info`, `validate`, a second
+`migrate` with nothing to do, a later pending migration, then the migrated rows and the history
+table, with Flyway's session-level lock (`flyway.postgresql.transactional.lock=false`) and
+Flyway's log on stderr. `scripts/pg-apps/check.sh` runs both against PostgreSQL 17 and EggDB
+(Flyway on a new, empty database on each) and requires the same bytes. CI's `pg-apps` job
+downloads Flyway's jars and their jackson dependencies from Maven Central as test tools, never
+shipped. `crates/eggdb/tests/clients/dotnet/EfCoreAppCheck` is an EF Core 8.0.11 app with two
+hand-written migrations: `Database.Migrate()` twice, a `SaveChanges` of two blogs and six posts
+(EF's `MERGE ... OUTPUT`), LINQ queries (paging, a join, `Count`, `Any`, `Include`, a missing row,
+`GroupBy`, `Contains` over a list through `OPENJSON`), an update and a delete batch (`OUTPUT 1`)
+and a `SaveChanges` inside a transaction that is rolled back. `scripts/tds-apps/check.sh` serves
+it a new database and compares its output with `scripts/tds-apps/expected-efcore-dotnet.out`.
+Below the tools, `crates/eggdb-sql/src/insert_select_tests.rs`, `migration_tool_tests.rs` and
+`advisory_locks.rs` test `INSERT ... SELECT`, Flyway's statements and the lock table, the SQL
+Server suite has cases for `MERGE`, `OPENJSON`, `SAVE TRANSACTION` and `INSERT ... SELECT`, and
+`crates/eggdb-tdswire/tests/rpc.rs` sends a save point and a rollback to it over the socket.
+
+SQL Server's drivers have their own check (item 23b, D132).
+`crates/eggdb/tests/clients/java/TdsAppCheck.java` (mssql-jdbc) and
+`crates/eggdb/tests/clients/dotnet/TdsAppCheck` (Microsoft.Data.SqlClient) run parameterized CRUD
+(a prepared statement executed three times, so the drivers go through `sp_executesql`,
+`sp_prepexec` and `sp_execute`), a committed and a rolled-back transaction, a failing query and,
+for SqlClient, a reused pooled connection whose reset clears `SET NOCOUNT ON`.
+`scripts/tds-apps/check.sh <eggdb> <work>` serves a new database with `eggdb serve --tds-listen`,
+runs both and fails unless each prints exactly `scripts/tds-apps/expected-java.out` and
+`expected-dotnet.out`, written from Microsoft's documentation, since SQL Server itself cannot be a
+CI oracle under its license. CI's `tds-apps` job runs it with mssql-jdbc 12.8.1 and SqlClient
+5.2.2, downloaded as test tools and never shipped, and keeps both outputs, the server log and the
+difference. The RPC, transaction manager and reset paths have unit tests in
+`crates/eggdb-tdswire/src/rpc.rs`, `messages.rs`, `procedures.rs` and `tokens.rs`, socket tests in
+`crates/eggdb-tdswire/tests/rpc.rs`, mutated requests in `hostile_packets.rs`, and the dialect's
+parameters, implicit transactions, `IF` and resets have tests in
+`crates/eggdb-sql/src/sqlserver_tests.rs`.
+
+Oracle SQL over PostgreSQL and TDS connections has its own check (item 44, D134).
+`scripts/oracle-apps/check.sh <eggdb> <work>` restores Oracle's HR installer unchanged, serves it
+as the user `hr`, and runs `scripts/oracle-apps/commands.sql` through psql with `PGOPTIONS='-c
+eggdb.dialect=oracle'` (HR's queries, joins and grouping, `FETCH FIRST`, `TO_CHAR` of a date,
+`SYS_CONTEXT`, the data dictionary and `NLS_SESSION_PARAMETERS`, HR's own verification query)
+and `crates/eggdb/tests/clients/java/OracleAppCheck.java` through pgjdbc with the same option in
+its `options` property (prepared statements with `?`, a dictionary self-join, a rolled-back and a
+committed transaction, a missing table's SQLSTATE). It fails unless they print exactly
+`scripts/oracle-apps/expected-psql.out` and `expected-java.out`, written from HR's documented
+data, since Oracle Database cannot be a CI oracle under its license. CI's `oracle-apps` job runs
+it with pgjdbc 42.7.4 and the `postgres:17` image's psql, test tools never shipped. The dictionary,
+`SYS_CONTEXT`, the dialect switch on PostgreSQL and Transact-SQL sessions, `$n` parameters and
+the user's own schema have unit tests in `crates/eggdb-sql/src/oracle_dictionary/tests.rs`; the
+startup option, a refused dialect and the extended protocol in Oracle's dialect have socket tests
+in `crates/eggdb-pgwire/tests/protocol.rs`, and a TDS batch that switches, with transaction
+manager requests after it, in `crates/eggdb-tdswire/tests/protocol.rs`; the hostile Oracle
+statement fuzzer in `crates/eggdb-sql/src/tests.rs` covers the new views, `SYS_CONTEXT` and the
+`SET`.
+
+## The C API (D142)
+`crates/eggdb-capi/tests/api.rs` calls every function of `eggdb.h` the way a C program does,
+through raw pointers: commits and rollbacks across a reopen, a read transaction refusing a
+change, scans of 1,000 keys in batches forward, backward, by range and by prefix, a scan
+continued in a later transaction that sees the writes ahead of it, collections kept apart from
+the default key space, times to live, counters and compare-and-set, SQL in PostgreSQL's and
+SQLite's dialects with typed values, a failing statement's SQLSTATE, parameters carrying a
+quote and a semicolon, a transaction block rolled back and one left open at close, backup and
+compaction, `eggdb_close` refusing while a transaction or session is open, four threads reading
+through one handle, and misuse (NULL handles and buffers, text that is not UTF-8, unknown flags
+and dialects) answered with `EGGDB_ERR_INVALID_ARGUMENT`. `tests/header.rs` parses `eggdb.h` and
+fails when a constant, a function's parameter count or a struct's fields differ from the Rust
+code. `scripts/c-api/check.sh <library directory> <work>` compiles
+`crates/eggdb-capi/tests/c/api_check.c` with `-Wall -Wextra -Wpedantic -Werror`, compiles the
+header as C++11, runs the program and then `examples/python/eggdb_ctypes.py`; CI runs it in
+`lint-and-test` (Linux) and `platforms` (macOS; the Python part on Windows), and the release
+workflow on the release libraries of the Linux and macOS targets its runners can load.
+
+## TLS (D161)
+
+- **Cryptography.** Every primitive in `eggdb-crypto` is checked against its standard's vectors
+  (FIPS 180-4, RFC 4231, RFC 5869, RFC 8439, FIPS 197 and the GCM specification, RFC 7748,
+  RFC 6979) and against Project Wycheproof's cases for AES-GCM, ChaCha20-Poly1305, X25519, P-256
+  ECDH and ECDSA, and RSA PKCS#1 v1.5 and PSS. The cases are kept in
+  `crates/eggdb-crypto/tests/data`.
+- **TLS 1.3 against RFC 8448.** `crates/eggdb-tls/tests/rfc8448.rs` checks every published value
+  of RFC 8448's "Simple 1-RTT Handshake": hellos decoded and re-encoded byte for byte, every
+  secret, key and IV, both Finished messages, the CertificateVerify signature, and every
+  protected record sealed and opened exactly.
+- **Handshakes over sockets.** `tests/handshake.rs` runs real TLS 1.3 and TLS 1.2 handshakes over
+  loopback TCP and covers:
+  - data in both directions;
+  - channel binding and exported keys agreeing on both sides;
+  - wrong names and unknown authorities refused, with the alert each side sees;
+  - ALPN;
+  - key updates;
+  - the version limits;
+  - garbage instead of a ClientHello.
+- **Hostile input.** `tests/hostile.rs` mutates every handshake decoder's input, the record layer's
+  and the handshake buffer's, and feeds a server mutated ClientHellos. None may panic.
+- **Protocols.** `crates/eggdb-pgwire/tests/tls.rs` covers SSLRequest, direct TLS with and without
+  ALPN, SCRAM-SHA-256-PLUS with a right and a wrong channel binding, and the downgrade check.
+  `crates/eggdb-mysqlwire/tests/tls.rs` covers the SSL request and a query over TLS.
+  `crates/eggdb-tdswire/tests/tls.rs` covers full encryption, login-only encryption, plaintext
+  from loopback, and TDS 8 strict.
+- **`eggdb serve`.** `crates/eggdb/tests/serve.rs` checks the option rules, and a self-signed
+  server on `0.0.0.0` whose printed fingerprint matches the certificate it serves.
+- **Real clients.** CI's `tls-clients` job runs `scripts/tls-clients/check.sh`, which connects
+  real clients to `eggdb serve` with a certificate from a test authority made by openssl:
+  - psql 17 with `sslmode=verify-full`, by SSLRequest and by direct TLS;
+  - the mysql client with `--ssl-mode=VERIFY_CA`;
+  - go-sqlcmd with `-N true` and `-N strict`;
+  - psql with `sslmode=require` against `--tls-self-signed`.
+- **Benchmarks.** `eggdb-bench` measures `tls.record_seal` (16 KiB records under AES-128-GCM and
+  ChaCha20-Poly1305) and `tls.handshake` (one TLS 1.3 handshake over loopback).
+
+## Other Unix systems (part 4.M1-3)
+
+CI's `unix-vms` job runs the platform layer's, the storage engine's and the embedded API's tests
+natively in FreeBSD, NetBSD and OmniOS (illumos) virtual machines, with the pinned toolchain.
+The `cross` job checks that the rest builds for those targets and for Solaris. OpenBSD and
+DragonFly have no prebuilt Rust standard library (tier 3), so neither job covers them yet.
 
 ## Not tested yet
 - `Off` after a power loss: the format promises nothing there, so the sweep only checks that
@@ -379,3 +659,12 @@ sample, restored with `eggdb restore` and with go-sqlcmd's `-i` against `eggdb s
   (`checkpoint_tests.rs`, `log.rs`), not by the whole-file fuzzer, which can only damage them.
 - Real disks: the simulator's model of a power loss is sector-sized pieces of unsynced writes,
   not every behavior of real hardware.
+
+## 32-bit and big-endian CPUs
+The `other-cpus` CI job runs the tests of the file format, the storage engine, cryptography and
+the columnar encodings on 32-bit x86 (`i686-unknown-linux-gnu`, natively), 32-bit ARM
+(`armv7-unknown-linux-gnueabihf`) and big-endian IBM Z (`s390x-unknown-linux-gnu`), the last two
+under QEMU's user-mode emulation. Every number the format stores is little-endian on disk
+(`eggdb-format`'s `bytes`), so a file written on one CPU opens on any other; these runs check that
+nothing reads memory in the CPU's own byte order or assumes a 64-bit `usize`. The other crates
+are only linted for those targets so far.

@@ -128,7 +128,7 @@ fn usage_mistakes_exit_2() {
         vec!["-c", "SELECT 1", "script.sql"],
         vec!["-c", "SELECT 1", "-c", "SELECT 2"],
         vec!["missing-script.sql"],
-        vec!["--format", "json", "-c", "SELECT 1"],
+        vec!["--format", "hex", "-c", "SELECT 1"],
     ] {
         let output = eggdb_sql(file.path(), &args, b"");
         assert_eq!(
@@ -220,6 +220,134 @@ fn a_killed_process_leaves_the_whole_transaction_or_none_of_it() {
         } else {
             assert_eq!(stdout, " id\n----\n  7\n(1 row)\n\n");
         }
+    }
+}
+
+#[test]
+fn a_killed_process_keeps_a_triggers_changes_with_its_statement() {
+    let setup = "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);
+                 CREATE TABLE log (id INTEGER, n INTEGER);
+                 CREATE TRIGGER t_logged AFTER INSERT ON t BEGIN
+                   INSERT INTO log VALUES (NEW.id, NEW.n);
+                 END;";
+    let mut script = String::new();
+    for id in 0..4_000 {
+        script.push_str(&format!("INSERT INTO t VALUES ({id}, {});\n", id % 13));
+    }
+    for delay_ms in [0u64, 50, 150, 400] {
+        let file = TempPath::new("sql-trigger-killed");
+        Database::open(file.path()).unwrap().close().unwrap();
+        let prepared = eggdb_sql(file.path(), &["--dialect", "sqlite", "-c", setup], b"");
+        assert_eq!(
+            prepared.status.code(),
+            Some(0),
+            "{}",
+            text(&prepared.stderr)
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("sql")
+            .arg(file.path())
+            .args(["--dialect", "sqlite"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let bytes = script.clone().into_bytes();
+        let writer = std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        let count = |table: &str| {
+            let output = eggdb_sql(
+                file.path(),
+                &[
+                    "--dialect",
+                    "sqlite",
+                    "-c",
+                    &format!("SELECT count(*) AS rows FROM {table}"),
+                ],
+                b"",
+            );
+            assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+            text(&output.stdout)
+        };
+        assert_eq!(count("t"), count("log"), "after {delay_ms} ms");
+        let db = Database::open(file.path()).unwrap();
+        assert_eq!(db.check().unwrap().leaked_pages, 0);
+        db.close().unwrap();
+    }
+}
+
+#[test]
+fn a_killed_process_keeps_a_procedures_writes_with_its_call() {
+    let mut setup = String::from(
+        "CREATE TABLE accounts (id integer PRIMARY KEY, balance integer);
+         CREATE TABLE ledger (account integer, amount integer);
+         CREATE PROCEDURE deposit(account integer, amount integer) LANGUAGE plpgsql AS $$
+         BEGIN
+           UPDATE accounts SET balance = balance + amount WHERE id = account;
+           INSERT INTO ledger VALUES (account, amount);
+         END $$;",
+    );
+    for id in 0..13 {
+        setup.push_str(&format!("INSERT INTO accounts VALUES ({id}, 0);"));
+    }
+    let mut script = String::new();
+    for call in 0..3_000 {
+        if call % 5 == 0 {
+            script.push_str(&format!(
+                "DO $$BEGIN CALL deposit({}, 1); END$$;\n",
+                call % 13
+            ));
+        } else {
+            script.push_str(&format!("CALL deposit({}, 1);\n", call % 13));
+        }
+    }
+    for delay_ms in [0u64, 50, 150, 400] {
+        let file = TempPath::new("sql-procedure-killed");
+        Database::open(file.path()).unwrap().close().unwrap();
+        let prepared = eggdb_sql(file.path(), &["-c", &setup], b"");
+        assert_eq!(
+            prepared.status.code(),
+            Some(0),
+            "{}",
+            text(&prepared.stderr)
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_eggdb"))
+            .arg("sql")
+            .arg(file.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let bytes = script.clone().into_bytes();
+        let writer = std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        let total = |query: &str| {
+            let output = eggdb_sql(file.path(), &["-c", query], b"");
+            assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+            text(&output.stdout)
+        };
+        assert_eq!(
+            total("SELECT sum(balance)::bigint AS total FROM accounts"),
+            total("SELECT count(*) AS total FROM ledger"),
+            "after {delay_ms} ms"
+        );
+        let db = Database::open(file.path()).unwrap();
+        assert_eq!(db.check().unwrap().leaked_pages, 0);
+        db.close().unwrap();
     }
 }
 
@@ -563,6 +691,226 @@ fn the_oracle_dialect_reads_oracle_and_reports_ora_errors() {
 }
 
 #[test]
+fn oracle_scripts_run_their_sqlplus_commands() {
+    let file = TempPath::new("sql-sqlplus");
+    let inner = TempPath::new("sql-sqlplus-inner");
+    let main = TempPath::new("sql-sqlplus-main");
+    std::fs::write(
+        inner.path(),
+        "INSERT INTO emp VALUES (2, 'Grace', &dept);\n",
+    )
+    .unwrap();
+    let inner_name = inner
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let script = format!(
+        "SET PAGESIZE 100\nSET FEEDBACK OFF\nCOLUMN name FORMAT A20\nPROMPT Loading department &dept\nCREATE TABLE emp (id NUMBER(6) PRIMARY KEY, name VARCHAR2(20), dept NUMBER(4));\nINSERT INTO emp VALUES (1, 'Ada', &dept);\n/\n@@{inner_name}\nSPOOL emp.log\nHOST echo never\nSELECT COUNT(*) AS n FROM emp WHERE dept = &&dept;\nSPOOL OFF\nEXIT\nINSERT INTO emp VALUES (9, 'Never', 1);\n"
+    );
+    std::fs::write(main.path(), script).unwrap();
+    let main_path = main.path().to_string_lossy().into_owned();
+    let output = eggdb_sql(
+        file.path(),
+        &[
+            "--create",
+            "--dialect",
+            "oracle",
+            main_path.as_str(),
+            "--define",
+            "dept=50",
+        ],
+        b"",
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stdout).starts_with("Loading department 50\n"),
+        "{}",
+        text(&output.stdout)
+    );
+    assert_eq!(
+        text(&output.stderr),
+        "NOTICE:  line 9: SPOOL emp.log never writes a file; redirect stdout instead (eggdb sql ... > emp.log)\n\
+         NOTICE:  line 10: HOST never runs a program; eggdb sql runs the SQL only\n\
+         NOTICE:  4 SQL*Plus commands had no effect: SET 2, COLUMN 1, / after ; 1 (eggdb sql runs the SQL only)\n"
+    );
+    let db = Database::open(file.path()).unwrap();
+    let mut rows = Vec::new();
+    {
+        let store = db.sql_store();
+        let mut session = store.session(eggdb::sql::Dialect::Oracle);
+        session
+            .execute("SELECT id, dept FROM emp ORDER BY id", &mut |result| {
+                for row in &result.rows {
+                    let cells: Vec<String> = row
+                        .iter()
+                        .map(|value| value.to_text().unwrap_or_default())
+                        .collect();
+                    rows.push(cells.join("|"));
+                }
+            })
+            .unwrap();
+        session.close().unwrap();
+    }
+    db.close().unwrap();
+    assert_eq!(rows, vec!["1|50", "2|50"]);
+
+    let json = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "--json"],
+        b"PROMPT hello\nSET PAGESIZE 10\nSELECT 1 AS one FROM dual;\n",
+    );
+    assert_eq!(json.status.code(), Some(0), "{}", text(&json.stderr));
+    let printed = text(&json.stdout);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(lines.first(), Some(&r#"{"prompt":"hello"}"#), "{printed}");
+    assert!(lines[1].starts_with(r#"{"tag":"SELECT 1""#), "{printed}");
+    assert_eq!(
+        lines.last(),
+        Some(
+            &r#"{"notices":["1 SQL*Plus command had no effect: SET 1 (eggdb sql runs the SQL only)"]}"#
+        ),
+        "{printed}"
+    );
+    assert_eq!(text(&json.stderr), "");
+
+    for (script, expected) in [
+        (
+            &b"SELECT &missing FROM dual;\n"[..],
+            "substitution variable &missing has no value",
+        ),
+        (
+            &b"SET SQLTERMINATOR !\n"[..],
+            "which EggDB does not support",
+        ),
+        (
+            &b"BEGIN\n  RAISE_APPLICATION_ERROR(-20001, 'stop here');\nEND;\n/\n"[..],
+            "ORA-20001: stop here",
+        ),
+        (&b"CONNECT nobody/secret\n"[..], "ORA-01435"),
+    ] {
+        let failed = eggdb_sql(file.path(), &["--dialect", "oracle"], script);
+        assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
+        assert!(
+            text(&failed.stderr).contains(expected),
+            "{}",
+            text(&failed.stderr)
+        );
+        assert!(!text(&failed.stderr).contains("secret"));
+    }
+    let unknown = eggdb_sql(file.path(), &["--dialect", "oracle"], b"FROB 1\n.\n");
+    assert_eq!(unknown.status.code(), Some(0), "{}", text(&unknown.stderr));
+    assert_eq!(
+        text(&unknown.stderr),
+        "NOTICE:  line 1: FROB is not SQL or a SQL*Plus command EggDB knows; the line was not run\n"
+    );
+    let plain = eggdb_sql(
+        file.path(),
+        &[
+            "--dialect",
+            "oracle",
+            "-c",
+            "SELECT 'Ada & Co' AS name FROM dual",
+        ],
+        b"",
+    );
+    assert_eq!(plain.status.code(), Some(0), "{}", text(&plain.stderr));
+    assert!(text(&plain.stdout).contains("Ada & Co"));
+    for args in [
+        &[
+            "--dialect",
+            "oracle",
+            "--define",
+            "x=1",
+            "-c",
+            "SELECT 1 FROM dual",
+        ][..],
+        &["--define", "x=1", "-c", "SELECT 1"][..],
+    ] {
+        let refused = eggdb_sql(file.path(), args, b"");
+        assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+        assert!(text(&refused.stderr).contains("--define"));
+    }
+}
+
+#[test]
+fn oracle_scripts_print_server_output_after_set_serveroutput_on() {
+    let file = TempPath::new("sql-serveroutput");
+    let script = b"CREATE OR REPLACE PROCEDURE greet(who IN VARCHAR2) AS\nBEGIN\n  DBMS_OUTPUT.PUT_LINE('Hello ' || who);\nEND;\n/\nEXECUTE greet('Nobody')\nSET SERVEROUTPUT ON SIZE 10000\nEXECUTE greet('Ada')\nBEGIN\n  DBMS_OUTPUT.PUT_LINE('one');\n  DBMS_OUTPUT.PUT('t');\n  DBMS_OUTPUT.PUT_LINE('wo');\nEND;\n/\nSET SERVEROUT OFF\nEXEC greet('Grace')\n";
+    let output = eggdb_sql(file.path(), &["--create", "--dialect", "oracle"], script);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "CREATE PROCEDURE\nPL/SQL BLOCK\nHello Ada\nPL/SQL BLOCK\none\ntwo\nPL/SQL BLOCK\nPL/SQL BLOCK\n"
+    );
+    assert_eq!(text(&output.stderr), "");
+
+    let json = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "--json"],
+        b"SET SERVEROUTPUT ON\nEXECUTE greet('Ada')\nEXECUTE greet('\"Bo\"')\nSELECT 1 AS one FROM dual;\n",
+    );
+    assert_eq!(json.status.code(), Some(0), "{}", text(&json.stderr));
+    let printed = text(&json.stdout);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(
+        lines[..4],
+        [
+            r#"{"server_output":["Hello Ada"]}"#,
+            r#"{"tag":"PL/SQL BLOCK"}"#,
+            r#"{"server_output":["Hello \"Bo\""]}"#,
+            r#"{"tag":"PL/SQL BLOCK"}"#,
+        ],
+        "{printed}"
+    );
+    assert!(!lines[4].contains("server_output"), "{printed}");
+
+    let command = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle", "-c", "BEGIN greet('Ada'); END;"],
+        b"",
+    );
+    assert_eq!(command.status.code(), Some(0), "{}", text(&command.stderr));
+    assert_eq!(text(&command.stdout), "Hello Ada\nPL/SQL BLOCK\n");
+
+    let failed = eggdb_sql(
+        file.path(),
+        &[
+            "--dialect",
+            "oracle",
+            "-c",
+            "BEGIN DBMS_OUTPUT.PUT_LINE('before'); RAISE_APPLICATION_ERROR(-20002, 'after'); END;",
+        ],
+        b"",
+    );
+    assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
+    assert_eq!(text(&failed.stdout), "before\n");
+    assert!(
+        text(&failed.stderr).contains("ORA-20002: after"),
+        "{}",
+        text(&failed.stderr)
+    );
+
+    let refused = eggdb_sql(
+        file.path(),
+        &["--dialect", "oracle"],
+        b"PROMPT start\nSET SERVEROUTPUT ON SIZE 500\nEXECUTE greet('Never')\n",
+    );
+    assert_eq!(refused.status.code(), Some(3), "{}", text(&refused.stderr));
+    assert_eq!(text(&refused.stdout), "start\n");
+    let stderr = text(&refused.stderr);
+    assert!(
+        stderr.contains("line 2: SET SERVEROUTPUT SIZE 500 is out of range: SIZE is 2000 to 1000000, or UNLIMITED"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("SET SERVEROUTPUT ON alone keeps every line, up to EggDB's 1 MiB buffer."),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn the_sqlserver_dialect_reads_transact_sql_and_reports_sql_server_errors() {
     let file = TempPath::new("sql-sqlserver");
     let created = eggdb_sql(
@@ -592,4 +940,75 @@ fn the_sqlserver_dialect_reads_transact_sql_and_reports_sql_server_errors() {
         text(&missing.stderr),
         "Msg 208, Level 16, State 1: Invalid object name 'missing'.\n"
     );
+}
+
+#[test]
+fn transact_sql_scripts_run_batch_by_batch_at_their_go_lines() {
+    let file = TempPath::new("sql-sqlserver-go");
+    let script = "CREATE TABLE [dbo].[Items] ([ID] INT IDENTITY(1,1) PRIMARY KEY, [Name] NVARCHAR(20))\r\nGO\r\nINSERT INTO items (name) VALUES (N'egg')\r\nGO 3\r\nCREATE VIEW [dbo].[Counted] AS SELECT COUNT(*) AS [N] FROM items\r\ngo\r\nSELECT [N] FROM [dbo].[Counted]\r\n";
+    let output = eggdb_sql(
+        file.path(),
+        &["--create", "--dialect", "sqlserver"],
+        script.as_bytes(),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let db = Database::open(file.path()).unwrap();
+    let mut counted = String::new();
+    {
+        let store = db.sql_store();
+        let mut session = store.session(eggdb::sql::Dialect::SqlServer);
+        session
+            .execute("SELECT N FROM dbo.Counted", &mut |result| {
+                if let Some(value) = result.rows.first().and_then(|row| row.first()) {
+                    counted = value.to_text().unwrap_or_default();
+                }
+            })
+            .unwrap();
+        session.close().unwrap();
+    }
+    db.close().unwrap();
+    assert_eq!(counted, "3");
+    let stopped = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlserver"],
+        b"SELECT 1 AS one\nGO\nSELECT * FROM [Missing]\nGO\nCREATE TABLE [Never] ([ID] INT PRIMARY KEY)\n",
+    );
+    assert_eq!(stopped.status.code(), Some(3));
+    assert_eq!(
+        text(&stopped.stderr),
+        "Msg 208, Level 16, State 1: Invalid object name 'missing'.\n"
+    );
+    let never = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlserver", "-c", "SELECT * FROM [Never]"],
+        b"",
+    );
+    assert_eq!(never.status.code(), Some(3));
+    let sqlcmd = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlserver"],
+        b":setvar Name egg\nSELECT N'$(Name)'\nGO\n",
+    );
+    assert_eq!(sqlcmd.status.code(), Some(3));
+    assert!(
+        text(&sqlcmd.stderr).contains(":setvar is a sqlcmd command"),
+        "{}",
+        text(&sqlcmd.stderr)
+    );
+}
+
+#[test]
+fn memory_runs_a_whole_database_without_a_file() {
+    let output = eggdb_sql(
+        Path::new(":memory:"),
+        &[],
+        b"CREATE TABLE t (v integer); INSERT INTO t VALUES (1), (2); SELECT sum(v) FROM t;",
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stdout).contains('3'),
+        "{}",
+        text(&output.stdout)
+    );
+    assert!(!Path::new(":memory:").exists());
 }

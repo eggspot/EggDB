@@ -45,8 +45,9 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
 /// (a FIFO, a device, a directory) or that has another name (a hard link) is refused before
 /// anything is written to it or its mode is changed. A FIFO never makes it wait. So nothing
 /// planted at the path can send the writes to another file. The file can be locked with
-/// [`File::try_lock`] on every system: on Windows, where locking needs read or write access
-/// and appending alone gives neither, it is also opened for reading.
+/// [`File::try_lock`] on every system, and it is also open for reading, so the holder of the
+/// lock reads it through the same handle (Windows refuses reads of a locked file through any
+/// other).
 pub fn open_private_append_no_follow(path: &Path) -> io::Result<File> {
     let file = match open_append_no_follow(path) {
         Ok(file) => file,
@@ -173,7 +174,7 @@ mod open_flags {
 fn open_append_no_follow(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let mut options = private_options();
-    options.append(true);
+    options.read(true).append(true);
     if let Some(no_follow) = open_flags::NO_FOLLOW {
         options.custom_flags(no_follow | open_flags::NON_BLOCK);
         return options.open(path);
@@ -210,7 +211,7 @@ fn open_append_no_follow(path: &Path) -> io::Result<File> {
 #[cfg(not(any(unix, windows)))]
 fn open_append_no_follow(path: &Path) -> io::Result<File> {
     let mut options = private_options();
-    options.append(true);
+    options.read(true).append(true);
     options.open(path)
 }
 

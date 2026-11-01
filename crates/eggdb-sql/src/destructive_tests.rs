@@ -343,6 +343,8 @@ fn transact_sql_brackets_and_transactions_are_classified_as_in_the_other_dialect
         "COMMIT",
         "ROLLBACK TRANSACTION",
         "ROLLBACK WORK",
+        "SAVE TRAN point",
+        "ROLLBACK TRANSACTION point",
     ] {
         assert_eq!(
             destructive_statement(text, Dialect::SqlServer),
@@ -352,7 +354,7 @@ fn transact_sql_brackets_and_transactions_are_classified_as_in_the_other_dialect
             "{text}"
         );
     }
-    for text in ["SAVE TRAN point", "BEGIN DELETE FROM t END"] {
+    for text in ["SAVE point", "BEGIN DELETE FROM t END"] {
         assert!(
             matches!(
                 destructive_statement(text, Dialect::SqlServer),

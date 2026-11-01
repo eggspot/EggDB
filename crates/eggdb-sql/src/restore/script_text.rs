@@ -10,10 +10,11 @@ const UTF16BE_BYTE_ORDER_MARK: &[u8] = b"\xFE\xFF";
 pub(crate) enum ScriptEncoding {
     Utf8,
     Utf16Le,
+    Utf16Be,
 }
 
 pub(crate) struct DecodedLines<'r> {
-    input: &'r mut dyn BufRead,
+    input: Box<dyn BufRead + 'r>,
     encoding: Option<ScriptEncoding>,
     pending: Vec<u8>,
     pending_at: usize,
@@ -24,10 +25,14 @@ pub(crate) struct DecodedLines<'r> {
 
 impl<'r> DecodedLines<'r> {
     pub(crate) fn new(input: &'r mut dyn BufRead) -> Self {
+        Self::owning(Box::new(input))
+    }
+
+    pub(crate) fn owning(input: Box<dyn BufRead + 'r>) -> Self {
         Self::with_max_line(input, MAX_LINE_BYTES)
     }
 
-    pub(crate) fn with_max_line(input: &'r mut dyn BufRead, max_line: usize) -> Self {
+    pub(crate) fn with_max_line(input: Box<dyn BufRead + 'r>, max_line: usize) -> Self {
         Self {
             input,
             encoding: None,
@@ -59,13 +64,7 @@ impl<'r> DecodedLines<'r> {
         } else if start.starts_with(UTF16LE_BYTE_ORDER_MARK) {
             (ScriptEncoding::Utf16Le, UTF16LE_BYTE_ORDER_MARK.len())
         } else if start.starts_with(UTF16BE_BYTE_ORDER_MARK) {
-            return Err(SqlError::new(
-                SqlState::CHARACTER_NOT_IN_REPERTOIRE,
-                "the script is UTF-16 big-endian text, which eggdb restore does not read yet",
-            )
-            .with_hint(
-                "Save it again as Unicode (UTF-16 little-endian) or UTF-8, or convert it with iconv -f UTF-16BE -t UTF-8.",
-            ));
+            (ScriptEncoding::Utf16Be, UTF16BE_BYTE_ORDER_MARK.len())
         } else {
             (ScriptEncoding::Utf8, 0)
         };
@@ -79,7 +78,8 @@ impl<'r> DecodedLines<'r> {
         line.clear();
         let read = match self.encoding()? {
             ScriptEncoding::Utf8 => self.utf8_line(line)?,
-            ScriptEncoding::Utf16Le => self.utf16_line(line)?,
+            ScriptEncoding::Utf16Le => self.utf16_line(line, u16::from_le_bytes)?,
+            ScriptEncoding::Utf16Be => self.utf16_line(line, u16::from_be_bytes)?,
         };
         if read {
             self.line_number += 1;
@@ -166,25 +166,25 @@ impl<'r> DecodedLines<'r> {
         }
     }
 
-    fn next_unit(&mut self, number: u64) -> SqlResult<Option<u16>> {
-        let Some(low) = self.next_byte()? else {
+    fn next_unit(&mut self, number: u64, unit_of: fn([u8; 2]) -> u16) -> SqlResult<Option<u16>> {
+        let Some(first) = self.next_byte()? else {
             return Ok(None);
         };
-        let Some(high) = self.next_byte()? else {
+        let Some(second) = self.next_byte()? else {
             return Err(SqlError::new(
                 SqlState::CHARACTER_NOT_IN_REPERTOIRE,
                 format!("the UTF-16 script ends inside a character on line {number} (an odd number of bytes)"),
             )
             .with_hint("The script is cut short or damaged; save it again."));
         };
-        Ok(Some(u16::from_le_bytes([low, high])))
+        Ok(Some(unit_of([first, second])))
     }
 
-    fn utf16_line(&mut self, line: &mut String) -> SqlResult<bool> {
+    fn utf16_line(&mut self, line: &mut String, unit_of: fn([u8; 2]) -> u16) -> SqlResult<bool> {
         let number = self.line_number + 1;
         let mut any = false;
         loop {
-            let Some(unit) = self.next_unit(number)? else {
+            let Some(unit) = self.next_unit(number, unit_of)? else {
                 if self.high_surrogate.take().is_some() {
                     return Err(lone_surrogate(number));
                 }

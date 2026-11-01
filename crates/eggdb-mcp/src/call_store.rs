@@ -1,7 +1,7 @@
 use crate::watchdog::Watchdog;
 use eggdb_sql::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, SqlError, SqlResult,
-    SqlState, StoreFailure,
+    SqlState, StoreFailure, VisibleRead, VisibleTables,
 };
 use std::cell::Cell;
 use std::time::Instant;
@@ -89,11 +89,20 @@ fn time_limit_error() -> SqlError {
 pub(crate) struct CallStore<'c, S: KeyValueStore> {
     inner: &'c S,
     limits: &'c CallLimits,
+    tables: Option<&'c VisibleTables>,
 }
 
 impl<'c, S: KeyValueStore> CallStore<'c, S> {
-    pub(crate) fn new(inner: &'c S, limits: &'c CallLimits) -> Self {
-        Self { inner, limits }
+    pub(crate) fn new(
+        inner: &'c S,
+        limits: &'c CallLimits,
+        tables: Option<&'c VisibleTables>,
+    ) -> Self {
+        Self {
+            inner,
+            limits,
+            tables,
+        }
     }
 }
 
@@ -175,7 +184,7 @@ impl KeyValueWrite for NeverWriter {
 
 impl<'c, S: KeyValueStore> KeyValueStore for CallStore<'c, S> {
     type Read<'s>
-        = LimitedRead<'c, S::Read<'s>>
+        = VisibleRead<LimitedRead<'c, S::Read<'s>>>
     where
         Self: 's;
     type Write<'s>
@@ -185,10 +194,14 @@ impl<'c, S: KeyValueStore> KeyValueStore for CallStore<'c, S> {
 
     fn begin_read(&self) -> SqlResult<Self::Read<'_>> {
         self.limits.check()?;
-        Ok(LimitedRead {
+        let limited = LimitedRead {
             inner: self.inner.begin_read()?,
             limits: self.limits,
-        })
+        };
+        match self.tables {
+            Some(tables) => tables.read(limited),
+            None => Ok(VisibleRead::everything(limited)),
+        }
     }
 
     fn begin_write(&self) -> SqlResult<NeverWriter> {
@@ -384,7 +397,7 @@ mod tests {
     fn a_write_is_refused_as_read_only_and_remembered() {
         let keys = keys();
         let limits = CallLimits::new(Instant::now() + Duration::from_secs(60));
-        let store = CallStore::new(&keys, &limits);
+        let store = CallStore::new(&keys, &limits, None);
         let error = store.begin_write().err().unwrap();
         assert_eq!(error.state().code(), "25006");
         assert!(limits.write_refused());
@@ -395,7 +408,7 @@ mod tests {
     fn reads_past_the_deadline_fail_with_query_canceled() {
         let keys = keys();
         let limits = CallLimits::new(Instant::now() + Duration::from_secs(60));
-        let store = CallStore::new(&keys, &limits);
+        let store = CallStore::new(&keys, &limits, None);
         let mut seen = 0;
         store
             .begin_read()
@@ -407,7 +420,7 @@ mod tests {
             .unwrap();
         assert_eq!(seen, 2000);
         let passed = CallLimits::new(Instant::now());
-        let store = CallStore::new(&keys, &passed);
+        let store = CallStore::new(&keys, &passed, None);
         let error = store.begin_read().err().unwrap();
         assert_eq!(error.state().code(), "57014");
         assert!(passed.deadline_passed());

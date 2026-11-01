@@ -115,12 +115,12 @@ pub(super) fn is_clause_word(word: &str) -> bool {
     )
 }
 
-fn variable_name(name: &str) -> &str {
+pub(super) fn variable_name(name: &str) -> &str {
     name.trim_start_matches('@')
 }
 
 impl<'t> Parser<'t> {
-    fn settings_or_default<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
+    pub(super) fn settings_or_default<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
         match self.settings {
             Some(settings) => read(settings),
             None => read(&Settings::default()),
@@ -178,6 +178,11 @@ impl<'t> Parser<'t> {
             return Ok(None);
         };
         let statement = match word.as_ref() {
+            "create" if self.creates_mysql_routine() => self.mysql_create_routine()?,
+            "drop" if self.is_word_at(1, "procedure") || self.is_word_at(1, "function") => {
+                self.mysql_drop_routine()?
+            }
+            "call" => self.call_routine()?,
             "show" => self.mysql_show()?,
             "describe" | "desc" => {
                 self.at += 1;
@@ -288,6 +293,49 @@ impl<'t> Parser<'t> {
         } else if self.is_word("create") && self.is_word_at(1, "view") {
             self.at += 2;
             MySqlStatement::ShowCreateView(self.table_name()?)
+        } else if self.is_word("create") && self.is_word_at(1, "trigger") {
+            self.at += 2;
+            MySqlStatement::ShowCreateTrigger(self.table_name()?)
+        } else if self.take_word("triggers") {
+            self.skip_database_qualifier()?;
+            MySqlStatement::ShowTriggers {
+                like: self.like_pattern()?,
+            }
+        } else if self.take_word("engines")
+            || (self.is_word("storage") && self.is_word_at(1, "engines"))
+        {
+            if self.take_word("storage") {
+                self.expect_word("engines")?;
+            }
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::Engines,
+                like: None,
+            }
+        } else if self.take_word("charset")
+            || (self.is_word("character") && self.is_word_at(1, "set"))
+        {
+            if self.take_word("character") {
+                self.expect_word("set")?;
+            }
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::CharacterSets,
+                like: self.like_pattern()?,
+            }
+        } else if self.take_word("collation") {
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::Collations,
+                like: self.like_pattern()?,
+            }
+        } else if self.take_word("plugins") {
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::Plugins,
+                like: None,
+            }
+        } else if self.take_word("processlist") {
+            MySqlStatement::ShowServerFacts {
+                view: crate::mysql_catalog::MySqlRelation::ProcessList,
+                like: None,
+            }
         } else if self.take_word("warnings") || self.take_word("errors") {
             let errors_only = self.tokens[self.at - 1].kind == TokenKind::Word("errors".into());
             if self.take_word("limit") {
@@ -311,10 +359,8 @@ impl<'t> Parser<'t> {
             };
             MySqlStatement::ShowCount { errors_only }
         } else {
-            let _ = self.take_word("session") || self.take_word("local");
-            if self.is_word("global") {
-                return Err(self.not_supported("SHOW GLOBAL"));
-            }
+            let _ =
+                self.take_word("session") || self.take_word("local") || self.take_word("global");
             if self.take_word("variables") {
                 MySqlStatement::ShowVariables {
                     like: self.like_pattern()?,
@@ -687,13 +733,15 @@ impl<'t> Parser<'t> {
             None
         };
         self.index_options()?;
-        let columns = self.index_column_list(false)?;
+        let columns = self.ordered_index_column_list(false)?;
         self.index_options()?;
         Ok(Some(IndexSpec {
             name,
             unique: false,
-            columns,
+            columns: columns.names,
             position,
+            method: crate::encoding::IndexMethod::BTree,
+            sort_options: columns.sort_options,
         }))
     }
 

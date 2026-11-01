@@ -131,6 +131,16 @@ fn wrong_passwords_unknown_users_and_other_databases_are_refused_with_sql_server
 }
 
 #[test]
+fn a_tds_8_login_is_accepted_as_tds_7_4() {
+    let server = TestServer::start(8);
+    let options = LoginOptions {
+        version: 0x0800_0000,
+        ..LoginOptions::default()
+    };
+    assert!(login_errors(&server, &options).is_empty());
+}
+
+#[test]
 fn older_tds_versions_integrated_logins_and_password_changes_are_refused() {
     let server = TestServer::start(8);
     for options in [
@@ -297,7 +307,10 @@ fn transactions_nest_report_their_changes_and_an_error_that_rolls_one_back_ends_
     assert_eq!(errors(&rolled_back).len(), 1, "{rolled_back:?}");
     let count = client.batch("SELECT count(*) FROM t");
     assert_eq!(rows(&count), vec![vec![Some("3".to_owned())]]);
-    assert_eq!(errors(&client.batch("BEGIN SELECT 1 END"))[0].0, 40517);
+    assert_eq!(
+        rows(&client.batch("BEGIN SELECT 1 END")),
+        vec![vec![Some("1".to_owned())]]
+    );
 }
 
 #[test]
@@ -321,7 +334,9 @@ fn use_set_nocount_and_unsupported_requests_answer_as_sql_server_does() {
         errors(&client.batch("SET ANSI_NULLS ON\nSET QUOTED_IDENTIFIER ON")).len(),
         0
     );
-    assert_eq!(errors(&client.batch("SET XACT_ABORT ON"))[0].0, 40517);
+    assert_eq!(errors(&client.batch("SET XACT_ABORT ON")).len(), 0);
+    assert_eq!(errors(&client.batch("SET XACT_ABORT OFF")).len(), 0);
+    assert_eq!(errors(&client.batch("SET NOEXEC ON"))[0].0, 40517);
     assert_eq!(errors(&client.batch("SET FOO ON"))[0].0, 195);
     assert_eq!(
         rows(&client.batch("SELECT 'a' + 'b'")),
@@ -329,9 +344,9 @@ fn use_set_nocount_and_unsupported_requests_answer_as_sql_server_does() {
     );
     assert_eq!(errors(&client.batch("SELECT version()"))[0].0, 195);
     assert_eq!(errors(&client.batch("SELECT @x"))[0].0, 137);
-    client.send(0x03, &[1, 2, 3]);
+    client.send(0x07, &[1, 2, 3]);
     let (_, body) = client.read_message().unwrap();
-    assert_eq!(errors(&common::parse_tokens(&body))[0].0, 40517);
+    assert_eq!(errors(&common::parse_tokens(&body))[0].0, 4002);
     client.send(0x06, &[]);
     let (_, body) = client.read_message().unwrap();
     assert_eq!(
@@ -408,4 +423,35 @@ fn a_malformed_batch_header_ends_the_connection_with_a_protocol_error() {
     let (_, reply) = client.read_message().unwrap();
     assert_eq!(errors(&common::parse_tokens(&reply))[0].0, 4002);
     assert!(client.is_closed());
+}
+
+#[test]
+fn a_connection_reads_oracle_sql_after_set_eggdb_dialect_and_keeps_its_transaction_requests() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    let created = client.batch(
+        "CREATE TABLE emp (id INT PRIMARY KEY, name NVARCHAR(20))\n\
+         SET eggdb.dialect oracle\n\
+         INSERT INTO emp VALUES (1, 'Ada')",
+    );
+    assert!(errors(&created).is_empty(), "{created:?}");
+    let listed = client.batch(
+        "SELECT table_name FROM user_tables; SELECT NVL(name, 'x') AS name FROM emp WHERE ROWNUM <= 1",
+    );
+    assert!(errors(&listed).is_empty(), "{listed:?}");
+    assert_eq!(
+        rows(&listed),
+        vec![vec![Some("EMP".to_owned())], vec![Some("Ada".to_owned())]]
+    );
+    let begun = client.transaction(5, &[0, 0]);
+    assert!(errors(&begun).is_empty(), "{begun:?}");
+    client.batch("INSERT INTO emp VALUES (2, 'Bob')");
+    let rolled_back = client.transaction(8, &[0, 0]);
+    assert!(errors(&rolled_back).is_empty(), "{rolled_back:?}");
+    assert_eq!(
+        rows(&client.batch("SELECT COUNT(*) AS n FROM emp")),
+        vec![vec![Some("1".to_owned())]]
+    );
+    let back = client.batch("SET eggdb.dialect = sqlserver;\nSELECT TOP 1 name FROM emp");
+    assert_eq!(rows(&back), vec![vec![Some("Ada".to_owned())]], "{back:?}");
 }

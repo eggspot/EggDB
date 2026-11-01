@@ -2,7 +2,7 @@
 //!
 //! This first part holds the file format's building blocks, as `docs/format.md` specifies
 //! them:
-//! - [`crc32c`], the checksum of every page and log record;
+//! - [`crc32c()`], the checksum of every page and log record;
 //! - the [`Superblock`] kept in two alternating header slots at the start of the file, and the
 //!   [`Features`] flags that decide whether a release may open a file for an [`Access`];
 //! - the [`PageHeader`] at the start of every other page, written and verified through
@@ -34,19 +34,23 @@ mod btree;
 mod btree_delete_tests;
 #[cfg(test)]
 mod btree_tests;
-mod bytes;
 mod cells;
 #[cfg(test)]
 mod checkpoint_tests;
+mod compression;
 #[cfg(test)]
 mod crash_sweep_tests;
-mod crc32c;
 mod cursor;
+#[cfg(test)]
+mod encryption_tests;
 mod error;
-mod format;
+use eggdb_format::{bytes, format};
 mod frames;
 mod hybrid_clock;
 mod log;
+mod lsm;
+#[cfg(test)]
+mod lsm_tests;
 #[cfg(test)]
 mod model_tests;
 mod overflow;
@@ -55,27 +59,37 @@ mod overflow_mutation_tests;
 #[cfg(test)]
 mod overflow_tests;
 mod page_cache;
+mod page_cipher;
 mod page_file;
 mod page_set;
 mod page_table;
+mod snapshot_copy;
+#[cfg(test)]
+mod snapshot_copy_tests;
 mod store;
 #[cfg(test)]
 mod store_tests;
+#[cfg(test)]
+mod stream_tests;
 #[cfg(test)]
 mod test_rng;
 mod tree_page;
 
 pub use btree::{BTree, TreeReport};
-pub use crc32c::{crc32c, crc32c_append};
+pub use compression::ValueCompression;
 pub use cursor::{Cursor, ScanOrder};
+pub use eggdb_format::crc32c::{self, crc32c, crc32c_append};
 pub use error::{FormatError, StorageError};
 pub use format::{
     Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC,
-    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageHeader,
-    PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
+    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK,
+    PageChecksum, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
 pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};
+pub use lsm::{LsmCursor, LsmReport, LsmTree};
 pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
+pub use page_cipher::{PAGE_KEY_BYTES, PageCipher};
 pub use page_file::{CreateOptions, PageFile};
-pub use store::{FileReport, ReadTransaction, Store, WriteTransaction};
+pub use snapshot_copy::{CopyDestination, CopyFailure, CopyReport};
+pub use store::{FileReport, ReadTransaction, Store, ValueReader, WriteTransaction};

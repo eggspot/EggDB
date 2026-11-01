@@ -261,6 +261,18 @@ pub enum NetBackend {
     /// never block. Each wait hands the kernel every socket an operation waits on, so it suits
     /// fewer connections than epoll or kqueue.
     Poll,
+    /// Runs accepts, receives and sends as completions in Linux's io_uring (kernel 5.11 or
+    /// later), on request only: each operation is one submission, a batch of submissions reaches
+    /// the kernel in one system call when the queue reaps, and a connect waits for its socket in
+    /// the same ring. A kernel without io_uring, or one that disables it, refuses the request
+    /// with [`ErrorKind::Unsupported`].
+    IoUring,
+    /// Runs accepts, connects, receives and sends as overlapped operations on a Windows I/O
+    /// completion port, on request only, waiting for their completion packets inside
+    /// [`NetQueue::reap`]. A socket is tied to the first such queue that uses it: another
+    /// completion-port queue refuses it with [`ErrorKind::Unsupported`], while the other
+    /// backends still take it.
+    Iocp,
 }
 
 /// How [`Network::net_queue`] builds a queue.

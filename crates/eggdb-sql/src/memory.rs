@@ -3,6 +3,14 @@ use crate::types::Value;
 
 pub(crate) const WORK_MEMORY_LIMIT: usize = 1 << 30;
 
+/// The largest value a statement may build in any session, 1 GiB as in PostgreSQL; a session
+/// may set a lower limit ([`crate::Session::set_max_value_bytes`]) but never a higher one.
+pub const MAX_VALUE_BYTES: usize = 1 << 30;
+
+/// The largest row a statement may build in any session, 2 GiB; a session may set a lower
+/// limit ([`crate::Session::set_max_row_bytes`]) but never a higher one.
+pub const MAX_ROW_BYTES: usize = 1 << 31;
+
 const ROW_OVERHEAD: usize = 24;
 const VALUE_SIZE: usize = std::mem::size_of::<Value>();
 
@@ -15,8 +23,8 @@ struct Shared {
 thread_local! {
     static SHARED: std::cell::Cell<Option<Shared>> = const { std::cell::Cell::new(None) };
     static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static VALUE_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
-    static ROW_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    static VALUE_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_VALUE_BYTES) };
+    static ROW_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_ROW_BYTES) };
 }
 
 pub(crate) fn held_bytes(value: &Value) -> usize {
@@ -25,6 +33,25 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
         Value::Bytea(bytes) => bytes.len(),
         Value::Array(array) => crate::arrays::held_bytes(array),
         Value::Reg(reg) => reg.name.len(),
+        Value::Defined(defined) => match defined.as_ref() {
+            crate::types::DefinedValue::Enum(label) => label.label.len(),
+            crate::types::DefinedValue::Record(record) => {
+                record.fields.iter().map(held_bytes).fold(
+                    record.names.iter().map(String::len).sum(),
+                    usize::saturating_add,
+                )
+            }
+            crate::types::DefinedValue::Range(range) => range.bounds.as_ref().map_or(0, |bounds| {
+                [&bounds.lower, &bounds.upper]
+                    .into_iter()
+                    .map(|bound| match bound {
+                        crate::ranges::RangeBound::Unbounded => 0,
+                        crate::ranges::RangeBound::Inclusive(value)
+                        | crate::ranges::RangeBound::Exclusive(value) => held_bytes(value),
+                    })
+                    .sum()
+            }),
+        },
         _ => 0,
     }
 }
@@ -41,7 +68,7 @@ impl Drop for EnteredRowLimit {
 
 pub(crate) fn enter_row_limit(bytes: usize) -> EnteredRowLimit {
     EnteredRowLimit {
-        previous: ROW_LIMIT.with(|limit| limit.replace(bytes)),
+        previous: ROW_LIMIT.with(|limit| limit.replace(bytes.min(MAX_ROW_BYTES))),
     }
 }
 
@@ -60,6 +87,13 @@ impl RowBytes {
         let limit = ROW_LIMIT.with(std::cell::Cell::get);
         if self.total <= limit {
             return Ok(());
+        }
+        if limit >= MAX_ROW_BYTES {
+            return Err(SqlError::new(
+                SqlState::PROGRAM_LIMIT_EXCEEDED,
+                format!("a row of more than {limit} bytes is larger than EggDB's limit on one row"),
+            )
+            .with_hint("Build smaller rows: one row may hold at most 2 GiB."));
         }
         Err(SqlError::new(
             SqlState::PROGRAM_LIMIT_EXCEEDED,
@@ -83,7 +117,7 @@ impl Drop for EnteredValueLimit {
 
 pub(crate) fn enter_value_limit(bytes: usize) -> EnteredValueLimit {
     EnteredValueLimit {
-        previous: VALUE_LIMIT.with(|limit| limit.replace(bytes)),
+        previous: VALUE_LIMIT.with(|limit| limit.replace(bytes.min(MAX_VALUE_BYTES))),
     }
 }
 
@@ -91,6 +125,13 @@ pub(crate) fn check_value_bytes(bytes: usize) -> SqlResult<()> {
     let limit = VALUE_LIMIT.with(std::cell::Cell::get);
     if bytes <= limit {
         return Ok(());
+    }
+    if limit >= MAX_VALUE_BYTES {
+        return Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!("a value of {bytes} bytes is larger than EggDB's limit of {limit} bytes on one value"),
+        )
+        .with_hint("Build smaller values: one value may be at most 1 GiB, as in PostgreSQL."));
     }
     Err(SqlError::new(
         SqlState::PROGRAM_LIMIT_EXCEEDED,
@@ -210,6 +251,7 @@ impl WorkMemory {
     }
 
     pub(crate) fn charge(&mut self, bytes: usize) -> SqlResult<()> {
+        crate::cancel::check()?;
         self.used = self.used.saturating_add(bytes);
         let total = self
             .statement
@@ -284,8 +326,8 @@ mod tests {
 
     #[test]
     fn the_value_limit_holds_while_entered_and_is_restored_after() {
-        use super::{check_value_bytes, enter_value_limit};
-        assert!(check_value_bytes(1 << 40).is_ok());
+        use super::{MAX_VALUE_BYTES, check_value_bytes, enter_value_limit};
+        assert!(check_value_bytes(MAX_VALUE_BYTES).is_ok());
         {
             let _outer = enter_value_limit(100);
             assert!(check_value_bytes(100).is_ok());
@@ -296,7 +338,52 @@ mod tests {
             }
             assert!(check_value_bytes(100).is_ok());
         }
-        assert!(check_value_bytes(1 << 40).is_ok());
+        assert!(check_value_bytes(MAX_VALUE_BYTES).is_ok());
+    }
+
+    #[test]
+    fn every_session_stops_at_eggdbs_own_limits_on_one_value_and_one_row() {
+        use super::{
+            MAX_ROW_BYTES, MAX_VALUE_BYTES, RowBytes, check_value_bytes, enter_row_limit,
+            enter_value_limit,
+        };
+        let error = check_value_bytes(MAX_VALUE_BYTES + 1).unwrap_err();
+        assert_eq!(error.state().code(), "54000");
+        assert_eq!(
+            error.message(),
+            format!(
+                "a value of {} bytes is larger than EggDB's limit of {MAX_VALUE_BYTES} bytes on one value",
+                MAX_VALUE_BYTES + 1
+            )
+        );
+        assert_eq!(
+            error.hint(),
+            Some("Build smaller values: one value may be at most 1 GiB, as in PostgreSQL.")
+        );
+        {
+            let _higher = enter_value_limit(usize::MAX);
+            assert!(check_value_bytes(MAX_VALUE_BYTES + 1).is_err());
+        }
+        {
+            let _session = enter_value_limit(16);
+            assert_eq!(
+                check_value_bytes(17).unwrap_err().message(),
+                "a value of 17 bytes is larger than this session's limit of 16 bytes"
+            );
+        }
+        let mut row = RowBytes::default();
+        assert!(row.add_bytes(MAX_ROW_BYTES).is_ok());
+        let error = row.add_bytes(1).unwrap_err();
+        assert_eq!(error.state().code(), "54000");
+        assert_eq!(
+            error.message(),
+            format!(
+                "a row of more than {MAX_ROW_BYTES} bytes is larger than EggDB's limit on one row"
+            )
+        );
+        let _higher = enter_row_limit(usize::MAX);
+        let mut row = RowBytes::default();
+        assert!(row.add_bytes(MAX_ROW_BYTES + 1).is_err());
     }
 
     #[test]

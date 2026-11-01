@@ -1,11 +1,11 @@
 use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, NONCE_BYTES};
 use crate::packets::{
-    BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, ColumnDefinition, Command,
+    BoundValue, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, CLIENT_SSL, ColumnDefinition, Command,
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
     STATUS_MORE_RESULTS, TYPE_BLOB, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON,
     TYPE_LONG, TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIME, TYPE_TIMESTAMP, TYPE_TINY,
     TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
-    err_packet, ok_packet, parse_command, parse_execute, parse_handshake_response,
+    err_packet, is_ssl_request, ok_packet, parse_command, parse_execute, parse_handshake_response,
 };
 use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
@@ -54,7 +54,12 @@ fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
     Some(nonce)
 }
 
-fn handshake_packet(connection_id: u32, nonce: &[u8; NONCE_BYTES]) -> Vec<u8> {
+fn handshake_packet(connection_id: u32, nonce: &[u8; NONCE_BYTES], tls: bool) -> Vec<u8> {
+    let capabilities = if tls {
+        SERVER_CAPABILITIES | CLIENT_SSL
+    } else {
+        SERVER_CAPABILITIES
+    };
     let mut payload = Payload::new();
     payload
         .u8(10)
@@ -62,10 +67,10 @@ fn handshake_packet(connection_id: u32, nonce: &[u8; NONCE_BYTES]) -> Vec<u8> {
         .u32(connection_id)
         .bytes(&nonce[..8])
         .u8(0)
-        .u16(SERVER_CAPABILITIES as u16)
+        .u16(capabilities as u16)
         .u8(UTF8MB4_0900_AI_CI)
         .u16(STATUS_AUTOCOMMIT)
-        .u16((SERVER_CAPABILITIES >> 16) as u16)
+        .u16((capabilities >> 16) as u16)
         .u8(NONCE_BYTES as u8 + 1)
         .bytes(&[0; 10])
         .null_terminated(&nonce[8..])
@@ -221,7 +226,7 @@ struct Connection<'a, 's, S: KeyValueStore + 's> {
     wire: Wire<'a>,
     shared: &'a Shared<'a>,
     store: &'s S,
-    session: Session<'s, S>,
+    session: Session<'s>,
     user: String,
     connection_id: u32,
     capabilities: u32,
@@ -235,7 +240,7 @@ fn new_session<'s, S: KeyValueStore + 's>(
     user: &str,
     database: &str,
     connection_id: u32,
-) -> Session<'s, S> {
+) -> Session<'s> {
     let mut session = Session::with_dialect(store, Dialect::MySql);
     session.identify(user, database);
     session.set_connection_id(connection_id);
@@ -268,17 +273,53 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         return;
     };
     wire.sequence = 0;
-    wire.send(&handshake_packet(connection_id, &nonce));
+    let tls_config = shared.config.tls.as_deref().filter(|_| !wire.is_local());
+    wire.send(&handshake_packet(
+        connection_id,
+        &nonce,
+        tls_config.is_some(),
+    ));
     if wire.flush().is_err() {
         return;
     }
-    let body = match wire.read_payload(1, MAX_AUTHENTICATION_PACKET_BYTES) {
+    let mut body = match wire.read_payload(1, MAX_AUTHENTICATION_PACKET_BYTES) {
         Ok(body) => body,
         Err(error) => {
             report_wire_error(&mut wire, &error);
             return;
         }
     };
+    if is_ssl_request(&body) {
+        let Some(config) = tls_config else {
+            refuse(
+                &mut wire,
+                1043,
+                "08S01",
+                "Bad handshake: the client asked for TLS, which this server is not set up for",
+            );
+            return;
+        };
+        if let Err(error) = wire.start_tls(config) {
+            (shared.log)(&format!("{}  TLS handshake failed: {error}", wire.peer()));
+            return;
+        }
+        body = match wire.read_payload(2, MAX_AUTHENTICATION_PACKET_BYTES) {
+            Ok(body) => body,
+            Err(error) => {
+                report_wire_error(&mut wire, &error);
+                return;
+            }
+        };
+    }
+    if wire.tls().is_none() && !wire.peer_is_loopback() {
+        refuse(
+            &mut wire,
+            3159,
+            "HY000",
+            "Connections using insecure transport are prohibited: EggDB accepts connections from other machines only over TLS (--ssl-mode=REQUIRED)",
+        );
+        return;
+    }
     let response = match parse_handshake_response(&body) {
         Ok(response) => response,
         Err(error) => {
@@ -369,7 +410,9 @@ fn class_of_type(sql_type: SqlType) -> ValueClass {
         | SqlType::Interval { .. }
         | SqlType::Uuid
         | SqlType::Array(_)
-        | SqlType::Catalog(_) => ValueClass::Text,
+        | SqlType::Catalog(_)
+        | SqlType::Defined(_)
+        | SqlType::Dynamic => ValueClass::Text,
         SqlType::Time(_) => ValueClass::Time,
         SqlType::Bytea => ValueClass::Bytes,
         SqlType::Date => ValueClass::Date,
@@ -595,9 +638,11 @@ fn packed_temporal(text: &str) -> Result<Vec<u8>, SqlError> {
 }
 
 fn packed_time(micros: i64) -> Vec<u8> {
-    const MICROS_PER_SECOND: i64 = 1_000_000;
-    let seconds = micros / MICROS_PER_SECOND;
-    let fraction = (micros % MICROS_PER_SECOND) as u32;
+    const MICROS_PER_SECOND: u64 = 1_000_000;
+    let negative = micros < 0;
+    let magnitude = micros.unsigned_abs();
+    let seconds = magnitude / MICROS_PER_SECOND;
+    let fraction = (magnitude % MICROS_PER_SECOND) as u32;
     let days = (seconds / 86_400) as u32;
     let (hour, minute, second) = (
         (seconds / 3600 % 24) as u8,
@@ -607,7 +652,7 @@ fn packed_time(micros: i64) -> Vec<u8> {
     if micros == 0 {
         return vec![0];
     }
-    let mut out = vec![0u8, 0];
+    let mut out = vec![0u8, u8::from(negative)];
     out.extend_from_slice(&days.to_le_bytes());
     out.extend_from_slice(&[hour, minute, second]);
     if fraction != 0 {

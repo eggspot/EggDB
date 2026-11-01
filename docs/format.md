@@ -75,7 +75,8 @@ slot 1. A superblock found in the other slot is refused.
 | 136 | 56 | `recycled_segments` | seven first pages of log segments emptied by checkpoints, kept for reuse before the file grows. 0 marks an unused entry. |
 | 192 | 8 | `log_sequence_reserved` | the highest log segment sequence number a writer may have used (see "Segment sequences") |
 | 200 | 32 | reserved for the consensus hard state (term and vote, M15) | written as zero |
-| 232 | 280 | reserved | written as zero |
+| 232 | 16 | `page_key_check` | for a file with `ENCRYPTED_PAGES`, the first 16 bytes of HMAC-SHA256(derived key, "EggDB page key check"); zero otherwise (D187) |
+| 248 | 264 | reserved | written as zero |
 
 Every page pointer (`free_list_head`, `catalog_root`, `log_head_page` and the recycled
 segments) must be 0 or lie between `first_data_page` and `page_count − 1`. A log segment
@@ -118,9 +119,15 @@ There are three 64-bit sets, with ext4's rules for a bit a release doesn't know:
 - **read-only compatible:** the file may be opened for reading, never for writing.
 - **incompatible:** the file is refused.
 
-Version 1 defines no bits. Anything a later release adds that an older release would get wrong
-sets a bit in the right set, so an older release never misreads a newer file. That includes new
-page types, key schemes other than 0, compression and encryption.
+Anything a later release adds that an older release would get wrong sets a bit in the right
+set, so an older release never misreads a newer file. That includes new page types, key schemes
+other than 0, compression and encryption. The bits defined so far:
+
+| Set | Bit | Name | Set by |
+|-----|----:|------|--------|
+| read-only compatible | 0 | `EXPIRING_KEYS` | the first commit that gives a key a time to live (D140). A release without expiring keys would show expired keys and could write a key without removing its deadline, so it may only read the file. The bit stays set. |
+| incompatible | 0 | `COMPRESSED_VALUES` | the first commit that writes a value compressed on overflow pages of layout 2 (D171). A release without them would refuse those pages as damaged, so it refuses the file at open instead. The bit stays set. |
+| incompatible | 1 | `ENCRYPTED_PAGES` | the data pages are encrypted with AES-256-CTR under a key derived from the user's (D187); the file opens only with that key, checked against `page_key_check` |
 
 ## Pages
 Every page except the header slots starts with a 16-byte header:
@@ -130,7 +137,7 @@ Every page except the header slots starts with a 16-byte header:
 | 0 | 4 | `checksum` | see below |
 | 4 | 1 | `page_type` | see the table below. 0 is never valid, so a page that was never written is refused. |
 | 5 | 1 | `layout` | the layout version of this page type |
-| 6 | 2 | `flags` | reserved for per-page compression and encryption. 0 in version 1, and a reader refuses anything else. |
+| 6 | 2 | `flags` | bit 0 (`PAGE_ENCRYPTED`): the bytes after the header are encrypted (D187). A reader refuses any other bit. |
 | 8 | 8 | `lsn` | the log position of the last change to the page |
 
 **The checksum** is CRC-32C, computed as
@@ -356,9 +363,16 @@ this order:
    `checkpoint_lsn` at the log's current append position, `log_head_page` and
    `log_head_sequence` naming the current segment, the new `recycled_segments` and
    `log_sequence_reserved` as "Segment sequences" says. Sync. When step 2 gave segments to the
-   free list or cut them off, write the same superblock again with `generation` raised by one,
-   to the other slot, and sync, so no header slot names a log that runs through pages now free
-   or cut off.
+   free list, write the same superblock again with `generation` raised by one, to the other
+   slot, and sync, so no header slot names a log that runs through pages now free. When it cut
+   segments off, the other slot still names a log through them, which is harmless while they
+   hold log segments or nothing: a new segment written there carries a sequence above that
+   slot's reservation, so the older slot is refused rather than misread. So the copy to the
+   other slot waits until a page of the cut range is about to hold anything else (a data page
+   handed out at the end of the file, or a free-list page), and is written and synced just
+   before; any other superblock write in between, and the next open for writing, which always
+   makes the older slot a copy, end the wait too. A checkpoint that cuts segments off writes one
+   slot and syncs once (D168).
    A checkpoint that cut segments off leaves the file's length as it is: the pages after
    `page_count` hold nothing the header names, the next growth reuses their space, and the
    next open for writing shortens the file to `page_count` pages (a file longer than its
@@ -405,11 +419,41 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   of the one tree a file holds.
 - **Key scheme 0**, the only scheme in v0.2.0, is the raw key compared as unsigned bytes. The
   empty key is a valid key, and the smallest.
+- **LSM trees (D170)** are made of B+trees of the same file, so they add no page type. A
+  manifest tree names the others: key `d` the delta, keys `r` and a 4-byte big-endian run
+  number the runs (a larger number is newer), `n` the next run number (4 bytes, little-endian),
+  and `m`, while one is under way, a merge: its target's root and entry count, a resume key (a
+  byte `0`, or `1`, a 4-byte length and the key) and the run numbers it merges. A component
+  entry is its root page and its entry count, 8 bytes each, little-endian. Each value in a
+  component starts with a tag byte: `1` and the value, or `0` alone for a deleted key.
 - **Tenant and shard prefixes (D20):** a later scheme encodes `(tenant, shard, key)` into the
   same byte string, preserving order, and sets an incompatible feature bit.
 - **Prefix truncation:** B+tree pages keep low and high fence keys and store the prefix those
   keys share only once. So an unused prefix costs nothing, and a used one costs about nothing
   per entry.
+- **Collections (D139)** are key prefixes in the same tree, not trees of their own. Every key
+  that starts with the five bytes `0xff 'C' 'O' 'L' 0x00` belongs to them, and the default key
+  space neither shows nor accepts such keys. Below that prefix:
+
+  | Key | Value |
+  |-----|-------|
+  | prefix, `0x01` | the catalog: a version byte (1) and the next collection number (4 bytes, big-endian) |
+  | prefix, `0x02`, name (UTF-8) | the collection: a version byte (1) and its number (4 bytes, big-endian) |
+  | prefix, `0x03`, number (4 bytes, big-endian), key | the value stored under `key` in that collection |
+  | prefix, `0x04`, stored key | the deadline of a key with a time to live (D140): a version byte (1) and the deadline in microseconds since the Unix epoch (8 bytes, big-endian) |
+  | prefix, `0x05`, deadline (8 bytes, big-endian), stored key | empty: the index of keys by deadline, which commits sweep in order |
+
+  Numbers start at 1 and are never reused, so a key of a dropped collection can never be read
+  as a key of a later one. The *stored key* of `0x04` and `0x05` is the key as the tree holds it:
+  a default key space key as it is, a collection's key with its `0x03` prefix and number. A key
+  is expired once the transaction's time, the clock or the last commit's stamp, whichever is
+  later, has reached its deadline; the two records and the key are written and removed
+  together. A deadline record with a version above 1 is refused as written by a newer release;
+  any other that is not nine bytes is damage. A record with a version above 1 is refused as written by a newer
+  release; any other record that is not five bytes is damage. Files without collections hold
+  none of these keys, so the layout needs no feature flag: a v0.2.0 file opens unchanged and
+  takes collections, and a release before collections reads such a file and shows these keys as
+  ordinary keys of its one key space.
 
 ### B+tree pages (types 2 and 3, layout 1)
 A tree is a B+tree (D77, D82): values live in leaf pages (type 3), and inner pages (type 2)
@@ -541,6 +585,16 @@ After the 16-byte page header, each overflow page holds:
   kind of reference, such as one keeping part of the value in the leaf, uses another length in
   the low bits behind a feature flag; this layout refuses every length but 16.
 
+
+**Compressed chains (layout 2, D171).** With value compression on, a value of at least 4 KiB
+is compressed with an LZ4 block (the block format of LZ4's public format description: sequences
+of a token, literals, a 2-byte little-endian offset and extra length bytes, the last five bytes
+literals). When the block and a 4-byte little-endian length of the uncompressed value save at
+least a sixteenth of the value, the chain holds those bytes instead, and every page of the chain
+has layout 2. Everything else about the chain is as above: the reference's `value_bytes` is the
+stored length, and pages, indexes, counts and the zero tail are checked the same way. A chain
+mixing layouts, a length above 1 GiB, or a block that does not give exactly that many bytes is
+damage. Writing one sets the incompatible feature `COMPRESSED_VALUES`.
 ## Hybrid-clock stamps (item 9)
 - A commit stamp is a `u64`: 52 bits of microseconds since **2026-01-01T00:00:00Z** (Unix time
   1767225600), followed by a 12-bit logical counter.
@@ -600,7 +654,34 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
 - The SQL layer's records are values in the trees, and table definitions and views are
   versioned by their own first byte; their layouts are in [sql.md](sql.md) "How SQL is stored"
   (D114, D116). They are part of the format from v0.2.0 on: after it, a new dialect code or
-  default tag in them needs a new record version (D124).
+  default tag in them needs a new record version (D124). The newest table-definition version is
+  9, written only for tables with an index method other than `btree`, a column order other than
+  `ASC`, a unique index that is not a constraint or a recorded identity column (D146), a
+  Transact-SQL `DEFAULT` kept as written or an `IDENTITY` seed and increment other than (1, 1)
+  (D147). Version 10 (D152) is written only for tables with an array, enum, composite or range
+  column, a column of a domain, a `NOT VALID` constraint or an `INITIALLY DEFERRED` foreign key;
+  user-defined types are records of their own (catalog prefix, `0x0A`, the type's name), with
+  record version 1. Both are described in [sql.md](sql.md) "How SQL is stored". Triggers are
+  one record per table or view (catalog prefix, `0x0B`, the table's internal name) holding all
+  its triggers in firing order, with record version 1 (D157); an Oracle trigger's action is
+  its PL/SQL block as written plus the names `REFERENCING` gives the new and old rows (action
+  code 4). Functions and procedures are one
+  record per name (catalog prefix, `0x0C`, the routine's internal name) holding every overload's
+  dialect, kind, identity and `CREATE` text, with record version 1 (D158); Transact-SQL
+  procedures and functions are the same records with SQL Server's dialect code, one per name
+  (D159), and so are PL/SQL procedures and functions, with Oracle's dialect code, one per name,
+  whose identity is their parameters' declared types as written (`EMPLOYEES.EMPLOYEE_ID%TYPE`).
+  PL/SQL packages are one record per package (catalog prefix, `0x0D`, the package's internal
+  name) with record version 1: a shape byte (0 specification only, 1 with a body), then the
+  specification's `CREATE` text and, with a body, the body's `CREATE` text, each a varint
+  length and UTF-8 bytes. Partitioning is one record per partitioned table or partition
+  (catalog prefix, `0x0E`, the table's internal name) with record version 1 (D169): a flag byte
+  (`1` the table is partitioned, `2` it is a partition), then, when partitioned, the strategy
+  (`1` range, `2` list, `3` hash) and its key's column names, and, when a partition, its parent's
+  internal name and bound (`1` range: two value lists; `2` list: one; `3` hash: modulus and
+  remainder as varints; `4` default). Each bound value is a byte (`0` the value as text, `1`
+  NULL, `2` MINVALUE, `3` MAXVALUE) and, for `0`, the text. Rows stay in each partition's own
+  table; a partitioned table holds none.
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.

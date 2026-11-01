@@ -45,6 +45,18 @@ impl<'t> Parser<'t> {
 
     pub(super) fn qualified_part(&mut self, schema: &Name) -> SqlResult<Name> {
         let name = self.name()?;
+        if self.postgresql()
+            && self.peek_kind() == &TokenKind::Dot
+            && self.check_database(schema).is_ok()
+        {
+            self.at += 1;
+            let in_schema = self.name()?;
+            return self.qualified_part_of(&name, in_schema);
+        }
+        self.qualified_part_of(schema, name)
+    }
+
+    fn qualified_part_of(&mut self, schema: &Name, name: Name) -> SqlResult<Name> {
         if self.peek_kind() == &TokenKind::Dot {
             return Err(
                 SqlError::not_supported("cross-database references are not implemented")
@@ -69,7 +81,7 @@ impl<'t> Parser<'t> {
         crate::schemas::schema_named(&name.text, name.position)
     }
 
-    fn if_exists(&mut self) -> SqlResult<bool> {
+    pub(super) fn if_exists(&mut self) -> SqlResult<bool> {
         if self.take_word("if") {
             self.expect_word("exists")?;
             return Ok(true);
@@ -77,7 +89,7 @@ impl<'t> Parser<'t> {
         Ok(false)
     }
 
-    fn if_not_exists(&mut self) -> SqlResult<bool> {
+    pub(super) fn if_not_exists(&mut self) -> SqlResult<bool> {
         if self.take_word("if") {
             self.expect_word("not")?;
             self.expect_word("exists")?;
@@ -170,9 +182,8 @@ impl<'t> Parser<'t> {
         if self.mysql() {
             self.mysql_view_options()?;
         }
-        if self.is_word("temp") || self.is_word("temporary") {
-            return Err(self.not_supported("CREATE TEMPORARY VIEW (temporary tables and views)"));
-        }
+        let temporary = (self.postgresql() || self.sqlite())
+            && (self.take_word("temp") || self.take_word("temporary"));
         if self.is_word("recursive") {
             return Err(self.not_supported("CREATE RECURSIVE VIEW"));
         }
@@ -205,6 +216,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("with") {
             return Err(self.not_supported("CREATE VIEW ... WITH (options)"));
         }
+        if self.oracle() {
+            self.oracle_view_options()?;
+        }
         if self.sqlserver() && self.take_word("with") {
             self.sqlserver_view_attributes()?;
         }
@@ -220,23 +234,29 @@ impl<'t> Parser<'t> {
             .get(self.at.saturating_sub(1))
             .map_or(first, |token| token.end);
         let text = self.text.get(first..last).unwrap_or("").to_owned();
+        let mut check_option = None;
         if self.is_word("with") {
-            let position = self.position();
             self.at += 1;
             if self.oracle() && self.take_word("read") {
                 self.expect_word("only")?;
-            } else if self.sqlserver() {
-                self.expect_word("check")?;
-                self.expect_word("option")?;
-                return Err(super::sqlserver::not_supported("WITH CHECK OPTION").at(position));
             } else {
-                let _ = self.take_word("cascaded") || self.take_word("local");
+                let local = !self.sqlserver()
+                    && !self.oracle()
+                    && !self.take_word("cascaded")
+                    && self.take_word("local");
                 self.expect_word("check")?;
                 self.expect_word("option")?;
-                return Err(SqlError::not_supported(
-                    "CREATE VIEW ... WITH CHECK OPTION is not supported yet: views are read-only",
-                )
-                .at(position));
+                if self.sqlite() {
+                    return Err(self.unexpected());
+                }
+                if self.oracle() && self.take_word("constraint") {
+                    self.name()?;
+                }
+                check_option = Some(if local {
+                    crate::encoding::CheckOption::Local
+                } else {
+                    crate::encoding::CheckOption::Cascaded
+                });
             }
         }
         Ok(Statement::CreateView(Box::new(CreateView {
@@ -247,6 +267,8 @@ impl<'t> Parser<'t> {
             columns,
             query,
             text,
+            check_option,
+            temporary,
         })))
     }
 
@@ -425,15 +447,16 @@ impl<'t> Parser<'t> {
 
     fn schema_table(&self, schema: Name, table: Name) -> SqlResult<Name> {
         if self.oracle() {
-            if crate::lexer::swap_uniform_case(&schema.text) != self.oracle_user() {
-                return Err(SqlError::new(
-                    SqlState::UNDEFINED_TABLE,
-                    "table or view does not exist",
-                )
-                .with_oracle_code(942)
-                .at(schema.position));
-            }
-            return Ok(table);
+            let own = crate::lexer::swap_uniform_case(&schema.text) == self.oracle_user();
+            let schema_name = if own {
+                self.oracle_user_schema()
+            } else {
+                schema.text.clone()
+            };
+            return Ok(Name {
+                text: written_qualified(&schema_name, &table.text),
+                position: schema.position,
+            });
         }
         if self.mysql() {
             self.check_database(&schema)?;
@@ -460,21 +483,43 @@ impl<'t> Parser<'t> {
         Ok(Statement::Ignored {
             tag,
             notice: Some(format!(
-                "WARNING:  {tag} was accepted and ignored: EggDB has no roles or privileges yet"
+                "WARNING:  {tag} was accepted and ignored: EggDB does not apply default privileges yet"
             )),
         })
     }
 
     pub(super) fn create_extension(&mut self) -> SqlResult<Statement> {
         self.expect_word("extension")?;
-        let _ = self.if_not_exists()?;
+        let if_not_exists = self.if_not_exists()?;
         let name = self.name()?;
-        if name.text != "plpgsql" {
+        if let Some(bundled) = [
+            "pg_cron",
+            "eggdb_cdc",
+            "eggdb_tenancy",
+            "eggdb_ledger",
+            "eggdb_console",
+            "eggdb_bi",
+            "eggdb_catalog",
+            "eggdb_privacy",
+            "eggdb_retention",
+            "eggdb_coordination",
+            "eggdb_migration",
+        ]
+        .into_iter()
+        .find(|bundled| *bundled == name.text)
+        {
+            self.skip_statement();
+            return Ok(Statement::InstallExtension {
+                name: bundled,
+                if_not_exists,
+            });
+        }
+        if !["plpgsql", "vector", "postgis"].contains(&name.text.as_str()) {
             return Err(SqlError::not_supported(format!(
                 "extension \"{}\" is not supported",
                 name.text
             ))
-            .with_hint("EggDB accepts CREATE EXTENSION plpgsql only; other extensions are not available yet.")
+            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron, eggdb_cdc, eggdb_tenancy, eggdb_ledger, eggdb_console, eggdb_bi, eggdb_catalog, eggdb_privacy, eggdb_retention, eggdb_coordination, eggdb_migration, vector and postgis only; other extensions are not available yet.")
             .at(name.position));
         }
         self.skip_statement();

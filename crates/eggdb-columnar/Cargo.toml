@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-columnar"
+description = "EggDB's columnar encodings: bit packing, run-length and bit-packed hybrid runs, zigzag deltas and dictionaries for column chunks, and aggregates computed on the encoded runs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

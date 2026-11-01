@@ -48,7 +48,10 @@ fn restore(store: &MemoryStore, dump: &str, keep_going: bool) -> RestoreReport {
     let report = restore_dump(
         &mut session,
         &mut input,
-        RestoreOptions { keep_going },
+        RestoreOptions {
+            keep_going,
+            ..RestoreOptions::default()
+        },
         &mut |_| {},
     );
     assert_eq!(session.close(), Ok(false));
@@ -431,7 +434,7 @@ CREATE TABLE public.events (
     id integer NOT NULL,
     at date NOT NULL
 )
-PARTITION BY RANGE (at);
+PARTITION BY RANGE (at); CREATE TABLE public.events_2024 PARTITION OF public.events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
 
 CREATE TABLE shop.items (
     id bigint NOT NULL,
@@ -545,7 +548,7 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
             report.comments,
             report.rows
         ),
-        (1, 2, 1, 2, 1, 4, 3, 4)
+        (1, 5, 1, 2, 1, 4, 3, 8)
     );
     let skipped: Vec<(u64, &str, &str, Option<u64>)> = report
         .skipped
@@ -563,31 +566,19 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
         skipped,
         [
             (26, "extension", "pg_trgm", None),
-            (29, "type", "public.mood", None),
-            (35, "domain", "public.positive", None),
-            (38, "function", "public.touch()", None),
-            (64, "table", "public.events", Some(3)),
             (101, "materialized view", "public.counts", None),
-            (134, "trigger", "people_touch on public.people", None),
             (137, "policy", "people_own on public.people", None),
             (138, "row-level security", "public.people", None),
         ]
     );
-    assert_eq!(report.skipped[4].detail.as_deref(), Some("partitioned"));
-    assert_eq!(report.tables_skipped, 2);
-    assert_eq!(report.rows_skipped, 4);
+    assert_eq!(report.tables_skipped, 0);
+    assert_eq!(report.rows_skipped, 0);
     let consequences: Vec<(u64, &str)> = report
         .consequences
         .iter()
         .map(|consequence| (consequence.line, consequence.uses.as_str()))
         .collect();
-    assert_eq!(
-        consequences,
-        [
-            (59, "type public.mood"),
-            (139, "materialized view public.counts"),
-        ]
-    );
+    assert_eq!(consequences, [(139, "materialized view public.counts")]);
     let ignored = &report.ignored;
     assert_eq!((ignored.owner_to, ignored.grant, ignored.revoke), (5, 1, 1));
     assert_eq!(ignored.set, ["default_toast_compression"]);
@@ -605,7 +596,30 @@ fn a_pg_dump_restores_what_eggdb_has_and_reports_the_rest() {
         .iter()
         .map(|table| (table.table.as_str(), table.rows))
         .collect();
-    assert_eq!(rows, [("public.people", 2), ("shop.items", 2)]);
+    assert_eq!(
+        rows,
+        [
+            ("public.people", 2),
+            ("public.feelings", 1),
+            ("public.events", 3),
+            ("public.events_2024", 0),
+            ("shop.items", 2)
+        ]
+    );
+    assert_eq!(
+        query(&store, "SELECT id, feeling FROM public.feelings"),
+        "id|feeling\n1|calm\nSELECT 1"
+    );
+    assert_eq!(
+        query(&store, "SELECT 5::public.positive AS n"),
+        "n\n5\nSELECT 1"
+    );
+    assert!(
+        Session::new(&store)
+            .execute("SELECT 0::public.positive", &mut |_| {})
+            .is_err(),
+        "the domain's check was restored"
+    );
 }
 
 #[test]
@@ -723,12 +737,12 @@ fn meta_commands_other_than_restrict_are_listed_and_never_run() {
 fn every_kind_eggdb_cannot_create_yet_is_reported_with_its_name() {
     let cases = [
         (
-            "CREATE OR REPLACE FUNCTION s.f(a integer) RETURNS integer LANGUAGE sql AS $$ SELECT a; $$;",
+            "CREATE OR REPLACE FUNCTION s.f(a integer) RETURNS integer LANGUAGE c AS 'lib', 'f';",
             "function",
             "s.f(…)",
         ),
         (
-            "CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC SELECT 1; END;",
+            "CREATE PROCEDURE p() LANGUAGE plperl AS $$ return; $$;",
             "procedure",
             "p()",
         ),
@@ -753,12 +767,6 @@ fn every_kind_eggdb_cannot_create_yet_is_reported_with_its_name() {
             "r on public.t",
         ),
         (
-            "CREATE TYPE public.pair AS (a integer, b integer);",
-            "type",
-            "public.pair",
-        ),
-        ("CREATE DOMAIN d AS text;", "domain", "d"),
-        (
             "CREATE MATERIALIZED VIEW m AS SELECT 1 WITH NO DATA;",
             "materialized view",
             "m",
@@ -782,11 +790,6 @@ fn every_kind_eggdb_cannot_create_yet_is_reported_with_its_name() {
             "CREATE TABLE public.child (b integer) INHERITS (public.parent);",
             "table",
             "public.child",
-        ),
-        (
-            "CREATE TABLE public.part PARTITION OF public.events FOR VALUES FROM (1) TO (2);",
-            "table",
-            "public.part",
         ),
         (
             "CREATE COLLATION public.c (provider = icu, locale = 'und');",
@@ -844,7 +847,7 @@ fn rows_of_a_skipped_table_are_counted_for_copy_and_inserts() {
 #[test]
 fn a_statement_failing_on_a_name_it_shares_with_a_skipped_object_is_still_an_error() {
     let store = MemoryStore::default();
-    let dump = "CREATE TYPE public.total AS ENUM ('a');\nCREATE TABLE t (total integer PRIMARY KEY);\nINSERT INTO t (total) VALUES (1);\nINSERT INTO t (total) VALUES (1);\n";
+    let dump = "CREATE FUNCTION public.total() RETURNS integer LANGUAGE c AS 'lib', 'total';\nCREATE TABLE t (total integer PRIMARY KEY);\nINSERT INTO t (total) VALUES (1);\nINSERT INTO t (total) VALUES (1);\n";
     let report = restore(&store, dump, false);
     let error = report.error.expect("the duplicate is an error");
     assert_eq!((error.line, error.error.state().code()), (4, "23505"));
@@ -893,9 +896,9 @@ fn inserts_and_column_inserts_restore_as_copy_does() {
 }
 
 #[test]
-fn a_dialect_other_than_postgresql_is_refused() {
+fn a_dialect_without_a_dump_format_is_refused() {
     let store = MemoryStore::default();
-    let mut session = Session::with_dialect(&store, crate::Dialect::MySql);
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
     let mut input: &[u8] = b"CREATE TABLE t (a int);\n";
     let report = restore_dump(
         &mut session,
@@ -964,7 +967,7 @@ CREATE TABLE public.m (
     id integer NOT NULL,
     at date NOT NULL
 )
-PARTITION BY RANGE (at);
+INHERITS (public.inherit);
 CREATE TABLE public.m_2024 (
     id integer NOT NULL,
     at date NOT NULL
@@ -1033,16 +1036,24 @@ fn identity_columns_of_skipped_tables_and_their_setval_are_consequences() {
         consequences,
         [
             (19, "table public.m"),
-            (27, "type public.status"),
-            (32, "table public.tasks"),
-            (58, "sequence public.m_id_seq"),
-            (59, "sequence public.tasks_id_seq"),
-            (60, "table public.tasks"),
+            (44, "table public.m"),
+            (58, "sequence public.m_id_seq")
         ]
     );
-    assert_eq!(report.skipped[2].kind, "partition");
-    assert_eq!((report.tables_skipped, report.rows_skipped), (2, 2));
-    assert_eq!((report.tables, report.constraints), (3, 2));
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|object| (object.kind.as_str(), object.name.as_str()))
+            .collect::<Vec<_>>(),
+        [("table", "public.m")]
+    );
+    assert_eq!((report.tables_skipped, report.rows_skipped), (1, 0));
+    assert_eq!((report.tables, report.constraints), (4, 3));
+    assert_eq!(
+        query(&store, "SELECT id, s FROM tasks ORDER BY id"),
+        "id|s\n1|new\n2|done\nSELECT 2"
+    );
     assert_eq!(
         query(
             &store,
@@ -1093,10 +1104,204 @@ fn a_data_statement_naming_a_skipped_object_is_still_an_error() {
     let store = MemoryStore::default();
     let report = restore(
         &store,
-        "CREATE FUNCTION public.f() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;\nCREATE TABLE public.t (a integer);\nINSERT INTO public.t (a) VALUES (public.f());\n",
+        "CREATE FUNCTION public.f() RETURNS integer LANGUAGE c AS 'lib', 'f';\nCREATE TABLE public.t (a integer);\nINSERT INTO public.t (a) VALUES (public.f());\n",
         false,
     );
     let error = report.error.expect("the INSERT is an error");
     assert_eq!(error.line, 3);
     assert!(report.consequences.is_empty());
+}
+
+const CLEAN_DUMP_WITH_USER_TYPES: &str = "SELECT pg_catalog.set_config('search_path', '', false);
+ALTER TABLE ONLY public.child DROP CONSTRAINT child_parent_id_fkey;
+ALTER TABLE ONLY public.parent DROP CONSTRAINT parent_pkey;
+DROP TABLE public.child;
+DROP TABLE public.parent;
+DROP TYPE public.pair;
+DROP TYPE public.span;
+DROP DOMAIN public.positive;
+DROP TYPE public.mood;
+CREATE TYPE public.mood AS ENUM (
+    'calm',
+    'busy'
+);
+CREATE DOMAIN public.positive AS integer
+\tCONSTRAINT positive_check CHECK ((VALUE > 0));
+CREATE TYPE public.span AS RANGE (
+    subtype = integer,
+    multirange_type_name = public.span_multi
+);
+CREATE TYPE public.pair AS (
+\ta integer,
+\tb text
+);
+CREATE TABLE public.parent (
+    id integer NOT NULL,
+    feeling public.mood,
+    amount public.positive,
+    tags text[],
+    during public.span,
+    p public.pair
+);
+CREATE TABLE public.child (
+    id integer NOT NULL,
+    parent_id integer
+);
+COPY public.child (id, parent_id) FROM stdin;
+1\t1
+\\.
+COPY public.parent (id, feeling, amount, tags, during, p) FROM stdin;
+1\tbusy\t5\t{a,\"b c\"}\t[1,4)\t(7,x)
+\\.
+ALTER TABLE ONLY public.parent
+    ADD CONSTRAINT parent_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.child
+    ADD CONSTRAINT child_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.parent(id) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE public.parent
+    ADD CONSTRAINT parent_amount_small CHECK (((amount)::integer < 3)) NOT VALID;
+";
+
+#[test]
+fn a_clean_dump_with_user_types_restores_over_itself() {
+    let store = MemoryStore::default();
+    for round in 0..2 {
+        let report = restore(&store, CLEAN_DUMP_WITH_USER_TYPES, false);
+        assert_eq!(report.error, None, "round {round}: {report:#?}");
+        assert!(report.skipped.is_empty(), "round {round}: {report:#?}");
+        assert!(report.consequences.is_empty(), "round {round}: {report:#?}");
+        assert_eq!(report.tables, 2, "round {round}");
+        assert_eq!(report.rows, 2, "round {round}");
+        let nothing_dropped = report
+            .ignored
+            .other
+            .iter()
+            .find(|(what, _)| what == super::classify_oracle::NOTHING_TO_DROP)
+            .map(|(_, count)| *count);
+        assert_eq!(
+            nothing_dropped,
+            if round == 0 { Some(8) } else { None },
+            "round {round}: {report:#?}"
+        );
+    }
+    assert_eq!(
+        query(
+            &store,
+            "SELECT id, feeling, amount, tags, during, p, (p).b AS b FROM public.parent"
+        ),
+        "id|feeling|amount|tags|during|p|b\n1|busy|5|{a,\"b c\"}|[1,4)|(7,x)|x\nSELECT 1"
+    );
+    assert_eq!(
+        query(
+            &store,
+            "SELECT conname, convalidated, condeferred FROM pg_constraint \
+             WHERE conname IN ('parent_amount_small', 'child_parent_id_fkey') ORDER BY conname"
+        ),
+        "conname|convalidated|condeferred\nchild_parent_id_fkey|t|t\nparent_amount_small|f|f\nSELECT 2"
+    );
+    assert_eq!(
+        query(
+            &store,
+            "SELECT typname, typtype FROM pg_type \
+             WHERE typname IN ('mood', 'positive', 'span', 'pair') ORDER BY typname"
+        ),
+        "typname|typtype\nmood|e\npair|c\npositive|d\nspan|r\nSELECT 4"
+    );
+}
+
+#[test]
+fn pg_dumpall_globals_go_to_the_report_and_the_database_restores() {
+    let store = MemoryStore::default();
+    let dump = "SET default_transaction_read_only = off;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+CREATE ROLE app;
+ALTER ROLE app WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5:c2VydmVy';
+CREATE ROLE postgres;
+ALTER ROLE postgres WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS;
+GRANT pg_read_all_data TO app GRANTED BY postgres;
+\\connect template1
+\\connect postgres
+CREATE DATABASE shop WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE_PROVIDER = libc LOCALE = 'C';
+ALTER DATABASE shop OWNER TO postgres;
+\\connect shop
+CREATE TYPE public.mood AS ENUM ('calm', 'busy');
+CREATE TABLE public.t (a public.mood);
+INSERT INTO public.t VALUES ('calm');
+";
+    let report = restore(&store, dump, false);
+    assert_eq!(report.error, None, "{report:#?}");
+    let skipped: Vec<(&str, &str)> = report
+        .skipped
+        .iter()
+        .map(|object| (object.kind.as_str(), object.name.as_str()))
+        .collect();
+    assert_eq!(
+        skipped,
+        [("role", "app"), ("role", "postgres"), ("database", "shop")]
+    );
+    assert_eq!(report.ignored.grant, 1);
+    assert_eq!(report.ignored.owner_to, 1);
+    assert!(
+        report
+            .ignored
+            .other
+            .iter()
+            .any(|(what, count)| what == "ALTER DATABASE and ALTER ROLE" && *count == 2),
+        "{report:#?}"
+    );
+    assert_eq!(report.ignored.meta_commands.len(), 3, "{report:#?}");
+    assert_eq!(query(&store, "SELECT a FROM t"), "a\ncalm\nSELECT 1");
+}
+
+#[test]
+fn postgresql_functions_procedures_and_triggers_are_restored_and_run() {
+    let store = MemoryStore::default();
+    let dump = "SET check_function_bodies = false;
+CREATE TABLE public.t (id integer PRIMARY KEY, note text, hits integer DEFAULT 0);
+CREATE FUNCTION public.touch() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.hits := NEW.hits + 1;
+    RETURN NEW;
+END;
+$$;
+ALTER FUNCTION public.touch() OWNER TO postgres;
+CREATE PROCEDURE public.reset_hits(IN target integer)
+    LANGUAGE sql
+    AS $$ UPDATE public.t SET hits = 0 WHERE id = target $$;
+CREATE FUNCTION public.native() RETURNS integer LANGUAGE c AS 'lib', 'native';
+COPY public.t (id, note, hits) FROM stdin;
+1\tone\t5
+\\.
+CREATE TRIGGER t_touch BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION public.touch();
+CREATE TRIGGER t_off BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION public.touch();
+ALTER TABLE public.t DISABLE TRIGGER t_off;
+";
+    let report = restore(&store, dump, false);
+    assert!(report.succeeded(), "{report:#?}");
+    let skipped: Vec<(&str, &str)> = report
+        .skipped
+        .iter()
+        .map(|object| (object.kind.as_str(), object.name.as_str()))
+        .collect();
+    assert_eq!(skipped, [("function", "public.native()")]);
+    assert_eq!(report.rows, 1);
+    let mut session = Session::new(&store);
+    let mut found = Vec::new();
+    session
+        .execute(
+            "UPDATE public.t SET note = 'two'; SELECT hits FROM public.t",
+            &mut |result| found.extend(result.rows.into_iter().map(|row| row[0].to_text())),
+        )
+        .unwrap();
+    assert_eq!(found, [Some("6".to_owned())]);
+    found.clear();
+    session
+        .execute(
+            "CALL public.reset_hits(1); SELECT hits FROM public.t",
+            &mut |result| found.extend(result.rows.into_iter().map(|row| row[0].to_text())),
+        )
+        .unwrap();
+    assert_eq!(found, [Some("1".to_owned())]);
 }

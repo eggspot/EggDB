@@ -5,7 +5,9 @@ use crate::source::{Change, ErrorKind, Source, SourceError, WriterBusy};
 use crate::terminal::{KeyCode, KeyEvent};
 use crate::text;
 use crate::theme::{Role, Symbol};
+use crate::time_to_live::format_time_left;
 use crate::width::{char_width, text_width};
+use std::time::Duration;
 
 const SMALLEST_TEXT_WIDTH: usize = 30;
 const PREVIEW_BYTES: usize = 256;
@@ -21,6 +23,7 @@ pub(super) struct Pending {
 pub(super) enum ModalKind {
     ConfirmPut(Pending),
     ConfirmDelete(Pending),
+    ConfirmExpiry(Pending),
     WriterBusy { pending: Pending, waiting: bool },
     Reopen,
     Corrupt,
@@ -100,6 +103,13 @@ impl Modal {
             wrap: Wrap::AnyCharacter,
         });
         self
+    }
+
+    fn in_collection(self, collection: Option<&str>) -> Self {
+        match collection {
+            Some(name) => self.line(format!("In     collection {name}")),
+            None => self,
+        }
     }
 
     fn key(mut self, key: &'static str, label: &'static str) -> Self {
@@ -239,6 +249,7 @@ impl<S: Source> Ui<S> {
         self.modal = Some(
             Modal::new(ModalKind::ConfirmPut(pending), title)
                 .key_line(&key)
+                .in_collection(self.collection.as_deref())
                 .line(value_line)
                 .line("")
                 .line("One commit, written to disk before you continue.")
@@ -265,11 +276,33 @@ impl<S: Source> Ui<S> {
         self.modal = Some(
             Modal::new(ModalKind::ConfirmDelete(pending), "Delete key")
                 .key_line(&key)
+                .in_collection(self.collection.as_deref())
                 .line(value_line)
                 .line("")
                 .line("Deletes this one key in one commit, written to disk before you continue. There is no undo.")
                 .key("d", "delete")
                 .key("Esc", "keep"),
+        );
+    }
+
+    pub(super) fn confirm_expiry(&mut self, pending: Pending, left: Option<Duration>) {
+        let key = pending.change.key().to_vec();
+        let arrow = self.theme.symbol(Symbol::RightArrow);
+        let shown =
+            |time: Option<Duration>| time.map_or_else(|| "never".to_owned(), format_time_left);
+        let (title, after) = match &pending.change {
+            Change::Expire { time_to_live, .. } => ("Set time to live", Some(*time_to_live)),
+            _ => ("Clear time to live", None),
+        };
+        self.modal = Some(
+            Modal::new(ModalKind::ConfirmExpiry(pending), title)
+                .key_line(&key)
+                .in_collection(self.collection.as_deref())
+                .line(format!("TTL    {} {arrow} {}", shown(left), shown(after)))
+                .line("")
+                .line("One commit, written to disk before you continue.")
+                .key("Enter", "commit")
+                .key("Esc", "back"),
         );
     }
 
@@ -306,6 +339,13 @@ impl<S: Source> Ui<S> {
             }
             ErrorKind::ReadOnly => {
                 self.error(error);
+                None
+            }
+            ErrorKind::NotAnInteger => {
+                self.toast(
+                    ToastKind::Error,
+                    format!("{line}\nTry: e to store a whole number"),
+                );
                 None
             }
             ErrorKind::NeedsReopen => Some(
@@ -385,6 +425,7 @@ impl<S: Source> Ui<S> {
         let kind = std::mem::replace(&mut modal.kind, ModalKind::Failed);
         match (kind, key.code) {
             (ModalKind::ConfirmPut(pending), KeyCode::Enter)
+            | (ModalKind::ConfirmExpiry(pending), KeyCode::Enter)
             | (ModalKind::ConfirmDelete(pending), KeyCode::Char('d')) => {
                 self.commit(pending, WriterBusy::Fail);
             }

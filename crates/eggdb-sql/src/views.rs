@@ -34,7 +34,7 @@ fn not_a_view(name: &str) -> SqlError {
 
 pub(crate) fn not_updatable(name: &str, verb: &str) -> SqlError {
     SqlError::not_supported(format!("cannot {verb} view \"{}\"", display(name)))
-        .with_hint("Views are read-only in this release: change the view's tables directly.")
+        .with_hint("INSERT, UPDATE and DELETE change a view; change the view's table directly for this statement.")
 }
 
 fn duplicate_relation(name: &Name, internal: &str, dialect: Dialect) -> SqlError {
@@ -149,7 +149,20 @@ pub(crate) fn create_view(
         )
         .at(create.name.position));
     }
-    let internal = schemas::creation_name(writer, &create.name)?;
+    let internal = if create.temporary {
+        if schemas::is_qualified(&create.name.text)
+            && !crate::temporary::is_temporary_name(&create.name.text)
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "cannot create temporary relation in non-temporary schema",
+            )
+            .at(create.name.position));
+        }
+        crate::temporary::internal_name(base_name(&create.name.text))
+    } else {
+        schemas::creation_name(writer, &create.name)?
+    };
     crate::constraints::check_identifier(&Name {
         text: internal.clone(),
         position: create.name.position,
@@ -204,10 +217,28 @@ pub(crate) fn create_view(
     };
     name_resolution::check_view_text(&create.text, dialect, settings)
         .map_err(|error| error.at_if_unplaced(create.name.position))?;
-    let path = schemas::relation_path(writer)?;
+    let mut path = schemas::relation_path(writer)?;
+    if create.temporary && !path.iter().any(|schema| schema == crate::temporary::SCHEMA) {
+        path.insert(0, crate::temporary::SCHEMA.to_owned());
+    }
     let mut query = create.query.clone();
     let (output, resolution) =
         describe(writer, tables, &internal, &mut query, path.clone(), context)?;
+    if !create.temporary
+        && resolution
+            .references
+            .iter()
+            .any(|reference| crate::temporary::is_temporary_name(reference))
+    {
+        let mut temporary = create.clone();
+        temporary.temporary = true;
+        return create_view(writer, tables, &temporary, context).map(|result| {
+            result.with_notice(format!(
+                "NOTICE:  view \"{}\" will be a temporary view",
+                base_name(&internal)
+            ))
+        });
+    }
     if resolution.expanded.contains(&internal) || resolution.references.contains(&internal) {
         return Err(SqlError::new(
             SqlState::INVALID_OBJECT_DEFINITION,
@@ -231,6 +262,7 @@ pub(crate) fn create_view(
         forget_dependencies(writer, existing)?;
     } else {
         crate::store::delete_prefix(writer, &comments_prefix(&internal))?;
+        crate::triggers::remove_table_triggers(writer, &internal)?;
     }
     let view = ViewDefinition {
         name: internal.clone(),
@@ -241,6 +273,7 @@ pub(crate) fn create_view(
         references: resolution.references,
         expands_wildcard: selects_wildcard(&create.query),
         has_column_list: !create.columns.is_empty(),
+        check_option: create.check_option,
     };
     let bytes = view.encode();
     if ViewDefinition::decode(&internal, &bytes).is_err() {
@@ -320,7 +353,9 @@ fn view_columns(
                 format!("invalid view column name \"{}\"", name.escape_default()),
             ));
         }
-        if let Some(sql_type @ crate::types::SqlType::Array(_)) = column.sql_type {
+        if let Some(sql_type @ crate::types::SqlType::Array(element)) = column.sql_type
+            && !element.is_storable()
+        {
             return Err(SqlError::not_supported(format!(
                 "a view column of type {} is not supported yet",
                 sql_type.name()
@@ -507,6 +542,7 @@ fn remove_view(
         crate::store::delete_prefix(writer, &dependencies_prefix(&view.name))?;
     }
     crate::store::delete_prefix(writer, &comments_prefix(&view.name))?;
+    crate::triggers::remove_table_triggers(writer, &view.name)?;
     writer.delete(&table_key(&view.name))?;
     Ok(())
 }
@@ -559,7 +595,8 @@ pub(crate) fn move_view(writer: &mut dyn KeyValueWrite, from: &str, to: &str) ->
     for reference in &view.references {
         writer.put(&dependency_key(reference, to), DEPENDENCY_VALUE)?;
     }
-    crate::comments::move_owner(writer, from, to)
+    crate::comments::move_owner(writer, from, to)?;
+    crate::triggers::move_table_triggers(writer, from, to)
 }
 
 pub(crate) fn alter_view(

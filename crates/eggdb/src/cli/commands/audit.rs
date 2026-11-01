@@ -17,6 +17,9 @@ impl Session<'_> {
     pub(super) fn audit(&mut self) -> Result<Exit, Failure> {
         let path = audit_path_for(&self.request.file);
         let shown = render::text(path.display().to_string().as_bytes());
+        if self.request.verify {
+            return self.verify_audit(&path, &shown);
+        }
         let limit = self
             .request
             .scan
@@ -60,7 +63,8 @@ impl Session<'_> {
         })?;
         let Some(totals) = totals else {
             if std::fs::symlink_metadata(&self.request.file).is_err() {
-                return Err(Failure::database(
+                return Err(Failure::coded(
+                    "not_found",
                     format!("cannot open {}: no such file. Check the path.", self.file),
                     Exit::DatabaseError,
                 ));
@@ -100,8 +104,26 @@ impl Session<'_> {
         let time = shown_time(&entry.time);
         match entry.event {
             AuditEvent::ServerStarted => {
+                let tables = match entry.tables.as_deref() {
+                    None => String::new(),
+                    Some([only]) => format!(", 1 table ({})", printable(only)),
+                    Some(names) => format!(
+                        ", {} tables ({})",
+                        names.len(),
+                        names
+                            .iter()
+                            .map(|name| printable(name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                let gap = match entry.call_gap_ms {
+                    None => String::new(),
+                    Some(0) => ", call gap off".to_owned(),
+                    Some(milliseconds) => format!(", call gap {milliseconds} ms"),
+                };
                 let sentence = format!(
-                    "{time}  server started: eggdb {}, pid {}, {}, time limit {} s",
+                    "{time}  server started: eggdb {}, pid {}, {}{tables}, time limit {} s{gap}",
                     printable(entry.version.as_deref().unwrap_or("?")),
                     entry.pid.unwrap_or(0),
                     if entry.allow_write {
@@ -285,6 +307,45 @@ fn summary(totals: &AuditTotals, shown_calls: u64) -> String {
         summary.push_str(&named);
     }
     summary
+}
+
+impl Session<'_> {
+    fn verify_audit(&mut self, path: &std::path::Path, shown: &str) -> Result<Exit, Failure> {
+        let report = eggdb_mcp::audit::verify_chain(path).map_err(|error| {
+            Failure::database(format!("cannot read {shown}: {error}"), Exit::DatabaseError)
+        })?;
+        if let Some(line) = report.first_break {
+            return Err(Failure::coded(
+                "audit_changed",
+                format!(
+                    "{shown} was changed at line {line}: that record does not link to the one before it"
+                ),
+                Exit::DatabaseError,
+            ));
+        }
+        let older = if report.unchained > 0 {
+            format!(
+                ", after {} older records from before the chain",
+                render::count(report.unchained)
+            )
+        } else {
+            String::new()
+        };
+        match self.format {
+            Format::Json => self.out.text(
+                &render::JsonObject::new()
+                    .number("chained", report.chained)
+                    .number("unchained", report.unchained)
+                    .boolean("intact", true)
+                    .line(),
+            ),
+            _ => self.out.text(&format!(
+                "{shown}: {} records, each linked to the one before{older}; intact\n",
+                render::count(report.chained)
+            )),
+        }
+        Ok(Exit::Done)
+    }
 }
 
 #[cfg(test)]

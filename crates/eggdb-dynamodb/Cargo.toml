@@ -1,0 +1,16 @@
+[package]
+name = "eggdb-dynamodb"
+description = "EggDB's DynamoDB-compatible endpoint: tables with partition and sort keys, items, queries and scans over the JSON protocol with Signature Version 4, stored in EggDB."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-auth = { path = "../eggdb-auth" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-sql = { path = "../eggdb-sql" }

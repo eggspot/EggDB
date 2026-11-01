@@ -1,7 +1,7 @@
 use crate::memory_store::MemoryStore;
 use crate::{BatchStep, Dialect, QueryResult, Session, SqlError, Value};
 
-fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<BatchStep>, SqlError> {
+fn batch(session: &mut Session<'_>, text: &str) -> Result<Vec<BatchStep>, SqlError> {
     let mut steps = Vec::new();
     session.execute_batch(text, &mut |step| {
         steps.push(step);
@@ -10,7 +10,7 @@ fn batch(session: &mut Session<'_, MemoryStore>, text: &str) -> Result<Vec<Batch
     Ok(steps)
 }
 
-fn values(session: &mut Session<'_, MemoryStore>, text: &str) -> Vec<Vec<Value>> {
+fn values(session: &mut Session<'_>, text: &str) -> Vec<Vec<Value>> {
     let mut last = None;
     session
         .execute(text, &mut |result: QueryResult| last = Some(result.rows))
@@ -138,7 +138,7 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         "INSERT INTO t (id, name) VALUES (2, NULL)",
         "INSERT INTO c VALUES (0)",
         "ALTER TABLE c ADD CONSTRAINT c_small CHECK (id > 5)",
-        "CREATE TABLE d (id INT PRIMARY KEY, at DATETIME2 DEFAULT SYSDATETIME() + 1)",
+        "CREATE TABLE d (id INT IDENTITY(1, 0) PRIMARY KEY)",
         "INSERT INTO t (id, name) VALUES (3, N'long')",
         "SELECT 1 / 0 AS x",
         "SELECT CAST(N'x' AS INT) AS x",
@@ -154,7 +154,7 @@ fn no_error_of_the_sql_server_dialect_carries_postgresql_wording() {
         "ALTER VIEW nowhere AS SELECT 1 AS one",
         "SELECT 1 AS one; CREATE VIEW v AS SELECT 1 AS one",
         "SELECT id FROM t GROUP BY name",
-        "SET XACT_ABORT ON",
+        "SET NOEXEC ON",
         "COMMIT",
         "USE elsewhere",
         "SELECT (SELECT id FROM t UNION ALL SELECT id FROM t) AS x",
@@ -418,13 +418,113 @@ fn defaults_fold_constants_to_the_columns_type() {
     assert_eq!(rows[0][2], Value::Text(String::new()));
     assert!(matches!(rows[0][3], Value::Uuid(_)));
     assert!(matches!(rows[0][4], Value::TimestampTz(_)));
-    let error = session
-        .execute(
-            "CREATE TABLE g (id INT PRIMARY KEY, due DATETIME DEFAULT (dateadd(day,(30),getdate())))",
-            &mut |_| {},
-        )
-        .expect_err("a non-constant default");
-    assert_eq!(error.vendor_code(), Some(40517));
+}
+
+#[test]
+fn any_transact_sql_default_is_kept_as_written_and_runs_in_transact_sql() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE g (id INT PRIMARY KEY, due DATETIME DEFAULT (dateadd(day,(30),getdate())), code NVARCHAR(10) DEFAULT (CONCAT(N'x', DATEPART(year, CAST('20240115' AS date)))), n INT DEFAULT (abs(-2) * 3))",
+    );
+    values(&mut session, "INSERT INTO g (id) VALUES (1)");
+    let rows = values(
+        &mut session,
+        "SELECT DATEDIFF(day, GETDATE(), due) AS days, code, n FROM g",
+    );
+    assert!(matches!(rows[0][0], Value::Integer(29 | 30)), "{rows:?}");
+    assert_eq!(rows[0][1], Value::Text("x2024".into()));
+    assert_eq!(rows[0][2], Value::Integer(6));
+    values(&mut session, "ALTER TABLE g ADD z INT NULL");
+    values(
+        &mut session,
+        "ALTER TABLE g ADD CONSTRAINT df_g_z DEFAULT (len(N'four')) FOR z",
+    );
+    values(&mut session, "INSERT INTO g (id) VALUES (2)");
+    let rows = values(&mut session, "SELECT z FROM g WHERE id = 2");
+    assert_eq!(rows[0][0], Value::Integer(4));
+    let mut postgresql = Session::new(&store);
+    postgresql
+        .execute("INSERT INTO g (id) VALUES (3)", &mut |_| {})
+        .unwrap();
+    let rows = values(&mut postgresql, "SELECT n, z FROM g WHERE id = 3");
+    assert_eq!(rows[0], [Value::Integer(6), Value::Integer(4)]);
+    let shown = values(
+        &mut postgresql,
+        "SELECT column_default FROM information_schema.columns WHERE table_name = 'g' AND column_name = 'due'",
+    );
+    assert_eq!(
+        shown[0][0].to_text().as_deref(),
+        Some("dateadd(day,(30),getdate())")
+    );
+    for refused in [
+        "CREATE TABLE h (id INT PRIMARY KEY, n INT DEFAULT ((SELECT 1)))",
+        "CREATE TABLE h (id INT PRIMARY KEY, a INT, n INT DEFAULT (a + 1))",
+    ] {
+        let error = session.execute(refused, &mut |_| {}).expect_err(refused);
+        assert_eq!(error.state().code(), "0A000", "{refused}: {error}");
+    }
+}
+
+#[test]
+fn identity_seeds_and_increments_number_new_rows_from_the_stored_definition() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE up (id INT IDENTITY(100, 7) PRIMARY KEY, note NVARCHAR(5))",
+    );
+    values(
+        &mut session,
+        "CREATE TABLE down (id BIGINT IDENTITY(0, -2) PRIMARY KEY, note NVARCHAR(5))",
+    );
+    values(
+        &mut session,
+        "INSERT INTO up (note) VALUES (N'a'), (N'b')\nINSERT INTO down (note) VALUES (N'a'), (N'b'), (N'c')",
+    );
+    let rows = values(&mut session, "SELECT id FROM up ORDER BY id");
+    assert_eq!(rows, [[Value::Integer(100)], [Value::Integer(107)]]);
+    let rows = values(&mut session, "SELECT id FROM down ORDER BY id DESC");
+    assert_eq!(
+        rows,
+        [[Value::BigInt(0)], [Value::BigInt(-2)], [Value::BigInt(-4)]]
+    );
+    let rows = values(&mut session, "SELECT SCOPE_IDENTITY() AS last");
+    assert_eq!(rows[0][0].to_text().as_deref(), Some("-4"));
+    values(&mut session, "DELETE FROM up WHERE id = 107");
+    let mut later = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut later, "INSERT INTO up (note) VALUES (N'c')");
+    let rows = values(&mut later, "SELECT id FROM up ORDER BY id");
+    assert_eq!(rows, [[Value::Integer(100)], [Value::Integer(107)]]);
+    let rows = values(
+        &mut later,
+        "SELECT CAST(seed_value AS int) AS seed, CAST(increment_value AS int) AS step FROM sys.identity_columns WHERE object_id = OBJECT_ID('up')",
+    );
+    assert_eq!(rows, [[Value::Integer(100), Value::Integer(7)]]);
+    for (refused, why) in [
+        (
+            "CREATE TABLE z1 (id INT IDENTITY(1, 0) PRIMARY KEY)",
+            "The IDENTITY increment, other than zero, of column 'id' must be a whole number within the range of int.",
+        ),
+        (
+            "CREATE TABLE z2 (id SMALLINT IDENTITY(40000, 1) PRIMARY KEY)",
+            "The IDENTITY seed of column 'id' must be a whole number within the range of smallint.",
+        ),
+        (
+            "CREATE TABLE z3 (id INT IDENTITY(1, 9999999999) PRIMARY KEY)",
+            "The IDENTITY increment, other than zero, of column 'id' must be a whole number within the range of int.",
+        ),
+        (
+            "CREATE TABLE z4 (id BIGINT IDENTITY(99999999999999999999, 1) PRIMARY KEY)",
+            "The IDENTITY seed of column 'id' must be a whole number within the range of bigint.",
+        ),
+    ] {
+        let error = later.execute(refused, &mut |_| {}).expect_err(refused);
+        assert_eq!(error.state().code(), "22023", "{refused}: {error}");
+        assert_eq!(error.vendor_code(), Some(50000), "{refused}");
+        assert_eq!(error.message(), why, "{refused}");
+    }
 }
 
 #[test]
@@ -495,7 +595,7 @@ fn stored(store: &MemoryStore, relation: &str) -> Vec<u8> {
         .unwrap()
 }
 
-fn error_of(session: &mut Session<'_, MemoryStore>, text: &str) -> SqlError {
+fn error_of(session: &mut Session<'_>, text: &str) -> SqlError {
     session.execute(text, &mut |_| {}).expect_err(text)
 }
 
@@ -707,7 +807,6 @@ fn view_options_and_replacement_follow_sql_servers_rules() {
     );
     for (text, code) in [
         ("CREATE VIEW w WITH ENCRYPTION AS SELECT id FROM t", 40517),
-        ("CREATE VIEW w AS SELECT id FROM t WITH CHECK OPTION", 40517),
         ("CREATE OR REPLACE VIEW w AS SELECT id FROM t", 102),
         ("ALTER OR ALTER VIEW v AS SELECT id FROM t", 156),
         ("CREATE VIEW v AS SELECT id FROM t", 2714),
@@ -866,6 +965,55 @@ fn stored_transact_sql_texts_keep_their_meaning() {
 }
 
 #[test]
+fn stored_transact_sql_defaults_keep_their_text_and_meaning() {
+    const DEFAULTS: [(&str, &str, &str, &str); 6] = [
+        ("INT", "(abs(-2)*(3))", "abs(-2)*(3)", "6"),
+        (
+            "NVARCHAR(10)",
+            "(CONCAT(N'a',N'b'))",
+            "CONCAT(N'a',N'b')",
+            "ab",
+        ),
+        (
+            "INT",
+            "(datepart(year,CONVERT([date],'20240115',(112))))",
+            "datepart(year,CONVERT([date],'20240115',(112)))",
+            "2024",
+        ),
+        ("INT", "(isnull(NULL,(7)))", "isnull(NULL,(7))", "7"),
+        ("INT", "((len(N'four')+(1)))", "len(N'four')+(1)", "5"),
+        (
+            "NVARCHAR(10)",
+            "(CONVERT([nvarchar](10),dateadd(day,(1),CONVERT([date],'20240131',(112))),(23)))",
+            "CONVERT([nvarchar](10),dateadd(day,(1),CONVERT([date],'20240131',(112))),(23))",
+            "2024-02-01",
+        ),
+    ];
+    for (index, (column_type, written, kept, value)) in DEFAULTS.iter().enumerate() {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+        values(
+            &mut session,
+            &format!(
+                "CREATE TABLE [dbo].[Defaults] ([ID] INT PRIMARY KEY, [V] {column_type} NULL CONSTRAINT [DF_Defaults_{index}] DEFAULT {written})"
+            ),
+        );
+        let table =
+            crate::encoding::TableDefinition::decode("defaults", &stored(&store, "defaults"))
+                .unwrap();
+        assert_eq!(
+            table.columns[1].default.as_deref(),
+            Some(*kept),
+            "{written}"
+        );
+        assert_eq!(table.default_dialect(1), Dialect::SqlServer, "{written}");
+        values(&mut session, "INSERT INTO Defaults (ID) VALUES (1)");
+        let rows = values(&mut session, "SELECT V FROM Defaults");
+        assert_eq!(rows[0][0].to_text().as_deref(), Some(*value), "{written}");
+    }
+}
+
+#[test]
 fn hostile_views_and_checks_in_transact_sql_return_errors_and_never_panic() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
@@ -883,8 +1031,554 @@ fn hostile_views_and_checks_in_transact_sql_return_errors_and_never_panic() {
         "ALTER TABLE t ADD CONSTRAINT c3 CHECK ((SELECT 1) = 1)".to_owned(),
         "ALTER TABLE t ADD CONSTRAINT c4 CHECK (COUNT(*) > 0)".to_owned(),
         "CREATE VIEW v6 WITH AS SELECT 1 AS one".to_owned(),
+        format!("CREATE TABLE d1 (id INT PRIMARY KEY, n INT DEFAULT (abs({deep})))"),
+        format!("ALTER TABLE t ADD DEFAULT (abs({deep})) FOR n"),
+        "CREATE TABLE d2 (id INT PRIMARY KEY, n INT DEFAULT (@local + 1))".to_owned(),
+        "CREATE TABLE d3 (id INT PRIMARY KEY, n INT DEFAULT ((1, 2)))".to_owned(),
+        format!(
+            "CREATE TABLE d4 (id INT IDENTITY(1, {}) PRIMARY KEY)",
+            "9".repeat(400)
+        ),
+        "CREATE TABLE d5 (id INT IDENTITY(-, 1) PRIMARY KEY)".to_owned(),
+        "CREATE TABLE d6 (id INT IDENTITY(1) PRIMARY KEY)".to_owned(),
     ] {
         let error = session.execute(&text, &mut |_| {}).expect_err("refused");
         assert!(error.vendor_code().is_some(), "{error}");
     }
+}
+
+fn parameterized(
+    session: &mut Session<'_>,
+    text: &str,
+    parameters: &[crate::NamedParameter],
+) -> Result<Vec<BatchStep>, SqlError> {
+    let mut steps = Vec::new();
+    session.execute_parameterized_batch(text, parameters, &mut |step| {
+        steps.push(step);
+        true
+    })?;
+    Ok(steps)
+}
+
+fn named(name: &str, declared_type: Option<crate::SqlType>, value: Value) -> crate::NamedParameter {
+    crate::NamedParameter {
+        name: name.to_owned(),
+        declared_type,
+        value,
+    }
+}
+
+fn rows_of(steps: &[BatchStep]) -> Vec<Vec<Value>> {
+    steps
+        .iter()
+        .rev()
+        .find_map(|step| {
+            step.outcome
+                .as_ref()
+                .ok()
+                .filter(|result| result.columns.is_some())
+        })
+        .map(|result| result.rows.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn named_parameters_bind_typed_values_converted_to_their_declared_types() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE items (id INT PRIMARY KEY, name NVARCHAR(40), price DECIMAL(10,2))",
+    );
+    let price = crate::SqlType::Numeric(Some(crate::NumericModifier {
+        precision: 10,
+        scale: 2,
+    }));
+    let steps = parameterized(
+        &mut session,
+        "INSERT INTO items VALUES (@id, @Name, @price)",
+        &[
+            named("@ID", Some(crate::SqlType::Integer), Value::Integer(7)),
+            named(
+                "@name",
+                Some(crate::SqlType::Varchar(Some(40))),
+                Value::Text("egg".into()),
+            ),
+            named(
+                "@price",
+                Some(price),
+                Value::Numeric(crate::Numeric::parse("12.5").unwrap()),
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(steps[0].outcome.as_ref().unwrap().tag.starts_with("INSERT"));
+    let found = parameterized(
+        &mut session,
+        "SELECT name, CAST(price AS varchar(20)) AS price FROM items WHERE id = @p1",
+        &[named(
+            "@p1",
+            Some(crate::SqlType::Integer),
+            Value::Text("7".into()),
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        rows_of(&found),
+        vec![vec![Value::Text("egg".into()), Value::Text("12.50".into())]]
+    );
+    let nothing = parameterized(
+        &mut session,
+        "SELECT COUNT(*) AS n FROM items WHERE name = @p1",
+        &[named("@p1", Some(crate::SqlType::Text), Value::Null)],
+    )
+    .unwrap();
+    assert_eq!(rows_of(&nothing), vec![vec![Value::Integer(0)]]);
+    let error = parameterized(&mut session, "SELECT @missing", &[]).expect_err("undeclared");
+    assert_eq!(error.vendor_code(), Some(137));
+    let error = batch(&mut session, "SELECT @p1").expect_err("no parameters");
+    assert_eq!(error.vendor_code(), Some(137));
+    session
+        .check_parameterized_batch("SELECT @p1", &[named("@p1", None, Value::Null)])
+        .unwrap();
+    let error = session
+        .check_parameterized_batch(
+            "SELECT * FORM t WHERE id = @p1",
+            &[named("@p1", None, Value::Null)],
+        )
+        .expect_err("a syntax error");
+    assert_eq!(error.vendor_code(), Some(102));
+}
+
+#[test]
+fn parameter_declarations_read_names_types_and_output_markers() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let declared = session
+        .parse_parameter_declarations(
+            "@P0 int,@p1 nvarchar(4000) OUTPUT, @p2 decimal(5,2) out, @p3 nvarchar(max),@p4 datetime2",
+        )
+        .unwrap();
+    let shown: Vec<(String, crate::SqlType, bool)> = declared
+        .into_iter()
+        .map(|declaration| (declaration.name, declaration.sql_type, declaration.output))
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("@p0".into(), crate::SqlType::Integer, false),
+            ("@p1".into(), crate::SqlType::Varchar(Some(4000)), true),
+            (
+                "@p2".into(),
+                crate::SqlType::Numeric(Some(crate::NumericModifier {
+                    precision: 5,
+                    scale: 2
+                })),
+                true
+            ),
+            ("@p3".into(), crate::SqlType::Text, false),
+            ("@p4".into(), crate::SqlType::Timestamp(Some(6)), false),
+        ]
+    );
+    assert!(session.parse_parameter_declarations("").unwrap().is_empty());
+    for (text, code) in [
+        ("@p1 foo", 2715),
+        ("@p1 int, @P1 int", 134),
+        ("p1 int", 102),
+        ("@p1 int @p2 int", 102),
+        ("@@p1 int", 102),
+    ] {
+        let error = session.parse_parameter_declarations(text).expect_err(text);
+        assert_eq!(error.vendor_code(), Some(code), "{text}");
+    }
+}
+
+#[test]
+fn implicit_transactions_keep_changes_open_until_commit_or_rollback() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let steps = batch(
+        &mut session,
+        "set implicit_transactions on INSERT INTO t VALUES (1) SELECT @@TRANCOUNT AS n",
+    )
+    .unwrap();
+    assert!(!steps[0].in_transaction);
+    assert!(steps[1].in_transaction);
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(1)]]);
+    let steps = batch(&mut session, "IF @@TRANCOUNT > 0 ROLLBACK TRAN").unwrap();
+    assert_eq!(steps[0].outcome.as_ref().unwrap().tag, "ROLLBACK");
+    assert!(!steps[0].in_transaction);
+    let steps = batch(
+        &mut session,
+        "CREATE TABLE u (id INT PRIMARY KEY) INSERT INTO t VALUES (2) IF @@TRANCOUNT > 0 COMMIT TRAN",
+    )
+    .unwrap();
+    assert!(steps[0].in_transaction);
+    assert!(!steps[2].in_transaction);
+    let steps = batch(
+        &mut session,
+        "set implicit_transactions off IF @@TRANCOUNT > 0 COMMIT TRAN INSERT INTO t VALUES (3)",
+    )
+    .unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[1].outcome.as_ref().unwrap().tag, "INSERT 0 1");
+    assert!(steps.iter().all(|step| !step.in_transaction));
+    assert_eq!(
+        values(&mut session, "SELECT id FROM t ORDER BY id"),
+        vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT COUNT(*) AS n FROM u"),
+        vec![vec![Value::Integer(0)]]
+    );
+}
+
+#[test]
+fn if_and_else_choose_their_statements_by_any_condition() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let steps = batch(&mut session, "IF 1 = 0 SELECT 1 AS n ELSE SELECT 2 AS n").unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(2)]]);
+    let steps = batch(
+        &mut session,
+        "IF 'a' = 'a' SELECT 3 AS n; ELSE SELECT 4 AS n",
+    )
+    .unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(3)]]);
+    let steps = batch(&mut session, "IF NULL = 1 SELECT 5 AS n SELECT 6 AS n").unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(6)]]);
+    let steps = batch(
+        &mut session,
+        "IF NOT EXISTS (SELECT 1 FROM t) INSERT INTO t VALUES (1) IF EXISTS (SELECT 1 FROM t WHERE id = 1) SELECT 7 AS n",
+    )
+    .unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(7)]]);
+    let steps = batch(
+        &mut session,
+        "IF 1 = 1 BEGIN SELECT 8 AS n SELECT 9 AS n END",
+    )
+    .unwrap();
+    assert_eq!(steps.len(), 2);
+    let steps = batch(&mut session, "IF id = 1 SELECT 1").unwrap();
+    assert_eq!(codes(&steps), vec![Some(207)]);
+}
+
+#[test]
+fn a_connection_reset_rolls_back_and_restores_the_options_of_a_new_login() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE t (id INT PRIMARY KEY)");
+    let steps = batch(
+        &mut session,
+        "SET NOCOUNT ON SET IMPLICIT_TRANSACTIONS ON BEGIN TRAN INSERT INTO t VALUES (1)",
+    )
+    .unwrap();
+    assert!(steps.last().unwrap().no_count);
+    session.reset_connection(true).unwrap();
+    assert!(session.in_block());
+    session.reset_connection(false).unwrap();
+    assert!(!session.in_block());
+    let steps = batch(
+        &mut session,
+        "INSERT INTO t VALUES (2) SELECT @@TRANCOUNT AS n",
+    )
+    .unwrap();
+    assert!(!steps[0].no_count);
+    assert!(!steps[0].in_transaction);
+    assert_eq!(rows_of(&steps), vec![vec![Value::Integer(0)]]);
+    assert_eq!(
+        values(&mut session, "SELECT id FROM t"),
+        vec![vec![Value::Integer(2)]]
+    );
+}
+
+fn column_types(session: &mut Session<'_>, text: &str) -> Vec<Option<crate::SqlType>> {
+    let mut last = None;
+    session
+        .execute(text, &mut |result: QueryResult| last = result.columns)
+        .unwrap_or_else(|error| panic!("{text}: {error}"));
+    last.unwrap_or_default()
+        .into_iter()
+        .map(|column| column.sql_type)
+        .collect()
+}
+
+fn decimal(precision: u16, scale: i16) -> Option<crate::SqlType> {
+    Some(crate::SqlType::Numeric(Some(crate::NumericModifier {
+        precision,
+        scale,
+    })))
+}
+
+#[test]
+fn sums_averages_and_quotients_take_sql_servers_result_types() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE s (id INT PRIMARY KEY, qty INT NOT NULL, price DECIMAL(10,2) NOT NULL, big BIGINT NOT NULL)",
+    );
+    values(
+        &mut session,
+        "INSERT INTO s VALUES (1, 2147483647, 1.50, 1), (2, 1, 2.25, 2)",
+    );
+    assert_eq!(
+        column_types(
+            &mut session,
+            "SELECT SUM(price) AS a, AVG(price) AS b, SUM(big) AS c, AVG(qty) AS d, COUNT_BIG(*) AS e FROM s"
+        ),
+        vec![
+            decimal(38, 2),
+            decimal(38, 6),
+            Some(crate::SqlType::BigInt),
+            Some(crate::SqlType::Integer),
+            Some(crate::SqlType::BigInt),
+        ]
+    );
+    assert_eq!(
+        column_types(&mut session, "SELECT price / 3 AS q FROM s"),
+        vec![decimal(21, 13)]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT price / 3 AS q FROM s WHERE id = 2"),
+        vec![vec![Value::Numeric(
+            crate::Numeric::parse("0.7500000000000").unwrap()
+        )]]
+    );
+    let error = session
+        .execute("SELECT SUM(qty) AS total FROM s", &mut |_| {})
+        .expect_err("an int overflow");
+    assert_eq!(error.vendor_code(), Some(8115));
+    let mut postgresql = Session::new(&store);
+    assert_eq!(
+        values(&mut postgresql, "SELECT sum(qty) AS total FROM s"),
+        vec![vec![Value::BigInt(2_147_483_648)]]
+    );
+}
+
+#[test]
+fn at_at_identity_follows_the_last_identity_value() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(
+        &mut session,
+        "CREATE TABLE i (id INT IDENTITY(1,1) PRIMARY KEY, note NVARCHAR(10))",
+    );
+    values(&mut session, "INSERT INTO i (note) VALUES (N'a'), (N'b')");
+    assert_eq!(
+        values(&mut session, "SELECT @@IDENTITY AS last_id"),
+        vec![vec![Value::Numeric(crate::Numeric::parse("2").unwrap())]]
+    );
+}
+
+#[test]
+fn string_split_and_string_agg_go_both_ways_through_a_variable() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let steps = batch(
+        &mut session,
+        "DECLARE @list NVARCHAR(100) = N'c,a,b' SELECT STRING_AGG(value, '+') WITHIN GROUP (ORDER BY value) AS joined FROM STRING_SPLIT(@list, ',')",
+    )
+    .unwrap();
+    assert_eq!(rows_of(&steps), vec![vec![Value::Text("a+b+c".into())]]);
+}
+
+#[test]
+fn hostile_arguments_to_the_common_functions_return_errors_or_values_and_never_panic() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let long = "9".repeat(5_000);
+    let texts = [
+        "SELECT REPLICATE(CAST('ab' AS varchar(max)), 2147483647) AS r".to_owned(),
+        "SELECT SPACE(2147483647) AS s".to_owned(),
+        "SELECT SUBSTRING('abc', -2147483648, 2147483647) AS s".to_owned(),
+        "SELECT STUFF('abc', 2147483647, 2147483647, 'x') AS s".to_owned(),
+        "SELECT LEFT('abc', 9223372036854775807) AS s".to_owned(),
+        "SELECT ROUND(1.5, -2147483648) AS r, ROUND(1e308, 2147483647) AS f".to_owned(),
+        "SELECT CEILING(CAST(1e308 AS float)) AS c".to_owned(),
+        "SELECT EOMONTH('2020-01-01', 2147483647) AS e".to_owned(),
+        "SELECT DATEDIFF_BIG(nanosecond, '0001-01-01', '9999-12-31') AS d".to_owned(),
+        "SELECT CHOOSE(2147483647, 'a') AS c".to_owned(),
+        format!("SELECT FORMAT(1, '{long}') AS f"),
+        "SELECT FORMAT(1, 'N99') AS f, FORMAT(1.5, 'E99') AS e, FORMAT(CAST('2020-01-01' AS date), 'fffffffff') AS d".to_owned(),
+        "SELECT FORMAT(-9223372036854775808, 'X') AS x, FORMAT(1, '\\') AS slash, FORMAT(1, ';;;') AS sections".to_owned(),
+        "SELECT CONCAT_WS(NULL, NULL, NULL) AS c, DATALENGTH(REPLICATE('a', 9000)) AS d".to_owned(),
+        "SELECT TRY_CONVERT(varbinary(10), 'zz', 2) AS b, CONVERT(varchar(10), CAST(1e308 AS float), 2) AS f".to_owned(),
+        "SELECT value FROM STRING_SPLIT(REPLICATE(',', 8000), ',')".to_owned(),
+        "SELECT DATENAME(tzoffset, SYSDATETIMEOFFSET()) AS z, DATEPART(nanosecond, '9999-12-31 23:59:59.9999999') AS n".to_owned(),
+    ];
+    for text in &texts {
+        let _ = session.execute(text, &mut |_| {});
+    }
+    assert_eq!(
+        values(&mut session, "SELECT 1 AS n"),
+        vec![vec![Value::Integer(1)]]
+    );
+}
+
+fn texts(rows: Vec<Vec<Value>>) -> Vec<Vec<String>> {
+    rows.into_iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| value.to_text().unwrap_or_else(|| "NULL".to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn sequences_number_with_sql_server_defaults_cycles_and_next_value_for() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    session
+        .execute(
+            "CREATE SEQUENCE dbo.counter AS int START WITH 5 INCREMENT BY 5 MINVALUE 5 MAXVALUE 15 CYCLE NO CACHE",
+            &mut |_| {},
+        )
+        .unwrap();
+    let mut drawn = Vec::new();
+    for _ in 0..4 {
+        drawn.extend(texts(values(
+            &mut session,
+            "SELECT NEXT VALUE FOR dbo.counter AS n",
+        )));
+    }
+    assert_eq!(drawn, vec![vec!["5"], vec!["10"], vec!["15"], vec!["5"]]);
+    session
+        .execute(
+            "CREATE SEQUENCE [tiny] AS [tinyint]; CREATE SEQUENCE big; CREATE SEQUENCE down AS smallint INCREMENT BY -1",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        texts(values(
+            &mut session,
+            "SELECT NEXT VALUE FOR tiny AS t, NEXT VALUE FOR big AS b, NEXT VALUE FOR down AS d"
+        )),
+        vec![vec![
+            "0".to_owned(),
+            i64::MIN.to_string(),
+            i16::MAX.to_string()
+        ]]
+    );
+    session
+        .execute("ALTER SEQUENCE tiny RESTART WITH 7", &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        texts(values(&mut session, "SELECT NEXT VALUE FOR tiny AS t")),
+        vec![vec!["7"]]
+    );
+    session
+        .execute(
+            "CREATE TABLE o (id BIGINT PRIMARY KEY DEFAULT (NEXT VALUE FOR big), n INT); INSERT INTO o (n) VALUES (1)",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        texts(values(&mut session, "SELECT id FROM o")),
+        vec![vec![(i64::MIN + 1).to_string()]]
+    );
+    let refused = session
+        .execute("CREATE SEQUENCE wide AS decimal(20, 0)", &mut |_| {})
+        .unwrap_err();
+    assert_eq!(refused.vendor_code(), Some(11702));
+    session
+        .execute("DROP SEQUENCE IF EXISTS dbo.counter", &mut |_| {})
+        .unwrap();
+    assert!(
+        session
+            .execute("SELECT NEXT VALUE FOR dbo.counter AS n", &mut |_| {})
+            .is_err()
+    );
+    assert_eq!(session.close(), Ok(false));
+}
+
+#[test]
+fn ms_description_extended_properties_are_comments_shown_in_sys_extended_properties() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    session
+        .execute(
+            "CREATE TABLE people (id INT PRIMARY KEY, name NVARCHAR(20)); \
+             EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Our people', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People'; \
+             EXEC sp_addextendedproperty N'MS_Description', N'Full name', N'SCHEMA', N'dbo', N'TABLE', N'People', N'COLUMN', N'Name'",
+            &mut |_| {},
+        )
+        .unwrap();
+    let listed = "SELECT minor_id, CAST(value AS nvarchar(50)) AS v FROM sys.extended_properties ORDER BY minor_id";
+    assert_eq!(
+        texts(values(&mut session, listed)),
+        vec![vec!["0", "Our people"], vec!["2", "Full name"]]
+    );
+    session
+        .execute(
+            "EXEC sp_updateextendedproperty @name=N'MS_Description', @value=N'Name of the person', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People', @level2type=N'COLUMN', @level2name=N'Name'; \
+             EXEC sp_dropextendedproperty @name=N'MS_Description', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People'",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        texts(values(&mut session, listed)),
+        vec![vec!["2", "Name of the person"]]
+    );
+    for text in [
+        "EXEC sp_addextendedproperty @name=N'Caption', @value=N'x', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'People'",
+        "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x'",
+        "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x', @level0type=N'USER', @level0name=N'dbo'",
+        "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'PROCEDURE', @level1name=N'p'",
+    ] {
+        let error = session.execute(text, &mut |_| {}).unwrap_err();
+        assert_eq!(error.vendor_code(), Some(40517), "{text}: {error}");
+    }
+    let unknown = session
+        .execute(
+            "EXEC sp_addextendedproperty @name=N'MS_Description', @nothing=N'x'",
+            &mut |_| {},
+        )
+        .unwrap_err();
+    assert_eq!(unknown.vendor_code(), Some(8145));
+    assert_eq!(session.close(), Ok(false));
+}
+
+#[test]
+fn hostile_sequences_descriptions_and_xact_abort_return_errors_and_never_panic() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    let long = "9".repeat(5_000);
+    let texts = [
+        "CREATE SEQUENCE s AS decimal(18, 0) MINVALUE -999999999999999999 MAXVALUE 999999999999999999".to_owned(),
+        "CREATE SEQUENCE s2 START WITH 99999999999999999999".to_owned(),
+        format!("CREATE SEQUENCE s3 INCREMENT BY {long}"),
+        "CREATE SEQUENCE s4 AS tinyint START WITH 300".to_owned(),
+        "CREATE SEQUENCE s5 INCREMENT BY 0".to_owned(),
+        "CREATE SEQUENCE s6 MINVALUE 10 MAXVALUE 1".to_owned(),
+        "CREATE SEQUENCE s7 AS sql_variant".to_owned(),
+        "CREATE SEQUENCE s8 MINVALUE - MAXVALUE".to_owned(),
+        "CREATE SEQUENCE s9 AS bigint INCREMENT BY -9223372036854775808 MINVALUE -9223372036854775808 MAXVALUE 9223372036854775807".to_owned(),
+        "SELECT NEXT VALUE FOR s9 AS a, NEXT VALUE FOR s9 AS b".to_owned(),
+        "SELECT NEXT VALUE FOR".to_owned(),
+        "SELECT NEXT VALUE FOR nowhere AS n".to_owned(),
+        "SELECT NEXT VALUE FOR s OVER (ORDER BY 1) AS n".to_owned(),
+        "ALTER SEQUENCE nowhere RESTART".to_owned(),
+        "DROP SEQUENCE nowhere".to_owned(),
+        "EXEC sp_addextendedproperty".to_owned(),
+        "EXEC sp_addextendedproperty NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL".to_owned(),
+        "EXEC sp_addextendedproperty N'MS_Description', N'x', N'SCHEMA', N'dbo', N'TABLE', N'nowhere', N'COLUMN', N'c', N'extra'".to_owned(),
+        "EXEC sp_dropextendedproperty N'MS_Description', N'SCHEMA', N'nowhere'".to_owned(),
+        format!("EXEC sp_addextendedproperty N'MS_Description', N'{long}', N'SCHEMA', N'{long}'"),
+        "EXEC sp_addextendedproperty @name = 1 / 0".to_owned(),
+        "SET XACT_ABORT".to_owned(),
+        "SET XACT_ABORT MAYBE".to_owned(),
+    ];
+    for text in &texts {
+        let _ = session.execute(text, &mut |_| {});
+        let _ = session.execute_batch(text, &mut |_| true);
+    }
+    assert_eq!(
+        values(&mut session, "SELECT 1 AS n"),
+        vec![vec![Value::Integer(1)]]
+    );
 }

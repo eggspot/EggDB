@@ -322,7 +322,7 @@ impl<'t> Parser<'t> {
                 Statement::Begin { read_only: false }
             }
             "replace" if self.is_word_at(1, "into") => self.insert()?,
-            "attach" | "detach" | "vacuum" | "reindex" | "savepoint" | "release" | "analyze" => {
+            "attach" | "detach" | "vacuum" | "reindex" => {
                 return Err(self.not_supported(&word.to_ascii_uppercase()));
             }
             _ => return Ok(None),
@@ -375,7 +375,6 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn sqlite_type(&mut self) -> SqlResult<(SqlType, bool)> {
-        let start = self.position();
         let mut words = Vec::new();
         while let TokenKind::Word(word) = self.peek_kind() {
             if matches!(
@@ -418,9 +417,7 @@ impl<'t> Parser<'t> {
             Affinity::Text => SqlType::Text,
             Affinity::Real => SqlType::Double,
             Affinity::Blob if declared.is_empty() => SqlType::Text,
-            Affinity::Blob => {
-                return Err(SqlError::not_supported("type BLOB is not supported yet").at(start));
-            }
+            Affinity::Blob => SqlType::Dynamic,
             Affinity::Numeric if matches!(declared.as_str(), "boolean" | "bool") => SqlType::BigInt,
             Affinity::Numeric if ["date", "time"].iter().any(|word| declared.contains(word)) => {
                 SqlType::Text
@@ -456,7 +453,10 @@ impl<'t> Parser<'t> {
             not_null: false,
             primary_key: false,
             default: None,
+            default_dialect: crate::Dialect::PostgreSql,
             auto_increment: false,
+            identity_seed: None,
+            generated_always: false,
             unique: None,
             constraints: Vec::new(),
             comment: None,
@@ -612,20 +612,36 @@ impl<'t> Parser<'t> {
         Ok(resolution)
     }
 
-    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<OnDuplicate> {
+    pub(super) fn sqlite_upsert(&mut self) -> SqlResult<(OnDuplicate, Option<Vec<Name>>)> {
         self.expect_word("on")?;
         self.expect_word("conflict")?;
-        if self.peek_kind() == &TokenKind::LeftParen {
-            self.name_list()?;
+        if self.postgresql() && self.is_word("on") {
+            return Err(self.not_supported("ON CONFLICT ON CONSTRAINT"));
+        }
+        let target = if self.peek_kind() == &TokenKind::LeftParen {
+            let target = self.name_list()?;
             if self.is_word("where") {
                 return Err(self.not_supported("ON CONFLICT (...) WHERE"));
             }
-        }
+            Some(target)
+        } else {
+            None
+        };
+        let targeted = target.is_some();
         self.expect_word("do")?;
         if self.take_word("nothing") {
-            return Ok(OnDuplicate::Ignore);
+            return Ok((OnDuplicate::Ignore, target));
         }
+        let update_position = self.position();
         self.expect_word("update")?;
+        if self.postgresql() && !targeted {
+            return Err(SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                "ON CONFLICT DO UPDATE requires inference specification or constraint name",
+            )
+            .with_hint("For example, ON CONFLICT (column_name).")
+            .at(update_position));
+        }
         self.expect_word("set")?;
         let mut assignments = Vec::new();
         loop {
@@ -649,7 +665,7 @@ impl<'t> Parser<'t> {
         if self.is_word("on") {
             return Err(self.not_supported("more than one ON CONFLICT clause"));
         }
-        Ok(OnDuplicate::Update(assignments))
+        Ok((OnDuplicate::Update(assignments), target))
     }
 
     pub(super) fn sqlite_infix_level(&self) -> Option<Level> {
@@ -666,7 +682,7 @@ impl<'t> Parser<'t> {
 
     pub(super) fn sqlite_parameter(&mut self, number: usize, position: usize) -> SqlResult<Expr> {
         let bound = match self.parameters {
-            super::Parameters::Absent => false,
+            super::Parameters::Absent | super::Parameters::Named(_) => false,
             super::Parameters::Values(values) => number <= values.len(),
             super::Parameters::Types(_) => true,
         };
@@ -741,12 +757,24 @@ impl<'t> Parser<'t> {
             "printf" | "format" => ("sqlite_printf", &[]),
             "like" => ("like", &[2]),
             "glob" => ("glob", &[2]),
+            "date" => ("sqlite_date", &[]),
+            "time" => ("sqlite_time", &[]),
+            "datetime" => ("sqlite_datetime", &[]),
+            "julianday" => ("sqlite_julianday", &[]),
+            "unixepoch" => ("sqlite_unixepoch", &[]),
+            "strftime" => ("sqlite_strftime", &[]),
+            "timediff" => ("sqlite_timediff", &[2]),
+            "unicode" => ("sqlite_unicode", &[1]),
+            "char" => ("sqlite_char", &[]),
+            "sign" => ("sqlite_sign", &[1]),
             _ => return Ok(None),
         };
         let arguments = self.call_arguments()?;
         let count_ok = if counts.is_empty() {
             match internal {
                 "coalesce" => arguments.len() >= 2,
+                "sqlite_date" | "sqlite_time" | "sqlite_datetime" | "sqlite_julianday"
+                | "sqlite_unixepoch" | "sqlite_char" => true,
                 _ => !arguments.is_empty(),
             }
         } else {

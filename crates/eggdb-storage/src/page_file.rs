@@ -1,8 +1,8 @@
 use crate::bytes::{read_u32, read_u64, write_u32, write_u64};
 use crate::error::{FormatError, StorageError};
 use crate::format::{
-    Access, FileId, HEADER_SLOT_SIZE, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum,
-    PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, Superblock,
+    Access, Features, FileId, HEADER_SLOT_SIZE, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE,
+    PAGE_VOLUME_MASK, PageChecksum, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, Superblock,
 };
 use crate::log::{
     self, COMMIT_PAYLOAD, CommitFields, DEFAULT_AUTO_CHECKPOINT_BYTES, Durability, LOG_BLOCK,
@@ -81,6 +81,7 @@ pub struct PageFile<F: File> {
     reused: Vec<u64>,
     freed: BTreeSet<u64>,
     free_list_pages: BTreeSet<u64>,
+    cipher: Option<crate::page_cipher::PageCipher>,
     staged: BTreeMap<u64, (PageHeader, Vec<u8>)>,
     log: Option<LogWriter>,
     log_pages: BTreeMap<u64, u64>,
@@ -91,6 +92,7 @@ pub struct PageFile<F: File> {
     scratch: Vec<u8>,
     page_count_before_commit: Option<u64>,
     damaged_header_slot: Option<usize>,
+    older_slot_log_reaches: Option<std::ops::Range<u64>>,
     failed: bool,
 }
 
@@ -103,6 +105,15 @@ impl<F: File> PageFile<F> {
         options: CreateOptions,
     ) -> Result<Self, StorageError> {
         let file = fs.open(path, OpenMode::CreateNew)?;
+        let created = Self::create_in(file, options)?;
+        fs.sync_dir(parent_directory(path))?;
+        Ok(created)
+    }
+
+    /// Makes `file`, a new empty file opened for writing, a database file, as
+    /// [`PageFile::create`] does for a path, and makes it durable. A file that lives in memory
+    /// is created this way.
+    pub fn create_in(file: F, options: CreateOptions) -> Result<Self, StorageError> {
         lock(&file, FileLock::Exclusive)?;
         let page_size = options.page_size;
         let superblock = Superblock {
@@ -121,12 +132,12 @@ impl<F: File> PageFile<F> {
             log_segment_pages: log::default_segment_pages(page_size),
             recycled_segments: [NO_PAGE; RECYCLED_SEGMENTS],
             log_sequence_reserved: 0,
+            page_key_check: [0; 16],
         };
         let file_bytes = superblock.page_count * page_size.bytes() as u64;
         file.set_size(file_bytes)?;
         file.write_all_at(&superblock.encode()?, 0)?;
         file.sync_all()?;
-        fs.sync_dir(parent_directory(path))?;
         Ok(Self::from_parts(
             file,
             Access::ReadWrite,
@@ -152,11 +163,20 @@ impl<F: File> PageFile<F> {
         path: &Path,
         access: Access,
     ) -> Result<Self, StorageError> {
-        let (mode, lock_kind) = match access {
-            Access::ReadOnly => (OpenMode::Read, FileLock::Shared),
-            Access::ReadWrite => (OpenMode::ReadWrite, FileLock::Exclusive),
+        let mode = match access {
+            Access::ReadOnly => OpenMode::Read,
+            Access::ReadWrite => OpenMode::ReadWrite,
         };
         let file = fs.open(path, mode)?;
+        Self::open_in(file, access)
+    }
+
+    /// Opens `file`, already opened for `access`, as [`PageFile::open`] does for a path.
+    pub fn open_in(file: F, access: Access) -> Result<Self, StorageError> {
+        let lock_kind = match access {
+            Access::ReadOnly => FileLock::Shared,
+            Access::ReadWrite => FileLock::Exclusive,
+        };
         lock(&file, lock_kind)?;
         let mut slots = vec![0u8; 2 * HEADER_SLOT_SIZE];
         let read = read_up_to(&file, &mut slots)?;
@@ -218,10 +238,57 @@ impl<F: File> PageFile<F> {
             auto_checkpoint_bytes: Some(DEFAULT_AUTO_CHECKPOINT_BYTES),
             log_stats: LogStats::default(),
             scratch: Vec::new(),
+            cipher: None,
             page_count_before_commit: None,
             damaged_header_slot: None,
+            older_slot_log_reaches: None,
             failed: false,
         }
+    }
+
+    /// Whether the file's data pages are encrypted (D187).
+    pub fn is_encrypted(&self) -> bool {
+        self.superblock.features.incompatible & Features::ENCRYPTED_PAGES != 0
+    }
+
+    /// Opens an encrypted file with its key, or makes a new, empty file encrypted with `key`
+    /// (one commit records it). Refuses a wrong key with [`StorageError::WrongKey`], and a file
+    /// that already holds data without encryption with [`StorageError::NotEncrypted`].
+    pub fn use_page_key(&mut self, key: &[u8]) -> Result<(), StorageError> {
+        let cipher = crate::page_cipher::PageCipher::new(key)?;
+        if self.is_encrypted() {
+            if !cipher.matches(&self.superblock.page_key_check) {
+                return Err(StorageError::WrongKey);
+            }
+            self.cipher = Some(cipher);
+            return Ok(());
+        }
+        if self.superblock.catalog_root != NO_PAGE {
+            return Err(StorageError::NotEncrypted);
+        }
+        self.adopt_cipher(cipher)
+    }
+
+    /// Encrypts this new, empty file with the same key as `cipher`, for a copy of an encrypted
+    /// file.
+    pub fn adopt_cipher(
+        &mut self,
+        cipher: crate::page_cipher::PageCipher,
+    ) -> Result<(), StorageError> {
+        if self.superblock.catalog_root != NO_PAGE && !self.is_encrypted() {
+            return Err(StorageError::NotEncrypted);
+        }
+        let key_check = cipher.key_check();
+        self.cipher = Some(cipher);
+        self.commit(|superblock| {
+            superblock.features.incompatible |= Features::ENCRYPTED_PAGES;
+            superblock.page_key_check = key_check;
+        })
+    }
+
+    /// The cipher the file's pages are encrypted with, once its key was given.
+    pub fn page_cipher(&self) -> Option<&crate::page_cipher::PageCipher> {
+        self.cipher.as_ref()
     }
 
     /// The superblock as of the last commit: the header the file opened with, updated by every
@@ -375,15 +442,21 @@ impl<F: File> PageFile<F> {
             self.file_bytes = wanted;
         }
         if let Some(entries) = &plan.free_entries {
+            for &page in &plan.list_pages {
+                self.copy_header_before_reusing(page)?;
+            }
             self.write_free_list_in_place(&plan.list_pages, entries, lsn)?;
         }
         self.sync_unless_off()?;
         let previous_reservation = self.header.log_sequence_reserved;
+        let cut_pages = plan.superblock.page_count..self.superblock.page_count;
         self.write_header(plan.superblock)?;
-        if plan.free_entries.is_some() || plan.cuts_segments_off {
+        if plan.free_entries.is_some() {
             let mut copy = plan.superblock;
             copy.generation = self.next_generation()?;
             self.write_header(copy)?;
+        } else if plan.cuts_segments_off {
+            self.older_slot_log_reaches = Some(cut_pages);
         }
         if let Some(log) = self.log.as_mut() {
             log.skip_sequences_to(previous_reservation.saturating_add(1));
@@ -480,8 +553,24 @@ impl<F: File> PageFile<F> {
             .write_all_at(&slot, (next.slot() * HEADER_SLOT_SIZE) as u64)?;
         self.sync_unless_off()?;
         self.header = next;
+        self.older_slot_log_reaches = None;
         self.adopt_header_fields();
         Ok(())
+    }
+
+    fn copy_header_before_reusing(&mut self, page_id: u64) -> Result<(), StorageError> {
+        let reused = self
+            .older_slot_log_reaches
+            .as_ref()
+            .is_some_and(|cut_pages| cut_pages.contains(&page_id));
+        if !reused {
+            return Ok(());
+        }
+        let copy = Superblock {
+            generation: self.next_generation()?,
+            ..self.header
+        };
+        self.write_header(copy)
     }
 
     fn adopt_header_fields(&mut self) {
@@ -530,7 +619,14 @@ impl<F: File> PageFile<F> {
         } else {
             self.file.read_exact_at(page, self.offset(page_id))?;
         }
-        Ok(self.checksums.verify(page, page_id)?)
+        let header = self.checksums.verify(page, page_id)?;
+        if header.flags & PAGE_ENCRYPTED == 0 {
+            return Ok(header);
+        }
+        let cipher = self.cipher.as_ref().ok_or(StorageError::NeedsKey)?;
+        cipher.apply(&mut page[PAGE_HEADER_SIZE..], page_id, header.lsn);
+        page[6..8].fill(0);
+        Ok(PageHeader { flags: 0, ..header })
     }
 
     /// Writes `header` and the checksum into `page`, which must be one page long, and keeps a
@@ -560,6 +656,8 @@ impl<F: File> PageFile<F> {
             self.reused.push(page);
             return Ok(page);
         }
+        let copied = self.copy_header_before_reusing(self.page_count);
+        self.fail_on_error(copied)?;
         grow(&mut self.page_count)
     }
 
@@ -683,6 +781,10 @@ impl<F: File> PageFile<F> {
                 self.free_list_pages.range(pages.clone()).next().is_some()
             })?,
         }
+        for &page in &list_pages {
+            let copied = self.copy_header_before_reusing(page);
+            self.fail_on_error(copied)?;
+        }
         let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
         let before = self.page_count;
         self.page_count = page_count;
@@ -714,7 +816,19 @@ impl<F: File> PageFile<F> {
         let lsn = log.lsn();
         let header = PageHeader { lsn, ..*header };
         self.checksums.write(page, page_id, &header)?;
-        log.put_image(page_id, page);
+        match &self.cipher {
+            None => log.put_image(page_id, page),
+            Some(cipher) => {
+                let mut sealed = page.to_vec();
+                cipher.apply(&mut sealed[PAGE_HEADER_SIZE..], page_id, lsn);
+                let encrypted = PageHeader {
+                    flags: PAGE_ENCRYPTED,
+                    ..header
+                };
+                self.checksums.write(&mut sealed, page_id, &encrypted)?;
+                log.put_image(page_id, &sealed);
+            }
+        }
         Ok(lsn)
     }
 
@@ -962,11 +1076,12 @@ impl<F: File> PageFile<F> {
             return Ok(());
         }
         let page_size = self.page_size();
-        let segment_pages = if log::segment_holds_a_page(page_size, self.header.log_segment_pages) {
-            self.header.log_segment_pages
-        } else {
-            log::default_segment_pages(page_size)
-        };
+        let segment_pages =
+            if crate::format::segment_holds_a_page(page_size, self.header.log_segment_pages) {
+                self.header.log_segment_pages
+            } else {
+                log::default_segment_pages(page_size)
+            };
         let first_page = self.superblock.page_count;
         let page_count = first_page
             .checked_add(u64::from(segment_pages))
@@ -1498,7 +1613,7 @@ fn read_up_to(file: &impl File, buf: &mut [u8]) -> Result<usize, StorageError> {
     Ok(filled)
 }
 
-fn parent_directory(path: &Path) -> &Path {
+pub(crate) fn parent_directory(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
