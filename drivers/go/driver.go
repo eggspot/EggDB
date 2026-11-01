@@ -79,12 +79,17 @@ type conn struct {
 }
 
 func (c *conn) run(query string, args []driver.NamedValue) ([]statementResult, error) {
-	texts := make([]*string, len(args))
+	values := make([]driver.Value, len(args))
 	for index, arg := range args {
 		if arg.Name != "" {
 			return nil, &Error{Message: "named parameters are not supported; use ?", SQLState: "0A000"}
 		}
-		text, err := parameterText(arg.Value, c.dialect)
+		values[index] = arg.Value
+	}
+	query, values = bound(query, c.dialect, values)
+	texts := make([]*string, len(values))
+	for index, value := range values {
+		text, err := parameterText(value, c.dialect)
 		if err != nil {
 			return nil, err
 		}
@@ -92,7 +97,7 @@ func (c *conn) run(query string, args []driver.NamedValue) ([]statementResult, e
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	return c.session.execute(numbered(query, c.dialect), texts)
+	return c.session.execute(query, texts)
 }
 
 func (c *conn) Prepare(query string) (driver.Stmt, error) {
@@ -224,7 +229,11 @@ func (r *rows) Next(dest []driver.Value) error {
 	if r.next >= len(r.result.rows) {
 		return io.EOF
 	}
-	copy(dest, r.result.rows[r.next])
+	for index, value := range r.result.rows[r.next] {
+		if index < len(dest) {
+			dest[index] = value
+		}
+	}
 	r.next++
 	return nil
 }
@@ -261,13 +270,12 @@ func parameterText(value driver.Value, dialect string) (*string, error) {
 	return &text, nil
 }
 
-func numbered(query, dialect string) string {
-	if dialect != "postgresql" {
-		return query
-	}
+func bound(query, dialect string, values []driver.Value) (string, []driver.Value) {
+	postgresql := dialect == "postgresql"
+	kept := make([]driver.Value, 0, len(values))
 	var out strings.Builder
 	var quote rune
-	number := 0
+	given := 0
 	for _, character := range query {
 		switch {
 		case quote != 0:
@@ -279,11 +287,27 @@ func numbered(query, dialect string) string {
 			quote = character
 			out.WriteRune(character)
 		case character == '?':
-			number++
-			out.WriteString("$" + strconv.Itoa(number))
+			var value driver.Value
+			if given < len(values) {
+				value = values[given]
+			}
+			given++
+			if blob, isBlob := value.([]byte); isBlob && !postgresql {
+				out.WriteString("X'" + hex.EncodeToString(blob) + "'")
+				continue
+			}
+			kept = append(kept, value)
+			if postgresql {
+				out.WriteString("$" + strconv.Itoa(len(kept)))
+			} else {
+				out.WriteRune('?')
+			}
 		default:
 			out.WriteRune(character)
 		}
 	}
-	return out.String()
+	if given < len(values) {
+		kept = append(kept, values[given:]...)
+	}
+	return out.String(), kept
 }

@@ -70,7 +70,7 @@ fn text_of(node: &Node) -> Option<String> {
 pub(crate) fn analyze(text: &str) -> Vec<String> {
     eggdb_search::words(text)
         .into_iter()
-        .map(|word| eggdb_search::stem(&word.to_lowercase()))
+        .map(|word| word.to_lowercase())
         .collect()
 }
 

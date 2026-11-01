@@ -40,7 +40,7 @@ fi
 
 "${PYTHON:-python3}" "$root/examples/python/eggdb_ctypes.py" --library "$library"
 EGGDB_LIBRARY="$library" PYTHONPATH="$root/drivers/python" \
-  "${PYTHON:-python3}" -m unittest discover -s "$root/drivers/python/tests" -t "$root/drivers/python"
+  "${PYTHON:-python3}" -m unittest discover -s "$root/drivers/python/tests"
 if command -v dotnet >/dev/null 2>&1; then
   dotnet build "$root/drivers/dotnet/EggDB.Data.Check" -o "$work/dotnet" > "$work/dotnet-build.log" 2>&1 \
     || { cat "$work/dotnet-build.log" >&2; exit 1; }
@@ -81,7 +81,7 @@ if command -v dart >/dev/null 2>&1; then
   EGGDB_LIBRARY="$library" dart run "$root/drivers/dart/test/check.dart"
 fi
 if command -v javac >/dev/null 2>&1 && javac --release 22 -version >/dev/null 2>&1; then
-  javac --release 22 -d "$work/java" $(find "$root/drivers/java/src" "$root/drivers/java/check" -name '*.java')
+  find "$root/drivers/java/src" "$root/drivers/java/check" -name '*.java' -exec javac --release 22 -d "$work/java" {} +
   cp -R "$root/drivers/java/src/META-INF" "$work/java/"
   java --enable-native-access=ALL-UNNAMED -Deggdb.library="$library" -cp "$work/java" Check
 fi

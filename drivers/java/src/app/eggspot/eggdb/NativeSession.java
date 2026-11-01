@@ -132,6 +132,8 @@ final class NativeSession implements AutoCloseable {
         if (session == null) {
             throw new SQLException("the connection is closed", "08003");
         }
+        Parameters.Bound bound = Parameters.bound(sql, dialect, parameters);
+        parameters = bound.parameters();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment array = arena.allocate(PARAMETER_BYTES * Math.max(parameters.size(), 1), 8);
             for (int index = 0; index < parameters.size(); index++) {
@@ -146,8 +148,7 @@ final class NativeSession implements AutoCloseable {
             }
             MemorySegment results = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
-            String numbered = Parameters.numbered(sql, dialect);
-            int status = (int) Api.EXECUTE.invokeExact(session, arena.allocateFrom(numbered), array,
+            int status = (int) Api.EXECUTE.invokeExact(session, arena.allocateFrom(bound.sql()), array,
                     (long) parameters.size(), results, count);
             if (status != 0) {
                 throw lastError(status);

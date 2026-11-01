@@ -79,7 +79,7 @@ fn context() -> Context {
             owner: String::new(),
             identity_insert_table: None,
             keeps_identity_values: false,
-            role_checked: false,
+            role_checked: true,
         })
     })
 }
@@ -789,7 +789,7 @@ fn apply_action(
             return Ok(());
         }
         if let Some(event) = event_of_action(action, change.new.is_none())
-            && crate::triggers::fire_on(&*writer, tables, &child.name, event)?
+            && crate::triggers::row_triggers_fire_on(&*writer, tables, &child.name, event)?
         {
             return Err(crate::triggers::unfired(
                 event,

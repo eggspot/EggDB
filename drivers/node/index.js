@@ -52,7 +52,7 @@ function parameterText(value, dialect) {
     return value.toString();
   }
   if (value instanceof Uint8Array) {
-    return `\\x${Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('hex')}`;
+    return `\\x${hexOf(value)}`;
   }
   if (value instanceof Date) {
     return value.toISOString().replace('T', ' ').replace('Z', '');
@@ -60,13 +60,16 @@ function parameterText(value, dialect) {
   return String(value);
 }
 
-function numbered(sql, dialect) {
-  if (dialect !== 'postgresql') {
-    return sql;
-  }
+function hexOf(value) {
+  return Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('hex');
+}
+
+function bound(sql, dialect, parameters) {
+  const postgresql = dialect === 'postgresql';
+  const kept = [];
   let out = '';
   let quote = null;
-  let number = 0;
+  let given = 0;
   for (const character of sql) {
     if (quote) {
       if (character === quote) {
@@ -77,13 +80,19 @@ function numbered(sql, dialect) {
       quote = character;
       out += character;
     } else if (character === '?') {
-      number += 1;
-      out += `$${number}`;
+      const value = parameters[given];
+      given += 1;
+      if (!postgresql && value instanceof Uint8Array) {
+        out += `X'${hexOf(value)}'`;
+      } else {
+        kept.push(value);
+        out += postgresql ? `$${kept.length}` : '?';
+      }
     } else {
       out += character;
     }
   }
-  return out;
+  return { sql: out, parameters: kept.concat(parameters.slice(given)) };
 }
 
 function changedRows(tag) {
@@ -116,9 +125,10 @@ class Database {
     if (!this.handle) {
       throw new EggDbError({ message: 'the database is closed', code: '08003' });
     }
-    const texts = parameters.map((value) => parameterText(value, this.dialect));
+    const statement = bound(sql, this.dialect, parameters);
+    const texts = statement.parameters.map((value) => parameterText(value, this.dialect));
     try {
-      return addon.execute(this.handle, numbered(sql, this.dialect), texts);
+      return addon.execute(this.handle, statement.sql, texts);
     } catch (error) {
       throw new EggDbError(error);
     }

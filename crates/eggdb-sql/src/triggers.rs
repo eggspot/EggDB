@@ -231,11 +231,45 @@ pub(crate) fn fire_on(
     table: &str,
     event: TriggerEvent,
 ) -> SqlResult<bool> {
+    any_enabled(reader, tables, table, event, |_| true)
+}
+
+pub(crate) fn row_triggers_fire_on(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    table: &str,
+    event: TriggerEvent,
+) -> SqlResult<bool> {
+    any_enabled(reader, tables, table, event, |trigger| {
+        trigger.level == TriggerLevel::Row
+    })
+}
+
+pub(crate) fn guarded_by_extension_on(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    table: &str,
+    event: TriggerEvent,
+) -> SqlResult<bool> {
+    any_enabled(reader, tables, table, event, |trigger| {
+        trigger.name.starts_with(EXTENSION_TRIGGER_PREFIX)
+    })
+}
+
+const EXTENSION_TRIGGER_PREFIX: &str = "eggdb_";
+
+fn any_enabled(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    table: &str,
+    event: TriggerEvent,
+    chosen: impl Fn(&TriggerDefinition) -> bool,
+) -> SqlResult<bool> {
     Ok(of_table(reader, tables, table)?.is_some_and(|table| {
         table
             .triggers
             .iter()
-            .any(|trigger| trigger.enabled && trigger.events.contains(event))
+            .any(|trigger| trigger.enabled && trigger.events.contains(event) && chosen(trigger))
     }))
 }
 

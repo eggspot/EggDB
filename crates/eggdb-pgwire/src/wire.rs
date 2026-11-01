@@ -7,8 +7,8 @@ pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_CHUNK_BYTES: usize = 64 * 1024;
-const REFUSAL_LINGER: Duration = Duration::from_millis(200);
-const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
+const CLOSE_LINGER: Duration = Duration::from_millis(200);
+const CLOSE_LINGER_BYTES: usize = 256 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -28,6 +28,13 @@ pub(crate) struct Wire<'a> {
     pub(crate) deadline: Option<Instant>,
     pub(crate) outbox: Outbox,
     read_timeout: Duration,
+    closed: bool,
+}
+
+impl Drop for Wire<'_> {
+    fn drop(&mut self) {
+        self.close_gracefully();
+    }
 }
 
 impl<'a> Wire<'a> {
@@ -47,6 +54,7 @@ impl<'a> Wire<'a> {
             deadline,
             outbox: Outbox::new(),
             read_timeout: POLL_INTERVAL,
+            closed: false,
         })
     }
 
@@ -150,13 +158,16 @@ impl<'a> Wire<'a> {
         Ok(())
     }
 
-    pub(crate) fn close_after_refusal(&mut self) {
+    pub(crate) fn close_gracefully(&mut self) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
         self.stream.close_tls();
         self.stream.shutdown_write();
-        let deadline = Instant::now() + REFUSAL_LINGER;
+        let deadline = Instant::now() + CLOSE_LINGER;
         let mut buffer = [0u8; 8 * 1024];
         let mut discarded = 0;
-        while discarded < REFUSAL_LINGER_BYTES {
+        while discarded < CLOSE_LINGER_BYTES {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return;

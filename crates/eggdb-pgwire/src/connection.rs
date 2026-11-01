@@ -108,7 +108,7 @@ fn report_error(wire: &mut Wire<'_>, severity: Severity, error: &SqlError, text:
 fn fatal(wire: &mut Wire<'_>, state: SqlState, message: &str) {
     report_error(wire, Severity::Fatal, &SqlError::new(state, message), None);
     let _ = wire.flush();
-    wire.close_after_refusal();
+    wire.close_gracefully();
 }
 
 fn send_notice(wire: &mut Wire<'_>, notice: &str) {
@@ -1175,6 +1175,17 @@ impl<'a, 's> Connection<'a, 's> {
         self.portals.clear();
     }
 
+    fn forget_deallocated_statements(&mut self) {
+        for deallocated in self.session.take_deallocated_statements() {
+            match deallocated {
+                Some(name) => {
+                    self.statements.remove(&name);
+                }
+                None => self.statements.retain(|name, _| name.is_empty()),
+            }
+        }
+    }
+
     fn extended(
         &mut self,
         step: impl FnOnce(&mut Self) -> Result<(), (SqlError, Option<String>)>,
@@ -1293,6 +1304,7 @@ impl<'a, 's> Connection<'a, 's> {
         if discarded_all {
             self.discard_all();
         }
+        self.forget_deallocated_statements();
         self.finish_implicit_transaction(succeeded);
         self.report_changed_parameters();
         self.ready_for_query();
@@ -1596,6 +1608,7 @@ impl<'a, 's> Connection<'a, 's> {
         if result.tag == DISCARD_ALL_TAG {
             self.discard_all();
         }
+        self.forget_deallocated_statements();
         if let Some(portal) = self.portals.get_mut(name) {
             portal.run = PortalRun::Finished(result.tag.clone());
         }

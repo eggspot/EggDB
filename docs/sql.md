@@ -2098,7 +2098,8 @@ resolved as PostgreSQL resolves a `regclass` (lower case unless quoted, `public.
 spellings work. Past its limit a sequence fails with `2200H` (`nextval: reached maximum value of
 sequence "s" (9223372036854775807)`) or, with `CYCLE`, starts again; arithmetic never wraps.
 `nextval` is not undone by a rollback, as in PostgreSQL, and is durable with the commit of any
-transaction that used the value. Oracle's sequences are the same objects: `CREATE SEQUENCE s
+transaction that used the value. Not yet: reading a sequence as a one-row relation (`SELECT
+last_value, is_called FROM s`, which `pg_dump` sends) and the `pg_sequences` view (`42P01`). Oracle's sequences are the same objects: `CREATE SEQUENCE s
 START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE` (with `NOMAXVALUE`, `NOMINVALUE`, `ORDER` and the
 rest accepted), `s.NEXTVAL` and `s.CURRVAL`, with ORA-02289, ORA-08002 and ORA-08004. SQL
 Server's are too: `CREATE SEQUENCE` with SQL Server's defaults and `NEXT VALUE FOR s` (see the
@@ -2234,9 +2235,11 @@ it, and a statement that fails in a trigger leaves nothing behind.
   triggers are `0A000`, and a trigger does not fire itself again.
 
 Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash. Row
-triggers do not fire yet for rows a cascading foreign key changes or removes, nor for rows a
-`REPLACE` (MySQL's statement, SQLite's `OR REPLACE`) removes, so those are refused (`0A000`) on a
-table with `UPDATE` or `DELETE` triggers instead of running without them. Dropping
+triggers do not fire yet for rows a cascading foreign key changes or removes, nor for rows
+MySQL's `REPLACE` removes, so those are refused (`0A000`) on a table with `UPDATE` or `DELETE`
+triggers instead of running without them. SQLite's `REPLACE` conflict resolution doesn't fire
+`DELETE` triggers either (as SQLite does with `recursive_triggers` off, its default), except that
+it is refused on a table guarded by an EggDB extension's trigger (retention, ledger). Dropping
 a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
 constraint and event triggers, SQL Server DDL and logon triggers, Oracle compound and event
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
@@ -2350,8 +2353,10 @@ rolled-back change never streams and a committed one always does. `eggdb serve
 --cdc-webhook http://...` delivers the outbox as Debezium-style events (`before`, `after`,
 `source`, `op` of `c`, `u` or `d`, `ts_ms`), oldest first, at least once. `eggdb serve
 --cdc-queue <name>` delivers the same events into EggDB's durable queue `<name>`, where AMQP
-0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). Not yet: Kafka and MQTT sinks,
-Debezium's schema section, and capture without triggers.
+0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). A cascading foreign key or a MySQL
+`REPLACE` that would change a captured table's rows is refused (`0A000`), since it would not be
+captured. Not yet: Kafka and MQTT sinks, Debezium's schema section, capture without triggers,
+and capturing cascaded changes.
 
 ### Transactional outbox and inbox
 
@@ -2390,7 +2395,9 @@ After `isolate`, a session sees and writes only the rows whose tenant column equ
 `eggdb.tenant` setting; a session that has set none sees no rows and cannot add any, and a
 new row for another tenant fails with SQLSTATE `42501`. This holds for roles that are not
 superusers, so connect the application as such a role. `TRUNCATE` of an isolated table is
-refused (`42501`) for every role but a superuser, since it would remove every tenant's rows. A
+refused (`42501`) for every role but a superuser, since it would remove every tenant's rows, and a
+cascading foreign key that would change its rows is refused (`0A000`) until cascades fire row
+triggers. A
 tenant with `max_rows` gets SQLSTATE `53400` once it holds that many rows in a table.
 
 ## Ledger tables (eggdb_ledger)

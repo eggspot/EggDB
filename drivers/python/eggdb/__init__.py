@@ -168,12 +168,15 @@ def _parameter_text(value, dialect):
     return str(value)
 
 
-def _placeholders(sql, dialect):
-    if dialect != "postgresql":
-        return sql
+def _is_bytes(value):
+    return isinstance(value, (bytes, bytearray, memoryview))
+
+
+def _placeholders(sql, dialect, parameters):
     out = []
+    kept = []
     quote = None
-    number = 0
+    given = 0
     for character in sql:
         if quote:
             if character == quote:
@@ -183,11 +186,17 @@ def _placeholders(sql, dialect):
             quote = character
             out.append(character)
         elif character == "?":
-            number += 1
-            out.append(f"${number}")
+            value = parameters[given] if given < len(parameters) else None
+            given += 1
+            if dialect != "postgresql" and _is_bytes(value):
+                out.append("X'" + bytes(value).hex() + "'")
+                continue
+            kept.append(value)
+            out.append(f"${len(kept)}" if dialect == "postgresql" else "?")
         else:
             out.append(character)
-    return "".join(out)
+    kept.extend(parameters[given:])
+    return "".join(out), kept
 
 
 def _converted(value):
@@ -239,6 +248,7 @@ class Connection:
         if self._session is None:
             raise InterfaceError("the connection is closed")
         api = _api()
+        sql, parameters = _placeholders(sql, self._dialect, list(parameters))
         texts = [_parameter_text(value, self._dialect) for value in parameters]
         encoded = [None if text is None else text.encode("utf-8") for text in texts]
         array = (_Parameter * max(len(encoded), 1))()
@@ -248,7 +258,7 @@ class Connection:
         count = c_size_t()
         status = api.eggdb_sql_execute_with_parameters(
             self._session,
-            _placeholders(sql, self._dialect).encode("utf-8"),
+            sql.encode("utf-8"),
             array,
             len(encoded),
             byref(results),

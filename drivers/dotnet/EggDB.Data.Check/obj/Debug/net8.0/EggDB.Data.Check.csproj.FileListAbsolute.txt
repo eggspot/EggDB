@@ -1,0 +1,17 @@
+/var/folders/qk/2hchq_591hdbvcq0h9n44vqh0000gn/T/capi/dotnet/EggDB.Data.Check
+/var/folders/qk/2hchq_591hdbvcq0h9n44vqh0000gn/T/capi/dotnet/EggDB.Data.Check.deps.json
+/var/folders/qk/2hchq_591hdbvcq0h9n44vqh0000gn/T/capi/dotnet/EggDB.Data.Check.runtimeconfig.json
+/var/folders/qk/2hchq_591hdbvcq0h9n44vqh0000gn/T/capi/dotnet/EggDB.Data.Check.dll
+/var/folders/qk/2hchq_591hdbvcq0h9n44vqh0000gn/T/capi/dotnet/EggDB.Data.Check.pdb
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.csproj.AssemblyReference.cache
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.GeneratedMSBuildEditorConfig.editorconfig
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.AssemblyInfoInputs.cache
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.AssemblyInfo.cs
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.csproj.CoreCompileInputs.cache
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.sourcelink.json
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Da.2EA446C2.Up2Date
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.dll
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/refint/EggDB.Data.Check.dll
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.pdb
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/EggDB.Data.Check.genruntimeconfig.cache
+/Users/hv/work/eg/src/EggAgentCode/work/EggDB/drivers/dotnet/EggDB.Data.Check/obj/Debug/net8.0/ref/EggDB.Data.Check.dll

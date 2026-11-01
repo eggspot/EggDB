@@ -2,7 +2,7 @@ use crate::bulk::{BulkInput, BulkLoadError, BulkReader};
 use crate::messages::{
     ATTENTION, BULK_LOAD, ENCRYPT_CLIENT_CERT, ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON,
     ENCRYPT_REQ, LOGIN7, Login7, PRELOGIN, PreLogin, RESET_CONNECTION,
-    RESET_CONNECTION_SKIP_TRANSACTION, RPC, SQL_BATCH, TABULAR_RESULT, TDS_7_4,
+    RESET_CONNECTION_SKIP_TRANSACTION, RPC, SQL_BATCH, TABULAR_RESULT, TDS_7_4, TDS_8_0,
     TRANSACTION_MANAGER, TransactionRequest, parse_login7, parse_prelogin, parse_sql_batch,
     parse_transaction_manager_request, prelogin_response,
 };
@@ -422,9 +422,9 @@ fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>, encryption: Encryption) -> L
 
 fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login {
     let user = login.user_name.clone();
-    if login.tds_version < TDS_7_4 {
+    if login.tds_version < TDS_7_4 && login.tds_version != TDS_8_0 {
         let reason = format!(
-            "the client speaks TDS {:#010x}; EggDB needs TDS 7.4",
+            "the client speaks TDS {:#010x}; EggDB needs TDS 7.4 or 8.0",
             login.tds_version
         );
         login_refusal(shared, wire, &user, &reason);

@@ -167,6 +167,11 @@ behavior (D19). Next for PostgreSQL: the `citext` and `hstore` extensions' types
 its text as written and compares, orders, groups, hashes and indexes it through one case fold
 (D233's), so those can never disagree; `hstore` brings its operators, functions and text format.
 SQLAlchemy's test setup creates both, and its suite runs without them until then (D163).
+Sequences next: reading one as a one-row relation (`SELECT last_value, is_called FROM s`, which
+`pg_dump` sends) and the `pg_sequences` view.
+Triggers next: row triggers fired for rows that cascading foreign keys and MySQL's `REPLACE`
+change or remove. Until then both are refused on tables with such triggers, which includes
+tables captured by `eggdb_cdc` and tables isolated by `eggdb_tenancy`.
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability

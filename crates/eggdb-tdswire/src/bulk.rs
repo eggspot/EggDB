@@ -18,7 +18,8 @@ const NBCROW: u8 = 0xD2;
 const DONE: u8 = 0xFD;
 const NO_METADATA: u16 = 0xFFFF;
 const ENCRYPTED_COLUMN: u16 = 0x0800;
-const DONE_BYTES: usize = 12;
+const DONE_STATUS_AND_COMMAND_BYTES: usize = 4;
+const SHORTEST_DONE_ROW_COUNT_BYTES: usize = 4;
 const TEXT_POINTER_LENGTH: u8 = 16;
 const TIMESTAMP_BYTES: usize = 8;
 
@@ -293,7 +294,7 @@ fn read_row(
             Ok(Some(values))
         }
         DONE => {
-            reader.take(DONE_BYTES)?;
+            reader.take(DONE_STATUS_AND_COMMAND_BYTES + SHORTEST_DONE_ROW_COUNT_BYTES)?;
             Ok(None)
         }
         _ => Err(malformed(
@@ -364,6 +365,14 @@ mod tests {
     }
 
     #[test]
+    fn a_done_token_with_a_four_byte_row_count_ends_the_data_as_sqlclient_sends_it() {
+        let mut short = sample();
+        short.truncate(short.len() - 4);
+        let (_, rows) = parse_bulk_load(&short).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
     fn metadata_rows_and_null_bitmaps_read_as_engine_values() {
         let (columns, rows) = parse_bulk_load(&sample()).unwrap();
         let names: Vec<&str> = columns.iter().map(|column| column.name()).collect();
@@ -415,7 +424,8 @@ mod tests {
     #[test]
     fn truncated_and_inconsistent_data_are_errors_never_panics() {
         let whole = sample();
-        for cut in 0..whole.len() {
+        let shortest_whole = whole.len() - 4;
+        for cut in 0..shortest_whole {
             assert!(parse_bulk_load(&whole[..cut]).is_err(), "cut at {cut}");
         }
         let mut variant = vec![0x81, 1, 0];

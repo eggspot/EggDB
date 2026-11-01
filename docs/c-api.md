@@ -114,7 +114,9 @@ eggdb_db *db = NULL;
 int status = eggdb_open("app.db", &options, &db);
 ```
 
-`eggdb_open` takes NULL options for the defaults. The fields of `eggdb_options`:
+`eggdb_open` takes NULL options for the defaults. The path `:memory:` opens a new, private
+database in memory, as SQLite's does: each open is its own database, gone once it is closed
+(read-only is refused for it). The fields of `eggdb_options`:
 
 | Field | Values | Default (0) |
 |-------|--------|-------------|

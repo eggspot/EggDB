@@ -158,8 +158,11 @@ fn open_options(options: Option<&EggdbOptions>) -> Result<Options, Failure> {
     Ok(opened)
 }
 
+const MEMORY_PATH: &str = ":memory:";
+
 /// Opens the database file at `path` (UTF-8), creating an empty one if no file is there, and
-/// puts its handle in `*db`; `options` may be NULL for the defaults. On failure `*db` is NULL.
+/// puts its handle in `*db`; `options` may be NULL for the defaults. The path `:memory:` opens a
+/// new, private database in memory instead, gone once it is closed. On failure `*db` is NULL.
 ///
 /// # Safety
 /// `path` is a NUL-terminated string, `options` is NULL or points to an `eggdb_options`, and
@@ -177,7 +180,11 @@ pub unsafe extern "C" fn eggdb_open(
         let path = unsafe { args::text(path, "path") }?;
         // SAFETY: eggdb.h asks for NULL or an `eggdb_options`.
         let options = open_options(unsafe { args::optional_struct(options) })?;
-        let database = Database::open_with(path, options)?;
+        let database = if path == MEMORY_PATH {
+            Database::in_memory_with(options)?
+        } else {
+            Database::open_with(path, options)?
+        };
         let handle = args::give(EggdbDb {
             database: Arc::new(database),
         });

@@ -146,7 +146,11 @@ def psycopg_copy(conninfo):
 
 def reflected_default(column):
     default = column.server_default
-    return None if default is None else str(default.arg)
+    if default is None:
+        return None
+    if isinstance(default, sa.Identity):
+        return f"identity {default.always} {default.start} {default.increment}"
+    return str(default.arg)
 
 
 def show_table(table):

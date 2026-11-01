@@ -166,13 +166,22 @@ fn a_document_without_an_id_gets_one() {
 }
 
 #[test]
-fn a_match_query_ranks_by_relevance_with_english_stemming() {
+fn a_match_query_ranks_by_relevance_with_the_standard_analyzer() {
     let keyspace = MemoryKeyspace::default();
     let api = seeded(&keyspace);
+    let unstemmed = body(&api.answer(&request(
+        "POST",
+        "/books/_search",
+        "{\"query\":{\"match\":{\"title\":\"fox\"}}}",
+    )));
+    assert!(
+        unstemmed.contains("\"total\":{\"value\":1,\"relation\":\"eq\"}"),
+        "{unstemmed}"
+    );
     let response = api.answer(&request(
         "POST",
         "/books/_search",
-        "{\"query\":{\"match\":{\"title\":\"fox quick\"}}}",
+        "{\"query\":{\"match\":{\"title\":\"quick fox hounds\"}}}",
     ));
     let text = body(&response);
     assert_eq!(response.status, 200, "{text}");

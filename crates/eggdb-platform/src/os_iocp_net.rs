@@ -770,7 +770,7 @@ mod port {
             return Err(last_socket_error().into());
         }
         // SAFETY: WSASocketW returned a new socket that nothing else owns.
-        Ok(unsafe { OwnedSocket::from_raw_socket(socket as u64) })
+        Ok(unsafe { OwnedSocket::from_raw_socket(socket as std::os::windows::io::RawSocket) })
     }
 
     fn extension(probe: &OwnedSocket, id: Guid) -> Result<usize> {
@@ -817,7 +817,7 @@ mod port {
         }
     }
 
-    fn raw_socket(socket: u64) -> usize {
+    fn raw_socket(socket: std::os::windows::io::RawSocket) -> usize {
         usize::try_from(socket).unwrap_or(INVALID_SOCKET)
     }
 

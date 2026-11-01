@@ -2361,8 +2361,53 @@ fn postgresql_upserts_act_only_on_their_conflict_target_and_once_per_row() {
         crate::SqlState::FEATURE_NOT_SUPPORTED
     );
     assert_eq!(
-        last(&mut session, "SELECT count(*) FROM users"),
-        "count\n1\nSELECT 1"
+        last(
+            &mut session,
+            "INSERT INTO users VALUES (5, 'old@x', 'Hal') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name"
+        ),
+        "INSERT 0 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "INSERT INTO users VALUES (5, 'old@x', 'Ivy') ON CONFLICT (email) DO NOTHING"
+        ),
+        "INSERT 0 0"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id, name FROM users"),
+        "id|name\n5|Hal\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlite_replace_runs_beside_delete_triggers_as_sqlite_does() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    last(&mut session, "CREATE TABLE kv (k TEXT PRIMARY KEY, v INT)");
+    last(&mut session, "CREATE TABLE gone (k TEXT)");
+    last(
+        &mut session,
+        "CREATE TRIGGER kv_gone AFTER DELETE ON kv BEGIN INSERT INTO gone VALUES (old.k); END",
+    );
+    last(&mut session, "INSERT INTO kv VALUES ('a', 1)");
+    last(&mut session, "INSERT OR REPLACE INTO kv VALUES ('a', 2)");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT v, (SELECT count(*) FROM gone) AS g FROM kv"
+        ),
+        "v|g\n2|0\nSELECT 1"
+    );
+}
+
+#[test]
+fn sqlite_hex_shows_every_byte_of_a_blob() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);
+    assert_eq!(
+        last(&mut session, "SELECT hex(X'00ff80') AS h, hex('é') AS t"),
+        "h|t\n00FF80|C3A9\nSELECT 1"
     );
 }
 

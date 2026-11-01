@@ -379,12 +379,13 @@ impl WithTable {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DiscardTarget {
     All,
     Plans,
     Sequences,
     Temporary,
+    PreparedStatement(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

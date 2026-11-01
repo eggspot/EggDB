@@ -86,7 +86,7 @@ impl AuditLog {
                 reason: "the audit file has reached its 1 GiB limit".to_owned(),
             });
         }
-        let previous = last_line_digest(&self.path, size).map_err(failure)?;
+        let previous = last_line_digest(&mut file, size).map_err(failure)?;
         let chained = match record.strip_prefix('{') {
             Some(rest) if rest.trim_start().starts_with('}') => {
                 format!("{{\"prev\":\"{previous}\"}}")
@@ -113,11 +113,10 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn last_line_digest(path: &Path, size: u64) -> io::Result<String> {
+fn last_line_digest(file: &mut File, size: u64) -> io::Result<String> {
     if size == 0 {
         return Ok(GENESIS.to_owned());
     }
-    let mut file = File::open(path)?;
     let start = size.saturating_sub(TAIL_BYTES);
     file.seek(io::SeekFrom::Start(start))?;
     let mut tail = Vec::with_capacity(usize::try_from(size - start).unwrap_or(0));

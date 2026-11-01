@@ -81,7 +81,7 @@ compare() {
     "SELECT id, name, coalesce(email, '<null>'), created FROM customers ORDER BY id" \
     "SELECT id, customer_id, amount, coalesce(note, '<null>') FROM orders ORDER BY id" \
     "SELECT at, payload::text FROM events ORDER BY at" \
-    "SELECT last_value FROM customers_id_seq"; do
+    "SELECT nextval('customers_id_seq')"; do
     psql -c "$query" > "$work/source.out"
     docker run --rm -i --network host -e PGPASSWORD=served postgres:17 \
       psql "host=127.0.0.1 port=$served_port user=eggdb dbname=app" -X -q -A -t -c "$query" > "$work/target.out" 2> "$work/eggdb.err" \

@@ -148,7 +148,8 @@ fn read(
 ) -> Result<(), String> {
     if !prefixes.iter().any(|allowed| allows(allowed, source)) {
         return Err(format!(
-            "{source} is not among the sources {VARIABLE} allows"
+            "{} is not among the sources {VARIABLE} allows",
+            shown_source(source)
         ));
     }
     if source.starts_with("postgresql://") || source.starts_with("postgres://") {
@@ -162,12 +163,28 @@ fn read(
         let checked = prefixes
             .iter()
             .find_map(|allowed| allowed_file(allowed, source))
-            .ok_or_else(|| format!("{source} is not among the sources {VARIABLE} allows"))?;
+            .ok_or_else(|| {
+                format!(
+                    "{} is not among the sources {VARIABLE} allows",
+                    shown_source(source)
+                )
+            })?;
         return read_parquet(&checked, query, row);
     }
     Err(format!(
-        "{source}: give a postgresql:// URL (EggDB or PostgreSQL) or a file:...parquet path"
+        "{}: give a postgresql:// URL (EggDB or PostgreSQL) or a file:...parquet path",
+        shown_source(source)
     ))
+}
+
+fn shown_source(source: &str) -> String {
+    if !is_postgresql(source) {
+        return source.to_owned();
+    }
+    eggdb_pgwire::client::parse_postgres_url_with_password(source).map_or_else(
+        |_| "the PostgreSQL source".to_owned(),
+        |options| options.shown(),
+    )
 }
 
 fn file_path(source: &str) -> Option<&str> {
@@ -243,6 +260,19 @@ mod tests {
             "postgresql://reader@db.internal/x?sslmode=require"
         ));
         assert!(!allows(verified, "postgresql://reader@db.internal/x"));
+    }
+
+    #[test]
+    fn a_refused_source_is_named_without_its_password() {
+        let refused = super::read(
+            &["postgresql://reader@db.internal".to_owned()],
+            "postgresql://admin:hunter2@db.internal/x",
+            "SELECT 1",
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(!refused.contains("hunter2"), "{refused}");
+        assert!(refused.contains("admin@db.internal"), "{refused}");
     }
 
     #[test]

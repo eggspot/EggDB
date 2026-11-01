@@ -44,8 +44,11 @@ const TM_PROMOTE_XACT: u16 = 6;
 const BEGIN_NEXT_TRANSACTION: u8 = 0x01;
 const HIGHEST_ISOLATION_LEVEL: u8 = 5;
 
-/// The only TDS version EggDB speaks: 7.4, as LOGIN7 carries it in a little-endian DWORD.
+/// The TDS version EggDB speaks: 7.4, as LOGIN7 carries it in a little-endian DWORD.
 pub const TDS_7_4: u32 = 0x7400_0004;
+/// TDS 8.0, which a client sends in LOGIN7 after opening the connection with TLS (strict
+/// encryption); after TLS it is TDS 7.4.
+pub const TDS_8_0: u32 = 0x0800_0000;
 
 /// Encryption is available but off: the client encrypts only its login.
 pub const ENCRYPT_OFF: u8 = 0x00;

@@ -354,9 +354,12 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             },
         },
         "sqlite_hex" => {
-            let bytes = text(0).unwrap_or_default();
+            let bytes = match first {
+                Value::Bytea(bytes) => bytes.clone(),
+                _ => text(0).unwrap_or_default().as_bytes().to_vec(),
+            };
             within_limit(bytes.len().saturating_mul(2))?;
-            Value::Text(bytes.bytes().map(|byte| format!("{byte:02X}")).collect())
+            Value::Text(bytes.iter().map(|byte| format!("{byte:02X}")).collect())
         }
         _ => {
             return Err(SqlError::new(

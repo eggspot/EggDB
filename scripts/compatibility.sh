@@ -13,7 +13,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 export EGGDB_PASSWORD="${EGGDB_PASSWORD:-compatibility}"
 connection="host=127.0.0.1 port=55432 user=eggdb dbname=eggdb sslmode=disable"
 
-"$eggdb" serve "$work/compat.eggdb" --create --listen 127.0.0.1:55432 &
+"$eggdb" serve "$work/compat.eggdb" --create --database eggdb --listen 127.0.0.1:55432 &
 server=$!
 trap 'kill "$server" 2> /dev/null || true' EXIT
 for _ in $(seq 1 50); do

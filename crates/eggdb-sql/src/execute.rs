@@ -1343,7 +1343,22 @@ pub(crate) fn insert(
                     }
                     (OnDuplicate::Replace, _) => {
                         let event = crate::triggers::TriggerEvent::Delete;
-                        if crate::triggers::fire_on(&*writer, tables, &table.name, event)? {
+                        let unfired = if dialect == Dialect::MySql {
+                            crate::triggers::row_triggers_fire_on(
+                                &*writer,
+                                tables,
+                                &table.name,
+                                event,
+                            )?
+                        } else {
+                            crate::triggers::guarded_by_extension_on(
+                                &*writer,
+                                tables,
+                                &table.name,
+                                event,
+                            )?
+                        };
+                        if unfired {
                             return Err(crate::triggers::unfired(event, &table.name, "REPLACE"));
                         }
                         let mut conflict = Some(conflict);
@@ -2049,7 +2064,7 @@ impl<'a> StoredRows<'a> {
                 self.table,
                 &self.table.indexes[position],
                 row,
-                &self.key,
+                &[],
             )?,
         };
         let index = match arbiter {

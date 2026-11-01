@@ -384,7 +384,19 @@ pub(super) fn procedure_parameters(
             ]);
         }
     }
-    result(PROCEDURE_PARAMETER_COLUMNS, rows)
+    match codes {
+        ParameterTypeCodes::OleDb => result(PROCEDURE_PARAMETER_COLUMNS, rows),
+        ParameterTypeCodes::SqlDbType => {
+            let managed: Vec<(&str, SqlType)> = PROCEDURE_PARAMETER_COLUMNS
+                .iter()
+                .map(|&(name, sql_type)| match name {
+                    "DATA_TYPE" => ("MANAGED_DATA_TYPE", sql_type),
+                    _ => (name, sql_type),
+                })
+                .collect();
+            result(&managed, rows)
+        }
+    }
 }
 
 fn sql_db_type(name: SqlServerTypeName) -> i64 {

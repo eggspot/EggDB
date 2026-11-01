@@ -959,3 +959,18 @@ fn threads_share_one_database_handle() {
     }
     close(db);
 }
+
+#[test]
+fn each_memory_open_is_its_own_database_and_writes_no_file() {
+    let first = open_at(Path::new(":memory:"));
+    let second = open_at(Path::new(":memory:"));
+    let txn = begin_write(first);
+    put(txn, b"k", b"v");
+    commit(txn);
+    let txn = begin_read(second);
+    assert_eq!(get(txn, b"k"), None);
+    rollback(txn);
+    close(first);
+    close(second);
+    assert!(!Path::new(":memory:").exists());
+}

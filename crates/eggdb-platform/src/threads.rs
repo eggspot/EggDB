@@ -4,6 +4,8 @@ use std::any::Any;
 use std::sync::mpsc;
 use std::thread;
 
+const MOST_STACK_BYTES: usize = 1 << 30;
+
 /// How to start a thread: its name, its stack size and the CPUs it is pinned to.
 ///
 /// [`ThreadOptions::spawn`] pins the new thread before it runs any of the caller's code, and
@@ -28,7 +30,8 @@ impl ThreadOptions {
         self
     }
 
-    /// Sets the thread's stack size in bytes; the platform may round it up.
+    /// Sets the thread's stack size in bytes; the platform may round it up. More than 1 GiB is
+    /// refused when the thread is spawned.
     pub fn stack_size(mut self, bytes: usize) -> Self {
         self.stack_size = Some(bytes);
         self
@@ -41,7 +44,7 @@ impl ThreadOptions {
     }
 
     /// Starts a thread that runs `work`. Fails with [`ErrorKind::InvalidInput`] when the name
-    /// contains a NUL byte, with the operating system's error when the thread cannot be
+    /// contains a NUL byte or the stack size is above 1 GiB, with the operating system's error when the thread cannot be
     /// created, and with the error of [`Cpus::pin_current_thread`] when the pin is refused, in
     /// which case `work` is dropped on the new thread without running and the thread has
     /// already ended. A pin that panics is [`ErrorKind::Other`].
@@ -59,6 +62,9 @@ impl ThreadOptions {
             builder = builder.name(name);
         }
         if let Some(bytes) = self.stack_size {
+            if bytes > MOST_STACK_BYTES {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
             builder = builder.stack_size(bytes);
         }
         let (pinned_sender, pinned) = mpsc::sync_channel(1);

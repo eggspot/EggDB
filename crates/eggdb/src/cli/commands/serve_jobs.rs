@@ -123,6 +123,10 @@ fn report_target_allowed(allowed: &str, target: &eggdb_http::HttpTarget) -> bool
 
 fn path_within(allowed: &str, target: &str) -> bool {
     let target_path = target.split('?').next().unwrap_or_default();
+    let lowered = target_path.to_ascii_lowercase();
+    if target_path.contains('\\') || lowered.contains("%2f") || lowered.contains("%5c") {
+        return false;
+    }
     let climbs = target_path.split('/').any(|segment| {
         let decoded = segment.to_ascii_lowercase().replace("%2e", ".");
         decoded == "." || decoded == ".."
@@ -176,6 +180,8 @@ mod report_target_tests {
             "http://hooks.example.com/hooks/../admin",
             "http://hooks.example.com/hooks/%2E%2E/admin",
             "http://hooks.example.com/admin",
+            "http://hooks.example.com/hooks/%2e%2e%2fadmin",
+            "http://hooks.example.com/hooks/..\\admin",
         ] {
             assert!(!report_target_allowed(entry, &target(refused)), "{refused}");
         }

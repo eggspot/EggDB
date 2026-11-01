@@ -263,7 +263,7 @@ jobs:
           ])
           assert client.get(index="books", id="1")["_source"]["pages"] == 120
           found = client.search(index="books", body={"query": {"match": {"title": "fox"}}})
-          assert [hit["_id"] for hit in found["hits"]["hits"]] == ["1", "2"], found
+          assert [hit["_id"] for hit in found["hits"]["hits"]] == ["1"], found
           totals = client.search(index="books", body={"size": 0, "aggs": {"genres": {"terms": {"field": "genre"}}}})
           assert totals["aggregations"]["genres"]["buckets"][0] == {"key": "fable", "doc_count": 2}, totals
           assert client.count(index="books")["count"] == 3

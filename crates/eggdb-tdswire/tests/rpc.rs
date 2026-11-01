@@ -542,6 +542,17 @@ fn a_user_procedure_called_by_name_returns_its_rows_status_and_output_parameters
         returned(&positional),
         vec![(1, String::new(), Some("2".to_owned()))]
     );
+    let mut defaulted_output = int_parameter("@half", None, true);
+    defaulted_output[1 + "@half".len() * 2] = 0x03;
+    let derived = client.rpc(&[call_by_name(
+        "dbo.split",
+        &[int_parameter("@total", Some(4), false), defaulted_output],
+    )]);
+    assert!(errors(&derived).is_empty(), "{derived:?}");
+    assert_eq!(
+        returned(&derived),
+        vec![(1, "@half".to_owned(), Some("2".to_owned()))]
+    );
     let missing = client.rpc(&[call_by_name("split", &[int_parameter("@half", None, true)])]);
     assert_eq!(errors(&missing)[0].0, 201, "{missing:?}");
     assert_eq!(

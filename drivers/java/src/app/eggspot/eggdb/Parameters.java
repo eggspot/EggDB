@@ -1,7 +1,9 @@
 package app.eggspot.eggdb;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 
 final class Parameters {
     private Parameters() {
@@ -26,13 +28,15 @@ final class Parameters {
         return value.toString();
     }
 
-    static String numbered(String sql, String dialect) {
-        if (!dialect.equals("postgresql")) {
-            return sql;
-        }
+    record Bound(String sql, List<Object> parameters) {
+    }
+
+    static Bound bound(String sql, String dialect, List<Object> parameters) {
+        boolean postgresql = dialect.equals("postgresql");
+        List<Object> kept = new ArrayList<>(parameters.size());
         StringBuilder out = new StringBuilder(sql.length() + 8);
         char quote = 0;
-        int number = 0;
+        int given = 0;
         for (int index = 0; index < sql.length(); index++) {
             char character = sql.charAt(index);
             if (quote != 0) {
@@ -44,11 +48,25 @@ final class Parameters {
                 quote = character;
                 out.append(character);
             } else if (character == '?') {
-                out.append('$').append(++number);
+                Object value = given < parameters.size() ? parameters.get(given) : null;
+                given++;
+                if (!postgresql && value instanceof byte[] blob) {
+                    out.append("X'").append(HexFormat.of().formatHex(blob)).append('\'');
+                    continue;
+                }
+                kept.add(value);
+                if (postgresql) {
+                    out.append('$').append(kept.size());
+                } else {
+                    out.append('?');
+                }
             } else {
                 out.append(character);
             }
         }
-        return out.toString();
+        if (given < parameters.size()) {
+            kept.addAll(parameters.subList(given, parameters.size()));
+        }
+        return new Bound(out.toString(), kept);
     }
 }

@@ -31,7 +31,7 @@ using (var connection = new EggDbConnection($"Data Source={path};Dialect=sqlite"
         var rows = new List<string>();
         while (reader.Read())
         {
-            rows.Add($"{reader.GetInt64(0)} {reader.GetString(1)} {reader.GetDouble(2)} {((byte[])reader.GetValue(3)).Length}");
+            rows.Add(FormattableString.Invariant($"{reader.GetInt64(0)} {reader.GetString(1)} {reader.GetDouble(2)} {((byte[])reader.GetValue(3)).Length}"));
         }
         Check(string.Join(";", rows) == "1 Ada 1.5 2;2 Grace 2.5 2", $"rows read back: {string.Join(";", rows)}");
     }

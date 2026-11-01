@@ -913,6 +913,7 @@ impl<'t> Parser<'t> {
             "comment" if self.postgresql() || self.oracle() => self.comment(),
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
+            "deallocate" if self.postgresql() => self.deallocate(),
             "lock" if self.postgresql() || self.oracle() => self.lock_table(),
             "listen" if self.postgresql() => {
                 self.at += 1;
@@ -1275,6 +1276,17 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         };
         Ok(Statement::Discard(target))
+    }
+
+    fn deallocate(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        self.take_word("prepare");
+        let name = if self.take_word("all") {
+            None
+        } else {
+            Some(self.name()?.text)
+        };
+        Ok(Statement::Discard(DiscardTarget::PreparedStatement(name)))
     }
 
     fn reset(&mut self) -> SqlResult<Statement> {
@@ -4147,8 +4159,26 @@ impl<'t> Parser<'t> {
                     position: first.position,
                 });
             }
+            if self.peek_kind() == &TokenKind::Dot
+                && matches!(
+                    self.peek_kind_at(1),
+                    TokenKind::Word(_) | TokenKind::QuotedIdentifier(_)
+                )
+                && !matches!(self.peek_kind_at(2), TokenKind::Dot | TokenKind::LeftParen)
+            {
+                self.at += 1;
+                let table = column;
+                let column = self.name()?;
+                return Ok(Expr {
+                    kind: ExprKind::Column {
+                        qualifier: Some(table.text),
+                        name: column.text,
+                    },
+                    position: first.position,
+                });
+            }
             if self.peek_kind() == &TokenKind::Dot || self.peek_kind() == &TokenKind::LeftParen {
-                return Err(self.not_supported("names with more than two parts"));
+                return Err(self.not_supported("names with more than three parts"));
             }
             return Ok(Expr {
                 kind: ExprKind::Column {

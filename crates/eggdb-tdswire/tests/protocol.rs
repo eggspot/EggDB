@@ -131,6 +131,16 @@ fn wrong_passwords_unknown_users_and_other_databases_are_refused_with_sql_server
 }
 
 #[test]
+fn a_tds_8_login_is_accepted_as_tds_7_4() {
+    let server = TestServer::start(8);
+    let options = LoginOptions {
+        version: 0x0800_0000,
+        ..LoginOptions::default()
+    };
+    assert!(login_errors(&server, &options).is_empty());
+}
+
+#[test]
 fn older_tds_versions_integrated_logins_and_password_changes_are_refused() {
     let server = TestServer::start(8);
     for options in [

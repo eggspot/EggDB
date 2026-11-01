@@ -154,6 +154,8 @@ public sealed class EggDbConnection : DbConnection
         {
             throw new InvalidOperationException("the connection is not open");
         }
+        var (boundText, bound) = Bound(text, parameters);
+        parameters = bound;
         var handles = new List<GCHandle>();
         var natives = new NativeParameter[Math.Max(parameters.Count, 1)];
         try
@@ -172,7 +174,7 @@ public sealed class EggDbConnection : DbConnection
             }
             fixed (NativeParameter* first = natives)
             {
-                var status = Native.Execute(_session, Numbered(text), first, (nuint)parameters.Count, out var results, out var count);
+                var status = Native.Execute(_session, boundText, first, (nuint)parameters.Count, out var results, out var count);
                 if (status != 0)
                 {
                     throw Native.LastException(status);
@@ -189,15 +191,13 @@ public sealed class EggDbConnection : DbConnection
         }
     }
 
-    private string Numbered(string text)
+    private (string Text, List<object?> Parameters) Bound(string text, IReadOnlyList<object?> parameters)
     {
-        if (Dialect != "postgresql")
-        {
-            return text;
-        }
+        var postgresql = Dialect == "postgresql";
+        var kept = new List<object?>(parameters.Count);
         var output = new StringBuilder(text.Length + 8);
         char? quote = null;
-        var number = 0;
+        var given = 0;
         foreach (var character in text)
         {
             if (quote is not null)
@@ -215,15 +215,33 @@ public sealed class EggDbConnection : DbConnection
             }
             else if (character == '?')
             {
-                number++;
-                output.Append('$').Append(number);
+                var value = given < parameters.Count ? parameters[given] : null;
+                given++;
+                if (!postgresql && value is byte[] blob)
+                {
+                    output.Append("X'").Append(Convert.ToHexString(blob)).Append('\'');
+                    continue;
+                }
+                kept.Add(value);
+                if (postgresql)
+                {
+                    output.Append('$').Append(kept.Count);
+                }
+                else
+                {
+                    output.Append('?');
+                }
             }
             else
             {
                 output.Append(character);
             }
         }
-        return output.ToString();
+        for (var rest = given; rest < parameters.Count; rest++)
+        {
+            kept.Add(parameters[rest]);
+        }
+        return (output.ToString(), kept);
     }
 
     private string? ParameterText(object? value) => value switch

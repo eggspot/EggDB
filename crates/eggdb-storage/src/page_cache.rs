@@ -1261,10 +1261,21 @@ mod tests {
         let memory = SimMemory::new();
         memory.set_budget(1 << 20);
         let file = PageFile::open(&fs, Path::new(DB), Access::ReadOnly).unwrap();
-        assert!(matches!(
-            PageCache::new(file, &memory, CacheSize::Pages(u32::MAX as usize)),
-            Err(StorageError::Io(error)) if error.kind() == ErrorKind::OutOfMemory
-        ));
+        let fits_the_address_space = (u32::MAX as usize)
+            .checked_mul(file.page_size().bytes())
+            .is_some();
+        let refused = PageCache::new(file, &memory, CacheSize::Pages(u32::MAX as usize));
+        if fits_the_address_space {
+            assert!(matches!(
+                refused,
+                Err(StorageError::Io(error)) if error.kind() == ErrorKind::OutOfMemory
+            ));
+        } else {
+            assert!(matches!(
+                refused,
+                Err(StorageError::InvalidCacheSize { .. })
+            ));
+        }
     }
 
     #[test]

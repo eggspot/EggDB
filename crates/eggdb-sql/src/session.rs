@@ -379,6 +379,7 @@ pub struct Session<'s> {
     savepoints: savepoints::Savepoints,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
     notifications: crate::notifications::Notifications,
+    deallocated: Vec<Option<String>>,
     _open: crate::activity::OpenSession,
     temporary: crate::temporary::TemporaryObjects,
     deferred: crate::deferred_checks::DeferredState,
@@ -450,6 +451,7 @@ impl<'s> Session<'s> {
             ),
             temporary: crate::temporary::TemporaryObjects::default(),
             notifications: crate::notifications::Notifications::default(),
+            deallocated: Vec::new(),
             _open: crate::activity::OpenSession::new(),
             deferred: crate::deferred_checks::DeferredState::default(),
             pending_user_types: None,
@@ -937,7 +939,22 @@ impl<'s> Session<'s> {
                 }
                 Ok(QueryResult::command("DISCARD TEMP"))
             }
+            DiscardTarget::PreparedStatement(name) => {
+                let tag = if name.is_some() {
+                    "DEALLOCATE"
+                } else {
+                    "DEALLOCATE ALL"
+                };
+                self.deallocated.push(name);
+                Ok(QueryResult::command(tag))
+            }
         }
+    }
+
+    /// Takes the prepared statements `DEALLOCATE` named since the last call, oldest first, for
+    /// the server to forget: a name, or `None` for `DEALLOCATE ALL`.
+    pub fn take_deallocated_statements(&mut self) -> Vec<Option<String>> {
+        std::mem::take(&mut self.deallocated)
     }
 
     /// Checks `text` as the text of a prepared statement: at most one statement, valid
@@ -2694,7 +2711,7 @@ impl<'s> Session<'s> {
                 self.reset_all_settings();
                 Ok(QueryResult::command("RESET"))
             }
-            Statement::Discard(target) => self.discard(*target),
+            Statement::Discard(target) => self.discard(target.clone()),
             Statement::Show { name } => self.show(name.as_deref()),
             Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
                 binding.create_table(writer, tables, create)?;

@@ -357,7 +357,7 @@ fn stored_procedure_call(
         text.push_str(if index == 0 { " " } else { ", " });
         text.push_str(&declaration.name);
         text.push_str(" = ");
-        if parameter.uses_default {
+        if parameter.uses_default && !parameter.output {
             text.push_str("DEFAULT");
             continue;
         }
@@ -688,7 +688,7 @@ impl Connection<'_> {
                 text.push_str(&parameter.name);
                 text.push_str(" = ");
             }
-            if parameter.uses_default {
+            if parameter.uses_default && !parameter.output {
                 text.push_str("DEFAULT");
                 continue;
             }
