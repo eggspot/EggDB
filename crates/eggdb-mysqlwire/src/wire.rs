@@ -1,3 +1,4 @@
+use eggdb_platform::connection_limits::{LoginTicket, MemoryBudget, Reservation};
 use eggdb_tls::{ServerConnection, SessionInfo};
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ const REFUSAL_LINGER: Duration = Duration::from_millis(200);
 const REFUSAL_LINGER_BYTES: usize = 256 * 1024;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const LARGEST_FRAME: usize = 0xFF_FFFF;
+const UNBUDGETED_PAYLOAD_BYTES: usize = READ_CHUNK_BYTES;
 
 #[derive(Debug)]
 pub(crate) enum WireError {
@@ -18,6 +20,7 @@ pub(crate) enum WireError {
     Stopping,
     TimedOut,
     TooLarge,
+    OverBudget,
     OutOfOrder,
     Io,
 }
@@ -26,6 +29,9 @@ pub(crate) struct Wire<'a> {
     stream: ServerConnection,
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
+    pub(crate) login: Option<LoginTicket<'a>>,
+    pub(crate) budget: Option<&'a MemoryBudget>,
+    payload_reservation: Option<Reservation<'a>>,
     outbox: Vec<u8>,
     read_timeout: Duration,
     pub(crate) sequence: u8,
@@ -45,6 +51,9 @@ impl<'a> Wire<'a> {
             stream,
             stop,
             deadline,
+            login: None,
+            budget: None,
+            payload_reservation: None,
             outbox: Vec::new(),
             read_timeout: POLL_INTERVAL,
             sequence: 0,
@@ -54,6 +63,9 @@ impl<'a> Wire<'a> {
     fn next_wait(&self) -> Result<Duration, WireError> {
         if (self.stop)() {
             return Err(WireError::Stopping);
+        }
+        if self.login.as_ref().is_some_and(LoginTicket::is_evicted) {
+            return Err(WireError::TimedOut);
         }
         match self.deadline {
             None => Ok(POLL_INTERVAL),
@@ -100,6 +112,7 @@ impl<'a> Wire<'a> {
     ) -> Result<Vec<u8>, WireError> {
         let mut payload = Vec::new();
         let mut sequence = expected;
+        self.payload_reservation = None;
         loop {
             let mut header = [0u8; 4];
             self.read_exact(&mut header)?;
@@ -111,6 +124,7 @@ impl<'a> Wire<'a> {
             if payload.len() + length > limit {
                 return Err(WireError::TooLarge);
             }
+            self.reserve_payload(payload.len() + length)?;
             let mut read = 0;
             while read < length {
                 let chunk = (length - read).min(READ_CHUNK_BYTES);
@@ -125,6 +139,34 @@ impl<'a> Wire<'a> {
                 return Ok(payload);
             }
         }
+    }
+
+    fn reserve_payload(&mut self, total: usize) -> Result<(), WireError> {
+        let Some(budget) = self.budget else {
+            return Ok(());
+        };
+        if total <= UNBUDGETED_PAYLOAD_BYTES {
+            return Ok(());
+        }
+        let reserved = match &mut self.payload_reservation {
+            Some(reservation) => reservation.resize(total),
+            None => {
+                self.payload_reservation = budget.reserve(total);
+                self.payload_reservation.is_some()
+            }
+        };
+        if reserved {
+            Ok(())
+        } else {
+            Err(WireError::OverBudget)
+        }
+    }
+
+    pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.stream
+            .tcp()
+            .and_then(|stream| stream.peer_addr().ok())
+            .map(|peer| peer.ip())
     }
 
     pub(crate) fn send(&mut self, payload: &[u8]) {

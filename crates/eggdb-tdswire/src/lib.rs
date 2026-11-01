@@ -52,8 +52,9 @@ mod wire;
 
 pub use auth::{DEFAULT_ITERATIONS, TdsCredentials};
 pub use connection::{MAX_BATCH_BYTES, MAX_LOGIN_BYTES};
+pub use eggdb_platform::connection_limits::MemoryBudget;
 pub use server::{
-    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
+    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
     MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve,
 };
 pub use tokens::COLLATION;

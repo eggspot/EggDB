@@ -2,6 +2,7 @@ use crate::backend_keys::BackendKeys;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
 use eggdb_auth::scram::ScramVerifier;
+use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
 use eggdb_platform::local_socket::LocalListener;
 use eggdb_sql::KeyValueStore;
 use eggdb_tls::ServerConnection;
@@ -16,10 +17,16 @@ use std::time::{Duration, Instant};
 /// The connections a server serves at once unless told otherwise.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 /// How long a client has from connecting to finishing authentication, unless told otherwise.
-pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(30);
-/// The most connections still starting up or authenticating at once; more are refused with
-/// `53300`, so slow or failing logins cannot take every slot.
-pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
+pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration =
+    eggdb_platform::connection_limits::DEFAULT_AUTHENTICATION_TIMEOUT;
+/// How long an authenticated connection may wait for its next message before it is ended with
+/// `57P05`, unless told otherwise.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = eggdb_platform::connection_limits::DEFAULT_IDLE_TIMEOUT;
+/// The most connections still starting up or authenticating at once. When they are all taken,
+/// a new connection takes the slot of the oldest that has waited a second or more, which is
+/// dropped, so idle sockets cannot lock logins out; when every one is younger, the new
+/// connection is refused with `53300`.
+pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = MAX_LOGINS_IN_PROGRESS;
 const MAX_REFUSING_THREADS: usize = 8;
 pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -41,6 +48,13 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// How long a client has from connecting to finishing authentication.
     pub authentication_timeout: Duration,
+    /// How long an authenticated connection may wait for its next message before it is ended
+    /// with `57P05 idle_session_timeout`; `None` waits for ever.
+    pub idle_timeout: Option<Duration>,
+    /// The bytes every connection holds together in large messages, prepared statements and
+    /// portals; a request that would go past it fails with `53200 out_of_memory`. Share one
+    /// budget between the servers of one process.
+    pub memory_budget: std::sync::Arc<MemoryBudget>,
     /// The rule file that picks how users other than [`ServerConfig::user`] log in (D185);
     /// without one, stored roles use SCRAM-SHA-256.
     pub auth_rules: Option<std::sync::Arc<eggdb_auth::AuthRules>>,
@@ -136,7 +150,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) secret: [u8; 32],
     pub(crate) backend_keys: BackendKeys,
-    pub(crate) unauthenticated: AtomicUsize,
+    pub(crate) logins: LoginSlots,
     pub(crate) ended_by_stop: AtomicUsize,
     pub(crate) notifications: crate::notifications::NotificationHub,
 }
@@ -220,7 +234,7 @@ pub fn serve_databases<S: KeyValueStore + Sync>(
         throttle: AuthenticationThrottle::new(),
         secret,
         backend_keys: BackendKeys::new(),
-        unauthenticated: AtomicUsize::new(0),
+        logins: LoginSlots::default(),
         ended_by_stop: AtomicUsize::new(0),
         notifications: crate::notifications::NotificationHub::default(),
     };

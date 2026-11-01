@@ -32,6 +32,8 @@ impl SqlState {
     pub const INSUFFICIENT_PRIVILEGE: Self = Self(*b"42501");
     /// `57P01` admin_shutdown: the server is stopping.
     pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
+    /// `57P05` idle_session_timeout: a connection waited longer than the server's idle timeout.
+    pub const IDLE_SESSION_TIMEOUT: Self = Self(*b"57P05");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
     pub const FEATURE_NOT_SUPPORTED: Self = Self(*b"0A000");
     /// `09000` triggered_action_exception: a trigger's body ended the statement that fired

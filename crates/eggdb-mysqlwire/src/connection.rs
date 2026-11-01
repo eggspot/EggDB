@@ -7,7 +7,7 @@ use crate::packets::{
     TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
     err_packet, is_ssl_request, ok_packet, parse_command, parse_execute, parse_handshake_response,
 };
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
+use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_sql::{
     Dialect, KeyValueStore, MYSQL_COMPATIBLE_VERSION, OutputColumn, Parameter, QueryResult,
@@ -122,6 +122,12 @@ fn report_wire_error(wire: &mut Wire<'_>, error: &WireError) {
         ),
         WireError::OutOfOrder => refuse(wire, 1156, "08S01", "Got packets out of order"),
         WireError::TimedOut => refuse(wire, 1043, "08S01", "Bad handshake: timed out"),
+        WireError::OverBudget => refuse(
+            wire,
+            1041,
+            "HY000",
+            "Out of memory: the server's connections already hold their memory budget",
+        ),
         WireError::Closed | WireError::Stopping | WireError::Io => {}
     }
 }
@@ -253,8 +259,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     store: &'s S,
     connection_id: u32,
 ) {
-    let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
-    else {
+    let Some(login) = shared.logins.admit(wire.peer_ip()) else {
         (shared.log)(&format!(
             "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
             wire.peer()
@@ -263,6 +268,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         refuse_too_many(&mut wire);
         return;
     };
+    wire.login = Some(login);
     let Some(nonce) = fresh_nonce() else {
         refuse(
             &mut wire,
@@ -347,8 +353,9 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         );
         return;
     }
-    drop(login_slot);
+    wire.login = None;
     wire.deadline = None;
+    wire.budget = Some(&*shared.config.memory_budget);
     let capabilities = response.capabilities & SERVER_CAPABILITIES;
     let session = new_session(store, &response.user, &config.database, connection_id);
     let mut connection = Connection {
@@ -758,8 +765,29 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
 
     fn run(&mut self) {
         loop {
-            let body = match self.wire.read_payload(0, MAX_PACKET_BYTES) {
+            self.wire.deadline = self
+                .shared
+                .config
+                .idle_timeout
+                .and_then(|timeout| Instant::now().checked_add(timeout));
+            let read = self.wire.read_payload(0, MAX_PACKET_BYTES);
+            self.wire.deadline = None;
+            let body = match read {
                 Ok(body) => body,
+                Err(WireError::TimedOut) => {
+                    (self.shared.log)(&format!(
+                        "{}  disconnected after the idle timeout",
+                        self.wire.peer()
+                    ));
+                    self.wire.sequence = 0;
+                    refuse(
+                        &mut self.wire,
+                        4031,
+                        "HY000",
+                        "The client was disconnected by the server because of inactivity.",
+                    );
+                    return;
+                }
                 Err(WireError::Stopping) => {
                     self.shared
                         .ended_by_stop

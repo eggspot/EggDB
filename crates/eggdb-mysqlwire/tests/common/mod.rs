@@ -139,6 +139,20 @@ impl KeyValueStore for SharedMemoryStore {
     }
 }
 
+pub struct Limits {
+    pub idle_timeout: Option<Duration>,
+    pub memory_budget: Arc<eggdb_platform::connection_limits::MemoryBudget>,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            idle_timeout: None,
+            memory_budget: Arc::default(),
+        }
+    }
+}
+
 pub struct TestServer {
     pub address: SocketAddr,
     pub stop: Arc<AtomicBool>,
@@ -152,17 +166,27 @@ impl TestServer {
     }
 
     pub fn start_with(max_connections: usize, authentication_timeout: Duration) -> Self {
-        Self::start_configured(max_connections, authentication_timeout, None)
+        Self::start_configured(
+            max_connections,
+            authentication_timeout,
+            None,
+            Limits::default(),
+        )
     }
 
     pub fn start_with_tls(tls: Arc<eggdb_tls::ServerConfig>) -> Self {
-        Self::start_configured(8, Duration::from_secs(5), Some(tls))
+        Self::start_configured(8, Duration::from_secs(5), Some(tls), Limits::default())
+    }
+
+    pub fn start_limited(max_connections: usize, limits: Limits) -> Self {
+        Self::start_configured(max_connections, Duration::from_secs(5), None, limits)
     }
 
     fn start_configured(
         max_connections: usize,
         authentication_timeout: Duration,
         tls: Option<Arc<eggdb_tls::ServerConfig>>,
+        limits: Limits,
     ) -> Self {
         let listener: TcpListener =
             eggdb_mysqlwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -175,6 +199,8 @@ impl TestServer {
             database: DATABASE.to_owned(),
             max_connections,
             authentication_timeout,
+            idle_timeout: limits.idle_timeout,
+            memory_budget: limits.memory_budget,
             tls,
         };
         let thread_stop = Arc::clone(&stop);

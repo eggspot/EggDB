@@ -3,13 +3,14 @@ use crate::messages::{
     ColumnDescription, Format, FrontendMessage, ReportField, StartupRequest, Target, TooLarge,
     parse_message, parse_sasl_initial_response, parse_startup,
 };
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
+use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared};
 use crate::types::{
     TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,
     sql_type_of,
 };
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
+use eggdb_platform::connection_limits::Reservation;
 use eggdb_sql::{
     CancelSignal, CopyChannel, CopyFormat, CopyStart, KeyValueStore, OutputColumn, Parameter,
     QueryResult, Session, SqlError, SqlResult, SqlState, SqlType, TransactionStatus,
@@ -23,6 +24,13 @@ pub const MAX_AUTHENTICATION_MESSAGE_BYTES: usize = 16 * 1024;
 /// The largest message accepted from an authenticated client: 1 GiB, the largest value a
 /// database stores, plus room for the rest of the message.
 pub const MAX_MESSAGE_BYTES: usize = (1 << 30) + (1 << 20);
+/// The most prepared statements one connection keeps; one more is refused with `54000`.
+pub const MAX_PREPARED_STATEMENTS: usize = 4096;
+/// The most portals one connection keeps open; one more is refused with `54000`.
+pub const MAX_PORTALS: usize = 4096;
+/// The most bytes of statement text and bound parameters one connection's prepared statements
+/// and portals hold together; a `Parse` or `Bind` that would hold more is refused with `54000`.
+pub const MAX_HELD_BYTES: usize = MAX_MESSAGE_BYTES;
 const MAX_ENCRYPTION_REQUESTS: usize = 2;
 const SERVER_NONCE_BYTES: usize = 18;
 
@@ -157,6 +165,16 @@ enum Lost {
     Closed,
     Stopping,
     TooLarge(usize),
+    OverBudget(usize),
+}
+
+fn over_budget(length: usize) -> SqlError {
+    SqlError::new(
+        SqlState::OUT_OF_MEMORY,
+        format!(
+            "out of memory: the server's connections already hold their memory budget, so a message of {length} bytes cannot be read now"
+        ),
+    )
 }
 
 struct WireCopy<'r, 'w, 'a> {
@@ -175,6 +193,7 @@ impl WireCopy<'_, '_, '_> {
             Lost::TooLarge(length) => {
                 protocol_violation(format!("invalid message length {length}"))
             }
+            Lost::OverBudget(length) => over_budget(length),
             Lost::Closed => SqlError::new(
                 SqlState::CONNECTION_FAILURE,
                 "unexpected EOF on client connection with an open transaction",
@@ -213,6 +232,9 @@ impl CopyChannel for WireCopy<'_, '_, '_> {
                 Ok(message) => message,
                 Err(WireError::Stopping) => return Err(self.lose(Lost::Stopping)),
                 Err(WireError::TooLarge(length)) => return Err(self.lose(Lost::TooLarge(length))),
+                Err(WireError::OverBudget(length)) => {
+                    return Err(self.lose(Lost::OverBudget(length)));
+                }
                 Err(WireError::Closed | WireError::TimedOut | WireError::Io) => {
                     return Err(self.lose(Lost::Closed));
                 }
@@ -747,9 +769,27 @@ struct PreparedEntry {
     declared_oids: Vec<u32>,
     declared_types: Vec<Option<SqlType>>,
     parameter_count: usize,
+    held_bytes: usize,
+}
+
+fn statement_held_bytes(name: &str, text: &str, parameter_count: usize) -> usize {
+    let per_parameter = std::mem::size_of::<u32>() + std::mem::size_of::<Option<SqlType>>();
+    name.len()
+        .saturating_add(text.len())
+        .saturating_add(parameter_count.saturating_mul(per_parameter))
+}
+
+fn too_many_held(what: &str, limit: usize) -> SqlError {
+    SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        format!(
+            "cannot keep more than {limit} {what} on one connection; close or deallocate some first"
+        ),
+    )
 }
 
 struct Portal {
+    held_bytes: usize,
     text: String,
     declared_types: Vec<Option<SqlType>>,
     parameters: Vec<Parameter>,
@@ -787,6 +827,7 @@ pub(crate) struct Connection<'a, 's> {
     reported: Vec<(&'static str, String)>,
     statements: HashMap<String, PreparedEntry>,
     portals: HashMap<String, Portal>,
+    held: Reservation<'a>,
     skipping_to_sync: bool,
     lost: Option<Lost>,
     cancel: CancelSignal,
@@ -801,8 +842,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     databases: &[(&str, &'s S)],
     process_id: i32,
 ) {
-    let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
-    else {
+    let Some(login) = shared.logins.admit(wire.peer_ip()) else {
         (shared.log)(&format!(
             "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
             wire.peer()
@@ -811,6 +851,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         refuse_too_many(&mut wire, shared);
         return;
     };
+    wire.login = Some(login);
     let Some(startup) = read_startup(&mut wire, shared) else {
         return;
     };
@@ -846,8 +887,9 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         AuthenticationOutcome::Authenticated => {}
         AuthenticationOutcome::Refused => return,
     }
-    drop(login_slot);
+    wire.login = None;
     wire.deadline = None;
+    wire.budget = Some(&*shared.config.memory_budget);
     let Some(store) = chosen else {
         (shared.log)(&format!(
             "{}  database \"{}\" does not exist",
@@ -941,6 +983,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         reported,
         statements: HashMap::new(),
         portals: HashMap::new(),
+        held: shared.config.memory_budget.empty_reservation(),
         skipping_to_sync: false,
         lost: None,
         cancel,
@@ -1000,8 +1043,27 @@ impl<'a, 's> Connection<'a, 's> {
         self.wire.outbox.ready_for_query(status);
     }
 
+    fn end_idle_session(&mut self) {
+        (self.shared.log)(&format!(
+            "{}  terminating connection due to idle-session timeout",
+            self.wire.peer()
+        ));
+        fatal(
+            &mut self.wire,
+            SqlState::IDLE_SESSION_TIMEOUT,
+            "terminating connection due to idle-session timeout",
+        );
+    }
+
     fn run(&mut self) {
         loop {
+            if self.wire.deadline.is_none() {
+                self.wire.deadline = self
+                    .shared
+                    .config
+                    .idle_timeout
+                    .and_then(|timeout| Instant::now().checked_add(timeout));
+            }
             if self.idle && self.listening && matches!(self.wire.wait_for_message(), Ok(false)) {
                 self.deliver_while_idle();
                 continue;
@@ -1027,8 +1089,18 @@ impl<'a, 's> Connection<'a, 's> {
                     );
                     return;
                 }
-                Err(WireError::Closed | WireError::TimedOut | WireError::Io) => return,
+                Err(WireError::OverBudget(length)) => {
+                    let error = over_budget(length);
+                    fatal(&mut self.wire, error.state(), error.message());
+                    return;
+                }
+                Err(WireError::TimedOut) => {
+                    self.end_idle_session();
+                    return;
+                }
+                Err(WireError::Closed | WireError::Io) => return,
             };
+            self.wire.deadline = None;
             let message = match parse_message(tag, &body) {
                 Ok(message) => message,
                 Err(error) => {
@@ -1081,9 +1153,9 @@ impl<'a, 's> Connection<'a, 's> {
                 }
                 FrontendMessage::Close(target, name) => {
                     match target {
-                        Target::Statement => self.statements.remove(&name).map(|_| ()),
-                        Target::Portal => self.portals.remove(&name).map(|_| ()),
-                    };
+                        Target::Statement => self.remove_statement(&name),
+                        Target::Portal => self.remove_portal(&name),
+                    }
                     self.wire.outbox.close_complete();
                     true
                 }
@@ -1153,6 +1225,11 @@ impl<'a, 's> Connection<'a, 's> {
                 );
                 false
             }
+            Some(Lost::OverBudget(length)) => {
+                let error = over_budget(length);
+                fatal(&mut self.wire, error.state(), error.message());
+                false
+            }
         }
     }
 
@@ -1166,22 +1243,80 @@ impl<'a, 's> Connection<'a, 's> {
             report_error(&mut self.wire, Severity::Error, &error, None);
         }
         if self.session.transaction_status() == TransactionStatus::Idle {
-            self.portals.clear();
+            self.clear_portals();
         }
     }
 
     fn discard_all(&mut self) {
         self.statements.clear();
         self.portals.clear();
+        self.held.resize(0);
+    }
+
+    fn hold(&mut self, replaced: usize, added: usize) -> Result<(), SqlError> {
+        let total = self
+            .held
+            .bytes()
+            .saturating_sub(replaced)
+            .saturating_add(added);
+        if total > MAX_HELD_BYTES {
+            return Err(too_many_held(
+                "bytes of prepared statements and bound parameters",
+                MAX_HELD_BYTES,
+            ));
+        }
+        if !self.held.resize(total) {
+            return Err(SqlError::new(
+                SqlState::OUT_OF_MEMORY,
+                format!(
+                    "out of memory: the server's connections already hold their memory budget, so {added} more bytes of prepared statements and bound parameters cannot be kept now"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn release_held(&mut self, bytes: usize) {
+        let total = self.held.bytes().saturating_sub(bytes);
+        self.held.resize(total);
+    }
+
+    fn remove_statement(&mut self, name: &str) {
+        if let Some(entry) = self.statements.remove(name) {
+            self.release_held(entry.held_bytes);
+        }
+    }
+
+    fn remove_portal(&mut self, name: &str) {
+        if let Some(portal) = self.portals.remove(name) {
+            self.release_held(portal.held_bytes);
+        }
+    }
+
+    fn clear_portals(&mut self) {
+        let released = self
+            .portals
+            .drain()
+            .map(|(_, portal)| portal.held_bytes)
+            .fold(0, usize::saturating_add);
+        self.release_held(released);
     }
 
     fn forget_deallocated_statements(&mut self) {
         for deallocated in self.session.take_deallocated_statements() {
             match deallocated {
-                Some(name) => {
-                    self.statements.remove(&name);
+                Some(name) => self.remove_statement(&name),
+                None => {
+                    let mut released = 0usize;
+                    self.statements.retain(|name, entry| {
+                        let keep = name.is_empty();
+                        if !keep {
+                            released = released.saturating_add(entry.held_bytes);
+                        }
+                        keep
+                    });
+                    self.release_held(released);
                 }
-                None => self.statements.retain(|name, _| name.is_empty()),
             }
         }
     }
@@ -1338,10 +1473,20 @@ impl<'a, 's> Connection<'a, 's> {
         self.refuse_in_failed_block(&query)?;
         let declared_types: Vec<Option<SqlType>> =
             parameter_oids.iter().map(|&oid| sql_type_of(oid)).collect();
+        let replaced = self.statements.get(&name).map(|entry| entry.held_bytes);
+        if replaced.is_none() && self.statements.len() >= MAX_PREPARED_STATEMENTS {
+            return Err((
+                too_many_held("prepared statements", MAX_PREPARED_STATEMENTS),
+                None,
+            ));
+        }
+        let held_bytes = statement_held_bytes(&name, &query, parameter_oids.len());
         let prepared = self
             .session
             .prepare(&query, &declared_types)
             .map_err(|error| (error, Some(query.clone())))?;
+        self.hold(replaced.unwrap_or(0), held_bytes)
+            .map_err(|error| (error, None))?;
         self.statements.insert(
             name,
             PreparedEntry {
@@ -1349,6 +1494,7 @@ impl<'a, 's> Connection<'a, 's> {
                 declared_oids: parameter_oids,
                 declared_types,
                 parameter_count: prepared.parameter_count,
+                held_bytes,
             },
         );
         self.wire.outbox.parse_complete();
@@ -1381,6 +1527,17 @@ impl<'a, 's> Connection<'a, 's> {
                 None,
             ));
         }
+        let replaced = self.portals.get(&portal_name).map(|portal| portal.held_bytes);
+        if replaced.is_none() && self.portals.len() >= MAX_PORTALS {
+            return Err((too_many_held("portals", MAX_PORTALS), None));
+        }
+        let held_bytes = values
+            .iter()
+            .map(|value| value.as_ref().map_or(0, Vec::len))
+            .fold(
+                statement_held_bytes(&portal_name, &statement.text, values.len()),
+                usize::saturating_add,
+            );
         if parameter_formats.len() > 1 && parameter_formats.len() != values.len() {
             return Err((
                 protocol_violation(format!(
@@ -1417,6 +1574,7 @@ impl<'a, 's> Connection<'a, 's> {
             });
         }
         let portal = Portal {
+            held_bytes,
             text: statement.text.clone(),
             declared_types: statement.declared_types.clone(),
             parameters,
@@ -1425,6 +1583,8 @@ impl<'a, 's> Connection<'a, 's> {
             pending: None,
             run: PortalRun::NotYet,
         };
+        self.hold(replaced.unwrap_or(0), held_bytes)
+            .map_err(|error| (error, None))?;
         self.portals.insert(portal_name, portal);
         self.wire.outbox.bind_complete();
         Ok(())

@@ -243,6 +243,7 @@ impl CommandName {
             | OptionName::User
             | OptionName::Database
             | OptionName::MaxConnections
+            | OptionName::IdleTimeout
             | OptionName::SocketDir
             | OptionName::MysqlSocket
             | OptionName::TlsCertificate
@@ -412,6 +413,7 @@ enum OptionName {
     PasswordFile,
     Database,
     MaxConnections,
+    IdleTimeout,
     SocketDir,
     MysqlSocket,
     TlsCertificate,
@@ -508,6 +510,7 @@ impl OptionName {
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
+            b"idle-timeout" => Self::IdleTimeout,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
             b"tls-certificate" => Self::TlsCertificate,
@@ -779,6 +782,7 @@ pub(crate) struct ServeOptions {
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
     pub(crate) max_connections: Option<usize>,
+    pub(crate) idle_timeout_seconds: Option<u64>,
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
     pub(crate) tls_certificate: Option<PathBuf>,
@@ -1365,6 +1369,16 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                         ))
                     })?;
                 request.serve.max_connections = Some(count);
+            }
+            OptionName::IdleTimeout => {
+                let seconds = parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
+                    usage(format!(
+                        "{} needs a whole number of seconds, 0 for none, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    ))
+                })?;
+                request.serve.idle_timeout_seconds = Some(seconds);
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),

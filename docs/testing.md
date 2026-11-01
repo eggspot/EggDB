@@ -156,6 +156,18 @@ example and malformed variants) and the cryptography's published vectors have un
 their own, and `crates/eggdb-pgwire/tests/protocol.rs` drives every protocol flow with a client
 written in the test.
 
+The limits that keep another program from locking users out or exhausting memory (DNEW-I79)
+have tests of their own on each SQL protocol, in `tests/limits.rs` of `eggdb-pgwire`,
+`eggdb-mysqlwire` and `eggdb-tdswire`: 20 idle sockets do not keep a real login out, 10,000
+`Parse` messages end in `54000` after 4,096 prepared statements, portals stop at 4,096, a message
+or prepared statements past the server's memory budget fail with `53200` (MySQL 1041, SQL Server
+701) and give their bytes back, and an idle connection is closed at the idle timeout while a busy
+one is not. The login slots and the budget have unit tests in `eggdb-platform`'s
+`connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
+`crates/eggdb-sql/src/tests.rs` (`hostile_tsql_input_returns_errors_and_never_panics`, 35,000
+statements per run) like the other dialects, and SQL Server is in the typed-statements fuzzer's
+dialect list.
+
 ## Hostile MCP messages (D119)
 `eggdb mcp` reads whatever an agent's client sends, so its JSON-RPC reader and dispatch have a
 seeded fuzzer in `crates/eggdb-mcp/tests/hostile_messages.rs`: it mutates valid MCP messages

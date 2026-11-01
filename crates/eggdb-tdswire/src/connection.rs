@@ -7,7 +7,7 @@ use crate::messages::{
     parse_transaction_manager_request, prelogin_response,
 };
 use crate::procedures::PreparedBatches;
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
+use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared};
 use crate::tokens::{
     self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
     ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE, ENV_ROLLBACK_TRANSACTION,
@@ -39,6 +39,7 @@ const CANNOT_OPEN_DATABASE: u32 = 4060;
 const TOO_MANY_CONNECTIONS: u32 = 17_809;
 pub(crate) const NOT_SUPPORTED: u32 = 40_517;
 const PROTOCOL_ERROR: u32 = 4002;
+const INSUFFICIENT_MEMORY: u32 = 701;
 pub(crate) const LOGGED_BATCH_CHARACTERS: usize = 200;
 const MAX_RESULT_COLUMNS: usize = 4096;
 const TOO_MANY_RESULT_COLUMNS: u32 = 1056;
@@ -191,6 +192,20 @@ pub(crate) fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error:
         }
         WireError::TimedOut => {
             (shared.log)(&format!("{}  login timed out", wire.peer()));
+        }
+        WireError::OverBudget => {
+            (shared.log)(&format!(
+                "{}  message refused: the connections hold the server's memory budget",
+                wire.peer()
+            ));
+            refuse(
+                wire,
+                &[(
+                    INSUFFICIENT_MEMORY,
+                    17,
+                    "There is insufficient memory to read this message: the server's connections already hold their memory budget.",
+                )],
+            );
         }
         WireError::Closed | WireError::Stopping | WireError::Io => {}
     }
@@ -542,8 +557,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     store: &'s S,
     connection_id: u32,
 ) {
-    let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
-    else {
+    let Some(login) = shared.logins.admit(wire.peer_ip()) else {
         (shared.log)(&format!(
             "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
             wire.peer()
@@ -552,14 +566,16 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         refuse_too_many(shared, &mut wire);
         return;
     };
+    wire.login = Some(login);
     let Some(encryption) = read_prelogin(shared, &mut wire) else {
         return;
     };
     let Login::Accepted { user, packet_size } = log_in(shared, &mut wire, encryption) else {
         return;
     };
-    drop(login_slot);
+    wire.login = None;
     wire.deadline = None;
+    wire.budget = Some(&*shared.config.memory_budget);
     wire.spid = connection_id as u16;
     let config = shared.config;
     if wire
@@ -613,8 +629,22 @@ pub(crate) struct Ran {
 impl Connection<'_> {
     fn run(&mut self, session: &mut Session<'_>) {
         loop {
-            let message = match self.next_message() {
+            self.wire.deadline = self
+                .shared
+                .config
+                .idle_timeout
+                .and_then(|timeout| Instant::now().checked_add(timeout));
+            let next = self.next_message();
+            self.wire.deadline = None;
+            let message = match next {
                 Ok(Incoming::Message(message)) => message,
+                Err(WireError::TimedOut) => {
+                    (self.shared.log)(&format!(
+                        "{}  closed after the idle timeout",
+                        self.wire.peer()
+                    ));
+                    return;
+                }
                 Ok(Incoming::BulkLoad { first, body }) => {
                     if !self.bulk_load(session, first, body) {
                         return;

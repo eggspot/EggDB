@@ -5,8 +5,8 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject, TimeStyle};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_pgwire::{
-    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError, MIN_SCRAM_ITERATIONS,
-    SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,
+    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
+    MIN_SCRAM_ITERATIONS, MemoryBudget, SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,
 };
 use eggdb_platform::{secure_random, stop_signals};
 use std::io::BufRead;
@@ -540,12 +540,20 @@ impl Session<'_> {
             let (name, first) = directory.remove(0);
             (super::Opened::Owned(Box::new(first)), name)
         };
+        let idle_timeout = match options.idle_timeout_seconds {
+            None => Some(DEFAULT_IDLE_TIMEOUT),
+            Some(0) => None,
+            Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        };
+        let memory_budget = Arc::new(MemoryBudget::default());
         let config = ServerConfig {
             user,
             verifier,
             database: options.database.unwrap_or(served_name),
             max_connections,
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
+            idle_timeout,
+            memory_budget: Arc::clone(&memory_budget),
             auth_rules: self.auth_rules()?,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
         };
@@ -556,6 +564,8 @@ impl Session<'_> {
             database: config.database.clone(),
             max_connections: config.max_connections,
             authentication_timeout: eggdb_mysqlwire::DEFAULT_AUTHENTICATION_TIMEOUT,
+            idle_timeout,
+            memory_budget: Arc::clone(&memory_budget),
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.mysql)),
         });
         let tds_config = tds_credentials.map(|credentials| eggdb_tdswire::ServerConfig {
@@ -564,6 +574,8 @@ impl Session<'_> {
             database: config.database.clone(),
             max_connections: config.max_connections,
             authentication_timeout: eggdb_tdswire::DEFAULT_AUTHENTICATION_TIMEOUT,
+            idle_timeout,
+            memory_budget: Arc::clone(&memory_budget),
             log_batches: options.log_batches,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.tds)),
         });

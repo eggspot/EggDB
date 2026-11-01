@@ -7,6 +7,7 @@ use eggdb_tls::ServerConnection;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
+use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -15,10 +16,16 @@ use std::time::{Duration, Instant};
 /// The connections a server serves at once unless told otherwise.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 /// How long a client has from connecting to finishing authentication, unless told otherwise.
-pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(30);
-/// The most connections still authenticating at once; more are refused with MySQL's error
-/// 1040, so slow or failing logins cannot take every slot.
-pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
+pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration =
+    eggdb_platform::connection_limits::DEFAULT_AUTHENTICATION_TIMEOUT;
+/// How long an authenticated connection may wait for its next command before it is closed
+/// with MySQL's error 4031, unless told otherwise.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = eggdb_platform::connection_limits::DEFAULT_IDLE_TIMEOUT;
+/// The most connections still authenticating at once. When they are all taken, a new
+/// connection takes the slot of the oldest that has waited a second or more, which is dropped,
+/// so idle sockets cannot lock logins out; when every one is younger, the new connection is
+/// refused with MySQL's error 1040.
+pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = MAX_LOGINS_IN_PROGRESS;
 const MAX_REFUSING_THREADS: usize = 8;
 pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -39,6 +46,13 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// How long a client has from connecting to finishing authentication.
     pub authentication_timeout: Duration,
+    /// How long an authenticated connection may wait for its next command before it is closed
+    /// with error 4031, MySQL's `wait_timeout`; `None` waits for ever.
+    pub idle_timeout: Option<Duration>,
+    /// The bytes every connection holds together in large packets; a packet that would go past
+    /// it closes its connection with error 1041. Share one budget between the servers of one
+    /// process.
+    pub memory_budget: std::sync::Arc<MemoryBudget>,
     /// The TLS setup, when the server offers TLS (D161): `CLIENT_SSL` is then advertised, and
     /// connections from other machines must use it.
     pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
@@ -123,7 +137,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) log: &'a (dyn Fn(&str) + Sync),
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) unknown_user: MySqlCredentials,
-    pub(crate) unauthenticated: AtomicUsize,
+    pub(crate) logins: LoginSlots,
     pub(crate) ended_by_stop: AtomicUsize,
 }
 
@@ -191,7 +205,7 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
         log,
         throttle: AuthenticationThrottle::new(),
         unknown_user: MySqlCredentials::matching_nothing(&secret),
-        unauthenticated: AtomicUsize::new(0),
+        logins: LoginSlots::default(),
         ended_by_stop: AtomicUsize::new(0),
     };
     let active = AtomicUsize::new(0);

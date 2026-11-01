@@ -24,7 +24,9 @@
 //! - [`process`]: running a child process and learning the most memory it held;
 //! - [`secure_random`]: unpredictable bytes from the operating system for salts and nonces;
 //! - [`stop_signals`]: `Ctrl-C` and `SIGTERM` turned into a flag a server reads to stop
-//!   gracefully.
+//!   gracefully;
+//! - [`connection_limits`]: the login slots, timeouts and memory budget every protocol server
+//!   shares, so no client can lock others out or exhaust the server.
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`OsIoQueue`], [`OsNetwork`], [`SystemClock`], [`OsMemory`], [`OsCpus`]) and a
@@ -36,6 +38,7 @@ mod aligned;
 mod allocator;
 mod cache;
 mod clock;
+pub mod connection_limits;
 mod cpus;
 mod database_file;
 mod error;
