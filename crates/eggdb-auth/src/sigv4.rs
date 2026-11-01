@@ -6,7 +6,7 @@
 
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 const MAX_SKEW_SECONDS: i64 = 15 * 60;
-const MAX_PRESIGNED_SECONDS: i64 = 7 * 24 * 60 * 60;
+pub(crate) const MAX_PRESIGNED_SECONDS: i64 = 7 * 24 * 60 * 60;
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 
 fn carries_unsigned_amz_header(request: &SignedRequest<'_>, signed_headers: &str) -> bool {
@@ -88,7 +88,7 @@ fn header<'r>(request: &SignedRequest<'r>, name: &str) -> Option<&'r str> {
         .map(|(_, value)| value.as_str())
 }
 
-fn percent_decode(text: &str) -> Result<Vec<u8>, SigV4Error> {
+pub(crate) fn percent_decode(text: &str) -> Result<Vec<u8>, SigV4Error> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -122,7 +122,7 @@ pub fn uri_encode(bytes: &[u8], keep_slash: bool) -> String {
         .collect()
 }
 
-fn query_pairs(query: Option<&str>) -> Result<Vec<(String, String)>, SigV4Error> {
+pub(crate) fn query_pairs(query: Option<&str>) -> Result<Vec<(String, String)>, SigV4Error> {
     query
         .unwrap_or_default()
         .split('&')

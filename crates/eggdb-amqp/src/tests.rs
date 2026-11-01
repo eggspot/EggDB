@@ -123,6 +123,15 @@ fn a_client_logs_in_publishes_and_gets_a_message() {
         ]
     );
     assert_eq!(frames[7].3, b"hello");
+    let start = &frames[0].3;
+    let announced = start
+        .windows(b"publisher_confirms".len())
+        .position(|window| window == b"publisher_confirms");
+    let flag_at = announced.map(|at| at + b"publisher_confirms".len());
+    assert_eq!(
+        flag_at.and_then(|at| start.get(at..at + 2)),
+        Some(&[b't', 1][..])
+    );
 }
 
 #[test]

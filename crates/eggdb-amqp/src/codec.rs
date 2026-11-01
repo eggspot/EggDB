@@ -179,14 +179,32 @@ impl Out {
         self.long(0)
     }
 
-    pub(crate) fn string_table(&mut self, entries: &[(&str, &str)]) -> &mut Self {
+    pub(crate) fn properties(
+        &mut self,
+        strings: &[(&str, &str)],
+        capabilities: &[&str],
+    ) -> &mut Self {
         let mut table = Vec::new();
-        for (name, value) in entries {
+        for (name, value) in strings {
             table.push(name.len() as u8);
             table.extend_from_slice(name.as_bytes());
             table.push(b'S');
             table.extend_from_slice(&(value.len() as u32).to_be_bytes());
             table.extend_from_slice(value.as_bytes());
+        }
+        if !capabilities.is_empty() {
+            let mut flags = Vec::new();
+            for name in capabilities {
+                flags.push(name.len() as u8);
+                flags.extend_from_slice(name.as_bytes());
+                flags.extend_from_slice(&[b't', 1]);
+            }
+            let name = "capabilities";
+            table.push(name.len() as u8);
+            table.extend_from_slice(name.as_bytes());
+            table.push(b'F');
+            table.extend_from_slice(&(flags.len() as u32).to_be_bytes());
+            table.extend_from_slice(&flags);
         }
         self.longstr(&table)
     }

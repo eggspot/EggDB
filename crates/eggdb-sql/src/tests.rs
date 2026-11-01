@@ -2450,6 +2450,96 @@ fn a_sqlite_upsert_that_updates_counts_one_change() {
 }
 
 #[test]
+fn a_subquery_sees_outer_columns_of_a_join_that_nothing_else_reads() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE TABLE owners (id integer PRIMARY KEY)");
+    last(
+        &mut session,
+        "CREATE TABLE pets (id integer PRIMARY KEY, kind text)",
+    );
+    last(&mut session, "CREATE TABLE toys (n integer)");
+    last(&mut session, "INSERT INTO owners VALUES (1), (2)");
+    last(
+        &mut session,
+        "INSERT INTO pets VALUES (1, 'cat'), (2, NULL)",
+    );
+    last(&mut session, "INSERT INTO toys VALUES (1)");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT owners.id, (SELECT count(*) FROM toys WHERE pets.kind IS NOT NULL) AS n \
+             FROM owners JOIN pets ON owners.id = pets.id ORDER BY owners.id"
+        ),
+        "id|n\n1|1\n2|0\nSELECT 2"
+    );
+    let catalog = last(
+        &mut session,
+        "SELECT a.attname, (SELECT count(*) FROM pg_namespace WHERE a.attnotnull AND pg_namespace.nspname = 'public') AS n \
+         FROM pg_class c JOIN pg_attribute a ON c.oid = a.attrelid AND a.attnum > 0 \
+         WHERE c.relname = 'pets' ORDER BY a.attnum",
+    );
+    assert_eq!(catalog, "attname|n\nid|1\nkind|0\nSELECT 2");
+}
+
+#[test]
+fn pg_tables_and_pg_views_list_what_the_schema_holds() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SCHEMA analytics");
+    last(
+        &mut session,
+        "CREATE TABLE analytics.orders (id integer PRIMARY KEY)",
+    );
+    last(
+        &mut session,
+        "CREATE VIEW analytics.recent AS SELECT id FROM analytics.orders",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT tablename, hasindexes FROM pg_tables WHERE schemaname = 'analytics'"
+        ),
+        "tablename|hasindexes\norders|t\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT viewname FROM pg_views WHERE schemaname = 'analytics'"
+        ),
+        "viewname\nrecent\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM pg_matviews"),
+        "count\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn identity_columns_show_their_implicit_sequence_in_the_catalog() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE tickets (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code text)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT pg_get_serial_sequence('tickets', 'id') AS s"
+        ),
+        "s\npublic.tickets_id_seq\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT seqstart, seqincrement, seqmax FROM pg_sequence WHERE seqrelid = 'tickets_id_seq'::regclass"
+        ),
+        "seqstart|seqincrement|seqmax\n1|1|2147483647\nSELECT 1"
+    );
+}
+
+#[test]
 fn hostile_sqlite_input_returns_errors_and_never_panics() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, crate::Dialect::Sqlite);

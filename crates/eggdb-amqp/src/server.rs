@@ -874,11 +874,14 @@ fn start_frame() -> Vec<u8> {
     let mut out = Out::method(10, 10);
     out.octet(0)
         .octet(9)
-        .string_table(&[
-            ("product", "EggDB"),
-            ("platform", "Rust"),
-            ("information", "compatible with AMQP 0-9-1"),
-        ])
+        .properties(
+            &[
+                ("product", "EggDB"),
+                ("platform", "Rust"),
+                ("information", "compatible with AMQP 0-9-1"),
+            ],
+            &["publisher_confirms", "basic.nack"],
+        )
         .longstr(b"PLAIN")
         .longstr(b"en_US");
     method(&out, 0)

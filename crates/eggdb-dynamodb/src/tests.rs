@@ -85,6 +85,12 @@ fn tables_items_queries_and_scans_work() {
             && queried.find(r#""N":"2""#) < queried.find(r#""N":"10""#),
         "{queried}"
     );
+    let (_, grouped) = call(
+        &endpoint,
+        "Query",
+        r##"{"TableName":"orders","KeyConditionExpression":"(#c = :c AND #n > :n)","ExpressionAttributeNames":{"#c":"customer","#n":"number"},"ExpressionAttributeValues":{":c":{"S":"ada"},":n":{"N":"1"}}}"##,
+    );
+    assert!(grouped.contains(r#""Count":2"#), "{grouped}");
     let (_, newest) = call(
         &endpoint,
         "Query",

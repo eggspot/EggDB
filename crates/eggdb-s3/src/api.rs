@@ -271,7 +271,12 @@ impl<'k> Endpoint<'k> {
             body: &request.body,
         };
         let now = i64::try_from(now_ms() / 1000).unwrap_or(i64::MAX);
-        if let Err(error) = sigv4::verify(&signed, &self.access_key, &self.secret, now) {
+        let verified = if eggdb_auth::sigv2::is_query_signed(&signed) {
+            eggdb_auth::sigv2::verify_query(&signed, &self.access_key, &self.secret, now)
+        } else {
+            sigv4::verify(&signed, &self.access_key, &self.secret, now)
+        };
+        if let Err(error) = verified {
             let (status, code) = match error {
                 SigV4Error::Missing | SigV4Error::Expired => (403, "AccessDenied"),
                 SigV4Error::UnknownAccessKey => (403, "InvalidAccessKeyId"),
@@ -306,7 +311,13 @@ impl<'k> Endpoint<'k> {
                     eggdb_http::percent_decoded(&value.replace('+', "%20"))?,
                 ))
             })
-            .filter(|(name, _)| !name.starts_with("X-Amz-") && name != "x-id")
+            .filter(|(name, _)| {
+                !name.starts_with("X-Amz-")
+                    && !matches!(
+                        name.as_str(),
+                        "x-id" | "AWSAccessKeyId" | "Signature" | "Expires"
+                    )
+            })
             .collect();
         let call = Call {
             request,

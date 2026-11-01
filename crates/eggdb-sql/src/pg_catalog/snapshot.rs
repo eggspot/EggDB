@@ -11,7 +11,7 @@ use crate::pg_keywords::quote_ident;
 use crate::routines::{NamedRoutines, ReturnType, RoutineDefinition, RoutineReturns};
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, ScanDirection};
-use crate::types::Value;
+use crate::types::{SqlType, Value};
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -422,6 +422,62 @@ struct PendingRelation {
     source: RelationSource,
 }
 
+fn implicit_identity_sequences(pending: &[PendingRelation]) -> Vec<PendingRelation> {
+    let mut implicit = Vec::new();
+    for entry in pending {
+        let RelationSource::Table(table) = &entry.source else {
+            continue;
+        };
+        for (index, column) in table.columns.iter().enumerate() {
+            if table.identity_of(index).is_none() {
+                continue;
+            }
+            let owned = (table.name.clone(), column.name.clone());
+            let name = format!("{}_{}_seq", entry.name, column.name);
+            let taken = pending.iter().any(|other| {
+                other.schema == entry.schema && other.name == name
+                    || matches!(&other.source, RelationSource::Sequence(sequence)
+                        if sequence.owned_by.as_ref() == Some(&owned))
+            });
+            if taken {
+                continue;
+            }
+            let sql_type = match column.sql_type {
+                SqlType::SmallInt | SqlType::Integer => column.sql_type,
+                _ => SqlType::BigInt,
+            };
+            let (low, high) =
+                crate::encoding::integer_type_range(sql_type).unwrap_or((i64::MIN, i64::MAX));
+            let seed = table.identity_seed();
+            let (min, max) = if seed.increment < 0 {
+                (low, -1)
+            } else {
+                (1, high)
+            };
+            implicit.push(PendingRelation {
+                schema: entry.schema.clone(),
+                internal: crate::schemas::qualified(&entry.schema, &name),
+                name,
+                kind: RelationKind::Sequence,
+                owner: String::new(),
+                source: RelationSource::Sequence(Box::new(SequenceDefinition {
+                    sql_type,
+                    start: seed.seed,
+                    increment: seed.increment,
+                    min,
+                    max,
+                    cache: 1,
+                    cycle: false,
+                    last_value: seed.seed,
+                    is_called: false,
+                    owned_by: Some(owned),
+                })),
+            });
+        }
+    }
+    implicit
+}
+
 impl CatalogSnapshot {
     fn load(
         reader: &dyn KeyValueRead,
@@ -539,6 +595,8 @@ impl CatalogSnapshot {
                 source: RelationSource::Sequence(Box::new(sequence)),
             });
         }
+        let implicit = implicit_identity_sequences(&pending);
+        pending.extend(implicit);
         let assigned = oids::assign(
             Space::Relation,
             &pending

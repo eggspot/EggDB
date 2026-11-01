@@ -1513,6 +1513,10 @@ impl JoinedFrom<'_> {
             }
         }
         for expr in exprs {
+            if crate::subquery::mentions_subquery(expr) {
+                mark(None, "*");
+                continue;
+            }
             visit_exprs(expr, &mut |node| {
                 if let ExprKind::Column { qualifier, name } = &node.kind {
                     mark(qualifier.as_deref(), name);

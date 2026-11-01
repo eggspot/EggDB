@@ -213,6 +213,31 @@ fn tokens(expression: &str) -> Vec<String> {
     out
 }
 
+fn without_grouping(words: Vec<String>) -> Vec<String> {
+    let mut kept = Vec::with_capacity(words.len());
+    let mut calls = Vec::new();
+    for word in words {
+        match word.as_str() {
+            "(" => {
+                let call = kept
+                    .last()
+                    .is_some_and(|before: &String| before.eq_ignore_ascii_case("begins_with"));
+                calls.push(call);
+                if call {
+                    kept.push(word);
+                }
+            }
+            ")" => {
+                if calls.pop().unwrap_or(false) {
+                    kept.push(word);
+                }
+            }
+            _ => kept.push(word),
+        }
+    }
+    kept
+}
+
 #[derive(Debug)]
 enum SortCondition {
     Compare(String, Vec<u8>),
@@ -710,10 +735,10 @@ impl<'k> Endpoint<'k> {
             names: member(body, "ExpressionAttributeNames"),
             values: member(body, "ExpressionAttributeValues"),
         };
-        let words = tokens(
+        let words = without_grouping(tokens(
             text(body, "KeyConditionExpression")
                 .ok_or_else(|| invalid("KeyConditionExpression is required"))?,
-        );
+        ));
         let (first, rest) = match words.iter().enumerate().find(|(at, word)| {
             word.eq_ignore_ascii_case("AND")
                 && words

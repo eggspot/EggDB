@@ -2957,8 +2957,11 @@ each), `pg_timezone_names` (every region of the time zone database, D153) and `p
 `pg_publication_rel`, `pg_publication_namespace`, `pg_rewrite`,
 `pg_auth_members`, `pg_opclass`, `pg_enum` and `pg_range`, `pg_proc` with the array
 functions `array_in`, `array_out`, `array_recv` and `array_send` (D135) and every user function
-and procedure (D158), and `pg_language` (`internal`, `c`, `sql`, `plpgsql`), each with PostgreSQL
-16's columns and column types. `pg_get_functiondef`, `pg_get_function_arguments`,
+and procedure (D158), and `pg_language` (`internal`, `c`, `sql`, `plpgsql`), the views `pg_tables`, `pg_views` and
+`pg_matviews` (empty: no materialized views are listed yet), each with PostgreSQL 16's columns
+and column types. An identity column shows its implicit sequence, `<table>_<column>_seq`, in
+`pg_class` and `pg_sequence` and through `pg_get_serial_sequence`, so SQLAlchemy and other ORMs
+reflect it as an identity; `nextval` on that name is not supported yet. `pg_get_functiondef`, `pg_get_function_arguments`,
 `pg_get_function_identity_arguments`, `pg_get_function_result`, `pg_function_is_visible` and
 `regproc` name user routines, `pg_trigger.tgfoid` is the trigger's function, and
 `information_schema.routines` and `parameters` list them, so psql's `\df` shows them. `information_schema`'s views are catalog relations too: see

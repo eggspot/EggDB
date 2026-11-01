@@ -55,7 +55,38 @@ pub(crate) enum MonitoringRelation {
     TsTemplate,
     Conversion,
     Opfamily,
+    Tables,
+    Views,
+    Matviews,
 }
+
+const TABLES: [CatalogColumn; 8] = [
+    column("schemaname", NAME),
+    column("tablename", NAME),
+    column("tableowner", NAME),
+    column("tablespace", NAME),
+    column("hasindexes", SqlType::Boolean),
+    column("hasrules", SqlType::Boolean),
+    column("hastriggers", SqlType::Boolean),
+    column("rowsecurity", SqlType::Boolean),
+];
+
+const VIEWS: [CatalogColumn; 4] = [
+    column("schemaname", NAME),
+    column("viewname", NAME),
+    column("viewowner", NAME),
+    column("definition", SqlType::Text),
+];
+
+const MATVIEWS: [CatalogColumn; 7] = [
+    column("schemaname", NAME),
+    column("matviewname", NAME),
+    column("matviewowner", NAME),
+    column("tablespace", NAME),
+    column("hasindexes", SqlType::Boolean),
+    column("ispopulated", SqlType::Boolean),
+    column("definition", SqlType::Text),
+];
 
 const STAT_ACTIVITY: [CatalogColumn; 22] = [
     column("datid", OID),
@@ -346,7 +377,7 @@ const OPFAMILY: [CatalogColumn; 5] = [
 ];
 
 impl MonitoringRelation {
-    pub(crate) const ALL: [Self; 27] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::StatActivity,
         Self::StatDatabase,
         Self::Locks,
@@ -374,6 +405,9 @@ impl MonitoringRelation {
         Self::TsTemplate,
         Self::Conversion,
         Self::Opfamily,
+        Self::Tables,
+        Self::Views,
+        Self::Matviews,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -405,6 +439,9 @@ impl MonitoringRelation {
             Self::TsTemplate => "pg_ts_template",
             Self::Conversion => "pg_conversion",
             Self::Opfamily => "pg_opfamily",
+            Self::Tables => "pg_tables",
+            Self::Views => "pg_views",
+            Self::Matviews => "pg_matviews",
         }
     }
 
@@ -451,6 +488,9 @@ impl MonitoringRelation {
             Self::TsTemplate => &TS_TEMPLATE,
             Self::Conversion => &CONVERSION,
             Self::Opfamily => &OPFAMILY,
+            Self::Tables => &TABLES,
+            Self::Views => &VIEWS,
+            Self::Matviews => &MATVIEWS,
         }
     }
 
@@ -465,6 +505,9 @@ impl MonitoringRelation {
                 | Self::ReplicationSlots
                 | Self::StatReplication
                 | Self::StatUserTables
+                | Self::Tables
+                | Self::Views
+                | Self::Matviews
                 | Self::StatUserIndexes
         )
     }
@@ -564,8 +607,55 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
                     .done()
             })
             .collect(),
+        MonitoringRelation::Tables => table_rows(snapshot),
+        MonitoringRelation::Views => view_rows(snapshot),
         _ => Vec::new(),
     }
+}
+
+fn table_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .relations
+        .iter()
+        .enumerate()
+        .filter_map(|(at, entry)| {
+            let table = entry.table()?;
+            let has_indexes = !table.primary_key.is_empty() || !table.indexes.is_empty();
+            let has_triggers = snapshot
+                .triggers
+                .iter()
+                .any(|trigger| trigger.relation == at);
+            Some(
+                CatalogRow::new(&TABLES)
+                    .set("schemaname", Value::Text(entry.schema.clone()))
+                    .set("tablename", Value::Text(entry.name.clone()))
+                    .set("tableowner", Value::Text(session_user_name()))
+                    .set("hasindexes", Value::Boolean(has_indexes))
+                    .set("hasrules", Value::Boolean(false))
+                    .set("hastriggers", Value::Boolean(has_triggers))
+                    .set("rowsecurity", Value::Boolean(false))
+                    .done(),
+            )
+        })
+        .collect()
+}
+
+fn view_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .relations
+        .iter()
+        .filter_map(|entry| match &entry.source {
+            super::snapshot::RelationSource::View(view) => Some(
+                CatalogRow::new(&VIEWS)
+                    .set("schemaname", Value::Text(entry.schema.clone()))
+                    .set("viewname", Value::Text(entry.name.clone()))
+                    .set("viewowner", Value::Text(session_user_name()))
+                    .set("definition", Value::Text(view.query.clone()))
+                    .done(),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The result type of an administration function, if `name` is one.

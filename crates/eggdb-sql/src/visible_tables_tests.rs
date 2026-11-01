@@ -154,7 +154,7 @@ fn every_catalog_leaves_out_what_is_hidden() {
             &mut session,
             "SELECT relname FROM pg_catalog.pg_class WHERE relname IN ('users', 'secrets', 'leaky', 'notes', 'users_id_seq', 'loose_seq', 'secrets_by_text') ORDER BY relname"
         ),
-        "relname\nleaky\nnotes\nusers\nSELECT 3"
+        "relname\nleaky\nnotes\nusers\nusers_id_seq\nSELECT 4"
     );
     assert_eq!(
         last(
@@ -224,7 +224,10 @@ fn every_catalog_leaves_out_what_is_hidden() {
             &mut |result| rendered.push(render(&result)),
         )
         .unwrap();
-    assert_eq!(rendered.last().unwrap(), "SEQUENCE_NAME\nSELECT 0");
+    assert_eq!(
+        rendered.last().unwrap(),
+        "SEQUENCE_NAME\nUSERS_ID_SEQ\nSELECT 1"
+    );
     assert!(
         oracle
             .execute("SELECT * FROM secrets", &mut |_| {})

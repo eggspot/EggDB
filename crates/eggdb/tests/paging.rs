@@ -352,7 +352,8 @@ fn row_list_refuses_views_foreign_cursors_and_missing_tables() {
     );
     assert!(
         error.contains(&format!(
-            "\"fix_command\":\"eggdb table sample {path} sales.totals\""
+            "\"fix_command\":\"eggdb table sample {} sales.totals\"",
+            path.replace('\\', "\\\\")
         )),
         "{error}"
     );
