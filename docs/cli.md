@@ -2,8 +2,9 @@
 
 `eggdb` works with an EggDB database file from a shell, a script or an AI agent: create a file,
 store, read and remove values, list entries in key order, check the file's health, see its
-statistics, export it to a text file that another database imports, run SQL on it, and serve it
-to psql and PostgreSQL drivers with `eggdb serve`. Every other command opens the file in its own
+statistics, export it to a text file that another database imports, restore another database's
+dump into it, run SQL on it in the PostgreSQL, MySQL, SQLite, Oracle or SQL Server dialect, and
+serve it to PostgreSQL, MySQL and SQL Server clients with `eggdb serve`. Every other command opens the file in its own
 process, like `sqlite3`. The design behind every choice here is
 [ux/cli.md](ux/cli.md) (D15, D90, D93); the embedded Rust API is [embedded.md](embedded.md).
 Installing it is downloading one file: see the README, "Install".
@@ -55,11 +56,11 @@ eggdb <command> <file> [arguments] [options]
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below); with `--table <name> --parquet <out>`, the table's rows as a Parquet file (D202); with `--table <name> --arrow <out>`, as an Apache Arrow IPC stream that pyarrow, Polars and DuckDB read (D240); with `--sql postgresql\|mysql\|sqlserver\|oracle\|sqlite`, every table as plain SQL in that dialect (`CREATE TABLE`, multi-row `INSERT`, `CREATE INDEX`) that the dialect's own client or `eggdb restore` loads; views are counted, not written yet |
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below); with `--csv <file> --table <name>`, a CSV file into a SQL table; with `--parquet <file> --table <name>`, a Parquet file into a SQL table, created from the file's columns when it does not exist (D202) |
-| `sql <file> [-c <sql> \| <script> \| -]` | for writing (`--read-only`: no); `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
+| `sql <file> [-c <sql> \| <script> \| -]` | for writing (`--read-only`: no); `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's, Oracle's or SQL Server's (Transact-SQL) with `--dialect` (below, and [sql.md](sql.md)) |
 | `explain <file> -c <sql>` | read-only | shows the plan for one statement, in its dialect's EXPLAIN form, without running it (below) |
 | `table list\|show\|sample <file> [<table>]` | read-only | lists the tables and views, shows one in full, or prints its first rows (below) |
 | `row list <file> <table>` | read-only | the rows of one table in the order they are stored, a page at a time with `--limit` and `--after` (below) |
-| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184) |
+| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the `mysql` client and MySQL drivers, and with `--tds-listen` to `sqlcmd` and SQL Server drivers over TDS; on a loopback address without TLS, on any address with TLS (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, or with `--dialect mysql` a `mysqldump` file, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
@@ -916,12 +917,12 @@ $ eggdb row list app.db orders --limit 2 --json
 ## `eggdb shell`
 
 ```
-eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle] [--read-only] [--create]
+eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--read-only] [--create]
 ```
 
 One prompt for everything this page and [sql.md](sql.md) do with a file: the key-value
 commands without their `eggdb <command> <file>` prefix, SQL in the PostgreSQL dialect (or
-MySQL's, SQLite's or Oracle's with `--dialect mysql`, `sqlite` or `oracle`; `.schema` then prints
+MySQL's, SQLite's, Oracle's or SQL Server's with `--dialect mysql`, `sqlite`, `oracle` or `sqlserver`; `.schema` then prints
 that dialect's `CREATE TABLE`, and in Oracle's the open transaction is committed when the shell
 ends, as SQL*Plus does; a PL/SQL block or `CREATE PROCEDURE` ends at a line holding `/`,
 `EXEC p` runs a procedure, `SET SERVEROUTPUT ON|OFF` switches the `DBMS_OUTPUT` lines printed
