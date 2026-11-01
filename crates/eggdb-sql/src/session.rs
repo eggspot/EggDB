@@ -2657,6 +2657,11 @@ impl<'s> Session<'s> {
                 sequences::drop_sequences(writer, tables, names, *if_exists, *cascade, dialect)
             }),
             Statement::AlterTable(alter) => self.write("ALTER TABLE", |writer, tables| {
+                if let Some(mut renamed_view) = view_renamed_by(writer, tables, alter, dialect)? {
+                    binding.names(writer, tables, std::slice::from_mut(&mut renamed_view.name))?;
+                    return crate::views::alter_view(writer, tables, &renamed_view, dialect)
+                        .map(|_| QueryResult::command("ALTER TABLE"));
+                }
                 binding.alter_table(writer, tables, alter)?;
                 crate::alter::alter_table(writer, tables, alter, dialect)
             }),
@@ -3380,6 +3385,29 @@ impl<'s> Session<'s> {
             }
         }
     }
+}
+
+fn view_renamed_by(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    alter: &crate::ast::AlterTable,
+    dialect: Dialect,
+) -> SqlResult<Option<crate::ast::AlterView>> {
+    let [crate::ast::AlterAction::RenameTable(new_name)] = alter.actions.as_slice() else {
+        return Ok(None);
+    };
+    if dialect != Dialect::PostgreSql {
+        return Ok(None);
+    }
+    let target = crate::ast::TableReference::named(alter.name.clone(), None);
+    if !crate::updatable_views::is_view(reader, tables, &target)? {
+        return Ok(None);
+    }
+    Ok(Some(crate::ast::AlterView {
+        name: alter.name.clone(),
+        if_exists: alter.if_exists,
+        action: crate::ast::AlterViewAction::RenameTo(new_name.clone()),
+    }))
 }
 
 fn milliseconds_setting(value: &str) -> Option<i64> {

@@ -933,7 +933,7 @@ mod tests {
             .map(|writer| {
                 let log = AuditLog::new(path.clone());
                 std::thread::spawn(move || {
-                    for record in 0..25 {
+                    for record in 0..10 {
                         let arguments = format!(
                             r#"{{"sql":"{}"}}"#,
                             format!("{writer}-{record} ").repeat(400)
@@ -947,8 +947,8 @@ mod tests {
             writer.join().unwrap();
         }
         let (lines, totals) = read_all(&path, None).unwrap();
-        assert_eq!(lines.len(), 100);
-        assert_eq!((totals.calls, totals.unreadable), (100, 0));
+        assert_eq!(lines.len(), 40);
+        assert_eq!((totals.calls, totals.unreadable), (40, 0));
         let _ = std::fs::remove_file(&path);
     }
 

@@ -7,3 +7,6 @@
 /crates/eggdb-redis-compare/target
 /drivers/dotnet/*/obj/
 /drivers/dotnet/*/bin/
+/crates/eggdb/tests/clients/dbt/target/
+/crates/eggdb/tests/clients/dbt/logs/
+/crates/eggdb/tests/clients/dbt/.user.yml

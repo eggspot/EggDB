@@ -2539,6 +2539,35 @@ fn a_table_named_with_the_current_database_is_found_and_another_database_is_refu
 }
 
 #[test]
+fn alter_table_renames_a_view_as_dbt_does_after_building_it() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "CREATE SCHEMA analytics");
+    last(&mut session, "CREATE TABLE orders (id integer)");
+    last(&mut session, "INSERT INTO orders VALUES (1), (2)");
+    last(
+        &mut session,
+        "CREATE VIEW analytics.daily__dbt_tmp AS SELECT id FROM orders",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "ALTER TABLE analytics.daily__dbt_tmp RENAME TO daily"
+        ),
+        "ALTER TABLE"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM analytics.daily"),
+        "count\n2\nSELECT 1"
+    );
+    let other = fails(
+        &mut session,
+        "ALTER TABLE analytics.daily ADD COLUMN extra integer",
+    );
+    assert_eq!(other.state().code(), "42809");
+}
+
+#[test]
 fn identity_columns_show_their_implicit_sequence_in_the_catalog() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

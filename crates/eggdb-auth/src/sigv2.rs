@@ -167,6 +167,26 @@ mod tests {
             verify_query(&signed, "someone else", secret, 1_175_139_000),
             Err(SigV4Error::UnknownAccessKey)
         );
+        let with_subresource = format!("{query}&uploadId=abc");
+        assert_eq!(
+            verify_query(
+                &request(&with_subresource, &headers),
+                "AKIAIOSFODNN7EXAMPLE",
+                secret,
+                1_175_139_000
+            ),
+            Err(SigV4Error::SignatureMismatch)
+        );
+        let amz_header = vec![("x-amz-copy-source".to_owned(), "/other/key".to_owned())];
+        assert_eq!(
+            verify_query(
+                &request(query, &amz_header),
+                "AKIAIOSFODNN7EXAMPLE",
+                secret,
+                1_175_139_000
+            ),
+            Err(SigV4Error::SignatureMismatch)
+        );
         let far = "AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Expires=1185139620&Signature=x";
         assert_eq!(
             verify_query(

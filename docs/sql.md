@@ -2736,7 +2736,8 @@ schemas and the foreign keys that reference them), `ALTER SCHEMA name RENAME TO 
 TO` (accepted). Tables, views, sequences and indexes live in a schema; write `schema.name`
 anywhere a table name goes (`app.t`, `public.t`, `REFERENCES app.t (id)`, `nextval('app.s')`,
 `OWNED BY app.t.id`, `DROP INDEX app.i`, `COMMENT ON COLUMN app.t.c`), and move a table with
-`ALTER TABLE t SET SCHEMA s`. `database.schema.name` works when the database is the one the
+`ALTER TABLE t SET SCHEMA s` (`ALTER TABLE v RENAME TO w` renames a view too, as PostgreSQL
+allows and dbt uses). `database.schema.name` works when the database is the one the
 session is connected to (dbt writes names this way), and is `0A000` for another database; a
 column may be written `schema.table.column`. `public` always exists and cannot be dropped or renamed;
 `pg_catalog`, `information_schema` and names starting with `pg_` are reserved (`42939`). Errors:
