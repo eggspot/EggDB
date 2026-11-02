@@ -378,7 +378,7 @@ impl EggdbSql {
     pub(crate) fn statement_finalized(&self) {
         let _ = self
             .open_statements
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |open| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
                 open.checked_sub(1)
             });
     }

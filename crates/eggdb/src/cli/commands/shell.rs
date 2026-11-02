@@ -192,12 +192,12 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     Ok(exit)
 }
 
-struct Shell<'s> {
+struct Shell<'s, 'db: 's> {
     request: Request,
     file: String,
     stem: String,
-    db: &'s Database,
-    store: &'s SharedWriteStore<'s>,
+    db: &'db Database,
+    store: &'s SharedWriteStore<'db>,
     sql: eggdb_sql::Session<'s>,
     buffer: String,
     entry: String,
@@ -220,11 +220,11 @@ struct CopyFiles {
     show_copy_tag: bool,
 }
 
-impl<'s> Shell<'s> {
+impl<'s, 'db: 's> Shell<'s, 'db> {
     fn new(
         request: Request,
-        db: &'s Database,
-        store: &'s SharedWriteStore<'s>,
+        db: &'db Database,
+        store: &'s SharedWriteStore<'db>,
         terminal: Terminal,
         interactive: bool,
     ) -> Self {
