@@ -29,10 +29,10 @@ impl std::fmt::Debug for DatabaseSwitch {
     }
 }
 
-fn moved_settings(settings: &Settings, database: &str, checked_role: Option<&String>) -> Settings {
+fn moved_settings(settings: &Settings, database: &str) -> Settings {
     let mut moved = settings.clone();
     moved.database = database.to_owned();
-    moved.checked_role = checked_role.cloned();
+    moved.checked_role = None;
     moved.oracle_user_schema = None;
     moved.sqlserver = SqlServerState {
         connection_id: settings.sqlserver.connection_id,
@@ -47,7 +47,7 @@ fn moved_settings(settings: &Settings, database: &str, checked_role: Option<&Str
 
 fn refused_database(role: &str, database: &str, dialect: Dialect) -> SqlError {
     let hint = format!(
-        "Each database keeps its own roles: create the role \"{role}\" with LOGIN in \"{database}\", or connect as a role that may log in there."
+        "Each database keeps its own roles, and a role of one database is never trusted in another by its name: connect to \"{database}\" directly as a role of that database."
     );
     match dialect {
         Dialect::MySql => SqlError::new(
@@ -66,7 +66,9 @@ fn refused_database(role: &str, database: &str, dialect: Dialect) -> SqlError {
             SqlState::INSUFFICIENT_PRIVILEGE,
             format!("permission denied for database \"{database}\""),
         )
-        .with_detail(format!("Role \"{role}\" may not log in to it.")),
+        .with_detail(format!(
+            "Role \"{role}\" logged in to another database and may not move to this one."
+        )),
     }
     .with_hint(hint)
 }
@@ -94,38 +96,25 @@ impl DatabaseSwitch {
 
 impl Session<'_> {
     /// Prepares the switch of this session's client to the served database `database`, whose
-    /// store is `store`. A session that logged in as a stored role takes that role's
-    /// privileges in `database`, since each database keeps its own roles: it is a superuser
-    /// there only when the role is one there, and the switch fails with `42501` (MySQL's
-    /// `1044`, SQL Server's `916`) when the role does not exist there or may not log in. The
-    /// server's own user keeps its rights. The caller closes this session and builds the new
-    /// one with [`DatabaseSwitch::into_session`].
+    /// store is `store`. Only the server's own user moves between databases: a session that
+    /// logged in as a stored role was authenticated by its own database's roles, and another
+    /// database's role of the same name is a different role, so the switch fails with `42501`
+    /// (MySQL's `1044`, SQL Server's `916`) for it. The caller closes this session and builds
+    /// the new one with [`DatabaseSwitch::into_session`].
     pub fn switch_to<S: KeyValueStore>(
         &self,
-        store: &S,
+        _store: &S,
         database: &str,
     ) -> SqlResult<DatabaseSwitch> {
-        let checked_role = match self.stored_login_role() {
-            None => None,
-            Some(role) => {
-                let mut probe = Session::with_dialect(store, self.connection_dialect);
-                let stored = probe.read(|reader, _| crate::roles::stored_role(reader, role))?;
-                let _ = probe.close();
-                match stored.filter(|stored| stored.login) {
-                    None => {
-                        return Err(refused_database(role, database, self.connection_dialect));
-                    }
-                    Some(stored) if stored.superuser => None,
-                    Some(stored) => Some(stored.name),
-                }
-            }
-        };
+        if let Some(role) = self.stored_login_role() {
+            return Err(refused_database(role, database, self.connection_dialect));
+        }
         Ok(DatabaseSwitch {
-            settings: moved_settings(&self.settings, database, checked_role.as_ref()),
+            settings: moved_settings(&self.settings, database),
             connection_settings: self
                 .connection_settings
                 .as_ref()
-                .map(|remembered| moved_settings(remembered, database, checked_role.as_ref())),
+                .map(|remembered| moved_settings(remembered, database)),
             dialect: self.dialect,
             connection_dialect: self.connection_dialect,
             max_value_bytes: self.max_value_bytes,
@@ -168,8 +157,9 @@ impl Session<'_> {
     /// name when `name` is this session's database or one the server serves (ignoring ASCII
     /// case), `Ok(None)` when it is neither. For another database the switch is then
     /// [taken](Session::take_database_switch) by the server; inside a transaction it fails
-    /// with `25001`, and for a session logged in as a stored role that may not log in to it
-    /// ([`ServedDatabases::may_log_in`](crate::ServedDatabases::may_log_in)) with `42501`.
+    /// with `25001`, and for a session logged in as a stored role with `42501`: a stored role
+    /// is trusted only in the database that authenticated it, so it connects to another one
+    /// directly.
     pub fn use_database(&mut self, name: &str) -> SqlResult<Option<String>> {
         if name.eq_ignore_ascii_case(&self.settings.database) {
             return Ok(Some(self.settings.database.clone()));
@@ -180,9 +170,7 @@ impl Session<'_> {
         let Some(database) = served.matching_name(name) else {
             return Ok(None);
         };
-        if let Some(role) = self.stored_login_role()
-            && !served.may_log_in(&database, role)
-        {
+        if let Some(role) = self.stored_login_role() {
             return Err(refused_database(role, &database, self.connection_dialect));
         }
         if self.in_block() {
@@ -206,7 +194,7 @@ mod tests {
 
     struct Logins {
         databases: [&'static str; 3],
-        logins: [(&'static str, &'static str); 2],
+        superusers: [(&'static str, &'static str); 2],
     }
 
     impl ServedDatabases for Logins {
@@ -225,8 +213,8 @@ mod tests {
             Err(ServedDatabaseError::Unsupported("fixed".to_owned()))
         }
 
-        fn may_log_in(&self, name: &str, role: &str) -> bool {
-            self.logins
+        fn is_superuser_in(&self, name: &str, role: &str) -> bool {
+            self.superusers
                 .iter()
                 .any(|(database, login)| database.eq_ignore_ascii_case(name) && *login == role)
         }
@@ -272,55 +260,53 @@ mod tests {
     }
 
     #[test]
-    fn a_superuser_of_one_database_takes_only_the_privileges_its_role_has_in_the_target() {
+    fn a_stored_role_never_moves_to_another_database_even_where_its_name_is_a_role() {
         let databases = three_databases();
-        let mut boss = Session::with_dialect(&databases.main, Dialect::MySql);
-        boss.identify_role("boss", "main").unwrap();
-        let switch = boss.switch_to(&databases.ours, "ours").unwrap();
-        let _ = boss.close();
-        let mut moved = switch.into_session(&databases.ours);
-        let refused = run(&mut moved, "SELECT id FROM secrets").unwrap_err();
-        assert!(refused.message().contains("permission denied"), "{refused}");
-        assert_eq!(
-            moved.settings.checked_role.as_deref(),
-            Some("boss"),
-            "the role is checked in the target"
-        );
-    }
-
-    #[test]
-    fn a_role_that_may_not_log_in_to_the_target_is_refused_with_each_protocols_error() {
-        let databases = three_databases();
-        for (dialect, code) in [(Dialect::MySql, 1044), (Dialect::SqlServer, 916)] {
-            let mut boss = Session::with_dialect(&databases.main, dialect);
-            boss.identify_role("boss", "main").unwrap();
-            let refused = boss.switch_to(&databases.theirs, "theirs").unwrap_err();
-            assert_eq!(refused.state(), SqlState::INSUFFICIENT_PRIVILEGE);
-            assert_eq!(refused.vendor_code(), Some(code));
-            let _ = boss.close();
+        for (dialect, code) in [
+            (Dialect::MySql, Some(1044)),
+            (Dialect::SqlServer, Some(916)),
+            (Dialect::PostgreSql, None),
+        ] {
+            for (target, store) in [("ours", &databases.ours), ("theirs", &databases.theirs)] {
+                let mut boss = Session::with_dialect(&databases.main, dialect);
+                boss.identify_role("boss", "main").unwrap();
+                let refused = boss.switch_to(store, target).unwrap_err();
+                assert_eq!(refused.state(), SqlState::INSUFFICIENT_PRIVILEGE);
+                assert_eq!(refused.vendor_code(), code, "{dialect:?} {target}");
+                assert!(
+                    refused.hint().is_some_and(|hint| hint.contains("directly")),
+                    "{refused:?}"
+                );
+                let _ = boss.close();
+            }
         }
-        let mut postgres = Session::new(&databases.main);
-        postgres.identify_role("boss", "main").unwrap();
-        let refused = postgres.switch_to(&databases.theirs, "theirs").unwrap_err();
-        assert_eq!(refused.state(), SqlState::INSUFFICIENT_PRIVILEGE);
-        assert_eq!(refused.vendor_code(), None);
     }
 
     #[test]
-    fn use_refuses_a_database_the_role_may_not_log_in_to_before_the_switch() {
+    fn a_role_named_like_another_databases_superuser_cannot_use_or_drop_that_database() {
         let databases = three_databases();
+        prepared(
+            &databases.main,
+            "CREATE ROLE keeper LOGIN SUPERUSER PASSWORD 'mine'",
+        );
         let served = Logins {
             databases: ["main", "ours", "theirs"],
-            logins: [("main", "boss"), ("ours", "boss")],
+            superusers: [("main", "keeper"), ("theirs", "keeper")],
         };
-        let mut boss = Session::with_dialect(&databases.main, Dialect::SqlServer);
-        boss.identify_role("boss", "main").unwrap();
-        boss.set_served_databases(&served);
-        let refused = run(&mut boss, "USE theirs").unwrap_err();
+        let mut keeper = Session::with_dialect(&databases.main, Dialect::SqlServer);
+        keeper.identify_role("keeper", "main").unwrap();
+        keeper.set_served_databases(&served);
+        let refused = run(&mut keeper, "USE theirs").unwrap_err();
         assert_eq!(refused.vendor_code(), Some(916));
-        assert_eq!(boss.take_database_switch(), None);
-        run(&mut boss, "USE ours").unwrap();
-        assert_eq!(boss.take_database_switch().as_deref(), Some("ours"));
+        assert_eq!(keeper.take_database_switch(), None);
+        let refused = run(&mut keeper, "DROP DATABASE theirs").unwrap_err();
+        assert_eq!(
+            refused.state(),
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            "{refused}"
+        );
+        run(&mut keeper, "USE main").unwrap();
+        assert_eq!(keeper.take_database_switch(), None);
     }
 
     #[test]

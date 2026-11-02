@@ -185,11 +185,6 @@ impl ServedDatabases for ServedDirectory<'_> {
         self.stored_role_in(name, role)
             .is_some_and(|stored| stored.login && stored.superuser)
     }
-
-    fn may_log_in(&self, name: &str, role: &str) -> bool {
-        self.stored_role_in(name, role)
-            .is_some_and(|stored| stored.login)
-    }
 }
 
 impl ServedDirectory<'_> {

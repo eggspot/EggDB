@@ -52,19 +52,11 @@ pub trait ServedDatabases: Sync {
     }
 
     /// Whether `role` is a stored role that may log in to, and is a superuser of, the served
-    /// database named `name` (ignoring ASCII case), whose own roles decide: `DROP DATABASE` by
-    /// a session that logged in as a stored role needs it, since each database keeps its own
-    /// roles. `false`, the default, for a server that cannot read another database's roles.
+    /// database named `name` (ignoring ASCII case), whose own roles decide. A session that
+    /// logged in as a stored role drops only the database it logged in to, and only when this
+    /// holds there: another database's role of the same name is a different role. `false`,
+    /// the default, for a server that cannot read another database's roles.
     fn is_superuser_in(&self, name: &str, role: &str) -> bool {
-        let _ = (name, role);
-        false
-    }
-
-    /// Whether `role` is a stored role that may log in to the served database named `name`
-    /// (ignoring ASCII case), whose own roles decide: `USE` by a session that logged in as a
-    /// stored role needs it, since each database keeps its own roles. `false`, the default,
-    /// for a server that cannot read another database's roles.
-    fn may_log_in(&self, name: &str, role: &str) -> bool {
         let _ = (name, role);
         false
     }
@@ -280,9 +272,10 @@ fn may_drop(
 ) -> bool {
     match context.login_role {
         None => context.superuser,
-        Some(role) => served
-            .matching_name(name)
-            .is_none_or(|target| served.is_superuser_in(&target, role)),
+        Some(role) => served.matching_name(name).is_none_or(|target| {
+            target.eq_ignore_ascii_case(context.current_database)
+                && served.is_superuser_in(&target, role)
+        }),
     }
 }
 
@@ -550,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn a_superuser_of_one_database_drops_only_databases_where_it_is_a_superuser_too() {
+    fn a_stored_role_drops_no_other_database_even_where_a_role_of_its_name_is_a_superuser() {
         let store = MemoryStore::default();
         let mut served = Served::with(&[("main", 1), ("theirs", 0), ("ours", 0)]);
         served.superusers = vec![("ours", "boss"), ("main", "boss")];
@@ -562,13 +555,16 @@ mod tests {
         assert_eq!(code(&mut boss, "DROP DATABASE theirs"), "42501");
         assert_eq!(code(&mut boss, "DROP DATABASE THEIRS"), "42501");
         assert!(served.names().contains(&"theirs".to_owned()));
-        run(&mut boss, "DROP DATABASE ours").unwrap();
+        assert_eq!(code(&mut boss, "DROP DATABASE ours"), "42501");
+        assert_eq!(code(&mut boss, "DROP DATABASE Ours"), "42501");
+        assert!(served.names().contains(&"ours".to_owned()));
         assert_eq!(code(&mut boss, "DROP DATABASE nowhere"), "3D000");
         run(&mut boss, "DROP DATABASE IF EXISTS nowhere").unwrap();
         let mut owner = Session::new(&store);
         owner.identify("eggdb", "main");
         owner.set_served_databases(&served);
         run(&mut owner, "DROP DATABASE theirs").unwrap();
+        run(&mut owner, "DROP DATABASE ours").unwrap();
         assert_eq!(served.names(), ["main"]);
     }
 
