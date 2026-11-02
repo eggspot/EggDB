@@ -1841,6 +1841,92 @@ fn every_join_method_agrees_on_random_tables() {
 }
 
 #[test]
+fn hash_joins_keep_every_column_read_after_the_join() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE l (id integer PRIMARY KEY, k integer, v text);
+         CREATE TABLE r (id integer PRIMARY KEY, k integer, w integer, t text);
+         CREATE TABLE h (k integer, w integer, t text)",
+    );
+    let mut random = Seeded(0x2545_F491_4F6C_DD1D);
+    let value = |random: &mut Seeded| {
+        if random.below(5) == 0 {
+            "NULL".to_owned()
+        } else {
+            random.below(15).to_string()
+        }
+    };
+    for id in 0..80 {
+        let k = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO l VALUES ({id}, {k}, 'v{id}')"),
+        );
+        let k = value(&mut random);
+        let w = value(&mut random);
+        last(
+            &mut session,
+            &format!(
+                "INSERT INTO r VALUES ({id}, {k}, {w}, 'r{id}'); INSERT INTO h VALUES ({k}, {w}, 'h{id}')"
+            ),
+        );
+    }
+    let pairs = [
+        (
+            "SELECT count(*), sum(l.id) FROM l JOIN r ON r.id = l.k WHERE r.w > 3",
+            "SELECT count(*), sum(l.id) FROM l JOIN r ON r.id + 0 = l.k WHERE r.w > 3",
+        ),
+        (
+            "SELECT l.id, r.w, r.t FROM l JOIN r ON r.id = l.k WHERE r.w > 3 ORDER BY 1",
+            "SELECT l.id, r.w, r.t FROM l JOIN r ON r.id + 0 = l.k WHERE r.w > 3 ORDER BY 1",
+        ),
+        (
+            "SELECT l.id, m.t FROM l JOIN r ON r.id = l.k JOIN r m ON m.id = r.k ORDER BY 1, 2",
+            "SELECT l.id, m.t FROM l JOIN r ON r.id + 0 = l.k JOIN r m ON m.id + 0 = r.k ORDER BY 1, 2",
+        ),
+        (
+            "SELECT l.id FROM l JOIN r ON r.id = l.k JOIN h ON h.k = l.id WHERE r.w = h.w ORDER BY 1",
+            "SELECT l.id FROM l JOIN r ON r.id + 0 = l.k JOIN h ON h.k + 0 = l.id WHERE r.w = h.w ORDER BY 1",
+        ),
+        (
+            "SELECT count(*) FROM l JOIN r ON r.id = l.k GROUP BY r.w ORDER BY r.w",
+            "SELECT count(*) FROM l JOIN r ON r.id + 0 = l.k GROUP BY r.w ORDER BY r.w",
+        ),
+        (
+            "SELECT l.id FROM l JOIN r ON r.id = l.k ORDER BY r.t, l.id",
+            "SELECT l.id FROM l JOIN r ON r.id + 0 = l.k ORDER BY r.t, l.id",
+        ),
+        (
+            "SELECT r.* FROM l JOIN r ON r.id = l.k ORDER BY r.id, l.id",
+            "SELECT r.* FROM l JOIN r ON r.id + 0 = l.k ORDER BY r.id, l.id",
+        ),
+        (
+            "SELECT l.id, r.w FROM l LEFT JOIN r ON r.id = l.k WHERE r.w IS NULL ORDER BY 1",
+            "SELECT l.id, r.w FROM l LEFT JOIN r ON r.id + 0 = l.k WHERE r.w IS NULL ORDER BY 1",
+        ),
+        (
+            "SELECT count(*), sum(l.id), max(h.t) FROM l JOIN h ON h.k = l.k WHERE h.w > 5",
+            "SELECT count(*), sum(l.id), max(h.t) FROM l JOIN h ON h.k + 0 = l.k WHERE h.w > 5",
+        ),
+        (
+            "SELECT l.id, h.t FROM l JOIN h ON h.k = l.k AND h.w < l.id ORDER BY 1, 2",
+            "SELECT l.id, h.t FROM l JOIN h ON h.k + 0 = l.k AND h.w < l.id ORDER BY 1, 2",
+        ),
+        (
+            "SELECT l.id FROM l JOIN r ON r.id = l.k WHERE EXISTS (SELECT 1 FROM h WHERE h.w = r.w) ORDER BY 1",
+            "SELECT l.id FROM l JOIN r ON r.id + 0 = l.k WHERE EXISTS (SELECT 1 FROM h WHERE h.w = r.w) ORDER BY 1",
+        ),
+    ];
+    for (hashed, looped) in pairs {
+        let expected = last(&mut session, looped);
+        assert!(expected.contains("SELECT"), "{looped}: {expected}");
+        assert_eq!(last(&mut session, hashed), expected, "{hashed}");
+    }
+}
+
+#[test]
 fn where_equalities_join_comma_and_cross_joined_tables_like_on_conditions() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
