@@ -118,6 +118,9 @@ fn added_function_type(
     if let Some(sql_type) = crate::advisory_locks::result_type(name) {
         return Some(Some(sql_type));
     }
+    if matches!(name, "pg_sleep" | "pg_notify") {
+        return Some(Some(SqlType::VOID));
+    }
     let argument_type = |at: usize| {
         arguments
             .get(at)
@@ -150,8 +153,6 @@ fn added_function_type(
         | "jsonb_pretty"
         | "json_extract_path_text"
         | "jsonb_extract_path_text"
-        | "pg_sleep"
-        | "pg_notify"
         | "to_tsvector"
         | "to_tsquery"
         | "plainto_tsquery"

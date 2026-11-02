@@ -1726,7 +1726,9 @@ ARRAY`, in `CREATE TABLE`, `ALTER TABLE ... ADD COLUMN` and views) store one-dim
 of every element type above; arrays of `name`, `oid`, `"char"`, `aclitem`, `int2vector` and
 `oidvector` stay catalog-only (`0A000` as a column). An array given to a text column is stored as
 its text. Multidimensional arrays, slices (`a[1:2]`), bounds in literals
-(`[1:2]={...}`), arrays of other element types and array parameters answer `0A000`. An array may
+(`[1:2]={...}`) and arrays of other element types answer `0A000`. Parameters declared with an
+array type OID (`int4[]`, `text[]` and every array a column can hold) bind in the text and binary
+formats (DNEW-R-45). An array may
 hold at most 2^27 elements (`54000`) and counts against the session's value limit.
 
 **Expressions**
@@ -3123,12 +3125,15 @@ pooled connections, an `int[]` column, a rolled-back and a committed transaction
 batch that fails half way and leaves nothing, and `SELECT pg_sleep(30)` cancelled after one
 second.
 
-Known differences: Npgsql resets a connection that holds prepared statements (after
-`NpgsqlCommand.Prepare()`, or with `Max Auto Prepare` set) with `SET SESSION AUTHORIZATION
-DEFAULT`, `CLOSE ALL`, `UNLISTEN *` and `pg_advisory_unlock_all()`, which EggDB does not run
-yet: such apps add `No Reset On Close=true` to their connection string for now. Array
-parameters are not supported yet (array results are). `pg_sleep`'s result column is `text`
-where PostgreSQL's is `void`.
+Npgsql resets a connection that holds prepared statements (after `NpgsqlCommand.Prepare()`, or
+with `Max Auto Prepare` set) with one query of `SET SESSION AUTHORIZATION DEFAULT`, `RESET ALL`,
+`CLOSE ALL`, `UNLISTEN *`, `SELECT pg_advisory_unlock_all()`, `DISCARD SEQUENCES` and `DISCARD
+TEMP`, which runs and keeps the prepared statements. `SET SESSION AUTHORIZATION` takes
+`DEFAULT` or the session's own user (`0A000` for another). Array parameters bind in the text and
+binary formats with PostgreSQL's array type OIDs, and `pg_sleep`, `pg_notify`, the waiting
+advisory lock functions, `pg_advisory_unlock_all()` and functions declared `RETURNS void` report
+the `void` type (OID 2278) (DNEW-R-45). Known difference: a function returning `void` yields
+NULL where PostgreSQL yields an empty value.
 
 ## ORMs and migration tools
 
@@ -3165,7 +3170,7 @@ D138):
 releases the session's session-level locks. They are held by the session in one table for every
 session over the same database: session-level locks count re-entries and last until unlocked or
 until the session ends, transaction-level locks until the transaction ends (the statement, outside
-one). The functions that wait return an empty `text` where PostgreSQL returns `void`.
+one). The functions that wait and `pg_advisory_unlock_all()` return `void`.
 
 CI's `pg-apps` job runs the ORM section of `crates/eggdb/tests/clients/python/app_check.py` and
 `crates/eggdb/tests/clients/java/FlywayCheck.java` (with the migrations in
@@ -3558,7 +3563,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   hold a window function in its select list (`0A000`).
 - Arrays and set-returning functions (D128): arrays cannot be stored in a table or a view, have
   one dimension, and take the element types above; `x[1:2]`, `'[1:2]={1,2}'`, `ARRAY[[1, 2]]`
-  and array parameters answer `0A000`. Set-returning functions run in `FROM` and as select-list
+  answer `0A000`. Set-returning functions run in `FROM` and as select-list
   items; several of them in one select list run in lock-step, each input row giving as many rows
   as the longest one, the others padded with NULL, as in PostgreSQL 10 and later (D131); one
   inside an expression is `0A000`, and a function in `FROM` cannot name an item after it in the

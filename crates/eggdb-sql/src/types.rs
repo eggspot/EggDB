@@ -350,6 +350,8 @@ impl SqlType {
         precision: None,
     };
 
+    pub(crate) const VOID: Self = Self::Catalog(crate::pg_catalog::CatalogType::Void);
+
     fn integer_range(self) -> Option<(i64, i64)> {
         match self {
             Self::SmallInt => Some((i16::MIN.into(), i16::MAX.into())),

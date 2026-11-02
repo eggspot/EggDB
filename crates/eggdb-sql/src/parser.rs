@@ -1035,7 +1035,7 @@ impl<'t> Parser<'t> {
         if self.is_word("local") {
             return Err(self.not_supported("SET LOCAL"));
         }
-        let _ = self.take_word("session");
+        let session = self.take_word("session");
         if self.is_word("characteristics") || self.is_word("transaction") {
             return self.set_transaction();
         }
@@ -1044,6 +1044,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("constraints") {
             return self.set_constraints();
+        }
+        if session && self.postgresql() && self.is_word("authorization") {
+            return self.set_session_authorization();
         }
         if self.is_word("authorization") || self.is_word("constraints") {
             return Err(self.not_supported(&format!(
@@ -1099,13 +1102,42 @@ impl<'t> Parser<'t> {
             }
             _ => self.name()?.text,
         };
+        self.set_to_the_session_user("SET ROLE", &role, position)
+    }
+
+    fn set_session_authorization(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        if self.take_word("default") {
+            return Ok(Statement::Ignored {
+                tag: "SET",
+                notice: None,
+            });
+        }
+        let position = self.position();
+        let user = match self.peek_kind() {
+            TokenKind::String(text) => {
+                let text = text.as_ref().to_owned();
+                self.at += 1;
+                text
+            }
+            _ => self.name()?.text,
+        };
+        self.set_to_the_session_user("SET SESSION AUTHORIZATION", &user, position)
+    }
+
+    fn set_to_the_session_user(
+        &self,
+        statement: &str,
+        role: &str,
+        position: usize,
+    ) -> SqlResult<Statement> {
         let user = self
             .settings
             .and_then(|settings| settings.get("session_authorization").ok());
         if user.is_some_and(|user| user != role) {
-            return Err(SqlError::not_supported(
-                "SET ROLE to a role other than the session's user is not supported yet",
-            )
+            return Err(SqlError::not_supported(format!(
+                "{statement} to a role other than the session's user is not supported yet"
+            ))
             .at(position));
         }
         Ok(Statement::Ignored {
@@ -1298,7 +1330,11 @@ impl<'t> Parser<'t> {
         if self.take_word("all") {
             return Ok(Statement::Reset { name: None });
         }
-        if self.take_word("role") {
+        let session_authorization = self.is_word("session") && self.is_word_at(1, "authorization");
+        if session_authorization {
+            self.at += 2;
+        }
+        if session_authorization || self.take_word("role") {
             return Ok(Statement::Ignored {
                 tag: "RESET",
                 notice: None,

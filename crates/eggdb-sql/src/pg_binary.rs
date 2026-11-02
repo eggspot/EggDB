@@ -469,6 +469,12 @@ fn four(bytes: &[u8]) -> [u8; 4] {
 /// `oid`, as the SQL layer reads a constant of that type: `22P03` when the bytes do not fit
 /// the form, `0A000` for a type whose binary form EggDB does not read.
 pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
+    if let Some(element) = ArrayElement::of_array_oid(oid) {
+        let array = decode_array(bytes, element)?;
+        return Ok(Value::Array(Box::new(array))
+            .to_text_in(TimeZone::UTC)
+            .unwrap_or_default());
+    }
     let value = match oid {
         BOOL_OID => match fixed(bytes, 1)?[0] {
             0 => Value::Boolean(false),
@@ -540,7 +546,10 @@ pub(crate) fn writes_binary(sql_type: SqlType) -> bool {
         SqlType::Defined(defined) => matches!(defined.kind, DefinedKind::Enum | DefinedKind::Base),
         SqlType::Catalog(kind) => !matches!(
             kind,
-            CatalogType::NodeTree | CatalogType::AclItem | CatalogType::AnyArray
+            CatalogType::NodeTree
+                | CatalogType::AclItem
+                | CatalogType::AnyArray
+                | CatalogType::Pseudo(_)
         ),
         SqlType::Array(element) => element != ArrayElement::AclItem,
         _ => true,
@@ -564,6 +573,20 @@ fn header_word(bytes: &[u8], at: usize) -> SqlResult<i32> {
         .get(at..at + 4)
         .map(|word| i32::from_be_bytes(four(word)))
         .ok_or_else(incorrect_binary)
+}
+
+pub(crate) fn decode_array(bytes: &[u8], element: ArrayElement) -> SqlResult<ArrayValue> {
+    let (lower_bound, texts) = decode_array_texts(bytes, element)?;
+    let items = texts
+        .iter()
+        .map(|text| match text {
+            None => Ok(Value::Null),
+            Some(text) => crate::eval::string_constant(text, Some(element.sql_type())),
+        })
+        .collect::<SqlResult<Vec<_>>>()?;
+    let mut array = ArrayValue::new(element, items);
+    array.lower_bound = lower_bound;
+    Ok(array)
 }
 
 pub(crate) fn decode_array_texts(

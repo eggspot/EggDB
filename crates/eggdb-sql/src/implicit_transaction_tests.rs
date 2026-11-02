@@ -1,6 +1,6 @@
 use crate::memory_store::MemoryStore;
 use crate::tests::render;
-use crate::{Session, SqlError, TransactionStatus};
+use crate::{ArrayElement, Parameter, Session, SqlError, SqlType, TransactionStatus};
 
 fn run(session: &mut Session<'_>, sql: &str) -> Result<Vec<String>, SqlError> {
     let mut outputs = Vec::new();
@@ -213,4 +213,187 @@ fn notifications_of_an_implicit_transaction_are_sent_when_it_commits() {
     last(&mut session, "NOTIFY jobs, 'two'");
     session.roll_back_implicit_transaction().unwrap();
     assert!(session.take_notifications().is_empty());
+}
+
+const NPGSQL_RESET: &str = "SET SESSION AUTHORIZATION DEFAULT;RESET ALL;CLOSE ALL;UNLISTEN *;\
+                            SELECT pg_advisory_unlock_all();DISCARD SEQUENCES;DISCARD TEMP";
+
+#[test]
+fn npgsqls_reset_of_a_connection_holding_prepared_statements_runs_as_one_query() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let mut other = Session::new(&store);
+    session.set_parameter("application_name", "npgsql").unwrap();
+    session.remember_connection_settings();
+    last(&mut session, "SET application_name = 'other'");
+    last(&mut session, "LISTEN jobs");
+    last(&mut session, "SELECT pg_advisory_lock(7)");
+    last(&mut session, "CREATE SEQUENCE s");
+    last(&mut session, "SELECT nextval('s')");
+    session.start_implicit_transaction();
+    let outputs = run(&mut session, NPGSQL_RESET).unwrap();
+    session.commit_implicit_transaction().unwrap();
+    assert_eq!(
+        outputs,
+        [
+            "SET",
+            "RESET",
+            "CLOSE CURSOR ALL",
+            "UNLISTEN",
+            "pg_advisory_unlock_all\n\nSELECT 1",
+            "DISCARD SEQUENCES",
+            "DISCARD TEMP"
+        ]
+    );
+    assert_eq!(session.parameter("application_name").unwrap(), "npgsql");
+    assert_eq!(state(&mut session, "SELECT currval('s')"), "55000");
+    assert_eq!(
+        last(&mut other, "SELECT pg_try_advisory_lock(7)"),
+        "pg_try_advisory_lock\nt\nSELECT 1"
+    );
+}
+
+#[test]
+fn session_authorization_is_set_and_reset_only_to_the_sessions_own_user() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let user = session.parameter("session_authorization").unwrap();
+    assert_eq!(last(&mut session, "SET SESSION AUTHORIZATION DEFAULT"), "SET");
+    assert_eq!(state(&mut session, "SET AUTHORIZATION DEFAULT"), "0A000");
+    assert_eq!(
+        last(&mut session, &format!("SET SESSION AUTHORIZATION '{user}'")),
+        "SET"
+    );
+    assert_eq!(
+        last(&mut session, &format!("SET SESSION AUTHORIZATION \"{user}\"")),
+        "SET"
+    );
+    assert_eq!(last(&mut session, "RESET SESSION AUTHORIZATION"), "RESET");
+    assert_eq!(
+        state(&mut session, "SET SESSION AUTHORIZATION someone_else"),
+        "0A000"
+    );
+    assert_eq!(
+        session.parameter("session_authorization").unwrap(),
+        user
+    );
+    assert_eq!(state(&mut session, "SET SESSION AUTHORIZATION"), "42601");
+}
+
+fn first_column_type(session: &mut Session<'_>, sql: &str) -> Option<SqlType> {
+    let mut found = None;
+    session
+        .execute(sql, &mut |result| {
+            found = result
+                .columns
+                .as_ref()
+                .and_then(|columns| columns.first())
+                .and_then(|column| column.sql_type);
+        })
+        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    found
+}
+
+#[test]
+fn functions_that_return_nothing_report_the_void_type() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let void = Some(SqlType::Catalog(crate::CatalogType::Void));
+    for sql in [
+        "SELECT pg_advisory_unlock_all()",
+        "SELECT pg_advisory_lock(1)",
+        "SELECT pg_advisory_xact_lock(2)",
+        "SELECT pg_sleep(0)",
+        "SELECT pg_notify('jobs', 'x')",
+    ] {
+        assert_eq!(first_column_type(&mut session, sql), void, "{sql}");
+    }
+    assert_eq!(
+        first_column_type(&mut session, "SELECT pg_try_advisory_lock(3)"),
+        Some(SqlType::Boolean)
+    );
+    last(
+        &mut session,
+        "CREATE FUNCTION nothing() RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$",
+    );
+    assert_eq!(first_column_type(&mut session, "SELECT nothing()"), void);
+    assert_eq!(
+        last(&mut session, "SELECT typname, typtype, typlen FROM pg_type WHERE oid = 2278"),
+        "typname|typtype|typlen\nvoid|p|4\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT 'void'::regtype::oid AS o, ''::void AS v"),
+        "o|v\n2278|\nSELECT 1"
+    );
+}
+
+fn prepared_rows(session: &mut Session<'_>, sql: &str, parameters: &[Parameter]) -> String {
+    let mut outputs = Vec::new();
+    session
+        .execute_prepared(sql, parameters, &mut |result| {
+            outputs.push(render(&result));
+            true
+        })
+        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    outputs.pop().unwrap_or_default()
+}
+
+fn array_parameter(element: ArrayElement, text: &str) -> Parameter {
+    Parameter {
+        declared_type: Some(SqlType::Array(element)),
+        value: Some(text.to_owned()),
+    }
+}
+
+#[test]
+fn array_parameters_bind_as_arrays_of_their_declared_element_type() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE tagged (id integer PRIMARY KEY, tags text[], scores bigint[])",
+    );
+    let inserted = prepared_rows(
+        &mut session,
+        "INSERT INTO tagged VALUES ($1, $2, $3)",
+        &[
+            Parameter {
+                declared_type: Some(SqlType::Integer),
+                value: Some("1".to_owned()),
+            },
+            array_parameter(ArrayElement::Text, "{a,\"b c\",NULL}"),
+            array_parameter(ArrayElement::BigInt, "{7,-1}"),
+        ],
+    );
+    assert_eq!(inserted, "INSERT 0 1");
+    assert_eq!(
+        last(&mut session, "SELECT tags, scores, cardinality(tags) FROM tagged"),
+        "tags|scores|cardinality\n{a,\"b c\",NULL}|{7,-1}|3\nSELECT 1"
+    );
+    assert_eq!(
+        prepared_rows(
+            &mut session,
+            "SELECT id FROM tagged WHERE id = ANY($1)",
+            &[array_parameter(ArrayElement::Integer, "{3,1}")],
+        ),
+        "id\n1\nSELECT 1"
+    );
+    assert_eq!(
+        prepared_rows(
+            &mut session,
+            "SELECT $1",
+            &[array_parameter(ArrayElement::Integer, "{}")],
+        ),
+        "?column?\n{}\nSELECT 1"
+    );
+    let mut outputs = Vec::new();
+    let refused = session.execute_prepared(
+        "SELECT $1",
+        &[array_parameter(ArrayElement::Integer, "{1,x}")],
+        &mut |result| {
+            outputs.push(render(&result));
+            true
+        },
+    );
+    assert_eq!(refused.unwrap_err().state().code(), "22P02");
 }

@@ -20,10 +20,76 @@ pub enum CatalogType {
     Xid,
     /// `aclitem`: an access privilege; always NULL in EggDB's catalog.
     AclItem,
-    /// `anyarray`: an array of any type; always NULL in EggDB's catalog.
+    /// `anyarray`: an array of any type; always NULL in EggDB's catalog, and a polymorphic
+    /// parameter or result type of a routine.
     AnyArray,
+    /// Another polymorphic pseudo-type of a routine's parameters and result.
+    Pseudo(PseudoType),
+    /// `void`: the result of a function that returns nothing, an empty value.
+    Void,
     /// A `reg*` type: an object identifier shown as the name of the object it identifies.
     Reg(RegKind),
+}
+
+/// A polymorphic pseudo-type a PostgreSQL routine declares for a parameter or its result,
+/// resolved on each call from the types of the arguments it is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoType {
+    /// `anyelement`: any type, the same for every `anyelement` argument.
+    AnyElement,
+    /// `anynonarray`: like `anyelement`, but never an array.
+    AnyNonArray,
+    /// `anyenum`: like `anyelement`, but always an enum type.
+    AnyEnum,
+    /// `anycompatible`: the common type of every `anycompatible` argument.
+    AnyCompatible,
+    /// `anycompatiblearray`: an array of the `anycompatible` type.
+    AnyCompatibleArray,
+    /// `anycompatiblenonarray`: like `anycompatible`, but never an array.
+    AnyCompatibleNonArray,
+}
+
+impl PseudoType {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::AnyElement,
+        Self::AnyNonArray,
+        Self::AnyEnum,
+        Self::AnyCompatible,
+        Self::AnyCompatibleArray,
+        Self::AnyCompatibleNonArray,
+    ];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::AnyElement => "anyelement",
+            Self::AnyNonArray => "anynonarray",
+            Self::AnyEnum => "anyenum",
+            Self::AnyCompatible => "anycompatible",
+            Self::AnyCompatibleArray => "anycompatiblearray",
+            Self::AnyCompatibleNonArray => "anycompatiblenonarray",
+        }
+    }
+
+    pub(crate) fn oid(self) -> u32 {
+        match self {
+            Self::AnyElement => 2283,
+            Self::AnyNonArray => 2776,
+            Self::AnyEnum => 3500,
+            Self::AnyCompatible => 5077,
+            Self::AnyCompatibleArray => 5078,
+            Self::AnyCompatibleNonArray => 5079,
+        }
+    }
+}
+
+pub(crate) fn polymorphic_type_named(word: &str) -> Option<SqlType> {
+    if word == "anyarray" {
+        return Some(SqlType::Catalog(CatalogType::AnyArray));
+    }
+    PseudoType::ALL
+        .into_iter()
+        .find(|pseudo| pseudo.name() == word)
+        .map(|pseudo| SqlType::Catalog(CatalogType::Pseudo(pseudo)))
 }
 
 /// The kind of object a `reg*` value identifies.
@@ -75,6 +141,7 @@ impl CatalogType {
             Self::Xid => "xid",
             Self::AclItem => "aclitem",
             Self::AnyArray => "anyarray",
+            Self::Void => "void",
             Self::Reg(kind) => kind.type_name(),
         }
     }
@@ -102,6 +169,7 @@ pub(crate) fn cast_type_named(word: &str) -> Option<SqlType> {
         "pg_node_tree" => SqlType::Catalog(CatalogType::NodeTree),
         "xid" => SqlType::Catalog(CatalogType::Xid),
         "aclitem" => SqlType::Catalog(CatalogType::AclItem),
+        "void" => SqlType::Catalog(CatalogType::Void),
         "regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
         "regtype" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
         "regnamespace" => SqlType::Catalog(CatalogType::Reg(RegKind::Namespace)),
@@ -212,7 +280,10 @@ pub(crate) fn parse_input(text: &str, kind: CatalogType) -> SqlResult<Value> {
         CatalogType::Name => Ok(Value::Text(truncated_name(text.to_owned()))),
         CatalogType::InternalChar => Ok(Value::Text(first_character(text))),
         CatalogType::NodeTree => Err(node_tree_input()),
-        CatalogType::AclItem | CatalogType::AnyArray => Err(always_null(kind)),
+        CatalogType::AclItem | CatalogType::AnyArray | CatalogType::Pseudo(_) => {
+            Err(always_null(kind))
+        }
+        CatalogType::Void => Ok(Value::Text(String::new())),
         CatalogType::Reg(reg) => super::snapshot::reg_from_text(reg, text).map(boxed),
     }
 }
@@ -330,7 +401,13 @@ pub(crate) fn convert(value: Value, kind: CatalogType, conversion: Conversion) -
             },
         },
         CatalogType::Reg(reg) => reg_value(reg, value),
-        CatalogType::AclItem | CatalogType::AnyArray => Err(always_null(kind)),
+        CatalogType::Void => match value {
+            Value::Text(_) => Ok(Value::Text(String::new())),
+            other => Err(cannot_cast(&other, kind.name())),
+        },
+        CatalogType::AclItem | CatalogType::AnyArray | CatalogType::Pseudo(_) => {
+            Err(always_null(kind))
+        }
     }
 }
 

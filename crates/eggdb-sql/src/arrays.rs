@@ -140,6 +140,16 @@ impl ArrayElement {
             .map(|(element, _)| *element)
     }
 
+    /// The element type of the array type PostgreSQL numbers `oid`, such as `Integer` for
+    /// 1007 (`int4[]`), for the arrays a table column can hold; `None` for any other OID.
+    pub fn of_array_oid(oid: u32) -> Option<Self> {
+        ELEMENT_CODES
+            .iter()
+            .map(|(element, _)| *element)
+            .filter(|element| element.is_storable())
+            .find(|element| crate::pg_catalog::type_oid(SqlType::Array(*element)) == oid)
+    }
+
     pub(crate) fn is_storable(self) -> bool {
         !matches!(
             self,

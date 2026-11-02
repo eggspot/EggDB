@@ -159,7 +159,7 @@ pub fn sql_type_of(oid: u32) -> Option<SqlType> {
         JSONB_OID => SqlType::Jsonb,
         CITEXT_OID => SqlType::Defined(DefinedType::CITEXT),
         HSTORE_OID => SqlType::Defined(DefinedType::HSTORE),
-        _ => return None,
+        oid => return ArrayElement::of_array_oid(oid).map(SqlType::Array),
     })
 }
 
@@ -270,7 +270,7 @@ pub fn decode_parameter(
     format: Format,
     number: usize,
 ) -> Result<String, SqlError> {
-    if ARRAY_OIDS.contains(&oid) {
+    if ARRAY_OIDS.contains(&oid) && ArrayElement::of_array_oid(oid).is_none() {
         return Err(SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
             format!("array parameters (type OID {oid}, parameter ${number}) are not supported yet"),
@@ -437,6 +437,13 @@ mod tests {
         ];
         for (element, oid) in pairs {
             assert_eq!(oid_of(SqlType::Array(element)), oid);
+            assert_eq!(sql_type_of(oid), Some(SqlType::Array(element)));
+            assert_eq!(
+                decode_parameter(b"{1}", oid, Format::Text, 1).unwrap(),
+                "{1}"
+            );
+        }
+        for oid in [1028, 1003, 1002, 1034, 22, 30] {
             assert_eq!(sql_type_of(oid), None);
             assert_eq!(
                 decode_parameter(b"{1}", oid, Format::Text, 1)
@@ -445,6 +452,68 @@ mod tests {
                     .code(),
                 "0A000"
             );
+        }
+    }
+
+    #[test]
+    fn binary_array_parameters_decode_to_postgresqls_array_text() {
+        let integers = Value::Array(Box::new(ArrayValue {
+            element: ArrayElement::Integer,
+            lower_bound: 1,
+            items: vec![Value::Integer(7), Value::Null, Value::Integer(-3)],
+        }));
+        let bytes = encode_value(&integers, INT4_ARRAY_OID, Format::Binary, TimeZone::UTC)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decode_parameter(&bytes, INT4_ARRAY_OID, Format::Binary, 1).unwrap(),
+            "{7,NULL,-3}"
+        );
+        let texts = Value::Array(Box::new(ArrayValue {
+            element: ArrayElement::Text,
+            lower_bound: 1,
+            items: vec![Value::Text("a b".into()), Value::Text("\"q\"".into())],
+        }));
+        let bytes = encode_value(&texts, TEXT_ARRAY_OID, Format::Binary, TimeZone::UTC)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decode_parameter(&bytes, TEXT_ARRAY_OID, Format::Binary, 1).unwrap(),
+            "{\"a b\",\"\\\"q\\\"\"}"
+        );
+        let mut empty = Vec::new();
+        for word in [0i32, 0, 20] {
+            empty.extend_from_slice(&word.to_be_bytes());
+        }
+        assert_eq!(
+            decode_parameter(&empty, INT8_ARRAY_OID, Format::Binary, 1).unwrap(),
+            "{}"
+        );
+        let mut wrong_element = Vec::new();
+        for word in [1i32, 0, 25, 1, 1, 4, 7] {
+            wrong_element.extend_from_slice(&word.to_be_bytes());
+        }
+        assert_eq!(
+            decode_parameter(&wrong_element, INT4_ARRAY_OID, Format::Binary, 1)
+                .unwrap_err()
+                .state()
+                .code(),
+            "42804"
+        );
+        let mut random = 0x0A11_A7ED_0000_0045u64;
+        for _ in 0..20_000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let length = (random % 40) as usize;
+            let mut bytes: Vec<u8> = (0..length)
+                .map(|shift| (random >> (shift % 8 * 8)) as u8)
+                .collect();
+            if let Some(header) = bytes.get_mut(..12) {
+                header[..4].copy_from_slice(&1i32.to_be_bytes());
+                header[8..12].copy_from_slice(&23u32.to_be_bytes());
+            }
+            let _ = decode_parameter(&bytes, INT4_ARRAY_OID, Format::Binary, 1);
         }
     }
 

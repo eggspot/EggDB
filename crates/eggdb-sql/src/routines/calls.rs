@@ -1,3 +1,4 @@
+use super::polymorphic::{self, is_polymorphic, is_polymorphic_array};
 use super::{
     ParameterMode, ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineParameter,
     RoutineReturns, Volatility, resolve,
@@ -797,6 +798,7 @@ fn choose(
     }
     let definition = Arc::clone(definition);
     let arguments = input_arguments(reader, tables, &definition, slots)?;
+    let (definition, arguments) = polymorphic::specialize(tables, definition, arguments)?;
     Ok(Chosen {
         definition,
         arguments,
@@ -854,8 +856,26 @@ fn matched(
             items.push(convert(item, element.sql_type(), Conversion::Assignment).ok()?);
         }
         *slots.get_mut(fixed)? = Some(Value::Array(Box::new(ArrayValue::new(element, items))));
+    } else if let Some(declared) = variadic
+        && is_polymorphic_array(declared)
+        && !spread.is_empty()
+    {
+        score += spread.len();
+        *slots.get_mut(fixed)? = Some(polymorphic::variadic_array(declared, spread)?);
     } else if !spread.is_empty() {
         return None;
+    }
+    if parameters
+        .iter()
+        .any(|parameter| is_polymorphic(parameter.sql_type))
+    {
+        polymorphic::resolve(
+            parameters
+                .iter()
+                .zip(&slots)
+                .filter(|(parameter, _)| parameter.mode.is_input())
+                .map(|(parameter, slot)| (parameter.sql_type, slot.as_ref())),
+        )?;
     }
     let complete = slots.iter().zip(&parameters).all(|(slot, parameter)| {
         slot.is_some()
@@ -866,7 +886,8 @@ fn matched(
 }
 
 fn literal_argument(value: &Value, target: SqlType) -> Value {
-    let text = matches!(value, Value::Text(_)) && target != SqlType::Dynamic;
+    let text =
+        matches!(value, Value::Text(_)) && target != SqlType::Dynamic && !is_polymorphic(target);
     if text && convert(value.clone(), target, Conversion::Assignment).is_err() {
         return convert(value.clone(), target, Conversion::Explicit)
             .unwrap_or_else(|_| value.clone());
@@ -875,7 +896,7 @@ fn literal_argument(value: &Value, target: SqlType) -> Value {
 }
 
 fn fit(value: &Value, target: SqlType) -> Option<usize> {
-    if target == SqlType::Dynamic {
+    if target == SqlType::Dynamic || is_polymorphic(target) {
         return Some(1);
     }
     match value.sql_type() {
@@ -1190,6 +1211,7 @@ fn declared_type(definition: &RoutineDefinition) -> Option<SqlType> {
     match &definition.returns {
         RoutineReturns::One(ReturnType::Type(sql_type))
         | RoutineReturns::Set(ReturnType::Type(sql_type)) => Some(*sql_type),
+        RoutineReturns::One(ReturnType::Void) => Some(SqlType::VOID),
         _ => None,
     }
 }

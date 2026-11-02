@@ -209,15 +209,15 @@ fn request_of(name: &str) -> Option<(Request, Mode, Lasts)> {
 }
 
 /// The type a function of the `pg_advisory_lock` family returns: `boolean` for the `try` and
-/// `unlock` forms, and `text` (an empty value, standing in for PostgreSQL's `void`) for the
-/// ones that wait and for `pg_advisory_unlock_all`.
+/// `unlock` forms, and `void` (an empty value) for the ones that wait and for
+/// `pg_advisory_unlock_all`.
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     if name == "pg_advisory_unlock_all" {
-        return Some(SqlType::Text);
+        return Some(SqlType::VOID);
     }
     let (request, _, _) = request_of(name)?;
     Some(match request {
-        Request::Wait => SqlType::Text,
+        Request::Wait => SqlType::VOID,
         Request::Try | Request::Unlock => SqlType::Boolean,
     })
 }

@@ -1,6 +1,6 @@
-//! Implicit transactions, portals that end with them, `DISCARD ALL`, `CancelRequest` and
-//! Npgsql's type-loading queries, spoken over a real loopback socket by the minimal client in
-//! `common`.
+//! Implicit transactions, portals that end with them, `DISCARD ALL`, Npgsql's reset of a
+//! connection holding prepared statements, `CancelRequest` and Npgsql's type-loading queries,
+//! spoken over a real loopback socket by the minimal client in `common`.
 
 mod common;
 
@@ -184,6 +184,71 @@ fn discard_all_drops_prepared_statements_and_returns_to_the_startup_settings() {
     assert_eq!(answer[0].code(), "26000");
     client.query("BEGIN");
     assert_eq!(client.query("DISCARD ALL")[0].code(), "25001");
+}
+
+#[test]
+fn npgsqls_reset_for_a_connection_holding_prepared_statements_keeps_them() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    let (mut other, _) = Client::login(server.address);
+    client.send(b'P', &parse("s1", "SELECT 1"));
+    client.send(b'S', b"");
+    assert_eq!(tags(&client.read_until_ready()), "1Z");
+    client.query("SET application_name = 'changed'");
+    client.query("LISTEN jobs");
+    client.query("SELECT pg_advisory_lock(7)");
+    let answer = client.query(
+        "SET SESSION AUTHORIZATION DEFAULT;RESET ALL;CLOSE ALL;UNLISTEN *;\
+         SELECT pg_advisory_unlock_all();DISCARD SEQUENCES;DISCARD TEMP",
+    );
+    let completed: Vec<String> = answer
+        .iter()
+        .filter(|message| message.tag == b'C')
+        .map(|message| message.text())
+        .collect();
+    assert_eq!(
+        completed,
+        [
+            "SET",
+            "RESET",
+            "CLOSE CURSOR ALL",
+            "UNLISTEN",
+            "SELECT 1",
+            "DISCARD SEQUENCES",
+            "DISCARD TEMP"
+        ],
+        "{answer:?}"
+    );
+    assert!(!answer.iter().any(|message| message.tag == b'E'), "{answer:?}");
+    assert_eq!(ready_status(&answer), b'I');
+    let description = answer
+        .iter()
+        .find(|message| message.tag == b'T')
+        .expect("RowDescription");
+    assert_eq!(
+        description.column_types(),
+        [("pg_advisory_unlock_all".to_owned(), 2278, 0)]
+    );
+    assert!(
+        answer.iter().any(|message| message.tag == b'S'
+            && message.text().starts_with("application_name\0tests")),
+        "{answer:?}"
+    );
+    let row = answer
+        .iter()
+        .find(|message| message.tag == b'D')
+        .expect("DataRow");
+    assert_eq!(row.raw_row(), [Some(Vec::new())]);
+    let answer = other.query("SELECT pg_try_advisory_lock(7)");
+    let row = answer
+        .iter()
+        .find(|message| message.tag == b'D')
+        .expect("DataRow");
+    assert_eq!(row.row(), [Some("t".to_owned())]);
+    client.send(b'B', &bind("", "s1"));
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    assert_eq!(tags(&client.read_until_ready()), "2DCZ");
 }
 
 #[test]
