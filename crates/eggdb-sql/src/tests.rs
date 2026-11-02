@@ -2402,7 +2402,7 @@ fn sqlite_replace_runs_beside_delete_triggers_as_sqlite_does() {
 }
 
 #[test]
-fn sqlite_replace_is_refused_where_a_trigger_of_another_dialect_watches_deletes() {
+fn sqlite_replace_fires_delete_triggers_of_another_dialect() {
     let store = MemoryStore::default();
     let mut postgresql = Session::new(&store);
     for sql in [
@@ -2415,9 +2415,14 @@ fn sqlite_replace_is_refused_where_a_trigger_of_another_dialect_watches_deletes(
         last(&mut postgresql, sql);
     }
     let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
-    let refused = fails(&mut sqlite, "INSERT OR REPLACE INTO kv VALUES ('a', 2)");
-    assert_eq!(refused.state(), crate::SqlState::FEATURE_NOT_SUPPORTED);
-    assert_eq!(last(&mut postgresql, "SELECT v FROM kv"), "v\n1\nSELECT 1");
+    last(&mut sqlite, "INSERT OR REPLACE INTO kv VALUES ('a', 2)");
+    assert_eq!(
+        last(
+            &mut postgresql,
+            "SELECT v, (SELECT k FROM gone) AS g FROM kv"
+        ),
+        "v|g\n2|a\nSELECT 1"
+    );
 }
 
 #[test]

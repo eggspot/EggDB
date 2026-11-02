@@ -1281,6 +1281,10 @@ pub(crate) fn insert(
         }
         None => None,
     };
+    let mut replace_firing = match insert.on_duplicate {
+        OnDuplicate::Replace => Firing::for_replace(&mut *writer, tables, &table, dialect)?,
+        _ => None,
+    };
     let mut stored = StoredRows::new(&table);
     stored.checks = Some(&checks);
     stored.identity_insert = identity_insert;
@@ -1342,37 +1346,54 @@ pub(crate) fn insert(
                         continue;
                     }
                     (OnDuplicate::Replace, _) => {
-                        let event = crate::triggers::TriggerEvent::Delete;
-                        let unfired = if dialect == Dialect::MySql {
-                            crate::triggers::row_triggers_fire_on(
-                                &*writer,
-                                tables,
-                                &table.name,
-                                event,
-                            )?
-                        } else {
-                            crate::triggers::sqlite_replace_must_fire_on(
-                                &*writer,
-                                tables,
-                                &table.name,
-                                event,
-                            )?
-                        };
-                        if unfired {
-                            return Err(crate::triggers::unfired(event, &table.name, "REPLACE"));
-                        }
                         let mut conflict = Some(conflict);
+                        let mut removals = 0usize;
                         while let Some(found) = conflict {
-                            let removed = delete_row(writer, &table, &found.row_key)?;
-                            if stored.track {
-                                stored.changes.push(RowChange {
-                                    table: Arc::clone(&table),
-                                    old: removed,
-                                    new: None,
-                                });
-                            }
-                            if dialect == Dialect::MySql {
-                                affected += 1;
+                            let removed = match replace_firing.as_mut() {
+                                Some(deleting) => {
+                                    removals += 1;
+                                    if removals > table.indexes.len() + 1 {
+                                        return Err(found.error(&table, &row));
+                                    }
+                                    let replaced = stored_row(&*writer, &table, &found.row_key)?
+                                        .ok_or_else(|| crate::encoding::corrupt("row"))?;
+                                    let outcome = deleting.before_row(
+                                        writer,
+                                        tables,
+                                        Some(replaced.as_slice()),
+                                        None,
+                                    )?;
+                                    stored.forget_generated_ids();
+                                    if outcome == RowOutcome::Skip {
+                                        return Err(found.error(&table, &row));
+                                    }
+                                    if writer.get(&found.row_key)?.is_some() {
+                                        let removed = delete_row(writer, &table, &found.row_key)?;
+                                        deleting.after_row(
+                                            writer,
+                                            tables,
+                                            Some(removed.as_slice()),
+                                            None,
+                                        )?;
+                                        stored.forget_generated_ids();
+                                        Some(removed)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => Some(delete_row(writer, &table, &found.row_key)?),
+                            };
+                            if let Some(removed) = removed {
+                                if stored.track {
+                                    stored.changes.push(RowChange {
+                                        table: Arc::clone(&table),
+                                        old: removed,
+                                        new: None,
+                                    });
+                                }
+                                if dialect == Dialect::MySql {
+                                    affected += 1;
+                                }
                             }
                             conflict = stored.try_insert(writer, &mut row)?;
                         }
@@ -1423,6 +1444,9 @@ pub(crate) fn insert(
         firing.finish();
     }
     if let Some(firing) = update_firing {
+        firing.finish();
+    }
+    if let Some(firing) = replace_firing {
         firing.finish();
     }
     for change in &changes {
@@ -1709,6 +1733,17 @@ impl Conflict {
             None => duplicate_key(table, row),
             Some(position) => indexes::unique_violation(table, &table.indexes[position], row),
         }
+    }
+}
+
+pub(crate) fn stored_row(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+    row_key: &[u8],
+) -> SqlResult<Option<Vec<Value>>> {
+    match reader.get(row_key)? {
+        Some(bytes) => Ok(Some(decode_row(&bytes, &table.columns)?)),
+        None => Ok(None),
     }
 }
 

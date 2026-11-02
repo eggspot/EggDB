@@ -29,6 +29,8 @@ pub(crate) use functions::run_statement_function;
 pub(crate) use views::{delete_instead_of_view, insert_instead_of_view, update_instead_of_view};
 
 #[cfg(test)]
+mod cascade_tests;
+#[cfg(test)]
 mod function_tests;
 #[cfg(test)]
 mod tests;
@@ -234,30 +236,6 @@ pub(crate) fn fire_on(
     any_enabled(reader, tables, table, event, |_| true)
 }
 
-pub(crate) fn row_triggers_fire_on(
-    reader: &dyn KeyValueRead,
-    tables: &mut TableCache,
-    table: &str,
-    event: TriggerEvent,
-) -> SqlResult<bool> {
-    any_enabled(reader, tables, table, event, |trigger| {
-        trigger.level == TriggerLevel::Row
-    })
-}
-
-pub(crate) fn sqlite_replace_must_fire_on(
-    reader: &dyn KeyValueRead,
-    tables: &mut TableCache,
-    table: &str,
-    event: TriggerEvent,
-) -> SqlResult<bool> {
-    any_enabled(reader, tables, table, event, |trigger| {
-        trigger.level == TriggerLevel::Row
-            && (trigger.name.starts_with(EXTENSION_TRIGGER_PREFIX)
-                || trigger.dialect != Dialect::Sqlite)
-    })
-}
-
 const EXTENSION_TRIGGER_PREFIX: &str = "eggdb_";
 
 fn any_enabled(
@@ -273,22 +251,6 @@ fn any_enabled(
             .iter()
             .any(|trigger| trigger.enabled && trigger.events.contains(event) && chosen(trigger))
     }))
-}
-
-pub(crate) fn unfired(event: TriggerEvent, table: &str, by: &str) -> SqlError {
-    let event = match event {
-        TriggerEvent::Insert => "INSERT",
-        TriggerEvent::Update => "UPDATE",
-        TriggerEvent::Delete => "DELETE",
-        TriggerEvent::Truncate => "TRUNCATE",
-    };
-    SqlError::not_supported(format!(
-        "{by} changing rows of table {}, which has {event} triggers",
-        display(table)
-    ))
-    .with_hint(format!(
-        "EggDB does not fire row triggers for {by} yet; change those rows with a {event} statement, which fires them."
-    ))
 }
 
 pub(crate) fn of_table(
@@ -1017,6 +979,59 @@ impl Firing {
         event: TriggerEvent,
         updated: &[usize],
     ) -> SqlResult<Option<Self>> {
+        let firing = Self::chosen_for_table(writer, tables, table, event, updated, &|_| true)?;
+        Self::fire_before_statement(writer, tables, firing)
+    }
+
+    pub(crate) fn for_cascade(
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        table: &TableDefinition,
+        event: TriggerEvent,
+        updated: &[usize],
+    ) -> SqlResult<Option<Self>> {
+        let firing = Self::chosen_for_table(writer, tables, table, event, updated, &|trigger| {
+            trigger.dialect != Dialect::MySql
+        })?;
+        if firing
+            .as_ref()
+            .is_some_and(|firing| firing.replaces_writes || !firing.instead.is_empty())
+        {
+            return Err(errors::instead_of_on_cascaded_table(&table.name, event));
+        }
+        Self::fire_before_statement(writer, tables, firing)
+    }
+
+    pub(crate) fn for_replace(
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        table: &TableDefinition,
+        dialect: Dialect,
+    ) -> SqlResult<Option<Self>> {
+        let firing = Self::chosen_for_table(
+            writer,
+            tables,
+            table,
+            TriggerEvent::Delete,
+            &[],
+            &|trigger| {
+                trigger.level == TriggerLevel::Row
+                    && (dialect == Dialect::MySql
+                        || trigger.name.starts_with(EXTENSION_TRIGGER_PREFIX)
+                        || trigger.dialect != Dialect::Sqlite)
+            },
+        )?;
+        Self::fire_before_statement(writer, tables, firing)
+    }
+
+    fn chosen_for_table(
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        table: &TableDefinition,
+        event: TriggerEvent,
+        updated: &[usize],
+        chosen: &dyn Fn(&TriggerDefinition) -> bool,
+    ) -> SqlResult<Option<Self>> {
         let Some(listed) = of_table(&*writer, tables, &table.name)? else {
             return Ok(None);
         };
@@ -1024,10 +1039,9 @@ impl Firing {
             .iter()
             .filter_map(|&index| table.columns.get(index).map(|column| column.name.as_str()))
             .collect();
-        let firing = Self::build(&table.name, &listed, event, &updated, || {
+        Self::build(&table.name, &listed, event, &updated, chosen, || {
             table_columns(table)
-        })?;
-        Self::fire_before_statement(writer, tables, firing)
+        })
     }
 
     pub(crate) fn for_view(
@@ -1040,7 +1054,9 @@ impl Firing {
         let Some(listed) = of_table(&*writer, tables, &view.name)? else {
             return Ok(None);
         };
-        let firing = Self::build(&view.name, &listed, event, updated, || view_columns(view))?;
+        let firing = Self::build(&view.name, &listed, event, updated, &|_| true, || {
+            view_columns(view)
+        })?;
         let firing = firing.filter(|firing| !firing.instead.is_empty() || firing.replaces_writes);
         Self::fire_before_statement(writer, tables, firing)
     }
@@ -1074,12 +1090,13 @@ impl Firing {
         listed: &TableTriggers,
         event: TriggerEvent,
         updated: &[&str],
+        chosen: &dyn Fn(&TriggerDefinition) -> bool,
         columns: impl FnOnce() -> Vec<OutputColumn>,
     ) -> SqlResult<Option<Self>> {
         let firing: Vec<&TriggerDefinition> = listed
             .triggers
             .iter()
-            .filter(|trigger| trigger.fires_on(event, updated))
+            .filter(|trigger| trigger.fires_on(event, updated) && chosen(trigger))
             .filter(|trigger| {
                 recursion_allowed(trigger.dialect) || !is_active(table, &trigger.name)
             })
@@ -1247,6 +1264,59 @@ impl Firing {
 
     pub(crate) fn finish(self) {
         queue_statement_calls(self.calls);
+    }
+}
+
+/// The trigger firings one statement's cascading foreign-key actions opened, one per child
+/// table, event and changed columns, so each statement-level trigger fires once per statement.
+#[derive(Default)]
+pub(crate) struct CascadeFirings {
+    opened: Vec<CascadeFiring>,
+}
+
+struct CascadeFiring {
+    table: String,
+    event: TriggerEvent,
+    updated: Vec<usize>,
+    firing: Option<Firing>,
+}
+
+impl CascadeFirings {
+    pub(crate) fn firing_for(
+        &mut self,
+        writer: &mut dyn KeyValueWrite,
+        tables: &mut TableCache,
+        table: &TableDefinition,
+        event: TriggerEvent,
+        updated: &[usize],
+    ) -> SqlResult<Option<&mut Firing>> {
+        let position = match self.opened.iter().position(|opened| {
+            opened.event == event && opened.updated == updated && opened.table == table.name
+        }) {
+            Some(position) => position,
+            None => {
+                let firing = Firing::for_cascade(writer, tables, table, event, updated)?;
+                self.opened.push(CascadeFiring {
+                    table: table.name.clone(),
+                    event,
+                    updated: updated.to_vec(),
+                    firing,
+                });
+                self.opened.len() - 1
+            }
+        };
+        Ok(self
+            .opened
+            .get_mut(position)
+            .and_then(|opened| opened.firing.as_mut()))
+    }
+
+    pub(crate) fn finish(self) {
+        for opened in self.opened {
+            if let Some(firing) = opened.firing {
+                firing.finish();
+            }
+        }
     }
 }
 

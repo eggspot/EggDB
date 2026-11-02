@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn cascades_and_replace_cannot_remove_retained_rows_without_their_triggers() {
+    fn cascades_and_replace_cannot_remove_retained_rows() {
         let store = records();
         let mut session = Session::new(&store);
         for sql in [
@@ -285,7 +285,7 @@ mod tests {
         let cascaded = run(&mut session, "DELETE FROM clients WHERE name = 'ada'").unwrap_err();
         assert_eq!(
             cascaded.state(),
-            SqlState::FEATURE_NOT_SUPPORTED,
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
             "{cascaded}"
         );
         assert_eq!(
@@ -298,7 +298,11 @@ mod tests {
             "INSERT OR REPLACE INTO fills VALUES (1, 'ada', '2020-01-01 00:00:00+00')",
         )
         .unwrap_err();
-        assert!(replaced.message().contains("DELETE triggers"), "{replaced}");
+        assert_eq!(
+            replaced.state(),
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "{replaced}"
+        );
         assert_eq!(
             run(&mut session, "SELECT count(*) FROM fills").unwrap(),
             "count\n1\nSELECT 1"

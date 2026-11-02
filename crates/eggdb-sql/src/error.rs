@@ -39,6 +39,9 @@ impl SqlState {
     /// `09000` triggered_action_exception: a trigger's body ended the statement that fired
     /// it, as SQLite's `RAISE(IGNORE)` does for the row being changed.
     pub const TRIGGERED_ACTION_EXCEPTION: Self = Self(*b"09000");
+    /// `27000` triggered_data_change_violation: a `BEFORE` trigger changed or removed the row
+    /// that the statement firing it was about to change.
+    pub const TRIGGERED_DATA_CHANGE_VIOLATION: Self = Self(*b"27000");
     /// `45000`: the SQLSTATE MySQL's `SIGNAL` uses for an unhandled user-defined condition.
     pub const USER_DEFINED_CONDITION: Self = Self(*b"45000");
     /// `P0001` raise_exception: an error a statement raised on purpose, such as Transact-SQL's

@@ -1,0 +1,38 @@
+## DNEW-F-trig-cascade Cascading foreign keys and `REPLACE` fire the triggers of the rows they change, each dialect as its own database does; a `BEFORE` trigger cannot break referential integrity — Decided by research (2026-11-02); builds on D27, D210 and D9
+
+Until now a cascading foreign-key action or a `REPLACE` that reached a table with row triggers
+was refused (`0A000`), which also kept `eggdb_cdc`, `eggdb_tenancy` and `eggdb_retention` off
+tables with cascades. They now fire.
+
+- **Which triggers fire for a cascade.** The child table's `UPDATE` (for `SET NULL`, `SET
+  DEFAULT` and `ON UPDATE CASCADE`) or `DELETE` (for `ON DELETE CASCADE`) triggers, as in
+  PostgreSQL, SQL Server, SQLite and Oracle. `UPDATE OF` columns are the foreign key's columns.
+  Triggers written in the MySQL dialect don't fire, since MySQL documents that cascaded
+  foreign-key actions do not activate triggers; a trigger's own dialect decides, so a
+  PostgreSQL-dialect trigger (such as `eggdb_cdc.capture()`) fires whichever session's
+  statement caused the cascade.
+- **Once per statement.** Row triggers fire per cascaded row. Statement triggers, and a
+  Transact-SQL trigger's `deleted` and `inserted` tables, fire once per statement and child table
+  (and event and changed columns) with every row the statement's cascades changed there, as
+  PostgreSQL does since 10 and SQL Server does. The cascade collects a child's matching rows
+  before changing them when triggers may fire, so a trigger's own writes never make it revisit a
+  row; the rows are charged to the statement's work memory, which bounds them.
+- **`BEFORE` triggers.** One may change a cascaded row's new values (its `NOT NULL`, `CHECK` and
+  foreign keys are checked afterwards). One that skips a cascaded row (`RETURN NULL`,
+  `RAISE(IGNORE)`) fails the statement with `23503`, since the row would keep pointing at a
+  parent that is gone; PostgreSQL leaves such a row behind, and EggDB keeps referential
+  integrity instead (D9). One that changes or removes the very row it fires for fails it with
+  `27000`, PostgreSQL's error and hint. A row an earlier trigger already moved to another parent
+  or removed is left alone.
+- **`INSTEAD OF` on a cascaded table** is refused when the cascade reaches it (`55000`, SQL
+  Server's 1787 and 1788), since SQL Server forbids that combination.
+- **Depth.** A cascade that fires a trigger that sets off another cascade nests through the
+  trigger depth limit (32, D27) and the stack guard, so a loop ends with `54001`, never a crash.
+  Cascades without triggers keep their own limit of 100,000 levels.
+- **`REPLACE`.** MySQL's fires, per row: `BEFORE INSERT`, then `BEFORE DELETE` and `AFTER
+  DELETE` for each row it removes, then `AFTER INSERT`, MySQL's documented order. SQLite's
+  `REPLACE` conflict resolution keeps not firing SQLite-dialect `DELETE` triggers (SQLite's
+  default, `recursive_triggers` off) but fires those of other dialects and of EggDB's extensions.
+  A `BEFORE DELETE` trigger that skips the row fails the `REPLACE` with the duplicate-key error;
+  a trigger that keeps recreating the conflicting row is stopped after one removal per unique
+  index.

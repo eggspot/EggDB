@@ -2237,14 +2237,22 @@ it, and a statement that fails in a trigger leaves nothing behind.
   from the block's first line, as in Oracle. Compound, DDL, database event and crossedition
   triggers are `0A000`, and a trigger does not fire itself again.
 
-Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash. Row
-triggers do not fire yet for rows a cascading foreign key changes or removes, nor for rows
-MySQL's `REPLACE` removes, so those are refused (`0A000`) on a table with `UPDATE` or `DELETE`
-triggers instead of running without them. SQLite's `REPLACE` conflict resolution doesn't fire
-`DELETE` triggers written in the SQLite dialect (as SQLite does with `recursive_triggers` off,
-its default); it is refused (`0A000`) on a table whose row `DELETE` triggers come from another
-dialect or from an EggDB extension (retention, ledger, change capture), which expect to see every
-removed row. Dropping
+Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash, also when
+a cascade fires a trigger that sets off another cascade (DNEW-F-trig-cascade). Rows a cascading
+foreign key changes or removes (`ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT`, `ON UPDATE
+CASCADE`) fire the child table's `UPDATE` or `DELETE` triggers, as in PostgreSQL, SQL Server,
+SQLite and Oracle: row triggers once per row, statement triggers (and a Transact-SQL trigger's
+`deleted` and `inserted` tables) once per statement and child table with every cascaded row.
+Triggers written in the MySQL dialect don't fire for cascades, as MySQL's own don't. A `BEFORE`
+trigger may change a cascaded row's new values; one that skips a cascaded row fails the statement
+with `23503` (the row would point at nothing), and one that changes or removes the row it fires
+for fails it with `27000`, as PostgreSQL does. An `INSTEAD OF` trigger on a table a cascade
+changes is refused (`55000`, SQL Server's 1787/1788). MySQL's `REPLACE` fires `BEFORE INSERT`,
+then `BEFORE DELETE` and `AFTER DELETE` for each row it removes, then `AFTER INSERT`, MySQL's
+order. SQLite's `REPLACE` conflict resolution doesn't fire `DELETE` triggers written in the
+SQLite dialect (as SQLite does with `recursive_triggers` off, its default), but fires those from
+another dialect or from an EggDB extension (retention, ledger, change capture), which expect to
+see every removed row. Dropping
 a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
 constraint and event triggers, SQL Server DDL and logon triggers, Oracle compound and event
 triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
@@ -2378,9 +2386,9 @@ rolled-back change never streams and a committed one always does. `eggdb serve
 --cdc-webhook http://...` delivers the outbox as Debezium-style events (`before`, `after`,
 `source`, `op` of `c`, `u` or `d`, `ts_ms`), oldest first, at least once. `eggdb serve
 --cdc-queue <name>` delivers the same events into EggDB's durable queue `<name>`, where AMQP
-0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). A cascading foreign key or a `REPLACE`
-that would change a captured table's rows is refused (`0A000`), since it would not be captured. Not yet: Kafka and MQTT sinks, Debezium's schema section, capture without triggers,
-and capturing cascaded changes.
+0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). Rows a cascading foreign key or a
+`REPLACE` changes or removes are captured like any other change (DNEW-F-trig-cascade). Not yet:
+Kafka and MQTT sinks, Debezium's schema section, and capture without triggers.
 
 ### Transactional outbox and inbox
 
@@ -2419,9 +2427,9 @@ After `isolate`, a session sees and writes only the rows whose tenant column equ
 `eggdb.tenant` setting; a session that has set none sees no rows and cannot add any, and a
 new row for another tenant fails with SQLSTATE `42501`. This holds for roles that are not
 superusers, so connect the application as such a role. `TRUNCATE` of an isolated table is
-refused (`42501`) for every role but a superuser, since it would remove every tenant's rows, and a
-cascading foreign key that would change its rows is refused (`0A000`) until cascades fire row
-triggers. A
+refused (`42501`) for every role but a superuser, since it would remove every tenant's rows. A
+cascading foreign key may change or remove its rows: the quota trigger fires for the rows a
+cascade changes, as for an `UPDATE`. A
 tenant with `max_rows` gets SQLSTATE `53400` once it holds that many rows in a table.
 
 ## Ledger tables (eggdb_ledger)
