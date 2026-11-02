@@ -135,9 +135,13 @@ fn infinite_shift(value: &Value, by: Interval) -> Option<SqlResult<Value>> {
 }
 
 fn infinite_difference(left: &Value, right: &Value) -> Option<SqlResult<Value>> {
-    if !matches!(left, Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_))
-        || !matches!(right, Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_))
-    {
+    if !matches!(
+        left,
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)
+    ) || !matches!(
+        right,
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)
+    ) {
         return None;
     }
     let signs = (infinity_sign(left), infinity_sign(right));

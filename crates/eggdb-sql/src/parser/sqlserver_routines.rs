@@ -158,8 +158,7 @@ impl Parser<'_> {
         if !at_batch_start {
             return Err(not_first_in_batch(kind, position));
         }
-        let temporary =
-            matches!(self.peek_kind(), TokenKind::Word(word) if word.starts_with('#'));
+        let temporary = matches!(self.peek_kind(), TokenKind::Word(word) if word.starts_with('#'));
         if temporary && kind == RoutineKind::Function {
             return Err(not_supported("Temporary functions (#name)").at(self.position()));
         }

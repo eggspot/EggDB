@@ -1,8 +1,8 @@
 mod cursors;
 pub(crate) mod database_switch;
 mod mysql;
-mod oracle;
 mod nonatomic;
+mod oracle;
 mod restore;
 mod savepoints;
 mod sqlite;
@@ -460,9 +460,7 @@ impl<'s> Session<'s> {
             set_error: None,
             save_points: Vec::new(),
             savepoints: savepoints::Savepoints::default(),
-            advisory_locks: crate::advisory_locks::AdvisoryLocks::new(
-                store.store_id(),
-            ),
+            advisory_locks: crate::advisory_locks::AdvisoryLocks::new(store.store_id()),
             temporary: crate::temporary::TemporaryObjects::default(),
             portals: crate::portals::Portals::default(),
             notifications: crate::notifications::Notifications::default(),
@@ -1680,8 +1678,7 @@ impl<'s> Session<'s> {
             let settings = Arc::clone(&self.settings);
             let context = Arc::clone(&self.batch_context);
             let _cancel = crate::cancel::enter(&self.cancel);
-            let _deadline =
-                crate::cancel::enter_deadline(self.statement_timeout(), self.deadline);
+            let _deadline = crate::cancel::enter_deadline(self.statement_timeout(), self.deadline);
             let _advisory = crate::advisory_locks::enter(
                 &self.advisory_locks,
                 !matches!(self.block, Block::None) || self.implicit_transaction,
@@ -2706,10 +2703,9 @@ impl<'s> Session<'s> {
                     crate::row_security::run(writer, binding.settings, &statement)
                 })
             }
-            Statement::Database(command) => Err(SqlError::not_supported(format!(
-                "{} here",
-                command.tag()
-            ))),
+            Statement::Database(command) => {
+                Err(SqlError::not_supported(format!("{} here", command.tag())))
+            }
             Statement::Role(role) => {
                 let mut role = role.clone();
                 let tag = role.tag();
@@ -3400,9 +3396,7 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         match outcome {
             Ok(result)
-                if !keep_open
-                    && !implicit
-                    && crate::triggers::statement_triggers_pending() =>
+                if !keep_open && !implicit && crate::triggers::statement_triggers_pending() =>
             {
                 self.block = Block::Writing(writer);
                 self.block_is_implicit = false;

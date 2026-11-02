@@ -362,9 +362,8 @@ fn json_path_query_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
         })
     };
     let path = |sql_type: &Option<SqlType>| sql_type.is_none_or(SqlType::is_character);
-    let silent = |sql_type: &Option<SqlType>| {
-        sql_type.is_none_or(|sql_type| sql_type == SqlType::Boolean)
-    };
+    let silent =
+        |sql_type: &Option<SqlType>| sql_type.is_none_or(|sql_type| sql_type == SqlType::Boolean);
     let accepted = match types {
         [target, path_type] => document(target) && path(path_type),
         [target, path_type, vars] => document(target) && path(path_type) && document(vars),
@@ -1834,9 +1833,7 @@ pub(crate) fn expressions(generated: &GeneratedTable) -> Vec<&Expr> {
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => {
-            Vec::new()
-        }
+        | GeneratedTable::Sequence(_) => Vec::new(),
     }
 }
 
@@ -1847,9 +1844,7 @@ pub(crate) fn expressions_mut(generated: &mut GeneratedTable) -> Vec<&mut Expr> 
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => {
-            Vec::new()
-        }
+        | GeneratedTable::Sequence(_) => Vec::new(),
     }
 }
 
@@ -1879,8 +1874,6 @@ pub(crate) fn generate_rows(
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => {
-            Ok(())
-        }
+        | GeneratedTable::Sequence(_) => Ok(()),
     }
 }

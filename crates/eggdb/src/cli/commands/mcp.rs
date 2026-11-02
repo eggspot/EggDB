@@ -206,7 +206,11 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
                 line.push_str(&format!(
                     "  not yet      {} not in the file yet: the agent may create {}\n",
                     not_there_yet.join(", "),
-                    if not_there_yet.len() == 1 { "it" } else { "them" }
+                    if not_there_yet.len() == 1 {
+                        "it"
+                    } else {
+                        "them"
+                    }
                 ));
             }
             for link in &outside_links {

@@ -305,7 +305,8 @@ const PSQL_DB_PLUS_QUERY: &str = "SELECT spcname AS \"Name\",
 FROM pg_catalog.pg_tablespace
 ORDER BY 1;";
 
-const PSQL_DC_PLUS_QUERY: &str = "SELECT pg_catalog.format_type(castsource, NULL) AS \"Source type\",
+const PSQL_DC_PLUS_QUERY: &str =
+    "SELECT pg_catalog.format_type(castsource, NULL) AS \"Source type\",
        pg_catalog.format_type(casttarget, NULL) AS \"Target type\",
        CASE WHEN c.castmethod = 'b' THEN '(binary coercible)'
             WHEN c.castmethod = 'i' THEN '(with inout)'

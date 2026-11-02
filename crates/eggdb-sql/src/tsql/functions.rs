@@ -556,12 +556,10 @@ impl FunctionRun<'_, '_> {
                 query,
                 per_row: false,
             } => self.select_assign(&targets, *query),
-            SqlServerStatement::SelectAssign { per_row: true, .. } => {
-                Err(SqlError::not_supported(
-                    "A SELECT in a function that assigns a variable from itself row by row",
-                )
-                .at(position))
-            }
+            SqlServerStatement::SelectAssign { per_row: true, .. } => Err(SqlError::not_supported(
+                "A SELECT in a function that assigns a variable from itself row by row",
+            )
+            .at(position)),
             SqlServerStatement::InsertVariable {
                 variable,
                 columns,

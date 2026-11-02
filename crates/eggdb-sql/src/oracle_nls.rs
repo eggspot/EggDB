@@ -1,7 +1,7 @@
+use crate::Value;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::oracle_date_language::DateLanguage;
 use crate::oracle_datetime::{DatetimeModel, ModelUse};
-use crate::Value;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -300,8 +300,7 @@ impl NlsParameters {
                 (next.iso_currency_territory, next.iso_currency) = iso_currency_of(plain)?;
             }
             "nls_numeric_characters" => {
-                (next.decimal_character, next.group_separator) =
-                    checked_numeric_characters(plain)?;
+                (next.decimal_character, next.group_separator) = checked_numeric_characters(plain)?;
             }
             "nls_sort" | "nls_comp" if plain.eq_ignore_ascii_case("binary") => {}
             "nls_sort" | "nls_comp" => return Err(unsupported(name, plain)),
@@ -432,7 +431,10 @@ mod tests {
     fn function_parameter_strings_are_checked() {
         assert_eq!(
             parameter_assignments("NLS_DATE_LANGUAGE = American").ok(),
-            Some(vec![("nls_date_language".to_owned(), "American".to_owned())])
+            Some(vec![(
+                "nls_date_language".to_owned(),
+                "American".to_owned()
+            )])
         );
         assert_eq!(
             parameter_assignments("NLS_NUMERIC_CHARACTERS = ', ' NLS_CURRENCY='EUR '").ok(),
@@ -445,7 +447,10 @@ mod tests {
             NlsParameters::default().with_function_parameters(text, &NUMBER_FUNCTION_PARAMETERS)
         };
         let swapped = numbers("NLS_NUMERIC_CHARACTERS = ',.'").expect("swapped");
-        assert_eq!((swapped.decimal_character(), swapped.group_separator()), (',', '.'));
+        assert_eq!(
+            (swapped.decimal_character(), swapped.group_separator()),
+            (',', '.')
+        );
         assert_eq!(code(numbers("NLS_NUMERIC_CHARACTERS = '.'")), Some(12702));
         assert_eq!(code(numbers("NLS_NUMERIC_CHARACTERS = '..'")), Some(12702));
         assert_eq!(code(numbers("NLS_NUMERIC_CHARACTERS = '1,'")), Some(12702));
@@ -457,7 +462,9 @@ mod tests {
             NlsParameters::default().with_function_parameters(text, &DATE_FUNCTION_PARAMETERS)
         };
         assert_eq!(
-            dates("NLS_DATE_LANGUAGE = 'French'").map(|nls| nls.date_language()).ok(),
+            dates("NLS_DATE_LANGUAGE = 'French'")
+                .map(|nls| nls.date_language())
+                .ok(),
             Some(DateLanguage::French)
         );
         assert_eq!(code(dates("NLS_DATE_LANGUAGE = Klingon")), Some(12702));
@@ -469,7 +476,9 @@ mod tests {
         let german = nls.with("nls_language", "german").expect("language");
         assert_eq!(german.language(), DateLanguage::German);
         assert_eq!(german.date_language(), DateLanguage::German);
-        let dutch = german.with("nls_date_language", "'DUTCH'").expect("date language");
+        let dutch = german
+            .with("nls_date_language", "'DUTCH'")
+            .expect("date language");
         assert_eq!(dutch.language(), DateLanguage::German);
         assert_eq!(dutch.date_language(), DateLanguage::Dutch);
         let priced = nls
@@ -487,7 +496,10 @@ mod tests {
         assert_eq!(reset.numeric_characters(), ".,");
         assert_eq!(code(nls.with("nls_iso_currency", "ATLANTIS")), Some(12705));
         assert_eq!(code(nls.with("nls_currency", "'ELEVENBYTES'")), Some(12705));
-        assert_eq!(code(nls.with("nls_numeric_characters", "'+,'")), Some(12705));
+        assert_eq!(
+            code(nls.with("nls_numeric_characters", "'+,'")),
+            Some(12705)
+        );
     }
 
     #[test]

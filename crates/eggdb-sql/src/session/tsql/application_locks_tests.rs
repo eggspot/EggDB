@@ -65,7 +65,10 @@ fn ef_core_9s_migration_lock_is_taken_and_released_with_its_return_codes() {
     let store = MemoryStore::default();
     let mut first = session(&store);
     let mut second = session(&store);
-    assert_eq!(status(&mut first, EF_CORE_9_LOCK), (Value::Integer(0), vec![]));
+    assert_eq!(
+        status(&mut first, EF_CORE_9_LOCK),
+        (Value::Integer(0), vec![])
+    );
     assert_eq!(
         status(
             &mut second,
@@ -87,7 +90,10 @@ fn ef_core_9s_migration_lock_is_taken_and_released_with_its_return_codes() {
         ),
         Value::Integer(0)
     );
-    assert_eq!(status(&mut first, EF_CORE_9_RELEASE), (Value::Integer(0), vec![]));
+    assert_eq!(
+        status(&mut first, EF_CORE_9_RELEASE),
+        (Value::Integer(0), vec![])
+    );
     assert_eq!(
         single(
             &mut second,
@@ -95,13 +101,19 @@ fn ef_core_9s_migration_lock_is_taken_and_released_with_its_return_codes() {
         ),
         Value::Integer(1)
     );
-    assert_eq!(status(&mut second, EF_CORE_9_LOCK), (Value::Integer(0), vec![]));
+    assert_eq!(
+        status(&mut second, EF_CORE_9_LOCK),
+        (Value::Integer(0), vec![])
+    );
     assert_eq!(
         status(&mut first, EF_CORE_9_RELEASE),
         (Value::Integer(-999), vec![Some(1223)])
     );
     drop(second);
-    assert_eq!(status(&mut first, EF_CORE_9_LOCK), (Value::Integer(0), vec![]));
+    assert_eq!(
+        status(&mut first, EF_CORE_9_LOCK),
+        (Value::Integer(0), vec![])
+    );
 }
 
 #[test]
@@ -120,7 +132,10 @@ fn a_lock_held_elsewhere_times_out_after_lock_timeout_milliseconds() {
     );
     assert!(started.elapsed() >= std::time::Duration::from_millis(40));
     assert_eq!(
-        status(&mut holder, "sp_getapplock 'job', 'Exclusive', 'Session', 0"),
+        status(
+            &mut holder,
+            "sp_getapplock 'job', 'Exclusive', 'Session', 0"
+        ),
         (Value::Integer(0), vec![])
     );
     for _ in 0..2 {
@@ -147,14 +162,26 @@ fn shared_and_update_modes_follow_sql_servers_compatibility() {
     };
     assert_eq!(status(&mut first, &take("Shared")).0, Value::Integer(0));
     assert_eq!(status(&mut second, &take("Update")).0, Value::Integer(0));
-    assert_eq!(status(&mut second, &take("IntentExclusive")).0, Value::Integer(-1));
-    assert_eq!(status(&mut second, &take("IntentShared")).0, Value::Integer(0));
     assert_eq!(
-        single(&mut second, "SELECT APPLOCK_MODE('public', 'Report', 'Session')"),
+        status(&mut second, &take("IntentExclusive")).0,
+        Value::Integer(-1)
+    );
+    assert_eq!(
+        status(&mut second, &take("IntentShared")).0,
+        Value::Integer(0)
+    );
+    assert_eq!(
+        single(
+            &mut second,
+            "SELECT APPLOCK_MODE('public', 'Report', 'Session')"
+        ),
         Value::Text("Update".to_owned())
     );
     assert_eq!(
-        single(&mut first, "SELECT APPLOCK_MODE('public', 'report', 'Session')"),
+        single(
+            &mut first,
+            "SELECT APPLOCK_MODE('public', 'report', 'Session')"
+        ),
         Value::Text("NoLock".to_owned())
     );
 }
@@ -171,20 +198,32 @@ fn transaction_locks_need_a_transaction_and_end_with_it() {
     assert_eq!(errors(&outside).len(), 1);
     batch(&mut first, "BEGIN TRANSACTION");
     assert_eq!(
-        status(&mut first, "sp_getapplock @Resource = 'tx', @LockMode = 'Exclusive'"),
+        status(
+            &mut first,
+            "sp_getapplock @Resource = 'tx', @LockMode = 'Exclusive'"
+        ),
         (Value::Integer(0), vec![])
     );
     assert_eq!(
-        single(&mut first, "SELECT APPLOCK_MODE('public', 'tx', 'Transaction')"),
+        single(
+            &mut first,
+            "SELECT APPLOCK_MODE('public', 'tx', 'Transaction')"
+        ),
         Value::Text("Exclusive".to_owned())
     );
     assert_eq!(
-        single(&mut second, "SELECT APPLOCK_TEST('public', 'tx', 'Exclusive', 'Session')"),
+        single(
+            &mut second,
+            "SELECT APPLOCK_TEST('public', 'tx', 'Exclusive', 'Session')"
+        ),
         Value::Integer(0)
     );
     batch(&mut first, "ROLLBACK TRANSACTION");
     assert_eq!(
-        single(&mut second, "SELECT APPLOCK_TEST('public', 'tx', 'Exclusive', 'Session')"),
+        single(
+            &mut second,
+            "SELECT APPLOCK_TEST('public', 'tx', 'Exclusive', 'Session')"
+        ),
         Value::Integer(1)
     );
 }
@@ -194,15 +233,27 @@ fn invalid_arguments_return_minus_999_with_sql_servers_numbers() {
     let store = MemoryStore::default();
     let mut session = session(&store);
     for (exec, number) in [
-        ("sp_getapplock @Resource = NULL, @LockMode = 'Exclusive', @LockOwner = 'Session'", 1224),
-        ("sp_getapplock @Resource = 'r', @LockMode = 'Huge', @LockOwner = 'Session'", 1225),
-        ("sp_getapplock @Resource = 'r', @LockMode = 'Shared', @LockOwner = 'Nobody'", 1226),
+        (
+            "sp_getapplock @Resource = NULL, @LockMode = 'Exclusive', @LockOwner = 'Session'",
+            1224,
+        ),
+        (
+            "sp_getapplock @Resource = 'r', @LockMode = 'Huge', @LockOwner = 'Session'",
+            1225,
+        ),
+        (
+            "sp_getapplock @Resource = 'r', @LockMode = 'Shared', @LockOwner = 'Nobody'",
+            1226,
+        ),
         (
             "sp_getapplock @Resource = 'r', @LockMode = 'Shared', @LockOwner = 'Session', @LockTimeout = -5",
             1227,
         ),
         ("sp_getapplock @Resource = 'r', @Unknown = 1", 1228),
-        ("sp_releaseapplock @Resource = 'never', @LockOwner = 'Session'", 1223),
+        (
+            "sp_releaseapplock @Resource = 'never', @LockOwner = 'Session'",
+            1223,
+        ),
     ] {
         assert_eq!(
             status(&mut session, exec),
@@ -210,6 +261,9 @@ fn invalid_arguments_return_minus_999_with_sql_servers_numbers() {
             "{exec}"
         );
     }
-    let steps = batch(&mut session, "SELECT APPLOCK_MODE('public', NULL, 'Session')");
+    let steps = batch(
+        &mut session,
+        "SELECT APPLOCK_MODE('public', NULL, 'Session')",
+    );
     assert_eq!(errors(&steps), vec![Some(1224)]);
 }

@@ -386,20 +386,22 @@ fn a_failed_block_refuses_key_value_writes_until_rollback() {
     let ran = shell(&file, &["--keep-going"], script);
     let stderr = text(&ran.stderr);
     assert!(stderr.contains("SQLSTATE:  23505"), "{stderr}");
-    assert!(
-        stderr.contains("cannot run put in "),
-        "{stderr}"
-    );
+    assert!(stderr.contains("cannot run put in "), "{stderr}");
     assert!(
         stderr.contains("the transaction block failed; ROLLBACK ends it"),
         "{stderr}"
     );
     assert!(
-        stderr.contains("expire cannot run inside a transaction block yet; COMMIT or ROLLBACK first"),
+        stderr
+            .contains("expire cannot run inside a transaction block yet; COMMIT or ROLLBACK first"),
         "{stderr}"
     );
     assert!(stderr.contains("key not found: k"), "{stderr}");
-    assert!(!text(&ran.stdout).contains("before"), "{}", text(&ran.stdout));
+    assert!(
+        !text(&ran.stdout).contains("before"),
+        "{}",
+        text(&ran.stdout)
+    );
 }
 
 #[test]

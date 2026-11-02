@@ -106,7 +106,9 @@ impl Builder {
 fn undeclared_label(label: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::SYNTAX_ERROR,
-        format!("A GOTO statement references the label '{label}' but the label has not been declared."),
+        format!(
+            "A GOTO statement references the label '{label}' but the label has not been declared."
+        ),
     )
     .with_sqlserver_code(133)
     .at(position)

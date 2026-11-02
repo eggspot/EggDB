@@ -68,8 +68,7 @@ pub(crate) fn original_text(
     let Some(bytes) = reader.get(&text_key(table))? else {
         return Ok(None);
     };
-    let (kept_generated, original) =
-        decode(&bytes).ok_or_else(|| corrupt("CREATE TABLE text"))?;
+    let (kept_generated, original) = decode(&bytes).ok_or_else(|| corrupt("CREATE TABLE text"))?;
     Ok((kept_generated == generated).then(|| original.to_owned()))
 }
 

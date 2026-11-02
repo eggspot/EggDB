@@ -219,7 +219,10 @@ fn npgsqls_reset_for_a_connection_holding_prepared_statements_keeps_them() {
         ],
         "{answer:?}"
     );
-    assert!(!answer.iter().any(|message| message.tag == b'E'), "{answer:?}");
+    assert!(
+        !answer.iter().any(|message| message.tag == b'E'),
+        "{answer:?}"
+    );
     assert_eq!(ready_status(&answer), b'I');
     let description = answer
         .iter()
@@ -230,8 +233,10 @@ fn npgsqls_reset_for_a_connection_holding_prepared_statements_keeps_them() {
         [("pg_advisory_unlock_all".to_owned(), 2278, 0)]
     );
     assert!(
-        answer.iter().any(|message| message.tag == b'S'
-            && message.text().starts_with("application_name\0tests")),
+        answer
+            .iter()
+            .any(|message| message.tag == b'S'
+                && message.text().starts_with("application_name\0tests")),
         "{answer:?}"
     );
     let row = answer

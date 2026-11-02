@@ -125,7 +125,10 @@ fn a_unique_citext_index_rejects_case_variants_whenever_they_meet() {
         "INSERT INTO guest VALUES ('Straße'), ('STRASSE')",
     );
     assert_eq!(
-        state(&mut session, "CREATE UNIQUE INDEX guest_name ON guest (name)"),
+        state(
+            &mut session,
+            "CREATE UNIQUE INDEX guest_name ON guest (name)"
+        ),
         "23505"
     );
     assert_eq!(
@@ -162,10 +165,7 @@ fn group_by_distinct_and_order_by_agree_on_citext() {
         "n\n3\nSELECT 1"
     );
     assert_eq!(
-        ok(
-            &mut session,
-            "SELECT id FROM fruit ORDER BY name DESC, id"
-        ),
+        ok(&mut session, "SELECT id FROM fruit ORDER BY name DESC, id"),
         "id\n6\n4\n5\n1\n2\n3\nSELECT 6"
     );
     assert_eq!(
@@ -215,7 +215,10 @@ fn a_view_over_a_citext_column_reads_back_after_reopening() {
     {
         let mut session = Session::new(&store);
         ok(&mut session, "CREATE TABLE account (email citext)");
-        ok(&mut session, "INSERT INTO account VALUES ('Ann@Example.com')");
+        ok(
+            &mut session,
+            "INSERT INTO account VALUES ('Ann@Example.com')",
+        );
         ok(
             &mut session,
             "CREATE VIEW account_email AS SELECT email FROM account",
@@ -254,7 +257,10 @@ fn hstore_operators_fetch_test_contain_join_and_remove() {
             "SELECT attrs -> ARRAY['weight', 'color'] AS v FROM item WHERE id = 2",
             "v\n{NULL,blue}\nSELECT 1",
         ),
-        ("SELECT id FROM item WHERE attrs ? 'weight'", "id\n2\nSELECT 1"),
+        (
+            "SELECT id FROM item WHERE attrs ? 'weight'",
+            "id\n2\nSELECT 1",
+        ),
         (
             "SELECT id FROM item WHERE attrs ?| ARRAY['size', 'x']",
             "id\n1\nSELECT 1",

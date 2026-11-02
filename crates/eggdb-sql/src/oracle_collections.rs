@@ -41,10 +41,7 @@ pub(crate) fn elements(value: &Value) -> Option<&[Value]> {
 
 fn is_collection(record: &RecordValue) -> bool {
     record.names.len() == record.fields.len()
-        && record
-            .names
-            .iter()
-            .all(|name| name.parse::<u32>().is_ok())
+        && record.names.iter().all(|name| name.parse::<u32>().is_ok())
 }
 
 pub(crate) fn cardinality(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
@@ -132,7 +129,10 @@ fn intersection(left: &[Value], right: &[Value]) -> Vec<Value> {
     let mut remaining: Vec<&Value> = right.iter().collect();
     let mut kept = Vec::new();
     for element in left {
-        if let Some(at) = remaining.iter().position(|other| equal_or_both_null(other, element)) {
+        if let Some(at) = remaining
+            .iter()
+            .position(|other| equal_or_both_null(other, element))
+        {
             remaining.swap_remove(at);
             kept.push(element.clone());
         }

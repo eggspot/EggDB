@@ -19,7 +19,10 @@ fn idle_sockets_cannot_lock_a_real_login_out() {
     let started = Instant::now();
     let mut client = Client::login(server.address);
     assert!(started.elapsed() < Duration::from_secs(4));
-    assert_eq!(rows(&client.batch("SELECT 1")), [vec![Some("1".to_owned())]]);
+    assert_eq!(
+        rows(&client.batch("SELECT 1")),
+        [vec![Some("1".to_owned())]]
+    );
     drop(idle);
 }
 
@@ -64,7 +67,11 @@ fn a_message_past_the_memory_budget_closes_its_connection_with_error_701() {
         .read_message()
         .expect("an error before the connection closes");
     let refused = errors(&common::parse_tokens(&body));
-    assert_eq!(refused.first().map(|error| error.0), Some(701), "{refused:?}");
+    assert_eq!(
+        refused.first().map(|error| error.0),
+        Some(701),
+        "{refused:?}"
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     while budget.used_bytes() != 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));

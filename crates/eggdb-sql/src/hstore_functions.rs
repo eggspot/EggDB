@@ -100,9 +100,7 @@ fn text_items(value: &Value) -> Option<SqlResult<Vec<Option<String>>>> {
 }
 
 fn keys_of(value: &Value) -> Option<SqlResult<Vec<String>>> {
-    text_items(value).map(|items| {
-        items.map(|items| items.into_iter().flatten().collect())
-    })
+    text_items(value).map(|items| items.map(|items| items.into_iter().flatten().collect()))
 }
 
 fn text_array(items: impl IntoIterator<Item = Option<String>>) -> SqlResult<Value> {
@@ -464,7 +462,10 @@ mod tests {
     }
 
     fn shown(value: SqlResult<Value>) -> String {
-        value.unwrap().to_text().unwrap_or_else(|| "NULL".to_owned())
+        value
+            .unwrap()
+            .to_text()
+            .unwrap_or_else(|| "NULL".to_owned())
     }
 
     #[test]
@@ -477,7 +478,10 @@ mod tests {
             shown(fetch(&h, &texts(&[Some("b"), Some("a"), None]))),
             "{NULL,1,NULL}"
         );
-        assert_eq!(fetch(&text("x"), &text("a")).unwrap_err().state().code(), "42883");
+        assert_eq!(
+            fetch(&text("x"), &text("a")).unwrap_err().state().code(),
+            "42883"
+        );
     }
 
     #[test]
@@ -486,8 +490,14 @@ mod tests {
         assert_eq!(shown(has_key("?", &h, &text("b"))), "t");
         assert_eq!(shown(has_key("?", &h, &text("c"))), "f");
         assert_eq!(shown(has_key("?|", &h, &text("{c,a}"))), "t");
-        assert_eq!(shown(has_key("?&", &h, &texts(&[Some("a"), Some("c")]))), "f");
-        assert_eq!(shown(has_key("?&", &h, &texts(&[Some("a"), Some("b")]))), "t");
+        assert_eq!(
+            shown(has_key("?&", &h, &texts(&[Some("a"), Some("c")]))),
+            "f"
+        );
+        assert_eq!(
+            shown(has_key("?&", &h, &texts(&[Some("a"), Some("b")]))),
+            "t"
+        );
         assert_eq!(shown(has_key("?", &h, &Value::Null)), "NULL");
     }
 
@@ -515,8 +525,17 @@ mod tests {
         assert!(concatenated((&left, false), (&text("z"), false)).is_none());
         assert_eq!(shown(subtract(&left, &text("a"))), "\"b\"=>\"2\"");
         assert_eq!(shown(subtract(&left, &texts(&[Some("a"), Some("b")]))), "");
-        assert_eq!(shown(subtract(&left, &hstore("a=>1, b=>9"))), "\"b\"=>\"2\"");
-        assert_eq!(subtract(&left, &Value::Integer(1)).unwrap_err().state().code(), "42883");
+        assert_eq!(
+            shown(subtract(&left, &hstore("a=>1, b=>9"))),
+            "\"b\"=>\"2\""
+        );
+        assert_eq!(
+            subtract(&left, &Value::Integer(1))
+                .unwrap_err()
+                .state()
+                .code(),
+            "42883"
+        );
     }
 
     #[test]
@@ -525,12 +544,21 @@ mod tests {
         let call = |name: &str, values: &[Value]| shown(function(name, values).unwrap());
         assert_eq!(call("akeys", std::slice::from_ref(&h)), "{a,b}");
         assert_eq!(call("avals", std::slice::from_ref(&h)), "{1,NULL}");
-        assert_eq!(call("hstore_to_array", std::slice::from_ref(&h)), "{a,1,b,NULL}");
-        assert_eq!(call("hstore_to_json", std::slice::from_ref(&h)), "{\"a\": \"1\", \"b\": null}");
+        assert_eq!(
+            call("hstore_to_array", std::slice::from_ref(&h)),
+            "{a,1,b,NULL}"
+        );
+        assert_eq!(
+            call("hstore_to_json", std::slice::from_ref(&h)),
+            "{\"a\": \"1\", \"b\": null}"
+        );
         assert_eq!(call("exist", &[h.clone(), text("b")]), "t");
         assert_eq!(call("defined", &[h.clone(), text("b")]), "f");
         assert_eq!(call("delete", &[h.clone(), text("a")]), "\"b\"=>NULL");
-        assert_eq!(call("slice", &[h.clone(), texts(&[Some("a"), Some("x")])]), "\"a\"=>\"1\"");
+        assert_eq!(
+            call("slice", &[h.clone(), texts(&[Some("a"), Some("x")])]),
+            "\"a\"=>\"1\""
+        );
         assert_eq!(call("hstore", &[text("k"), text("v")]), "\"k\"=>\"v\"");
         assert_eq!(call("hstore", &[text("k"), Value::Null]), "\"k\"=>NULL");
         assert_eq!(call("hstore", &[Value::Null, text("v")]), "NULL");
@@ -541,14 +569,25 @@ mod tests {
             ),
             "\"a\"=>\"1\", \"b\"=>NULL"
         );
-        assert_eq!(call("hstore", &[texts(&[Some("a"), Some("1")])]), "\"a\"=>\"1\"");
+        assert_eq!(
+            call("hstore", &[texts(&[Some("a"), Some("1")])]),
+            "\"a\"=>\"1\""
+        );
         assert_eq!(call("akeys", &[Value::Null]), "NULL");
         let state = |name: &str, values: &[Value]| {
-            function(name, values).unwrap().unwrap_err().state().code().to_owned()
+            function(name, values)
+                .unwrap()
+                .unwrap_err()
+                .state()
+                .code()
+                .to_owned()
         };
         assert_eq!(state("hstore", &[texts(&[Some("a")]), texts(&[])]), "2202E");
         assert_eq!(state("hstore", &[texts(&[Some("a")])]), "2202E");
-        assert_eq!(state("hstore", &[texts(&[None]), texts(&[Some("1")])]), "22004");
+        assert_eq!(
+            state("hstore", &[texts(&[None]), texts(&[Some("1")])]),
+            "22004"
+        );
         let long_key = "k".repeat(crate::hstore::MAX_KEY_BYTES + 1);
         assert_eq!(state("hstore", &[text(&long_key), text("v")]), "54000");
         assert!(function("akeys", &[Value::Integer(1)]).is_none());

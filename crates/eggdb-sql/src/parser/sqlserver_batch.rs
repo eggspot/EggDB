@@ -894,7 +894,9 @@ impl Parser<'_> {
     pub(super) fn at_statement_end(&self) -> bool {
         match self.peek_kind() {
             TokenKind::Semicolon | TokenKind::End => true,
-            TokenKind::Word(word) => starts_statement(word) || ends_a_block(word) || self.at_label(),
+            TokenKind::Word(word) => {
+                starts_statement(word) || ends_a_block(word) || self.at_label()
+            }
             _ => false,
         }
     }

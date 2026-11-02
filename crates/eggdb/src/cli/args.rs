@@ -2086,7 +2086,8 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     }
     if layouts.iter().filter(|given| **given).count() > 1 {
         return Err(
-            "give one of --unicode (bcp -w), --native (bcp -n) or --format-file (bcp -f)".to_owned(),
+            "give one of --unicode (bcp -w), --native (bcp -n) or --format-file (bcp -f)"
+                .to_owned(),
         );
     }
     if (csv.native || csv.format_file.is_some())
@@ -2520,19 +2521,25 @@ mod tests {
             usage_message("import app.db --csv d.csv --table t --keep-nulls")
                 .contains("--dialect sqlserver")
         );
-        let native = request("import --dialect sqlserver app.db --csv items.bcp --table t --native");
+        let native =
+            request("import --dialect sqlserver app.db --csv items.bcp --table t --native");
         assert!(native.csv.native && !native.csv.unicode);
         let formatted = request(
             "import --dialect sqlserver app.db --csv items.bcp --table t --format-file items.fmt",
         );
         assert_eq!(formatted.csv.format_file, Some(PathBuf::from("items.fmt")));
         assert!(
-            request("import --dialect sqlserver app.db --csv w.dat --table t --unicode --delimiter ,")
-                .csv
-                .unicode
+            request(
+                "import --dialect sqlserver app.db --csv w.dat --table t --unicode --delimiter ,"
+            )
+            .csv
+            .unicode
         );
         for (line, mentions) in [
-            ("import app.db --csv d.csv --table t --unicode", "--dialect sqlserver"),
+            (
+                "import app.db --csv d.csv --table t --unicode",
+                "--dialect sqlserver",
+            ),
             (
                 "import --dialect sqlserver app.db --csv d --table t --native --unicode",
                 "one of",
@@ -2632,7 +2639,10 @@ mod tests {
     fn sizes_take_suffixes() {
         assert_eq!(request("get a k --cache 64m").cache_bytes, Some(64 << 20));
         assert_eq!(request("get a k --cache=4096").cache_bytes, Some(4096));
-        assert_eq!(request("put a k v --busy-timeout 250").busy_timeout_ms, Some(250));
+        assert_eq!(
+            request("put a k v --busy-timeout 250").busy_timeout_ms,
+            Some(250)
+        );
         assert_eq!(request("get a k --busy-timeout=0").busy_timeout_ms, Some(0));
         assert_eq!(request("get a k").busy_timeout_ms, None);
         assert_eq!(

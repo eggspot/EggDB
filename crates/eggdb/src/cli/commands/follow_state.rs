@@ -138,8 +138,14 @@ mod tests {
         assert_eq!(statements.len(), 2 + 4);
         assert!(statements[5].contains("'table dbo.o''brien'"));
         let rows = vec![
-            vec![Value::Text(SOURCE.to_owned()), Value::Text(POSTGRES.to_owned())],
-            vec![Value::Text(LSN.to_owned()), Value::Text("0/16B3750".to_owned())],
+            vec![
+                Value::Text(SOURCE.to_owned()),
+                Value::Text(POSTGRES.to_owned()),
+            ],
+            vec![
+                Value::Text(LSN.to_owned()),
+                Value::Text("0/16B3750".to_owned()),
+            ],
             vec![Value::Null, Value::Text("ignored".to_owned())],
         ];
         let read = SavedFollow::from_rows(rows);
@@ -159,7 +165,10 @@ mod tests {
     #[test]
     fn another_source_or_database_is_refused() {
         let saved = SavedFollow::new(POSTGRES, "system 7 database app");
-        assert_eq!(saved.refusal(POSTGRES, "system 7 database app", "f.db"), None);
+        assert_eq!(
+            saved.refusal(POSTGRES, "system 7 database app", "f.db"),
+            None
+        );
         assert!(
             saved
                 .refusal(POSTGRES, "system 8 database app", "f.db")
@@ -176,7 +185,9 @@ mod tests {
 
     #[test]
     fn reconnect_delays_double_up_to_a_minute() {
-        let seconds: Vec<u64> = (1..=9).map(|attempt| reconnect_delay(attempt).as_secs()).collect();
+        let seconds: Vec<u64> = (1..=9)
+            .map(|attempt| reconnect_delay(attempt).as_secs())
+            .collect();
         assert_eq!(seconds, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
         assert_eq!(reconnect_delay(200).as_secs(), 60);
     }

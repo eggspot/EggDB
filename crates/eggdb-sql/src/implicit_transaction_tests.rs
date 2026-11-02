@@ -258,14 +258,20 @@ fn session_authorization_is_set_and_reset_only_to_the_sessions_own_user() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     let user = session.parameter("session_authorization").unwrap();
-    assert_eq!(last(&mut session, "SET SESSION AUTHORIZATION DEFAULT"), "SET");
+    assert_eq!(
+        last(&mut session, "SET SESSION AUTHORIZATION DEFAULT"),
+        "SET"
+    );
     assert_eq!(state(&mut session, "SET AUTHORIZATION DEFAULT"), "0A000");
     assert_eq!(
         last(&mut session, &format!("SET SESSION AUTHORIZATION '{user}'")),
         "SET"
     );
     assert_eq!(
-        last(&mut session, &format!("SET SESSION AUTHORIZATION \"{user}\"")),
+        last(
+            &mut session,
+            &format!("SET SESSION AUTHORIZATION \"{user}\"")
+        ),
         "SET"
     );
     assert_eq!(last(&mut session, "RESET SESSION AUTHORIZATION"), "RESET");
@@ -273,10 +279,7 @@ fn session_authorization_is_set_and_reset_only_to_the_sessions_own_user() {
         state(&mut session, "SET SESSION AUTHORIZATION someone_else"),
         "0A000"
     );
-    assert_eq!(
-        session.parameter("session_authorization").unwrap(),
-        user
-    );
+    assert_eq!(session.parameter("session_authorization").unwrap(), user);
     assert_eq!(state(&mut session, "SET SESSION AUTHORIZATION"), "42601");
 }
 
@@ -318,11 +321,17 @@ fn functions_that_return_nothing_report_the_void_type() {
     );
     assert_eq!(first_column_type(&mut session, "SELECT nothing()"), void);
     assert_eq!(
-        last(&mut session, "SELECT typname, typtype, typlen FROM pg_type WHERE oid = 2278"),
+        last(
+            &mut session,
+            "SELECT typname, typtype, typlen FROM pg_type WHERE oid = 2278"
+        ),
         "typname|typtype|typlen\nvoid|p|4\nSELECT 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT 'void'::regtype::oid AS o, ''::void AS v"),
+        last(
+            &mut session,
+            "SELECT 'void'::regtype::oid AS o, ''::void AS v"
+        ),
         "o|v\n2278|\nSELECT 1"
     );
 }
@@ -367,7 +376,10 @@ fn array_parameters_bind_as_arrays_of_their_declared_element_type() {
     );
     assert_eq!(inserted, "INSERT 0 1");
     assert_eq!(
-        last(&mut session, "SELECT tags, scores, cardinality(tags) FROM tagged"),
+        last(
+            &mut session,
+            "SELECT tags, scores, cardinality(tags) FROM tagged"
+        ),
         "tags|scores|cardinality\n{a,\"b c\",NULL}|{7,-1}|3\nSELECT 1"
     );
     assert_eq!(

@@ -400,9 +400,7 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn socket(&self) -> Option<std::net::TcpStream> {
-        self.stream
-            .tcp()
-            .and_then(|stream| stream.try_clone().ok())
+        self.stream.tcp().and_then(|stream| stream.try_clone().ok())
     }
 
     pub(crate) fn peer_is_loopback(&self) -> bool {

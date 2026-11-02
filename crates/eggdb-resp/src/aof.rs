@@ -142,7 +142,9 @@ mod tests {
         let keyspace = MemoryKeyspace::default();
         let mut replay = AofReplay::new(&keyspace, 0);
         replay
-            .replay(&b"*2\r\n$6\r\nSELECT\r\n$1\r\n3\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\n1\r\n"[..])
+            .replay(
+                &b"*2\r\n$6\r\nSELECT\r\n$1\r\n3\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\n1\r\n"[..],
+            )
             .unwrap();
         replay.replay(&b""[..]).unwrap();
         replay
@@ -161,7 +163,8 @@ mod tests {
             password_sha256: None,
             now_ms: 0,
         };
-        let reply = crate::commands::execute(&context, &mut client, &[b"GET".to_vec(), b"k".to_vec()]);
+        let reply =
+            crate::commands::execute(&context, &mut client, &[b"GET".to_vec(), b"k".to_vec()]);
         assert_eq!(reply, Reply::Bulk(Some(b"2".to_vec())));
     }
 

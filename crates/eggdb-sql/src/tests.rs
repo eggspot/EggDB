@@ -4572,9 +4572,14 @@ fn time_zone_abbreviations_read_in_input_at_time_zone_and_pg_timezone_abbrevs() 
         ),
         "abbrev\nCEST\nSELECT 1"
     );
-    assert!(one_value(&mut session, "SELECT count(*) AS n FROM pg_timezone_abbrevs")
+    assert!(
+        one_value(
+            &mut session,
+            "SELECT count(*) AS n FROM pg_timezone_abbrevs"
+        )
         .parse::<u32>()
-        .is_ok_and(|count| count > 150));
+        .is_ok_and(|count| count > 150)
+    );
     assert_eq!(state(&mut session, "SET TimeZone = 'PST'"), "22023");
 }
 
@@ -4584,20 +4589,32 @@ fn posix_rule_strings_set_the_session_time_zone() {
     let mut session = Session::new(&store);
     last(&mut session, "SET TimeZone = 'EST5EDT,M3.2.0,M11.1.0'");
     assert_eq!(
-        one_value(&mut session, "SELECT '2024-07-01 12:00:00+00'::timestamptz::text AS t"),
+        one_value(
+            &mut session,
+            "SELECT '2024-07-01 12:00:00+00'::timestamptz::text AS t"
+        ),
         "2024-07-01 08:00:00-04"
     );
     assert_eq!(
-        one_value(&mut session, "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"),
+        one_value(
+            &mut session,
+            "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"
+        ),
         "2024-01-01 07:00:00-05"
     );
     assert_eq!(
-        one_value(&mut session, "SELECT '2024-03-10 02:30:00'::timestamptz::text AS t"),
+        one_value(
+            &mut session,
+            "SELECT '2024-03-10 02:30:00'::timestamptz::text AS t"
+        ),
         "2024-03-10 03:30:00-04"
     );
     last(&mut session, "SET TimeZone = '<+03>-3'");
     assert_eq!(
-        one_value(&mut session, "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"),
+        one_value(
+            &mut session,
+            "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"
+        ),
         "2024-01-01 15:00:00+03"
     );
     assert_eq!(
@@ -4643,19 +4660,49 @@ fn infinite_time_stamps_and_dates_follow_postgresql() {
         "id|a|d\n1|f|f\n2|t|t\n3|f|f\nSELECT 3"
     );
     for (sql, shown) in [
-        ("SELECT ('infinity'::timestamp + interval '1 day')::text AS v", "infinity"),
-        ("SELECT ('-infinity'::timestamptz - interval '1 year')::text AS v", "-infinity"),
-        ("SELECT ('2024-01-01'::timestamp + 'infinity'::interval)::text AS v", "infinity"),
+        (
+            "SELECT ('infinity'::timestamp + interval '1 day')::text AS v",
+            "infinity",
+        ),
+        (
+            "SELECT ('-infinity'::timestamptz - interval '1 year')::text AS v",
+            "-infinity",
+        ),
+        (
+            "SELECT ('2024-01-01'::timestamp + 'infinity'::interval)::text AS v",
+            "infinity",
+        ),
         ("SELECT ('infinity'::date + 7)::text AS v", "infinity"),
-        ("SELECT ('infinity'::date)::timestamp::text AS v", "infinity"),
-        ("SELECT ('-infinity'::timestamp)::date::text AS v", "-infinity"),
-        ("SELECT ('infinity'::timestamp)::timestamptz::text AS v", "infinity"),
+        (
+            "SELECT ('infinity'::date)::timestamp::text AS v",
+            "infinity",
+        ),
+        (
+            "SELECT ('-infinity'::timestamp)::date::text AS v",
+            "-infinity",
+        ),
+        (
+            "SELECT ('infinity'::timestamp)::timestamptz::text AS v",
+            "infinity",
+        ),
         ("SELECT ('infinity'::timestamp(3))::text AS v", "infinity"),
-        ("SELECT ('infinity'::timestamp - '2024-01-01'::timestamp)::text AS v", "infinity"),
-        ("SELECT ('2024-01-01'::timestamp - 'infinity'::timestamp)::text AS v", "-infinity"),
-        ("SELECT ('infinity'::timestamptz AT TIME ZONE 'Europe/Paris')::text AS v", "infinity"),
+        (
+            "SELECT ('infinity'::timestamp - '2024-01-01'::timestamp)::text AS v",
+            "infinity",
+        ),
+        (
+            "SELECT ('2024-01-01'::timestamp - 'infinity'::timestamp)::text AS v",
+            "-infinity",
+        ),
+        (
+            "SELECT ('infinity'::timestamptz AT TIME ZONE 'Europe/Paris')::text AS v",
+            "infinity",
+        ),
         ("SELECT 'infinity'::date = 'infinity'::timestamp AS v", "t"),
-        ("SELECT '-infinity'::timestamp < '0001-01-01 BC'::timestamp AS v", "t"),
+        (
+            "SELECT '-infinity'::timestamp < '0001-01-01 BC'::timestamp AS v",
+            "t",
+        ),
     ] {
         assert_eq!(one_value(&mut session, sql), shown, "{sql}");
     }
@@ -4667,7 +4714,10 @@ fn infinite_time_stamps_and_dates_follow_postgresql() {
         assert_eq!(state(&mut session, sql), "22008", "{sql}");
     }
     assert_eq!(
-        one_value(&mut session, "SELECT count(*) AS n FROM moments WHERE at > '2100-01-01'"),
+        one_value(
+            &mut session,
+            "SELECT count(*) AS n FROM moments WHERE at > '2100-01-01'"
+        ),
         "1"
     );
 }

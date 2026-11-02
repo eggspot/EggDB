@@ -106,7 +106,11 @@ fn applier_for_target(
             applier.know_target_table(
                 &relation.schema,
                 &relation.name,
-                table.columns.into_iter().map(|column| column.name).collect(),
+                table
+                    .columns
+                    .into_iter()
+                    .map(|column| column.name)
+                    .collect(),
             );
         }
     }
@@ -114,7 +118,10 @@ fn applier_for_target(
     Ok(applier)
 }
 
-fn added_column_type(step: &ReshapeStep, source_type: Option<(String, Option<String>)>) -> Option<String> {
+fn added_column_type(
+    step: &ReshapeStep,
+    source_type: Option<(String, Option<String>)>,
+) -> Option<String> {
     let (type_oid, type_modifier, adding) = match step {
         ReshapeStep::AddColumn {
             type_oid,
@@ -352,7 +359,11 @@ impl Session<'_> {
                 RelationKind::Table(table) if relation.schema != "eggdb_follow" => Some((
                     relation.schema,
                     relation.name,
-                    table.columns.into_iter().map(|column| column.name).collect(),
+                    table
+                        .columns
+                        .into_iter()
+                        .map(|column| column.name)
+                        .collect(),
                 )),
                 _ => None,
             })
@@ -696,7 +707,10 @@ impl Session<'_> {
         saved: &SavedFollow,
     ) -> Result<Resumed, Failure> {
         let cannot = |reason: String| {
-            source_failed(format!("cannot resume the follow into {}: {reason}", self.file_display))
+            source_failed(format!(
+                "cannot resume the follow into {}: {reason}",
+                self.file_display
+            ))
         };
         if let Some(refusal) = saved.refusal(POSTGRES, identity, &self.file_display) {
             return Err(cannot(refusal));

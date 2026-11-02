@@ -148,13 +148,24 @@ fn cursor_mistakes_raise_sql_servers_errors() {
     let mut session = session(&store);
     create_items(&mut session);
     fails_with(&mut session, "OPEN missing", 16916);
-    succeeds(&mut session, "DECLARE g CURSOR GLOBAL FOR SELECT id, name FROM items");
-    fails_with(&mut session, "DECLARE g CURSOR GLOBAL FOR SELECT id FROM items", 16915);
+    succeeds(
+        &mut session,
+        "DECLARE g CURSOR GLOBAL FOR SELECT id, name FROM items",
+    );
+    fails_with(
+        &mut session,
+        "DECLARE g CURSOR GLOBAL FOR SELECT id FROM items",
+        16915,
+    );
     fails_with(&mut session, "FETCH NEXT FROM g", 16917);
     fails_with(&mut session, "CLOSE g", 16917);
     succeeds(&mut session, "OPEN g");
     fails_with(&mut session, "OPEN g", 16905);
-    fails_with(&mut session, "DECLARE @id INT; FETCH NEXT FROM g INTO @id", 16924);
+    fails_with(
+        &mut session,
+        "DECLARE @id INT; FETCH NEXT FROM g INTO @id",
+        16924,
+    );
     succeeds(&mut session, "CLOSE g; DEALLOCATE g");
     fails_with(&mut session, "DEALLOCATE g", 16916);
 }
@@ -230,7 +241,10 @@ fn goto_refuses_unknown_and_duplicate_labels_and_jumps_into_try() {
     let store = MemoryStore::default();
     let mut session = session(&store);
     assert_eq!(refused(&mut session, "GOTO nowhere"), Some(133));
-    assert_eq!(refused(&mut session, "here: PRINT 1; here: PRINT 2"), Some(132));
+    assert_eq!(
+        refused(&mut session, "here: PRINT 1; here: PRINT 2"),
+        Some(132)
+    );
     assert_eq!(
         refused(
             &mut session,

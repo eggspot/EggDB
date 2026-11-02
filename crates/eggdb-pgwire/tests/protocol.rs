@@ -1116,11 +1116,7 @@ fn a_client_sees_citext_and_hstore_columns_by_their_type_oids_and_names() {
     );
     client.send(
         b'P',
-        &parse(
-            "",
-            "INSERT INTO people VALUES ($1, $2)",
-            &[9000, 9002],
-        ),
+        &parse("", "INSERT INTO people VALUES ($1, $2)", &[9000, 9002]),
     );
     let tags_binary: Vec<u8> = [
         &1i32.to_be_bytes()[..],
@@ -1271,7 +1267,11 @@ fn array_parameters_bind_in_text_and_binary_with_postgresqls_array_oids() {
 
     client.send(
         b'P',
-        &parse("", "SELECT id, tags, scores FROM tagged WHERE id = ANY($1)", &[1007]),
+        &parse(
+            "",
+            "SELECT id, tags, scores FROM tagged WHERE id = ANY($1)",
+            &[1007],
+        ),
     );
     let wanted = binary_int4_array(&[Some(5), Some(1)]);
     client.send(b'B', &bind("", "", &[1], &[Some(&wanted)], &[0, 0, 1]));
@@ -1328,10 +1328,7 @@ fn functions_that_return_nothing_describe_their_column_as_void() {
     let (mut client, _) = Client::login(server.address);
     let answer = client.query("SELECT pg_sleep(0)");
     assert_eq!(tags(&answer), "TDCZ");
-    assert_eq!(
-        answer[0].column_types(),
-        [("pg_sleep".to_owned(), 2278, 0)]
-    );
+    assert_eq!(answer[0].column_types(), [("pg_sleep".to_owned(), 2278, 0)]);
     assert_eq!(answer[1].raw_row(), [Some(Vec::new())]);
     client.send(b'P', &parse("", "SELECT pg_advisory_unlock_all()", &[]));
     client.send(b'B', &bind("", "", &[], &[], &[1]));

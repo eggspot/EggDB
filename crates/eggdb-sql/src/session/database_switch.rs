@@ -98,9 +98,10 @@ impl Session<'_> {
         };
         Ok(DatabaseSwitch {
             settings: moved_settings(&self.settings, database, checked_role.as_ref()),
-            connection_settings: self.connection_settings.as_ref().map(|remembered| {
-                moved_settings(remembered, database, checked_role.as_ref())
-            }),
+            connection_settings: self
+                .connection_settings
+                .as_ref()
+                .map(|remembered| moved_settings(remembered, database, checked_role.as_ref())),
             dialect: self.dialect,
             connection_dialect: self.connection_dialect,
             max_value_bytes: self.max_value_bytes,

@@ -4,9 +4,7 @@ mod plsql_tests;
 #[cfg(test)]
 mod tests;
 
-use crate::encoding::{
-    Column, CommentKind, SequenceDefinition, TableDefinition, ViewDefinition,
-};
+use crate::encoding::{Column, CommentKind, SequenceDefinition, TableDefinition, ViewDefinition};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::swap_uniform_case;
 use crate::pg_catalog::{
@@ -1629,7 +1627,10 @@ fn nls_parameters(session: bool) -> Vec<(&'static str, String)> {
         ("NLS_NUMERIC_CHARACTERS", chosen.numeric_characters()),
         ("NLS_CALENDAR", "GREGORIAN".to_owned()),
         ("NLS_DATE_FORMAT", chosen.date_format().to_owned()),
-        ("NLS_DATE_LANGUAGE", chosen.date_language().name().to_owned()),
+        (
+            "NLS_DATE_LANGUAGE",
+            chosen.date_language().name().to_owned(),
+        ),
         ("NLS_SORT", "BINARY".to_owned()),
         ("NLS_TIME_FORMAT", TIME_FORMAT.to_owned()),
         ("NLS_TIMESTAMP_FORMAT", chosen.timestamp_format().to_owned()),

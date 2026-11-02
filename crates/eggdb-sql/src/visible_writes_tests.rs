@@ -152,7 +152,10 @@ fn listed_tables_take_every_change_and_new_tables_only_under_listed_names() {
     runs(&mut session, "DROP TABLE drafts");
     session.close().unwrap();
     assert_eq!(
-        shown(&store, "SELECT count(*) FROM pg_class WHERE relname = 'drafts'"),
+        shown(
+            &store,
+            "SELECT count(*) FROM pg_class WHERE relname = 'drafts'"
+        ),
         "count\n0\nSELECT 1"
     );
 }
@@ -256,7 +259,10 @@ fn a_foreign_key_or_a_view_across_the_list_keeps_the_listed_table_from_changing(
     refused(&mut session, "TRUNCATE parents");
     refused(&mut session, "DROP TABLE parents");
     fails(&mut session, "INSERT INTO orders VALUES (2, 1, 'second')");
-    let referencing = refused(&mut session, "UPDATE orders SET note = 'changed' WHERE id = 1");
+    let referencing = refused(
+        &mut session,
+        "UPDATE orders SET note = 'changed' WHERE id = 1",
+    );
     assert!(
         referencing.contains("\"orders\" has a foreign key to table \"customers\""),
         "{referencing}"
@@ -320,10 +326,19 @@ fn the_ties_across_the_list_are_named() {
 #[test]
 fn a_refused_change_rolls_the_transaction_back_even_when_it_was_caught() {
     let store = shop();
-    let before = decode_meta(&store.begin_read().unwrap().get(&meta_key()).unwrap().unwrap())
-        .unwrap();
+    let before = decode_meta(
+        &store
+            .begin_read()
+            .unwrap()
+            .get(&meta_key())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     let mut writer = listed().write(store.begin_write().unwrap()).unwrap();
-    writer.put(&meta_key(), &encode_meta(before + 1000)).unwrap();
+    writer
+        .put(&meta_key(), &encode_meta(before + 1000))
+        .unwrap();
     let error = writer.put(b"outside SQL", b"x").unwrap_err();
     assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE);
     let commit = writer.commit().unwrap_err();

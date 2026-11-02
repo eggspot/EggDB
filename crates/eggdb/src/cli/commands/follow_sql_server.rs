@@ -872,13 +872,19 @@ impl Session<'_> {
             let mut resumed_version: Option<i64> = None;
             for table in &mut tables {
                 let shown = table.shown();
-                match (&mut table.changes, saved.table(&shown).and_then(read_position)) {
+                match (
+                    &mut table.changes,
+                    saved.table(&shown).and_then(read_position),
+                ) {
                     (ChangeSource::Tracking, Some(SavedPosition::Tracking(saved_version))) => {
                         resumed_version = Some(
                             resumed_version.map_or(saved_version, |least| least.min(saved_version)),
                         );
                     }
-                    (ChangeSource::Capture { next, .. }, Some(SavedPosition::Capture(saved_next))) => {
+                    (
+                        ChangeSource::Capture { next, .. },
+                        Some(SavedPosition::Capture(saved_next)),
+                    ) => {
                         *next = saved_next;
                     }
                     (_, None) => {
@@ -903,8 +909,11 @@ impl Session<'_> {
                     *name == table.name && (*schema == table.schema || table.schema == "dbo")
                 });
                 if let Some((_, _, columns)) = in_target {
-                    let source_columns: Vec<String> =
-                        table.columns.iter().map(|column| column.name.clone()).collect();
+                    let source_columns: Vec<String> = table
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect();
                     if let Some(change) = column_change(columns, &source_columns) {
                         return Err(schema_changed(
                             &target,
@@ -921,7 +930,10 @@ impl Session<'_> {
                     .string("event", "resumed")
                     .number("tables", tables.len() as u64)
                     .string("position", &position),
-                &format!("  resumed         {} tables from {position}\n", tables.len()),
+                &format!(
+                    "  resumed         {} tables from {position}\n",
+                    tables.len()
+                ),
             );
         }
 
@@ -1100,8 +1112,11 @@ impl Session<'_> {
             if !tables.is_empty() {
                 let columns_now = first_rows(query(&mut source, &columns_query(&tables))?);
                 for table in &tables {
-                    let known: Vec<String> =
-                        table.columns.iter().map(|column| column.name.clone()).collect();
+                    let known: Vec<String> = table
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect();
                     if let Some(change) = column_change(&known, &columns_of(&columns_now, table)) {
                         return Err(schema_changed(
                             &target,
@@ -1454,7 +1469,10 @@ mod tests {
             column_change(&known, &["note".to_owned(), "id".to_owned()]).as_deref(),
             Some("reordered its columns")
         );
-        assert_eq!(column_change(&known, &[]).as_deref(), Some("the table is gone"));
+        assert_eq!(
+            column_change(&known, &[]).as_deref(),
+            Some("the table is gone")
+        );
     }
 
     #[test]
@@ -1463,8 +1481,16 @@ mod tests {
         let query = columns_query(std::slice::from_ref(&table));
         assert!(query.contains("(TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'orders')"));
         let rows = vec![
-            vec![Some("dbo".to_owned()), Some("orders".to_owned()), Some("id".to_owned())],
-            vec![Some("dbo".to_owned()), Some("other".to_owned()), Some("x".to_owned())],
+            vec![
+                Some("dbo".to_owned()),
+                Some("orders".to_owned()),
+                Some("id".to_owned()),
+            ],
+            vec![
+                Some("dbo".to_owned()),
+                Some("other".to_owned()),
+                Some("x".to_owned()),
+            ],
         ];
         assert_eq!(columns_of(&rows, &table), vec!["id".to_owned()]);
     }

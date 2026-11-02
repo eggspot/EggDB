@@ -106,7 +106,6 @@ fn follow_refuses_bad_sources_and_options_before_connecting() {
             ],
             "--reconnect-for needs a whole number of seconds",
         ),
-
         (
             vec![
                 "follow",

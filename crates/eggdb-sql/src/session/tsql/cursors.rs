@@ -28,9 +28,9 @@ impl Session<'_> {
         let name = &cursor.name.text;
         let local = (!cursor.global)
             .then(|| {
-                self.tsql_cursors
-                    .iter()
-                    .position(|known| !known.global && known.nest_level == level && known.named(name))
+                self.tsql_cursors.iter().position(|known| {
+                    !known.global && known.nest_level == level && known.named(name)
+                })
             })
             .flatten();
         local.or_else(|| {

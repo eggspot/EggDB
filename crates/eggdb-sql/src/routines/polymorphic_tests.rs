@@ -54,7 +54,10 @@ fn anyelement_takes_the_type_of_its_arguments_on_each_call() {
         answer(&mut session, "SELECT first_of(1, '2') + 1 AS n"),
         "n\n2\nSELECT 1"
     );
-    assert_eq!(answer(&mut session, "SELECT same(42)"), "same\n42\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT same(42)"),
+        "same\n42\nSELECT 1"
+    );
     let error = refusal(&mut session, "SELECT first_of(1, 'x'::text)");
     assert_eq!(error.state(), SqlState::UNDEFINED_FUNCTION);
     assert_eq!(
@@ -64,7 +67,10 @@ fn anyelement_takes_the_type_of_its_arguments_on_each_call() {
         ),
         "prorettype\n2283\nSELECT 1"
     );
-    answer(&mut session, "DROP FUNCTION first_of(anyelement, anyelement)");
+    answer(
+        &mut session,
+        "DROP FUNCTION first_of(anyelement, anyelement)",
+    );
     let error = refusal(&mut session, "SELECT first_of(1, 2)");
     assert_eq!(error.state(), SqlState::UNDEFINED_FUNCTION);
 }
@@ -186,8 +192,10 @@ fn set_returning_polymorphic_functions_run_in_from() {
     let store = MemoryStore::default();
     let mut session = session_with(
         &store,
-        &["CREATE FUNCTION both_of(a anyelement, b anyelement) RETURNS SETOF anyelement \
-           LANGUAGE plpgsql AS $$ BEGIN RETURN NEXT a; RETURN NEXT b; END $$"],
+        &[
+            "CREATE FUNCTION both_of(a anyelement, b anyelement) RETURNS SETOF anyelement \
+           LANGUAGE plpgsql AS $$ BEGIN RETURN NEXT a; RETURN NEXT b; END $$",
+        ],
     );
     assert_eq!(
         answer(&mut session, "SELECT * FROM both_of(3, 4)"),
@@ -204,8 +212,10 @@ fn results_and_arguments_that_cannot_be_resolved_are_errors() {
     let store = MemoryStore::default();
     let mut session = session_with(
         &store,
-        &["CREATE FUNCTION pick(a anyelement, b anyelement DEFAULT 'x'::text) RETURNS anyelement \
-           LANGUAGE plpgsql AS $$ BEGIN RETURN b; END $$"],
+        &[
+            "CREATE FUNCTION pick(a anyelement, b anyelement DEFAULT 'x'::text) RETURNS anyelement \
+           LANGUAGE plpgsql AS $$ BEGIN RETURN b; END $$",
+        ],
     );
     let error = refusal(
         &mut session,
@@ -219,5 +229,8 @@ fn results_and_arguments_that_cannot_be_resolved_are_errors() {
     assert_eq!(error.state(), SqlState::INVALID_FUNCTION_DEFINITION);
     let error = refusal(&mut session, "SELECT pick(1)");
     assert_eq!(error.state(), SqlState::DATATYPE_MISMATCH);
-    assert_eq!(answer(&mut session, "SELECT pick('a'::text)"), "pick\nx\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT pick('a'::text)"),
+        "pick\nx\nSELECT 1"
+    );
 }

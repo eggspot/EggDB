@@ -344,17 +344,26 @@ END $$",
         &mut session,
         "INSERT INTO items VALUES (1, 'pen', 2), (2, 'ink', 3), (3, 'pad', 5)",
     );
-    answer(&mut session, "UPDATE items SET price = price * 10 WHERE id < 3");
+    answer(
+        &mut session,
+        "UPDATE items SET price = price * 10 WHERE id < 3",
+    );
     answer(&mut session, "DELETE FROM items WHERE id <> 2");
     assert_eq!(
-        rows(&mut session, "SELECT op, tbl, detail FROM audit ORDER BY seq"),
+        rows(
+            &mut session,
+            "SELECT op, tbl, detail FROM audit ORDER BY seq"
+        ),
         vec![
             "INSERT|items|3 rows, 10",
             "UPDATE|items|5 -> 50",
             "DELETE|items|pad,pen",
         ]
     );
-    answer(&mut session, "INSERT INTO items SELECT 9, 'cap', 1 WHERE false");
+    answer(
+        &mut session,
+        "INSERT INTO items SELECT 9, 'cap', 1 WHERE false",
+    );
     assert_eq!(
         rows(&mut session, "SELECT detail FROM audit WHERE seq = 4"),
         vec!["0 rows, 0"]

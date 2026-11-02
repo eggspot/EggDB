@@ -1,8 +1,7 @@
 use crate::encoding::{
-    CommentKind, KeyOwner, NAMESPACE, SequenceDefinition, TableDefinition,
-    every_dependency_prefix, every_reference_prefix, is_temporary_key, is_view_record, key_owner,
-    meta_key, prefix_end, sequence_key, sequences_prefix, split_comment_key, table_key,
-    triggers_prefix,
+    CommentKind, KeyOwner, NAMESPACE, SequenceDefinition, TableDefinition, every_dependency_prefix,
+    every_reference_prefix, is_temporary_key, is_view_record, key_owner, meta_key, prefix_end,
+    sequence_key, sequences_prefix, split_comment_key, table_key, triggers_prefix,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::schemas::{DEFAULT_SCHEMA, QUALIFIER};
@@ -792,7 +791,11 @@ impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
     }
 
     fn commit(self) -> SqlResult<()> {
-        if self.confined.as_ref().is_some_and(|confined| confined.refused) {
+        if self
+            .confined
+            .as_ref()
+            .is_some_and(|confined| confined.refused)
+        {
             self.inner.rollback()?;
             return Err(rolled_back());
         }

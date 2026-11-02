@@ -62,14 +62,15 @@ fn jsonb_path_exists_and_match_answer_like_postgresql() {
     assert_eq!(
         one(
             &mut session,
-            &format!(
-                "SELECT jsonb_path_exists({DOC}, '$.a[*] ? (@ >= $min)', '{{\"min\": 4}}')"
-            )
+            &format!("SELECT jsonb_path_exists({DOC}, '$.a[*] ? (@ >= $min)', '{{\"min\": 4}}')")
         ),
         "t"
     );
     assert_eq!(
-        state(&mut session, &format!("SELECT jsonb_path_match({DOC}, '$.a')")),
+        state(
+            &mut session,
+            &format!("SELECT jsonb_path_match({DOC}, '$.a')")
+        ),
         "22038"
     );
     assert_eq!(
@@ -194,7 +195,10 @@ fn hostile_paths_fail_with_errors() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     assert_eq!(
-        state(&mut session, &format!("SELECT jsonb_path_exists({DOC}, '$.a[')")),
+        state(
+            &mut session,
+            &format!("SELECT jsonb_path_exists({DOC}, '$.a[')")
+        ),
         "42601"
     );
     let deep = format!("{}$ {}", "(".repeat(5_000), ")".repeat(5_000));
@@ -240,10 +244,7 @@ fn date_trunc_of_an_interval_zeroes_the_smaller_fields() {
         "3 years"
     );
     assert_eq!(
-        state(
-            &mut session,
-            "SELECT date_trunc('week', interval '3 days')"
-        ),
+        state(&mut session, "SELECT date_trunc('week', interval '3 days')"),
         "0A000"
     );
 }

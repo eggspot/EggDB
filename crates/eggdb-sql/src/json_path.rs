@@ -229,7 +229,9 @@ fn is_word_char(character: char) -> bool {
 }
 
 fn hex_value(digits: &str) -> Option<char> {
-    u32::from_str_radix(digits, 16).ok().and_then(char::from_u32)
+    u32::from_str_radix(digits, 16)
+        .ok()
+        .and_then(char::from_u32)
 }
 
 struct Lexer<'t> {
@@ -240,7 +242,9 @@ struct Lexer<'t> {
 
 impl<'t> Lexer<'t> {
     fn peek(&self, ahead: usize) -> Option<char> {
-        self.chars.get(self.at + ahead).map(|(_, character)| *character)
+        self.chars
+            .get(self.at + ahead)
+            .map(|(_, character)| *character)
     }
 
     fn offset(&self) -> usize {
@@ -250,7 +254,12 @@ impl<'t> Lexer<'t> {
     }
 
     fn near(&self, start: usize) -> String {
-        self.text.get(start..).unwrap_or("").chars().take(20).collect()
+        self.text
+            .get(start..)
+            .unwrap_or("")
+            .chars()
+            .take(20)
+            .collect()
     }
 
     fn tokens(mut self) -> SqlResult<Vec<Token>> {
@@ -339,7 +348,10 @@ impl<'t> Lexer<'t> {
         if matches!(self.peek(0), Some('e' | 'E')) {
             let signed = matches!(self.peek(1), Some('+' | '-'));
             let digit_at = if signed { 2 } else { 1 };
-            if self.peek(digit_at).is_some_and(|next| next.is_ascii_digit()) {
+            if self
+                .peek(digit_at)
+                .is_some_and(|next| next.is_ascii_digit())
+            {
                 text.push('e');
                 if signed {
                     text.extend(self.peek(1));
@@ -406,9 +418,7 @@ impl<'t> Lexer<'t> {
         let mut out = String::new();
         loop {
             let Some(character) = self.peek(0) else {
-                return Err(invalid_path(
-                    "unterminated quoted string in jsonpath input",
-                ));
+                return Err(invalid_path("unterminated quoted string in jsonpath input"));
             };
             self.at += 1;
             match character {
@@ -694,7 +704,11 @@ impl Parser {
             let first = self.value(left)?;
             let right = self.multiplicative()?;
             let second = self.value(right)?;
-            left = Parsed::Value(Expr::Arithmetic(operator, Box::new(first), Box::new(second)));
+            left = Parsed::Value(Expr::Arithmetic(
+                operator,
+                Box::new(first),
+                Box::new(second),
+            ));
         }
     }
 
@@ -712,7 +726,11 @@ impl Parser {
             let first = self.value(left)?;
             let right = self.unary()?;
             let second = self.value(right)?;
-            left = Parsed::Value(Expr::Arithmetic(operator, Box::new(first), Box::new(second)));
+            left = Parsed::Value(Expr::Arithmetic(
+                operator,
+                Box::new(first),
+                Box::new(second),
+            ));
         }
     }
 
@@ -1043,13 +1061,7 @@ fn member<'j>(json: &'j Json, key: &str) -> Option<&'j Json> {
     }
 }
 
-fn collect_levels<'j>(
-    json: &'j Json,
-    level: u32,
-    from: u32,
-    to: u32,
-    out: &mut Vec<&'j Json>,
-) {
+fn collect_levels<'j>(json: &'j Json, level: u32, from: u32, to: u32, out: &mut Vec<&'j Json>) {
     if level >= from {
         out.push(json);
     }
@@ -1115,7 +1127,12 @@ impl<'a> Evaluator<'a> {
         out
     }
 
-    fn eval(&self, expr: &Expr, current: Option<&Cow<'a, Json>>, last: Option<i64>) -> Run<Items<'a>> {
+    fn eval(
+        &self,
+        expr: &Expr,
+        current: Option<&Cow<'a, Json>>,
+        last: Option<i64>,
+    ) -> Run<Items<'a>> {
         crate::stack_depth::check().map_err(fatal)?;
         let items = match expr {
             Expr::Root => vec![Cow::Borrowed(self.root)],
@@ -1174,7 +1191,9 @@ impl<'a> Evaluator<'a> {
                 out
             }
             Expr::Arithmetic(operator, left, right) => {
-                vec![Cow::Owned(self.arithmetic(*operator, left, right, current, last)?)]
+                vec![Cow::Owned(
+                    self.arithmetic(*operator, left, right, current, last)?,
+                )]
             }
             Expr::Predicate(predicate) => vec![Cow::Owned(
                 match self.predicate(predicate, current, last)? {
@@ -1205,7 +1224,9 @@ impl<'a> Evaluator<'a> {
         .ok_or_else(|| {
             suppressible(
                 SqlState::SINGLETON_SQL_JSON_ITEM_REQUIRED,
-                format!("{side} operand of jsonpath operator {symbol} is not a single numeric value"),
+                format!(
+                    "{side} operand of jsonpath operator {symbol} is not a single numeric value"
+                ),
             )
         })
     }
@@ -1231,7 +1252,9 @@ impl<'a> Evaluator<'a> {
             Arithmetic::Divide => left.divide(&right),
             Arithmetic::Modulo => left.remainder(&right),
         };
-        result.map(|number| number_json(&number)).map_err(Failure::Suppressible)
+        result
+            .map(|number| number_json(&number))
+            .map_err(Failure::Suppressible)
     }
 
     #[allow(clippy::ptr_arg)]
@@ -1246,7 +1269,8 @@ impl<'a> Evaluator<'a> {
         match step {
             Step::Member(key) => match item.as_ref() {
                 Json::Object(_) => {
-                    let found = borrowed_children(item, |json| member(json, key).into_iter().collect());
+                    let found =
+                        borrowed_children(item, |json| member(json, key).into_iter().collect());
                     if found.is_empty() && !self.lax() {
                         return Err(suppressible(
                             SqlState::SQL_JSON_MEMBER_NOT_FOUND,
@@ -1317,11 +1341,12 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Step::Method(method) => {
-                let targets = if method.unwraps() && self.lax() && matches!(item.as_ref(), Json::Array(_)) {
-                    borrowed_children(item, elements)
-                } else {
-                    vec![item.clone()]
-                };
+                let targets =
+                    if method.unwraps() && self.lax() && matches!(item.as_ref(), Json::Array(_)) {
+                        borrowed_children(item, elements)
+                    } else {
+                        vec![item.clone()]
+                    };
                 for target in &targets {
                     match self.method(*method, target)? {
                         Json::Array(pairs) if *method == Method::KeyValue => {
@@ -1419,7 +1444,10 @@ impl<'a> Evaluator<'a> {
             )
         };
         let cannot_cast = |message: String| {
-            suppressible(SqlState::SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE, message)
+            suppressible(
+                SqlState::SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE,
+                message,
+            )
         };
         Ok(match method {
             Method::Type => Json::String(json::type_of(item).to_owned()),
@@ -1515,7 +1543,9 @@ impl<'a> Evaluator<'a> {
             Method::Number | Method::Integer | Method::BigInt => {
                 let number = match item {
                     Json::Number(text) => Numeric::parse(text).ok(),
-                    Json::String(text) => Numeric::parse(text.trim()).ok().filter(|number| !number.is_nan()),
+                    Json::String(text) => Numeric::parse(text.trim())
+                        .ok()
+                        .filter(|number| !number.is_nan()),
                     _ => {
                         return Err(cannot_cast(format!(
                             "jsonpath item method .{name}() can only be applied to a string or numeric value"
@@ -1541,8 +1571,12 @@ impl<'a> Evaluator<'a> {
                     _ => {
                         let whole = number.to_i128_rounded();
                         let fits = match method {
-                            Method::Integer => whole.and_then(|whole| i32::try_from(whole).ok()).map(i128::from),
-                            _ => whole.and_then(|whole| i64::try_from(whole).ok()).map(i128::from),
+                            Method::Integer => whole
+                                .and_then(|whole| i32::try_from(whole).ok())
+                                .map(i128::from),
+                            _ => whole
+                                .and_then(|whole| i64::try_from(whole).ok())
+                                .map(i128::from),
                         };
                         let whole = fits.ok_or_else(|| {
                             cannot_cast(format!(
@@ -1557,7 +1591,9 @@ impl<'a> Evaluator<'a> {
             Method::Boolean => match item {
                 Json::Boolean(_) => item.clone(),
                 Json::Number(text) => {
-                    let whole = Numeric::parse(text).ok().and_then(|number| number.integral_value());
+                    let whole = Numeric::parse(text)
+                        .ok()
+                        .and_then(|number| number.integral_value());
                     match whole {
                         Some(whole) => Json::Boolean(whole != 0),
                         None => {
@@ -1585,7 +1621,12 @@ impl<'a> Evaluator<'a> {
         })
     }
 
-    fn operand(&self, expr: &Expr, current: Option<&Cow<'a, Json>>, last: Option<i64>) -> Run<Option<Items<'a>>> {
+    fn operand(
+        &self,
+        expr: &Expr,
+        current: Option<&Cow<'a, Json>>,
+        last: Option<i64>,
+    ) -> Run<Option<Items<'a>>> {
         match self.eval(expr, current, last) {
             Ok(items) => Ok(Some(self.unwrapped(items))),
             Err(Failure::Suppressible(_)) => Ok(None),
@@ -1614,7 +1655,12 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn predicate(&self, predicate: &Predicate, current: Option<&Cow<'a, Json>>, last: Option<i64>) -> Run<Truth> {
+    fn predicate(
+        &self,
+        predicate: &Predicate,
+        current: Option<&Cow<'a, Json>>,
+        last: Option<i64>,
+    ) -> Run<Truth> {
         crate::stack_depth::check().map_err(fatal)?;
         Ok(match predicate {
             Predicate::And(left, right) => match self.predicate(left, current, last)? {
@@ -1672,10 +1718,12 @@ impl<'a> Evaluator<'a> {
                 let mut results = Vec::with_capacity(subjects.len());
                 for item in &subjects {
                     results.push(match item.as_ref() {
-                        Json::String(text) => match regex.is_match(text, &mut StepBudget::new(MATCH_STEPS)) {
-                            Ok(matched) => Truth::of(matched),
-                            Err(_) => Truth::Unknown,
-                        },
+                        Json::String(text) => {
+                            match regex.is_match(text, &mut StepBudget::new(MATCH_STEPS)) {
+                                Ok(matched) => Truth::of(matched),
+                                Err(_) => Truth::Unknown,
+                            }
+                        }
                         _ => Truth::Unknown,
                     });
                 }
@@ -1847,12 +1895,14 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             let items = items.unwrap_or_default();
             jsonb(&Json::Array(items.into_iter().map(node).collect()))
         }),
-        _ => call.items().and_then(|items| {
-            match items.and_then(|items| items.into_iter().next()) {
-                Some(first) => jsonb(&first),
-                None => Ok(Value::Null),
-            }
-        }),
+        _ => {
+            call.items().and_then(
+                |items| match items.and_then(|items| items.into_iter().next()) {
+                    Some(first) => jsonb(&first),
+                    None => Ok(Value::Null),
+                },
+            )
+        }
     })
 }
 
@@ -1904,7 +1954,12 @@ fn operator_call(document: &Value, path: &Value) -> SqlResult<Option<Call>> {
     if document.is_null() || path.is_null() {
         return Ok(None);
     }
-    let values = [document.clone(), path.clone(), Value::Jsonb("{}".to_owned()), Value::Boolean(true)];
+    let values = [
+        document.clone(),
+        path.clone(),
+        Value::Jsonb("{}".to_owned()),
+        Value::Boolean(true),
+    ];
     match call_of(&values) {
         Some(call) => call.map(Some),
         None => Err(SqlError::new(
@@ -1993,7 +2048,10 @@ mod tests {
             ok(doc, "$.items[*] ? (exists(@.n) && !(@.n < 5)).n"),
             ["5", "null"]
         );
-        assert_eq!(ok(doc, "$.items[*] ? ((@.n > \"a\") is unknown).n").len(), 2);
+        assert_eq!(
+            ok(doc, "$.items[*] ? ((@.n > \"a\") is unknown).n").len(),
+            2
+        );
         assert_eq!(ok(doc, "$.items[*].n > 4"), ["true"]);
         assert_eq!(ok(doc, "$.items[*].n > 40"), ["false"]);
     }
@@ -2029,7 +2087,10 @@ mod tests {
         assert_eq!(found.len(), 2);
         let missing = parse("$[*] ? (@ >= $max)").unwrap();
         assert_eq!(
-            select(&target, &missing, Some(&vars)).unwrap_err().state().code(),
+            select(&target, &missing, Some(&vars))
+                .unwrap_err()
+                .state()
+                .code(),
             "42704"
         );
     }
@@ -2037,8 +2098,22 @@ mod tests {
     #[test]
     fn hostile_paths_return_errors() {
         for path in [
-            "", "$.", "$[", "$ ? (@ > 1", "$.a ==", "@.a", "last", "$.\"abc", "$.a(", "$ &&",
-            "$.a.nonsense()", "$[1 to]", "$.**{x}", "\"\\u{110000}\"", "\"\\ud800\"", "#",
+            "",
+            "$.",
+            "$[",
+            "$ ? (@ > 1",
+            "$.a ==",
+            "@.a",
+            "last",
+            "$.\"abc",
+            "$.a(",
+            "$ &&",
+            "$.a.nonsense()",
+            "$[1 to]",
+            "$.**{x}",
+            "\"\\u{110000}\"",
+            "\"\\ud800\"",
+            "#",
         ] {
             assert!(parse(path).is_err(), "{path} parsed");
         }
@@ -2049,7 +2124,10 @@ mod tests {
         let doc = format!("{}1{}", "[".repeat(200), "]".repeat(200));
         let target = json::parse(&doc, true).unwrap().value;
         let path = parse("$.**.**.**.**").unwrap();
-        assert_eq!(select(&target, &path, None).unwrap_err().state().code(), "54000");
+        assert_eq!(
+            select(&target, &path, None).unwrap_err().state().code(),
+            "54000"
+        );
     }
 
     #[test]
@@ -2057,34 +2135,73 @@ mod tests {
         let doc = Value::Jsonb(r#"{"a":[1,2,3]}"#.to_owned());
         let path = |text: &str| Value::Text(text.to_owned());
         assert_eq!(
-            function("jsonb_path_exists", &[doc.clone(), path("$.a[*] ? (@ > 2)")]).unwrap().unwrap(),
+            function(
+                "jsonb_path_exists",
+                &[doc.clone(), path("$.a[*] ? (@ > 2)")]
+            )
+            .unwrap()
+            .unwrap(),
             Value::Boolean(true)
         );
         assert_eq!(
-            function("jsonb_path_match", &[doc.clone(), path("exists($.a ? (@ == 9))")]).unwrap().unwrap(),
+            function(
+                "jsonb_path_match",
+                &[doc.clone(), path("exists($.a ? (@ == 9))")]
+            )
+            .unwrap()
+            .unwrap(),
             Value::Boolean(false)
         );
         assert_eq!(
-            function("jsonb_path_query_array", &[doc.clone(), path("$.a[*] ? (@ > 1)")]).unwrap().unwrap(),
+            function(
+                "jsonb_path_query_array",
+                &[doc.clone(), path("$.a[*] ? (@ > 1)")]
+            )
+            .unwrap()
+            .unwrap(),
             Value::Jsonb("[2, 3]".to_owned())
         );
         assert_eq!(
-            function("jsonb_path_query_first", &[doc.clone(), path("$.a[*]")]).unwrap().unwrap(),
+            function("jsonb_path_query_first", &[doc.clone(), path("$.a[*]")])
+                .unwrap()
+                .unwrap(),
             Value::Jsonb("1".to_owned())
         );
-        assert!(function("jsonb_path_match", &[doc.clone(), path("$.a")]).unwrap().is_err());
+        assert!(
+            function("jsonb_path_match", &[doc.clone(), path("$.a")])
+                .unwrap()
+                .is_err()
+        );
         assert_eq!(
             function(
                 "jsonb_path_query_first",
-                &[doc.clone(), path("strict $.x"), Value::Jsonb("{}".to_owned()), Value::Boolean(true)]
+                &[
+                    doc.clone(),
+                    path("strict $.x"),
+                    Value::Jsonb("{}".to_owned()),
+                    Value::Boolean(true)
+                ]
             )
             .unwrap()
             .unwrap(),
             Value::Null
         );
-        assert!(function("jsonb_path_exists", &[doc.clone(), path("$"), Value::Jsonb("[]".to_owned())]).unwrap().is_err());
-        assert_eq!(exists_operator(&doc, &path("$.a[*] ? (@ == 2)")).unwrap(), Value::Boolean(true));
-        assert_eq!(match_operator(&doc, &path("$.a[0] == 1")).unwrap(), Value::Boolean(true));
+        assert!(
+            function(
+                "jsonb_path_exists",
+                &[doc.clone(), path("$"), Value::Jsonb("[]".to_owned())]
+            )
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(
+            exists_operator(&doc, &path("$.a[*] ? (@ == 2)")).unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            match_operator(&doc, &path("$.a[0] == 1")).unwrap(),
+            Value::Boolean(true)
+        );
         assert_eq!(match_operator(&doc, &path("$.a")).unwrap(), Value::Null);
     }
 }

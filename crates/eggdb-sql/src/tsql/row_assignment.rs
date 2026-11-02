@@ -44,7 +44,10 @@ fn item_values(select: &Select) -> impl Iterator<Item = &Expr> {
 }
 
 fn any_node(expr: &Expr, test: &dyn Fn(&Expr) -> bool) -> bool {
-    test(expr) || children(expr).into_iter().any(|child| any_node(child, test))
+    test(expr)
+        || children(expr)
+            .into_iter()
+            .any(|child| any_node(child, test))
 }
 
 fn is_assigned_variable(expr: &Expr) -> bool {
@@ -61,7 +64,10 @@ pub(crate) fn refuses_per_row(query: &Statement) -> Option<&'static str> {
     let select = select_of(query)?;
     let aggregates = item_values(select).any(|value| {
         any_node(value, &|node: &Expr| {
-            matches!(node.kind, ExprKind::Aggregate { .. } | ExprKind::Subquery(_))
+            matches!(
+                node.kind,
+                ExprKind::Aggregate { .. } | ExprKind::Subquery(_)
+            )
         })
     });
     if aggregates || select.distinct {
@@ -117,7 +123,11 @@ impl RowAssignment {
             },
             alias: None,
         }];
-        items.extend(columns.iter().map(|reference| column_item(reference, position)));
+        items.extend(
+            columns
+                .iter()
+                .map(|reference| column_item(reference, position)),
+        );
         select.items = items;
         Some(Self {
             inputs,
@@ -138,7 +148,13 @@ impl RowAssignment {
         bound
     }
 
-    fn bind(&self, expr: &mut Expr, output: &[OutputColumn], row: &[Value], context: &BatchContext) {
+    fn bind(
+        &self,
+        expr: &mut Expr,
+        output: &[OutputColumn],
+        row: &[Value],
+        context: &BatchContext,
+    ) {
         if let ExprKind::Column { qualifier, name } = &expr.kind {
             let (qualifier, name) = (qualifier.clone(), name.clone());
             let position = expr.position;

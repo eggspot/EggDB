@@ -882,13 +882,9 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
                 .flatten();
             authenticate(&mut wire, shared, &startup.user, stored_role)
         }
-        external => authenticate_externally(
-            &mut wire,
-            shared,
-            &startup.user,
-            &external,
-            roles_store,
-        ),
+        external => {
+            authenticate_externally(&mut wire, shared, &startup.user, &external, roles_store)
+        }
     };
     match outcome {
         AuthenticationOutcome::Authenticated => {}
@@ -1531,7 +1527,10 @@ impl<'a, 's> Connection<'a, 's> {
                 None,
             ));
         }
-        let replaced = self.portals.get(&portal_name).map(|portal| portal.held_bytes);
+        let replaced = self
+            .portals
+            .get(&portal_name)
+            .map(|portal| portal.held_bytes);
         if replaced.is_none() && self.portals.len() >= MAX_PORTALS {
             return Err((too_many_held("portals", MAX_PORTALS), None));
         }

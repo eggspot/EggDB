@@ -133,7 +133,11 @@ pub(crate) fn close(name: Option<&str>) -> SqlResult<QueryResult> {
     Ok(QueryResult::command("CLOSE CURSOR"))
 }
 
-pub(crate) fn fetch(name: &str, direction: PortalDirection, only_move: bool) -> SqlResult<QueryResult> {
+pub(crate) fn fetch(
+    name: &str,
+    direction: PortalDirection,
+    only_move: bool,
+) -> SqlResult<QueryResult> {
     OPEN.with(|open| {
         let mut open = open.borrow_mut();
         let portal = open

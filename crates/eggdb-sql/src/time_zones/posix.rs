@@ -71,7 +71,8 @@ impl DayRule {
                     );
                     last - (weekday_of(last) - weekday).rem_euclid(7)
                 } else {
-                    let first = datetime::days_from_civil(year, month, 1) + (i64::from(week) - 1) * 7;
+                    let first =
+                        datetime::days_from_civil(year, month, 1) + (i64::from(week) - 1) * 7;
                     first + (weekday - weekday_of(first)).rem_euclid(7)
                 }
             }
@@ -229,7 +230,9 @@ impl Reader<'_> {
             if !(1..=365).contains(&number) {
                 return None;
             }
-            return u16::try_from(number).ok().map(DayRule::JulianWithoutLeapDay);
+            return u16::try_from(number)
+                .ok()
+                .map(DayRule::JulianWithoutLeapDay);
         }
         let number = self.number(3)?;
         if number > 365 {
@@ -400,31 +403,70 @@ mod tests {
         let eastern = zone("EST5EDT,M3.2.0,M11.1.0");
         let before = eastern.local_time_at(seconds(2026, 3, 8, 6, 59));
         let after = eastern.local_time_at(seconds(2026, 3, 8, 7, 0));
-        assert_eq!((before.offset, before.abbreviation.as_str()), (-5 * 3600, "EST"));
-        assert_eq!((after.offset, after.abbreviation.as_str()), (-4 * 3600, "EDT"));
+        assert_eq!(
+            (before.offset, before.abbreviation.as_str()),
+            (-5 * 3600, "EST")
+        );
+        assert_eq!(
+            (after.offset, after.abbreviation.as_str()),
+            (-4 * 3600, "EDT")
+        );
         assert!(after.is_dst);
-        assert_eq!(eastern.local_time_at(seconds(2026, 11, 1, 5, 59)).offset, -4 * 3600);
-        assert_eq!(eastern.local_time_at(seconds(2026, 11, 1, 6, 0)).offset, -5 * 3600);
-        assert_eq!(eastern.offset_of_local(seconds(2026, 3, 8, 2, 30)), -5 * 3600);
-        assert_eq!(eastern.offset_of_local(seconds(2026, 11, 1, 1, 30)), -5 * 3600);
-        assert_eq!(eastern.offset_of_local(seconds(2026, 7, 1, 12, 0)), -4 * 3600);
+        assert_eq!(
+            eastern.local_time_at(seconds(2026, 11, 1, 5, 59)).offset,
+            -4 * 3600
+        );
+        assert_eq!(
+            eastern.local_time_at(seconds(2026, 11, 1, 6, 0)).offset,
+            -5 * 3600
+        );
+        assert_eq!(
+            eastern.offset_of_local(seconds(2026, 3, 8, 2, 30)),
+            -5 * 3600
+        );
+        assert_eq!(
+            eastern.offset_of_local(seconds(2026, 11, 1, 1, 30)),
+            -5 * 3600
+        );
+        assert_eq!(
+            eastern.offset_of_local(seconds(2026, 7, 1, 12, 0)),
+            -4 * 3600
+        );
     }
 
     #[test]
     fn a_daylight_time_without_rules_follows_the_united_states() {
         let pacific = zone("PST8PDT");
-        assert_eq!(pacific.local_time_at(seconds(2026, 7, 1, 12, 0)).offset, -7 * 3600);
-        assert_eq!(pacific.local_time_at(seconds(2026, 1, 1, 12, 0)).offset, -8 * 3600);
+        assert_eq!(
+            pacific.local_time_at(seconds(2026, 7, 1, 12, 0)).offset,
+            -7 * 3600
+        );
+        assert_eq!(
+            pacific.local_time_at(seconds(2026, 1, 1, 12, 0)).offset,
+            -8 * 3600
+        );
     }
 
     #[test]
     fn southern_rules_wrap_the_year_and_julian_days_ignore_leap_days() {
         let sydney = zone("AEST-10AEDT,M10.1.0,M4.1.0/3");
-        assert_eq!(sydney.local_time_at(seconds(2026, 1, 15, 0, 0)).offset, 11 * 3600);
-        assert_eq!(sydney.local_time_at(seconds(2026, 6, 15, 0, 0)).offset, 10 * 3600);
+        assert_eq!(
+            sydney.local_time_at(seconds(2026, 1, 15, 0, 0)).offset,
+            11 * 3600
+        );
+        assert_eq!(
+            sydney.local_time_at(seconds(2026, 6, 15, 0, 0)).offset,
+            10 * 3600
+        );
         let julian = zone("XST3XDT,J60/0,J300/0");
-        assert_eq!(julian.local_time_at(seconds(2024, 3, 1, 4, 0)).offset, -2 * 3600);
-        assert_eq!(julian.local_time_at(seconds(2024, 2, 29, 12, 0)).offset, -3 * 3600);
+        assert_eq!(
+            julian.local_time_at(seconds(2024, 3, 1, 4, 0)).offset,
+            -2 * 3600
+        );
+        assert_eq!(
+            julian.local_time_at(seconds(2024, 2, 29, 12, 0)).offset,
+            -3 * 3600
+        );
     }
 
     #[test]

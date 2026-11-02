@@ -87,7 +87,10 @@ const SEQUENCES: [CatalogColumn; 11] = [
     column("schemaname", NAME),
     column("sequencename", NAME),
     column("sequenceowner", NAME),
-    column("data_type", SqlType::Catalog(CatalogType::Reg(RegKind::Type))),
+    column(
+        "data_type",
+        SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
+    ),
     column("start_value", SqlType::BigInt),
     column("min_value", SqlType::BigInt),
     column("max_value", SqlType::BigInt),

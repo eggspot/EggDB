@@ -81,11 +81,7 @@ pub(super) fn key_value_in_block(
     let value = bytes_of(request.value.clone())?;
     let ran = store.with_open_transaction(|transaction| {
         run(transaction, request, &key, &value, file).map_err(|error| {
-            let context = format!(
-                "cannot {} {} in {file}",
-                command.name(),
-                render::text(&key)
-            );
+            let context = format!("cannot {} {} in {file}", command.name(), render::text(&key));
             match (&request.collection, error.kind()) {
                 (Some(name), ErrorKind::CollectionNotFound) => {
                     missing_collection(file, name, &context, command)
@@ -143,10 +139,7 @@ fn run(
             Ok(match found {
                 Some(found) => shown(format, key, &found),
                 None if format == Format::Json => InBlock::not_found(None),
-                None => InBlock::not_found(Some(format!(
-                    "key not found: {}",
-                    render::text(key)
-                ))),
+                None => InBlock::not_found(Some(format!("key not found: {}", render::text(key)))),
             })
         }
         CommandName::Del => {

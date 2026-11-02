@@ -875,10 +875,7 @@ fn oracle_collection_elements(value: Value) -> Vec<Value> {
         Value::Defined(defined) => match *defined {
             DefinedValue::Record(record)
                 if record.names.len() == record.fields.len()
-                    && record
-                        .names
-                        .iter()
-                        .all(|name| name.parse::<u32>().is_ok()) =>
+                    && record.names.iter().all(|name| name.parse::<u32>().is_ok()) =>
             {
                 record.fields
             }

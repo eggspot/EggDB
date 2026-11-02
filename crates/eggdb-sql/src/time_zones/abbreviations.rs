@@ -293,8 +293,14 @@ mod tests {
         let rows = abbreviation_rows(0);
         assert_eq!(rows.len(), DEFAULT_SET.len());
         let row = |name: &str| rows.iter().find(|row| row.abbreviation == name).copied();
-        assert_eq!(row("PDT").map(|row| (row.offset, row.is_dst)), Some((-7 * 3600, true)));
-        assert_eq!(row("PST").map(|row| (row.offset, row.is_dst)), Some((-8 * 3600, false)));
+        assert_eq!(
+            row("PDT").map(|row| (row.offset, row.is_dst)),
+            Some((-7 * 3600, true))
+        );
+        assert_eq!(
+            row("PST").map(|row| (row.offset, row.is_dst)),
+            Some((-8 * 3600, false))
+        );
         assert_eq!(row("MSK").map(|row| row.offset), Some(3 * 3600));
     }
 }

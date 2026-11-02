@@ -523,7 +523,10 @@ pub fn reshape_steps(previous: &[RelationColumn], current: &[RelationColumn]) ->
     };
     let mut steps = Vec::new();
     let renamed = previous.len() == current.len()
-        && previous.iter().zip(current).any(|(old, new)| old.name != new.name)
+        && previous
+            .iter()
+            .zip(current)
+            .any(|(old, new)| old.name != new.name)
         && previous.iter().zip(current).all(|(old, new)| {
             old.name == new.name
                 || (same_type(old, new)
@@ -1053,7 +1056,8 @@ mod tests {
             type_modifier: -1,
         };
         assert_eq!(
-            add.sql("public", "orders", Some("numeric DEFAULT 0")).unwrap(),
+            add.sql("public", "orders", Some("numeric DEFAULT 0"))
+                .unwrap(),
             "ALTER TABLE \"public\".\"orders\" ADD COLUMN \"amount\" numeric DEFAULT 0"
         );
         assert!(add.sql("public", "orders", None).is_err());
@@ -1093,7 +1097,10 @@ mod tests {
     fn a_second_relation_message_with_other_columns_reshapes_the_table() {
         let mut applier = ChangeApplier::new();
         let first = vec![column("id", 23), column("note", 25)];
-        assert_eq!(applier.apply(orders_with(first.clone())).unwrap(), Change::Nothing);
+        assert_eq!(
+            applier.apply(orders_with(first.clone())).unwrap(),
+            Change::Nothing
+        );
         assert_eq!(applier.apply(orders_with(first)).unwrap(), Change::Nothing);
         let change = applier
             .apply(orders_with(vec![
@@ -1122,7 +1129,11 @@ mod tests {
         let mut applier = ChangeApplier::new();
         applier.know_target_table("public", "orders", vec!["id".to_owned(), "gone".to_owned()]);
         let change = applier
-            .apply(orders_with(vec![column("id", 23), column("note", 25), column("x", 25)]))
+            .apply(orders_with(vec![
+                column("id", 23),
+                column("note", 25),
+                column("x", 25),
+            ]))
             .unwrap();
         assert!(matches!(change, Change::Reshape { ref steps, .. } if steps.len() == 3));
         let mut unknown = vec![b'R'];
@@ -1130,7 +1141,12 @@ mod tests {
         unknown.extend_from_slice(b"public\0brand_new\0d");
         unknown.extend_from_slice(&0u16.to_be_bytes());
         let refused = applier.apply(parse_logical_message(&unknown).unwrap());
-        assert!(refused.unwrap_err().0.contains("new table public.brand_new"));
+        assert!(
+            refused
+                .unwrap_err()
+                .0
+                .contains("new table public.brand_new")
+        );
     }
 
     #[test]

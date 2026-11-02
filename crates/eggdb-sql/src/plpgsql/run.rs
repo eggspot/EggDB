@@ -339,7 +339,11 @@ impl OpenCursor {
     }
 
     fn from_portal(portal: crate::portals::Portal) -> Self {
-        let names = portal.columns.iter().map(|column| column.name.clone()).collect();
+        let names = portal
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
         Self {
             name: portal.name,
             columns: portal.columns,
@@ -2333,7 +2337,11 @@ impl<'r> Run<'r> {
                 format!("cursor variable \"{variable}\" is null"),
             ));
         };
-        if let Some(at) = self.cursors.iter().position(|cursor| &cursor.name == portal) {
+        if let Some(at) = self
+            .cursors
+            .iter()
+            .position(|cursor| &cursor.name == portal)
+        {
             return Ok(at);
         }
         if self.oracle {

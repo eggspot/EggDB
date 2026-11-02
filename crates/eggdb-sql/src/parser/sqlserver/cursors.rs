@@ -55,7 +55,9 @@ impl Parser<'_> {
                 return Err(self.unexpected());
             }
             if CURSOR_SCOPES.contains(&word) {
-                if let Some(other) = seen.iter().find(|seen| CURSOR_SCOPES.contains(&seen.as_str()))
+                if let Some(other) = seen
+                    .iter()
+                    .find(|seen| CURSOR_SCOPES.contains(&seen.as_str()))
                 {
                     return Err(conflicting_options(&other.to_uppercase(), &shown, position));
                 }
@@ -79,7 +81,11 @@ impl Parser<'_> {
         }
         let fast_forward = kind.as_deref() == Some("fast_forward");
         if fast_forward && scroll {
-            return Err(conflicting_options("FAST_FORWARD", "SCROLL", self.position()));
+            return Err(conflicting_options(
+                "FAST_FORWARD",
+                "SCROLL",
+                self.position(),
+            ));
         }
         let scrolls = scroll
             || insensitive
@@ -221,8 +227,9 @@ impl Parser<'_> {
         } else if self.take_word("delay") {
             false
         } else {
-            return Err(not_supported("WAITFOR RECEIVE and WAITFOR GET CONVERSATION GROUP")
-                .at(position));
+            return Err(
+                not_supported("WAITFOR RECEIVE and WAITFOR GET CONVERSATION GROUP").at(position),
+            );
         };
         let time = self.expression()?;
         if self.take(&TokenKind::Comma) || self.is_word("timeout") {

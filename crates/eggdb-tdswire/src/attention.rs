@@ -89,7 +89,11 @@ impl AttentionWatch {
 
     fn start(&mut self) {
         self.started = true;
-        let Some(socket) = self.socket.as_ref().and_then(|socket| socket.try_clone().ok()) else {
+        let Some(socket) = self
+            .socket
+            .as_ref()
+            .and_then(|socket| socket.try_clone().ok())
+        else {
             return;
         };
         let shared = Arc::clone(&self.shared);

@@ -280,7 +280,9 @@ fn seeded_fuzzing_of_citext_and_hstore_rows_never_panics_and_what_decodes_re_enc
         column("c", SqlType::Defined(DefinedType::CITEXT)),
         column("h", SqlType::Defined(DefinedType::HSTORE)),
     ];
-    let alphabet = [0u8, 1, 2, 3, 0x7F, 0x80, 0xC3, 0xA9, 0xFF, b'a', b'b', CITEXT_TAG, HSTORE_TAG];
+    let alphabet = [
+        0u8, 1, 2, 3, 0x7F, 0x80, 0xC3, 0xA9, 0xFF, b'a', b'b', CITEXT_TAG, HSTORE_TAG,
+    ];
     let mut state = 0xF022_C17E_4857_0DE0u64;
     let mut next = || {
         state ^= state << 13;

@@ -729,7 +729,10 @@ mod tests {
             encode_pg_binary(&citext, CITEXT_OID, TimeZone::UTC).unwrap(),
             Some(b"MiXed".to_vec())
         );
-        assert_eq!(decode_pg_binary_text(b"MiXed", CITEXT_OID).unwrap(), "MiXed");
+        assert_eq!(
+            decode_pg_binary_text(b"MiXed", CITEXT_OID).unwrap(),
+            "MiXed"
+        );
         let hstore = crate::hstore::value(crate::hstore::HstoreValue::from_pairs([
             ("b".to_owned(), None),
             ("a".to_owned(), Some("1".to_owned())),
@@ -753,8 +756,12 @@ mod tests {
             decode_pg_binary_text(&bytes, HSTORE_OID).unwrap(),
             "\"a\"=>\"1\", \"b\"=>NULL"
         );
-        assert!(writes_binary(SqlType::Defined(crate::types::DefinedType::HSTORE)));
-        assert!(reads_binary(SqlType::Defined(crate::types::DefinedType::CITEXT)));
+        assert!(writes_binary(SqlType::Defined(
+            crate::types::DefinedType::HSTORE
+        )));
+        assert!(reads_binary(SqlType::Defined(
+            crate::types::DefinedType::CITEXT
+        )));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::cursors::{CursorMove, OpenCursor, cursor_status, CursorState};
+use super::cursors::{CursorMove, CursorState, OpenCursor, cursor_status};
 use crate::types::Value;
 
 fn three_rows() -> OpenCursor {

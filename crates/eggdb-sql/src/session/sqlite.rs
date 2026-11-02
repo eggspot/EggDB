@@ -150,8 +150,10 @@ fn kept_create_text(reader: &dyn KeyValueRead, table: &TableSchema) -> SqlResult
     if table.schema != crate::schemas::DEFAULT_SCHEMA {
         return Ok(generated);
     }
-    Ok(crate::sqlite_schema_text::original_text(reader, &table.name, &generated)?
-        .unwrap_or(generated))
+    Ok(
+        crate::sqlite_schema_text::original_text(reader, &table.name, &generated)?
+            .unwrap_or(generated),
+    )
 }
 
 fn text_literal(text: String) -> InsertValue {

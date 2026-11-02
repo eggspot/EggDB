@@ -69,7 +69,9 @@ impl Parser<'_> {
         if self.take_word("all") {
             return Ok(Statement::Cursor(CursorCommand::Close(None)));
         }
-        Ok(Statement::Cursor(CursorCommand::Close(Some(self.name()?.text))))
+        Ok(Statement::Cursor(CursorCommand::Close(Some(
+            self.name()?.text,
+        ))))
     }
 
     fn portal_direction(&mut self) -> SqlResult<PortalDirection> {

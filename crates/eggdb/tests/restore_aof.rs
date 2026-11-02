@@ -57,7 +57,9 @@ fn command(arguments: &[&str]) -> Vec<u8> {
 }
 
 fn commands(list: &[&[&str]]) -> Vec<u8> {
-    list.iter().flat_map(|arguments| command(arguments)).collect()
+    list.iter()
+        .flat_map(|arguments| command(arguments))
+        .collect()
 }
 
 fn write_multi_part(directory: &Path, manifest: &str) {
@@ -65,7 +67,11 @@ fn write_multi_part(directory: &Path, manifest: &str) {
     std::fs::write(directory.join("appendonly.aof.manifest"), manifest).unwrap();
     std::fs::write(
         directory.join("appendonly.aof.1.base.aof"),
-        commands(&[&["SELECT", "0"], &["SET", "base", "1"], &["SET", "counter", "10"]]),
+        commands(&[
+            &["SELECT", "0"],
+            &["SET", "base", "1"],
+            &["SET", "counter", "10"],
+        ]),
     )
     .unwrap();
     std::fs::write(
@@ -75,7 +81,11 @@ fn write_multi_part(directory: &Path, manifest: &str) {
     .unwrap();
     std::fs::write(
         directory.join("appendonly.aof.2.incr.aof"),
-        commands(&[&["SET", "still-db-2", "y"], &["SELECT", "0"], &["INCR", "counter"]]),
+        commands(&[
+            &["SET", "still-db-2", "y"],
+            &["SELECT", "0"],
+            &["INCR", "counter"],
+        ]),
     )
     .unwrap();
     std::fs::write(
@@ -151,8 +161,16 @@ fn an_rdb_preamble_is_refused_with_the_way_out() {
 #[test]
 fn hostile_and_broken_manifests_are_refused_before_anything_is_written() {
     let cases = [
-        ("traversal", "file ../secret.aof seq 1 type i\n", "not a plain file name"),
-        ("absolute", "file /etc/passwd seq 1 type b\n", "not a plain file name"),
+        (
+            "traversal",
+            "file ../secret.aof seq 1 type i\n",
+            "not a plain file name",
+        ),
+        (
+            "absolute",
+            "file /etc/passwd seq 1 type b\n",
+            "not a plain file name",
+        ),
         (
             "huge-seq",
             "file appendonly.aof.1.incr.aof seq 184467440737095516160 type i\n",

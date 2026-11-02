@@ -2678,9 +2678,7 @@ fn prepare_generated(
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => {
-            Vec::new()
-        }
+        | GeneratedTable::Sequence(_) => Vec::new(),
     };
     let (columns, rows, streamed, charge) = match built {
         Filling::Rows(built) => (built.columns, built.rows, None, Some(built.charge)),

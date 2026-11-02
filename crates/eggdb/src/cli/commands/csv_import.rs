@@ -36,10 +36,7 @@ enum BcpLayout {
     FormatFile(BcpFormat),
 }
 
-fn bulk_load_rows(
-    session: &mut eggdb_sql::Session<'_>,
-    rows: &mut dyn BulkRows,
-) -> SqlResult<u64> {
+fn bulk_load_rows(session: &mut eggdb_sql::Session<'_>, rows: &mut dyn BulkRows) -> SqlResult<u64> {
     let mut loaded: SqlResult<u64> = Ok(0);
     session.execute_bulk_load(rows, &mut |step| {
         loaded = step.outcome.as_ref().map(loaded_rows).map_err(Clone::clone);
@@ -132,7 +129,9 @@ impl Session<'_> {
         let layout = if !bcp {
             None
         } else if let Some(path) = &options.format_file {
-            Some(BcpLayout::FormatFile(read_format_file(path).map_err(usage)?))
+            Some(BcpLayout::FormatFile(
+                read_format_file(path).map_err(usage)?,
+            ))
         } else if options.native {
             Some(BcpLayout::Native)
         } else {

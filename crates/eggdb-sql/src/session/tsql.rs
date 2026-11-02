@@ -101,8 +101,7 @@ fn assigns_only(result: &QueryResult) -> bool {
                 | "CLOSE CURSOR"
                 | "DEALLOCATE CURSOR"
                 | "WAITFOR"
-        )
-            || result.tag.starts_with("SELECT "))
+        ) || result.tag.starts_with("SELECT "))
 }
 
 fn resolves_names(error: &SqlError) -> bool {

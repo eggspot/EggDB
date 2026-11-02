@@ -122,7 +122,9 @@ pub(crate) fn application_function(name: &str, values: &[Value]) -> Option<SqlRe
         ("applock_mode" | "applock_test", _) => {
             return Some(Err(application_lock_error(
                 1228,
-                format!("An invalid parameter \"{name}\" was passed to the application lock function or procedure."),
+                format!(
+                    "An invalid parameter \"{name}\" was passed to the application lock function or procedure."
+                ),
             )));
         }
         _ => return None,
@@ -148,8 +150,9 @@ pub(crate) fn application_function(name: &str, values: &[Value]) -> Option<SqlRe
                 1225,
                 format!("An invalid application lock mode was passed to {shown}."),
             )),
-            Some(mode) => application_lock_free(&resource, mode)
-                .map(|free| Value::Integer(i32::from(free))),
+            Some(mode) => {
+                application_lock_free(&resource, mode).map(|free| Value::Integer(i32::from(free)))
+            }
         },
     })
 }

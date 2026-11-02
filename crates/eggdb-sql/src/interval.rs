@@ -1524,7 +1524,10 @@ mod tests {
             "1234 years 7 mons 3 days 25:30:15.123"
         );
         assert_eq!(
-            interval("-1 day -02:30:45.5").truncate("minute").unwrap().to_string(),
+            interval("-1 day -02:30:45.5")
+                .truncate("minute")
+                .unwrap()
+                .to_string(),
             "-1 days -02:30:00"
         );
         let week = value.truncate("week").unwrap_err();

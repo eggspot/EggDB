@@ -100,8 +100,8 @@ fn parse_line(line: &[u8]) -> Result<AofManifestFile, String> {
 
 fn file_name(value: &[u8]) -> Result<String, String> {
     let shown = String::from_utf8_lossy(value).escape_debug().to_string();
-    let name = std::str::from_utf8(value)
-        .map_err(|_| format!("the file name {shown} is not UTF-8"))?;
+    let name =
+        std::str::from_utf8(value).map_err(|_| format!("the file name {shown} is not UTF-8"))?;
     let plain = !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
         && name != "."
@@ -180,7 +180,10 @@ fn quoted_token(mut rest: &[u8]) -> Result<(Vec<u8>, &[u8]), String> {
         match rest {
             [] => return Err("a quoted value without its closing quote".to_owned()),
             [b'"', after @ ..] => {
-                if after.first().is_some_and(|byte| !byte.is_ascii_whitespace()) {
+                if after
+                    .first()
+                    .is_some_and(|byte| !byte.is_ascii_whitespace())
+                {
                     return Err("a closing quote not followed by a space".to_owned());
                 }
                 return Ok((token, after));
@@ -252,8 +255,7 @@ mod tests {
 
     #[test]
     fn quoted_names_unescape() {
-        let manifest =
-            parse_aof_manifest(b"file \"my file\\x2eaof\" seq 1 type i\n").unwrap();
+        let manifest = parse_aof_manifest(b"file \"my file\\x2eaof\" seq 1 type i\n").unwrap();
         assert_eq!(names(&manifest.replay), ["my file.aof"]);
     }
 

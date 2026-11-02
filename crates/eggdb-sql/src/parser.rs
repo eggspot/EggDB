@@ -1864,9 +1864,12 @@ impl<'t> Parser<'t> {
             comment,
             partition_by,
             partition_of: None,
-            sqlite_text: self
-                .sqlite()
-                .then(|| format!("CREATE TABLE {}", self.slice(name_start, self.previous_end()))),
+            sqlite_text: self.sqlite().then(|| {
+                format!(
+                    "CREATE TABLE {}",
+                    self.slice(name_start, self.previous_end())
+                )
+            }),
         }))
     }
 
@@ -2656,10 +2659,7 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }
-        if self.oracle()
-            && self.is_word("table")
-            && self.peek_kind_at(1) == &TokenKind::LeftParen
-        {
+        if self.oracle() && self.is_word("table") && self.peek_kind_at(1) == &TokenKind::LeftParen {
             return self.oracle_collection_table();
         }
         if self.sqlserver() && self.at_openjson() {

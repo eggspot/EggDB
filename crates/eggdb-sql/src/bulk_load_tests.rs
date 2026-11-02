@@ -310,7 +310,10 @@ fn bulk_insert_and_openrowset_bulk_never_read_server_files() {
         Some(4834)
     );
     assert_eq!(
-        first_error_code(&mut session, "BULK INSERT items FROM N'C:\\data\\items.dat'"),
+        first_error_code(
+            &mut session,
+            "BULK INSERT items FROM N'C:\\data\\items.dat'"
+        ),
         Some(4834)
     );
     assert_eq!(
@@ -360,12 +363,16 @@ fn bcp_native_files_and_format_files_written_from_a_table_load_back() {
     assert!(format_file.starts_with("14.0\n6\n1\tSQLINT\t0\t4\t\"\"\t1\tid\t\"\"\n"));
     assert!(format_file.contains("\tSQLSMALLINT\t0\t2\t"));
 
-    session.execute("INSERT BULK native_copy", &mut |_| {}).unwrap();
+    session
+        .execute("INSERT BULK native_copy", &mut |_| {})
+        .unwrap();
     let mut data: &[u8] = &native;
     let mut reader = BcpFileReader::native(&mut data);
     assert_eq!(tag(&load(&mut session, &mut reader)[0]), "INSERT 0 3");
 
-    session.execute("INSERT BULK format_copy WITH (KEEP_NULLS)", &mut |_| {}).unwrap();
+    session
+        .execute("INSERT BULK format_copy WITH (KEEP_NULLS)", &mut |_| {})
+        .unwrap();
     let mut data: &[u8] = &native;
     let mut reader = BcpFileReader::new(&mut data, BcpFormat::parse(&format_file).unwrap());
     assert_eq!(tag(&load(&mut session, &mut reader)[0]), "INSERT 0 3");
@@ -373,8 +380,14 @@ fn bcp_native_files_and_format_files_written_from_a_table_load_back() {
     let original = texts(&mut session, "SELECT * FROM goods ORDER BY id");
     assert_eq!(original[0][1], "Bánh mì");
     assert_eq!(original[2][1], "");
-    assert_eq!(texts(&mut session, "SELECT * FROM native_copy ORDER BY id"), original);
-    assert_eq!(texts(&mut session, "SELECT * FROM format_copy ORDER BY id"), original);
+    assert_eq!(
+        texts(&mut session, "SELECT * FROM native_copy ORDER BY id"),
+        original
+    );
+    assert_eq!(
+        texts(&mut session, "SELECT * FROM format_copy ORDER BY id"),
+        original
+    );
 
     let mut character = Vec::new();
     write_bcp_table(

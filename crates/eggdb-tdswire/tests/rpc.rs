@@ -588,7 +588,11 @@ fn oracle_sql_reads_at_sign_parameters_and_procedures_called_by_name_stay_transa
     let inserted = client.rpc(&[call_by_id(
         SP_EXECUTESQL,
         &[
-            text_parameter("", Some("INSERT INTO items (id, name) VALUES (@P0, @P1)"), false),
+            text_parameter(
+                "",
+                Some("INSERT INTO items (id, name) VALUES (@P0, @P1)"),
+                false,
+            ),
             text_parameter("", Some("@P0 int,@P1 nvarchar(40)"), false),
             text_parameter("@P1", Some("egg"), false),
             int_parameter("@P0", Some(7), false),
@@ -598,7 +602,11 @@ fn oracle_sql_reads_at_sign_parameters_and_procedures_called_by_name_stay_transa
     let selected = client.rpc(&[call_by_id(
         SP_EXECUTESQL,
         &[
-            text_parameter("", Some("SELECT NVL(name, 'none') FROM items WHERE id = @P0"), false),
+            text_parameter(
+                "",
+                Some("SELECT NVL(name, 'none') FROM items WHERE id = @P0"),
+                false,
+            ),
             text_parameter("", Some("@P0 int"), false),
             int_parameter("@P0", Some(7), false),
         ],
@@ -621,5 +629,9 @@ fn oracle_sql_reads_at_sign_parameters_and_procedures_called_by_name_stay_transa
     assert!(errors(&reordered).is_empty(), "{reordered:?}");
     assert_eq!(rows(&reordered), vec![vec![Some("Hi Bob".to_owned())]]);
     let still_oracle = client.batch("SELECT COUNT(*) AS n FROM items WHERE ROWNUM <= 5");
-    assert_eq!(rows(&still_oracle), vec![vec![Some("1".to_owned())]], "{still_oracle:?}");
+    assert_eq!(
+        rows(&still_oracle),
+        vec![vec![Some("1".to_owned())]],
+        "{still_oracle:?}"
+    );
 }

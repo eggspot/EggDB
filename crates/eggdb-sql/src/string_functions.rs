@@ -397,7 +397,11 @@ fn translated(text: &str, from: &str, to: &str) -> SqlResult<Value> {
         Some(at) => to.get(at).copied(),
         None => Some(character),
     };
-    let widest = to.iter().map(|character| character.len_utf8()).max().unwrap_or(1);
+    let widest = to
+        .iter()
+        .map(|character| character.len_utf8())
+        .max()
+        .unwrap_or(1);
     crate::memory::check_grown_value_bytes(text.len().saturating_mul(widest), || {
         text.chars()
             .filter_map(replacement)

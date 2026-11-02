@@ -550,7 +550,14 @@ fn a_function_date_language_names_months_and_days_in_that_language() {
             text("märz Di"),
         ]]
     );
-    for language in ["German", "French", "Spanish", "Italian", "Portuguese", "Dutch"] {
+    for language in [
+        "German",
+        "French",
+        "Spanish",
+        "Italian",
+        "Portuguese",
+        "Dutch",
+    ] {
         let round_trip = format!(
             "SELECT TO_CHAR(DATE '2024-02-07', 'DD MON YYYY DY', 'NLS_DATE_LANGUAGE = {language}'), \
              TO_CHAR(TO_DATE(TO_CHAR(DATE '2024-02-07', 'fmDD Mon YYYY Day', 'NLS_DATE_LANGUAGE = {language}'), \
@@ -577,7 +584,10 @@ fn a_function_date_language_names_months_and_days_in_that_language() {
         Some(12702)
     );
     assert_eq!(
-        values(&mut session, "SELECT TO_CHAR(DATE '2024-03-05', 'MON') FROM dual"),
+        values(
+            &mut session,
+            "SELECT TO_CHAR(DATE '2024-03-05', 'MON') FROM dual"
+        ),
         vec![vec![text("MAR")]]
     );
 }
@@ -586,7 +596,10 @@ fn a_function_date_language_names_months_and_days_in_that_language() {
 fn the_session_date_language_reaches_conversions_next_day_and_the_nls_views() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
-    values(&mut session, "ALTER SESSION SET NLS_DATE_LANGUAGE = SPANISH");
+    values(
+        &mut session,
+        "ALTER SESSION SET NLS_DATE_LANGUAGE = SPANISH",
+    );
     assert_eq!(
         values(
             &mut session,
@@ -609,11 +622,18 @@ fn the_session_date_language_reaches_conversions_next_day_and_the_nls_views() {
     );
     values(&mut session, "ALTER SESSION SET NLS_LANGUAGE = 'FRENCH'");
     assert_eq!(
-        values(&mut session, "SELECT TO_CHAR(DATE '2024-08-01', 'MON') FROM dual"),
+        values(
+            &mut session,
+            "SELECT TO_CHAR(DATE '2024-08-01', 'MON') FROM dual"
+        ),
         vec![vec![text("AOÛT")]]
     );
     assert_eq!(
-        failure(&mut session, "ALTER SESSION SET NLS_DATE_LANGUAGE = KLINGON").vendor_code(),
+        failure(
+            &mut session,
+            "ALTER SESSION SET NLS_DATE_LANGUAGE = KLINGON"
+        )
+        .vendor_code(),
         Some(12705)
     );
 }
@@ -670,7 +690,10 @@ fn session_currency_and_numeric_characters_shape_to_char_and_to_number() {
     );
     values(&mut session, "ALTER SESSION SET NLS_TERRITORY = AMERICA");
     assert_eq!(
-        values(&mut session, "SELECT TO_CHAR(1234.5, 'FML9G999D99') FROM dual"),
+        values(
+            &mut session,
+            "SELECT TO_CHAR(1234.5, 'FML9G999D99') FROM dual"
+        ),
         vec![vec![text("$1,234.5")]]
     );
 }
@@ -723,10 +746,7 @@ fn at_sign_parameters_bind_by_name_in_any_order_in_oracle_sql() {
         &parameters,
     );
     assert_eq!(selected.len(), 1);
-    assert_eq!(
-        selected[0].as_ref().ok(),
-        Some(&vec![vec![text("Ada")]])
-    );
+    assert_eq!(selected[0].as_ref().ok(), Some(&vec![vec![text("Ada")]]));
     let missing = parameterized(&mut session, "SELECT @P2 FROM dual", &parameters);
     assert!(missing.iter().any(Result::is_err), "{missing:?}");
 }

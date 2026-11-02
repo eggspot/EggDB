@@ -95,7 +95,11 @@ fn an_attention_during_a_running_batch_stops_it_and_is_acknowledged_once() {
         Token::Done { status, .. } => Some(*status),
         _ => None,
     });
-    assert_eq!(last_done.map(|status| status & 0x20), Some(0x20), "{tokens:?}");
+    assert_eq!(
+        last_done.map(|status| status & 0x20),
+        Some(0x20),
+        "{tokens:?}"
+    );
     assert_eq!(
         rows(&client.batch("SELECT 2 AS next")),
         vec![vec![Some("2".to_owned())]]

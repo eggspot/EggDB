@@ -1291,7 +1291,10 @@ fn an_identity_columns_sequence_reads_as_a_relation_that_setval_round_trips() {
 fn pg_sequences_lists_every_sequence_with_postgresql_columns() {
     let store = MemoryStore::default();
     let mut session = session(&store);
-    last(&mut session, "CREATE SEQUENCE s START 5 INCREMENT 2 CACHE 3");
+    last(
+        &mut session,
+        "CREATE SEQUENCE s START 5 INCREMENT 2 CACHE 3",
+    );
     last(&mut session, "CREATE SEQUENCE small AS smallint CYCLE");
     assert_eq!(
         last(

@@ -106,10 +106,10 @@ mod ranges;
 mod records;
 mod regex;
 mod regexp_functions;
-mod result_row_cap;
 mod relations;
 pub mod reports;
 mod restore;
+mod result_row_cap;
 mod retention;
 mod roles;
 mod routines;
@@ -171,13 +171,13 @@ mod citext_tests;
 #[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]
-mod json_path_tests;
-#[cfg(test)]
 mod copy_tests;
 #[cfg(test)]
 mod correctness;
 #[cfg(test)]
 mod destructive_tests;
+#[cfg(test)]
+mod engine_limits_tests;
 #[cfg(test)]
 mod geo_tests;
 #[cfg(test)]
@@ -186,6 +186,8 @@ mod implicit_transaction_tests;
 mod index_tests;
 #[cfg(test)]
 mod insert_select_tests;
+#[cfg(test)]
+mod json_path_tests;
 #[cfg(test)]
 mod lateral_tests;
 #[cfg(test)]
@@ -218,8 +220,6 @@ mod subquery_tests;
 mod table_ddl_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod engine_limits_tests;
 #[cfg(test)]
 mod time_series_tests;
 #[cfg(test)]
@@ -282,15 +282,14 @@ pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use schema::{
     ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,
 };
+pub use served_databases::{
+    DatabaseDirectory, FixedDatabases, ServedDatabaseError, ServedDatabases, is_valid_database_name,
+};
 pub use session::database_switch::DatabaseSwitch;
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
     Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
     StoredProcedure, TransactionStatus,
-};
-pub use served_databases::{
-    DatabaseDirectory, FixedDatabases, ServedDatabaseError, ServedDatabases,
-    is_valid_database_name,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;

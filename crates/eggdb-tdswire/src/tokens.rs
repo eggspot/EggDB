@@ -278,10 +278,7 @@ mod tests {
             line: 3,
             procedure: "pq",
         });
-        assert_eq!(
-            in_procedure[23..33],
-            [0, 2, b'p', 0, b'q', 0, 3, 0, 0, 0]
-        );
+        assert_eq!(in_procedure[23..33], [0, 2, b'p', 0, b'q', 0, 3, 0, 0, 0]);
     }
 
     #[test]

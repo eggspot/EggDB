@@ -304,28 +304,45 @@ fn a_writing_agent_limited_to_tables_changes_only_those() {
         write_refused(&mut server, 8, "INSERT INTO logged_tags VALUES (1, 'blue')").0,
         "42P01"
     );
+    assert_eq!(write_refused(&mut server, 9, "CALL raise_pay()").0, "42P01");
     assert_eq!(
-        write_refused(&mut server, 9, "CALL raise_pay()").0,
-        "42P01"
-    );
-    assert_eq!(
-        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM tags"),
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM tags"
+        ),
         1
     );
     assert_eq!(
-        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM notes"),
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM notes"
+        ),
         1
     );
     assert_eq!(
-        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM tag_log"),
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM tag_log"
+        ),
         0
     );
     assert_eq!(
-        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM logged_tags"),
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM logged_tags"
+        ),
         0
     );
     assert_eq!(
-        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM users"),
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM users"
+        ),
         2
     );
     assert_eq!(

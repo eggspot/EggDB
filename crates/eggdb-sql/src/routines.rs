@@ -22,14 +22,14 @@ pub(crate) mod polymorphic;
 mod sqlserver;
 
 pub(crate) use calls::{
-    DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_nonatomic,
-    call_procedure_outputs, called_name, correlated_table_function_columns,
-    correlated_table_function_rows, default_argument, default_value, evaluate, exprs_call_marked_routine,
-    insert_calls_marked_routine, is_default_argument, marked_call, mentions_routine_call,
-    prepare_delete, prepare_insert, prepare_oracle_table_function, prepare_query, prepare_select,
-    prepare_update,
-    query_calls_marked_routine, run_do, run_do_nonatomic, select_calls_marked_routine, select_calls_volatile,
-    select_may_write,
+    DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure,
+    call_procedure_nonatomic, call_procedure_outputs, called_name,
+    correlated_table_function_columns, correlated_table_function_rows, default_argument,
+    default_value, evaluate, exprs_call_marked_routine, insert_calls_marked_routine,
+    is_default_argument, marked_call, mentions_routine_call, prepare_delete, prepare_insert,
+    prepare_oracle_table_function, prepare_query, prepare_select, prepare_update,
+    query_calls_marked_routine, run_do, run_do_nonatomic, select_calls_marked_routine,
+    select_calls_volatile, select_may_write,
 };
 
 pub(crate) const MAX_ROUTINE_TEXT: usize = 1 << 20;

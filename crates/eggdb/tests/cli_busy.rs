@@ -33,7 +33,10 @@ fn a_busy_file_exits_5_and_says_which_side_waits() {
     writer.close().unwrap();
 
     let reader = Database::open_with(&path, Options::new().read_only(true)).unwrap();
-    let write = eggdb(&directory, &["put", "app.db", "k", "w", "--busy-timeout", "0"]);
+    let write = eggdb(
+        &directory,
+        &["put", "app.db", "k", "w", "--busy-timeout", "0"],
+    );
     assert_eq!(write.status.code(), Some(5), "{}", stderr(&write));
     assert_eq!(
         stderr(&write),
@@ -66,7 +69,10 @@ fn a_writer_waits_for_a_file_another_program_holds_for_a_moment() {
 
     let reader = Database::open_with(&path, Options::new().read_only(true)).unwrap();
     let started = std::time::Instant::now();
-    let refused = eggdb(&directory, &["put", "app.db", "k", "x", "--busy-timeout", "200"]);
+    let refused = eggdb(
+        &directory,
+        &["put", "app.db", "k", "x", "--busy-timeout", "200"],
+    );
     assert_eq!(refused.status.code(), Some(5), "{}", stderr(&refused));
     assert!(started.elapsed() >= std::time::Duration::from_millis(200));
     drop(reader);

@@ -36,7 +36,10 @@ fn mysql_first_and_after_move_columns_with_their_values() {
     last(&mut session, "CREATE TABLE t (id INT PRIMARY KEY, b INT)");
     last(&mut session, "CREATE INDEX by_b ON t (b)");
     last(&mut session, "INSERT INTO t VALUES (1, 10), (2, 20)");
-    last(&mut session, "ALTER TABLE t ADD COLUMN a INT DEFAULT 7 FIRST");
+    last(
+        &mut session,
+        "ALTER TABLE t ADD COLUMN a INT DEFAULT 7 FIRST",
+    );
     assert_eq!(
         last(&mut session, "SELECT * FROM t ORDER BY id"),
         "a|id|b\n7|1|10\n7|2|20\nSELECT 2"
@@ -144,7 +147,10 @@ fn sqlite_schema_shows_the_current_definition_after_a_change() {
     );
     last(&mut session, "ALTER TABLE pets RENAME TO animals");
     let renamed = sqlite_text(&mut session, "animals");
-    assert!(renamed.starts_with("sql\nCREATE TABLE animals ("), "{renamed}");
+    assert!(
+        renamed.starts_with("sql\nCREATE TABLE animals ("),
+        "{renamed}"
+    );
     last(&mut session, "DROP TABLE animals");
     last(&mut session, "CREATE TABLE animals(kind text)");
     assert_eq!(

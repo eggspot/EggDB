@@ -149,7 +149,11 @@ fn transaction_control_is_refused_where_postgresql_refuses_it() {
     );
     let error = refusal(&mut session, "SELECT commits_in_function()");
     assert_eq!(error.state(), SqlState::INVALID_TRANSACTION_TERMINATION);
-    assert!(error.to_string().contains("invalid transaction termination"));
+    assert!(
+        error
+            .to_string()
+            .contains("invalid transaction termination")
+    );
     let error = refusal(&mut session, "SELECT calls_procedure()");
     assert_eq!(error.state(), SqlState::INVALID_TRANSACTION_TERMINATION);
     let error = refusal(&mut session, "CALL commits_in_handler()");
@@ -165,7 +169,10 @@ fn transaction_control_is_refused_where_postgresql_refuses_it() {
     let error = refusal(&mut session, "CALL commits()");
     assert_eq!(error.state(), SqlState::INVALID_TRANSACTION_TERMINATION);
     answer(&mut session, "ROLLBACK");
-    assert_eq!(answer(&mut session, "SELECT count(*) FROM t"), "count\n0\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM t"),
+        "count\n0\nSELECT 1"
+    );
 }
 
 #[test]
@@ -198,7 +205,10 @@ fn a_returned_refcursor_stays_open_for_the_caller_until_the_transaction_ends() {
     );
     assert_eq!(answer(&mut session, "CLOSE items_cursor"), "CLOSE CURSOR");
     let unnamed = answer(&mut session, "SELECT open_unnamed()");
-    assert!(unnamed.starts_with("open_unnamed\n<unnamed portal "), "{unnamed}");
+    assert!(
+        unnamed.starts_with("open_unnamed\n<unnamed portal "),
+        "{unnamed}"
+    );
     let name = unnamed.lines().nth(1).unwrap_or_default().to_owned();
     assert_eq!(
         answer(&mut session, &format!("FETCH ALL FROM \"{name}\"")),
@@ -229,13 +239,16 @@ fn procedures_hand_back_refcursors_through_inout_parameters_and_other_routines_r
         ],
     );
     answer(&mut session, "BEGIN");
+    assert_eq!(answer(&mut session, "CALL get_items('pc')"), "c\npc\nCALL");
     assert_eq!(
-        answer(&mut session, "CALL get_items('pc')"),
-        "c\npc\nCALL"
+        answer(&mut session, "SELECT next_id('pc')"),
+        "next_id\n1\nSELECT 1"
     );
-    assert_eq!(answer(&mut session, "SELECT next_id('pc')"), "next_id\n1\nSELECT 1");
     assert_eq!(answer(&mut session, "FETCH NEXT FROM pc"), "id\n2\nFETCH 1");
-    assert_eq!(answer(&mut session, "SELECT next_id('pc')"), "next_id\n3\nSELECT 1");
+    assert_eq!(
+        answer(&mut session, "SELECT next_id('pc')"),
+        "next_id\n3\nSELECT 1"
+    );
     assert_eq!(answer(&mut session, "FETCH pc"), "id\nFETCH 0");
     answer(&mut session, "COMMIT");
 }
@@ -254,20 +267,44 @@ fn declared_cursors_fetch_move_and_close_as_postgresql_does() {
     assert_eq!(error.state(), SqlState::NO_ACTIVE_SQL_TRANSACTION);
     answer(&mut session, "BEGIN");
     assert_eq!(
-        answer(&mut session, "DECLARE c SCROLL CURSOR FOR SELECT v FROM n ORDER BY v"),
+        answer(
+            &mut session,
+            "DECLARE c SCROLL CURSOR FOR SELECT v FROM n ORDER BY v"
+        ),
         "DECLARE CURSOR"
     );
-    assert_eq!(answer(&mut session, "FETCH FORWARD 2 FROM c"), "v\n1\n2\nFETCH 2");
+    assert_eq!(
+        answer(&mut session, "FETCH FORWARD 2 FROM c"),
+        "v\n1\n2\nFETCH 2"
+    );
     assert_eq!(answer(&mut session, "MOVE FORWARD 1 IN c"), "MOVE 1");
     assert_eq!(answer(&mut session, "FETCH PRIOR FROM c"), "v\n2\nFETCH 1");
-    assert_eq!(answer(&mut session, "FETCH ABSOLUTE -1 FROM c"), "v\n5\nFETCH 1");
-    assert_eq!(answer(&mut session, "FETCH BACKWARD 2 FROM c"), "v\n4\n3\nFETCH 2");
-    assert_eq!(answer(&mut session, "FETCH RELATIVE 0 FROM c"), "v\n3\nFETCH 1");
+    assert_eq!(
+        answer(&mut session, "FETCH ABSOLUTE -1 FROM c"),
+        "v\n5\nFETCH 1"
+    );
+    assert_eq!(
+        answer(&mut session, "FETCH BACKWARD 2 FROM c"),
+        "v\n4\n3\nFETCH 2"
+    );
+    assert_eq!(
+        answer(&mut session, "FETCH RELATIVE 0 FROM c"),
+        "v\n3\nFETCH 1"
+    );
     assert_eq!(answer(&mut session, "FETCH FIRST FROM c"), "v\n1\nFETCH 1");
-    assert_eq!(answer(&mut session, "FETCH ALL FROM c"), "v\n2\n3\n4\n5\nFETCH 4");
+    assert_eq!(
+        answer(&mut session, "FETCH ALL FROM c"),
+        "v\n2\n3\n4\n5\nFETCH 4"
+    );
     assert_eq!(answer(&mut session, "FETCH NEXT FROM c"), "v\nFETCH 0");
-    assert_eq!(answer(&mut session, "FETCH BACKWARD ALL FROM c"), "v\n5\n4\n3\n2\n1\nFETCH 5");
-    answer(&mut session, "DECLARE forward_only NO SCROLL CURSOR FOR SELECT v FROM n");
+    assert_eq!(
+        answer(&mut session, "FETCH BACKWARD ALL FROM c"),
+        "v\n5\n4\n3\n2\n1\nFETCH 5"
+    );
+    answer(
+        &mut session,
+        "DECLARE forward_only NO SCROLL CURSOR FOR SELECT v FROM n",
+    );
     answer(&mut session, "FETCH 2 FROM forward_only");
     let error = refusal(&mut session, "FETCH PRIOR FROM forward_only");
     assert_eq!(error.state(), SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE);
@@ -278,7 +315,10 @@ fn declared_cursors_fetch_move_and_close_as_postgresql_does() {
     assert_eq!(error.state(), SqlState::DUPLICATE_CURSOR);
     answer(&mut session, "ROLLBACK");
     answer(&mut session, "BEGIN");
-    answer(&mut session, "DECLARE held CURSOR WITH HOLD FOR SELECT v FROM n ORDER BY v");
+    answer(
+        &mut session,
+        "DECLARE held CURSOR WITH HOLD FOR SELECT v FROM n ORDER BY v",
+    );
     answer(&mut session, "DECLARE dropped CURSOR FOR SELECT v FROM n");
     answer(&mut session, "COMMIT");
     assert_eq!(answer(&mut session, "FETCH 1 FROM held"), "v\n1\nFETCH 1");

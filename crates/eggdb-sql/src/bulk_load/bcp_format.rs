@@ -185,7 +185,9 @@ impl BcpField {
     }
 
     fn time_scale(&self) -> u8 {
-        self.scale.unwrap_or(DEFAULT_TIME_SCALE).min(DEFAULT_TIME_SCALE)
+        self.scale
+            .unwrap_or(DEFAULT_TIME_SCALE)
+            .min(DEFAULT_TIME_SCALE)
     }
 
     fn learn_column(&mut self, column: &BulkColumn) {
@@ -690,9 +692,8 @@ fn parse_xml(text: &str) -> SqlResult<BcpFormat> {
     }
     for (index, tag) in xml_tags(text, "COLUMN").into_iter().enumerate() {
         let attributes = xml_attributes(tag);
-        let source = attribute(&attributes, "SOURCE").ok_or_else(|| {
-            format_error("a <COLUMN> of the XML format file has no SOURCE")
-        })?;
+        let source = attribute(&attributes, "SOURCE")
+            .ok_or_else(|| format_error("a <COLUMN> of the XML format file has no SOURCE"))?;
         let at = ids.iter().position(|id| id == source).ok_or_else(|| {
             format_error(format!(
                 "a <COLUMN> of the XML format file names SOURCE=\"{source}\", which no <FIELD> has as its ID"
@@ -702,7 +703,9 @@ fn parse_xml(text: &str) -> SqlResult<BcpFormat> {
             continue;
         };
         field.column = Some(index);
-        field.name = attribute(&attributes, "NAME").unwrap_or_default().to_owned();
+        field.name = attribute(&attributes, "NAME")
+            .unwrap_or_default()
+            .to_owned();
         if field.data == FieldData::Binary {
             let kind = attribute(&attributes, "type").unwrap_or("SQLVARYBIN");
             field.data = FieldData::named(kind).ok_or_else(|| {
@@ -743,7 +746,10 @@ impl FileBytes<'_> {
         let at = self.buffer.len();
         self.buffer.resize(at + READ_CHUNK_BYTES, 0);
         loop {
-            match self.input.read(self.buffer.get_mut(at..).unwrap_or_default()) {
+            match self
+                .input
+                .read(self.buffer.get_mut(at..).unwrap_or_default())
+            {
                 Ok(count) => {
                     self.buffer.truncate(at + count);
                     self.ended = count == 0;
@@ -1052,7 +1058,9 @@ fn unsigned_little_endian(bytes: &[u8]) -> u64 {
 
 fn utf16_text(bytes: &[u8]) -> SqlResult<String> {
     if !bytes.len().is_multiple_of(2) {
-        return Err(conversion_error("a UTF-16 field has an odd number of bytes"));
+        return Err(conversion_error(
+            "a UTF-16 field has an odd number of bytes",
+        ));
     }
     let units = bytes
         .as_chunks::<2>()
@@ -1169,15 +1177,15 @@ fn decode(field: &BcpField, bytes: &[u8]) -> SqlResult<Value> {
             [byte] => Value::SmallInt(i16::from(*byte)),
             _ => return Err(wrong()),
         },
-        NativeType::SmallInt => Value::SmallInt(i16::from_le_bytes(
-            little_endian(bytes).ok_or_else(wrong)?,
-        )),
-        NativeType::Int => Value::Integer(i32::from_le_bytes(
-            little_endian(bytes).ok_or_else(wrong)?,
-        )),
-        NativeType::BigInt => Value::BigInt(i64::from_le_bytes(
-            little_endian(bytes).ok_or_else(wrong)?,
-        )),
+        NativeType::SmallInt => {
+            Value::SmallInt(i16::from_le_bytes(little_endian(bytes).ok_or_else(wrong)?))
+        }
+        NativeType::Int => {
+            Value::Integer(i32::from_le_bytes(little_endian(bytes).ok_or_else(wrong)?))
+        }
+        NativeType::BigInt => {
+            Value::BigInt(i64::from_le_bytes(little_endian(bytes).ok_or_else(wrong)?))
+        }
         NativeType::Bit => match bytes {
             [byte] => Value::Boolean(*byte != 0),
             _ => return Err(wrong()),
@@ -1204,8 +1212,7 @@ fn decode(field: &BcpField, bytes: &[u8]) -> SqlResult<Value> {
                 return Err(wrong());
             };
             let magnitude: [u8; 16] = little_endian(magnitude).ok_or_else(wrong)?;
-            let units =
-                i128::try_from(u128::from_le_bytes(magnitude)).map_err(|_| wrong())?;
+            let units = i128::try_from(u128::from_le_bytes(magnitude)).map_err(|_| wrong())?;
             let units = if *sign == 0 { -units } else { units };
             Value::Numeric(Numeric::from_scaled(units, u16::from(*scale)))
         }
@@ -1222,15 +1229,14 @@ fn decode(field: &BcpField, bytes: &[u8]) -> SqlResult<Value> {
         NativeType::SmallDateTime => {
             let (days, minutes) = bytes.split_at(bytes.len().min(2));
             let days = i64::from(u16::from_le_bytes(little_endian(days).ok_or_else(wrong)?));
-            let minutes =
-                i64::from(u16::from_le_bytes(little_endian(minutes).ok_or_else(wrong)?));
+            let minutes = i64::from(u16::from_le_bytes(
+                little_endian(minutes).ok_or_else(wrong)?,
+            ));
             Value::Timestamp(
                 (days - DAYS_FROM_1900_TO_2000) * MICROS_PER_DAY + minutes * MICROS_PER_MINUTE,
             )
         }
-        NativeType::Date => {
-            Value::Date(i32::try_from(date_of(bytes)?).map_err(|_| wrong())?)
-        }
+        NativeType::Date => Value::Date(i32::try_from(date_of(bytes)?).map_err(|_| wrong())?),
         NativeType::Time => {
             if !(3..=5).contains(&bytes.len()) {
                 return Err(wrong());
@@ -1264,7 +1270,11 @@ fn scaled_units(number: &Numeric, scale: u8) -> SqlResult<i128> {
         None => (false, text.as_str()),
     };
     let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
-    if !whole.bytes().chain(fraction.bytes()).all(|byte| byte.is_ascii_digit()) {
+    if !whole
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|byte| byte.is_ascii_digit())
+    {
         return Err(write_error(format!(
             "the value {text} cannot be written to a bcp native file"
         )));
@@ -1311,7 +1321,9 @@ fn date_bytes(days_since_2000: i64) -> SqlResult<Vec<u8>> {
     let days = u32::try_from(days_since_2000 + DAYS_FROM_YEAR_ONE_TO_2000)
         .ok()
         .filter(|days| *days < 1 << 24)
-        .ok_or_else(|| write_error("a date before year 1 or after 9999 cannot be written".to_owned()))?;
+        .ok_or_else(|| {
+            write_error("a date before year 1 or after 9999 cannot be written".to_owned())
+        })?;
     Ok(days.to_le_bytes().get(..3).unwrap_or_default().to_vec())
 }
 
@@ -1366,7 +1378,9 @@ fn encode_native(native: NativeType, field: &BcpField, value: &Value) -> SqlResu
             };
             let scale = field
                 .scale
-                .unwrap_or_else(|| u8::try_from(number.scale()).unwrap_or(LARGEST_DECIMAL_PRECISION))
+                .unwrap_or_else(|| {
+                    u8::try_from(number.scale()).unwrap_or(LARGEST_DECIMAL_PRECISION)
+                })
                 .min(LARGEST_DECIMAL_PRECISION);
             let units = scaled_units(number, scale)?;
             let mut bytes = vec![field.precision, scale, u8::from(units >= 0)];
@@ -1626,7 +1640,10 @@ pub fn write_bcp_table(
         found = Some(result);
     })?;
     let result = found.ok_or_else(|| {
-        SqlError::new(SqlState::UNDEFINED_TABLE, format!("{table} returned no rows"))
+        SqlError::new(
+            SqlState::UNDEFINED_TABLE,
+            format!("{table} returned no rows"),
+        )
     })?;
     let mut columns = Vec::new();
     for column in result.columns.unwrap_or_default() {
@@ -1651,9 +1668,7 @@ pub fn write_bcp_table(
         });
     }
     let layout = match format {
-        BcpFileFormat::Character(terminators) => {
-            BcpFormat::character(&columns, terminators, false)
-        }
+        BcpFileFormat::Character(terminators) => BcpFormat::character(&columns, terminators, false),
         BcpFileFormat::Unicode(terminators) => BcpFormat::character(&columns, terminators, true),
         BcpFileFormat::Native => BcpFormat::native(&columns),
     };
@@ -1681,7 +1696,10 @@ mod tests {
         }
     }
 
-    fn read_all(reader: &mut BcpFileReader<'_>, columns: usize) -> crate::SqlResult<Vec<Vec<Value>>> {
+    fn read_all(
+        reader: &mut BcpFileReader<'_>,
+        columns: usize,
+    ) -> crate::SqlResult<Vec<Vec<Value>>> {
         let mut rows = Vec::new();
         let mut row = Vec::new();
         while reader.next_row(columns, &mut row)? {
@@ -1715,26 +1733,16 @@ mod tests {
     }
 
     const NATIVE_ROW: &[u8] = &[
-        0x07, 0x00, 0x00, 0x00,
-        0x04, 0x00, b'p', 0x00, b'i', 0x00,
-        0x13, 10, 2, 1, 0xE2, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0x01, 0x01,
-        0x03, 0x5B, 0x95, 0x0A,
-        0x08, 0xAC, 0x8E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x10, 0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
-        0xDD, 0xEE, 0xFF,
-        0x02, 0, 0, 0, 0, 0, 0, 0, 0xCA, 0xFE,
+        0x07, 0x00, 0x00, 0x00, 0x04, 0x00, b'p', 0x00, b'i', 0x00, 0x13, 10, 2, 1, 0xE2, 0x04, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x01, 0x03, 0x5B, 0x95, 0x0A, 0x08, 0xAC,
+        0x8E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77,
+        0x66, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0xCA,
+        0xFE,
     ];
 
     const NATIVE_NULL_ROW: &[u8] = &[
-        0x08, 0x00, 0x00, 0x00,
-        0xFF, 0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x08, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF,
     ];
 
     fn expected_row() -> Vec<Value> {
@@ -1746,8 +1754,8 @@ mod tests {
             Value::Date(-36_524),
             Value::Timestamp(0),
             Value::Uuid([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
-                0xDD, 0xEE, 0xFF,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+                0xEE, 0xFF,
             ]),
             Value::Bytea(vec![0xCA, 0xFE]),
         ]
@@ -1938,7 +1946,10 @@ mod tests {
         BcpFileWriter::new(&mut unicode, format.clone())
             .write_row(&row)
             .unwrap();
-        assert_eq!(unicode, [b'1', 0, b'\t', 0, b'1', 0, b'\t', 0, 0, 0, b'\n', 0]);
+        assert_eq!(
+            unicode,
+            [b'1', 0, b'\t', 0, b'1', 0, b'\t', 0, 0, 0, b'\n', 0]
+        );
         let mut input = unicode.as_slice();
         let mut reader = BcpFileReader::new(&mut input, format);
         assert_eq!(
@@ -1956,9 +1967,14 @@ mod tests {
         let columns = table();
         for data in [
             &[0x07, 0x00][..],
-            &[0x07, 0, 0, 0, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F][..],
+            &[
+                0x07, 0, 0, 0, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
+            ][..],
             &[0x07, 0, 0, 0, 0, 0, 0x02, 1, 2][..],
-            &[0x07, 0, 0, 0, 0, 0, 0x13, 10, 2, 1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF][..],
+            &[
+                0x07, 0, 0, 0, 0, 0, 0x13, 10, 2, 1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            ][..],
         ] {
             let mut input = data;
             let mut reader = BcpFileReader::native(&mut input);

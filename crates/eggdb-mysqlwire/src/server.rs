@@ -1,13 +1,13 @@
 use crate::auth::MySqlCredentials;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
+use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
 use eggdb_platform::local_socket::LocalListener;
 use eggdb_sql::{DatabaseDirectory, FixedDatabases, KeyValueStore};
 use eggdb_tls::ServerConnection;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};

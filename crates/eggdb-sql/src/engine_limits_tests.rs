@@ -156,7 +156,11 @@ fn the_result_row_cap_cuts_selects_and_leaves_writes_and_aggregates_whole() {
         vec![vec![Value::BigInt(50)]]
     );
     assert_eq!(
-        rows(&mut session, "INSERT INTO t SELECT n + 100 FROM t RETURNING n").len(),
+        rows(
+            &mut session,
+            "INSERT INTO t SELECT n + 100 FROM t RETURNING n"
+        )
+        .len(),
         50
     );
     session.set_max_result_rows(None);

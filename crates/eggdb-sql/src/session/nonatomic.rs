@@ -1,11 +1,13 @@
 use super::{Session, read_only_refusal};
-use crate::sequences;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
 use crate::notifications::Notifications;
 use crate::plpgsql::{TransactionControl, TransactionEnd};
+use crate::sequences;
 use crate::session::QueryResult;
-use crate::store::{BoxedWrite, EntryVisitor, ErasedStore, KeyValueRead, KeyValueWrite, ScanDirection};
+use crate::store::{
+    BoxedWrite, EntryVisitor, ErasedStore, KeyValueRead, KeyValueWrite, ScanDirection,
+};
 use crate::temporary::{TemporaryObjects, TemporaryRead, TemporaryWrite};
 
 pub(super) struct NonatomicWrite<'a, 's> {
@@ -203,7 +205,8 @@ fn run_nonatomic(
     body: impl FnOnce(&mut dyn TransactionControl, &mut TableCache) -> SqlResult<QueryResult>,
 ) -> SqlResult<QueryResult> {
     sequences::load_for_sequence_calls(&*control)?;
-    let result = body(&mut *control, tables).map_err(|error| sequences::explain_missing(&*control, error))?;
+    let result = body(&mut *control, tables)
+        .map_err(|error| sequences::explain_missing(&*control, error))?;
     sequences::save_changed(control)?;
     Ok(result)
 }

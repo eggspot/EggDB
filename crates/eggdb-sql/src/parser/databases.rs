@@ -29,7 +29,10 @@ impl Parser<'_> {
             names.push(self.name()?);
         }
         self.skip_database_options();
-        Ok(Statement::Database(DatabaseStatement::Drop { names, if_exists }))
+        Ok(Statement::Database(DatabaseStatement::Drop {
+            names,
+            if_exists,
+        }))
     }
 
     fn skip_database_options(&mut self) {

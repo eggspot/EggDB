@@ -161,9 +161,10 @@ fn field(document: &str, node: &Node, sql_type: Option<SqlType>, binary: bool) -
         (_, Some(SqlType::Jsonb)) => Ok(Value::Jsonb(json::normalized_value(&node.value)?)),
         (Json::String(text), target) => typed(Value::Text(text.clone()), target),
         (Json::Number(text), target) => typed(Value::Text(text.clone()), target),
-        (Json::Boolean(flag), target) => {
-            typed(Value::Text(if *flag { "true" } else { "false" }.to_owned()), target)
-        }
+        (Json::Boolean(flag), target) => typed(
+            Value::Text(if *flag { "true" } else { "false" }.to_owned()),
+            target,
+        ),
         (Json::Array(_) | Json::Object(_), target) => {
             typed(Value::Text(source_text(document, node, binary)?), target)
         }
@@ -260,9 +261,18 @@ mod tests {
         };
         assert_eq!(state("json_to_record", "[1]", SqlType::Integer), "22023");
         assert_eq!(state("json_to_record", "3", SqlType::Integer), "22023");
-        assert_eq!(state("jsonb_to_recordset", r#"{"a": 1}"#, SqlType::Integer), "22023");
-        assert_eq!(state("jsonb_to_recordset", "[1]", SqlType::Integer), "22023");
-        assert_eq!(state("jsonb_to_record", r#"{"a": "x"}"#, SqlType::Integer), "22P02");
+        assert_eq!(
+            state("jsonb_to_recordset", r#"{"a": 1}"#, SqlType::Integer),
+            "22023"
+        );
+        assert_eq!(
+            state("jsonb_to_recordset", "[1]", SqlType::Integer),
+            "22023"
+        );
+        assert_eq!(
+            state("jsonb_to_record", r#"{"a": "x"}"#, SqlType::Integer),
+            "22P02"
+        );
         assert_eq!(state("jsonb_to_record", "{", SqlType::Integer), "22P02");
         assert_eq!(result_type(&[None]).unwrap_err().state().code(), "42601");
     }

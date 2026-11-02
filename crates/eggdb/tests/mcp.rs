@@ -1086,10 +1086,7 @@ fn an_agent_writing_with_tables_changes_only_those_tables() {
         r#"{"sql":"CREATE FUNCTION leak() RETURNS integer AS 'SELECT 1' LANGUAGE sql"}"#,
     );
     assert_eq!(sql_failure(&routine).0, "42501");
-    let cascading = mcp.call(
-        "write_sql",
-        r#"{"sql":"INSERT INTO parents VALUES (2)"}"#,
-    );
+    let cascading = mcp.call("write_sql", r#"{"sql":"INSERT INTO parents VALUES (2)"}"#);
     let (state, message) = sql_failure(&cascading);
     assert_eq!(state, "42501");
     assert!(

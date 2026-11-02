@@ -123,7 +123,9 @@ fn a_message_past_the_memory_budget_ends_the_connection_and_gives_the_bytes_back
     assert!(error_codes(&answer).is_empty(), "{answer:?}");
     assert!(budget.used_bytes() <= budget.limit_bytes());
     client.send(b'B', &bind_text("", "", &vec![b'a'; 150 * 1024]));
-    let refused = client.read().expect("an error before the connection closes");
+    let refused = client
+        .read()
+        .expect("an error before the connection closes");
     assert_eq!(refused.code(), "53200");
     assert_eq!(refused.field(b'S').as_deref(), Some("FATAL"));
     assert!(client.read().is_none());

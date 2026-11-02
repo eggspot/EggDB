@@ -158,13 +158,19 @@ pub(crate) fn no_such_cursor(name: &str) -> SqlError {
 }
 
 pub(crate) fn cursor_already_open() -> SqlError {
-    SqlError::new(SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE, "The cursor is already open.")
-        .with_sqlserver_code(16905)
+    SqlError::new(
+        SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        "The cursor is already open.",
+    )
+    .with_sqlserver_code(16905)
 }
 
 pub(crate) fn cursor_not_open() -> SqlError {
-    SqlError::new(SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE, "Cursor is not open.")
-        .with_sqlserver_code(16917)
+    SqlError::new(
+        SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        "Cursor is not open.",
+    )
+    .with_sqlserver_code(16917)
 }
 
 pub(crate) fn forward_only(step: CursorMove) -> SqlError {

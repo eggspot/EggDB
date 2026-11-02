@@ -95,7 +95,10 @@ fn a_function_returning_a_nested_table_is_a_table_in_from() {
     let mut session = session(&store);
     create_numbers_package(&mut session);
     assert_eq!(
-        column(&mut session, "SELECT column_value FROM TABLE(nums.listed())"),
+        column(
+            &mut session,
+            "SELECT column_value FROM TABLE(nums.listed())"
+        ),
         ["7", "8"]
     );
 }
