@@ -144,6 +144,16 @@ pub(crate) fn check_value_bytes(bytes: usize) -> SqlResult<()> {
     ))
 }
 
+pub(crate) fn check_grown_value_bytes(
+    most_bytes: usize,
+    exact_bytes: impl FnOnce() -> usize,
+) -> SqlResult<()> {
+    if most_bytes <= VALUE_LIMIT.with(std::cell::Cell::get) {
+        return Ok(());
+    }
+    check_value_bytes(exact_bytes())
+}
+
 pub(crate) struct SharedStatementMemory {
     outermost: bool,
 }

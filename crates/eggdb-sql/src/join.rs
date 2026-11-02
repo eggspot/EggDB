@@ -1237,6 +1237,7 @@ impl<'a> JoinedRows<'a> {
         row: &mut Vec<Value>,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
+        crate::cancel::check()?;
         if !self.passes(level, row)? {
             return Ok(true);
         }

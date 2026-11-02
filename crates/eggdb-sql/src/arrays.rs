@@ -248,6 +248,10 @@ impl ArrayValue {
     }
 }
 
+pub(crate) fn item_bytes(item: &Value) -> usize {
+    ITEM_OVERHEAD.saturating_add(crate::memory::held_bytes(item))
+}
+
 pub(crate) fn held_bytes(array: &ArrayValue) -> usize {
     array
         .items

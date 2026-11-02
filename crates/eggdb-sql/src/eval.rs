@@ -1528,8 +1528,8 @@ impl Evaluator<'_> {
             ("length" | "char_length" | "character_length", [Value::Text(text)]) => {
                 integer_value(text.chars().count() as i64, SqlType::Integer)
             }
-            ("lower", [Value::Text(text)]) => Ok(Value::Text(text.to_lowercase())),
-            ("upper", [Value::Text(text)]) => Ok(Value::Text(text.to_uppercase())),
+            ("lower", [Value::Text(text)]) => crate::string_functions::case_mapped(text, false),
+            ("upper", [Value::Text(text)]) => crate::string_functions::case_mapped(text, true),
             ("pg_notify", [channel, payload]) => {
                 let text = |value: &Value| match value {
                     Value::Null => String::new(),

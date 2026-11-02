@@ -100,6 +100,7 @@ mod ranges;
 mod records;
 mod regex;
 mod regexp_functions;
+mod result_row_cap;
 mod relations;
 pub mod reports;
 mod restore;
@@ -205,6 +206,8 @@ mod sqlserver_tests;
 mod subquery_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod engine_limits_tests;
 #[cfg(test)]
 mod time_series_tests;
 #[cfg(test)]

@@ -351,6 +351,8 @@ pub struct Session<'s> {
     search_path_at_begin: Option<String>,
     max_value_bytes: usize,
     max_row_bytes: usize,
+    deadline: Option<std::time::Instant>,
+    max_result_rows: Option<u64>,
     batch_resume: Option<(usize, usize)>,
     sqlserver_status: crate::sqlserver_functions::SessionStatus,
     oracle_nls: Arc<crate::oracle_nls::NlsParameters>,
@@ -420,6 +422,8 @@ impl<'s> Session<'s> {
             search_path_at_begin: None,
             max_value_bytes: crate::memory::MAX_VALUE_BYTES,
             max_row_bytes: crate::memory::MAX_ROW_BYTES,
+            deadline: None,
+            max_result_rows: None,
             batch_resume: None,
             sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
             oracle_nls: Arc::new(crate::oracle_nls::NlsParameters::default()),
@@ -475,6 +479,25 @@ impl<'s> Session<'s> {
     /// server that runs untrusted statements sets it low.
     pub fn set_max_row_bytes(&mut self, bytes: usize) {
         self.max_row_bytes = bytes.min(crate::memory::MAX_ROW_BYTES);
+    }
+
+    /// Stops every statement of this session still running at `deadline` with SQLSTATE
+    /// `57014`, as `statement_timeout` does (the earlier of the two applies), checked by the
+    /// engine itself as it works through rows, so a statement that reads nothing from the
+    /// store stops too. `None` (the default) sets no deadline. A server
+    /// that runs untrusted statements under a time limit sets it.
+    pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.deadline = deadline;
+    }
+
+    /// Makes a `SELECT` of this session return at most `rows` rows: the engine stops reading
+    /// once it has them, as a `LIMIT` would (a statement's own lower `LIMIT` stays), so a
+    /// query that would produce millions of rows never builds them. Statements that can write
+    /// (a `SELECT` of a function that may change data, `nextval`, `INSERT ... RETURNING`) are
+    /// never cut. `None` (the default) sets no cap. A server that sends at most `n` rows
+    /// sets `n + 1`, so it can tell the client the result was cut.
+    pub fn set_max_result_rows(&mut self, rows: Option<u64>) {
+        self.max_result_rows = rows;
     }
 
     /// The dialect this session reads: the one it was opened in, or the one a client chose
@@ -1556,7 +1579,8 @@ impl<'s> Session<'s> {
             let settings = Arc::clone(&self.settings);
             let context = Arc::clone(&self.batch_context);
             let _cancel = crate::cancel::enter(&self.cancel);
-            let _deadline = crate::cancel::enter_deadline(self.statement_timeout());
+            let _deadline =
+                crate::cancel::enter_deadline(self.statement_timeout(), self.deadline);
             let _advisory = crate::advisory_locks::enter(
                 &self.advisory_locks,
                 !matches!(self.block, Block::None) || self.implicit_transaction,
@@ -2498,6 +2522,11 @@ impl<'s> Session<'s> {
         }
         let settings = Arc::clone(&self.settings);
         crate::roles::check_statement(&settings, statement)?;
+        if let Some(most_rows) = self.max_result_rows
+            && !self.statement_uses_sequences
+        {
+            crate::result_row_cap::cap_result_rows(statement, most_rows);
+        }
         let binding = Binding {
             settings: &settings,
             walk_expressions: self.statement_walks_expressions,

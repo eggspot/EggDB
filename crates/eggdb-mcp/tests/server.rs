@@ -5,11 +5,12 @@
 mod common;
 
 use common::{
-    MapOpener, MapStore, TempAudit, call, canonical, error_code, get, initialized, is_error,
-    member, parsed, sample_store, server, structured, text_at,
+    MapOpener, MapStore, TempAudit, call, canonical, config, error_code, get, initialized,
+    is_error, member, parsed, sample_store, server, structured, text_at,
 };
 use eggdb_sql::Dialect;
 use eggdb_sql::json::Json;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -467,7 +468,7 @@ fn rows_past_max_rows_are_cut_and_flagged() {
         r#"{"sql":"SELECT n FROM numbers"}"#,
     );
     let result = structured(&answer);
-    assert_eq!(text_at(result, &["row_count"]), "150");
+    assert_eq!(text_at(result, &["row_count"]), "101");
     assert_eq!(text_at(result, &["returned_rows"]), "100");
     assert_eq!(text_at(result, &["truncated_by"]), "max_rows");
     let all = call(
@@ -477,6 +478,75 @@ fn rows_past_max_rows_are_cut_and_flagged() {
         r#"{"sql":"SELECT n FROM numbers","max_rows":1000}"#,
     );
     assert_eq!(text_at(structured(&all), &["truncated"]), "false");
+}
+
+fn numbers_store(count: u32) -> MapStore {
+    let store = sample_store();
+    store.sql(
+        Dialect::PostgreSql,
+        &format!(
+            "CREATE TABLE numbers (n integer PRIMARY KEY); INSERT INTO numbers VALUES {}",
+            (1..=count)
+                .map(|n| format!("({n})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+    store
+}
+
+#[test]
+fn the_engine_stops_a_query_at_one_row_past_max_rows_without_building_the_rest() {
+    let audit = TempAudit::new("engine-row-cap");
+    let opener = MapOpener::new(numbers_store(150));
+    let mut server = initialized(&opener, &audit);
+    let answer = call(
+        &mut server,
+        1,
+        "run_sql",
+        r#"{"sql":"SELECT a.n, b.n, c.n FROM numbers a CROSS JOIN numbers b CROSS JOIN numbers c","max_rows":10}"#,
+    );
+    let result = structured(&answer);
+    assert_eq!(text_at(result, &["row_count"]), "11", "{answer:?}");
+    assert_eq!(text_at(result, &["returned_rows"]), "10");
+    assert_eq!(text_at(result, &["truncated_by"]), "max_rows");
+    let counted = call(
+        &mut server,
+        2,
+        "run_sql",
+        r#"{"sql":"SELECT count(*) FROM numbers a CROSS JOIN numbers b"}"#,
+    );
+    assert_eq!(text_at(structured(&counted), &["rows", "0", "0"]), "22500");
+}
+
+static ENGINE_DEADLINE_EXITED: AtomicBool = AtomicBool::new(false);
+
+fn exit_for_engine_deadline_test(_code: i32) -> ! {
+    ENGINE_DEADLINE_EXITED.store(true, Ordering::SeqCst);
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn the_engine_stops_a_join_at_the_time_limit_before_the_watchdog_ends_the_server() {
+    let audit = TempAudit::new("engine-deadline");
+    let opener = MapOpener::new(numbers_store(150));
+    let mut config = config(&audit);
+    config.time_limit = Duration::from_secs(1);
+    config.exit_process = Some(exit_for_engine_deadline_test);
+    let mut server = eggdb_mcp::Server::new(&opener, config).unwrap();
+    server
+        .handle(br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}"#)
+        .unwrap();
+    let answer = call(
+        &mut server,
+        1,
+        "run_sql",
+        r#"{"sql":"SELECT count(*) FROM numbers a CROSS JOIN numbers b CROSS JOIN numbers c CROSS JOIN numbers d WHERE a.n + b.n + c.n + d.n < 0"}"#,
+    );
+    assert_eq!(error_code(&answer), "time_limit", "{answer:?}");
+    assert!(!ENGINE_DEADLINE_EXITED.load(Ordering::SeqCst));
 }
 
 #[test]

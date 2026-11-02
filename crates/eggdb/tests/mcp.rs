@@ -372,7 +372,7 @@ fn an_agent_reads_but_never_writes_and_every_call_is_audited() {
 }
 
 #[test]
-fn a_call_past_its_time_limit_is_stopped_and_a_stuck_one_ends_the_server() {
+fn a_call_past_its_time_limit_is_stopped_and_a_stuck_one_is_stopped_or_ends_the_server() {
     let (file, audit) = sample("mcp-time-limit", 5000);
     let mut mcp = Mcp::start(file.path(), &["--time-limit", "1"]);
     mcp.initialize();
@@ -400,13 +400,23 @@ fn a_call_past_its_time_limit_is_stopped_and_a_stuck_one_ends_the_server() {
     let reads = mcp.answer();
     assert_eq!(error_code(&reads), "time_limit");
     mcp.send(r#"{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"WITH k AS (SELECT n FROM numbers) SELECT count(*) FROM k x CROSS JOIN k y CROSS JOIN k z WHERE x.n + y.n + z.n < 0"}}}"#);
-    let (status, _) = mcp.finish();
-    assert_eq!(status.code(), Some(3));
-    let records = std::fs::read_to_string(&audit.0).unwrap();
-    assert!(
-        records.contains("\"event\":\"time_limit_exceeded\""),
-        "{records}"
-    );
+    match mcp.lines.recv_timeout(Duration::from_secs(10)) {
+        Ok(line) => {
+            let stopped = parse_document(&line).unwrap();
+            assert_eq!(error_code(&stopped), "time_limit");
+            let (status, _) = mcp.finish();
+            assert!(status.success());
+        }
+        Err(_) => {
+            let (status, _) = mcp.finish();
+            assert_eq!(status.code(), Some(3));
+            let records = std::fs::read_to_string(&audit.0).unwrap();
+            assert!(
+                records.contains("\"event\":\"time_limit_exceeded\""),
+                "{records}"
+            );
+        }
+    }
     let writer = eggdb(&["put", file.path().to_str().unwrap(), "after", "exit"]);
     assert!(writer.status.success(), "{}", stderr(&writer));
 }

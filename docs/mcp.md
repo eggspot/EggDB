@@ -72,7 +72,10 @@ The resource `eggdb://schema` is the whole catalog as one JSON document. Every t
 
 Results come back as structured JSON (`structuredContent`, with the same JSON as text): column
 names and types, rows, how many rows there were and whether the result was cut (`truncated`,
-`truncated_by`: `max_rows` or `bytes`). Integers are JSON numbers; other values are text as the
+`truncated_by`: `max_rows` or `bytes`). The engine itself stops a `SELECT` of `run_sql` or
+`write_sql` once it has `max_rows` + 1 rows, as a `LIMIT` would, so a query that would produce
+millions of rows never builds them; `row_count` then counts at most `max_rows` + 1 rows (a
+statement's own lower `LIMIT` stays, and statements that write are never cut). Integers are JSON numbers; other values are text as the
 dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..., "bytes": n}`.
 `row_list` answers in pages: `{"columns": [...], "items": [{column: value, ...}], "truncated":
 true, "truncated_by": "limit" | "bytes", "next_cursor": "r1.…"}`, the last two only on a cut
@@ -92,7 +95,9 @@ that check says.
   `BEGIN`, `START TRANSACTION`, `COMMIT` and `ROLLBACK` are refused, since each call is a
   transaction of its own, so `COMMIT; DROP TABLE t` runs nothing. `COPY` is refused too: use
   `SELECT`.
-- **Build huge values.** A value a statement builds (`||`, `CONCAT`, `REPLACE`, padding) may be
+- **Build huge values.** A value a statement builds (`||`, `CONCAT`, `REPLACE`, padding,
+  `repeat`, `translate`, `upper`/`lower`, `format`, the JSON and array builders, and aggregates
+  such as `string_agg`, `array_agg` and `json_agg` as they grow) may be
   at most 16 MiB in a call (SQLSTATE `54000`), so a call cannot take gigabytes of memory by
   doubling a string; stored values of any size are still read. Every other session has EggDB's
   own limits: 1 GiB for one value, as in PostgreSQL, and 2 GiB for one row (D156), besides
@@ -101,10 +106,11 @@ that check says.
   statement copying a large value many times stops early. One consequence: a single stored value
   over 64 MiB cannot be read through `eggdb mcp`, since the row that holds it is over the limit;
   read it with `eggdb get` or `eggdb sql`.
-- **Run longer than the time limit.** A statement past the limit is stopped and the call
-  answers `time_limit`. A statement that cannot be stopped (a long computation that reads
-  nothing) is still running a second after the limit: the server records it in the audit file
-  and exits, and the client starts it again on its next call.
+- **Run longer than the time limit.** A statement past the limit is stopped by the engine
+  itself, as it reads rows, joins them or holds them, and the call answers `time_limit`. A
+  statement that still cannot be stopped (a long computation inside one function call) is
+  still running a second after the limit: the server records it in the audit file and exits,
+  and the client starts it again on its next call.
 - **See tables you did not list.** With `--tables` the agent sees only the tables and views
   you named (below); without it, it reads every table, and the keys outside SQL's tables.
 - **Reach it over the network.** MCP inside `eggdb serve` waits for EggDB's own TLS (D102).
@@ -303,14 +309,16 @@ Each call opens the file read-only for at most the time limit and closes it agai
 calls `eggdb mcp` holds nothing. So:
 
 - your app, `eggdb sql` or `eggdb put` can write the file **between** the agent's calls;
-- **while** a call runs, a program that opens the file for writing is **refused** (exit 5 for
-  `eggdb` commands, `ErrorKind::Locked` for the Rust API), and is told it may be an `eggdb mcp`
-  call; retry. A call holds the file for at most its time limit plus one second (up to 301 s
+- **while** a call runs, a program that opens the file for writing **waits** for it: `eggdb`
+  commands wait up to five seconds (`--busy-timeout <ms>` changes it), and programs on the Rust
+  API wait as long as `Options::busy_timeout` says (by default they fail at once with
+  `ErrorKind::Locked`). A writer still refused after its wait exits 5 and is told it may be an
+  `eggdb mcp` call (DNEW-F-mcp-limits). A call holds the file for at most its time limit plus one second (up to 301 s
   with `--time-limit 300`), after which the watchdog ends the server;
 - after each call the next one waits `--call-gap` milliseconds (100 by default, at most 10,000)
   before it opens the file, so an agent calling again and again leaves your writers, which do
   not wait for a lock, that gap to get in; `--call-gap 0` turns it off. The wait is not part of
-  the call's time limit. Writers that wait for the lock are a follow-up;
+  the call's time limit;
 - a call made while a program has the file open for writing answers `database_busy` after a
   second of retrying, and the agent is told to try again;
 - other read-only programs (`eggdb get`, `scan`, `ui --read-only`, `serve --read-only`) run beside

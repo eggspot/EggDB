@@ -491,7 +491,9 @@ impl<O: DatabaseOpener> Call<'_, O> {
     }
 
     fn sql_failure(&self, limits: &CallLimits, error: SqlError) -> ToolError {
-        if limits.deadline_passed() {
+        let stopped_by_engine =
+            error.state() == SqlState::QUERY_CANCELED && Instant::now() >= self.deadline;
+        if limits.deadline_passed() || stopped_by_engine {
             return ToolError::new(
                 "time_limit",
                 format!(
@@ -670,10 +672,13 @@ fn one_statement<S: KeyValueStore, O: DatabaseOpener>(
     call: &Call<'_, O>,
     dialect: Dialect,
     sql: &str,
+    most_rows: Option<u64>,
 ) -> Result<Option<QueryResult>, ToolError> {
     let mut session = Session::with_dialect(store, dialect);
     session.set_max_value_bytes(MAX_VALUE_BYTES);
     session.set_max_row_bytes(MAX_ROW_BYTES);
+    session.set_deadline(Some(call.deadline));
+    session.set_max_result_rows(most_rows);
     call.as_agent(&mut session, limits)?;
     let mut result = None;
     let ran = session.run_one_statement(sql, &mut |returned| {
@@ -860,6 +865,8 @@ pub(crate) fn write_sql<O: DatabaseOpener>(
         let mut session = Session::with_dialect(store, dialect);
         session.set_max_value_bytes(MAX_VALUE_BYTES);
         session.set_max_row_bytes(MAX_ROW_BYTES);
+        session.set_deadline(Some(call.deadline));
+        session.set_max_result_rows(Some(request.max_rows.saturating_add(1)));
         if let Err(error) = call.as_agent(&mut session, limits) {
             let _ = session.close();
             return Err(error);
@@ -871,6 +878,7 @@ pub(crate) fn write_sql<O: DatabaseOpener>(
                 true
             });
         if ran.is_ok() && session.in_block() {
+            session.set_deadline(None);
             ran = session
                 .execute("COMMIT", &mut |_| {})
                 .map_err(OneStatementError::Failed);
@@ -913,7 +921,14 @@ fn run_sql<O: DatabaseOpener>(
     let dialect = arguments.dialect()?;
     let max_rows = arguments.integer("max_rows", LARGEST_MAX_ROWS, DEFAULT_MAX_ROWS)?;
     call.with_database(|store, limits| {
-        let result = one_statement(store, limits, call, dialect, sql)?;
+        let result = one_statement(
+            store,
+            limits,
+            call,
+            dialect,
+            sql,
+            Some(max_rows.saturating_add(1)),
+        )?;
         Ok(statement_success(result, dialect, max_rows))
     })
 }
@@ -960,7 +975,7 @@ fn explain_query<O: DatabaseOpener>(
         format!("EXPLAIN {sql}")
     };
     call.with_database(|store, limits| {
-        let result = one_statement(store, limits, call, dialect, &explained)?;
+        let result = one_statement(store, limits, call, dialect, &explained, None)?;
         Ok(statement_success(result, dialect, LARGEST_MAX_ROWS))
     })
 }
@@ -1119,7 +1134,7 @@ fn describe_table<O: DatabaseOpener>(
     call.with_database(|store, limits| {
         let relation = find_relation(catalog(store, limits, call)?, wanted)?;
         let count_sql = relation.bounded_count_statement(EXACT_ROW_COUNT_UP_TO);
-        let counted = one_statement(store, limits, call, Dialect::PostgreSql, &count_sql)?
+        let counted = one_statement(store, limits, call, Dialect::PostgreSql, &count_sql, None)?
             .and_then(|result| result.rows.into_iter().next())
             .and_then(|row| row.into_iter().next());
         let count = match counted {
@@ -1155,7 +1170,7 @@ fn sample_rows<O: DatabaseOpener>(
     call.with_database(|store, limits| {
         let relation = find_relation(catalog(store, limits, call)?, wanted)?;
         let sql = relation.first_rows_statement(max_rows + 1);
-        let result = one_statement(store, limits, call, Dialect::PostgreSql, &sql)?;
+        let result = one_statement(store, limits, call, Dialect::PostgreSql, &sql, None)?;
         Ok(statement_success(result, Dialect::PostgreSql, max_rows))
     })
 }

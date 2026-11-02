@@ -938,7 +938,7 @@ pub(crate) enum Accumulator {
     Extreme(Value),
     Joined(Option<Value>),
     JsonParts(Option<String>),
-    Collected(Vec<Value>),
+    Collected { values: Vec<Value>, bytes: usize },
     Truth(Option<bool>),
     Ordered(Vec<OrderedInput>),
     Sketch(crate::hyperloglog::Sketch),
@@ -958,7 +958,7 @@ impl Accumulator {
             Self::Extreme(value) | Self::Joined(Some(value)) => crate::memory::held_bytes(value),
             Self::JsonParts(Some(text)) => text.len(),
             Self::Sketch(_) => crate::hyperloglog::Sketch::BYTES,
-            Self::Collected(values) => values.iter().map(crate::memory::held_bytes).sum(),
+            Self::Collected { bytes, .. } => *bytes,
             Self::Ordered(inputs) => inputs
                 .iter()
                 .map(|input| {
@@ -1012,7 +1012,10 @@ impl Call {
             | AggregateFunction::JsonbAgg
             | AggregateFunction::JsonObjectAgg
             | AggregateFunction::JsonbObjectAgg => Accumulator::JsonParts(None),
-            AggregateFunction::ArrayAgg => Accumulator::Collected(Vec::new()),
+            AggregateFunction::ArrayAgg => Accumulator::Collected {
+                values: Vec::new(),
+                bytes: 0,
+            },
             AggregateFunction::BoolAnd | AggregateFunction::BoolOr | AggregateFunction::Every => {
                 Accumulator::Truth(None)
             }
@@ -1280,7 +1283,12 @@ impl Call {
                     *best = value;
                 }
             }
-            Accumulator::Collected(values) => values.push(value),
+            Accumulator::Collected { values, bytes } => {
+                let grown = bytes.saturating_add(crate::arrays::item_bytes(&value));
+                crate::memory::check_value_bytes(grown)?;
+                *bytes = grown;
+                values.push(value);
+            }
             Accumulator::Truth(state) => {
                 let Value::Boolean(next) = value else {
                     return Err(undefined_aggregate(self.function, &value.type_name()));
@@ -1402,8 +1410,8 @@ impl Call {
             Accumulator::JsonParts(Some(text)) => {
                 crate::json_functions::finish_list(&text, self.function.builds_jsonb())?
             }
-            Accumulator::Collected(values) if values.is_empty() => Value::Null,
-            Accumulator::Collected(values) => {
+            Accumulator::Collected { values, .. } if values.is_empty() => Value::Null,
+            Accumulator::Collected { values, .. } => {
                 crate::arrays::from_rows(values, self.argument_type.map(SqlType::without_modifier))?
             }
             Accumulator::Truth(state) => state.map_or(Value::Null, Value::Boolean),

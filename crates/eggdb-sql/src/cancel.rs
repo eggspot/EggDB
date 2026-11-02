@@ -51,9 +51,15 @@ impl Drop for EnteredDeadline {
     }
 }
 
-/// Stops the statement with `57014` once `timeout` has passed, as `statement_timeout` does.
-pub(crate) fn enter_deadline(timeout: Option<Duration>) -> EnteredDeadline {
-    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+pub(crate) fn enter_deadline(
+    timeout: Option<Duration>,
+    session_deadline: Option<Instant>,
+) -> EnteredDeadline {
+    let timed = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+    let deadline = match (timed, session_deadline) {
+        (Some(timed), Some(session)) => Some(timed.min(session)),
+        (timed, session) => timed.or(session),
+    };
     CHECKS.with(|checks| checks.set(0));
     EnteredDeadline {
         previous: DEADLINE.with(|current| current.replace(deadline)),
@@ -140,7 +146,7 @@ pub(crate) fn sleep(seconds: f64) -> SqlResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CancelSignal, check, enter, sleep};
+    use super::{CancelSignal, check, enter, enter_deadline, sleep};
     use crate::error::SqlState;
     use std::time::{Duration, Instant};
 
@@ -158,6 +164,21 @@ mod tests {
         signal.clear();
         let _entered = enter(&signal);
         assert!(check().is_ok());
+    }
+
+    #[test]
+    fn the_earlier_of_the_timeout_and_the_session_deadline_stops_the_statement() {
+        let past = Instant::now();
+        {
+            let _deadline = enter_deadline(Some(Duration::from_secs(3600)), Some(past));
+            assert_eq!(sleep(60.0).unwrap_err().state(), SqlState::QUERY_CANCELED);
+        }
+        {
+            let _deadline = enter_deadline(Some(Duration::ZERO), None);
+            assert_eq!(sleep(60.0).unwrap_err().state(), SqlState::QUERY_CANCELED);
+        }
+        let _none = enter_deadline(None, None);
+        sleep(0.01).unwrap();
     }
 
     #[test]
