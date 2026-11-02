@@ -8,17 +8,25 @@
 //!   [`eggdb_last_error`] gives the message for the calling thread;
 //! - handles are opaque: [`EggdbDb`] from [`eggdb_open`], [`EggdbTxn`] from
 //!   [`eggdb_begin_read`] and [`eggdb_begin_write`], [`EggdbScan`] from [`eggdb_scan_open`],
-//!   [`EggdbSql`] from [`eggdb_sql_open`] and [`EggdbStmt`] from [`eggdb_sql_prepare`];
+//!   [`EggdbSql`] from [`eggdb_sql_open`] and [`eggdb_sql_connect`], [`EggdbStmt`] from
+//!   [`eggdb_sql_prepare`] and [`EggdbCopy`] from [`eggdb_sql_copy_in_begin`] and
+//!   [`eggdb_sql_copy_out_begin`];
 //! - a value [`eggdb_get`] returns and the names [`eggdb_collection_names`] returns are the
 //!   caller's, freed with [`eggdb_free`]; a scan's entries and a SQL statement's results are
 //!   batches the handle owns, read in place until the next call on that handle;
-//! - [`eggdb_sql_cancel`] stops a session's running statement from another thread, and
-//!   [`eggdb_sql_copy_in`] bulk-loads rows through `COPY ... FROM STDIN`;
+//! - [`eggdb_stmt_step`] reads a statement's rows one at a time, with [`eggdb_stmt_row`] and
+//!   the `eggdb_stmt_value_*` getters for the current row;
+//! - [`eggdb_sql_cancel`] stops a session's running statement from another thread,
+//!   [`eggdb_sql_copy_in`] bulk-loads rows from one buffer through `COPY ... FROM STDIN`,
+//!   [`eggdb_copy_put`] feeds one piece by piece, and [`eggdb_copy_read`] reads a `COPY ... TO
+//!   STDOUT` in pieces;
+//! - a session from [`eggdb_sql_connect`] takes every SQL call, over PostgreSQL's protocol;
 //! - no input reaches a panic (D9), and a panic never unwinds into the caller: a build that
 //!   unwinds turns it into `EGGDB_ERR_INTERNAL`, and a release build, which aborts on panic,
 //!   stops the process instead.
 
 mod args;
+mod copy;
 mod database;
 mod scan;
 mod sql;
@@ -26,6 +34,10 @@ mod statement;
 mod status;
 mod transaction;
 
+pub use copy::{
+    EggdbCopy, eggdb_copy_end, eggdb_copy_free, eggdb_copy_put, eggdb_copy_read,
+    eggdb_sql_copy_in, eggdb_sql_copy_in_begin, eggdb_sql_copy_out_begin,
+};
 pub use database::{
     EGGDB_DURABILITY_FULL, EGGDB_DURABILITY_NORMAL, EGGDB_DURABILITY_OFF, EGGDB_OPEN_NO_CREATE,
     EGGDB_OPEN_READ_ONLY, EggdbBackupReport, EggdbCompactReport, EggdbDb, EggdbOptions,
@@ -37,15 +49,16 @@ pub use scan::{
 };
 pub use sql::{
     EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbParameter, EggdbResult,
-    EggdbSql, EggdbValue, eggdb_sql_cancel, eggdb_sql_close, eggdb_sql_connect, eggdb_sql_copy_in,
-    eggdb_sql_execute, eggdb_sql_execute_with_parameters, eggdb_sql_open,
+    EggdbSql, EggdbValue, eggdb_sql_cancel, eggdb_sql_close, eggdb_sql_connect, eggdb_sql_execute,
+    eggdb_sql_execute_with_parameters, eggdb_sql_open,
 };
 pub use statement::{
     EggdbStmt, eggdb_sql_prepare, eggdb_stmt_bind_blob, eggdb_stmt_bind_bool,
     eggdb_stmt_bind_double, eggdb_stmt_bind_int64, eggdb_stmt_bind_null, eggdb_stmt_bind_text,
     eggdb_stmt_clear_bindings, eggdb_stmt_column_count, eggdb_stmt_column_name,
     eggdb_stmt_column_type, eggdb_stmt_execute, eggdb_stmt_finalize, eggdb_stmt_parameter_count,
-    eggdb_stmt_reset,
+    eggdb_stmt_reset, eggdb_stmt_row, eggdb_stmt_step, eggdb_stmt_value_blob,
+    eggdb_stmt_value_double, eggdb_stmt_value_int64, eggdb_stmt_value_kind, eggdb_stmt_value_text,
 };
 pub use status::{
     EGGDB_ERR_ALREADY_EXISTS, EGGDB_ERR_CACHE_FULL, EGGDB_ERR_COLLECTION_NOT_FOUND,

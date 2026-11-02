@@ -60,6 +60,7 @@ typedef struct eggdb_txn eggdb_txn;
 typedef struct eggdb_scan eggdb_scan;
 typedef struct eggdb_sql eggdb_sql;
 typedef struct eggdb_stmt eggdb_stmt;
+typedef struct eggdb_copy eggdb_copy;
 
 typedef struct eggdb_options {
     uint32_t flags;
@@ -196,7 +197,21 @@ int eggdb_stmt_reset(eggdb_stmt *stmt);
 int eggdb_stmt_column_count(eggdb_stmt *stmt, size_t *count);
 int eggdb_stmt_column_name(eggdb_stmt *stmt, size_t column, const char **name);
 int eggdb_stmt_column_type(eggdb_stmt *stmt, size_t column, int32_t *kind);
+int eggdb_stmt_step(eggdb_stmt *stmt, int *has_row);
+int eggdb_stmt_row(eggdb_stmt *stmt, const eggdb_value **values, size_t *count);
+int eggdb_stmt_value_kind(eggdb_stmt *stmt, size_t column, int32_t *kind);
+int eggdb_stmt_value_int64(eggdb_stmt *stmt, size_t column, int64_t *value);
+int eggdb_stmt_value_double(eggdb_stmt *stmt, size_t column, double *value);
+int eggdb_stmt_value_text(eggdb_stmt *stmt, size_t column, const char **text, size_t *len);
+int eggdb_stmt_value_blob(eggdb_stmt *stmt, size_t column, const uint8_t **data, size_t *len);
 int eggdb_stmt_finalize(eggdb_stmt *stmt);
+
+int eggdb_sql_copy_in_begin(eggdb_sql *sql, const char *text, eggdb_copy **copy);
+int eggdb_sql_copy_out_begin(eggdb_sql *sql, const char *text, eggdb_copy **copy);
+int eggdb_copy_put(eggdb_copy *copy, const uint8_t *data, size_t len);
+int eggdb_copy_read(eggdb_copy *copy, const uint8_t **data, size_t *len);
+int eggdb_copy_end(eggdb_copy *copy, const eggdb_result **results, size_t *count);
+void eggdb_copy_free(eggdb_copy *copy);
 
 #ifdef __cplusplus
 }

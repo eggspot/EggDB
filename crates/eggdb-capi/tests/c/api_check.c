@@ -266,6 +266,93 @@ static void check_prepared_statements_and_copy(eggdb_db *db) {
     CHECK_OK(eggdb_sql_close(sql));
 }
 
+static void check_stepping_and_streaming_copy(eggdb_db *db) {
+    eggdb_sql *sql = NULL;
+    CHECK_OK(eggdb_sql_open(db, "postgresql", &sql));
+    run_sql(sql, "CREATE TABLE lines (id bigint, word text, weight double precision)", 1);
+
+    eggdb_copy *copy = NULL;
+    CHECK_OK(eggdb_sql_copy_in_begin(sql, "COPY lines FROM STDIN", &copy));
+    const char *data = "1\tone\t0.5\n2\ttwo\t\\N\n3\tthr";
+    CHECK_OK(eggdb_copy_put(copy, bytes(data), strlen(data)));
+    CHECK_OK(eggdb_copy_put(copy, bytes("ee\t1.5\n"), 7));
+    const eggdb_result *results = NULL;
+    size_t count = 0;
+    CHECK(eggdb_sql_execute(sql, "SELECT 1", &results, &count) == EGGDB_ERR_IN_USE);
+    CHECK_OK(eggdb_copy_end(copy, &results, &count));
+    CHECK(count == 1 && strcmp(results[0].tag, "COPY 3") == 0);
+    CHECK(eggdb_copy_end(copy, &results, &count) == EGGDB_ERR_INVALID_ARGUMENT);
+    eggdb_copy_free(copy);
+
+    const char *text = "SELECT id, word, weight FROM lines ORDER BY id";
+    eggdb_stmt *select = NULL;
+    CHECK_OK(eggdb_sql_prepare(sql, text, strlen(text), &select));
+    int has_row = 0;
+    int64_t total = 0;
+    size_t rows = 0;
+    for (;;) {
+        CHECK_OK(eggdb_stmt_step(select, &has_row));
+        if (!has_row) {
+            break;
+        }
+        const eggdb_value *values = NULL;
+        size_t columns = 0;
+        CHECK_OK(eggdb_stmt_row(select, &values, &columns));
+        CHECK(columns == 3 && values[0].kind == EGGDB_INTEGER);
+        int64_t id = 0;
+        CHECK_OK(eggdb_stmt_value_int64(select, 0, &id));
+        total += id;
+        const char *word = NULL;
+        size_t word_len = 0;
+        CHECK_OK(eggdb_stmt_value_text(select, 1, &word, &word_len));
+        CHECK(word != NULL && word[word_len] == '\0');
+        int32_t kind = EGGDB_NULL;
+        CHECK_OK(eggdb_stmt_value_kind(select, 2, &kind));
+        if (kind == EGGDB_REAL) {
+            double weight = 0;
+            CHECK_OK(eggdb_stmt_value_double(select, 2, &weight));
+            CHECK(weight == 0.5 || weight == 1.5);
+        } else {
+            double weight = 0;
+            CHECK(kind == EGGDB_NULL && id == 2);
+            CHECK(eggdb_stmt_value_double(select, 2, &weight) == EGGDB_ERR_INVALID_ARGUMENT);
+        }
+        const uint8_t *raw = NULL;
+        size_t raw_len = 0;
+        CHECK_OK(eggdb_stmt_value_blob(select, 1, &raw, &raw_len));
+        CHECK(raw_len == word_len);
+        rows++;
+    }
+    CHECK(rows == 3 && total == 6);
+    CHECK_OK(eggdb_stmt_step(select, &has_row));
+    CHECK(has_row == 0);
+    CHECK_OK(eggdb_stmt_reset(select));
+    CHECK_OK(eggdb_stmt_step(select, &has_row));
+    CHECK(has_row == 1);
+    CHECK_OK(eggdb_stmt_finalize(select));
+
+    CHECK_OK(eggdb_sql_copy_out_begin(sql, "COPY lines (id, word) TO STDOUT", &copy));
+    char out[64] = {0};
+    size_t used = 0;
+    for (;;) {
+        const uint8_t *piece = NULL;
+        size_t piece_len = 0;
+        CHECK_OK(eggdb_copy_read(copy, &piece, &piece_len));
+        if (piece == NULL) {
+            break;
+        }
+        CHECK(used + piece_len < sizeof out);
+        memcpy(out + used, piece, piece_len);
+        used += piece_len;
+    }
+    CHECK(strcmp(out, "1\tone\n2\ttwo\n3\tthree\n") == 0);
+    CHECK_OK(eggdb_copy_end(copy, &results, &count));
+    CHECK(count == 1 && strcmp(results[0].tag, "COPY 3") == 0);
+    eggdb_copy_free(copy);
+    eggdb_copy_free(NULL);
+    CHECK_OK(eggdb_sql_close(sql));
+}
+
 static void check_backup_and_compaction(eggdb_db *db, const char *work) {
     char copy[4096];
     join_path(copy, sizeof copy, work, "api-check-copy.db");
@@ -325,6 +412,7 @@ int main(int argc, char **argv) {
     check_collections_expiry_and_counters(db);
     check_sql(db);
     check_prepared_statements_and_copy(db);
+    check_stepping_and_streaming_copy(db);
     check_backup_and_compaction(db, work);
     eggdb_compact_report compacted;
     CHECK_OK(eggdb_compact(db, &compacted));
