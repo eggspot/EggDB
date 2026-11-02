@@ -52,6 +52,7 @@ pub(crate) enum CollectionAction {
     List,
     Add,
     Delete,
+    Move,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +318,7 @@ impl CommandName {
             | OptionName::To
             | OptionName::Reverse
             | OptionName::KeysOnly => self == Self::Scan,
+            OptionName::Collections => self == Self::Stats,
         }
     }
 
@@ -387,6 +389,7 @@ enum OptionName {
     Reverse,
     Limit,
     KeysOnly,
+    Collections,
     Mono,
     Ascii,
     ReadOnly,
@@ -493,6 +496,7 @@ impl OptionName {
             b"reverse" => Self::Reverse,
             b"limit" => Self::Limit,
             b"keys-only" => Self::KeysOnly,
+            b"collections" => Self::Collections,
             b"mono" => Self::Mono,
             b"ascii" => Self::Ascii,
             b"read-only" => Self::ReadOnly,
@@ -606,6 +610,7 @@ impl OptionName {
                 | Self::Create
                 | Self::Reverse
                 | Self::KeysOnly
+                | Self::Collections
                 | Self::Mono
                 | Self::Ascii
                 | Self::ReadOnly
@@ -699,6 +704,8 @@ pub(crate) struct Request {
     pub(crate) tables: Vec<String>,
     pub(crate) call_gap_ms: Option<u64>,
     pub(crate) collection: Option<String>,
+    pub(crate) new_collection_name: Option<String>,
+    pub(crate) collection_stats: bool,
     pub(crate) collection_action: Option<CollectionAction>,
     pub(crate) table_action: Option<TableAction>,
     pub(crate) table: Option<OsString>,
@@ -1128,6 +1135,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         tables: Vec::new(),
         call_gap_ms: None,
         collection: None,
+        new_collection_name: None,
+        collection_stats: false,
         collection_action: None,
         table_action: None,
         table: None,
@@ -1192,6 +1201,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.scan.limit = Some(parse_limit(&option.spelled, value).map_err(usage)?);
             }
             OptionName::KeysOnly => request.scan.keys_only = true,
+            OptionName::Collections => request.collection_stats = true,
             OptionName::Mono => request.mono = true,
             OptionName::Ascii => request.ascii = true,
             OptionName::ReadOnly => request.read_only = true,
@@ -1852,16 +1862,21 @@ fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Requ
         b"list" => CollectionAction::List,
         b"add" => CollectionAction::Add,
         b"delete" | b"del" => CollectionAction::Delete,
+        b"move" | b"rename" => CollectionAction::Move,
         _ => return Err(usage(COLLECTION_NEEDS_A_VERB.to_owned())),
     };
     let (verb, needed) = match action {
         CollectionAction::List => ("list", 2),
         CollectionAction::Add => ("add", 3),
         CollectionAction::Delete => ("delete", 3),
+        CollectionAction::Move => ("move", 4),
     };
     if arguments.len() < needed {
         let needs = match (action, arguments.len()) {
             (CollectionAction::List, _) => "a file",
+            (CollectionAction::Move, 1) => "a file, a collection name and its new name",
+            (CollectionAction::Move, 2) => "a collection name and its new name",
+            (CollectionAction::Move, _) => "the collection's new name",
             (_, 1) => "a file and a collection name",
             _ => "a collection name",
         };
@@ -1874,6 +1889,9 @@ fn collection_request(mut request: Request, arguments: &[&OsStr]) -> Result<Requ
     request.file = PathBuf::from(arguments[1]);
     if let Some(name) = arguments.get(2) {
         request.collection = Some(parse_collection_name(None, name).map_err(usage)?);
+    }
+    if let Some(new_name) = arguments.get(3) {
+        request.new_collection_name = Some(parse_collection_name(None, new_name).map_err(usage)?);
     }
     Ok(request)
 }
@@ -2023,7 +2041,7 @@ const READ_ONLY_CANNOT_CREATE: &str =
     "--read-only cannot be combined with --create: a read-only open never creates a file";
 const TABLE_NEEDS_A_VERB: &str = "table needs list, show or sample";
 const ROW_NEEDS_A_VERB: &str = "row needs list";
-const COLLECTION_NEEDS_A_VERB: &str = "collection needs list, add or delete";
+const COLLECTION_NEEDS_A_VERB: &str = "collection needs list, add, delete or move";
 pub(crate) const MOST_SAMPLE_ROWS: u64 = 1_000;
 
 const MOST_COLLECTION_NAME_BYTES: usize = 128;
@@ -2927,11 +2945,38 @@ mod tests {
         }
         assert_eq!(
             usage_message("collection"),
-            "collection needs list, add or delete"
+            "collection needs list, add, delete or move"
         );
         assert_eq!(
+            usage_message("collection copy app.db a b"),
+            "collection needs list, add, delete or move"
+        );
+        for verb in ["move", "rename"] {
+            let moved = request(&format!("collection {verb} app.db cache sessions"));
+            assert_eq!(moved.collection_action, Some(CollectionAction::Move));
+            assert_eq!(moved.collection.as_deref(), Some("cache"));
+            assert_eq!(moved.new_collection_name.as_deref(), Some("sessions"));
+        }
+        assert_eq!(
             usage_message("collection rename app.db a"),
-            "collection needs list, add or delete"
+            "eggdb collection move needs the collection's new name"
+        );
+        assert_eq!(
+            usage_message("collection move app.db"),
+            "eggdb collection move needs a collection name and its new name"
+        );
+        assert_eq!(
+            usage_message("collection move"),
+            "eggdb collection move needs a file, a collection name and its new name"
+        );
+        assert_eq!(
+            usage_message("collection move app.db a b c"),
+            "too many arguments for eggdb collection: 'c'"
+        );
+        let too_long = "x".repeat(129);
+        assert!(
+            usage_message(&format!("collection move app.db a {too_long}"))
+                .starts_with("a collection name is 1 to 128 bytes")
         );
         assert_eq!(
             usage_message("collection list"),

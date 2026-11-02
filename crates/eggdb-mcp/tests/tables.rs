@@ -192,6 +192,8 @@ fn the_key_value_tools_are_withdrawn_and_refused() {
     for (id, tool, arguments) in [
         (2, "kv_get", r#"{"key":"session:1"}"#),
         (3, "kv_scan", r#"{"prefix":"session:"}"#),
+        (4, "kv_get", r#"{"key":"s:1","collection":"sessions"}"#),
+        (5, "kv_scan", r#"{"collection":"sessions"}"#),
     ] {
         let answer = call(&mut server, id, tool, arguments);
         assert_eq!(error_code(&answer), "limited_to_tables", "{tool}");

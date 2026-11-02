@@ -1261,3 +1261,50 @@ fn startup_refuses_column_lists_it_cannot_serve() {
     );
     assert!(!audit_path(file.path()).exists());
 }
+
+#[test]
+fn an_agent_reads_a_collection_by_name_and_a_missing_one_names_those_there() {
+    let (file, _audit) = sample("mcp-collections", 0);
+    let path = file.path().to_str().unwrap();
+    for (key, value) in [("s:1", "alice"), ("s:2", "bob"), ("t:1", "other")] {
+        let put = eggdb(&["put", path, "-C", "sessions", key, value, "--create"]);
+        assert!(put.status.success(), "{}", stderr(&put));
+    }
+    let mut mcp = Mcp::start(file.path(), &[]);
+    mcp.initialize();
+    let found = mcp.call("kv_get", r#"{"key":"s:2","collection":"sessions"}"#);
+    let found = ok(&found);
+    assert_eq!(text_at(found, &["collection"]), "sessions");
+    assert_eq!(text_at(found, &["entry", "value"]), "bob");
+    let outside = mcp.call("kv_get", r#"{"key":"greeting","collection":"sessions"}"#);
+    assert_eq!(text_at(ok(&outside), &["found"]), "false");
+    let default_space = mcp.call("kv_get", r#"{"key":"s:2"}"#);
+    assert_eq!(text_at(ok(&default_space), &["found"]), "false");
+    let scanned = mcp.call(
+        "kv_scan",
+        r#"{"collection":"sessions","prefix":"s:","max_entries":1}"#,
+    );
+    let scanned = ok(&scanned);
+    assert_eq!(text_at(scanned, &["returned_entries"]), "1");
+    assert_eq!(text_at(scanned, &["entries", "0", "key"]), "s:1");
+    assert_eq!(text_at(scanned, &["truncated"]), "true");
+    let next = text_at(scanned, &["next_start_hex"]);
+    let rest = mcp.call(
+        "kv_scan",
+        &format!(r#"{{"collection":"sessions","prefix":"s:","start_hex":"{next}"}}"#),
+    );
+    let rest = ok(&rest);
+    assert_eq!(text_at(rest, &["returned_entries"]), "1");
+    assert_eq!(text_at(rest, &["entries", "0", "value"]), "bob");
+    let everything = mcp.call("kv_scan", r#"{"keys_only":true}"#);
+    assert_eq!(text_at(ok(&everything), &["returned_entries"]), "1");
+    let missing = mcp.call("kv_scan", r#"{"collection":"sesions"}"#);
+    assert_eq!(error_code(&missing), "collection_not_found");
+    let message = text_at(result(&missing), &["error", "message"]);
+    assert!(
+        message.contains("its collections are \"sessions\""),
+        "{message}"
+    );
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+}

@@ -1,6 +1,6 @@
 use super::output::{Output, Style};
 use super::render::{self, JsonObject, TimeStyle};
-use eggdb::{BackupReport, CheckReport, CommitStamp, CompactReport, Stats};
+use eggdb::{BackupReport, CheckReport, CollectionStats, CommitStamp, CompactReport, Stats};
 use std::time::Duration;
 
 const LABEL_WIDTH: usize = 16;
@@ -150,7 +150,12 @@ pub(crate) fn damage_json(damage: &Damage<'_>) -> String {
         .line()
 }
 
-pub(crate) fn stats_text(out: &mut Output<'_>, file: &str, stats: &Stats) {
+pub(crate) fn stats_text(
+    out: &mut Output<'_>,
+    file: &str,
+    stats: &Stats,
+    collections: Option<&[CollectionStats]>,
+) {
     out.text(file);
     out.text("\n");
     label(
@@ -186,11 +191,52 @@ pub(crate) fn stats_text(out: &mut Output<'_>, file: &str, stats: &Stats) {
         &format!("{} ({replay})", render::size(log_bytes)),
         Style::Bold,
     );
+    if let Some(collections) = collections {
+        collections_text(out, collections);
+    }
 }
 
-pub(crate) fn stats_json(file: &str, stats: &Stats) -> String {
+fn collections_text(out: &mut Output<'_>, collections: &[CollectionStats]) {
+    let count = match collections.len() {
+        0 => "none".to_owned(),
+        n => render::count(n as u64),
+    };
+    label(out, "collections", &count, Style::Bold);
+    for collection in collections {
+        out.text("  ");
+        out.styled(Style::Bold, &collection.name);
+        out.text(": ");
+        out.text(&render::entries(collection.entries));
+        out.text(&format!(
+            ", {} of keys, {} of values\n",
+            render::size(collection.key_bytes),
+            render::size(collection.value_bytes)
+        ));
+    }
+}
+
+fn collections_json(collections: &[CollectionStats]) -> String {
+    let items: Vec<String> = collections
+        .iter()
+        .map(|collection| {
+            JsonObject::new()
+                .string("name", &collection.name)
+                .number("entries", collection.entries)
+                .number("key_bytes", collection.key_bytes)
+                .number("value_bytes", collection.value_bytes)
+                .object()
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+pub(crate) fn stats_json(
+    file: &str,
+    stats: &Stats,
+    collections: Option<&[CollectionStats]>,
+) -> String {
     let (stamp, time) = stamp_fields(stats.last_commit);
-    JsonObject::new()
+    let object = JsonObject::new()
         .string("file", file)
         .number("page_size", stats.page_size as u64)
         .number("pages", stats.page_count)
@@ -201,8 +247,13 @@ pub(crate) fn stats_json(file: &str, stats: &Stats) -> String {
         .number(
             "log_bytes_since_checkpoint",
             stats.log_bytes_since_checkpoint,
-        )
-        .line()
+        );
+    match collections {
+        Some(collections) => object
+            .raw("collections", &collections_json(collections))
+            .line(),
+        None => object.line(),
+    }
 }
 
 pub(crate) struct Copied<'a> {

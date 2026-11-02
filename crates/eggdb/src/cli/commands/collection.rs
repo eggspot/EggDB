@@ -3,6 +3,7 @@ use crate::cli::args::{CollectionAction, CommandName, Format};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::Style;
 use crate::cli::render::{self, JsonObject};
+use eggdb::ErrorKind;
 
 impl Session<'_> {
     pub(super) fn collection_command(&mut self) -> Result<Exit, Failure> {
@@ -10,8 +11,9 @@ impl Session<'_> {
             Some(CollectionAction::List) => self.list_collections(),
             Some(CollectionAction::Add) => self.add_collection(),
             Some(CollectionAction::Delete) => self.delete_collection(),
+            Some(CollectionAction::Move) => self.move_collection(),
             None => Err(Failure::usage(
-                "collection needs list, add or delete",
+                "collection needs list, add, delete or move",
                 Some(CommandName::Collection),
             )),
         }
@@ -110,6 +112,55 @@ impl Session<'_> {
             )),
         }
         Ok(if deleted { Exit::Done } else { Exit::NotFound })
+    }
+
+    fn move_collection(&mut self) -> Result<Exit, Failure> {
+        let name = self.request.collection.clone().unwrap_or_default();
+        let new_name = self.request.new_collection_name.clone().unwrap_or_default();
+        let db = self.open(Access::Write { create: false }, None)?;
+        let moved = match db.rename_collection(&name, &new_name) {
+            Ok(()) => true,
+            Err(error) if error.kind() == ErrorKind::CollectionNotFound => false,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                return Err(Failure::coded(
+                    "already_exists",
+                    format!(
+                        "cannot rename the collection {name} to {new_name} in {}: {new_name} is already a collection there, and a rename never replaces one. Choose another name, or delete {new_name} first.",
+                        self.file
+                    ),
+                    Exit::DatabaseError,
+                ));
+            }
+            Err(error) => {
+                return Err(operation_failure(
+                    &error,
+                    &format!(
+                        "cannot rename the collection {name} to {new_name} in {}",
+                        self.file
+                    ),
+                ));
+            }
+        };
+        self.close(db)?;
+        match self.format {
+            Format::Json => self.out.text(
+                &JsonObject::new()
+                    .string("file", &self.file_display)
+                    .string("collection", &name)
+                    .string("new_name", &new_name)
+                    .boolean("moved", moved)
+                    .line(),
+            ),
+            _ if moved => self.out.text(&format!(
+                "renamed collection {name} to {new_name} in {}\n",
+                self.file
+            )),
+            _ => self.error_message(&format!(
+                "nothing to rename: {name} is not a collection in {}",
+                self.file
+            )),
+        }
+        Ok(if moved { Exit::Done } else { Exit::NotFound })
     }
 }
 

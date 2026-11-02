@@ -181,7 +181,8 @@ scan.
 
 ## Collections
 `eggdb_create_collection(txn, name, &created)` and `eggdb_drop_collection(txn, name, &dropped)`
-change the collections in a write transaction; `eggdb_collection_names(txn, &names, &length,
+change the collections in a write transaction (a drop takes the name away at once and removes up
+to 512 keys; later commits remove the rest, D292); `eggdb_collection_names(txn, &names, &length,
 &count)` lists them as one buffer of NUL-terminated names in name order. Every key call takes a
 collection name; one that does not exist fails with `EGGDB_ERR_COLLECTION_NOT_FOUND`. See
 [embedded.md](embedded.md#collections).

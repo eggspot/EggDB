@@ -497,17 +497,24 @@ pub(super) const STATS: CommandDefinition = CommandDefinition {
     aliases: &[],
     synopsis: "<file>",
     summary: "size, pages, last commit and log, without reading pages",
-    description: "Prints the page size, the pages and free pages, the file's size, the last commit and the log since the last checkpoint, without reading a page. It changes nothing.",
+    description: "Prints the page size, the pages and free pages, the file's size, the last commit and the log since the last checkpoint, without reading a page; --collections adds each collection's entries and bytes, reading every key. It changes nothing.",
     usage: "eggdb stats <file>",
     help: "\
 Prints the page size, the pages and free pages, the file's size, the last commit and the log
 written since the last checkpoint. It reads no page, so it is instant on a file of any size.
 
+      --collections   also count each collection's entries, key bytes and value bytes; this
+                      reads every key of every collection, so it takes time on a large file
+
 Examples:
   eggdb stats app.db
   eggdb stats app.db --format json
+  eggdb stats app.db --collections
 ",
-    options: &[],
+    options: &[flag(
+        "collections",
+        "also count each collection's entries and bytes, reading every key of every collection",
+    )],
     operands: &[FILE],
     outputs: &[
         OutputDefinition {
@@ -521,7 +528,11 @@ Examples:
     ],
     max_effect: Effect::Read,
     errors: READING_ERRORS,
-    examples: &["eggdb stats app.db", "eggdb stats app.db --format json"],
+    examples: &[
+        "eggdb stats app.db",
+        "eggdb stats app.db --format json",
+        "eggdb stats app.db --collections",
+    ],
     surfaces: "none yet: the GUI client (D15) brings a file view",
 };
 

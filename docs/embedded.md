@@ -219,9 +219,18 @@ fn main() -> eggdb::Result<()> {
   refuses keys that start with the bytes kept for collections, `0xff 'C' 'O' 'L' 0x00`, with
   `ErrorKind::ReservedKey`. SQL's tables stay in the default key space under their own prefix
   (`sql.md`), as before.
-- **Dropping** deletes every key of the collection in one transaction, so a collection that
-  changes more pages than the page cache holds fails with `CacheFull`; open the database with a
-  larger `Options::cache_bytes`.
+- **Dropping** takes the collection's name away in its first commit, so nothing sees it again
+  and the name is free for a new, empty collection, and removes its keys in steps (D292):
+  `db.drop_collection` commits up to 512 keys at a time until none are left, so a collection of
+  any size drops within a small page cache. `tx.drop_collection` inside your own transaction
+  removes up to 512 and leaves a mark; every later commit removes up to 32 more, and
+  `db.finish_collection_drops()` removes the rest at once, as it does after a crash between
+  steps.
+- **Renaming**: `db.rename_collection("sessions", "old-sessions")` (or
+  `tx.rename_collection`) moves the name with every key and time to live in one commit, and
+  fails with `ErrorKind::AlreadyExists` when a collection already has the new name.
+- **Counting**: `db.collection_stats()` gives each collection's `entries`, `key_bytes` and
+  `value_bytes`, read from every key (`CollectionStats`).
 - A read transaction keeps its snapshot: a collection dropped or changed after it began is still
   there, as it was, for it.
 

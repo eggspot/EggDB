@@ -11,10 +11,16 @@ pub(crate) const COLLECTIONS_END: &[u8] = b"\xffCOL\x01";
 const CATALOG_TAG: u8 = 0x01;
 const NAME_TAG: u8 = 0x02;
 const ENTRY_TAG: u8 = 0x03;
+const DROPPING_TAG: u8 = 0x06;
 const RECORD_VERSION: u8 = 1;
 const RECORD_BYTES: usize = 5;
 const FIRST_NUMBER: u32 = 1;
-const DROP_BATCH_KEYS: usize = 256;
+const DROP_STEP_KEYS: usize = 512;
+const DROPPED_KEYS_PER_COMMIT: usize = 32;
+
+pub(crate) const DROPS_UNKNOWN: u8 = 0;
+const DROPS_NONE: u8 = 1;
+const DROPS_PENDING: u8 = 2;
 pub(crate) const ENTRY_PREFIX_BYTES: usize = COLLECTIONS_PREFIX.len() + 1 + 4;
 
 pub(crate) const MAX_COLLECTION_NAME_BYTES: usize = 128;
@@ -78,6 +84,34 @@ fn name_key(name: &str) -> Vec<u8> {
 
 fn entries_prefix(number: u32) -> Vec<u8> {
     tagged(ENTRY_TAG, &number.to_be_bytes())
+}
+
+fn droppings_prefix() -> Vec<u8> {
+    tagged(DROPPING_TAG, b"")
+}
+
+fn dropping_key(number: u32) -> Vec<u8> {
+    tagged(DROPPING_TAG, &number.to_be_bytes())
+}
+
+fn dropping_record(name: &str) -> Vec<u8> {
+    let mut record = Vec::with_capacity(1 + name.len());
+    record.push(RECORD_VERSION);
+    record.extend_from_slice(name.as_bytes());
+    record
+}
+
+fn read_dropping_number(key: &[u8]) -> Result<u32> {
+    let number: [u8; 4] = key.try_into().map_err(|_| {
+        Error::new(
+            ErrorKind::Corrupt,
+            format!(
+                "a dropped collection's marker is damaged: its key holds {} bytes after the tag, not a 4-byte number; restore from a backup or run `eggdb check`",
+                key.len()
+            ),
+        )
+    })?;
+    Ok(u32::from_be_bytes(number))
 }
 
 fn record(number: u32) -> [u8; RECORD_BYTES] {
@@ -511,7 +545,52 @@ impl std::fmt::Debug for WriteCollection<'_, '_> {
     }
 }
 
+/// What [`Database::collection_stats`] counts in one collection: its entries and their bytes,
+/// as a scan of the whole collection reads them, so keys whose time to live has run out are
+/// left out.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct CollectionStats {
+    /// The collection's name.
+    pub name: String,
+    /// How many keys it holds.
+    pub entries: u64,
+    /// The bytes of its keys together, as the collection's own keys (without the ten bytes
+    /// that say which collection a key is in).
+    pub key_bytes: u64,
+    /// The bytes of its values together.
+    pub value_bytes: u64,
+}
+
+fn count_entries(name: String, mut scan: Scan<'_>) -> Result<CollectionStats> {
+    let mut stats = CollectionStats {
+        name,
+        entries: 0,
+        key_bytes: 0,
+        value_bytes: 0,
+    };
+    while let Some((key, value_bytes)) = scan.next_key_and_value_len()? {
+        stats.entries += 1;
+        stats.key_bytes += key.len() as u64;
+        stats.value_bytes += value_bytes;
+    }
+    Ok(stats)
+}
+
 impl ReadTransaction<'_> {
+    /// Each collection's entries and their bytes, as this transaction sees them, in the byte
+    /// order of the names (see [`CollectionStats`]). It reads every key of every collection.
+    pub fn collection_stats(&self) -> Result<Vec<CollectionStats>> {
+        self.collection_names()?
+            .into_iter()
+            .map(|name| {
+                let collection = self.collection(&name)?;
+                let scan = collection.scan_prefix(b"");
+                count_entries(name, scan)
+            })
+            .collect()
+    }
+
     /// The collection named `name`, as this transaction sees it (see [`ReadCollection`]). It
     /// fails with [`ErrorKind::CollectionNotFound`] when the snapshot has no such collection,
     /// and with [`ErrorKind::InvalidCollectionName`] for a name no collection can have.
@@ -611,10 +690,41 @@ impl<'db> WriteTransaction<'db> {
         Ok(true)
     }
 
+    /// Gives the collection named `name` the name `new_name`, with every key in it and their
+    /// times to live, in this transaction: no transaction ever sees it under both names or
+    /// under neither. It fails with [`ErrorKind::CollectionNotFound`] when there is no
+    /// collection named `name`, with [`ErrorKind::AlreadyExists`] when a collection is already
+    /// named `new_name` (`name` itself included), which is left as it is, and with
+    /// [`ErrorKind::InvalidCollectionName`] for a name no collection can have. It changes only
+    /// the collection's name record, so it takes the same time for a collection of any size.
+    pub fn rename_collection(&mut self, name: &str, new_name: &str) -> Result<()> {
+        check_collection_name(name)?;
+        check_collection_name(new_name)?;
+        let key = name_key(name);
+        let number = collection_number(self.get_raw(&key)?, name)?;
+        let new_key = name_key(new_name);
+        if self.get_raw(&new_key)?.is_some() {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "cannot rename the collection \"{name}\" to \"{new_name}\": a collection named \"{new_name}\" is already there, and a rename never replaces one; choose another name, or drop that collection first"
+                ),
+            ));
+        }
+        self.delete_raw(&key)?;
+        self.put_raw(&new_key, &record(number))?;
+        Ok(())
+    }
+
     /// Removes the collection named `name` and every key in it, and returns whether it was
-    /// there. The keys go in this transaction, so a collection with more changed pages than the
-    /// page cache holds fails with [`ErrorKind::CacheFull`](crate::ErrorKind::CacheFull); open
-    /// the database with a larger [`Options::cache_bytes`](crate::Options::cache_bytes).
+    /// there. The collection is gone at once: from this transaction on, it has no name and no
+    /// read sees its keys, and the name is free for a new collection, which starts empty.
+    /// The keys go in steps, so a collection of any size drops within a small page cache: this
+    /// transaction removes up to 512 of them, and a mark left in the file has later commits
+    /// remove the rest, up to 32 each, until
+    /// [`Database::finish_collection_drops`] or [`Database::drop_collection`] removes them
+    /// all. A crash between steps leaves the mark, so those commits carry on where the steps
+    /// stopped; keys of a dropped collection are never read again in the meantime.
     pub fn drop_collection(&mut self, name: &str) -> Result<bool> {
         check_collection_name(name)?;
         let key = name_key(name);
@@ -622,24 +732,55 @@ impl<'db> WriteTransaction<'db> {
             return Ok(false);
         };
         let number = read_record(&existing, &format!("the collection \"{name}\""))?;
-        let base = entries_prefix(number);
-        loop {
-            let keys = self.first_keys_under(&base)?;
-            if keys.is_empty() {
-                break;
-            }
-            for key in &keys {
-                self.remove_stored(key)?;
-            }
-        }
         self.delete_raw(&key)?;
+        self.put_raw(&dropping_key(number), &dropping_record(name))?;
+        self.database().note_collection_drops(DROPS_PENDING);
+        self.remove_dropped_entries(DROP_STEP_KEYS)?;
         Ok(true)
     }
 
-    fn first_keys_under(&self, base: &[u8]) -> Result<Vec<Vec<u8>>> {
+    pub(crate) fn finish_drops_before_commit(&mut self) -> Result<()> {
+        if self.database().collection_drops() == DROPS_NONE {
+            return Ok(());
+        }
+        self.remove_dropped_entries(DROPPED_KEYS_PER_COMMIT).map(drop)
+    }
+
+    fn remove_dropped_entries(&mut self, limit: usize) -> Result<DropStep> {
+        let mut step = DropStep::default();
+        while step.entries < limit {
+            let Some(number) = self.first_dropping_number()? else {
+                if step == DropStep::default() {
+                    self.database().note_collection_drops(DROPS_NONE);
+                }
+                return Ok(step);
+            };
+            let wanted = limit - step.entries;
+            let keys = self.first_keys_under(&entries_prefix(number), wanted)?;
+            for key in &keys {
+                self.remove_stored(key)?;
+            }
+            step.entries += keys.len();
+            if keys.len() < wanted {
+                self.delete_raw(&dropping_key(number))?;
+                step.finished += 1;
+            }
+        }
+        Ok(step)
+    }
+
+    fn first_dropping_number(&self) -> Result<Option<u32>> {
+        let mut scan = Scan::within_prefix(self.reader(), self.tree(), &droppings_prefix(), b"");
+        match scan.next_key_and_value_len()? {
+            Some((key, _)) => read_dropping_number(key).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn first_keys_under(&self, base: &[u8], limit: usize) -> Result<Vec<Vec<u8>>> {
         let mut scan = Scan::within_prefix(self.reader(), self.tree(), base, b"");
         let mut keys = Vec::new();
-        while keys.len() < DROP_BATCH_KEYS {
+        while keys.len() < limit {
             match scan.next_key_and_value_len()? {
                 Some((key, _)) => keys.push([base, key].concat()),
                 None => break,
@@ -647,6 +788,12 @@ impl<'db> WriteTransaction<'db> {
         }
         Ok(keys)
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DropStep {
+    entries: usize,
+    finished: usize,
 }
 
 impl Database {
@@ -671,17 +818,60 @@ impl Database {
         }
     }
 
-    /// Removes the collection named `name` and every key in it, and commits, and returns
-    /// whether it was there (see [`WriteTransaction::drop_collection`]).
+    /// Removes the collection named `name` and every key in it, and returns whether it was
+    /// there. The first commit removes its name, so no read sees the collection from then on,
+    /// and up to 512 of its keys; later commits of up to 512 keys each remove the rest, so a
+    /// collection of millions of keys never needs one huge transaction, and each step's write
+    /// leaves read transactions working as any commit does. It also finishes every earlier
+    /// drop that a crash or [`WriteTransaction::drop_collection`] left unfinished (see
+    /// [`Database::finish_collection_drops`]). An error in the first commit changes nothing;
+    /// after one in a later step the collection stays dropped, and the next commits, or
+    /// [`Database::finish_collection_drops`], remove its remaining keys.
     pub fn drop_collection(&self, name: &str) -> Result<bool> {
         let mut transaction = self.begin_write()?;
-        if transaction.drop_collection(name)? {
-            transaction.commit()?;
-            Ok(true)
-        } else {
+        if !transaction.drop_collection(name)? {
             transaction.rollback()?;
-            Ok(false)
+            return Ok(false);
         }
+        transaction.commit()?;
+        self.finish_collection_drops()?;
+        Ok(true)
+    }
+
+    /// Removes every key left of collections that were dropped, in commits of up to 512 keys,
+    /// and returns how many it removed: none when no drop is unfinished. Reads never see those
+    /// keys, and every commit removes up to 32 of them by itself; this frees their space at
+    /// once, for example after a crash in the middle of [`Database::drop_collection`].
+    pub fn finish_collection_drops(&self) -> Result<u64> {
+        let mut removed = 0u64;
+        loop {
+            let mut transaction = self.begin_write()?;
+            transaction.skip_sweep_on_commit();
+            let step = transaction.remove_dropped_entries(DROP_STEP_KEYS)?;
+            if step.entries == 0 && step.finished == 0 {
+                transaction.rollback()?;
+                return Ok(removed);
+            }
+            transaction.commit()?;
+            removed += step.entries as u64;
+        }
+    }
+
+    /// Gives the collection named `name` the name `new_name` and commits (see
+    /// [`WriteTransaction::rename_collection`]): atomic, and refused with
+    /// [`ErrorKind::AlreadyExists`] when a collection already has the new name.
+    pub fn rename_collection(&self, name: &str, new_name: &str) -> Result<()> {
+        let mut transaction = self.begin_write()?;
+        transaction.rename_collection(name, new_name)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Each collection's entries and their bytes as of the last commit, in the byte order of
+    /// the names (see [`CollectionStats`]). Unlike [`Database::stats`] it reads every key of
+    /// every collection, so it takes time in proportion to their size.
+    pub fn collection_stats(&self) -> Result<Vec<CollectionStats>> {
+        self.begin_read()?.collection_stats()
     }
 
     /// The names of the database's collections as of the last commit, in byte order.
@@ -700,8 +890,8 @@ impl Database {
 mod tests {
     use super::{
         COLLECTIONS_END, COLLECTIONS_PREFIX, ENTRY_PREFIX_BYTES, catalog_key,
-        check_collection_name, entries_prefix, is_reserved, name_key, names_prefix, read_record,
-        record,
+        check_collection_name, dropping_key, dropping_record, droppings_prefix, entries_prefix,
+        is_reserved, name_key, names_prefix, read_dropping_number, read_record, record,
     };
     use crate::ErrorKind;
     use crate::scan::keys_after_prefix;
@@ -732,6 +922,26 @@ mod tests {
         );
         assert_eq!(record(1), [1, 0, 0, 0, 1]);
         assert_eq!(record(0x0102_0304), [1, 1, 2, 3, 4]);
+        assert_eq!(droppings_prefix(), b"\xffCOL\x00\x06");
+        assert_eq!(dropping_key(1), b"\xffCOL\x00\x06\x00\x00\x00\x01");
+        assert_eq!(dropping_record("cache"), b"\x01cache");
+    }
+
+    #[test]
+    fn a_dropping_mark_sorts_after_every_entry_and_names_its_number() {
+        assert!(dropping_key(1) > entries_prefix(u32::MAX));
+        assert!(is_reserved(&dropping_key(7)));
+        let tag = droppings_prefix().len();
+        assert_eq!(read_dropping_number(&dropping_key(7)[tag..]).ok(), Some(7));
+        assert_eq!(
+            read_dropping_number(&dropping_key(u32::MAX)[tag..]).ok(),
+            Some(u32::MAX)
+        );
+        let damaged_keys: [&[u8]; 3] = [b"", b"\x00\x00\x01", b"\x00\x00\x00\x01\x00"];
+        for damaged in damaged_keys {
+            let error = read_dropping_number(damaged).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Corrupt, "{damaged:?}");
+        }
     }
 
     #[test]

@@ -141,7 +141,7 @@ Commands:
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
   follow <file> <source-url>    copy a running PostgreSQL or SQL Server database into the file and keep it in step
-  collection list|add|delete <file> [name]
+  collection list|add|delete|move <file> [name] [new-name]
                                 a named key space inside the file; see eggdb help collection
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
@@ -851,4 +851,89 @@ fn put_from_a_file_and_raw_get_stream_large_values() {
     let missing = dir.eggdb(&["put", "app.db", "other", "@absent.bin"]);
     assert_exit(&missing, 2);
     assert!(stderr(&missing).starts_with("eggdb: cannot read @absent.bin: "));
+}
+
+#[test]
+fn collections_are_renamed_counted_by_stats_and_deleted_in_steps_by_the_binary() {
+    let dir = TempDirectory::new("collection-move-stats");
+    assert_exit(&dir.eggdb(&["create", "app.db"]), 0);
+    for name in ["cache", "users"] {
+        assert_exit(&dir.eggdb(&["collection", "add", "app.db", name]), 0);
+    }
+    assert_exit(&dir.eggdb(&["put", "app.db", "-C", "cache", "c:1", "hot"]), 0);
+    let moved = dir.eggdb(&["collection", "move", "app.db", "cache", "warm"]);
+    assert_exit(&moved, 0);
+    assert_eq!(
+        stdout(&moved),
+        "{\"file\":\"app.db\",\"collection\":\"cache\",\"new_name\":\"warm\",\"moved\":true}\n"
+    );
+    let got = dir.eggdb(&["get", "app.db", "-C", "warm", "c:1"]);
+    assert_exit(&got, 0);
+    assert_eq!(stdout(&got), "hot");
+    let renamed = dir.eggdb(&["collection", "rename", "app.db", "warm", "cache", "-F", "text"]);
+    assert_exit(&renamed, 0);
+    assert_eq!(
+        stdout(&renamed),
+        "renamed collection warm to cache in app.db\n"
+    );
+    let taken = dir.eggdb(&["collection", "move", "app.db", "cache", "users"]);
+    assert_exit(&taken, 3);
+    assert!(
+        stderr(&taken).contains("users is already a collection there"),
+        "{}",
+        stderr(&taken)
+    );
+    let missing = dir.eggdb(&["collection", "move", "app.db", "gone", "new"]);
+    assert_exit(&missing, 1);
+    let listed = dir.eggdb(&["collection", "list", "app.db"]);
+    assert_eq!(
+        stdout(&listed),
+        "{\"file\":\"app.db\",\"collections\":[\"cache\",\"users\"]}\n"
+    );
+
+    let plain = dir.eggdb(&["stats", "app.db"]);
+    assert_exit(&plain, 0);
+    assert!(!stdout(&plain).contains("collections"), "{}", stdout(&plain));
+    let counted = dir.eggdb(&["stats", "app.db", "--collections"]);
+    assert_exit(&counted, 0);
+    assert!(
+        stdout(&counted).contains(
+            ",\"collections\":[{\"name\":\"cache\",\"entries\":1,\"key_bytes\":3,\"value_bytes\":3},{\"name\":\"users\",\"entries\":0,\"key_bytes\":0,\"value_bytes\":0}]}\n"
+        ),
+        "{}",
+        stdout(&counted)
+    );
+    let text = dir.eggdb(&["stats", "app.db", "--collections", "-F", "text", "--color", "never"]);
+    assert_exit(&text, 0);
+    assert!(
+        stdout(&text).contains("  cache: 1 entry, 3 B of keys, 3 B of values\n"),
+        "{}",
+        stdout(&text)
+    );
+    assert!(
+        stdout(&text).contains("  users: no entries, 0 B of keys, 0 B of values\n"),
+        "{}",
+        stdout(&text)
+    );
+    let refused = dir.eggdb(&["get", "app.db", "k", "--collections"]);
+    assert_exit(&refused, 2);
+
+    let path = dir.path().join("app.db");
+    let db = Database::open(&path).unwrap();
+    db.write(|tx| {
+        let mut cache = tx.collection("cache")?;
+        for n in 0..3000u32 {
+            cache.put(n.to_be_bytes(), "v")?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    db.close().unwrap();
+    let deleted = dir.eggdb(&["collection", "delete", "app.db", "cache"]);
+    assert_exit(&deleted, 0);
+    let db = Database::open(&path).unwrap();
+    assert_eq!(db.collection_names().unwrap(), ["users"]);
+    assert_eq!(db.finish_collection_drops().unwrap(), 0);
+    assert_eq!(db.check().unwrap().entries, 1 + 1);
+    db.close().unwrap();
 }

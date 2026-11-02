@@ -84,6 +84,38 @@ pub trait KeyValueRead {
     fn committed_version(&self) -> Option<u64> {
         None
     }
+
+    /// The names of the store's collections, in byte order: named key spaces of their own
+    /// beside the one this trait reads, which SQL never uses (D139). A store without
+    /// collections, the default, has none.
+    fn collection_names(&self) -> SqlResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Whether the store has a collection named `name`; by default it has none.
+    fn has_collection(&self, _name: &str) -> SqlResult<bool> {
+        Ok(false)
+    }
+
+    /// The value under `key` in the collection named `name`, or `None` when the key or the
+    /// collection is absent.
+    fn collection_get(&self, _name: &str, _key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Calls `visit` with each entry of the collection named `name` whose key is at least
+    /// `start` and below `end`, as [`KeyValueRead::scan`] does; with none when there is no
+    /// such collection.
+    fn collection_scan(
+        &self,
+        _name: &str,
+        _start: &[u8],
+        _end: &[u8],
+        _direction: ScanDirection,
+        _visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        Ok(())
+    }
 }
 
 /// The one write transaction of an ordered byte-string key-value store.

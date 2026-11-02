@@ -67,7 +67,7 @@ file holds only EggDB's own tables, and the registry test checks them against th
 | `audit` | kept | shipped |
 | `help` | kept | shipped |
 | `version` | kept | shipped |
-| `collection list`, `collection add`, `collection delete` | `<noun> <verb>` | the noun `collection` with the core verbs `list`, `add` and `delete` |
+| `collection list`, `collection add`, `collection delete`, `collection move` | `<noun> <verb>` | the noun `collection` with the core verbs `list`, `add`, `delete` and `move`; `rename` is an alias of `move`, as `del` is of `delete` (D292) |
 | `table list`, `table show`, `table sample` | `<noun> <verb>` | the noun `table` with the core verbs `list`, `show` and `sample` (D144) |
 | `row list` | `<noun> <verb>` | the noun `row` with the core verb `list`, a table's rows a page at a time (D145) |
 
@@ -95,7 +95,7 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `decr` | change | text, json | one object, `key` and `value` | |
 | `cas` | destroy | text, json | one object, `key`, `swapped`, and `value` when it did not swap | |
 | `check` | read | text, json | one object, the check report | |
-| `stats` | read | text, json | one object, the stats report | |
+| `stats` | read | text, json | one object, the stats report; with `--collections`, `collections`: one object per collection, `name`, `entries`, `key_bytes`, `value_bytes` | |
 | `backup` | change | text, json | one object, the backup report | |
 | `compact` | change | text, json | one object, the compaction report | |
 | `ui` | destroy | none | none: it draws a screen | |
@@ -114,6 +114,7 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `collection list` | read | text, json | one object, `file` and `collections` | |
 | `collection add` | change | text, json | one object, `file`, `collection`, `added` | |
 | `collection delete` | destroy | text, json | one object, `file`, `collection`, `deleted` | |
+| `collection move` | change | text, json | one object, `file`, `collection`, `new_name`, `moved` | |
 | `mcp` | destroy | none | none: stdout carries the protocol | |
 | `audit` | read | text, json | records, the audit file's lines | |
 | `help` | read | text, text | `--json`: the registry, one object; for a noun, one object per verb | |
@@ -129,8 +130,8 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `write_sql` | `sql --json` | destroy | `--allow-write` | no | `destructive_statement`: the statement is destructive (DROP, TRUNCATE, a column dropped or retyped, a DELETE or UPDATE whose WHERE does not pin every column of the primary key or of a unique key to values, REPLACE or an upsert, or a MERGE that updates or deletes) (D121, D255) | the same, and `rows_changed`, `committed`, `warning` |
 | `explain_query` | `explain --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
 | `sample_rows` | `table sample --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated_by`; `tag` and `row_count` count the rows shown, not the `LIMIT n+1` read |
-| `kv_get` | `get --json` | read | | yes | | `notice`, `found`; in `entry`, `key_hex` when `key` is there, and `value_bytes` |
-| `kv_scan` | `scan --json` | read | | yes | | `notice`, `returned_entries`, `truncated`, `next_start_hex`; in each entry, as `kv_get` |
+| `kv_get` | `get --json` | read | | yes | | `notice`, `collection` when one was named, `found`; in `entry`, `key_hex` when `key` is there, and `value_bytes` |
+| `kv_scan` | `scan --json` | read | | yes | | `notice`, `collection` when one was named, `returned_entries`, `truncated`, `next_start_hex`; in each entry, as `kv_get` |
 | `row_list` | `row list --json` | read | | yes | | `notice`, `columns`, `truncated_by`; `truncated` and `next_cursor` are the twin's page trailer |
 
 No tool reaches outside the database (`openWorldHint` is false for all). Their names are the
@@ -164,7 +165,7 @@ that declares the code; `-` marks a code only MCP gives.
 | `not_a_table` | `refused` | 3 | `row list` or `row_list` named a view, which has no stored order to page through; `fix_command` is `eggdb table sample <file> <table>` |
 | `collection_not_found` | `not_found` | 1 | `-C <name>` names no collection; `fix_command` is `eggdb collection add <file> <name>` |
 | `source_failed` | `failed` | 3 | `follow` could not connect to, read from or keep in step with the source database |
-| `already_exists` | `exists` | 3 | `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact`, or the scratch copy (`<file>.restoring`, `<file>.importing`) a dry run of `restore` or `import --csv` would write |
+| `already_exists` | `exists` | 3 | `collection move` to a name a collection already has, `export`, `create` or `backup` to a file that is there, or a staging file left by `backup` or `compact`, or the scratch copy (`<file>.restoring`, `<file>.importing`) a dry run of `restore` or `import --csv` would write |
 | `database_busy` | `busy` | 5 | another program holds the file |
 | `read_only` | `read_only` | 3 | MCP: a write without `--allow-write`, or sent to `run_sql`. CLI: a statement refused with SQLSTATE 25006, as `sql --read-only` refuses writes |
 | `limited_to_tables` | `needs_grant` | - | MCP: `kv_get` or `kv_scan` on a server started with `--tables`, which leaves out the key-value store |

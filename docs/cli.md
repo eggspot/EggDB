@@ -65,7 +65,7 @@ eggdb <command> <file> [arguments] [options]
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, or with `--dialect mysql` a `mysqldump` file, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
 | `audit <file> [--verify]` | never: reads `<file>.mcp-audit.jsonl` | lists the calls AI agents made through `eggdb mcp` (below); `--verify` checks that every record links to the one before it by its SHA-256, so a record changed, removed or inserted since it was written is found (exit 3, `audit_changed`) (D231) |
-| `collection list\|add\|delete <file> [<name>]` | read-only for `list`, for writing otherwise | lists, adds or deletes the named key spaces in the file (below) |
+| `collection list\|add\|delete\|move <file> [<name>] [<new-name>]` | read-only for `list`, for writing otherwise | lists, adds, deletes or renames the named key spaces in the file (below) |
 | `help [<command>]` | | the help, or one command's help; `--help` and `-h` work after any command |
 | `version` | | the version; also `--version` and `-V`; `--json` prints `{"version":…}` |
 
@@ -144,7 +144,7 @@ lowercase hex, instead of `key` or `value`. Numbers are plain integers. The fiel
 | `create` | `{"file":"app.db","page_size":4096}` |
 | `scan` | `{"key":…,"value":…}` per entry, `{"key":…}` with `--keys-only` |
 | `check` | `{"ok":true,"file","commit_stamp","commit_time","page_size","pages","file_bytes","entries","key_bytes","value_bytes","tree_height","tree_pages","overflow_values","overflow_pages","free_pages","log_pages","leaked_pages"}`; when damaged `{"ok":false,"file","problem","page","what_to_do"}`, `page` only when the problem names one |
-| `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`; the commit fields are `null` before the first commit |
+| `stats` | `{"file","page_size","pages","free_pages","file_bytes","last_commit_stamp","last_commit_time","log_bytes_since_checkpoint"}`, and `"collections"` with `--collections`; the commit fields are `null` before the first commit |
 | `export` | `{"file","out","entries","collections"}` when the export goes to a file; to stdout, the export itself |
 | `sql` | with `--json`, one line per statement: `{"tag","columns","rows","row_count","notices"}`, the last four only when the statement has them, as MCP's `run_sql` returns them without its envelope |
 | `explain` | one `sql --json` line, `{"tag":"EXPLAIN","columns","rows","row_count"}` |
@@ -618,6 +618,7 @@ never appear in a scan of the default key space.
 eggdb collection list <file>
 eggdb collection add <file> <name>
 eggdb collection delete <file> <name>
+eggdb collection move <file> <name> <new-name>      # alias: rename
 ```
 
 ```sh
@@ -633,8 +634,16 @@ eggdb collection delete app.db cache
 - `list` prints the names in byte order, one per line, and the count on stderr (`3 collections`,
   `no collections`); in a pipe, `{"file":"app.db","collections":["cache","sessions"]}`.
 - `add` prints `added collection sessions to app.db`; `delete` removes the collection and every
-  key in it in one commit, asks nothing, and prints `deleted collection cache from app.db`. In a
-  pipe they print `{"file":…,"collection":…,"added":true}` and `…"deleted":true}`.
+  key in it, asks nothing, and prints `deleted collection cache from app.db`. In a pipe they print
+  `{"file":…,"collection":…,"added":true}` and `…"deleted":true}`. The first commit of a delete
+  takes the name away, so nothing sees the collection again, and its keys go in commits of 512,
+  so a collection of millions of keys deletes in the default page cache; keys a crash leaves
+  behind are never read and the next commits remove them (D292).
+- `move` (or `rename`) gives a collection a new name with all its keys in one commit, and prints
+  `renamed collection sessions to old-sessions in app.db` (in a pipe
+  `{"file":…,"collection":…,"new_name":…,"moved":true}`). A missing collection exits 1
+  (`nothing to rename: …`); a new name a collection already has exits 3 (`already_exists`) and
+  changes nothing.
 - `add` of a collection already there, and `delete` of one that is not, exit 1 with
   `nothing to add: …` or `nothing to delete: …`, as `del` of a missing key does.
 - `-C` on a collection that does not exist exits 1, with the command that adds it:
@@ -651,7 +660,10 @@ eggdb collection delete app.db cache
   choice (`app[sessions]=> `). `eggdb ui` shows one key space at a time too: `C` opens the
   collection picker, which also adds collections, and from 110 columns a sidebar lists them
   ([ux/ui.md](ux/ui.md) "Collections").
-- SQL does not see collections in this release, and `check` and `stats` report the whole file.
+- `stats --collections` adds each collection's entries, key bytes and value bytes, read from
+  every key (`"collections":[{"name","entries","key_bytes","value_bytes"}]` in JSON); plain
+  `stats` stays instant.
+- SQL does not see collections in this release, and `check` reports the whole file.
 
 ## Expiring keys and counters
 

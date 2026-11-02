@@ -51,8 +51,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `run_sql` | runs **one** SQL statement that reads, in a dialect: `postgresql` (the default), `mysql`, `sqlite` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
 | `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN` (Oracle has no `EXPLAIN` yet) |
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
-| `kv_get` | the value under one key of the key-value store, by text or hexadecimal key |
-| `kv_scan` | keys and values in key order, by prefix or range, a page at a time |
+| `kv_get` | the value under one key of the key-value store, by text or hexadecimal key; `collection` reads a named collection instead of the default key space (D292) |
+| `kv_scan` | keys and values in key order, by prefix or range, a page at a time; `collection` lists a named collection instead of the default key space (D292) |
 | `row_list` | the rows of one table in the order they are stored, a page at a time: `limit` rows (100 by default, at most 1,000) and at most 1 MiB, then `next_cursor` to send back as `after`; pages neither repeat nor skip rows while others write (D145) |
 
 The tools, their arguments, descriptions and annotations come from EggDB's command registry
@@ -138,7 +138,7 @@ or is named itself.
   listed too; a view over an unlisted table fails as missing, so listing a view never exposes the
   table behind it.
 - **The keys are off.** `kv_get` and `kv_scan` are not offered, and a call to either answers
-  `limited_to_tables`.
+  `limited_to_tables`, with or without a `collection`: collections are keys too (D292).
 - **What it still shows.** The names of schemas and of user-defined types, and what a listed
   table's own definition says: a foreign key or a listed view's text names the table it refers
   to, though that table stays unreadable. Internal numbers are not renumbered, so gaps in them

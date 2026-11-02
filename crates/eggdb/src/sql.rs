@@ -136,6 +136,54 @@ impl KeyValueRead for SqlSnapshot<'_> {
     fn committed_version(&self) -> Option<u64> {
         Some(self.0.stamp().bits())
     }
+
+    fn collection_names(&self) -> SqlResult<Vec<String>> {
+        self.0.collection_names().map_err(store_error)
+    }
+
+    fn has_collection(&self, name: &str) -> SqlResult<bool> {
+        Ok(collection_of(&self.0, name)?.is_some())
+    }
+
+    fn collection_get(&self, name: &str, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        match collection_of(&self.0, name)? {
+            Some(collection) => collection.get(key).map_err(store_error),
+            None => Ok(None),
+        }
+    }
+
+    fn collection_scan(
+        &self,
+        name: &str,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        let Some(collection) = collection_of(&self.0, name)? else {
+            return Ok(());
+        };
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        scan_through(collection.scan(range), direction, visit)
+    }
+}
+
+fn collection_of<'t>(
+    transaction: &'t ReadTransaction<'_>,
+    name: &str,
+) -> SqlResult<Option<crate::ReadCollection<'t>>> {
+    match transaction.collection(name) {
+        Ok(collection) => Ok(Some(collection)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::CollectionNotFound | ErrorKind::InvalidCollectionName
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(store_error(error)),
+    }
 }
 
 impl KeyValueRead for SqlWriter<'_> {

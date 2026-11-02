@@ -144,6 +144,38 @@ impl<R: KeyValueRead> KeyValueRead for LimitedRead<'_, R> {
     fn committed_version(&self) -> Option<u64> {
         self.inner.committed_version()
     }
+
+    fn collection_names(&self) -> SqlResult<Vec<String>> {
+        self.limits.check()?;
+        self.inner.collection_names()
+    }
+
+    fn has_collection(&self, name: &str) -> SqlResult<bool> {
+        self.limits.check()?;
+        self.inner.has_collection(name)
+    }
+
+    fn collection_get(&self, name: &str, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.limits.check()?;
+        self.inner.collection_get(name, key)
+    }
+
+    fn collection_scan(
+        &self,
+        name: &str,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        self.limits.check()?;
+        let limits = self.limits;
+        self.inner
+            .collection_scan(name, start, end, direction, &mut |key, value| {
+                limits.check()?;
+                visit(key, value)
+            })
+    }
 }
 
 pub(crate) enum NeverWriter {}

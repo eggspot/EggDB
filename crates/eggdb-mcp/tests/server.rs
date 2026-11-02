@@ -417,6 +417,35 @@ fn keys_outside_sql_are_read_and_sql_s_key_space_is_left_out() {
 }
 
 #[test]
+fn a_collection_the_store_does_not_have_is_named_as_missing_and_reads_nothing() {
+    let audit = TempAudit::new("keys-collection");
+    let opener = MapOpener::new(sample_store());
+    let mut server = initialized(&opener, &audit);
+    for (id, tool, arguments) in [
+        (1, "kv_get", r#"{"key":"user:1","collection":"sessions"}"#),
+        (2, "kv_scan", r#"{"collection":"sessions"}"#),
+        (3, "kv_scan", r#"{"collection":"two words","prefix":"u"}"#),
+    ] {
+        let answer = call(&mut server, id, tool, arguments);
+        assert_eq!(error_code(&answer), "collection_not_found", "{tool}");
+        let message = text_at(structured(&answer), &["error", "message"]);
+        assert!(message.contains("it has no collections"), "{message}");
+        assert!(!message.contains("Ada"), "{message}");
+    }
+    let wrong_type = call(&mut server, 4, "kv_get", r#"{"key":"k","collection":7}"#);
+    assert_eq!(error_code(&wrong_type), "invalid_arguments");
+    let default_space = call(&mut server, 5, "kv_get", r#"{"key":"user:1"}"#);
+    assert_eq!(
+        text_at(structured(&default_space), &["entry", "value"]),
+        "Ada"
+    );
+    assert!(
+        !format!("{default_space:?}").contains("\"collection\""),
+        "{default_space:?}"
+    );
+}
+
+#[test]
 fn stored_text_stays_one_escaped_value_marked_as_data() {
     let audit = TempAudit::new("injection");
     let opener = MapOpener::new(sample_store());

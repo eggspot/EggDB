@@ -1419,8 +1419,11 @@ commands to the parser. `add`, not `create`, because `create` is the file comman
 the UI's word; `del` is accepted as an alias of `delete`, as `delete` is of `del`. `list` opens
 the file read-only; `add` and `delete` open it for writing (section 7's busy rules, so an open
 `eggdb ui` or `eggdb shell` must quit first, which both say). `delete` removes the collection and
-every key in it in one commit and asks nothing, as `del` asks nothing: the command line is for
-scripts, and the shell and the UI name the command rather than offering it.
+every key in it and asks nothing, as `del` asks nothing: the command line is for scripts, and the
+shell and the UI name the command rather than offering it. Its first commit takes the name away,
+so nothing sees the collection again, and the keys go in commits of 512 (D292), so a collection
+of millions of keys deletes in the default page cache; keys a crash leaves behind are invisible
+and the next commits remove them.
 
 **`text`** (a terminal):
 ```
@@ -1449,6 +1452,39 @@ the shape of `del`'s: `nothing to add: sessions is already a collection in app.d
 ```
 Names are always JSON strings (a name is UTF-8 by definition, so there is no `_hex` form).
 `hex` and `raw` are usage errors here, as for `check` (section 13, item 4).
+
+### `eggdb collection move` (D292)
+```
+eggdb collection move <file> <name> <new-name>
+eggdb collection rename <file> <name> <new-name>     # the same command
+```
+`move`, the core verb, gives a collection a new name with every key in it and their times to
+live, in one commit, so no reader ever sees it under both names or under neither; it takes the
+same time for any size. `rename` is an alias, as `del` is of `delete`. A missing collection is
+exit 1 in `delete`'s shape (`nothing to rename: cache is not a collection in app.db`); a new name
+a collection already has is exit 3 with code `already_exists`, and nothing changes:
+```
+$ eggdb collection move app.db sessions old-sessions
+renamed collection sessions to old-sessions in app.db
+$ eggdb collection move app.db cache users
+eggdb: cannot rename the collection cache to users in app.db: users is already a collection there, and a rename never replaces one. Choose another name, or delete users first.
+```
+```
+{"file":"app.db","collection":"sessions","new_name":"old-sessions","moved":true}   false with exit 1
+```
+
+### Per-collection counts in `eggdb stats --collections` (D292)
+`stats` stays instant and reads no page; `--collections` adds one line per collection, counted by
+reading every key of every collection (keys whose time to live has run out are left out):
+```
+$ eggdb stats app.db --collections
+...
+collections      2
+  cache: 1,204 entries, 18.8 KiB of keys, 2.3 MiB of values
+  sessions: no entries, 0 B of keys, 0 B of values
+```
+In JSON it adds `"collections":[{"name":"cache","entries":1204,"key_bytes":19264,"value_bytes":2411724},…]`,
+`[]` for a file without collections; without the flag the object is unchanged.
 
 ### Errors for a missing collection
 A `-C` on a collection that does not exist is **exit 1**, not found, the kind's own name
@@ -1508,7 +1544,7 @@ key, so a restore gives an application the collections it expects:
 The command list of section 9 gains, after `restore`, two lines (the usage does not fit the
 description column, so the description takes the line below, at the column):
 ```
-  collection list|add|delete <file> [name]
+  collection list|add|delete|move <file> [name] [new-name]
                                 a named key space inside the file; see eggdb help collection
 ```
 Each of `get`, `put`, `del`, `scan` adds to its options
@@ -1617,8 +1653,9 @@ and, under Shell commands, before `.mode`,
 7. `collection list` prints names on stdout and the count on stderr, as `scan` does; JSON is one
    object with an array.
 
-Not in this release: `eggdb ui -C <name>` to open on a collection, `collection rename`, a
-per-collection key count in `list` and `stats`, `-C` on `check`, and collections in SQL.
+Not in this release: `eggdb ui -C <name>` to open on a collection, a per-collection key count in
+`list`, `-C` on `check`, and collections in SQL. `collection move` (alias `rename`) and
+`stats --collections` came with D292.
 
 ### As built (D139)
 - The shell's "collection dropped by another program" warning is left out: the shell holds the
