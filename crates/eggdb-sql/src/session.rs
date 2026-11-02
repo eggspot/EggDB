@@ -40,6 +40,31 @@ use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, Sca
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
 
+fn check_copied_columns(
+    reader: &dyn KeyValueRead,
+    settings: &Settings,
+    table: &str,
+    listed: &[crate::ast::Name],
+    privilege: crate::roles::Privilege,
+) -> SqlResult<()> {
+    let columns: Vec<String> = if listed.is_empty() {
+        crate::roles::relation_columns(reader, table)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|column| !crate::temp_tables::is_hidden_column(column))
+            .collect()
+    } else {
+        listed.iter().map(|name| name.text.clone()).collect()
+    };
+    crate::roles::check_columns(
+        reader,
+        settings,
+        table,
+        privilege,
+        columns.iter().map(String::as_str),
+    )
+}
+
 fn walks_expressions(tokens: &[Token<'_>]) -> bool {
     let mut selects = 0;
     for token in tokens {
@@ -1817,7 +1842,9 @@ impl<'s> Session<'s> {
             let _plsql = self
                 .oracle()
                 .then(|| crate::plsql::enter_session(&self.plsql));
-            if let Some(mut rows) = parser.literal_rows() {
+            if self.settings.checked_role.is_none()
+                && let Some(mut rows) = parser.literal_rows()
+            {
                 let _catalog = crate::pg_catalog::enter_statement(false, &settings);
                 resume = parser.resume_point();
                 if self.batch_resume.is_some() {
@@ -2507,17 +2534,18 @@ impl<'s> Session<'s> {
         }
         match copy.direction {
             CopyDirection::FromClient => self.write("COPY FROM", |writer, tables| {
-                if let CopySource::Table { name, .. } = &mut copy.source {
+                if let CopySource::Table { name, columns } = &mut copy.source {
                     if let Some(relation) =
                         crate::pg_catalog::catalog_reference(writer, &name.text)?
                     {
                         return Err(crate::pg_catalog::read_only(relation.name()).at(name.position));
                     }
                     binding.names(writer, tables, std::slice::from_mut(name))?;
-                    crate::roles::check_table(
+                    check_copied_columns(
                         writer,
                         binding.settings,
                         &name.text,
+                        columns,
                         crate::roles::Privilege::Insert,
                     )?;
                     if crate::row_security::visible_rows(
@@ -2554,12 +2582,13 @@ impl<'s> Session<'s> {
                 let channel = &mut *io.channel;
                 if matches!(copy.source, CopySource::Table { .. }) {
                     return self.read(|reader, tables| {
-                        if let CopySource::Table { name, .. } = &mut copy.source {
+                        if let CopySource::Table { name, columns } = &mut copy.source {
                             binding.names(reader, tables, std::slice::from_mut(name))?;
-                            crate::roles::check_table(
+                            check_copied_columns(
                                 reader,
                                 binding.settings,
                                 &name.text,
+                                columns,
                                 crate::roles::Privilege::Select,
                             )?;
                             if crate::row_security::visible_rows(

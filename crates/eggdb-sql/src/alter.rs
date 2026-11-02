@@ -108,6 +108,7 @@ pub(crate) fn alter_table(
         }
         if let AlterAction::DropColumn { name: column, .. } = action {
             crate::comments::forget_part(writer, &name, CommentKind::Column, &column.text)?;
+            crate::roles::forget_column(writer, &name, &column.text)?;
         }
     }
     sqlite_texts.save(writer, &name, &alter.actions)?;
@@ -155,6 +156,7 @@ fn apply(
         AlterAction::RenameColumn { from, to } => {
             rename_column(writer, tables, name, from, to, dialect)?;
             crate::comments::move_part(writer, name, CommentKind::Column, &from.text, &to.text)?;
+            crate::roles::move_column(writer, name, &from.text, &to.text)?;
             Ok(None)
         }
         AlterAction::RenameTable(to) => {
@@ -1198,6 +1200,8 @@ fn rename_table(
     crate::sequences::rename_owner(writer, &old_name, None, &to.text)?;
     crate::comments::move_owner(writer, &old_name, &to.text)?;
     crate::triggers::move_table_triggers(writer, &old_name, &to.text)?;
+    crate::roles::move_table(writer, &old_name, &to.text)?;
+    crate::row_security::move_table(writer, &old_name, &to.text)?;
     crate::partitions::rename(writer, &old_name, &to.text)?;
     crate::statistics::rename(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)

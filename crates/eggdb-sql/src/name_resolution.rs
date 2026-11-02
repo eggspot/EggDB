@@ -13,6 +13,7 @@ use crate::lexer::tokenize_in;
 use crate::parser::{Nesting, Parameters, Parser};
 use crate::schemas::{self, DEFAULT_SCHEMA, base_name, display, is_qualified};
 use crate::settings::Settings;
+use crate::column_privileges::{ColumnScopes, ScopeItem};
 use crate::store::KeyValueRead;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -45,6 +46,7 @@ pub(crate) struct Resolver<'a> {
     view_paths: Vec<Arc<[String]>>,
     resolution: Resolution,
     target_privilege: Option<crate::roles::Privilege>,
+    columns: ColumnScopes,
 }
 
 fn nested_too_deep(position: usize) -> SqlError {
@@ -120,6 +122,7 @@ impl<'a> Resolver<'a> {
             view_paths: Vec::new(),
             resolution: Resolution::default(),
             target_privilege: None,
+            columns: ColumnScopes::default(),
         })
     }
 
@@ -199,6 +202,15 @@ impl<'a> Resolver<'a> {
     }
 
     pub(crate) fn target(&mut self, reference: &mut TableReference) -> SqlResult<()> {
+        self.resolve_target(reference)?;
+        if let Some(privilege) = self.target_privilege {
+            self.check_privilege(&reference.name.text, privilege)?;
+            self.check_new_rows(&reference.name.text, privilege)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_target(&mut self, reference: &mut TableReference) -> SqlResult<()> {
         if let Some(relation) =
             crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
         {
@@ -210,11 +222,143 @@ impl<'a> Resolver<'a> {
         {
             reference.alias = Some(base_name(&resolved).to_owned());
         }
-        if let Some(privilege) = self.target_privilege {
-            self.check_privilege(&resolved, privilege)?;
-            self.check_new_rows(&resolved, privilege)?;
-        }
         reference.name.text = resolved;
+        Ok(())
+    }
+
+    fn check_written_columns(
+        &self,
+        table: &str,
+        privilege: crate::roles::Privilege,
+        written: &[String],
+    ) -> SqlResult<()> {
+        match self.settings {
+            Some(settings) if self.stack.is_empty() => crate::roles::check_columns(
+                self.reader,
+                settings,
+                table,
+                privilege,
+                written.iter().map(String::as_str),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    fn open_target_scope(&mut self, reference: &TableReference) -> SqlResult<()> {
+        self.columns.open();
+        if !self.checks_columns() {
+            return Ok(());
+        }
+        let table = reference.name.text.clone();
+        let Some(relation) = self.tables.relation(self.reader, &table)? else {
+            return Ok(());
+        };
+        let label = reference
+            .alias
+            .clone()
+            .unwrap_or_else(|| base_name(&table).to_owned());
+        let item = match self.readable_item(label.clone(), &table, &relation) {
+            Ok(item) => item,
+            Err(error) if error.state() == SqlState::INSUFFICIENT_PRIVILEGE => {
+                let columns = crate::roles::relation_columns(self.reader, &table)?.unwrap_or_default();
+                ScopeItem::relation(label, table, columns.clone(), columns)
+            }
+            Err(error) => return Err(error),
+        };
+        self.columns.add(item);
+        Ok(())
+    }
+
+    fn walk_in_target_scope(
+        &mut self,
+        reference: &TableReference,
+        returning: &mut Option<Vec<SelectItem>>,
+        exprs: Vec<&mut Expr>,
+        read_columns: &[Name],
+    ) -> SqlResult<()> {
+        self.open_target_scope(reference)?;
+        let walked = self.walk_target_reads(returning, exprs, read_columns);
+        self.columns.close();
+        walked
+    }
+
+    fn walk_target_reads(
+        &mut self,
+        returning: &mut Option<Vec<SelectItem>>,
+        exprs: Vec<&mut Expr>,
+        read_columns: &[Name],
+    ) -> SqlResult<()> {
+        let checks_columns = self.columns.has_unreadable();
+        if checks_columns {
+            for column in read_columns {
+                self.columns.check_column(None, &column.text)?;
+            }
+            for item in returning.iter().flatten() {
+                if let SelectItem::Wildcard { qualifier, .. } = item {
+                    self.columns.check_wildcard(qualifier.as_deref(), true)?;
+                }
+            }
+        }
+        if !self.walk_expressions && !checks_columns {
+            return Ok(());
+        }
+        let mut ctes = Vec::new();
+        for expr in exprs.into_iter().chain(returning_exprs(returning)) {
+            self.walk_expr(expr, &mut ctes)?;
+        }
+        Ok(())
+    }
+
+    fn walk_policy_expr(&mut self, expr: &mut Expr) -> SqlResult<()> {
+        let walk_expressions = std::mem::replace(&mut self.walk_expressions, true);
+        let outer_columns = self.columns.suspend();
+        let mut ctes = Vec::new();
+        let walked = self.walk_expr(expr, &mut ctes);
+        self.columns.resume(outer_columns);
+        self.walk_expressions = walk_expressions;
+        walked
+    }
+
+    fn restrict_to_policies(
+        &mut self,
+        table: &str,
+        commands: &[crate::row_security::PolicyCommand],
+        filter: &mut Option<Expr>,
+    ) -> SqlResult<()> {
+        for command in commands {
+            if let Some(mut condition) = self.row_security_filter(table, *command)? {
+                self.walk_policy_expr(&mut condition)?;
+                *filter = Some(crate::row_security::restricted(filter.take(), condition));
+            }
+        }
+        Ok(())
+    }
+
+    fn add_new_row_check(
+        &mut self,
+        table: &str,
+        command: crate::row_security::PolicyCommand,
+        returning: &mut Option<Vec<SelectItem>>,
+    ) -> SqlResult<()> {
+        let Some(settings) = self.settings else {
+            return Ok(());
+        };
+        if self.target_privilege.is_none() || !self.stack.is_empty() {
+            return Ok(());
+        }
+        let Some(text) = crate::row_security::new_row_condition(
+            self.reader,
+            settings,
+            table,
+            command,
+            returning.is_some(),
+        )?
+        else {
+            return Ok(());
+        };
+        let mut check = crate::row_security::condition_expression(&text, settings)?;
+        self.walk_policy_expr(&mut check)?;
+        crate::row_security::append_new_row_check(returning, check);
         Ok(())
     }
 
@@ -222,20 +366,24 @@ impl<'a> Resolver<'a> {
         if self.target_privilege.is_none() {
             return Ok(());
         }
-        let (privilege, command, form) = match action {
-            OnDuplicate::Update(_) => (
-                crate::roles::Privilege::Update,
-                crate::row_security::PolicyCommand::Update,
-                "INSERT ... ON CONFLICT DO UPDATE",
-            ),
-            OnDuplicate::Replace => (
-                crate::roles::Privilege::Delete,
-                crate::row_security::PolicyCommand::Delete,
-                "REPLACE",
-            ),
+        let (command, form) = match action {
+            OnDuplicate::Update(assignments) => {
+                let written: Vec<String> = assignments
+                    .iter()
+                    .map(|(name, _)| name.text.clone())
+                    .collect();
+                self.check_written_columns(table, crate::roles::Privilege::Update, &written)?;
+                (
+                    crate::row_security::PolicyCommand::Update,
+                    "INSERT ... ON CONFLICT DO UPDATE",
+                )
+            }
+            OnDuplicate::Replace => {
+                self.check_privilege(table, crate::roles::Privilege::Delete)?;
+                (crate::row_security::PolicyCommand::Delete, "REPLACE")
+            }
             OnDuplicate::Fail | OnDuplicate::Ignore => return Ok(()),
         };
-        self.check_privilege(table, privilege)?;
         if self.row_security_filter(table, command)?.is_some() {
             return Err(SqlError::not_supported(format!(
                 "{form} on a table with row-level security for this role"
@@ -383,25 +531,40 @@ impl<'a> Resolver<'a> {
             ctes.push(table.name.text.clone());
             self.nested_query(&mut table.query, ctes, table.name.position)?;
         }
-        let mut bodies: Vec<&mut SetExpr> = vec![&mut query.body];
-        while let Some(body) = bodies.pop() {
-            match body {
-                SetExpr::Select(select) => self.walk_select(select, ctes)?,
-                SetExpr::Operation(operation) => {
-                    bodies.push(&mut operation.right);
-                    bodies.push(&mut operation.left);
-                }
-                SetExpr::Query(inner) => {
-                    let position = inner.position;
-                    self.nested_query(inner, ctes, position)?;
+        let Query {
+            body,
+            order_by,
+            limit,
+            offset,
+            ..
+        } = query;
+        let ordered_with_body = if let SetExpr::Select(select) = &mut *body {
+            self.walk_select_ordered(select, ctes, order_by)?;
+            true
+        } else {
+            let mut bodies: Vec<&mut SetExpr> = vec![body];
+            while let Some(body) = bodies.pop() {
+                match body {
+                    SetExpr::Select(select) => self.walk_select(select, ctes)?,
+                    SetExpr::Operation(operation) => {
+                        bodies.push(&mut operation.right);
+                        bodies.push(&mut operation.left);
+                    }
+                    SetExpr::Query(inner) => {
+                        let position = inner.position;
+                        self.nested_query(inner, ctes, position)?;
+                    }
                 }
             }
-        }
-        if self.walk_expressions {
-            for item in &mut query.order_by {
-                self.walk_expr(&mut item.expr, ctes)?;
+            false
+        };
+        if self.walk_expressions || self.columns.has_unreadable() {
+            if !ordered_with_body {
+                for item in order_by.iter_mut() {
+                    self.walk_expr(&mut item.expr, ctes)?;
+                }
             }
-            for expr in query.limit.iter_mut().chain(query.offset.iter_mut()) {
+            for expr in limit.iter_mut().chain(offset.iter_mut()) {
                 self.walk_expr(expr, ctes)?;
             }
         }
@@ -410,6 +573,27 @@ impl<'a> Resolver<'a> {
     }
 
     fn walk_select(&mut self, select: &mut Select, ctes: &mut Vec<String>) -> SqlResult<()> {
+        self.walk_select_ordered(select, ctes, &mut [])
+    }
+
+    fn walk_select_ordered(
+        &mut self,
+        select: &mut Select,
+        ctes: &mut Vec<String>,
+        query_order: &mut [crate::ast::OrderItem],
+    ) -> SqlResult<()> {
+        self.columns.open();
+        let walked = self.walk_select_scoped(select, ctes, query_order);
+        self.columns.close();
+        walked
+    }
+
+    fn walk_select_scoped(
+        &mut self,
+        select: &mut Select,
+        ctes: &mut Vec<String>,
+        query_order: &mut [crate::ast::OrderItem],
+    ) -> SqlResult<()> {
         self.selects += 1;
         if self.selects > MAX_QUERIES {
             return Err(too_many_queries(0));
@@ -424,13 +608,20 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
-        if !self.walk_expressions {
+        let checks_columns = self.columns.has_unreadable();
+        if !self.walk_expressions && !checks_columns {
             return Ok(());
+        }
+        if checks_columns {
+            self.check_select_columns(select)?;
         }
         for item in &mut select.items {
             if let SelectItem::Expr { expr, .. } = item {
                 self.walk_expr(expr, ctes)?;
             }
+        }
+        for item in query_order.iter_mut() {
+            self.walk_expr(&mut item.expr, ctes)?;
         }
         let mut others: Vec<&mut Expr> = select.filter.iter_mut().collect();
         others.extend(select.group_by.iter_mut());
@@ -458,8 +649,27 @@ impl<'a> Resolver<'a> {
         walked
     }
 
+    fn check_select_columns(&self, select: &Select) -> SqlResult<()> {
+        for item in &select.items {
+            if let SelectItem::Wildcard { qualifier, .. } = item {
+                self.columns.check_wildcard(qualifier.as_deref(), true)?;
+            }
+        }
+        if let Some(from) = &select.from {
+            for join in &from.joins {
+                if let JoinCondition::Using(columns) = &join.condition {
+                    self.columns.check_using(columns)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn walk_expr_inner(&mut self, expr: &mut Expr, ctes: &mut Vec<String>) -> SqlResult<()> {
         match &mut expr.kind {
+            ExprKind::Column { qualifier, name } => {
+                self.columns.check_column(qualifier.as_deref(), name)
+            }
             ExprKind::Subquery(subquery) => {
                 if let Some(operand) = subquery.test.operand_mut() {
                     self.walk_expr(operand, ctes)?;
@@ -502,19 +712,86 @@ impl<'a> Resolver<'a> {
         ctes: &mut Vec<String>,
         filter: Option<&Expr>,
     ) -> SqlResult<()> {
+        let item = self.walk_reference_item(reference, ctes, filter)?;
+        if self.checks_columns() {
+            self.columns.add(item);
+        }
+        Ok(())
+    }
+
+    fn checks_columns(&self) -> bool {
+        self.stack.is_empty()
+            && self
+                .settings
+                .is_some_and(|settings| settings.checked_role.is_some())
+    }
+
+    fn opaque_item(&self, reference: &TableReference) -> ScopeItem {
+        if !self.checks_columns() {
+            return ScopeItem::opaque(None);
+        }
+        ScopeItem::opaque(
+            reference
+                .alias
+                .clone()
+                .or_else(|| Some(base_name(&reference.name.text).to_owned())),
+        )
+    }
+
+    fn readable_item(
+        &self,
+        label: String,
+        table: &str,
+        relation: &Relation,
+    ) -> SqlResult<ScopeItem> {
+        let columns: Vec<String> = match relation {
+            Relation::Table(definition) => definition
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            Relation::View(view) => view.columns.iter().map(|column| column.name.clone()).collect(),
+        };
+        let unreadable = match self.settings {
+            Some(settings) if self.stack.is_empty() => {
+                let reach = crate::roles::column_reach(
+                    self.reader,
+                    settings,
+                    table,
+                    crate::roles::Privilege::Select,
+                )?;
+                crate::column_privileges::unreadable_columns(&columns, &reach)
+            }
+            _ => Vec::new(),
+        };
+        Ok(ScopeItem::relation(
+            label,
+            table.to_owned(),
+            columns,
+            unreadable,
+        ))
+    }
+
+    fn walk_reference_item(
+        &mut self,
+        reference: &mut TableReference,
+        ctes: &mut Vec<String>,
+        filter: Option<&Expr>,
+    ) -> SqlResult<ScopeItem> {
         if let Some(derived) = &mut reference.derived {
-            return self.nested_query(&mut derived.query, ctes, reference.name.position);
+            self.nested_query(&mut derived.query, ctes, reference.name.position)?;
+            return Ok(self.opaque_item(reference));
         }
         if let Some(generated) = &mut reference.generated {
-            if self.walk_expressions {
+            if self.walk_expressions || self.columns.has_unreadable() {
                 for expr in crate::set_returning::expressions_mut(generated) {
                     self.walk_expr(expr, ctes)?;
                 }
             }
-            return Ok(());
+            return Ok(self.opaque_item(reference));
         }
         if ctes.contains(&reference.name.text) {
-            return Ok(());
+            return Ok(self.opaque_item(reference));
         }
         if let Some(relation) =
             crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?
@@ -523,7 +800,7 @@ impl<'a> Resolver<'a> {
                 reference.alias = Some(relation.name().to_owned());
             }
             reference.generated = Some(Box::new(GeneratedTable::Catalog(relation)));
-            return Ok(());
+            return Ok(self.opaque_item(reference));
         }
         let written_qualified = is_qualified(&reference.name.text);
         if let Some(resolved) = self.resolved_name(&reference.name.text)? {
@@ -535,23 +812,31 @@ impl<'a> Resolver<'a> {
             reference.alias = Some(base_name(&reference.name.text).to_owned());
         }
         let relation = self.tables.relation(self.reader, &reference.name.text)?;
-        if relation.is_some() {
-            self.check_privilege(&reference.name.text, crate::roles::Privilege::Select)?;
-        }
+        let item = match &relation {
+            Some(found) if self.checks_columns() => {
+                let label = reference
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| base_name(&reference.name.text).to_owned());
+                self.readable_item(label, &reference.name.text, found)?
+            }
+            _ => self.opaque_item(reference),
+        };
         if let Some(Relation::Table(table)) = &relation
             && self.row_security_view(reference, table)?
         {
-            return Ok(());
+            return Ok(item);
         }
         if relation.is_some() && self.recorded_at.is_some() {
             let name = reference.name.text.clone();
             self.record(&name);
         }
         match relation {
-            Some(Relation::View(view)) => self.expand(reference, view),
-            Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter),
-            None => self.sequence_reference(reference),
+            Some(Relation::View(view)) => self.expand(reference, view)?,
+            Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter)?,
+            None => self.sequence_reference(reference)?,
         }
+        Ok(item)
     }
 
     fn sequence_reference(&mut self, reference: &mut TableReference) -> SqlResult<()> {
@@ -765,12 +1050,14 @@ impl<'a> Resolver<'a> {
         self.stack.push(view.name.clone());
         self.view_paths.push(path.into());
         let walk_expressions = std::mem::replace(&mut self.walk_expressions, true);
+        let outer_columns = self.columns.suspend();
         self.depth += 1;
         self.levels += 1;
         let mut ctes = Vec::new();
         let walked = self.walk_query(&mut query, &mut ctes);
         self.depth -= 1;
         self.levels -= 1;
+        self.columns.resume(outer_columns);
         self.walk_expressions = walk_expressions;
         self.view_paths.pop();
         self.stack.pop();
@@ -1154,26 +1441,42 @@ impl Binding<'_> {
             self.query(reader, tables, query)?;
         }
         let mut resolver = self.resolver(reader, tables)?;
-        resolver.target(&mut insert.table)?;
-        resolver.check_conflict_action(&insert.table.name.text, &insert.on_duplicate)?;
-        if !self.walk_expressions {
-            return Ok(());
+        resolver.resolve_target(&mut insert.table)?;
+        let table = insert.table.name.text.clone();
+        if resolver.target_privilege.is_some() {
+            let written = inserted_columns(reader, &table, insert)?;
+            resolver.check_written_columns(&table, crate::roles::Privilege::Insert, &written)?;
+            resolver.check_conflict_action(&table, &insert.on_duplicate)?;
         }
-        let mut exprs: Vec<&mut Expr> = Vec::new();
-        if let InsertSource::Values(rows) = &mut insert.source {
-            for row in rows {
-                for value in row {
-                    if let InsertValue::Expr(expr) = value {
-                        exprs.push(expr);
+        if self.walk_expressions {
+            let mut values: Vec<&mut Expr> = Vec::new();
+            if let InsertSource::Values(rows) = &mut insert.source {
+                for row in rows {
+                    for value in row {
+                        if let InsertValue::Expr(expr) = value {
+                            values.push(expr);
+                        }
                     }
                 }
             }
+            resolver.expressions(values)?;
         }
+        let mut reads: Vec<&mut Expr> = Vec::new();
         if let OnDuplicate::Update(assignments) = &mut insert.on_duplicate {
-            exprs.extend(assignments.iter_mut().map(|(_, expr)| expr));
+            reads.extend(assignments.iter_mut().map(|(_, expr)| expr));
         }
-        exprs.extend(returning_exprs(&mut insert.returning));
-        resolver.expressions(exprs)
+        let conflict_columns = insert.conflict_target.clone().unwrap_or_default();
+        resolver.walk_in_target_scope(
+            &insert.table,
+            &mut insert.returning,
+            reads,
+            &conflict_columns,
+        )?;
+        resolver.add_new_row_check(
+            &table,
+            crate::row_security::PolicyCommand::Insert,
+            &mut insert.returning,
+        )
     }
 
     pub(crate) fn update(
@@ -1183,19 +1486,17 @@ impl Binding<'_> {
         update: &mut Update,
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
-        resolver.target(&mut update.table)?;
-        if let Some(condition) = resolver.row_security_filter(
-            &update.table.name.text,
-            crate::row_security::PolicyCommand::Update,
-        )? {
-            update.filter = Some(crate::row_security::restricted(
-                update.filter.take(),
-                condition,
-            ));
+        resolver.resolve_target(&mut update.table)?;
+        let table = update.table.name.text.clone();
+        if resolver.target_privilege.is_some() {
+            let written: Vec<String> = update
+                .assignments
+                .iter()
+                .map(|(name, _)| name.text.clone())
+                .collect();
+            resolver.check_written_columns(&table, crate::roles::Privilege::Update, &written)?;
         }
-        if !self.walk_expressions {
-            return Ok(());
-        }
+        let reads_rows = update_reads_rows(update);
         let mut exprs: Vec<&mut Expr> = update
             .assignments
             .iter_mut()
@@ -1205,8 +1506,21 @@ impl Binding<'_> {
             })
             .collect();
         exprs.extend(update.filter.iter_mut());
-        exprs.extend(returning_exprs(&mut update.returning));
-        resolver.expressions(exprs)
+        resolver.walk_in_target_scope(&update.table, &mut update.returning, exprs, &[])?;
+        let commands: &[crate::row_security::PolicyCommand] = if reads_rows {
+            &[
+                crate::row_security::PolicyCommand::Update,
+                crate::row_security::PolicyCommand::Select,
+            ]
+        } else {
+            &[crate::row_security::PolicyCommand::Update]
+        };
+        resolver.restrict_to_policies(&table, commands, &mut update.filter)?;
+        resolver.add_new_row_check(
+            &table,
+            crate::row_security::PolicyCommand::Update,
+            &mut update.returning,
+        )
     }
 
     pub(crate) fn merge(
@@ -1226,6 +1540,15 @@ impl Binding<'_> {
             }
         }
         resolver.target_privilege = checked;
+        if checked.is_some() {
+            resolver.open_target_scope(&merge.target)?;
+            let hides_columns = resolver.columns.has_unreadable();
+            resolver.columns.close();
+            if hides_columns {
+                return Err(crate::roles::permission_denied(&merge.target.name.text)
+                    .with_hint("MERGE reads the target's columns: it needs SELECT on the whole target table."));
+            }
+        }
         if resolver
             .row_security_filter(
                 &merge.target.name.text,
@@ -1266,21 +1589,19 @@ impl Binding<'_> {
     ) -> SqlResult<()> {
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut delete.table)?;
-        if let Some(condition) = resolver.row_security_filter(
-            &delete.table.name.text,
-            crate::row_security::PolicyCommand::Delete,
-        )? {
-            delete.filter = Some(crate::row_security::restricted(
-                delete.filter.take(),
-                condition,
-            ));
-        }
-        if !self.walk_expressions {
-            return Ok(());
-        }
-        let mut exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
-        exprs.extend(returning_exprs(&mut delete.returning));
-        resolver.expressions(exprs)
+        let table = delete.table.name.text.clone();
+        let reads_rows = delete.filter.is_some() || delete.returning.is_some();
+        let exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();
+        resolver.walk_in_target_scope(&delete.table, &mut delete.returning, exprs, &[])?;
+        let commands: &[crate::row_security::PolicyCommand] = if reads_rows {
+            &[
+                crate::row_security::PolicyCommand::Delete,
+                crate::row_security::PolicyCommand::Select,
+            ]
+        } else {
+            &[crate::row_security::PolicyCommand::Delete]
+        };
+        resolver.restrict_to_policies(&table, commands, &mut delete.filter)
     }
 
     pub(crate) fn create_table(
@@ -1358,6 +1679,63 @@ impl Binding<'_> {
             _ => Ok(()),
         }
     }
+}
+
+fn inserted_columns(
+    reader: &dyn KeyValueRead,
+    table: &str,
+    insert: &Insert,
+) -> SqlResult<Vec<String>> {
+    if let Some(columns) = &insert.columns {
+        return Ok(columns.iter().map(|name| name.text.clone()).collect());
+    }
+    let width = match &insert.source {
+        InsertSource::DefaultValues => return Ok(Vec::new()),
+        InsertSource::Values(rows) => Some(rows.iter().map(Vec::len).max().unwrap_or(0)),
+        InsertSource::Query(query) => match &query.body {
+            SetExpr::Select(select)
+                if select
+                    .items
+                    .iter()
+                    .all(|item| matches!(item, SelectItem::Expr { .. })) =>
+            {
+                Some(select.items.len())
+            }
+            _ => None,
+        },
+    };
+    let columns: Vec<String> = crate::roles::relation_columns(reader, table)?
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|column| !crate::temp_tables::is_hidden_column(column))
+        .collect();
+    Ok(match width {
+        Some(width) => columns.into_iter().take(width).collect(),
+        None => columns,
+    })
+}
+
+fn update_reads_rows(update: &Update) -> bool {
+    update.filter.is_some()
+        || update.returning.is_some()
+        || update.assignments.iter().any(|(_, value)| match value {
+            InsertValue::Expr(expr) => mentions_column(expr),
+            InsertValue::Default => false,
+        })
+}
+
+fn mentions_column(expr: &Expr) -> bool {
+    let mut pending = vec![expr];
+    while let Some(next) = pending.pop() {
+        if matches!(
+            next.kind,
+            ExprKind::Column { .. } | ExprKind::Subquery(_) | ExprKind::OuterColumn { .. }
+        ) {
+            return true;
+        }
+        pending.extend(crate::eval::children(next));
+    }
+    false
 }
 
 fn returning_exprs(returning: &mut Option<Vec<SelectItem>>) -> impl Iterator<Item = &mut Expr> {

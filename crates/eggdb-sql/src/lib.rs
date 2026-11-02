@@ -30,6 +30,7 @@ mod cancel;
 mod catalog;
 pub mod cdc;
 mod citext;
+mod column_privileges;
 mod comments;
 mod console;
 mod constraints;

@@ -55,7 +55,7 @@ impl Privilege {
         }
     }
 
-    fn bit(self) -> u8 {
+    pub(crate) fn bit(self) -> u8 {
         1 << (self as u8)
     }
 }
@@ -87,6 +87,7 @@ pub(crate) enum RoleStatement {
     Privileges {
         granting: bool,
         privileges: Vec<Privilege>,
+        columns: Vec<(Privilege, Vec<Name>)>,
         tables: Vec<Name>,
         grantees: Vec<String>,
     },
@@ -398,9 +399,19 @@ pub(crate) fn run(
         RoleStatement::Privileges {
             granting,
             privileges,
+            columns: column_privileges,
             tables,
             grantees,
-        } => change_privileges(writer, *granting, privileges, tables, grantees)?,
+        } => {
+            change_privileges(writer, *granting, privileges, tables, grantees)?;
+            columns::change_column_privileges(
+                writer,
+                *granting,
+                column_privileges,
+                tables,
+                grantees,
+            )?;
+        }
         RoleStatement::Membership {
             granting,
             roles,
@@ -457,7 +468,10 @@ fn granted_tables(reader: &dyn KeyValueRead, grantee: &str) -> SqlResult<Vec<Str
         &mut |key, _| {
             let rest = &key[prefix.len()..];
             if let Some(split) = rest.iter().position(|byte| *byte == 0)
-                && &rest[split + 1..] == grantee.as_bytes()
+                && rest[split + 1..]
+                    .split(|byte| *byte == 0)
+                    .next()
+                    .is_some_and(|holder| holder == grantee.as_bytes())
             {
                 tables.push(String::from_utf8_lossy(&rest[..split]).into_owned());
             }
@@ -489,18 +503,22 @@ impl TableGrant {
     /// The grant in PostgreSQL's `aclitem` text form, `grantee=privileges/grantor`, with an
     /// empty grantee for `PUBLIC`.
     pub(crate) fn acl_item(&self, grantor: &str) -> String {
-        let letters: String = ACL_LETTERS
-            .iter()
-            .filter(|(privilege, _)| self.privileges & privilege.bit() != 0)
-            .map(|(_, letter)| *letter)
-            .collect();
-        let grantee = if self.grantee == PUBLIC {
-            String::new()
-        } else {
-            acl_role_name(&self.grantee)
-        };
-        format!("{grantee}={letters}/{}", acl_role_name(grantor))
+        acl_text(&self.grantee, self.privileges, grantor)
     }
+}
+
+fn acl_text(grantee: &str, privileges: u8, grantor: &str) -> String {
+    let letters: String = ACL_LETTERS
+        .iter()
+        .filter(|(privilege, _)| privileges & privilege.bit() != 0)
+        .map(|(_, letter)| *letter)
+        .collect();
+    let grantee = if grantee == PUBLIC {
+        String::new()
+    } else {
+        acl_role_name(grantee)
+    };
+    format!("{grantee}={letters}/{}", acl_role_name(grantor))
 }
 
 /// The owner's implicit entry that PostgreSQL lists first once a table has any grant.
@@ -535,6 +553,7 @@ pub(crate) fn every_grant(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableGrant
             let rest = key.get(prefix.len()..).unwrap_or_default();
             if let Some(split) = rest.iter().position(|byte| *byte == 0)
                 && let (Some(table), Some(grantee)) = (rest.get(..split), rest.get(split + 1..))
+                && !grantee.contains(&0)
                 && let [RECORD_VERSION, held] = value
             {
                 grants.push(TableGrant {
@@ -589,6 +608,9 @@ fn change_privileges(
                 writer.delete(&key)?;
             } else {
                 writer.put(&key, &[RECORD_VERSION, changed])?;
+            }
+            if !granting {
+                columns::revoke_from_every_column(writer, &table.text, grantee, bits)?;
             }
         }
     }
@@ -663,22 +685,41 @@ pub(crate) fn check_table(
     if crate::temporary::is_temporary_name(table) {
         return Ok(());
     }
-    for role in role_closure(reader, user)? {
-        if let Some(bytes) = reader.get(&grant_key(table, &role))? {
+    if table_level_held(reader, &role_closure(reader, user)?, table, privilege)? {
+        Ok(())
+    } else {
+        Err(permission_denied(table))
+    }
+}
+
+fn table_level_held(
+    reader: &dyn KeyValueRead,
+    held: &BTreeSet<String>,
+    table: &str,
+    privilege: Privilege,
+) -> SqlResult<bool> {
+    for role in held {
+        if let Some(bytes) = reader.get(&grant_key(table, role))? {
             match bytes.as_slice() {
-                [RECORD_VERSION, held] if held & privilege.bit() != 0 => return Ok(()),
+                [RECORD_VERSION, bits] if bits & privilege.bit() != 0 => return Ok(true),
                 [RECORD_VERSION, _] => {}
                 _ => return Err(crate::encoding::corrupt("grant")),
             }
         }
     }
-    Err(SqlError::new(
+    Ok(false)
+}
+
+/// The error PostgreSQL reports when a role lacks a privilege on a table or on the columns a
+/// statement uses: `42501 permission denied for table <name>`.
+pub(crate) fn permission_denied(table: &str) -> SqlError {
+    SqlError::new(
         SqlState::INSUFFICIENT_PRIVILEGE,
         format!(
             "permission denied for table {}",
             crate::schemas::display(table)
         ),
-    ))
+    )
 }
 
 pub(crate) fn target_privilege(statement: &Statement) -> Privilege {
@@ -756,6 +797,13 @@ pub fn login_verifier(reader: &dyn KeyValueRead, user: &str) -> SqlResult<Option
         .filter(|role| role.login)
         .and_then(|role| role.scram_verifier))
 }
+
+mod columns;
+
+pub(crate) use columns::{
+    COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns, column_reach, every_column_grant,
+    forget_column, move_column, move_table, relation_columns,
+};
 
 #[cfg(test)]
 mod tests;

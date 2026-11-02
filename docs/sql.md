@@ -2091,8 +2091,24 @@ objects EggDB does not check yet are accepted with a `WARNING` and change nothin
 IN SCHEMA` they are refused (`0A000`) rather than ignored, so a `REVOKE` never seems to work when
 it did not. An upsert (`ON CONFLICT DO UPDATE`) also needs `UPDATE`, and `REPLACE` also needs
 `DELETE`. Only a superuser creates, changes or drops objects, and turns triggers on or off. Not
-yet: logins of stored roles over MySQL's and SQL Server's protocols, column and schema
-privileges, object owners and `SET ROLE`.
+yet: logins of stored roles over MySQL's and SQL Server's protocols, schema privileges, object
+owners and `SET ROLE`.
+
+Privileges can also be granted on single columns, as PostgreSQL (and MySQL) write them (D285):
+
+```sql
+GRANT SELECT (id, name), UPDATE (name) ON staff TO clerk;
+REVOKE SELECT (name) ON staff FROM clerk;
+```
+
+A role without `SELECT` on the whole table then reads only its granted columns: naming another
+one anywhere in a statement (the select list, `*`, `WHERE`, `ORDER BY`, a subquery, `RETURNING`,
+`COPY ... TO`) fails with `42501 permission denied for table staff`, and `SELECT count(*)`
+works. Writes need `INSERT` or `UPDATE` on the columns they write and `SELECT` on the columns
+they read, so `UPDATE staff SET name = 'x' WHERE salary > 0` needs `SELECT (salary)`, as on
+PostgreSQL. Column grants show in `pg_attribute.attacl` (psql's `\dp`) and
+`information_schema.column_privileges`, follow column and table renames and go with a dropped
+column.
 
 Tables can limit which rows a role sees and changes with PostgreSQL's row-level security
 (D186):
@@ -2104,8 +2120,11 @@ CREATE POLICY own_notes ON notes FOR ALL TO PUBLIC
 ```
 
 A checked role then reads, updates and deletes only the rows its policies' `USING` let through,
-and none when no policy names it; superusers are not filtered. `WITH CHECK` conditions are not
-evaluated yet, so inserts and updates under row security need `WITH CHECK (true)`. Under row
+and none when no policy names it; superusers are not filtered. Every row an `INSERT` or `UPDATE`
+writes must pass the role's `WITH CHECK` conditions (a policy's `USING` when it has none), after
+`BEFORE` triggers ran, or the statement fails with `42501 new row violates row-level security
+policy for table "notes"` and writes nothing (D285); with `RETURNING`, the new rows must also be
+ones the role may see. Under row
 security, `COPY ... FROM` is refused as in PostgreSQL ("use INSERT statements instead"), and so
 are `INSERT ... ON CONFLICT DO UPDATE`, `REPLACE` and `MERGE`, which would reach rows the
 policies hide. `COPY ... FROM` into a table with enabled `INSERT` triggers is refused too, since
@@ -3319,8 +3338,7 @@ method, storage, size and descriptions), `\df`, `\dT`, `\dD`, `\dp` (grants as P
 answer psql 16's own queries; the catalog tables answer `tableoid` as a hidden system column.
 
 **Not yet:** system columns (`tableoid`, `ctid`, `xmin` and the rest) on user tables, rows in
-`pg_cast` (so `\dC` lists nothing), column privileges (`attacl` is NULL and `\dp` shows no
-column grants), the composite row type of each table, and a view column of a
+`pg_cast` (so `\dC` lists nothing), the composite row type of each table, and a view column of a
 catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`; `relname::text`
 works). A `serial` column made by `CREATE TABLE` in EggDB (not restored from a dump) is an
 auto-increment column and shows as an identity column, where PostgreSQL shows a sequence and a

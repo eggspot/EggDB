@@ -467,6 +467,7 @@ struct AttributeRow<'a> {
     not_null: bool,
     has_default: bool,
     identity: &'a str,
+    acl: Value,
 }
 
 fn attribute_row(attribute: AttributeRow<'_>) -> Vec<Value> {
@@ -494,7 +495,21 @@ fn attribute_row(attribute: AttributeRow<'_>) -> Vec<Value> {
         .set("attinhcount", small(0))
         .set("attstattarget", small(-1))
         .set("attcollation", oid(facts.collation))
+        .set("attacl", attribute.acl)
         .done()
+}
+
+fn column_acl(snapshot: &CatalogSnapshot, internal: &str, column: &str) -> Value {
+    let items: Vec<Value> = snapshot
+        .column_grants
+        .iter()
+        .filter(|grant| grant.table == internal && grant.column == column)
+        .map(|grant| Value::Text(grant.acl_item(&snapshot.user)))
+        .collect();
+    if items.is_empty() {
+        return Value::Null;
+    }
+    Value::Array(Box::new(ArrayValue::new(ArrayElement::AclItem, items)))
 }
 
 fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
@@ -517,6 +532,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: column.not_null || table.primary_key.contains(&at),
                         has_default: column.default.is_some() && table.identity_of(at).is_none(),
                         identity: identity_code(table.identity_of(at)),
+                        acl: column_acl(snapshot, &entry.internal, &column.name),
                     }));
                 }
             }
@@ -530,6 +546,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        acl: column_acl(snapshot, &entry.internal, &column.name),
                     }));
                 }
             }
@@ -550,6 +567,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: true,
                         has_default: false,
                         identity: "",
+                        acl: Value::Null,
                     }));
                 }
             }
@@ -578,6 +596,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        acl: Value::Null,
                     }));
                 }
             }
@@ -591,6 +610,7 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         not_null: false,
                         has_default: false,
                         identity: "",
+                        acl: Value::Null,
                     }));
                 }
             }

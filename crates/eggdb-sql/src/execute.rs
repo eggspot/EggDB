@@ -1155,6 +1155,15 @@ pub(crate) fn insert(
     tables: &mut TableCache,
     insert: &Insert,
 ) -> SqlResult<QueryResult> {
+    let result = insert_rows(writer, tables, insert)?;
+    crate::row_security::checked_new_rows(result, &insert.table.name.text)
+}
+
+fn insert_rows(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    insert: &Insert,
+) -> SqlResult<QueryResult> {
     if crate::updatable_views::is_view(writer, tables, &insert.table)? {
         if let Some(result) = crate::triggers::insert_instead_of_view(writer, tables, insert)? {
             return Ok(result);
@@ -3813,6 +3822,15 @@ fn check_sortable(order_by: &[OrderItem], rows: &[(Vec<Value>, Vec<Value>)]) -> 
 }
 
 pub(crate) fn update(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    update: &Update,
+) -> SqlResult<QueryResult> {
+    let result = update_rows(writer, tables, update)?;
+    crate::row_security::checked_new_rows(result, &update.table.name.text)
+}
+
+fn update_rows(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     update: &Update,
