@@ -61,7 +61,7 @@ pub fn theme_from_code(code: u32) -> ThemeKind {
 }
 
 /// The number a host receives for an action: 0 none, 1 open, 2 browse, 3 cancel, 4 show the
-/// layout picker, 5 load the sample dataset, 6 quit.
+/// layout picker, 5 load the sample dataset, 6 quit, 7 stop the open in progress.
 pub fn action_code(action: ConnectAction) -> u32 {
     match action {
         ConnectAction::None => 0,
@@ -71,6 +71,7 @@ pub fn action_code(action: ConnectAction) -> u32 {
         ConnectAction::ShowLayoutPicker => 4,
         ConnectAction::LoadSampleDataset => 5,
         ConnectAction::Quit => 6,
+        ConnectAction::StopOpening => 7,
     }
 }
 

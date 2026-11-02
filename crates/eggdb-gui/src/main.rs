@@ -1,24 +1,34 @@
 //! `eggdb-gui`: EggDB's desktop client (D15, D256), a binary of its own so the server's
 //! size never carries the GUI. It shows the first screen's connect card in a native window, or
-//! renders it offscreen to a PNG file for scripts and tests.
+//! renders it offscreen to a PNG file for scripts and tests. `--open` opens a database file
+//! the way typing its path and pressing `Enter` does, so a PNG shows the outcome: the main
+//! window on it, or the card with the failure's lines.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eggdb_gui::connect_screen::{
-    self, ConnectAction, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
+    self, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
 };
-use eggdb_gui::main_window::Faces;
+use eggdb_gui::connection::{EngineConnector, home_directory};
+use eggdb_gui::main_window::{self, Faces};
 use eggdb_gui::png::encode_png;
-use eggdb_gui::{BoxFace, SystemFaces, Theme, ThemeKind};
-use eggdb_platform::window::{WindowEvent, WindowOptions, open_window};
+use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
+use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
+use eggdb_platform::window::{WindowEvent, WindowOptions, has_file_dialog, open_window};
 
-const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
+const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
 Shows EggDB's connect screen.
   --window          open it in a native window (the default without --png)
   --png <file>      render it offscreen and write it to <file> as PNG
+  --open <path>     open the database file at <path> as the connect card's Open does
+  --no-create       uncheck \"Create the file if it does not exist\" (checked by default)
+  --read-only       check \"Open read-only\"
+  --no-file-dialog  lay the card out as on a system without an open-file dialog (with --png)
   --theme <theme>   light (the default), dark or high-contrast
   --scale <n>       device pixels per logical pixel for --png (default 1)
   --size <w>x<h>    the logical size for --png (default 1280x800)
@@ -27,6 +37,8 @@ Shows EggDB's connect screen.
 ";
 
 const SCRIPTED_FRAME_INTERVAL: Duration = Duration::from_millis(50);
+const OPENING_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const SCRIPTED_OPEN_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq)]
 struct Options {
@@ -37,6 +49,10 @@ struct Options {
     size: (u32, u32),
     box_text: bool,
     frames: Option<u32>,
+    open: Option<OsString>,
+    create_if_missing: bool,
+    read_only: bool,
+    file_dialog: bool,
 }
 
 fn parse_size(text: &str) -> Option<(u32, u32)> {
@@ -54,6 +70,10 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         box_text: false,
         frames: None,
+        open: None,
+        create_if_missing: true,
+        read_only: false,
+        file_dialog: true,
     };
     while let Some(arg) = args.next() {
         let name = arg
@@ -65,6 +85,10 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
             "-h" | "--help" => return Ok(None),
             "--window" => options.window = true,
             "--box-text" => options.box_text = true,
+            "--no-create" => options.create_if_missing = false,
+            "--read-only" => options.read_only = true,
+            "--no-file-dialog" => options.file_dialog = false,
+            "--open" => options.open = Some(value("a path")?),
             "--frames" => {
                 let frames = value("a number")?;
                 options.frames = Some(
@@ -140,10 +164,36 @@ fn with_faces<T>(box_text: bool, run: impl FnOnce(Faces<'_>) -> T) -> T {
     }
 }
 
+fn workspace(options: &Options, file_dialog: bool) -> Workspace {
+    let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut workspace = Workspace::new(
+        Arc::new(EngineConnector),
+        home_directory(),
+        current,
+        file_dialog,
+    );
+    if let Some(card) = workspace.card_mut() {
+        card.create_if_missing = options.create_if_missing;
+        card.read_only = options.read_only;
+    }
+    workspace
+}
+
+fn render(workspace: &Workspace, theme: Theme, faces: Faces<'_>, size: (u32, u32), scale: f32) -> Canvas {
+    match workspace.screen() {
+        Screen::Connect(card) => connect_screen::draw(card, theme, faces, size, scale),
+        Screen::Main(window) => main_window::draw(window, theme, faces),
+    }
+}
+
 fn write_png(options: &Options, path: &OsString, faces: Faces<'_>) -> Result<(), String> {
-    let card = ConnectCard::first_start();
-    let frame = connect_screen::draw(
-        &card,
+    let mut workspace = workspace(options, options.file_dialog);
+    if let Some(open) = &options.open {
+        workspace.open_typed(&open.to_string_lossy(), Instant::now());
+        workspace.wait_for_open(SCRIPTED_OPEN_LIMIT);
+    }
+    let frame = render(
+        &workspace,
         Theme::of(options.theme),
         faces,
         options.size,
@@ -168,38 +218,71 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
     })
     .map_err(|error| error.to_string())?;
     let theme = Theme::of(options.theme);
-    let mut card = ConnectCard::first_start();
+    let mut workspace = workspace(options, has_file_dialog());
+    if let Some(open) = &options.open {
+        workspace.open_typed(&open.to_string_lossy(), Instant::now());
+    }
     let mut scale = window.scale();
     let mut size = window.size();
     let mut dirty = true;
     let mut presented: u32 = 0;
-    let timeout = options.frames.map(|_| SCRIPTED_FRAME_INTERVAL);
+    let scripted = options.frames.map(|_| SCRIPTED_FRAME_INTERVAL);
     loop {
+        if workspace.tick(Instant::now()) {
+            dirty = true;
+        }
         if dirty {
             let logical = logical_size(size, scale);
-            let frame = connect_screen::draw(&card, theme, faces, logical, scale);
+            let frame = render(&workspace, theme, faces, logical, scale);
             let (width, height) = (frame.width() as u32, frame.height() as u32);
             window
                 .present(width, height, &frame.rgba_bytes())
                 .map_err(|error| error.to_string())?;
-            window
-                .set_accessibility_tree(&connect_screen::accessibility_tree(&card, faces, logical));
+            let tree = match workspace.screen() {
+                Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, logical),
+                Screen::Main(_) => Vec::new(),
+            };
+            window.set_accessibility_tree(&tree);
             dirty = false;
             presented = presented.saturating_add(1);
             if options.frames.is_some_and(|limit| presented >= limit) {
                 return Ok(());
             }
         }
+        let timeout = if workspace.is_opening() {
+            Some(scripted.map_or(OPENING_POLL_INTERVAL, |interval| interval.min(OPENING_POLL_INTERVAL)))
+        } else {
+            scripted
+        };
         match window
             .next_event(timeout)
             .map_err(|error| error.to_string())?
         {
             Some(WindowEvent::Key(press)) => {
-                let (next, action) = connect_screen::handle_key(card, press);
-                card = next;
-                if action == ConnectAction::Quit {
-                    return Ok(());
+                match workspace.key(press, Instant::now()) {
+                    WorkspaceCommand::Quit => return Ok(()),
+                    WorkspaceCommand::ChooseFile(dialog) => {
+                        let chosen = window.choose_file_to_open(&dialog).unwrap_or_else(|error| {
+                            eprintln!("eggdb-gui: {error}");
+                            None
+                        });
+                        workspace.file_chosen(chosen.as_deref());
+                    }
+                    WorkspaceCommand::None => {}
                 }
+                dirty = true;
+            }
+            Some(WindowEvent::FileDragEntered(paths)) => {
+                workspace.drag_entered(&paths);
+                dirty = true;
+            }
+            Some(WindowEvent::FileDragLeft) => {
+                workspace.drag_left();
+                dirty = true;
+            }
+            Some(WindowEvent::FilesDropped(paths)) => {
+                workspace.drag_left();
+                workspace.dropped(&paths, Instant::now());
                 dirty = true;
             }
             Some(WindowEvent::Resized { width, height }) => {
@@ -213,7 +296,7 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
             Some(WindowEvent::Redraw) => dirty = true,
             Some(WindowEvent::CloseRequested) => return Ok(()),
             Some(WindowEvent::Focused(_)) => {}
-            None => dirty = timeout.is_some(),
+            None => dirty = scripted.is_some(),
         }
     }
 }
@@ -261,6 +344,12 @@ mod tests {
         let window = parse(&[]).unwrap().unwrap();
         assert!(window.window && window.png.is_none());
         assert!(!window.box_text && window.frames.is_none());
+        assert!(window.create_if_missing && !window.read_only && window.file_dialog);
+        let opening = parse(&["--png", "a.png", "--open", "shop.eggdb", "--no-create", "--read-only", "--no-file-dialog"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(opening.open, Some(OsString::from("shop.eggdb")));
+        assert!(!opening.create_if_missing && opening.read_only && !opening.file_dialog);
         let scripted = parse(&["--window", "--frames", "3", "--box-text"])
             .unwrap()
             .unwrap();
@@ -294,6 +383,7 @@ mod tests {
             &["--frames", "0"],
             &["--frames", "-1"],
             &["--frames"],
+            &["--open"],
             &["--frobnicate"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");

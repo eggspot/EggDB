@@ -10,4 +10,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+eggdb = { path = "../eggdb" }
+eggdb-pgwire = { path = "../eggdb-pgwire" }
 eggdb-platform = { path = "../eggdb-platform" }

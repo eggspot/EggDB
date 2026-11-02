@@ -16,6 +16,12 @@ mod color;
 /// The first screen: the connect card, its focus order, keys and accessibility tree
 /// (`docs/ux/first-screen.md`).
 pub mod connect_screen;
+/// The GUI's link to a database: opening files and connecting to servers, with failures in
+/// the card's words (`docs/ux/workspace.md` 1).
+pub mod connection;
+/// The client's screens in order: the connect card until a database opens, then the main
+/// window on it (`docs/ux/workspace.md` 1.5 to 1.7).
+pub mod workspace;
 /// The query editor: text, cursor, selection and editing commands.
 pub mod editor;
 mod font;

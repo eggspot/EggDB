@@ -1,7 +1,10 @@
-use eggdb_platform::window::{Key, KeyPress};
+use std::path::{Path, PathBuf};
+
+use eggdb_platform::window::{FileFilter, Key, KeyPress, OpenFileDialog};
 
 use crate::canvas::{Canvas, Rect};
 use crate::color::{Rgba, Theme};
+use crate::connection::{ConnectFailure, FailureField, FileTarget, resolve_typed_path};
 use crate::font::{TextStyle, Typeface};
 use crate::main_window::Faces;
 
@@ -10,7 +13,7 @@ mod accessibility;
 pub use accessibility::{
     NODE_BROWSE, NODE_CANCEL, NODE_CARD, NODE_CONNECT_TO_A_SERVER, NODE_CREATE_IF_MISSING,
     NODE_ERROR, NODE_FILE, NODE_OPEN, NODE_OPEN_A_FILE, NODE_PANEL, NODE_READ_ONLY, NODE_SAMPLE,
-    NODE_SEGMENTS, NODE_TITLE, NODE_WHERE_FROM, NODE_WINDOW, accessibility_tree,
+    NODE_SEGMENTS, NODE_STATUS_LINE, NODE_TITLE, NODE_WHERE_FROM, NODE_WINDOW, accessibility_tree,
     error_announcement,
 };
 
@@ -37,6 +40,12 @@ const SEGMENT_LABEL_TOP: f32 = 71.0;
 const ERROR_TOP: f32 = 100.0;
 const FILE_LABEL: (f32, f32) = (24.0, 120.0);
 const FILE_INPUT: Rect = Rect::new(24.0, 142.0, 420.0, 28.0);
+const FILE_INPUT_WITHOUT_BROWSE: Rect = Rect::new(24.0, 142.0, 512.0, 28.0);
+const STATUS_LINE: (f32, f32) = (24.0, 440.0);
+const DROP_HINT: (f32, f32) = (400.0, 28.0);
+const DROP_RING_WIDTH: f32 = 2.0;
+const ERROR_LINE_HEIGHT: f32 = 18.0;
+const PROGRESS_BAR: (f32, f32) = (120.0, 2.0);
 const INPUT_TEXT_INSET: f32 = 8.0;
 const INPUT_TEXT_TOP: f32 = 5.0;
 const CARET_TOP: f32 = 4.0;
@@ -60,6 +69,7 @@ const CONNECT_TO_A_SERVER_LABEL: &str = "Connect to a server";
 const CREATE_LABEL: &str = "Create the file if it does not exist";
 const READ_ONLY_LABEL: &str = "Open read-only";
 const PLACEHOLDER: &str = "/path/to/shop.eggdb";
+const DROP_HINT_LABEL: &str = "Drop to open";
 const WHERE_FROM_LABEL: &str = "Where are you coming from?";
 const SAMPLE_LABEL: &str = "Load a sample dataset";
 
@@ -102,6 +112,8 @@ pub enum ConnectAction {
     ShowLayoutPicker,
     /// Load the `shop` sample dataset.
     LoadSampleDataset,
+    /// Stop the open or connect in progress (`Esc`, or `Cancel` while it runs).
+    StopOpening,
     /// Quit the client.
     Quit,
 }
@@ -194,9 +206,17 @@ impl TextField {
         self.anchor = None;
     }
 
-    fn select_all(&mut self) {
+    /// Selects the whole value, as when a failure points at this field.
+    pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.caret = self.length();
+    }
+
+    /// Replaces the value with `value`, nothing selected and the caret at the end.
+    pub fn set(&mut self, value: &str) {
+        self.value = value.to_owned();
+        self.caret = self.length();
+        self.anchor = None;
     }
 
     fn apply(&mut self, press: KeyPress) {
@@ -239,13 +259,28 @@ impl TextField {
     }
 }
 
-/// An `Error:` line under the segments, with its `Try:` line.
+/// The `Error` line under the segments, with its `Try:` line, as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardError {
-    /// The engine's message.
-    pub message: String,
-    /// What to try instead.
-    pub fix: String,
+    /// The first line: `Error: cannot open …`, or `Error 28P01: …` with the engine's code.
+    pub line: String,
+    /// The second line, `Try: …`, when the engine has a fix.
+    pub fix: Option<String>,
+}
+
+impl CardError {
+    /// The lines in order: the `Error` line, then the `Try:` line when there is one.
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.line.as_str()).chain(self.fix.as_deref())
+    }
+
+    /// The lines of `failure`.
+    pub fn from_failure(failure: &ConnectFailure) -> Self {
+        Self {
+            line: failure.error_line(),
+            fix: failure.try_line(),
+        }
+    }
 }
 
 /// The connect card's state (`docs/ux/first-screen.md`): the `Open a file` segment's fields
@@ -264,6 +299,19 @@ pub struct ConnectCard {
     pub error: Option<CardError>,
     /// The element with the keyboard focus.
     pub focus: Focus,
+    /// Whether this system has an open-file dialog: without one `Browse…` is not drawn and
+    /// the File input is 512 px wide.
+    pub file_dialog: bool,
+    /// Whether an open is running: the card takes only `Esc` until it ends.
+    pub busy: bool,
+    /// The progress status line (`Opening shop.eggdb…`), drawn once the open has run for
+    /// 120 ms; while it is shown the card is drawn disabled.
+    pub progress: Option<String>,
+    /// A status line after an open ended without one (`Cancelled`, `Opened the first of 3
+    /// files`).
+    pub status: Option<String>,
+    /// Whether a drag of a file is over the window: the card's border turns `accent`.
+    pub drag_over: bool,
 }
 
 impl ConnectCard {
@@ -277,18 +325,151 @@ impl ConnectCard {
             can_cancel: false,
             error: None,
             focus: Focus::FileInput,
+            file_dialog: true,
+            busy: false,
+            progress: None,
+            status: None,
+            drag_over: false,
         }
+    }
+
+    /// The file the card asks to open: the File input resolved against `home` and `current`
+    /// (`docs/ux/workspace.md` 1.1), with the two checkboxes.
+    pub fn file_target(&self, home: Option<&Path>, current: &Path) -> FileTarget {
+        FileTarget {
+            path: resolve_typed_path(self.file.value(), home, current),
+            create_if_missing: self.create_if_missing,
+            read_only: self.read_only,
+        }
+    }
+
+    /// Starts an open: clears the error lines, and takes only `Esc` until
+    /// [`ConnectCard::finish_with_failure`] or [`ConnectCard::stop_opening`].
+    pub fn begin_opening(&mut self) {
+        self.error = None;
+        self.busy = true;
+        self.progress = None;
+    }
+
+    /// Shows the progress status line for `target` once the open has run for 120 ms:
+    /// `Opening shop.eggdb…`.
+    pub fn show_progress(&mut self, target: &FileTarget) {
+        if self.busy {
+            let name = target
+                .path
+                .file_name()
+                .map_or_else(|| target.path.display().to_string(), |name| name.to_string_lossy().into_owned());
+            self.progress = Some(format!("Opening {name}…"));
+        }
+    }
+
+    /// Ends an open that failed: the card re-enables with the failure's two lines, and the
+    /// field the failure is about takes the focus with its value selected.
+    pub fn finish_with_failure(&mut self, failure: &ConnectFailure) {
+        self.busy = false;
+        self.progress = None;
+        self.error = Some(CardError::from_failure(failure));
+        match failure.field {
+            FailureField::File => {
+                self.focus = Focus::FileInput;
+                self.file.select_all();
+            }
+            FailureField::Url
+            | FailureField::Host
+            | FailureField::Database
+            | FailureField::User
+            | FailureField::Password => {}
+        }
+    }
+
+    /// Ends an open the user stopped: the card re-enables, the status line reads `Cancelled`
+    /// and the focus returns to the input.
+    pub fn stop_opening(&mut self) {
+        self.busy = false;
+        self.progress = None;
+        self.status = Some("Cancelled".to_owned());
+        self.focus = Focus::FileInput;
+    }
+
+    /// Takes the file the OS dialog returned: its path in the input, nothing selected, the
+    /// caret at the end and the focus back in the input. `None` (cancelled) changes
+    /// nothing and leaves the focus on `Browse…`.
+    pub fn choose_file(&mut self, chosen: Option<&Path>) {
+        match chosen {
+            Some(path) => {
+                self.file.set(&path.display().to_string());
+                self.focus = Focus::FileInput;
+            }
+            None => self.focus = Focus::Browse,
+        }
+    }
+
+    /// What `Browse…` asks the OS dialog for: `*.eggdb` first and `All files` second,
+    /// starting in the input's directory when it exists, otherwise in `home`.
+    pub fn file_dialog_request(&self, home: Option<&Path>, current: &Path) -> OpenFileDialog {
+        let typed = resolve_typed_path(self.file.value(), home, current);
+        let start_in = if typed.is_dir() {
+            Some(typed)
+        } else {
+            typed
+                .parent()
+                .filter(|parent| parent.is_dir())
+                .map(Path::to_path_buf)
+                .or_else(|| home.map(Path::to_path_buf))
+        };
+        OpenFileDialog {
+            start_in,
+            filters: vec![
+                FileFilter {
+                    name: "EggDB databases".to_owned(),
+                    patterns: vec!["*.eggdb".to_owned()],
+                },
+                FileFilter {
+                    name: "All files".to_owned(),
+                    patterns: vec!["*.*".to_owned()],
+                },
+            ],
+        }
+    }
+
+    /// A drag came over the window carrying `paths`: the ring shows when the first is a file
+    /// (not a directory).
+    pub fn drag_entered(&mut self, paths: &[PathBuf]) {
+        self.drag_over = !self.busy && paths.first().is_some_and(|path| !path.is_dir());
+    }
+
+    /// Takes dropped files: the first non-directory one goes into the input, to be opened at
+    /// once ([`ConnectAction::Open`]); with several, the status line says which. A directory,
+    /// nothing, or a drop during an open does nothing.
+    pub fn drop_files(&mut self, paths: &[PathBuf]) -> ConnectAction {
+        self.drag_over = false;
+        let Some(first) = paths.first().filter(|path| !path.is_dir()) else {
+            return ConnectAction::None;
+        };
+        if self.busy {
+            return ConnectAction::None;
+        }
+        self.file.set(&first.display().to_string());
+        self.focus = Focus::FileInput;
+        self.status = None;
+        if paths.len() > 1 {
+            self.status = Some(format!("Opened the first of {} files", paths.len()));
+        }
+        ConnectAction::Open
+    }
+
+    /// Whether the card is drawn disabled: while the progress status line is shown.
+    pub fn disabled(&self) -> bool {
+        self.progress.is_some()
     }
 
     /// The `Tab` order: `Cancel` only while it is enabled.
     pub fn focus_order(&self) -> Vec<Focus> {
-        let mut order = vec![
-            Focus::Segments,
-            Focus::FileInput,
-            Focus::Browse,
-            Focus::CreateIfMissing,
-            Focus::ReadOnly,
-        ];
+        let mut order = vec![Focus::Segments, Focus::FileInput];
+        if self.file_dialog {
+            order.push(Focus::Browse);
+        }
+        order.extend([Focus::CreateIfMissing, Focus::ReadOnly]);
         if self.can_cancel {
             order.push(Focus::Cancel);
         }
@@ -312,12 +493,13 @@ impl ConnectCard {
 
     fn activate(&self) -> ConnectAction {
         match self.focus {
-            Focus::Browse => ConnectAction::Browse,
+            Focus::Browse if self.file_dialog => ConnectAction::Browse,
             Focus::Cancel if self.can_cancel => ConnectAction::Cancel,
             Focus::WhereFromLink => ConnectAction::ShowLayoutPicker,
             Focus::SampleLink => ConnectAction::LoadSampleDataset,
             Focus::Segments
             | Focus::FileInput
+            | Focus::Browse
             | Focus::CreateIfMissing
             | Focus::ReadOnly
             | Focus::Cancel
@@ -330,6 +512,14 @@ impl ConnectCard {
 pub fn handle_key(mut card: ConnectCard, press: KeyPress) -> (ConnectCard, ConnectAction) {
     let modifiers = press.modifiers;
     let primary = modifiers.control || modifiers.command;
+    if card.busy {
+        let action = match press.key {
+            Key::Escape => ConnectAction::StopOpening,
+            Key::Character('q' | 'Q') if primary => ConnectAction::Quit,
+            _ => ConnectAction::None,
+        };
+        return (card, action);
+    }
     let action = match press.key {
         Key::Character('q' | 'Q') if primary => ConnectAction::Quit,
         Key::Character('w' | 'W') if modifiers.command => ConnectAction::Quit,
@@ -414,7 +604,17 @@ fn grow(rect: Rect, by: f32) -> Rect {
 }
 
 fn panel_shift(card: &ConnectCard) -> f32 {
-    if card.error.is_some() { 36.0 } else { 0.0 }
+    card.error
+        .as_ref()
+        .map_or(0.0, |error| ERROR_LINE_HEIGHT * error.lines().count() as f32)
+}
+
+fn file_input(card: &ConnectCard) -> Rect {
+    if card.file_dialog {
+        FILE_INPUT
+    } else {
+        FILE_INPUT_WITHOUT_BROWSE
+    }
 }
 
 fn link_rects(faces: Faces<'_>, origin: (f32, f32)) -> [(Rect, &'static str); 2] {
@@ -449,7 +649,7 @@ pub fn focus_target(card: &ConnectCard, faces: Faces<'_>, size: (u32, u32)) -> (
     };
     let rect = match card.focus {
         Focus::Segments => offset(OPEN_A_FILE, origin),
-        Focus::FileInput => offset(down(FILE_INPUT, shift), origin),
+        Focus::FileInput => offset(down(file_input(card), shift), origin),
         Focus::Browse => offset(down(BROWSE, shift), origin),
         Focus::CreateIfMissing => offset(down(CREATE_BOX, shift), origin),
         Focus::ReadOnly => offset(down(READ_ONLY_BOX, shift), origin),
@@ -586,7 +786,11 @@ pub fn draw(
         scale,
     };
     let origin = card_origin(size.0, size.1);
-    pen.outlined(offset(CARD, origin), RADIUS_CARD, theme.bg0, theme.border);
+    if card.drag_over {
+        drop_ring(&mut pen, origin);
+    } else {
+        pen.outlined(offset(CARD, origin), RADIUS_CARD, theme.bg0, theme.border);
+    }
     heading(&mut pen, origin);
     segments(&mut pen, origin);
     error_lines(&mut pen, card, origin);
@@ -594,9 +798,42 @@ pub fn draw(
     checkboxes(&mut pen, card, origin);
     buttons(&mut pen, card, origin);
     links(&mut pen, origin);
-    let (rect, radius) = focus_target(card, faces, size);
-    pen.focus_ring(rect, radius);
+    status_line(&mut pen, card, origin);
+    if card.drag_over {
+        let at = (origin.0 + DROP_HINT.0, origin.1 + DROP_HINT.1);
+        pen.text(faces.ui, DROP_HINT_LABEL, at, BODY, theme.accent);
+    }
+    if !card.disabled() {
+        let (rect, radius) = focus_target(card, faces, size);
+        pen.focus_ring(rect, radius);
+    }
     canvas
+}
+
+fn status_line(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
+    let theme = pen.theme;
+    let face = pen.faces.ui;
+    if let Some(text) = card.progress.as_ref().or(card.status.as_ref()) {
+        let at = (origin.0 + STATUS_LINE.0, origin.1 + STATUS_LINE.1);
+        pen.text(face, text, at, BODY, theme.text_secondary);
+    }
+    if card.progress.is_some() {
+        let bar = Rect::new(
+            origin.0 + RADIUS_CARD,
+            origin.1 + CARD.h - 1.0 - PROGRESS_BAR.1,
+            PROGRESS_BAR.0,
+            PROGRESS_BAR.1,
+        );
+        pen.fill(bar, theme.accent);
+    }
+}
+
+fn drop_ring(pen: &mut Pen<'_, '_>, origin: (f32, f32)) {
+    let theme = pen.theme;
+    let card = offset(CARD, origin);
+    let inner = grow(card, -DROP_RING_WIDTH);
+    pen.rounded(card, RADIUS_CARD, theme.accent);
+    pen.rounded(inner, RADIUS_CARD - DROP_RING_WIDTH, theme.bg0);
 }
 
 fn heading(pen: &mut Pen<'_, '_>, origin: (f32, f32)) {
@@ -665,15 +902,14 @@ fn error_lines(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
     };
     let theme = pen.theme;
     let face = pen.faces.ui;
-    for (index, line) in [
-        format!("Error: {}", error.message),
-        format!("Try: {}", error.fix),
-    ]
-    .iter()
-    .enumerate()
-    {
-        let top = origin.1 + ERROR_TOP + BODY.1 * index as f32;
-        pen.text(face, line, (origin.0 + 24.0, top), BODY, theme.error);
+    for (index, line) in error.lines().enumerate() {
+        let top = origin.1 + ERROR_TOP + ERROR_LINE_HEIGHT * index as f32;
+        let color = if index == 0 {
+            theme.error
+        } else {
+            theme.text_primary
+        };
+        pen.text(face, line, (origin.0 + 24.0, top), BODY, color);
     }
 }
 
@@ -688,14 +924,17 @@ fn file_row(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
         BODY,
         theme.text_primary,
     );
-    let focused = card.focus == Focus::FileInput;
-    let input = offset(down(FILE_INPUT, shift), origin);
-    let border = if focused {
+    let focused = card.focus == Focus::FileInput && !card.disabled();
+    let input = offset(down(file_input(card), shift), origin);
+    let border = if card.error.is_some() {
+        theme.error
+    } else if focused {
         theme.accent
     } else {
         theme.border_control
     };
-    pen.outlined(input, RADIUS_CONTROL, theme.bg0, border);
+    let fill = if card.disabled() { theme.bg1 } else { theme.bg0 };
+    pen.outlined(input, RADIUS_CONTROL, fill, border);
     let text_left = input.x + INPUT_TEXT_INSET;
     let text_top = input.y + INPUT_TEXT_TOP;
     let field = &card.file;
@@ -736,9 +975,11 @@ fn file_row(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
             theme.accent,
         );
     }
-    let browse = offset(down(BROWSE, shift), origin);
-    pen.outlined(browse, RADIUS_CONTROL, theme.bg0, theme.border);
-    pen.centred_label(face, "Browse…", browse, theme.text_primary);
+    if card.file_dialog {
+        let browse = offset(down(BROWSE, shift), origin);
+        pen.outlined(browse, RADIUS_CONTROL, theme.bg0, theme.border);
+        pen.centred_label(face, "Browse…", browse, theme.text_primary);
+    }
 }
 
 fn checkboxes(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
@@ -776,7 +1017,7 @@ fn buttons(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
     let theme = pen.theme;
     let face = pen.faces.ui;
     let cancel = offset(CANCEL, origin);
-    if card.can_cancel {
+    if card.can_cancel || card.disabled() {
         pen.outlined(cancel, RADIUS_CONTROL, theme.bg0, theme.border);
         pen.centred_label(face, "Cancel", cancel, theme.text_primary);
     } else {
@@ -785,7 +1026,8 @@ fn buttons(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
     }
     let open = offset(OPEN, origin);
     pen.rounded(open, RADIUS_CONTROL, theme.accent);
-    pen.centred_label(face, "Open", open, theme.on_accent);
+    let label = if card.disabled() { "Opening…" } else { "Open" };
+    pen.centred_label(face, label, open, theme.on_accent);
 }
 
 fn links(pen: &mut Pen<'_, '_>, origin: (f32, f32)) {
@@ -1124,8 +1366,8 @@ mod tests {
     fn an_error_line_moves_the_panel_down() {
         let card = ConnectCard {
             error: Some(CardError {
-                message: "no such file".into(),
-                fix: "check the path".into(),
+                line: "Error: no such file".into(),
+                fix: Some("Try: check the path".into()),
             }),
             ..ConnectCard::first_start()
         };

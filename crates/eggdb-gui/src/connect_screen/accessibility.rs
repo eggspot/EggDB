@@ -2,9 +2,9 @@ use eggdb_platform::window::{AccessNode, AccessRect, AccessRole, AccessState};
 
 use super::{
     BODY, BROWSE, CANCEL, CARD, CHECK_LABEL_X, CONNECT_TO_A_SERVER, CONNECT_TO_A_SERVER_LABEL,
-    CREATE_BOX, CREATE_LABEL, ConnectCard, ERROR_TOP, FILE_INPUT, Focus, HEADLINE, OPEN,
-    OPEN_A_FILE, OPEN_A_FILE_LABEL, PLACEHOLDER, READ_ONLY_BOX, READ_ONLY_LABEL, SEGMENTS, TITLE,
-    card_origin, down, link_rects, offset, panel_shift,
+    CREATE_BOX, CREATE_LABEL, ConnectCard, ERROR_TOP, Focus, HEADLINE, OPEN, OPEN_A_FILE,
+    OPEN_A_FILE_LABEL, PLACEHOLDER, READ_ONLY_BOX, READ_ONLY_LABEL, SEGMENTS, STATUS_LINE, TITLE,
+    card_origin, down, file_input, link_rects, offset, panel_shift,
 };
 use crate::canvas::Rect;
 use crate::main_window::Faces;
@@ -41,6 +41,9 @@ pub const NODE_OPEN: u32 = 14;
 pub const NODE_WHERE_FROM: u32 = 15;
 /// The link `Load a sample dataset`.
 pub const NODE_SAMPLE: u32 = 16;
+/// The progress or status line (`Opening shop.eggdb…`, `Cancelled`), present only while one
+/// is shown; announced politely.
+pub const NODE_STATUS_LINE: u32 = 17;
 
 const CARD_NAME: &str = "Connect";
 const SEGMENTS_NAME: &str = "Connection kind";
@@ -51,7 +54,7 @@ const OPEN_NAME: &str = "Open";
 const TITLE_AT: (f32, f32) = (48.0, 24.0);
 const PANEL_LEFT: f32 = 24.0;
 const PANEL_WIDTH: f32 = 512.0;
-const ERROR_HEIGHT: f32 = 36.0;
+const STATUS_HEIGHT: f32 = 18.0;
 
 fn access_rect(rect: Rect) -> AccessRect {
     AccessRect {
@@ -111,11 +114,12 @@ fn focused_node_id(card: &ConnectCard) -> u32 {
     }
 }
 
-/// The error line as one announcement: the `Error:` line, then the `Try:` line.
+/// The error lines as one announcement: the `Error` line, then the `Try:` line when there is
+/// one.
 pub fn error_announcement(card: &ConnectCard) -> Option<String> {
     card.error
         .as_ref()
-        .map(|error| format!("Error: {}\nTry: {}", error.message, error.fix))
+        .map(|error| error.lines().collect::<Vec<_>>().join("\n"))
 }
 
 /// The connect card's accessibility tree for a window of `size` logical pixels, in the order
@@ -198,7 +202,7 @@ pub fn accessibility_tree(
             Some(NODE_PANEL),
             AccessRole::Status,
             &announcement,
-            at(Rect::new(PANEL_LEFT, ERROR_TOP, PANEL_WIDTH, ERROR_HEIGHT)),
+            at(Rect::new(PANEL_LEFT, ERROR_TOP, PANEL_WIDTH, shift)),
         );
     }
     tree.add(
@@ -206,19 +210,21 @@ pub fn accessibility_tree(
         Some(NODE_PANEL),
         AccessRole::TextField,
         FILE_NAME,
-        at(down(FILE_INPUT, shift)),
+        at(down(file_input(card), shift)),
     );
     if let Some(file) = tree.nodes.last_mut() {
         file.value = Some(card.file.value().to_owned());
         file.placeholder = Some(PLACEHOLDER.to_owned());
     }
-    tree.add(
-        NODE_BROWSE,
-        Some(NODE_PANEL),
-        AccessRole::Button,
-        BROWSE_NAME,
-        at(down(BROWSE, shift)),
-    );
+    if card.file_dialog {
+        tree.add(
+            NODE_BROWSE,
+            Some(NODE_PANEL),
+            AccessRole::Button,
+            BROWSE_NAME,
+            at(down(BROWSE, shift)),
+        );
+    }
     for (id, label, rect, checked) in [
         (
             NODE_CREATE_IF_MISSING,
@@ -254,7 +260,7 @@ pub fn accessibility_tree(
         );
     }
     let cancel = AccessState {
-        disabled: !card.can_cancel,
+        disabled: !card.can_cancel && !card.disabled(),
         ..AccessState::default()
     };
     tree.add_with(
@@ -277,11 +283,35 @@ pub fn accessibility_tree(
         at(OPEN),
         open,
     );
+    if let Some(text) = card.progress.as_ref().or(card.status.as_ref()) {
+        tree.add(
+            NODE_STATUS_LINE,
+            Some(NODE_CARD),
+            AccessRole::Status,
+            text,
+            at(Rect::new(STATUS_LINE.0, STATUS_LINE.1, PANEL_WIDTH, STATUS_HEIGHT)),
+        );
+    }
     for ((rect, label), id) in link_rects(faces, origin)
         .into_iter()
         .zip([NODE_WHERE_FROM, NODE_SAMPLE])
     {
         tree.add(id, Some(NODE_WINDOW), AccessRole::Link, label, rect);
+    }
+    if card.disabled() {
+        for node in &mut tree.nodes {
+            let control = matches!(
+                node.role,
+                AccessRole::Tab
+                    | AccessRole::TextField
+                    | AccessRole::Button
+                    | AccessRole::CheckBox
+                    | AccessRole::Link
+            );
+            if control && node.id != NODE_CANCEL {
+                node.state.disabled = true;
+            }
+        }
     }
     tree.nodes
 }
@@ -294,7 +324,7 @@ impl ConnectCard {
         let focus = match id {
             NODE_OPEN_A_FILE | NODE_SEGMENTS => Focus::Segments,
             NODE_FILE => Focus::FileInput,
-            NODE_BROWSE => Focus::Browse,
+            NODE_BROWSE if self.file_dialog => Focus::Browse,
             NODE_CREATE_IF_MISSING => Focus::CreateIfMissing,
             NODE_READ_ONLY => Focus::ReadOnly,
             NODE_CANCEL if self.can_cancel => Focus::Cancel,
@@ -481,8 +511,8 @@ mod tests {
     fn an_error_adds_a_status_node_and_moves_the_panel_down() {
         let mut card = ConnectCard::first_start();
         card.error = Some(CardError {
-            message: "the file is locked".to_owned(),
-            fix: "close the other EggDB".to_owned(),
+            line: "Error: the file is locked".to_owned(),
+            fix: Some("Try: close the other EggDB".to_owned()),
         });
         let nodes = tree(&card);
         let error = node(&nodes, NODE_ERROR);

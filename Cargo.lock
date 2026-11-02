@@ -199,6 +199,8 @@ dependencies = [
 name = "eggdb-gui"
 version = "0.1.0"
 dependencies = [
+ "eggdb",
+ "eggdb-pgwire",
  "eggdb-platform",
 ]
 
