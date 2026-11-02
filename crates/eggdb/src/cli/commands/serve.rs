@@ -1454,7 +1454,7 @@ impl Session<'_> {
                 ),
                 Exit::DatabaseError,
             ),
-            LocalBindError::Unsupported => usage(format!("{option} is not available on Windows yet; connect over --listen instead")),
+            LocalBindError::Unsupported => usage(format!("{option} needs Windows 10 version 1803 or later, whose Unix sockets it uses; connect over --listen instead")),
             LocalBindError::Io(error) => Failure::database(format!("cannot listen on {}: {error}", path.display()), Exit::DatabaseError),
         })
     }

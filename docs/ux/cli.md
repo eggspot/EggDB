@@ -3982,5 +3982,6 @@ the option is not used.
 - **Live server** on the socket (exit 3): the message names the likely server.
 - **Stale socket file:** replaced silently, as PostgreSQL does.
 - **Path that is not a socket** (exit 2): the message asks to remove it or pass another path.
-- **Windows:** exit 2 when the options are parsed, saying the option is "not available on
-  Windows yet".
+- **Windows:** the options work on Windows 10 version 1803 and later, on its `AF_UNIX`
+  sockets, with an owner-only access list for "owner only"; older Windows gets exit 2 saying
+  the option needs Windows 10 version 1803 or later (DNEW-F-win-afunix).

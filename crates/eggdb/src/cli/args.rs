@@ -1364,7 +1364,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::SocketDir | OptionName::MysqlSocket => {
                 if !eggdb_platform::local_socket::LOCAL_SOCKETS_SUPPORTED {
                     return Err(usage(format!(
-                        "{} is not available on Windows yet; connect over --listen instead",
+                        "{} is not available on this OS; connect over --listen instead",
                         option.spelled
                     )));
                 }

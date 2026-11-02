@@ -171,7 +171,7 @@ the running statements, rolls back open transactions and stops with exit 0.
       --idle-timeout <seconds>    close a logged-in connection that sends nothing for that
                                   long (default 3600; 0 never closes it)
       --socket-dir <directory>    also accept PostgreSQL connections on a Unix socket there,
-                                  .s.PGSQL.<port> (psql -h <directory>); not on Windows yet
+                                  .s.PGSQL.<port> (psql -h <directory>); Windows 10 1803+
       --mysql-socket <file>       also accept MySQL connections on that Unix socket
                                   (mysql --socket=<file>); needs --mysql-listen
       --tls-certificate <file>    PEM certificate chain, server's first; with --tls-key, clients

@@ -320,10 +320,10 @@ fn serve_with_a_self_signed_certificate_listens_beyond_loopback_and_answers_ssl_
     let _ = server.wait();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn serve_answers_postgresql_clients_on_a_unix_socket_and_removes_it_at_stop() {
-    use std::os::unix::net::UnixStream;
+    use eggdb_platform::local_socket::LocalStream;
     let file = TempPath::new("serve-socket");
     let path = file.path().to_str().unwrap().to_owned();
     let directory = std::env::temp_dir().join(format!("eggdb-serve-socket-{}", std::process::id()));
@@ -354,9 +354,9 @@ fn serve_answers_postgresql_clients_on_a_unix_socket_and_removes_it_at_stop() {
         .nth(1)
         .and_then(|rest| rest.split('"').next())
         .unwrap()
-        .to_owned();
+        .replace("\\\\", "\\");
     assert!(socket.contains(".s.PGSQL."), "{first}");
-    let mut client = UnixStream::connect(&socket).unwrap();
+    let mut client = LocalStream::connect(&socket).unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -369,10 +369,12 @@ fn serve_answers_postgresql_clients_on_a_unix_socket_and_removes_it_at_stop() {
     drop(client);
     stop(&mut server);
     let _ = server.wait();
-    assert!(
-        !std::path::Path::new(&socket).exists(),
-        "the socket file is removed at stop"
-    );
+    if cfg!(unix) {
+        assert!(
+            !std::path::Path::new(&socket).exists(),
+            "the socket file is removed at stop"
+        );
+    }
     let refused = eggdb(
         &[
             "serve",
