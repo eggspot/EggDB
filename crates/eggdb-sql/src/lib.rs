@@ -59,6 +59,7 @@ pub mod jobs;
 mod join;
 pub mod json;
 mod json_functions;
+mod json_path;
 mod ledger;
 mod lexer;
 mod md5;
@@ -167,6 +168,8 @@ mod bulk_load_tests;
 mod citext_tests;
 #[cfg(test)]
 mod constraint_tests;
+#[cfg(test)]
+mod json_path_tests;
 #[cfg(test)]
 mod copy_tests;
 #[cfg(test)]

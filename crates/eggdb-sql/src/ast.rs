@@ -970,6 +970,7 @@ pub(crate) struct CreateTable {
     pub(crate) comment: Option<String>,
     pub(crate) partition_by: Option<PartitionBy>,
     pub(crate) partition_of: Option<PartitionOf>,
+    pub(crate) sqlite_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1447,6 +1448,7 @@ pub(crate) enum BinaryOperator {
     JsonHasAnyKey,
     JsonHasAllKeys,
     JsonDeletePath,
+    JsonPathExists,
     TextSearchMatch,
     VectorL2Distance,
     VectorCosineDistance,
@@ -1484,6 +1486,7 @@ impl BinaryOperator {
             Self::JsonHasAnyKey => "?|",
             Self::JsonHasAllKeys => "?&",
             Self::JsonDeletePath => "#-",
+            Self::JsonPathExists => "@?",
             Self::TextSearchMatch => "@@",
             Self::VectorL2Distance => "<->",
             Self::VectorCosineDistance => "<=>",

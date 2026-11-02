@@ -118,6 +118,9 @@ fn added_function_type(
     if let Some(sql_type) = crate::advisory_locks::result_type(name) {
         return Some(Some(sql_type));
     }
+    if let Some(sql_type) = crate::json_path::result_type(name) {
+        return Some(Some(sql_type));
+    }
     if matches!(name, "pg_sleep" | "pg_notify") {
         return Some(Some(SqlType::VOID));
     }
@@ -482,7 +485,9 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::JsonHasAnyKey
             | BinaryOperator::JsonHasAllKeys => Some(SqlType::Boolean),
             BinaryOperator::JsonDeletePath => Some(SqlType::Jsonb),
-            BinaryOperator::TextSearchMatch => Some(SqlType::Boolean),
+            BinaryOperator::TextSearchMatch | BinaryOperator::JsonPathExists => {
+                Some(SqlType::Boolean)
+            }
             BinaryOperator::VectorL2Distance
             | BinaryOperator::VectorCosineDistance
             | BinaryOperator::VectorNegativeInnerProduct

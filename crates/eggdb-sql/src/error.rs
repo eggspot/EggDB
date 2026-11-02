@@ -93,6 +93,22 @@ impl SqlState {
     pub const INVALID_REGULAR_EXPRESSION: Self = Self(*b"2201B");
     /// `22012` division_by_zero.
     pub const DIVISION_BY_ZERO: Self = Self(*b"22012");
+    /// `22033` invalid_sql_json_subscript: an array subscript outside a strict path's array.
+    pub const INVALID_SQL_JSON_SUBSCRIPT: Self = Self(*b"22033");
+    /// `22036` non_numeric_sql_json_item: arithmetic or a numeric method on a non-number.
+    pub const NON_NUMERIC_SQL_JSON_ITEM: Self = Self(*b"22036");
+    /// `22038` singleton_sql_json_item_required: a path that must yield exactly one item.
+    pub const SINGLETON_SQL_JSON_ITEM_REQUIRED: Self = Self(*b"22038");
+    /// `22039` sql_json_array_not_found: an array accessor applied to a non-array.
+    pub const SQL_JSON_ARRAY_NOT_FOUND: Self = Self(*b"22039");
+    /// `2203A` sql_json_member_not_found: a strict path's member is missing.
+    pub const SQL_JSON_MEMBER_NOT_FOUND: Self = Self(*b"2203A");
+    /// `2203B` sql_json_number_not_found: a string that is not a number.
+    pub const SQL_JSON_NUMBER_NOT_FOUND: Self = Self(*b"2203B");
+    /// `2203C` sql_json_object_not_found: a member accessor applied to a non-object.
+    pub const SQL_JSON_OBJECT_NOT_FOUND: Self = Self(*b"2203C");
+    /// `2203G` sql_json_item_cannot_be_cast_to_target_type.
+    pub const SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE: Self = Self(*b"2203G");
     /// `22019` invalid_escape_character.
     pub const INVALID_ESCAPE_CHARACTER: Self = Self(*b"22019");
     /// `2201F` invalid_argument_for_power_function.

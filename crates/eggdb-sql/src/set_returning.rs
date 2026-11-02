@@ -18,7 +18,19 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 23] = [
+const FUNCTIONS: [SetReturningFunction; 25] = [
+    SetReturningFunction {
+        name: "jsonb_path_query",
+        result_type: json_path_query_type,
+        rows: json_path_query_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "jsonb_path_query_tz",
+        result_type: json_path_query_type,
+        rows: json_path_query_rows,
+        fields: false,
+    },
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -324,6 +336,35 @@ fn json_object_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -
 
 fn jsonb_object_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
     json_rows_of("jsonb_object_keys", values, sink)
+}
+
+fn json_path_query_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    let document = |sql_type: &Option<SqlType>| {
+        sql_type.is_none_or(|sql_type| {
+            matches!(sql_type, SqlType::Jsonb | SqlType::Json) || sql_type.is_character()
+        })
+    };
+    let path = |sql_type: &Option<SqlType>| sql_type.is_none_or(SqlType::is_character);
+    let silent = |sql_type: &Option<SqlType>| {
+        sql_type.is_none_or(|sql_type| sql_type == SqlType::Boolean)
+    };
+    let accepted = match types {
+        [target, path_type] => document(target) && path(path_type),
+        [target, path_type, vars] => document(target) && path(path_type) && document(vars),
+        [target, path_type, vars, flag] => {
+            document(target) && path(path_type) && document(vars) && silent(flag)
+        }
+        _ => false,
+    };
+    if accepted {
+        Ok(SqlType::Jsonb)
+    } else {
+        Err(does_not_exist("jsonb_path_query", types))
+    }
+}
+
+fn json_path_query_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_path::query_rows(values, sink)
 }
 
 fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {

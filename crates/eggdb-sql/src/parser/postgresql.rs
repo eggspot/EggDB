@@ -123,6 +123,7 @@ impl Parser<'_> {
             "?|" => Some(BinaryOperator::JsonHasAnyKey),
             "?&" => Some(BinaryOperator::JsonHasAllKeys),
             "#-" => Some(BinaryOperator::JsonDeletePath),
+            "@?" => Some(BinaryOperator::JsonPathExists),
             "@@" => Some(BinaryOperator::TextSearchMatch),
             "<->" => Some(BinaryOperator::VectorL2Distance),
             "<=>" => Some(BinaryOperator::VectorCosineDistance),

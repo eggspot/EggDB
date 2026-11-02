@@ -887,8 +887,22 @@ impl Evaluator<'_> {
                 crate::json_functions::has_key(operator.symbol(), &document, &keys)
             }
             BinaryOperator::TextSearchMatch => {
+                if !is_unknown_literal(left) {
+                    let left_value = self.eval(left, None)?;
+                    if matches!(left_value, Value::Jsonb(_)) {
+                        let path = self.eval(right, Some(SqlType::Text))?;
+                        return crate::json_path::match_operator(&left_value, &path);
+                    }
+                    let right_value = self.eval(right, self.type_of(&left_value, left))?;
+                    return crate::text_search::matches(&left_value, &right_value);
+                }
                 let (left, right) = self.pair(left, right)?;
                 crate::text_search::matches(&left, &right)
+            }
+            BinaryOperator::JsonPathExists => {
+                let document = self.eval(left, Some(SqlType::Jsonb))?;
+                let path = self.eval(right, Some(SqlType::Text))?;
+                crate::json_path::exists_operator(&document, &path)
             }
             BinaryOperator::VectorL2Distance
             | BinaryOperator::VectorCosineDistance
@@ -1465,6 +1479,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::json_functions::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::json_path::function(name, &values) {
             return result;
         }
         if let Some(result) = crate::regexp_functions::function(name, &values) {
