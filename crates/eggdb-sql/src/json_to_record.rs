@@ -1,8 +1,9 @@
+use crate::arrays::{ArrayElement, ArrayValue};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::json::{self, Json, Node};
 use crate::json_functions::RecordSink;
 use crate::session::OutputColumn;
-use crate::types::{Conversion, SqlType, Value, convert};
+use crate::types::{Conversion, DefinedKind, DefinedType, SqlType, Value, convert};
 
 /// The functions that turn a JSON object (or an array of objects) into rows whose columns the
 /// caller declares in a column definition list: `AS x(a int, b text)`.
@@ -159,6 +160,14 @@ fn field(document: &str, node: &Node, sql_type: Option<SqlType>, binary: bool) -
         (Json::Null, _) => Ok(Value::Null),
         (_, Some(SqlType::Json)) => Ok(Value::Json(source_text(document, node, binary)?)),
         (_, Some(SqlType::Jsonb)) => Ok(Value::Jsonb(json::normalized_value(&node.value)?)),
+        (Json::Array(elements), Some(SqlType::Array(element))) => {
+            array(document, elements, element, binary)
+        }
+        (Json::Object(members), Some(SqlType::Defined(defined)))
+            if defined.kind == DefinedKind::Composite =>
+        {
+            composite(document, members, defined, binary)
+        }
         (Json::String(text), target) => typed(Value::Text(text.clone()), target),
         (Json::Number(text), target) => typed(Value::Text(text.clone()), target),
         (Json::Boolean(flag), target) => typed(
@@ -169,6 +178,70 @@ fn field(document: &str, node: &Node, sql_type: Option<SqlType>, binary: bool) -
             typed(Value::Text(source_text(document, node, binary)?), target)
         }
     }
+}
+
+fn array(
+    document: &str,
+    elements: &[Node],
+    element: ArrayElement,
+    binary: bool,
+) -> SqlResult<Value> {
+    let nested = elements
+        .iter()
+        .filter(|node| matches!(node.value, Json::Array(_)))
+        .count();
+    if nested > 0 && nested == elements.len() {
+        return Err(SqlError::not_supported(
+            "multidimensional arrays are not supported yet",
+        ));
+    }
+    if nested > 0 {
+        return Err(
+            SqlError::new(SqlState::INVALID_TEXT_REPRESENTATION, "expected JSON array")
+                .with_detail("Every element of a one-dimensional array must be a scalar."),
+        );
+    }
+    let items = elements
+        .iter()
+        .map(|node| field(document, node, Some(element.sql_type()), binary))
+        .collect::<SqlResult<Vec<Value>>>()?;
+    crate::arrays::convert_to(
+        Value::Array(Box::new(ArrayValue::new(element, items))),
+        element,
+        Conversion::Assignment,
+    )
+}
+
+fn composite(
+    document: &str,
+    members: &[(String, Node)],
+    defined: DefinedType,
+    binary: bool,
+) -> SqlResult<Value> {
+    let Some(attributes) = crate::user_types::composite_attributes(defined.oid) else {
+        return Err(SqlError::not_supported(
+            "populating an anonymous record from a JSON object is not supported",
+        ));
+    };
+    let fields = attributes
+        .iter()
+        .map(|attribute| {
+            let found = members
+                .iter()
+                .rev()
+                .find(|(key, _)| *key == attribute.name)
+                .map(|(_, node)| node);
+            match found {
+                None => Ok(Value::Null),
+                Some(node) => field(document, node, Some(attribute.sql_type), binary),
+            }
+        })
+        .collect::<SqlResult<Vec<Value>>>()?;
+    Ok(crate::records::record_value(
+        defined.oid,
+        fields,
+        Vec::new(),
+    ))
 }
 
 fn typed(text: Value, target: Option<SqlType>) -> SqlResult<Value> {
@@ -275,5 +348,69 @@ mod tests {
         );
         assert_eq!(state("jsonb_to_record", "{", SqlType::Integer), "22P02");
         assert_eq!(result_type(&[None]).unwrap_err().state().code(), "42601");
+    }
+
+    fn sql(session: &mut crate::Session<'_>, statement: &str) -> Result<Vec<String>, SqlError> {
+        let mut outputs = Vec::new();
+        session.execute(statement, &mut |result| {
+            outputs.push(crate::tests::render(&result))
+        })?;
+        let output = outputs.pop().unwrap_or_default();
+        let lines: Vec<String> = output.lines().map(str::to_owned).collect();
+        Ok(match lines.as_slice() {
+            [_, body @ .., _] => body.to_vec(),
+            _ => lines,
+        })
+    }
+
+    #[test]
+    fn postgresql_documented_example_fills_arrays_and_composites() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::new(&store);
+        sql(&mut session, "CREATE TYPE myrowtype AS (a int, b text)").unwrap();
+        assert_eq!(
+            sql(
+                &mut session,
+                r#"select * from json_to_record('{"a":1,"b":[1,2,3],"c":[1,2,3],"e":"bar","r": {"a": 123, "b": "a b c"}}') as x(a int, b text, c int[], d text, r myrowtype)"#
+            )
+            .unwrap(),
+            [r#"1|[1,2,3]|{1,2,3}|NULL|(123,"a b c")"#]
+        );
+        assert_eq!(
+            sql(
+                &mut session,
+                r#"select c from jsonb_to_record('{"c": ["x", null, "y z"]}') as x(c text[])"#
+            )
+            .unwrap(),
+            [r#"{x,NULL,"y z"}"#]
+        );
+        let state = |session: &mut crate::Session<'_>, statement: &str| {
+            sql(session, statement)
+                .unwrap_err()
+                .state()
+                .code()
+                .to_owned()
+        };
+        assert_eq!(
+            state(
+                &mut session,
+                r#"select * from json_to_record('{"c": [[1, 2], [3, 4]]}') as x(c int[])"#
+            ),
+            "0A000"
+        );
+        assert_eq!(
+            state(
+                &mut session,
+                r#"select * from json_to_record('{"c": [1, [2]]}') as x(c int[])"#
+            ),
+            "22P02"
+        );
+        assert_eq!(
+            state(
+                &mut session,
+                r#"select * from json_to_record('{"c": [1, "x"]}') as x(c int[])"#
+            ),
+            "22P02"
+        );
     }
 }
