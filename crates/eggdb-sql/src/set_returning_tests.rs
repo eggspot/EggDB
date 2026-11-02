@@ -34,6 +34,70 @@ fn rows_a_function_generates_count_against_the_statements_memory() {
 }
 
 #[test]
+fn a_function_in_from_stops_at_a_plain_outer_limit_instead_of_building_every_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let _shared = share_statement_memory();
+    let mut held = WorkMemory::new();
+    held.charge(WORK_MEMORY_LIMIT - 100_000).unwrap();
+    let started = std::time::Instant::now();
+    for (sql, expected) in [
+        (
+            "SELECT * FROM generate_series(1, 1000000000000) LIMIT 3",
+            "generate_series\n1\n2\n3\nSELECT 3",
+        ),
+        (
+            "SELECT g * 2 AS d FROM generate_series(1, 1000000000000) g LIMIT 2 OFFSET 5",
+            "d\n12\n14\nSELECT 2",
+        ),
+        (
+            "SELECT * FROM generate_series(1, 1000000000000) WITH ORDINALITY AS g(n, i) LIMIT 1",
+            "n|i\n1|1\nSELECT 1",
+        ),
+    ] {
+        assert_eq!(run(&mut session, sql).unwrap(), expected, "{sql}");
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    for sql in [
+        "SELECT * FROM generate_series(1, 1000000000000) g ORDER BY g LIMIT 3",
+        "SELECT * FROM generate_series(1, 1000000000000) g WHERE g > 5 LIMIT 3",
+        "SELECT count(*) FROM generate_series(1, 1000000000000) LIMIT 1",
+    ] {
+        assert_eq!(state(&mut session, sql), "53200", "{sql}");
+    }
+}
+
+#[test]
+fn a_limit_over_a_function_that_needs_every_row_still_sees_every_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for (sql, expected) in [
+        (
+            "SELECT * FROM generate_series(1, 10) g ORDER BY g DESC LIMIT 2",
+            "g\n10\n9\nSELECT 2",
+        ),
+        (
+            "SELECT g FROM generate_series(1, 10) g WHERE g > 7 LIMIT 2",
+            "g\n8\n9\nSELECT 2",
+        ),
+        (
+            "SELECT count(*) FROM generate_series(1, 10) LIMIT 1",
+            "count\n10\nSELECT 1",
+        ),
+        (
+            "SELECT count(*) FROM (SELECT DISTINCT g / 3 AS r FROM generate_series(1, 9) g LIMIT 4) d",
+            "count\n4\nSELECT 1",
+        ),
+        (
+            "SELECT * FROM unnest(ARRAY[1, 2, 3]) LIMIT 5",
+            "unnest\n1\n2\n3\nSELECT 3",
+        ),
+    ] {
+        assert_eq!(run(&mut session, sql).unwrap(), expected, "{sql}");
+    }
+}
+
+#[test]
 fn placements_that_do_not_run_yet_are_0a000() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

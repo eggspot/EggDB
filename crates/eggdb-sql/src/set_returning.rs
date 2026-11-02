@@ -1309,6 +1309,37 @@ impl BoundFunction {
         )
     }
 
+    pub(crate) fn generate_at_most(
+        &self,
+        most_rows: Option<u64>,
+        store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
+    ) -> SqlResult<()> {
+        let Some(most_rows) = most_rows else {
+            return self.generate(store);
+        };
+        if most_rows == 0 {
+            return Ok(());
+        }
+        let mut stored: u64 = 0;
+        let mut enough = false;
+        let generated = self.generate(&mut |row| {
+            store(row)?;
+            stored += 1;
+            if stored < most_rows {
+                return Ok(());
+            }
+            enough = true;
+            Err(SqlError::new(
+                SqlState::QUERY_CANCELED,
+                "the outer LIMIT has all its rows",
+            ))
+        });
+        match generated {
+            Err(_) if enough => Ok(()),
+            generated => generated,
+        }
+    }
+
     pub(crate) fn generate(
         &self,
         store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
