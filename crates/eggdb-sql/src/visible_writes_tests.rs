@@ -385,3 +385,35 @@ fn a_writer_with_nothing_confined_passes_everything_through() {
         Some(b"x".to_vec())
     );
 }
+
+#[test]
+fn a_trigger_cannot_be_dropped_or_disabled_but_goes_with_its_dropped_table() {
+    let store = shop();
+    let limited = confined(&store);
+    let mut session = Session::new(&limited);
+    for sql in [
+        "DROP TRIGGER logged_log ON logged",
+        "ALTER TABLE logged DISABLE TRIGGER logged_log",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(message.contains("trigger"), "{sql}: {message}");
+    }
+    session.close().unwrap();
+    assert_eq!(
+        shown(
+            &store,
+            "SELECT count(*) FROM information_schema.triggers WHERE trigger_name = 'logged_log'"
+        ),
+        "count\n1\nSELECT 1"
+    );
+    let mut session = Session::new(&limited);
+    runs(&mut session, "DROP TABLE logged");
+    session.close().unwrap();
+    assert_eq!(
+        shown(
+            &store,
+            "SELECT count(*) FROM information_schema.triggers WHERE trigger_name = 'logged_log'"
+        ),
+        "count\n0\nSELECT 1"
+    );
+}

@@ -484,10 +484,14 @@ pub(crate) fn classify(
     with: &WithStatement,
     keys: &mut crate::destructive::KeyLookup<'_>,
 ) -> Option<crate::destructive::DestructiveStatement> {
-    crate::destructive::classify(&with.body, keys).or_else(|| {
-        with.tables.iter().find_map(|table| match table {
+    let mut found = None;
+    for table in &with.tables {
+        let part = match table {
             WithTable::Modifying { statement, .. } => crate::destructive::classify(statement, keys),
-            WithTable::Query(_) => None,
-        })
-    })
+            WithTable::Query(common) => crate::destructive::query_runs_code(&common.query),
+        };
+        found = crate::destructive::DestructiveStatement::combined(found, part);
+    }
+    let body = crate::destructive::classify(&with.body, keys);
+    crate::destructive::DestructiveStatement::combined(found, body)
 }

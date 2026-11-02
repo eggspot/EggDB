@@ -129,6 +129,12 @@ pub enum OneStatementRefusal {
     Unconfirmed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseFor {
+    Refusing,
+    Classifying,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum DestructiveRule<'c> {
     Allowed,
@@ -1505,7 +1511,7 @@ impl<'s> Session<'s> {
             Ok(tokens) => tokens,
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         };
-        match self.one_statement_in(text, &tokens) {
+        match self.one_statement_in(text, &tokens, ParseFor::Classifying) {
             Ok(Ok(statement)) => Ok(self.destructive_part_of(statement)),
             Ok(Err(refusal)) => Err(OneStatementError::Refused(refusal)),
             Err(error) => Err(OneStatementError::Failed(self.in_dialect(text, error))),
@@ -1536,7 +1542,11 @@ impl<'s> Session<'s> {
             Ok(tokens) => tokens,
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         };
-        match self.one_statement_in(text, &tokens) {
+        let parse_for = match rule {
+            DestructiveRule::OnlyConfirmed(_) => ParseFor::Classifying,
+            DestructiveRule::Allowed => ParseFor::Refusing,
+        };
+        match self.one_statement_in(text, &tokens, parse_for) {
             Ok(Ok(statement)) => {
                 let destructive = match rule {
                     DestructiveRule::OnlyConfirmed(_) => self.destructive_part_of(statement),
@@ -1551,6 +1561,12 @@ impl<'s> Session<'s> {
             }
             Ok(Err(refusal)) => return Err(OneStatementError::Refused(refusal)),
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
+        }
+        if self.sqlserver() && crate::tsql::uses_batch_logic(&tokens) {
+            self.statement_start = 0;
+            return self
+                .run_logic_text(text, tokens, Parameters::Absent, on_result)
+                .map_err(|error| OneStatementError::Failed(self.in_dialect(text, error)));
         }
         let mut client = Client {
             channel: &mut NoCopyChannel,
@@ -1574,6 +1590,7 @@ impl<'s> Session<'s> {
         &self,
         text: &str,
         tokens: &[Token<'_>],
+        parse_for: ParseFor,
     ) -> SqlResult<Result<Option<Statement>, OneStatementRefusal>> {
         let settings = Arc::clone(&self.settings);
         let _clock = crate::datetime::enter_statement(settings.time_zone);
@@ -1587,7 +1604,7 @@ impl<'s> Session<'s> {
             return Ok(Err(OneStatementRefusal::Empty));
         }
         let _constraints = self.enter_constraints();
-        let statement = if parser.literal_rows().is_none() {
+        let statement = if parse_for == ParseFor::Classifying || parser.literal_rows().is_none() {
             match parser.statement()? {
                 Statement::Begin { .. }
                 | Statement::Commit

@@ -169,8 +169,10 @@ can reach another table is covered, not a list of statement kinds:
   `--tables` (the name need not exist when the server starts), and a sequence a listed table
   owns (`serial`, identity) comes with it. Any other name, renaming a listed table to an
   unlisted name, and creating or replacing a schema, type, function, procedure, package or role
-  is refused with SQLSTATE `42501`, naming the object. So is creating or changing a trigger, even
-  on a listed table, since its function would run in your own later sessions, unfiltered.
+  is refused with SQLSTATE `42501`, naming the object. So is creating, changing, disabling or
+  dropping a trigger, even on a listed table, since its function would run in your own later
+  sessions, unfiltered, and dropping it switches off what it guards; dropping the table takes
+  its triggers with it.
 - **Ties to unlisted tables freeze what they tie.** When an unlisted table has a foreign key to a
   listed one, or a listed one has a foreign key to an unlisted one, the listed table's rows and
   definition cannot change, since a delete could cascade or a check would read the other table;
@@ -199,10 +201,15 @@ stay drawn, as in the database itself. Only `write_sql` opens the file read-writ
 statement runs (the time limit bounds it), commits and closes the file, other programs cannot
 open the file at all.
 
-**Destructive statements need your confirmation** (D255): `DROP` of anything, `TRUNCATE`,
-`ALTER TABLE ... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change,
-any statement that can change or delete many rows, and a statement that can run other
-statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`). A `DELETE` or
+**Destructive statements need your confirmation** (D255): `DROP` of anything (a trigger and a
+row security policy too), `TRUNCATE`, `ALTER TABLE ... DROP COLUMN`, `DROP CONSTRAINT` or
+`DROP PRIMARY KEY`, a column's type change, disabling a trigger or row level security, any
+statement that can change or delete many rows, and a statement that can run other statements:
+an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`, Transact-SQL's `EXEC` of a
+procedure or of dynamic SQL (`EXEC('...')`, `sp_executesql`), a `SELECT` of a user-defined
+function (`SELECT f()`, `SELECT * FROM f()`), and an `INSERT` into a table with an enabled
+`INSERT` trigger, into a view, or into a table whose definition `eggdb mcp` cannot read. A `WITH` lists every
+statement it runs: each data-modifying part and its body. A `DELETE` or
 `UPDATE` runs without asking only when its `WHERE` pins every column of the table's primary key,
 or of one of its unique indexes, to values, in parts joined by a top-level `AND`:
 
@@ -213,15 +220,17 @@ or of one of its unique indexes, to values, in parts joined by a top-level `AND`
   it as a number and match `'1'`, `'01'` and `' 1'`;
 - and the statement reaches no other rows: no `ON DELETE` (or, for an `UPDATE` of a referenced
   column, `ON UPDATE`) `CASCADE`, `SET NULL` or `SET DEFAULT` foreign key points at the table,
-  and no trigger fires on it for that statement.
+  and no trigger fires on it for that statement. For a partitioned table this holds for every
+  partition, at any depth, too.
 
 So `DELETE FROM t WHERE id = 7` runs, while `WHERE id = id`, `WHERE id IS NOT NULL`,
 `WHERE id >= 0 OR id < 0`, `WHERE id > 5`, `WHERE NOT (id <> 7)`, `WHERE id IN (SELECT ...)`,
 a `WHERE` on a column outside every key, and any `DELETE` or `UPDATE` of a table without a key
 ask first. `REPLACE`, `INSERT OR REPLACE`, `ON DUPLICATE KEY UPDATE`, `ON CONFLICT ... DO UPDATE`
 and a `MERGE` that updates or deletes always ask, since they overwrite rows chosen by the data.
-Other `INSERT`s (`ON CONFLICT DO NOTHING` and `INSERT IGNORE` too), `CREATE`, renames,
-`ADD COLUMN` and the like run without asking. To tell, `eggdb mcp` reads the table's keys,
+Other `INSERT`s into a table without an `INSERT` trigger (`ON CONFLICT DO NOTHING`,
+`INSERT IGNORE` and an insert-only `MERGE` too), `CREATE`, renames, `ADD COLUMN` and the like
+run without asking. To tell, `eggdb mcp` reads the table's keys,
 foreign keys and triggers from the file before it asks you, and closes it again; when it cannot
 read them it asks.
 

@@ -1,13 +1,17 @@
 use crate::ast::{
-    AlterAction, BinaryOperator, Delete, Expr, ExprKind, Insert, Literal, Name, OnDuplicate,
-    ReferentialAction, Statement, TableReference, UnaryOperator, Update,
+    AlterAction, AlterTriggerAction, BinaryOperator, Delete, Expr, ExprKind, GeneratedTable,
+    Insert, Literal, Name, OnDuplicate, Query, ReferentialAction, Select, SetExpr,
+    SqlServerStatement, Statement, TableReference, UnaryOperator, Update, VariableSource,
 };
 use crate::dialect::Dialect;
+use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult};
 use crate::execute::TableCache;
+use crate::row_security::RowSecurityStatement;
 use crate::session::{OneStatementError, Session};
 use crate::store::StoreFailure;
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
+use crate::triggers::TriggerEvent;
 use crate::types::SqlType;
 
 /// A statement that can destroy data or a rule protecting it, which `eggdb mcp` runs for an AI
@@ -48,11 +52,37 @@ impl DestructiveStatement {
 
     fn add(&mut self, kind: DestructiveKind, object: String) {
         match self.parts.iter_mut().find(|part| part.kind == kind) {
-            Some(part) => part.objects.push(object),
+            Some(part) => {
+                if !part.objects.contains(&object) {
+                    part.objects.push(object);
+                }
+            }
             None => self.parts.push(DestructivePart {
                 kind,
                 objects: vec![object],
             }),
+        }
+    }
+
+    pub(crate) fn absorb(&mut self, other: DestructiveStatement) {
+        for part in other.parts {
+            for object in part.objects {
+                self.add(part.kind, object);
+            }
+        }
+        self.cascade |= other.cascade;
+    }
+
+    pub(crate) fn combined(
+        found: Option<DestructiveStatement>,
+        more: Option<DestructiveStatement>,
+    ) -> Option<DestructiveStatement> {
+        match (found, more) {
+            (Some(mut found), Some(more)) => {
+                found.absorb(more);
+                Some(found)
+            }
+            (found, more) => found.or(more),
         }
     }
 }
@@ -98,8 +128,18 @@ pub enum DestructiveKind {
     /// An `INSERT` that overwrites the rows it collides with: `REPLACE`, `INSERT OR REPLACE`,
     /// `ON DUPLICATE KEY UPDATE` or `ON CONFLICT ... DO UPDATE`.
     InsertOverwritingRows,
-    /// `CALL` of a procedure or a `DO` block, whose code may change or drop anything.
+    /// Code that may change or drop anything: `CALL` of a procedure, a `DO` or PL/SQL block,
+    /// Transact-SQL's `EXEC`, a `SELECT` of a function, or an `INSERT` whose table fires a
+    /// trigger (or that the classifier cannot look up, such as a view).
     RunCode,
+    /// `DROP TRIGGER`.
+    DropTrigger,
+    /// `ALTER TABLE ... DISABLE TRIGGER`, `DISABLE TRIGGER` or `ALTER TRIGGER ... DISABLE`.
+    DisableTrigger,
+    /// `DROP POLICY`, which removes a row security policy.
+    DropPolicy,
+    /// `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`.
+    DisableRowSecurity,
 }
 
 impl DestructiveKind {
@@ -125,7 +165,13 @@ impl DestructiveKind {
             Self::InsertOverwritingRows => {
                 "INSERT that overwrites existing rows (REPLACE or an upsert)"
             }
-            Self::RunCode => "CALL or DO, which runs code that may change or drop data",
+            Self::RunCode => {
+                "code that may change or drop data (CALL, DO, EXEC, a function or a trigger)"
+            }
+            Self::DropTrigger => "DROP TRIGGER",
+            Self::DisableTrigger => "DISABLE TRIGGER",
+            Self::DropPolicy => "DROP POLICY",
+            Self::DisableRowSecurity => "DISABLE ROW LEVEL SECURITY",
         }
     }
 }
@@ -133,9 +179,9 @@ impl DestructiveKind {
 /// Parses `text` as [`Session::run_one_statement`] does, in `dialect`, without a database,
 /// and says whether its one statement is destructive. It refuses what `run_one_statement`
 /// refuses (no statement, a second one, transaction control, `COPY`) and fails on a parse
-/// error, both before anything could run. With no database it knows no table's keys, so every
-/// `DELETE` and `UPDATE` is destructive here; [`Session::destructive_statement`] on a session
-/// over the database reads them.
+/// error, both before anything could run. With no database it knows no table's keys or
+/// triggers, so every `DELETE`, `UPDATE` and `INSERT` is destructive here;
+/// [`Session::destructive_statement`] on a session over the database reads them.
 pub fn destructive_statement(
     text: &str,
     dialect: Dialect,
@@ -173,7 +219,7 @@ pub(crate) fn classify(
         )),
         Statement::Delete(delete) => deleted(delete, keys),
         Statement::Update(update) => updated(update, keys),
-        Statement::Insert(insert) => inserted(insert),
+        Statement::Insert(insert) => inserted(insert, keys),
         Statement::AlterTable(alter) => altered(&alter.name, &alter.actions),
         Statement::MaterializedView(crate::ast::MaterializedViewCommand::Drop {
             names, ..
@@ -183,16 +229,67 @@ pub(crate) fn classify(
             dropped(DestructiveKind::DropDatabase, names, false)
         }
         Statement::Database(crate::served_databases::DatabaseStatement::Create { .. }) => None,
+        Statement::Select(select) => selected(select),
+        Statement::Query(query) => queried(query),
+        Statement::SqlServer(statement) => sqlserver(statement, keys),
+        Statement::DropTrigger(drop) => Some(DestructiveStatement::new(
+            DestructiveKind::DropTrigger,
+            drop.names
+                .iter()
+                .map(|trigger| match &drop.table {
+                    Some(table) => format!("{}.{}", shown(table), shown(&trigger.name)),
+                    None => shown(&trigger.name),
+                })
+                .collect(),
+            false,
+        )),
+        Statement::EnableTrigger(switch) if !switch.enable => {
+            let table = shown(&switch.table);
+            Some(DestructiveStatement::new(
+                DestructiveKind::DisableTrigger,
+                match &switch.names {
+                    Some(names) => names
+                        .iter()
+                        .map(|name| format!("{table}.{}", shown(name)))
+                        .collect(),
+                    None => vec![table],
+                },
+                false,
+            ))
+        }
+        Statement::AlterTrigger(alter) if alter.action == AlterTriggerAction::Disable => {
+            Some(DestructiveStatement::new(
+                DestructiveKind::DisableTrigger,
+                vec![shown(&alter.name.name)],
+                false,
+            ))
+        }
+        Statement::RowSecurity(RowSecurityStatement::DropPolicy { table, name, .. }) => {
+            Some(DestructiveStatement::new(
+                DestructiveKind::DropPolicy,
+                vec![format!("{}.{}", shown(table), shown(name))],
+                false,
+            ))
+        }
+        Statement::RowSecurity(RowSecurityStatement::Switch {
+            table,
+            enabled: false,
+        }) => Some(DestructiveStatement::new(
+            DestructiveKind::DisableRowSecurity,
+            vec![shown(table)],
+            false,
+        )),
         Statement::CreateTable(_)
-        | Statement::Select(_)
-        | Statement::Query(_)
         | Statement::Begin { .. }
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
         | Statement::Analyze(_)
         | Statement::Role(_)
-        | Statement::RowSecurity(_)
+        | Statement::RowSecurity(
+            RowSecurityStatement::CreatePolicy { .. }
+            | RowSecurityStatement::Switch { enabled: true, .. },
+        )
         | Statement::Listen(_)
         | Statement::Unlisten(_)
         | Statement::Notify { .. }
@@ -222,7 +319,6 @@ pub(crate) fn classify(
         | Statement::AlterDomain(_)
         | Statement::SetConstraints { .. }
         | Statement::CreateTrigger(_)
-        | Statement::DropTrigger(_)
         | Statement::EnableTrigger(_)
         | Statement::AlterTrigger(_)
         | Statement::CreateRoutine(_)
@@ -230,8 +326,7 @@ pub(crate) fn classify(
         | Statement::AlterRoutine(_)
         | Statement::CreatePackage(_)
         | Statement::DropPackage(_)
-        | Statement::AlterPackage(_)
-        | Statement::SqlServer(_) => None,
+        | Statement::AlterPackage(_) => None,
         Statement::Call(call) => Some(DestructiveStatement::new(
             DestructiveKind::RunCode,
             vec![shown(&call.name)],
@@ -248,15 +343,160 @@ pub(crate) fn classify(
             false,
         )),
         Statement::With(with) => crate::with_statement::classify(with, keys),
-        Statement::Merge(merge) => merge.update.as_ref().map(|update| {
-            let kind = if update.delete_condition.is_some() {
-                DestructiveKind::DeleteOfManyRows
-            } else {
-                DestructiveKind::UpdateOfManyRows
-            };
-            DestructiveStatement::new(kind, vec![shown(&merge.target.name)], false)
-        }),
+        Statement::Merge(merge) => match &merge.update {
+            Some(update) => {
+                let kind = if update.delete_condition.is_some() {
+                    DestructiveKind::DeleteOfManyRows
+                } else {
+                    DestructiveKind::UpdateOfManyRows
+                };
+                Some(DestructiveStatement::new(
+                    kind,
+                    vec![shown(&merge.target.name)],
+                    false,
+                ))
+            }
+            None if merge.insert.is_some() => insert_runs_code(&merge.target.name, keys),
+            None => None,
+        },
     }
+}
+
+fn run_code(objects: Vec<String>) -> Option<DestructiveStatement> {
+    Some(DestructiveStatement::new(
+        DestructiveKind::RunCode,
+        objects,
+        false,
+    ))
+}
+
+fn sqlserver(
+    statement: &SqlServerStatement,
+    keys: &mut KeyLookup<'_>,
+) -> Option<DestructiveStatement> {
+    match statement {
+        SqlServerStatement::Execute(call)
+        | SqlServerStatement::InsertVariable {
+            source: VariableSource::Execute(call),
+            ..
+        } => run_code(vec![shown(&call.procedure)]),
+        SqlServerStatement::ExecuteDynamic(_) => run_code(vec!["EXEC".to_owned()]),
+        SqlServerStatement::InsertVariable {
+            source: VariableSource::Query(query),
+            ..
+        }
+        | SqlServerStatement::SelectAssign { query, .. } => classify(query, keys),
+        SqlServerStatement::DeclareCursor(cursor) => classify(&cursor.query, keys),
+        SqlServerStatement::InsertBulk(bulk) => insert_runs_code(&bulk.table, keys),
+        SqlServerStatement::Use(_)
+        | SqlServerStatement::NoCount(_)
+        | SqlServerStatement::ImplicitTransactions(_)
+        | SqlServerStatement::IdentityInsert { .. }
+        | SqlServerStatement::DeclareTable { .. }
+        | SqlServerStatement::InsertVariable {
+            source: VariableSource::Values(_),
+            ..
+        }
+        | SqlServerStatement::UpdateVariable { .. }
+        | SqlServerStatement::DeleteVariable { .. }
+        | SqlServerStatement::FormatOnly(_)
+        | SqlServerStatement::XactAbort(_)
+        | SqlServerStatement::Declare(_)
+        | SqlServerStatement::SetVariable { .. }
+        | SqlServerStatement::Condition(_)
+        | SqlServerStatement::Print(_)
+        | SqlServerStatement::RaiseError(_)
+        | SqlServerStatement::Throw(_)
+        | SqlServerStatement::SaveTransaction(_)
+        | SqlServerStatement::RollbackTo(_)
+        | SqlServerStatement::Return(_)
+        | SqlServerStatement::OpenCursor(_)
+        | SqlServerStatement::FetchCursor { .. }
+        | SqlServerStatement::CloseCursor(_)
+        | SqlServerStatement::DeallocateCursor(_)
+        | SqlServerStatement::WaitFor { .. } => None,
+    }
+}
+
+fn selected(select: &Select) -> Option<DestructiveStatement> {
+    let mut functions = Vec::new();
+    select_running_code(select, &mut functions);
+    running(functions)
+}
+
+fn queried(query: &Query) -> Option<DestructiveStatement> {
+    let mut functions = Vec::new();
+    query_running_code(query, &mut functions);
+    running(functions)
+}
+
+pub(crate) fn query_runs_code(query: &Query) -> Option<DestructiveStatement> {
+    queried(query)
+}
+
+fn running(functions: Vec<String>) -> Option<DestructiveStatement> {
+    let mut found: Option<DestructiveStatement> = None;
+    for function in functions {
+        match &mut found {
+            Some(statement) => statement.add(DestructiveKind::RunCode, function),
+            None => found = run_code(vec![function]),
+        }
+    }
+    found
+}
+
+fn query_running_code(query: &Query, functions: &mut Vec<String>) {
+    for common in &query.with {
+        query_running_code(&common.query, functions);
+    }
+    body_running_code(&query.body, functions);
+}
+
+fn body_running_code(body: &SetExpr, functions: &mut Vec<String>) {
+    match body {
+        SetExpr::Select(select) => select_running_code(select, functions),
+        SetExpr::Operation(operation) => {
+            body_running_code(&operation.left, functions);
+            body_running_code(&operation.right, functions);
+        }
+        SetExpr::Query(query) => query_running_code(query, functions),
+    }
+}
+
+fn select_running_code(select: &Select, functions: &mut Vec<String>) {
+    if !crate::routines::select_may_write(select) {
+        return;
+    }
+    let before = functions.len();
+    if let Some(from) = &select.from
+        && let Some(generated) = &from.first.generated
+        && let GeneratedTable::Function(function) = generated.as_ref()
+    {
+        functions.push(shown_text(&function.name));
+    } else {
+        for expr in crate::subquery::select_expressions(select) {
+            function_names(expr, functions);
+        }
+    }
+    if functions.len() == before {
+        functions.push("SELECT".to_owned());
+    }
+}
+
+fn function_names(expr: &Expr, functions: &mut Vec<String>) {
+    if let ExprKind::Function { name, .. } = &expr.kind
+        && !name.is_empty()
+        && !name.starts_with('*')
+    {
+        functions.push(shown_text(name));
+    }
+    for child in crate::eval::children(expr) {
+        function_names(child, functions);
+    }
+}
+
+fn shown_text(name: &str) -> String {
+    name.replace(crate::schemas::QUALIFIER, ".")
 }
 
 fn deleted(delete: &Delete, keys: &mut KeyLookup<'_>) -> Option<DestructiveStatement> {
@@ -285,14 +525,21 @@ fn updated(update: &Update, keys: &mut KeyLookup<'_>) -> Option<DestructiveState
     ))
 }
 
-fn inserted(insert: &Insert) -> Option<DestructiveStatement> {
+fn inserted(insert: &Insert, keys: &mut KeyLookup<'_>) -> Option<DestructiveStatement> {
     match insert.on_duplicate {
         OnDuplicate::Replace | OnDuplicate::Update(_) => Some(DestructiveStatement::new(
             DestructiveKind::InsertOverwritingRows,
             vec![shown(&insert.table.name)],
             false,
         )),
-        OnDuplicate::Fail | OnDuplicate::Ignore => None,
+        OnDuplicate::Fail | OnDuplicate::Ignore => insert_runs_code(&insert.table.name, keys),
+    }
+}
+
+fn insert_runs_code(table: &Name, keys: &mut KeyLookup<'_>) -> Option<DestructiveStatement> {
+    match keys(&table.text) {
+        Some(found) if !found.insert_reaches_further => None,
+        _ => run_code(vec![shown(table)]),
     }
 }
 
@@ -363,7 +610,7 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
 }
 
 fn shown(name: &Name) -> String {
-    name.text.replace(crate::schemas::QUALIFIER, ".")
+    shown_text(&name.text)
 }
 
 fn qualifies_target(qualifier: &str, table: &TableReference) -> bool {
@@ -397,7 +644,8 @@ fn row_reach(filter: Option<&Expr>, table: &TableReference, keys: &mut KeyLookup
 const MOST_PINNED_ROWS: usize = 100;
 
 /// Finds what the classifier needs to know of a table by its internal name, or `None` when it
-/// cannot tell (no database, no such table, a view, or a read that failed).
+/// cannot tell (no database, a view, or a read that failed). A relation that does not exist has
+/// no keys and reaches nothing: a statement naming it fails before it changes anything.
 pub(crate) type KeyLookup<'a> = dyn FnMut(&str) -> Option<TableKeys> + 'a;
 
 /// A table's keys and what else a change of its rows reaches, as the classifier needs them to
@@ -408,6 +656,7 @@ pub(crate) struct TableKeys {
     keys: Vec<Vec<usize>>,
     delete_reaches_further: bool,
     update_reaches_further: bool,
+    insert_reaches_further: bool,
     columns_cascading_on_update: Vec<usize>,
 }
 
@@ -417,17 +666,26 @@ struct KeyedColumn {
     character: bool,
 }
 
-/// Reads the keys of table `name`: its primary key and its unique indexes, whether a `DELETE`
-/// or `UPDATE` of its rows fires a trigger, and which foreign keys of other tables change their
-/// rows when its rows are deleted or their referenced columns updated. `None` when `name` is
-/// not a table.
+/// Reads the keys of table `name`: its primary key and its unique indexes, whether a `DELETE`,
+/// `UPDATE` or `INSERT` of its rows fires a trigger, and which foreign keys of other tables
+/// change their rows when its rows are deleted or their referenced columns updated. A
+/// partitioned table's rows live in its partitions, so the triggers and foreign keys of every
+/// partition, at any depth, count as the table's own. A relation that does not exist gives
+/// keys of no columns that reach nothing; a view is an error.
 pub(crate) fn table_keys(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
     name: &str,
 ) -> SqlResult<Option<TableKeys>> {
     let Some(table) = tables.table(reader, name)? else {
-        return Ok(None);
+        return Ok(Some(TableKeys {
+            columns: Vec::new(),
+            keys: Vec::new(),
+            delete_reaches_further: false,
+            update_reaches_further: false,
+            insert_reaches_further: false,
+            columns_cascading_on_update: Vec::new(),
+        }));
     };
     let mut keys = Vec::new();
     if !table.primary_key.is_empty() {
@@ -450,44 +708,72 @@ pub(crate) fn table_keys(
             })
             .collect(),
         keys,
-        delete_reaches_further: crate::triggers::fire_on(
-            reader,
-            tables,
-            &table.name,
-            crate::triggers::TriggerEvent::Delete,
-        )?,
-        update_reaches_further: crate::triggers::fire_on(
-            reader,
-            tables,
-            &table.name,
-            crate::triggers::TriggerEvent::Update,
-        )?,
+        delete_reaches_further: false,
+        update_reaches_further: false,
+        insert_reaches_further: false,
         columns_cascading_on_update: Vec::new(),
     };
-    for child_name in crate::constraints::referencing_tables(reader, &table.name)? {
-        let Some(child) = tables.table(reader, &child_name)? else {
-            found.delete_reaches_further = true;
-            found.update_reaches_further = true;
-            continue;
-        };
-        for key in child
-            .foreign_keys
-            .iter()
-            .filter(|key| key.parent == table.name)
-        {
-            found.delete_reaches_further |= changes_child_rows(key.on_delete);
-            if !changes_child_rows(key.on_update) {
-                continue;
-            }
-            for column in &key.parent_columns {
-                match table.column_index(column) {
-                    Some(index) => found.columns_cascading_on_update.push(index),
-                    None => found.update_reaches_further = true,
-                }
-            }
+    found.add_reach_of(reader, tables, &table, &table.name)?;
+    let partitions = crate::partitions::catalog(reader, tables)?.descendants_of(&table.name);
+    for partition in partitions {
+        found.add_reach_of(reader, tables, &table, &partition)?;
+        for moved_row_event in [TriggerEvent::Insert, TriggerEvent::Delete] {
+            found.update_reaches_further |=
+                crate::triggers::fire_on(reader, tables, &partition, moved_row_event)?;
         }
     }
     Ok(Some(found))
+}
+
+impl TableKeys {
+    fn reach_everything(&mut self) {
+        self.delete_reaches_further = true;
+        self.update_reaches_further = true;
+        self.insert_reaches_further = true;
+    }
+
+    fn add_reach_of(
+        &mut self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        root: &TableDefinition,
+        relation: &str,
+    ) -> SqlResult<()> {
+        if tables.table(reader, relation)?.is_none() {
+            self.reach_everything();
+            return Ok(());
+        }
+        let fires = |tables: &mut TableCache, event: TriggerEvent| {
+            crate::triggers::fire_on(reader, tables, relation, event)
+        };
+        self.delete_reaches_further |= fires(tables, TriggerEvent::Delete)?;
+        self.update_reaches_further |= fires(tables, TriggerEvent::Update)?;
+        self.insert_reaches_further |= fires(tables, TriggerEvent::Insert)?;
+        for child_name in crate::constraints::referencing_tables(reader, relation)? {
+            let Some(child) = tables.table(reader, &child_name)? else {
+                self.delete_reaches_further = true;
+                self.update_reaches_further = true;
+                continue;
+            };
+            for key in child
+                .foreign_keys
+                .iter()
+                .filter(|key| key.parent == relation)
+            {
+                self.delete_reaches_further |= changes_child_rows(key.on_delete);
+                if !changes_child_rows(key.on_update) {
+                    continue;
+                }
+                for column in &key.parent_columns {
+                    match root.column_index(column) {
+                        Some(index) => self.columns_cascading_on_update.push(index),
+                        None => self.update_reaches_further = true,
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn changes_child_rows(action: ReferentialAction) -> bool {

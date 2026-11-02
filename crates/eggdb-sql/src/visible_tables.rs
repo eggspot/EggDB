@@ -1,7 +1,7 @@
 use crate::encoding::{
     CommentKind, KeyOwner, NAMESPACE, SequenceDefinition, TableDefinition, every_dependency_prefix,
     every_reference_prefix, is_temporary_key, is_view_record, key_owner, meta_key, prefix_end,
-    sequence_key, sequences_prefix, split_comment_key, table_key, triggers_prefix,
+    sequence_key, sequences_prefix, split_comment_key, table_key, trigger_key, triggers_prefix,
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::schemas::{DEFAULT_SCHEMA, QUALIFIER};
@@ -118,6 +118,8 @@ impl VisibleTables {
                 links,
                 rows_blocked,
                 refused: false,
+                dropped_trigger_records: Vec::new(),
+                dropped_definitions: Vec::new(),
             }),
         })
     }
@@ -469,6 +471,8 @@ struct Confined {
     links: Vec<Link>,
     rows_blocked: HashSet<u32>,
     refused: bool,
+    dropped_trigger_records: Vec<Vec<u8>>,
+    dropped_definitions: Vec<Vec<u8>>,
 }
 
 enum Written<'k> {
@@ -526,9 +530,9 @@ impl Refusal {
             .with_hint("Ask the user to make this change, or to run the session without --tables."),
             Self::Trigger => SqlError::new(
                 SqlState::INSUFFICIENT_PRIVILEGE,
-                "cannot create or change a trigger: a trigger runs its function in every later session that changes the table, where --tables does not confine it",
+                "cannot create, change or drop a trigger: a trigger runs its function in every later session that changes the table, where --tables does not confine it, and dropping one switches off what it guards",
             )
-            .with_hint("Ask the user to create the trigger."),
+            .with_hint("Ask the user to change the trigger."),
         }
     }
 }
@@ -690,6 +694,27 @@ impl Confined {
         }
     }
 
+    fn note_deleted(&mut self, key: &[u8]) {
+        if key.starts_with(&triggers_prefix()) && !is_temporary_key(key) {
+            self.dropped_trigger_records.push(key.to_vec());
+            return;
+        }
+        let Written::Definition(name) = written(key) else {
+            return;
+        };
+        if let Ok(text) = std::str::from_utf8(name)
+            && key == table_key(text).as_slice()
+        {
+            self.dropped_definitions.push(trigger_key(text));
+        }
+    }
+
+    fn drops_a_trigger_of_a_kept_table(&self) -> bool {
+        self.dropped_trigger_records
+            .iter()
+            .any(|record| !self.dropped_definitions.contains(record))
+    }
+
     fn admit(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         match self.check(key, Some(value)) {
             Ok(()) => {
@@ -778,26 +803,34 @@ impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
     }
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
-        if let Some(confined) = &mut self.confined
-            && let Err(refusal) = confined.check(key, None)
-        {
+        let Some(confined) = &mut self.confined else {
+            return self.inner.delete(key);
+        };
+        if let Err(refusal) = confined.check(key, None) {
             if self.inner.get(key)?.is_none() {
                 return Ok(false);
             }
             confined.refused = true;
             return Err(refusal.error());
         }
-        self.inner.delete(key)
+        let deleted = self.inner.delete(key)?;
+        if deleted {
+            confined.note_deleted(key);
+        }
+        Ok(deleted)
     }
 
     fn commit(self) -> SqlResult<()> {
-        if self
-            .confined
-            .as_ref()
-            .is_some_and(|confined| confined.refused)
-        {
+        let Some(confined) = &self.confined else {
+            return self.inner.commit();
+        };
+        if confined.refused {
             self.inner.rollback()?;
             return Err(rolled_back());
+        }
+        if confined.drops_a_trigger_of_a_kept_table() {
+            self.inner.rollback()?;
+            return Err(Refusal::Trigger.error());
         }
         self.inner.commit()
     }

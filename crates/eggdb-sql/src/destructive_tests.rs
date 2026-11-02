@@ -473,7 +473,6 @@ fn creating_inserting_renaming_and_reading_are_not_destructive() {
     for dialect in Dialect::ALL {
         for text in [
             "SELECT id FROM t",
-            "INSERT INTO t VALUES (1, 'a')",
             "CREATE TABLE n (id integer PRIMARY KEY)",
             "CREATE INDEX t_n ON t (name)",
             "CREATE VIEW w AS SELECT id FROM t",
@@ -668,4 +667,241 @@ fn transact_sql_brackets_and_transactions_are_classified_as_in_the_other_dialect
             OneStatementRefusal::MoreThanOne { position: 14 }
         ))
     );
+}
+
+fn reaching_store() -> MemoryStore {
+    let store = MemoryStore::default();
+    Session::new(&store)
+        .execute(
+            "CREATE TABLE t (id integer PRIMARY KEY, name text); \
+             CREATE TABLE u (id integer PRIMARY KEY); \
+             CREATE TABLE log (note text); \
+             CREATE FUNCTION wipe_u() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM u; RETURN NEW; END $$; \
+             CREATE FUNCTION wipe_now() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN DELETE FROM u; RETURN 1; END $$; \
+             CREATE TABLE inserted (id integer PRIMARY KEY, v integer); \
+             CREATE TRIGGER inserted_wipes AFTER INSERT ON inserted FOR EACH ROW EXECUTE FUNCTION wipe_u(); \
+             CREATE VIEW t_view AS SELECT id, name FROM t; \
+             CREATE TABLE measured (id integer, region text, PRIMARY KEY (id, region)) PARTITION BY LIST (region); \
+             CREATE TABLE measured_eu PARTITION OF measured FOR VALUES IN ('eu'); \
+             CREATE TRIGGER measured_eu_wipes BEFORE DELETE ON measured_eu FOR EACH ROW EXECUTE FUNCTION wipe_u(); \
+             CREATE TABLE ordered (id integer, region text, PRIMARY KEY (id, region)) PARTITION BY LIST (region); \
+             CREATE TABLE ordered_eu PARTITION OF ordered FOR VALUES IN ('eu'); \
+             CREATE TABLE ordered_lines (id integer PRIMARY KEY, order_id integer, region text, \
+                 FOREIGN KEY (order_id, region) REFERENCES ordered_eu (id, region) ON DELETE CASCADE); \
+             CREATE TABLE quiet (id integer, region text, PRIMARY KEY (id, region)) PARTITION BY LIST (region); \
+             CREATE TABLE quiet_eu PARTITION OF quiet FOR VALUES IN ('eu')",
+            &mut |_| {},
+        )
+        .unwrap();
+    store
+}
+
+fn classified_with_keys(
+    store: &MemoryStore,
+    dialect: Dialect,
+    text: &str,
+) -> Option<DestructiveStatement> {
+    Session::with_dialect(store, dialect)
+        .destructive_statement(text)
+        .unwrap_or_else(|error| panic!("{dialect:?} {text:?}: {error:?}"))
+}
+
+#[test]
+fn a_key_pinned_delete_of_a_partitioned_table_reaches_its_partitions_triggers_and_foreign_keys() {
+    let store = reaching_store();
+    for text in [
+        "DELETE FROM measured WHERE id = 1 AND region = 'eu'",
+        "DELETE FROM ordered WHERE id = 1 AND region = 'eu'",
+        "UPDATE measured SET region = 'eu' WHERE id = 1 AND region = 'eu'",
+    ] {
+        let found = kind_with_keys(&store, Dialect::PostgreSql, text);
+        assert!(
+            matches!(
+                found,
+                Some(DestructiveKind::DeleteOfManyRows | DestructiveKind::UpdateOfManyRows)
+            ),
+            "{text}: {found:?}"
+        );
+    }
+    assert_eq!(
+        kind_with_keys(
+            &store,
+            Dialect::PostgreSql,
+            "DELETE FROM quiet WHERE id = 1 AND region = 'eu'"
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_insert_that_fires_a_trigger_or_cannot_be_looked_up_runs_code() {
+    let store = reaching_store();
+    for (dialect, text, object) in [
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO inserted VALUES (1, 1)",
+            "inserted",
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO inserted VALUES (1, 1) ON CONFLICT DO NOTHING",
+            "inserted",
+        ),
+        (
+            Dialect::MySql,
+            "INSERT IGNORE INTO inserted VALUES (1, 1)",
+            "inserted",
+        ),
+        (
+            Dialect::Oracle,
+            "MERGE INTO inserted USING u ON (inserted.id = u.id) WHEN NOT MATCHED THEN INSERT VALUES (u.id, 1)",
+            "inserted",
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t_view VALUES (5, 'v')",
+            "t_view",
+        ),
+    ] {
+        let found = classified_with_keys(&store, dialect, text)
+            .unwrap_or_else(|| panic!("{dialect:?} {text} is not destructive"));
+        assert_eq!(found.parts[0].kind, DestructiveKind::RunCode, "{text}");
+        assert_eq!(found.parts[0].objects, [object], "{text}");
+    }
+    for text in [
+        "INSERT INTO t VALUES (1, 'a')",
+        "INSERT INTO t VALUES (1, 'a') ON CONFLICT DO NOTHING",
+        "INSERT INTO quiet VALUES (1, 'eu')",
+        "INSERT INTO nowhere VALUES (1)",
+    ] {
+        assert_eq!(
+            classified_with_keys(&store, Dialect::PostgreSql, text),
+            None,
+            "{text}"
+        );
+    }
+    for dialect in Dialect::ALL {
+        match destructive_statement("INSERT INTO t VALUES (1, 'a')", dialect) {
+            Ok(Some(found)) => assert_eq!(found.parts[0].kind, DestructiveKind::RunCode),
+            Err(OneStatementError::Failed(_)) if dialect != Dialect::PostgreSql => {}
+            other => panic!("{dialect:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn transact_sql_exec_and_dynamic_sql_run_code() {
+    let store = reaching_store();
+    for text in [
+        "EXEC clean_up",
+        "EXECUTE dbo.clean_up 1",
+        "EXEC('DELETE FROM t')",
+        "EXEC sp_executesql N'DELETE FROM t'",
+    ] {
+        for found in [
+            statement(Dialect::SqlServer, text),
+            classified_with_keys(&store, Dialect::SqlServer, text)
+                .unwrap_or_else(|| panic!("{text} is not destructive")),
+        ] {
+            assert_eq!(found.parts[0].kind, DestructiveKind::RunCode, "{text}");
+        }
+    }
+    assert_eq!(
+        statement(Dialect::SqlServer, "EXEC clean_up").parts[0].objects,
+        ["clean_up"]
+    );
+}
+
+#[test]
+fn a_select_of_a_function_that_may_write_runs_code() {
+    let store = reaching_store();
+    for (text, object) in [
+        ("SELECT wipe_now()", "wipe_now"),
+        ("SELECT * FROM wipe_now()", "wipe_now"),
+        ("SELECT 1 UNION ALL SELECT wipe_now()", "wipe_now"),
+    ] {
+        let found = classified_with_keys(&store, Dialect::PostgreSql, text)
+            .unwrap_or_else(|| panic!("{text} is not destructive"));
+        assert_eq!(found.parts[0].kind, DestructiveKind::RunCode, "{text}");
+        assert_eq!(found.parts[0].objects, [object], "{text}");
+    }
+    for text in [
+        "SELECT id FROM t",
+        "SELECT 1",
+        "SELECT name FROM t WHERE id = 1",
+    ] {
+        assert_eq!(
+            classified_with_keys(&store, Dialect::PostgreSql, text),
+            None,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_with_statement_lists_every_modifying_part_and_its_body() {
+    let found = statement(
+        Dialect::PostgreSql,
+        "WITH a AS (DELETE FROM t RETURNING id), b AS (DELETE FROM u RETURNING id) UPDATE log SET note = 'x'",
+    );
+    assert_eq!(
+        found.parts,
+        [
+            crate::DestructivePart {
+                kind: DestructiveKind::DeleteWithoutFilter,
+                objects: vec!["t".to_owned(), "u".to_owned()],
+            },
+            crate::DestructivePart {
+                kind: DestructiveKind::UpdateWithoutFilter,
+                objects: vec!["log".to_owned()],
+            },
+        ]
+    );
+}
+
+#[test]
+fn dropping_or_disabling_a_trigger_or_row_security_is_destructive() {
+    for (dialect, text, expected, object) in [
+        (
+            Dialect::PostgreSql,
+            "DROP TRIGGER inserted_wipes ON inserted",
+            DestructiveKind::DropTrigger,
+            "inserted.inserted_wipes",
+        ),
+        (
+            Dialect::PostgreSql,
+            "ALTER TABLE inserted DISABLE TRIGGER inserted_wipes",
+            DestructiveKind::DisableTrigger,
+            "inserted.inserted_wipes",
+        ),
+        (
+            Dialect::PostgreSql,
+            "ALTER TABLE inserted DISABLE TRIGGER ALL",
+            DestructiveKind::DisableTrigger,
+            "inserted",
+        ),
+        (
+            Dialect::PostgreSql,
+            "DROP POLICY own_rows ON t",
+            DestructiveKind::DropPolicy,
+            "t.own_rows",
+        ),
+        (
+            Dialect::PostgreSql,
+            "ALTER TABLE t DISABLE ROW LEVEL SECURITY",
+            DestructiveKind::DisableRowSecurity,
+            "t",
+        ),
+    ] {
+        let found = statement(dialect, text);
+        assert_eq!(found.parts[0].kind, expected, "{text}");
+        assert_eq!(found.parts[0].objects, [object], "{text}");
+    }
+    for text in [
+        "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE inserted ENABLE TRIGGER inserted_wipes",
+        "CREATE POLICY own_rows ON t USING (id > 0)",
+    ] {
+        assert_eq!(kind(Dialect::PostgreSql, text), None, "{text}");
+    }
 }

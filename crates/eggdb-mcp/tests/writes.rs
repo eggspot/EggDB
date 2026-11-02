@@ -624,7 +624,7 @@ fn a_committed_write_is_never_reported_failed() {
     assert!(text_at(committed, &["warning"]).starts_with("committed;"));
 
     let path = audit.path.clone();
-    *opener.after_close.borrow_mut() = Some(Box::new(move || {
+    *opener.after_write_close.borrow_mut() = Some(Box::new(move || {
         let _ = std::fs::remove_file(&path);
         std::fs::create_dir(&path).unwrap();
     }));
@@ -634,7 +634,7 @@ fn a_committed_write_is_never_reported_failed() {
         "write_sql",
         r#"{"sql":"INSERT INTO scratch VALUES (4, 'd')"}"#,
     );
-    *opener.after_close.borrow_mut() = None;
+    *opener.after_write_close.borrow_mut() = None;
     assert_eq!(error_code(&unrecorded), "audit_unavailable");
     assert!(text_at(structured(&unrecorded), &["error", "message"]).contains("WAS committed"));
     assert_eq!(scratch_rows(&opener.store), 4);
@@ -775,4 +775,108 @@ fn a_failed_write_that_drew_sequence_values_says_they_stay_drawn() {
         r#"{"sql":"INSERT INTO q VALUES (nextval('s'))"}"#,
     );
     assert_eq!(!is_error(&next), committed, "{next:?}");
+}
+
+fn code_running_store() -> MapStore {
+    let store = scratch_store();
+    store.sql(
+        Dialect::PostgreSql,
+        "CREATE TABLE gone (id integer PRIMARY KEY); INSERT INTO gone VALUES (1); \
+         CREATE FUNCTION wipe_gone() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM gone; RETURN NEW; END $$; \
+         CREATE FUNCTION wipe_now() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN DELETE FROM gone; RETURN 1; END $$; \
+         CREATE TABLE noisy (id integer PRIMARY KEY); \
+         CREATE TRIGGER noisy_wipes AFTER INSERT ON noisy FOR EACH ROW EXECUTE FUNCTION wipe_gone(); \
+         CREATE TABLE zoned (id integer, region text, PRIMARY KEY (id, region)) PARTITION BY LIST (region); \
+         CREATE TABLE zoned_eu PARTITION OF zoned FOR VALUES IN ('eu'); \
+         CREATE TRIGGER zoned_eu_wipes BEFORE DELETE ON zoned_eu FOR EACH ROW EXECUTE FUNCTION wipe_gone(); \
+         INSERT INTO zoned VALUES (1, 'eu')",
+    );
+    store
+}
+
+#[test]
+fn code_a_write_would_run_and_a_trigger_dropped_need_confirmation_first() {
+    let audit = TempAudit::new("runs-code");
+    let opener = MapOpener::new(code_running_store());
+    let before = opener.store.snapshot();
+    let mut server = writing_server(&opener, &audit, "{}");
+    for (id, (dialect, sql, named)) in (1..).zip([
+        ("postgresql", "INSERT INTO noisy VALUES (1)", "noisy"),
+        ("postgresql", "SELECT wipe_now()", "wipe_now"),
+        (
+            "postgresql",
+            "DELETE FROM zoned WHERE id = 1 AND region = 'eu'",
+            "zoned",
+        ),
+        (
+            "postgresql",
+            "DROP TRIGGER noisy_wipes ON noisy",
+            "noisy_wipes",
+        ),
+        (
+            "postgresql",
+            "WITH a AS (DELETE FROM scratch RETURNING id), b AS (DELETE FROM gone RETURNING id) SELECT 1",
+            "scratch, gone",
+        ),
+        ("sqlserver", "EXEC('DELETE FROM scratch')", "EXEC"),
+        ("sqlserver", "EXEC sp_executesql N'DELETE FROM scratch'", ""),
+    ]) {
+        let answer = call(
+            &mut server,
+            id,
+            "write_sql",
+            &format!(r#"{{"sql":"{sql}","dialect":"{dialect}"}}"#),
+        );
+        assert_eq!(
+            error_code(&answer),
+            "needs_confirmation",
+            "{dialect} {sql}: {answer:?}"
+        );
+        assert!(
+            text_at(structured(&answer), &["error", "message"]).contains(named),
+            "{dialect} {sql}: {answer:?}"
+        );
+    }
+    assert_eq!(opener.store.snapshot(), before);
+    let plain = call(
+        &mut server,
+        50,
+        "write_sql",
+        r#"{"sql":"INSERT INTO scratch VALUES (3, 'c')"}"#,
+    );
+    assert!(!is_error(&plain), "{plain:?}");
+    assert_eq!(scratch_rows(&opener.store), 3);
+}
+
+#[test]
+fn confirmed_dynamic_transact_sql_commits_its_change() {
+    let audit = TempAudit::new("dynamic-tsql");
+    let opener = MapOpener::new(scratch_store());
+    let mut server = writing_server(&opener, &audit, "{}");
+    let exec = call(
+        &mut server,
+        1,
+        "write_sql",
+        r#"{"sql":"EXEC('DELETE FROM scratch WHERE id = 1')","dialect":"sqlserver","confirm":true}"#,
+    );
+    assert!(!is_error(&exec), "{exec:?}");
+    assert_eq!(
+        text_at(structured(&exec), &["committed"]),
+        "true",
+        "{exec:?}"
+    );
+    assert_eq!(scratch_rows(&opener.store), 1);
+    let executesql = call(
+        &mut server,
+        2,
+        "write_sql",
+        r#"{"sql":"EXEC sp_executesql N'DELETE FROM scratch WHERE id = 2'","dialect":"sqlserver","confirm":true}"#,
+    );
+    assert!(!is_error(&executesql), "{executesql:?}");
+    assert_eq!(
+        text_at(structured(&executesql), &["committed"]),
+        "true",
+        "{executesql:?}"
+    );
+    assert_eq!(scratch_rows(&opener.store), 0);
 }

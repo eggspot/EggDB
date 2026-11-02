@@ -169,6 +169,12 @@ fn to_char_is_refused_before_it_builds_past_the_value_limit() {
 fn merge_that_updates_or_deletes_is_destructive_and_one_that_only_inserts_is_not() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    session
+        .execute(
+            "CREATE TABLE t (id NUMBER PRIMARY KEY, v NUMBER, k NUMBER); CREATE TABLE s (id NUMBER, v NUMBER, k NUMBER)",
+            &mut |_| {},
+        )
+        .unwrap();
     let classify = |session: &mut Session<'_>, text: &str| {
         session
             .destructive_statement(text)

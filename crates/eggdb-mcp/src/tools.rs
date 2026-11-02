@@ -9,9 +9,9 @@ use eggdb_commands::{
 };
 use eggdb_sql::json::{Json, Node};
 use eggdb_sql::{
-    DestructiveKind, DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead,
-    KeyValueStore, OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX,
-    Relation, RelationKind, ScanDirection, Session, SqlError, SqlState, Value, VisibleTables,
+    DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead, KeyValueStore,
+    OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX, Relation,
+    RelationKind, ScanDirection, Session, SqlError, SqlState, Value, VisibleTables,
     destructive_statement,
 };
 use std::time::{Duration, Instant};
@@ -769,24 +769,22 @@ pub(crate) fn destructive_part<O: DatabaseOpener>(
     request: &WriteRequest<'_>,
     call: &Call<'_, O>,
 ) -> Result<Option<DestructiveStatement>, ToolError> {
-    let without_keys = destructive_statement(request.sql, request.dialect);
-    let keys_may_clear_it = matches!(
-        &without_keys,
-        Ok(Some(statement)) if statement.parts.iter().all(|part| matches!(
-            part.kind,
-            DestructiveKind::DeleteOfManyRows | DestructiveKind::UpdateOfManyRows
-        ))
-    );
-    let classified = if keys_may_clear_it {
-        call.with_database(|store, _| {
-            let mut session = Session::with_dialect(store, request.dialect);
-            let with_keys = session.destructive_statement(request.sql);
-            let _ = session.close();
-            Ok(with_keys)
-        })
-        .unwrap_or(without_keys)
-    } else {
-        without_keys
+    let classified = match destructive_statement(request.sql, request.dialect) {
+        Ok(Some(without_keys)) => {
+            let mut with_keys = None;
+            let opened = call.with_database(|store, _| {
+                let mut session = Session::with_dialect(store, request.dialect);
+                with_keys = Some(session.destructive_statement(request.sql));
+                let _ = session.close();
+                Ok(())
+            });
+            match (with_keys, opened) {
+                (Some(with_keys), _) => with_keys,
+                (None, Err(error)) => return Err(error),
+                (None, Ok(())) => Ok(Some(without_keys)),
+            }
+        }
+        other => other,
     };
     match classified {
         Ok(destructive) => Ok(destructive),
