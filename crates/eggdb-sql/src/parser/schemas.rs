@@ -514,12 +514,12 @@ impl<'t> Parser<'t> {
                 if_not_exists,
             });
         }
-        if !["plpgsql", "vector", "postgis"].contains(&name.text.as_str()) {
+        if !["plpgsql", "vector", "postgis", "citext", "hstore"].contains(&name.text.as_str()) {
             return Err(SqlError::not_supported(format!(
                 "extension \"{}\" is not supported",
                 name.text
             ))
-            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron, eggdb_cdc, eggdb_tenancy, eggdb_ledger, eggdb_console, eggdb_bi, eggdb_catalog, eggdb_privacy, eggdb_retention, eggdb_coordination, eggdb_migration, vector and postgis only; other extensions are not available yet.")
+            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron, eggdb_cdc, eggdb_tenancy, eggdb_ledger, eggdb_console, eggdb_bi, eggdb_catalog, eggdb_privacy, eggdb_retention, eggdb_coordination, eggdb_migration, vector, postgis, citext and hstore only; other extensions are not available yet.")
             .at(name.position));
         }
         self.skip_statement();

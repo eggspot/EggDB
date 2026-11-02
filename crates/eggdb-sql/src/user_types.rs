@@ -390,6 +390,12 @@ pub(crate) fn resolve_type(
     name: &str,
     position: usize,
 ) -> SqlResult<SqlType> {
+    if schema.is_none_or(|schema| {
+        schema == crate::schemas::CATALOG_SCHEMA || schema == crate::schemas::DEFAULT_SCHEMA
+    }) && let Some(base) = DefinedType::builtin_base_named(name)
+    {
+        return Ok(SqlType::Defined(base));
+    }
     if schema.is_none_or(|schema| schema == crate::schemas::CATALOG_SCHEMA) {
         if let Some(range) = crate::ranges::builtin_named(name) {
             return Ok(DefinedType::range(range.oid));
@@ -416,6 +422,9 @@ pub(crate) fn type_name(defined: DefinedType) -> String {
     if defined.oid == crate::records::RECORD_OID {
         return "record".to_owned();
     }
+    if let Some(name) = DefinedType::builtin_base_name(defined.oid) {
+        return name.to_owned();
+    }
     if let Some(range) = crate::ranges::builtin(defined.oid) {
         return range.name.to_owned();
     }
@@ -432,6 +441,9 @@ pub(crate) fn formatted_type(oid: u32) -> Option<String> {
     if oid == crate::records::RECORD_OID {
         return Some("record".to_owned());
     }
+    if let Some(name) = DefinedType::builtin_base_name(oid) {
+        return Some(name.to_owned());
+    }
     if let Some(range) = crate::ranges::builtin(oid) {
         return Some(range.name.to_owned());
     }
@@ -443,6 +455,9 @@ pub(crate) fn base_type_name(oid: u32) -> Option<String> {
     if oid == crate::records::RECORD_OID {
         return Some("record".to_owned());
     }
+    if let Some(name) = DefinedType::builtin_base_name(oid) {
+        return Some(name.to_owned());
+    }
     if let Some(range) = crate::ranges::builtin(oid) {
         return Some(range.name.to_owned());
     }
@@ -452,7 +467,10 @@ pub(crate) fn base_type_name(oid: u32) -> Option<String> {
 }
 
 pub(crate) fn is_visible(oid: u32) -> Option<bool> {
-    if crate::ranges::builtin(oid).is_some() || oid == crate::records::RECORD_OID {
+    if crate::ranges::builtin(oid).is_some()
+        || oid == crate::records::RECORD_OID
+        || DefinedType::builtin_base_name(oid).is_some()
+    {
         return Some(true);
     }
     let registry = current()?;
@@ -564,6 +582,35 @@ pub(crate) fn parse_input(text: &str, defined: DefinedType) -> SqlResult<Value> 
             check_domain_value(defined.oid, &value)?;
             Ok(value)
         }
+        DefinedKind::Base => parse_base(text, defined),
+    }
+}
+
+fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
+    if defined == DefinedType::CITEXT {
+        Ok(crate::citext::value(text.to_owned()))
+    } else if defined == DefinedType::HSTORE {
+        crate::hstore::parse_text(text).map(crate::hstore::value)
+    } else {
+        Err(crate::encoding::corrupt("type definition"))
+    }
+}
+
+fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) -> SqlResult<Value> {
+    let text = match &value {
+        Value::Text(text) => Some(text.as_str()),
+        Value::Bpchar(text) => Some(crate::types::without_trailing_spaces(text)),
+        other => crate::citext::text_of(other),
+    };
+    if crate::citext::is_citext(target) {
+        return Ok(crate::citext::value(match text {
+            Some(text) => text.to_owned(),
+            None => value.to_text().unwrap_or_default(),
+        }));
+    }
+    match (text, conversion) {
+        (Some(text), Conversion::Explicit) => parse_base(text, target),
+        _ => Err(cannot_cast(&value, target)),
     }
 }
 
@@ -592,6 +639,9 @@ pub(crate) fn convert(
     if value.sql_type() == Some(SqlType::Defined(target)) {
         return Ok(value);
     }
+    if target.kind == DefinedKind::Base {
+        return convert_to_base(value, target, conversion);
+    }
     if target.kind == DefinedKind::Domain {
         let base =
             domain_base(target.oid).ok_or_else(|| crate::encoding::corrupt("type definition"))?;
@@ -617,6 +667,9 @@ pub(crate) fn convert(
 }
 
 pub(crate) fn comparable(defined: DefinedType, other: SqlType) -> bool {
+    if crate::citext::is_citext(defined) && other.is_character() {
+        return true;
+    }
     let Some(other) = other.defined() else {
         return false;
     };
@@ -761,10 +814,12 @@ pub(crate) fn table_needs_registry(table: &TableDefinition) -> bool {
         lower.contains("::") || lower.contains("cast")
     };
     !table.domains.is_empty()
-        || table
-            .columns
-            .iter()
-            .any(|column| column.sql_type.defined().is_some())
+        || table.columns.iter().any(|column| {
+            column
+                .sql_type
+                .defined()
+                .is_some_and(|defined| defined.kind != DefinedKind::Base)
+        })
         || table
             .columns
             .iter()
@@ -789,6 +844,7 @@ fn duplicate_type(name: &str) -> SqlError {
 fn is_builtin_type_name(name: &str) -> bool {
     crate::pg_catalog::builtin_type_named(name).is_some()
         || crate::ranges::builtin_named(name).is_some()
+        || DefinedType::builtin_base_named(name).is_some()
         || name == "record"
 }
 

@@ -1,7 +1,8 @@
 //! The statistics views, extension catalogs and administration functions that PostgreSQL
 //! administration tools such as pgAdmin read on every connection and dashboard refresh. EggDB
 //! answers them truthfully: one database, one user with every privilege, this session as the
-//! only activity, no foreign data, no replication, no extensions but `plpgsql`.
+//! only activity, no foreign data, no replication, and as extensions `plpgsql` and the built-in
+//! types of `citext` and `hstore`.
 
 use super::snapshot::{self, CatalogSnapshot};
 use super::types::{RegKind, RegValue};
@@ -20,6 +21,8 @@ const OIDS: SqlType = SqlType::Array(ArrayElement::Oid);
 const ACL_ITEMS: SqlType = SqlType::Array(ArrayElement::AclItem);
 const STAMP: SqlType = SqlType::TimestampTz(None);
 const PLPGSQL_EXTENSION: u32 = 13_581;
+const CITEXT_EXTENSION: u32 = 9_100;
+const HSTORE_EXTENSION: u32 = 9_101;
 const FIRST_OID: u32 = 12_500;
 
 const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
@@ -593,16 +596,23 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             }
             vec![built.done()]
         }
-        MonitoringRelation::Extension => vec![
+        MonitoringRelation::Extension => [
+            (PLPGSQL_EXTENSION, "plpgsql", oids::PG_CATALOG, false, "1.0"),
+            (CITEXT_EXTENSION, "citext", oids::PUBLIC, true, "1.6"),
+            (HSTORE_EXTENSION, "hstore", oids::PUBLIC, true, "1.8"),
+        ]
+        .into_iter()
+        .map(|(oid, name, namespace, relocatable, version)| {
             row()
-                .set("oid", Value::Oid(PLPGSQL_EXTENSION))
-                .set("extname", Value::Text("plpgsql".to_owned()))
+                .set("oid", Value::Oid(oid))
+                .set("extname", Value::Text(name.to_owned()))
                 .set("extowner", Value::Oid(oids::SESSION_USER))
-                .set("extnamespace", Value::Oid(oids::PG_CATALOG))
-                .set("extrelocatable", Value::Boolean(false))
-                .set("extversion", Value::Text("1.0".to_owned()))
-                .done(),
-        ],
+                .set("extnamespace", Value::Oid(namespace))
+                .set("extrelocatable", Value::Boolean(relocatable))
+                .set("extversion", Value::Text(version.to_owned()))
+                .done()
+        })
+        .collect(),
         MonitoringRelation::User => vec![
             row()
                 .set("usename", Value::Text(session_user_name()))

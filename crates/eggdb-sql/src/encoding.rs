@@ -5,6 +5,8 @@ use crate::interval::{Interval, IntervalFields};
 use crate::numeric::Numeric;
 use crate::types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 
+#[cfg(test)]
+mod base_types_tests;
 mod catalog;
 mod defined;
 mod packages;
@@ -36,7 +38,8 @@ const SCHEMA_FORMAT_VERSION: u8 = 7;
 pub(crate) const VIEW_FORMAT_VERSION: u8 = 8;
 const IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION: u8 = 9;
 const DEFINED_TYPES_FORMAT_VERSION: u8 = 10;
-const NEWEST_TABLE_FORMAT_VERSION: u8 = DEFINED_TYPES_FORMAT_VERSION;
+const BASE_TYPES_FORMAT_VERSION: u8 = 11;
+const NEWEST_TABLE_FORMAT_VERSION: u8 = BASE_TYPES_FORMAT_VERSION;
 const CONSTRAINT_NOT_VALIDATED: u8 = 1;
 const CONSTRAINT_INITIALLY_DEFERRED: u8 = 2;
 const FIRST_USER_TYPE_OID: u32 = 16_384;
@@ -284,6 +287,12 @@ fn type_tag(sql_type: SqlType) -> u8 {
         SqlType::Defined(_) => 23,
         SqlType::Dynamic => 24,
     }
+}
+
+fn is_base_type(sql_type: SqlType) -> bool {
+    sql_type
+        .defined()
+        .is_some_and(|defined| defined.kind == DefinedKind::Base)
 }
 
 fn is_version_10_type(sql_type: SqlType) -> bool {
@@ -780,6 +789,12 @@ impl TableDefinition {
                 .any(|column| is_version_10_type(column.sql_type))
     }
 
+    fn uses_base_types(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|column| is_base_type(column.sql_type))
+    }
+
     fn encode_defined(&self, out: &mut Vec<u8>) {
         put_varint(out, self.domains.len() as u64);
         for entry in &self.domains {
@@ -942,7 +957,9 @@ impl TableDefinition {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let version = if self.needs_defined_version() {
+        let version = if self.uses_base_types() {
+            BASE_TYPES_FORMAT_VERSION
+        } else if self.needs_defined_version() {
             DEFINED_TYPES_FORMAT_VERSION
         } else if self.needs_options_version() {
             IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
@@ -1020,7 +1037,7 @@ impl TableDefinition {
         if version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION {
             self.encode_options(&mut out);
         }
-        if version == DEFINED_TYPES_FORMAT_VERSION {
+        if version >= DEFINED_TYPES_FORMAT_VERSION {
             self.encode_defined(&mut out);
         }
         out
@@ -1067,7 +1084,9 @@ impl TableDefinition {
         let qualified = crate::schemas::is_qualified(name);
         let name_fits_version = match version {
             SCHEMA_FORMAT_VERSION => qualified,
-            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION | DEFINED_TYPES_FORMAT_VERSION => true,
+            IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
+            | DEFINED_TYPES_FORMAT_VERSION
+            | BASE_TYPES_FORMAT_VERSION => true,
             _ => !qualified,
         };
         if !name_fits_version || !crate::schemas::is_well_formed(name) {
@@ -1075,7 +1094,8 @@ impl TableDefinition {
         }
         let auto_allowed = version >= AUTO_INCREMENT_FORMAT_VERSION;
         let options_allowed = version >= IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION;
-        let defined_allowed = version == DEFINED_TYPES_FORMAT_VERSION;
+        let defined_allowed = version >= DEFINED_TYPES_FORMAT_VERSION;
+        let base_types_allowed = version >= BASE_TYPES_FORMAT_VERSION;
         let mut identity_seed = None;
         let mut default_dialects = Vec::new();
         let new_types_allowed = version >= TYPES_FORMAT_VERSION;
@@ -1091,8 +1111,12 @@ impl TableDefinition {
             if name.contains(crate::schemas::QUALIFIER) {
                 return Err(reader.damaged());
             }
-            let sql_type =
-                reader.sql_type(new_types_allowed, more_types_allowed, defined_allowed)?;
+            let sql_type = reader.sql_type(
+                new_types_allowed,
+                more_types_allowed,
+                defined_allowed,
+                base_types_allowed,
+            )?;
             if sql_type
                 .defined()
                 .is_some_and(|defined| defined.kind == DefinedKind::Domain)
@@ -1166,7 +1190,8 @@ impl TableDefinition {
             | CONSTRAINTS_FORMAT_VERSION
             | SCHEMA_FORMAT_VERSION
             | IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION
-            | DEFINED_TYPES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
+            | DEFINED_TYPES_FORMAT_VERSION
+            | BASE_TYPES_FORMAT_VERSION => decode_indexes(&mut reader, columns.len(), true)?,
             _ => Vec::new(),
         };
         let constraints = if version >= CONSTRAINTS_FORMAT_VERSION {
@@ -1179,7 +1204,7 @@ impl TableDefinition {
         } else {
             Vec::new()
         };
-        let (domains, constraint_statuses) = if version == DEFINED_TYPES_FORMAT_VERSION {
+        let (domains, constraint_statuses) = if version >= DEFINED_TYPES_FORMAT_VERSION {
             decode_defined(&mut reader)?
         } else {
             (Vec::new(), Vec::new())
@@ -1254,9 +1279,12 @@ impl TableDefinition {
         if version == IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION && !table.needs_options_version() {
             return Err(reader.damaged());
         }
-        if version == DEFINED_TYPES_FORMAT_VERSION
+        if version >= DEFINED_TYPES_FORMAT_VERSION
             && (!table.needs_defined_version() || !table.defined_parts_fit())
         {
+            return Err(reader.damaged());
+        }
+        if (version == BASE_TYPES_FORMAT_VERSION) != table.uses_base_types() {
             return Err(reader.damaged());
         }
         Ok(table)
@@ -1760,6 +1788,9 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
                 DefinedValue::Enum(label) => {
                     out.extend_from_slice(&ordered_double(label.sort_order));
                 }
+                DefinedValue::Citext(text) => {
+                    push_escaped_text(out, crate::citext::fold(text).as_bytes());
+                }
                 other => push_escaped_text(out, other.to_text().as_bytes()),
             }
         }
@@ -1793,6 +1824,10 @@ pub(crate) fn encode_row_into(out: &mut Vec<u8>, values: &[Value]) {
 const ENUM_TAG: u8 = 24;
 const RECORD_TAG: u8 = 25;
 const RANGE_TAG: u8 = 26;
+const CITEXT_TAG: u8 = 27;
+const HSTORE_TAG: u8 = 28;
+const HSTORE_NULL_VALUE: u8 = 0;
+const HSTORE_TEXT_VALUE: u8 = 1;
 const RANGE_EMPTY: u8 = 1;
 const RANGE_LOWER: u8 = 2;
 const RANGE_LOWER_INCLUSIVE: u8 = 4;
@@ -1839,6 +1874,20 @@ fn put_range(out: &mut Vec<u8>, range: &crate::ranges::RangeValue) {
     }
 }
 
+fn put_hstore(out: &mut Vec<u8>, hstore: &crate::hstore::HstoreValue) {
+    put_varint(out, hstore.pairs().len() as u64);
+    for (key, value) in hstore.pairs() {
+        put_bytes(out, key.as_bytes());
+        match value {
+            Some(value) => {
+                out.push(HSTORE_TEXT_VALUE);
+                put_bytes(out, value.as_bytes());
+            }
+            None => out.push(HSTORE_NULL_VALUE),
+        }
+    }
+}
+
 fn put_nested(out: &mut Vec<u8>, value: &Value) {
     match value {
         Value::Array(array) => {
@@ -1862,6 +1911,7 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
                 out.extend_from_slice(&range.type_oid.to_le_bytes());
                 put_range(out, range);
             }
+            DefinedValue::Citext(_) | DefinedValue::Hstore(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -1907,6 +1957,14 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Range(range) => {
                 out.push(RANGE_TAG);
                 put_range(out, range);
+            }
+            DefinedValue::Citext(text) => {
+                out.push(CITEXT_TAG);
+                put_bytes(out, text.as_bytes());
+            }
+            DefinedValue::Hstore(hstore) => {
+                out.push(HSTORE_TAG);
+                put_hstore(out, hstore);
             }
         },
         Value::Null => out.push(0),
@@ -2081,9 +2139,14 @@ pub(crate) fn decode_row_into(
                     None => return Err(reader.damaged()),
                 }
             }
-            7 | 13 | 14 | 18 | 20 | 21 => {
+            CITEXT_TAG if wanted => crate::citext::value(reader.text()?),
+            7 | 13 | 14 | 18 | 20 | 21 | CITEXT_TAG => {
                 reader.skip_text()?;
                 Value::Null
+            }
+            HSTORE_TAG => {
+                let hstore = reader.hstore()?;
+                if wanted { hstore } else { Value::Null }
             }
             ENUM_TAG => {
                 let SqlType::Defined(defined) = column.sql_type else {
@@ -2174,6 +2237,8 @@ pub(crate) fn decode_row_into(
 
 fn value_tag(sql_type: SqlType) -> u8 {
     match sql_type {
+        SqlType::Defined(defined) if defined == DefinedType::CITEXT => CITEXT_TAG,
+        SqlType::Defined(defined) if defined == DefinedType::HSTORE => HSTORE_TAG,
         SqlType::Defined(DefinedType {
             kind: DefinedKind::Enum,
             ..
@@ -2313,6 +2378,7 @@ impl<'b> Reader<'b> {
         new_types_allowed: bool,
         more_types_allowed: bool,
         defined_allowed: bool,
+        base_types_allowed: bool,
     ) -> SqlResult<SqlType> {
         Ok(match self.byte()? {
             1 => SqlType::SmallInt,
@@ -2348,8 +2414,18 @@ impl<'b> Reader<'b> {
             23 if defined_allowed => {
                 let kind = defined_kind_of(self.byte()?).ok_or_else(|| self.damaged())?;
                 let oid = self.u32()?;
-                let builtin = oid == crate::records::RECORD_OID
-                    || (kind == DefinedKind::Range && crate::ranges::builtin(oid).is_some());
+                let builtin = match kind {
+                    DefinedKind::Base => {
+                        if !base_types_allowed || DefinedType::builtin_base_name(oid).is_none() {
+                            return Err(self.damaged());
+                        }
+                        true
+                    }
+                    _ => {
+                        oid == crate::records::RECORD_OID
+                            || (kind == DefinedKind::Range && crate::ranges::builtin(oid).is_some())
+                    }
+                };
                 if oid < FIRST_USER_TYPE_OID && !builtin {
                     return Err(self.damaged());
                 }
@@ -2421,6 +2497,52 @@ impl<'b> Reader<'b> {
         Ok(())
     }
 
+    fn hstore(&mut self) -> SqlResult<Value> {
+        let count = self.count()?;
+        let mut pairs = Vec::new();
+        for _ in 0..count {
+            let key = self.text()?;
+            let value = match self.byte()? {
+                HSTORE_NULL_VALUE => None,
+                HSTORE_TEXT_VALUE => Some(self.text()?),
+                _ => return Err(self.damaged()),
+            };
+            pairs.push((key, value));
+        }
+        crate::hstore::HstoreValue::from_sorted(pairs)
+            .map(crate::hstore::value)
+            .ok_or_else(|| self.damaged())
+    }
+
+    fn escaped_key_text_width(&self) -> SqlResult<usize> {
+        let rest = self.bytes.get(self.at..).unwrap_or(&[]);
+        let mut at = 0;
+        loop {
+            match (rest.get(at), rest.get(at + 1)) {
+                (Some(0), Some(0x01)) => break,
+                (Some(0), Some(0xFF)) => at += 2,
+                (Some(0), _) | (None, _) => return Err(self.damaged()),
+                (Some(_), _) => at += 1,
+            }
+        }
+        Ok(at + 2)
+    }
+
+    fn escaped_key_bytes(&mut self) -> SqlResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        loop {
+            match self.byte()? {
+                0 => match self.byte()? {
+                    0x01 => break,
+                    0xFF => bytes.push(0),
+                    _ => return Err(self.damaged()),
+                },
+                byte => bytes.push(byte),
+            }
+        }
+        Ok(bytes)
+    }
+
     fn skip_key_value(&mut self, sql_type: SqlType) -> SqlResult<()> {
         match self.byte()? {
             NULL_IN_KEY => return Ok(()),
@@ -2442,6 +2564,9 @@ impl<'b> Reader<'b> {
                 kind: DefinedKind::Enum,
                 ..
             }) => 8,
+            SqlType::Defined(defined) if crate::citext::is_citext(defined) => {
+                self.escaped_key_text_width()?
+            }
             SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
                 return Err(self.damaged());
             }
@@ -2454,19 +2579,7 @@ impl<'b> Reader<'b> {
             | SqlType::Json
             | SqlType::Jsonb
             | SqlType::Bytea
-            | SqlType::Bpchar(_) => {
-                let rest = self.bytes.get(self.at..).unwrap_or(&[]);
-                let mut at = 0;
-                loop {
-                    match (rest.get(at), rest.get(at + 1)) {
-                        (Some(0), Some(0x01)) => break,
-                        (Some(0), Some(0xFF)) => at += 2,
-                        (Some(0), _) | (None, _) => return Err(self.damaged()),
-                        (Some(_), _) => at += 1,
-                    }
-                }
-                at + 2
-            }
+            | SqlType::Bpchar(_) => self.escaped_key_text_width()?,
         };
         self.take(width).map(|_| ())
     }
@@ -2567,6 +2680,10 @@ impl<'b> Reader<'b> {
                 }
                 crate::enums::decoded(oid, sort_order)?
             }
+            SqlType::Defined(defined) if crate::citext::is_citext(defined) => {
+                let bytes = self.escaped_key_bytes()?;
+                crate::citext::value(String::from_utf8(bytes).map_err(|_| self.damaged())?)
+            }
             SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic => {
                 return Err(self.damaged());
             }
@@ -2576,17 +2693,7 @@ impl<'b> Reader<'b> {
             | SqlType::Jsonb
             | SqlType::Bytea
             | SqlType::Bpchar(_) => {
-                let mut bytes = Vec::new();
-                loop {
-                    match self.byte()? {
-                        0 => match self.byte()? {
-                            0x01 => break,
-                            0xFF => bytes.push(0),
-                            _ => return Err(self.damaged()),
-                        },
-                        byte => bytes.push(byte),
-                    }
-                }
+                let bytes = self.escaped_key_bytes()?;
                 if sql_type == SqlType::Bytea {
                     return Ok(Value::Bytea(bytes));
                 }
@@ -2778,6 +2885,8 @@ impl<'b> Reader<'b> {
                 let oid = self.u32()?;
                 self.range_body(oid, depth)?
             }
+            CITEXT_TAG => crate::citext::value(self.text()?),
+            HSTORE_TAG => self.hstore()?,
             _ => return Err(self.damaged()),
         })
     }

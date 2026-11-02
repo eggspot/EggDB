@@ -29,6 +29,7 @@ mod bytea;
 mod cancel;
 mod catalog;
 pub mod cdc;
+mod citext;
 mod comments;
 mod console;
 mod constraints;
@@ -48,6 +49,7 @@ mod explain;
 mod foreign;
 mod geo_functions;
 mod hash_index;
+mod hstore;
 mod hyperloglog;
 mod indexes;
 mod information_schema;
@@ -156,6 +158,8 @@ mod batch_logic_tests;
 #[cfg(test)]
 mod bulk_load_tests;
 #[cfg(test)]
+mod citext_tests;
+#[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]
 mod copy_tests;
@@ -229,6 +233,7 @@ pub use eggdb_auth::scram::{ScramParts, parse_scram_verifier};
 pub use enums::EnumValue;
 pub use error::{SqlError, SqlResult, SqlState};
 pub use foreign::{ForeignSource, set_foreign_source};
+pub use hstore::HstoreValue;
 pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};
 pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES};
