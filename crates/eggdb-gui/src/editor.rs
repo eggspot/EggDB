@@ -208,6 +208,52 @@ impl Editor {
         self.caret = to;
     }
 
+    /// The byte offset in [`Editor::text`] of `at`, clamped to the text.
+    pub fn offset(&self, at: Position) -> usize {
+        let line = at.line.min(self.lines.len() - 1);
+        let before: usize = self.lines[..line].iter().map(|text| text.len() + 1).sum();
+        before + byte_at(&self.lines[line], at.column)
+    }
+
+    /// The position of byte `offset` of [`Editor::text`], clamped to the text.
+    pub fn position_at(&self, offset: usize) -> Position {
+        let mut left = offset;
+        for (line, text) in self.lines.iter().enumerate() {
+            if left <= text.len() {
+                let mut at = left;
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                return Position {
+                    line,
+                    column: text[..at].chars().count(),
+                };
+            }
+            left -= text.len() + 1;
+        }
+        let line = self.lines.len() - 1;
+        Position {
+            line,
+            column: self.line_length(line),
+        }
+    }
+
+    /// The selection as a byte range of [`Editor::text`], when there is one.
+    pub fn selected_bytes(&self) -> Option<std::ops::Range<usize>> {
+        self.selection()
+            .map(|(start, end)| self.offset(start)..self.offset(end))
+    }
+
+    /// Puts the caret at `at` (clamped to the text) and clears the selection.
+    pub fn place_caret(&mut self, at: Position) {
+        let line = at.line.min(self.lines.len() - 1);
+        self.caret = Position {
+            line,
+            column: at.column.min(self.line_length(line)),
+        };
+        self.anchor = None;
+    }
+
     /// Applies `key`.
     pub fn apply(&mut self, key: Key) {
         match key {
@@ -361,6 +407,21 @@ mod tests {
         for character in text.chars() {
             editor.apply(Key::Char(character));
         }
+    }
+
+    #[test]
+    fn offsets_and_positions_convert_both_ways() {
+        let mut editor = Editor::new("SELECT 1;\nSELECT 'é', 2;");
+        assert_eq!(editor.offset(Position { line: 1, column: 0 }), 10);
+        assert_eq!(editor.offset(Position { line: 1, column: 9 }), 20);
+        assert_eq!(editor.position_at(20), Position { line: 1, column: 9 });
+        assert_eq!(editor.position_at(18), Position { line: 1, column: 8 });
+        assert_eq!(editor.position_at(9), Position { line: 0, column: 9 });
+        assert_eq!(editor.position_at(999), Position { line: 1, column: 14 });
+        editor.place_caret(Position { line: 7, column: 99 });
+        assert_eq!(editor.caret(), Position { line: 1, column: 14 });
+        editor.apply(Key::Left { select: true });
+        assert_eq!(editor.selected_bytes(), Some(24..25));
     }
 
     #[test]

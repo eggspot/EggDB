@@ -12,6 +12,9 @@
 /// accessibility tree as JSON for the ARIA mirror over the canvas (D256).
 pub mod browser;
 mod canvas;
+/// Where copied text goes: the [`clipboard::Clipboard`] the platform layer gives, or one in
+/// memory.
+pub mod clipboard;
 mod color;
 /// The first screen: the connect card, its focus order, keys and accessibility tree
 /// (`docs/ux/first-screen.md`).
@@ -22,6 +25,8 @@ pub mod connection;
 /// The client's screens in order: the connect card until a database opens, then the main
 /// window on it (`docs/ux/workspace.md` 1.5 to 1.7).
 pub mod workspace;
+/// The SQL dialects a query tab runs in.
+pub mod dialect;
 /// The query editor: text, cursor, selection and editing commands.
 pub mod editor;
 mod font;
@@ -35,6 +40,13 @@ pub mod layout;
 pub mod main_window;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
+/// The query tab: its editor, dialect, runs, results and inline errors
+/// (`docs/ux/workspace.md` 2).
+pub mod query_tab;
+/// Splitting an editor's text into statements by each dialect's rules.
+pub mod statements;
+/// The status line's and status bar's strings (`docs/ux/workspace.md` 2.4).
+pub mod status_line;
 mod system_faces;
 
 pub use canvas::{Canvas, Rect};

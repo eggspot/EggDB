@@ -20,7 +20,7 @@ use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
 use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
 use eggdb_platform::window::{WindowEvent, WindowOptions, has_file_dialog, open_window};
 
-const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
+const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
 Shows EggDB's connect screen.
   --window          open it in a native window (the default without --png)
@@ -29,6 +29,7 @@ Shows EggDB's connect screen.
   --no-create       uncheck \"Create the file if it does not exist\" (checked by default)
   --read-only       check \"Open read-only\"
   --no-file-dialog  lay the card out as on a system without an open-file dialog (with --png)
+  --run <sql>       after --open, put <sql> in the editor and run it as Ctrl/Cmd+Enter does (with --png)
   --theme <theme>   light (the default), dark or high-contrast
   --scale <n>       device pixels per logical pixel for --png (default 1)
   --size <w>x<h>    the logical size for --png (default 1280x800)
@@ -50,6 +51,7 @@ struct Options {
     box_text: bool,
     frames: Option<u32>,
     open: Option<OsString>,
+    run: Option<OsString>,
     create_if_missing: bool,
     read_only: bool,
     file_dialog: bool,
@@ -71,6 +73,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         box_text: false,
         frames: None,
         open: None,
+        run: None,
         create_if_missing: true,
         read_only: false,
         file_dialog: true,
@@ -89,6 +92,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
             "--read-only" => options.read_only = true,
             "--no-file-dialog" => options.file_dialog = false,
             "--open" => options.open = Some(value("a path")?),
+            "--run" => options.run = Some(value("a statement")?),
             "--frames" => {
                 let frames = value("a number")?;
                 options.frames = Some(
@@ -192,6 +196,10 @@ fn write_png(options: &Options, path: &OsString, faces: Faces<'_>) -> Result<(),
         workspace.open_typed(&open.to_string_lossy(), Instant::now());
         workspace.wait_for_open(SCRIPTED_OPEN_LIMIT);
     }
+    if let Some(sql) = &options.run {
+        workspace.run_text(&sql.to_string_lossy(), false, Instant::now());
+        workspace.wait_for_run(SCRIPTED_OPEN_LIMIT);
+    }
     let frame = render(
         &workspace,
         Theme::of(options.theme),
@@ -240,7 +248,7 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
             let tree = match workspace.screen() {
                 Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, logical),
-                Screen::Main(_) => Vec::new(),
+                Screen::Main(main) => main_window::accessibility_tree(main),
             };
             window.set_accessibility_tree(&tree);
             dirty = false;
@@ -249,7 +257,7 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
                 return Ok(());
             }
         }
-        let timeout = if workspace.is_opening() {
+        let timeout = if workspace.is_opening() || workspace.is_running() {
             Some(scripted.map_or(OPENING_POLL_INTERVAL, |interval| interval.min(OPENING_POLL_INTERVAL)))
         } else {
             scripted

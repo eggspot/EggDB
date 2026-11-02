@@ -34,6 +34,14 @@ pub const KEY_HOME: u16 = 0x73;
 pub const KEY_FORWARD_DELETE: u16 = 0x75;
 /// `kVK_F4`.
 pub const KEY_F4: u16 = 0x76;
+/// `kVK_F5`.
+pub const KEY_F5: u16 = 0x60;
+/// `kVK_F2`.
+pub const KEY_F2: u16 = 0x78;
+/// `kVK_PageUp`.
+pub const KEY_PAGE_UP: u16 = 0x74;
+/// `kVK_PageDown`.
+pub const KEY_PAGE_DOWN: u16 = 0x79;
 /// `kVK_End`.
 pub const KEY_END: u16 = 0x77;
 /// `kVK_LeftArrow`.
@@ -101,6 +109,10 @@ pub fn key_from_key_code(code: u16) -> Option<Key> {
         KEY_HOME => Key::Home,
         KEY_END => Key::End,
         KEY_F4 => Key::F4,
+        KEY_F2 => Key::F2,
+        KEY_F5 => Key::F5,
+        KEY_PAGE_UP => Key::PageUp,
+        KEY_PAGE_DOWN => Key::PageDown,
         _ => return None,
     })
 }
@@ -327,6 +339,10 @@ mod tests {
             (KEY_HOME, Key::Home),
             (KEY_END, Key::End),
             (KEY_F4, Key::F4),
+            (KEY_F2, Key::F2),
+            (KEY_F5, Key::F5),
+            (KEY_PAGE_UP, Key::PageUp),
+            (KEY_PAGE_DOWN, Key::PageDown),
         ];
         for (code, key) in cases {
             assert_eq!(key_from_key_code(code), Some(key));

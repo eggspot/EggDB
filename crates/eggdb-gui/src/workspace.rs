@@ -5,9 +5,14 @@ use std::time::{Duration, Instant};
 
 use eggdb_platform::window::{KeyPress, OpenFileDialog};
 
+use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::connect_screen::{ConnectAction, ConnectCard, Segment, handle_key};
-use crate::connection::{ConnectFailure, ConnectTarget, Connection, Connector};
+use crate::connection::{
+    CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
+    StatementFailure,
+};
 use crate::main_window::MainWindow;
+use crate::query_tab::{RunRequest, TabAction};
 
 /// How long an open runs before the card shows its progress state, so a quick open never
 /// flickers.
@@ -15,7 +20,10 @@ pub const PROGRESS_DELAY: Duration = Duration::from_millis(120);
 /// How long `Cancelled` stays on the status line.
 pub const CANCELLED_SHOWN_FOR: Duration = Duration::from_secs(2);
 
-const DIALECT: &str = "PostgreSQL";
+/// How long a notice such as `Copied 12 cells` stays in the status bar.
+pub const NOTICE_SHOWN_FOR: Duration = Duration::from_secs(2);
+
+type RunAnswer = (Connection, Vec<Result<Vec<ResultTable>, StatementFailure>>);
 
 /// What the window around the workspace must do after an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +45,13 @@ pub enum Screen {
     Main(Box<MainWindow>),
 }
 
+struct Running {
+    request: RunRequest,
+    started: Instant,
+    cancel: CancelHandle,
+    answer: Receiver<RunAnswer>,
+}
+
 struct Opening {
     target: ConnectTarget,
     started: Instant,
@@ -51,7 +66,10 @@ pub struct Workspace {
     connection: Option<Connection>,
     connector: Arc<dyn Connector>,
     opening: Option<Opening>,
+    running: Option<Running>,
     status_until: Option<Instant>,
+    notice_until: Option<Instant>,
+    clipboard: Box<dyn Clipboard>,
     home: Option<PathBuf>,
     current: PathBuf,
 }
@@ -83,7 +101,10 @@ impl Workspace {
             connection: None,
             connector,
             opening: None,
+            running: None,
             status_until: None,
+            notice_until: None,
+            clipboard: Box::new(MemoryClipboard::default()),
             home,
             current,
         }
@@ -112,14 +133,153 @@ impl Workspace {
         self.opening.is_some()
     }
 
+    /// Whether a query runs.
+    pub fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// The clipboard copies go to.
+    pub fn clipboard(&self) -> &dyn Clipboard {
+        self.clipboard.as_ref()
+    }
+
+    /// Sends copies to `clipboard`, as the platform layer's system clipboard.
+    pub fn set_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
+        self.clipboard = clipboard;
+    }
+
+    /// The main window, once it shows.
+    pub fn main_window_mut(&mut self) -> Option<&mut MainWindow> {
+        match &mut self.screen {
+            Screen::Main(window) => Some(window),
+            Screen::Connect(_) => None,
+        }
+    }
+
     /// Answers a key press.
     pub fn key(&mut self, press: KeyPress, now: Instant) -> WorkspaceCommand {
+        if let Screen::Main(window) = &mut self.screen {
+            let action = window.tab.key(press);
+            self.tab_action(action, now);
+            return WorkspaceCommand::None;
+        }
         let Screen::Connect(card) = &mut self.screen else {
             return WorkspaceCommand::None;
         };
         let (next, action) = handle_key(card.clone(), press);
         *card = next;
         self.act(action, now)
+    }
+
+    fn tab_action(&mut self, action: TabAction, now: Instant) {
+        match action {
+            TabAction::None => {
+                if self.main_window_mut().is_some_and(|window| window.tab.notice.is_some()) {
+                    self.notice_until.get_or_insert(now + NOTICE_SHOWN_FOR);
+                }
+            }
+            TabAction::Run(request) => self.start_run(request, now),
+            TabAction::Stop => {
+                if let Some(running) = &self.running {
+                    running.cancel.cancel();
+                }
+                if let Some(window) = self.main_window_mut() {
+                    window.tab.stop_requested();
+                }
+            }
+            TabAction::Copy { text, toast } => {
+                self.clipboard.put_text(&text);
+                if let Some(window) = self.main_window_mut() {
+                    window.tab.notice = Some(toast);
+                }
+                self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+            }
+        }
+    }
+
+    fn start_run(&mut self, request: RunRequest, now: Instant) {
+        let Some(mut connection) = self.connection.take() else {
+            return;
+        };
+        let (send, answer) = mpsc::channel();
+        let cancel = CancelHandle::default();
+        let worker_cancel = cancel.clone();
+        let statements = request.statements.clone();
+        let dialect = request.dialect;
+        std::thread::spawn(move || {
+            let outcomes = connection.run_script(dialect, &statements, &worker_cancel);
+            let _ = send.send((connection, outcomes));
+        });
+        if let Some(window) = self.main_window_mut() {
+            window.tab.started();
+        }
+        self.running = Some(Running {
+            request,
+            started: now,
+            cancel,
+            answer,
+        });
+    }
+
+    fn finish_run(&mut self, running: Running, answer: RunAnswer, now: Instant) {
+        let (connection, outcomes) = answer;
+        self.connection = Some(connection);
+        let elapsed = now.saturating_duration_since(running.started);
+        if let Some(window) = self.main_window_mut() {
+            window.tab.finish(&running.request, outcomes, elapsed);
+        }
+    }
+
+    fn tick_run(&mut self, now: Instant) -> bool {
+        let Some(running) = &self.running else {
+            return false;
+        };
+        match running.answer.try_recv() {
+            Ok(answer) => {
+                if let Some(running) = self.running.take() {
+                    self.finish_run(running, answer, now);
+                }
+                true
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.running = None;
+                if let Some(window) = self.main_window_mut() {
+                    window.tab.running = false;
+                    window.tab.stopping = false;
+                    window.tab.summary = "Error".to_owned();
+                }
+                true
+            }
+            Err(TryRecvError::Empty) => {
+                let elapsed = now.saturating_duration_since(running.started);
+                self.main_window_mut()
+                    .is_some_and(|window| window.tab.show_running(elapsed))
+            }
+        }
+    }
+
+    /// Waits for the running query to end, up to `limit`, and takes its outcome; for scripted
+    /// runs and tests that render a run's result.
+    pub fn wait_for_run(&mut self, limit: Duration) {
+        let Some(running) = self.running.take() else {
+            return;
+        };
+        match running.answer.recv_timeout(limit) {
+            Ok(answer) => self.finish_run(running, answer, Instant::now()),
+            Err(_) => self.running = Some(running),
+        }
+    }
+
+    /// Puts `text` in the editor, the caret at its end, and runs it as `Ctrl/Cmd+Enter`
+    /// (or, with `all`, `Ctrl/Cmd+Shift+Enter`) would; for scripted runs.
+    pub fn run_text(&mut self, text: &str, all: bool, now: Instant) {
+        let Some(window) = self.main_window_mut() else {
+            return;
+        };
+        window.tab.editor = crate::editor::Editor::new(text);
+        if let Some(request) = window.tab.run_request(all) {
+            self.start_run(request, now);
+        }
     }
 
     fn act(&mut self, action: ConnectAction, now: Instant) -> WorkspaceCommand {
@@ -227,7 +387,14 @@ impl Workspace {
     /// after [`PROGRESS_DELAY`] and clears `Cancelled` after [`CANCELLED_SHOWN_FOR`].
     /// Returns whether the screen changed.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = false;
+        let mut changed = self.tick_run(now);
+        if self.notice_until.is_some_and(|until| now >= until) {
+            self.notice_until = None;
+            if let Some(window) = self.main_window_mut() {
+                window.tab.notice = None;
+            }
+            changed = true;
+        }
         if self.status_until.is_some_and(|until| now >= until) {
             self.status_until = None;
             if let Some(card) = self.card_mut() {
@@ -296,18 +463,9 @@ impl Workspace {
 /// The main window as it first shows `connection` (`docs/ux/workspace.md` 1.7): its name and
 /// location in the toolbar, its tables in the tree, one empty `Query 1` editor.
 pub fn main_window_for(connection: &mut Connection) -> MainWindow {
-    MainWindow {
-        database: connection.name().to_owned(),
-        location: connection.location().to_owned(),
-        writable: !connection.read_only(),
-        tables: connection.table_names().unwrap_or_default(),
-        selected_table: None,
-        sql: String::new(),
-        columns: Vec::new(),
-        rows: Vec::new(),
-        elapsed: String::new(),
-        dialect: DIALECT.to_owned(),
-    }
+    let writable = !connection.read_only();
+    let tables = connection.table_names().unwrap_or_default();
+    MainWindow::opened(connection.name(), connection.location(), writable, tables)
 }
 
 #[cfg(test)]
@@ -369,7 +527,7 @@ mod tests {
         };
         assert_eq!(window.database, "shop");
         assert_eq!(window.location, "shop.eggdb");
-        assert!(window.writable && window.sql.is_empty());
+        assert!(window.writable && window.tab.editor.text().is_empty());
         let connection = workspace.connection_mut().unwrap();
         assert_eq!(connection.status_text(), "Connected · shop.eggdb · read-write");
         assert!(path.exists(), "Create was checked at first start");

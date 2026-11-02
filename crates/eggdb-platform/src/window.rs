@@ -88,8 +88,16 @@ pub enum Key {
     Home,
     /// End.
     End,
+    /// Page Up.
+    PageUp,
+    /// Page Down.
+    PageDown,
+    /// The F2 function key.
+    F2,
     /// The F4 function key.
     F4,
+    /// The F5 function key.
+    F5,
     /// A key that types a character, as typed with the modifiers' effect on case already
     /// applied (`q` or `Q`).
     Character(char),

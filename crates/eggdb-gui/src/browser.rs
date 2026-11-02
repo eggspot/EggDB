@@ -29,6 +29,10 @@ pub fn key_from_dom(key: &str) -> Option<Key> {
         "Home" => Key::Home,
         "End" => Key::End,
         "F4" => Key::F4,
+        "F2" => Key::F2,
+        "F5" => Key::F5,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
         _ => {
             let mut characters = key.chars();
             let character = characters.next()?;

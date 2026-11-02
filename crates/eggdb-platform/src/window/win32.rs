@@ -28,6 +28,10 @@ pub const VK_MENU: i32 = 0x12;
 pub const VK_ESCAPE: usize = 0x1B;
 /// `VK_SPACE`.
 pub const VK_SPACE: usize = 0x20;
+/// `VK_PRIOR` (Page Up).
+pub const VK_PRIOR: usize = 0x21;
+/// `VK_NEXT` (Page Down).
+pub const VK_NEXT: usize = 0x22;
 /// `VK_END`.
 pub const VK_END: usize = 0x23;
 /// `VK_HOME`.
@@ -42,8 +46,12 @@ pub const VK_RIGHT: usize = 0x27;
 pub const VK_DOWN: usize = 0x28;
 /// `VK_DELETE`.
 pub const VK_DELETE: usize = 0x2E;
+/// `VK_F2`.
+pub const VK_F2: usize = 0x71;
 /// `VK_F4`.
 pub const VK_F4: usize = 0x73;
+/// `VK_F5`.
+pub const VK_F5: usize = 0x74;
 
 /// The modifiers from `GetKeyState` results for Shift, Control and Alt: a key is held when
 /// the high bit of its state is set.
@@ -75,6 +83,10 @@ pub fn key_from_virtual_key(virtual_key: usize, modifiers: Modifiers) -> Option<
         VK_HOME => Key::Home,
         VK_END => Key::End,
         VK_F4 => Key::F4,
+        VK_F2 => Key::F2,
+        VK_F5 => Key::F5,
+        VK_PRIOR => Key::PageUp,
+        VK_NEXT => Key::PageDown,
         0x30..=0x39 | 0x41..=0x5A if modifiers.control && !modifiers.alt => {
             let code = u8::try_from(virtual_key).ok()?;
             let character = char::from(code);
@@ -311,6 +323,10 @@ mod tests {
             (VK_HOME, Key::Home),
             (VK_END, Key::End),
             (VK_F4, Key::F4),
+            (VK_F2, Key::F2),
+            (VK_F5, Key::F5),
+            (VK_PRIOR, Key::PageUp),
+            (VK_NEXT, Key::PageDown),
         ];
         for (virtual_key, key) in cases {
             assert_eq!(key_from_virtual_key(virtual_key, plain), Some(key));

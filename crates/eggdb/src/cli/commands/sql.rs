@@ -623,7 +623,7 @@ pub(super) fn value_json(value: &Value, dialect: Dialect) -> String {
 }
 
 pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &str) {
-    let lines = error_lines(error, text);
+    let lines = eggdb::sql::error_lines(error, text);
     for (index, line) in lines.iter().enumerate() {
         let prefix = if line.starts_with("Error:") {
             "Error:"
@@ -643,61 +643,6 @@ pub(super) fn print_error(messages: &mut Output<'_>, error: &SqlError, text: &st
         }
         messages.text("\n");
     }
-}
-
-pub(crate) fn error_lines(error: &SqlError, text: &str) -> Vec<String> {
-    if error.vendor() == Some(Dialect::Sqlite) {
-        let code = error.vendor_code().unwrap_or(1);
-        let name = eggdb_sql::sqlite_result_code_name(code).unwrap_or("SQLITE_ERROR");
-        return vec![
-            format!("Error: {}", error.message()),
-            format!("Result code: {name} ({code})"),
-        ];
-    }
-    if error.vendor() == Some(Dialect::Oracle) || error.vendor() == Some(Dialect::SqlServer) {
-        return vec![error.to_string()];
-    }
-    if let Some(code) = error.vendor_code() {
-        return vec![format!(
-            "ERROR {code} ({}): {}",
-            error.state(),
-            error.message()
-        )];
-    }
-    let mut lines = vec![format!("ERROR:  {}", error.message())];
-    if let Some(position) = error.position().filter(|&position| position <= text.len()) {
-        let (number, line, column) = line_of(text, position);
-        let prefix = format!("LINE {number}: ");
-        lines.push(format!("{prefix}{line}"));
-        lines.push(format!("{}^", " ".repeat(prefix.chars().count() + column)));
-    }
-    if let Some(detail) = error.detail() {
-        lines.push(format!("DETAIL:  {detail}"));
-    }
-    if let Some(hint) = error.hint() {
-        lines.push(format!("HINT:  {hint}"));
-    }
-    if let Some(context) = error.context() {
-        lines.push(format!("CONTEXT:  {context}"));
-    }
-    lines.push(format!("SQLSTATE:  {}", error.state()));
-    lines
-}
-
-fn line_of(text: &str, position: usize) -> (usize, &str, usize) {
-    let mut position = position;
-    while !text.is_char_boundary(position) {
-        position -= 1;
-    }
-    let before = &text[..position];
-    let number = before.matches('\n').count() + 1;
-    let start = before.rfind('\n').map_or(0, |index| index + 1);
-    let end = text[position..]
-        .find('\n')
-        .map_or(text.len(), |index| position + index);
-    let line = text[start..end].trim_end_matches('\r');
-    let column = text[start..position].chars().count();
-    (number, line, column)
 }
 
 pub(super) fn print_result(out: &mut Output<'_>, result: &QueryResult, dialect: Dialect) {
@@ -1020,13 +965,5 @@ mod tests {
             db.close().unwrap();
         }
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn an_error_position_names_its_line_and_column() {
-        let text = "SELECT 1;\nSELECT * FROM nope;";
-        assert_eq!(line_of(text, 24), (2, "SELECT * FROM nope;", 14));
-        assert_eq!(line_of(text, 0), (1, "SELECT 1;", 0));
-        assert_eq!(line_of("é x", 3), (1, "é x", 2));
     }
 }

@@ -1,9 +1,19 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use eggdb::sql::{Dialect, QueryResult, SqlError};
+use eggdb::sql::{CancelSignal, Dialect, QueryResult, SqlError, Value, error_lines};
 use eggdb::{Database, Error, ErrorKind, Options};
-use eggdb_pgwire::client::{ClientError, ConnectOptions, PgClient, QueryRows, SslMode};
+use eggdb_pgwire::client::{
+    CancelRequest, ClientError, ConnectOptions, PgClient, QueryRows, SslMode,
+};
+
+use crate::dialect::QueryDialect;
+use crate::grid::ValueKind;
+
+/// The most rows one result keeps for the grid; the rest are counted, not held
+/// (`docs/ux/workspace.md` 3.7).
+pub const ROW_LIMIT: usize = 100_000;
 
 const USER_TABLES: &str = "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY tablename";
 const AUTHENTICATION_FAILED: &str = "28P01";
@@ -91,8 +101,13 @@ impl ConnectFailure {
 pub struct ResultTable {
     /// The column names; empty for a statement that returns no rows.
     pub columns: Vec<String>,
-    /// Each row's values as text, `None` for NULL.
+    /// Each column's kind of value, which sets its cells' alignment and drawing.
+    pub kinds: Vec<ValueKind>,
+    /// Each row's values as text, `None` for NULL, at most [`ROW_LIMIT`] of them.
     pub rows: Vec<Vec<Option<String>>>,
+    /// How many rows the statement returned: more than `rows.len()` when the result was cut
+    /// at [`ROW_LIMIT`].
+    pub row_count: usize,
     /// The command tag, such as `SELECT 3`.
     pub tag: String,
 }
@@ -106,30 +121,117 @@ pub struct StatementFailure {
     pub message: String,
     /// The engine's hint, when it has one.
     pub hint: Option<String>,
+    /// The byte offset in the statement's text the error is about, when the engine gives one.
+    pub position: Option<usize>,
+    /// The lines `eggdb sql` prints for it: `ERROR:`, `LINE n:` with its `^`, `SQLSTATE:`.
+    pub report: Vec<String>,
 }
 
 impl StatementFailure {
-    fn from_sql(error: &SqlError) -> Self {
+    fn from_sql(error: &SqlError, text: &str) -> Self {
         Self {
             code: error.state().code().to_owned(),
             message: error.message().to_owned(),
             hint: error.hint().map(str::to_owned),
+            position: error.position().filter(|&position| position <= text.len()),
+            report: error_lines(error, text),
         }
     }
 
     fn from_client(error: &ClientError) -> Self {
-        match error {
-            ClientError::Server { code, message } => Self {
-                code: code.clone(),
-                message: message.clone(),
-                hint: None,
-            },
-            other => Self {
-                code: String::new(),
-                message: other.to_string(),
-                hint: None,
-            },
+        let (code, message) = match error {
+            ClientError::Server { code, message } => (code.clone(), message.clone()),
+            other => (String::new(), other.to_string()),
+        };
+        let mut report = vec![format!("ERROR:  {message}")];
+        if !code.is_empty() {
+            report.push(format!("SQLSTATE:  {code}"));
         }
+        Self {
+            code,
+            message,
+            hint: None,
+            position: None,
+            report,
+        }
+    }
+}
+
+enum Stopper {
+    File(CancelSignal),
+    Server(CancelRequest),
+}
+
+impl Stopper {
+    fn stop(self) {
+        match self {
+            Self::File(signal) => signal.cancel(),
+            Self::Server(request) => {
+                std::thread::spawn(move || {
+                    let _ = request.send();
+                });
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct CancelState {
+    requested: bool,
+    stopper: Option<Stopper>,
+}
+
+/// Stops a running [`Connection::run_script`] from another thread: a file's session gets the
+/// engine's cancel signal, a server gets PostgreSQL's cancel request. A cancel that comes
+/// before the run starts stops it as soon as it starts.
+#[derive(Clone, Default)]
+pub struct CancelHandle(Arc<Mutex<CancelState>>);
+
+impl std::fmt::Debug for CancelHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CancelHandle")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl CancelHandle {
+    /// Asks the running statement to stop.
+    pub fn cancel(&self) {
+        let stopper = {
+            let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            state.requested = true;
+            state.stopper.take()
+        };
+        if let Some(stopper) = stopper {
+            stopper.stop();
+        }
+    }
+
+    /// Whether [`CancelHandle::cancel`] was called.
+    pub fn is_cancelled(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .requested
+    }
+
+    fn arm(&self, stopper: Stopper) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.requested {
+            drop(state);
+            stopper.stop();
+        } else {
+            state.stopper = Some(stopper);
+        }
+    }
+
+    fn disarm(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stopper = None;
     }
 }
 
@@ -231,7 +333,9 @@ impl Connection {
             Link::File(database) => {
                 let store = database.sql_store();
                 let mut session = store.session(Dialect::PostgreSql);
-                let tables = session.tables().map_err(|error| StatementFailure::from_sql(&error));
+                let tables = session
+                    .tables()
+                    .map_err(|error| StatementFailure::from_sql(&error, ""));
                 let _ = session.close();
                 let mut names: Vec<String> = tables?.into_iter().map(|table| table.name).collect();
                 names.sort();
@@ -253,45 +357,145 @@ impl Connection {
     /// Runs `sql` (one or more statements in PostgreSQL's dialect) and returns each
     /// statement's result as text.
     pub fn run(&mut self, sql: &str) -> Result<Vec<ResultTable>, StatementFailure> {
+        let outcomes = self.run_script(
+            QueryDialect::PostgreSql,
+            &[sql.to_owned()],
+            &CancelHandle::default(),
+        );
+        outcomes.into_iter().next().unwrap_or(Ok(Vec::new()))
+    }
+
+    /// Runs `statements` one after another in `dialect` on one session, so a `BEGIN` in one
+    /// holds for the next, and stops at the first that fails: the answer has one entry per
+    /// statement that ran, the last one the failure when there was one. `cancel` can stop the
+    /// running statement from another thread.
+    pub fn run_script(
+        &mut self,
+        dialect: QueryDialect,
+        statements: &[String],
+        cancel: &CancelHandle,
+    ) -> Vec<Result<Vec<ResultTable>, StatementFailure>> {
+        let mut outcomes = Vec::with_capacity(statements.len());
         match &mut self.link {
             Link::File(database) => {
                 let store = database.sql_store();
-                let mut session = store.session(Dialect::PostgreSql);
-                let mut tables = Vec::new();
-                let ran = session.execute(sql, &mut |result| tables.push(file_result(result)));
+                let mut session = store.session(dialect.engine());
+                cancel.arm(Stopper::File(session.cancel_signal()));
+                for statement in statements {
+                    let mut tables = Vec::new();
+                    let ran =
+                        session.execute(statement, &mut |result| tables.push(file_result(result)));
+                    let failed = ran.is_err();
+                    outcomes.push(
+                        ran.map(|()| tables)
+                            .map_err(|error| StatementFailure::from_sql(&error, statement)),
+                    );
+                    if failed {
+                        break;
+                    }
+                }
+                cancel.disarm();
                 let _ = session.close();
-                ran.map_err(|error| StatementFailure::from_sql(&error))?;
-                Ok(tables)
             }
-            Link::Server(client) => client
-                .simple_query(sql)
-                .map(|results| results.into_iter().map(server_result).collect())
-                .map_err(|error| StatementFailure::from_client(&error)),
+            Link::Server(client) => {
+                if let Some(request) = client.cancel_request() {
+                    cancel.arm(Stopper::Server(request));
+                }
+                for statement in statements {
+                    let ran = client
+                        .simple_query(statement)
+                        .map(|results| results.into_iter().map(server_result).collect())
+                        .map_err(|error| StatementFailure::from_client(&error));
+                    let failed = ran.is_err();
+                    outcomes.push(ran);
+                    if failed {
+                        break;
+                    }
+                }
+                cancel.disarm();
+            }
         }
+        outcomes
     }
 }
 
 fn file_result(result: QueryResult) -> ResultTable {
+    let columns: Vec<String> = result
+        .columns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    let kinds = (0..columns.len())
+        .map(|column| {
+            result
+                .rows
+                .iter()
+                .find_map(|row| row.get(column).and_then(value_kind))
+                .unwrap_or(ValueKind::Text)
+        })
+        .collect();
+    let row_count = result.rows.len();
     ResultTable {
-        columns: result
-            .columns
-            .unwrap_or_default()
-            .into_iter()
-            .map(|column| column.name)
-            .collect(),
+        columns,
+        kinds,
         rows: result
             .rows
             .iter()
+            .take(ROW_LIMIT)
             .map(|row| row.iter().map(|value| value.to_text()).collect())
             .collect(),
+        row_count,
         tag: result.tag,
     }
 }
 
+fn value_kind(value: &Value) -> Option<ValueKind> {
+    Some(match value {
+        Value::Null => return None,
+        Value::SmallInt(_)
+        | Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Real(_)
+        | Value::Double(_)
+        | Value::Numeric(_)
+        | Value::Oid(_) => ValueKind::Number,
+        Value::Boolean(_) => ValueKind::Boolean,
+        Value::Json(_) | Value::Jsonb(_) | Value::Array(_) => ValueKind::Json,
+        Value::Bytea(_) => ValueKind::Blob,
+        _ => ValueKind::Text,
+    })
+}
+
+/// The kind of value a PostgreSQL type OID holds, for a server's result columns.
+pub fn type_oid_kind(oid: u32) -> ValueKind {
+    match oid {
+        20 | 21 | 23 | 26 | 700 | 701 | 790 | 1700 => ValueKind::Number,
+        16 => ValueKind::Boolean,
+        17 => ValueKind::Blob,
+        114 | 3802 | 199 | 1000..=1041 | 1115 | 1182 | 1183 | 1185 | 1231 | 3807 => {
+            ValueKind::Json
+        }
+        _ => ValueKind::Text,
+    }
+}
+
 fn server_result(result: QueryRows) -> ResultTable {
+    let row_count = result.rows.len();
+    let kinds = result
+        .column_types
+        .iter()
+        .map(|&oid| type_oid_kind(oid))
+        .chain(std::iter::repeat(ValueKind::Text))
+        .take(result.columns.len())
+        .collect();
+    let mut rows = result.rows;
+    rows.truncate(ROW_LIMIT);
     ResultTable {
         columns: result.columns,
-        rows: result.rows,
+        kinds,
+        rows,
+        row_count,
         tag: result.tag,
     }
 }

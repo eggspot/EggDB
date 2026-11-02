@@ -79,18 +79,7 @@ fn a_typed_path_opens_the_main_window_on_the_file() {
     let _ = std::fs::remove_file(&path);
     let frame = binary_png(&directory, &["--open", "shop.eggdb"]);
     assert!(path.exists(), "Create is checked by default, so the file was created");
-    let expected = MainWindow {
-        database: "shop".to_owned(),
-        location: "shop.eggdb".to_owned(),
-        writable: true,
-        tables: Vec::new(),
-        selected_table: None,
-        sql: String::new(),
-        columns: Vec::new(),
-        rows: Vec::new(),
-        elapsed: String::new(),
-        dialect: "PostgreSQL".to_owned(),
-    };
+    let expected = MainWindow::opened("shop", "shop.eggdb", true, Vec::new());
     let library = main_window::draw(&expected, Theme::of(ThemeKind::Light), BOX_FACES);
     assert_eq!(frame, encode_png(&library), "the main window on shop.eggdb");
     let reopened = binary_png(&directory, &["--open", "shop.eggdb", "--no-create", "--read-only"]);
@@ -357,7 +346,7 @@ fn connecting_to_a_running_server_opens_the_main_window_on_its_database() {
         Screen::Main(window) => {
             assert_eq!(window.database, "shop");
             assert_eq!(window.location, place);
-            assert!(window.sql.is_empty());
+            assert!(window.tab.editor.text().is_empty());
         }
         Screen::Connect(card) => panic!("still on the card: {:?}", card.error),
     }
