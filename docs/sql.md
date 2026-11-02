@@ -636,16 +636,23 @@ SELECT @@VERSION
   alias (columns)` as a table, and `SELECT total = qty * price`.
 - **`MERGE`** (D138): `MERGE [INTO] target [[AS] alias] USING source [[AS] alias [(columns)]] ON
   condition`, then `WHEN MATCHED [AND condition] THEN UPDATE SET ... | DELETE` and `WHEN NOT
-  MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)] VALUES (...)`, and `OUTPUT` with
-  `inserted.`, `deleted.` and the source's columns (rows of changed rows first, then inserted
-  ones); the tag is `MERGE n`. `WHEN NOT MATCHED BY SOURCE`, a second `WHEN MATCHED`, `$action`,
-  `TOP`, table hints and `OUTPUT ... INTO` are 40517, and a `MERGE` without `WHEN` is Msg 10713.
+  MATCHED [BY TARGET] [AND condition] THEN INSERT [(columns)] VALUES (...)`, up to two `WHEN NOT
+  MATCHED BY SOURCE [AND condition] THEN UPDATE SET ... | DELETE` for target rows no source row
+  matches (the first of two needs `AND`, and they are one `UPDATE` and one `DELETE`, else Msg
+  10714; the source's columns are NULL there) (D291), and `OUTPUT` with `inserted.`, `deleted.`
+  and the source's columns (rows of changed rows first, then rows changed by source, then
+  inserted ones); the tag is `MERGE n`. A second `WHEN MATCHED`, `$action`, `TOP`, table hints
+  and `OUTPUT ... INTO` are 40517, and a `MERGE` without `WHEN` is Msg 10713.
 - **`OPENJSON(json [, path]) WITH (column type ['path'] [AS JSON], ...) [AS] alias`** in `FROM`
   (D138): one row per element of a JSON array (an object is one row), each column the value at
   its path (`$`, `$.key`, `$."key"`, `$[n]`, `lax`; without a path the key named as the column
   is written) converted to its type, NULL when missing or, without `AS JSON`, when it is an
   object or array; text that is not an array or object is Msg 13609, a bad path Msg 13607.
-  `OPENJSON` without `WITH`, `strict` paths and `CROSS APPLY` are 40517.
+  Without `WITH` (D291), `OPENJSON(json [, path]) [AS] alias` returns SQL Server's default
+  schema: one row per array element or object member with `key` (the index from 0, or the
+  member's name), `value` (the text of a scalar, NULL for `null`, the JSON text of an array or
+  object) and `type` (0 null, 1 string, 2 number, 3 `true`/`false`, 4 array, 5 object).
+  `strict` paths and `CROSS APPLY` are 40517.
 - **Defaults** may be any Transact-SQL expression without column references, subqueries or
   variables, inline or through `ALTER TABLE ... ADD [CONSTRAINT name] DEFAULT ... FOR column`
   (D147). Constants are folded to the column's type (`DEFAULT ((0))` on a `bit` column is false)
@@ -3412,13 +3419,16 @@ between them; `@LockOwner` is `Transaction` (the default, which needs an open tr
 ends with it) or `Session` (until released or the session ends; each take needs its own
 release); `@LockTimeout` is in milliseconds, `-1` or none waits as long as it takes and `0`
 returns at once. `EXEC @result = sp_getapplock ...` sets `@result` to 0 (granted at once), 1
-(granted after waiting) or -1 (timed out); `sp_releaseapplock` returns 0. A bad argument or
+(granted after waiting), -1 (timed out), -2 (the wait was cancelled; the cancel still ends the
+batch) or -3 (deadlock victim: the session it waits for waits, directly or through others, for
+an application lock this session holds, so the request that closes the cycle is refused and
+the others keep waiting) (D291); `sp_releaseapplock` returns 0. A bad argument or
 releasing a lock the session does not hold returns -999 with SQL Server's error 1223 to 1228,
 ending the statement and not the batch. `APPLOCK_MODE('public', resource, owner)` names the mode
 the session holds (`NoLock` when none) and `APPLOCK_TEST('public', resource, mode, owner)` returns
 1 when the lock could be granted now, 0 when not. `@DbPrincipal` is accepted and not checked.
-Not yet: -2 (cancelled) and -3 (deadlock victim), which EggDB reports as the cancel or error
-itself.
+A cycle through PostgreSQL's advisory locks or row locks is not seen by the application-lock
+deadlock check.
 
 CI's `pg-apps` job runs the ORM section of `crates/eggdb/tests/clients/python/app_check.py` and
 `crates/eggdb/tests/clients/java/FlywayCheck.java` (with the migrations in
@@ -4159,9 +4169,12 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   Server's normalized form. `sp_statistics` reports no row counts or pages; `sp_tables` and
   `sp_columns` list the database's own tables and views, not the `sys` and `INFORMATION_SCHEMA`
   views. Object ids change when an object is renamed.
-- `GetSchema("Databases")` (it runs `EXEC sp_executesql` inside a batch over
-  `master..sysdatabases`) and mssql-jdbc's `getSchemas()` (it names `sys.schemas.name` with three
-  parts) are not answered yet.
+- SqlClient's `GetSchema("Databases")` is answered (D291): its `IF OBJECT_ID(...) ... EXEC
+  sp_executesql` batch reads the compatibility view `sysdatabases` (`sys.sysdatabases`, also as
+  `dbo.sysdatabases` and `master..sysdatabases`: `name`, `dbid`, `sid`, `mode`, `status`,
+  `status2`, `crdate`, `reserved`, `category`, `cmptlevel`, `filename`, `version`).
+  mssql-jdbc's `getSchemas()` (it names `sys.schemas.name` with three parts) is not answered
+  yet.
 - Under `IMPLICIT_TRANSACTIONS ON`, a `SELECT` starts no transaction (SQL Server's does), so
   `@@TRANCOUNT` stays 0 after reads alone.
 - Over TDS: an `OUTPUT` parameter comes back in the type of its declaration, whatever TDS type
