@@ -62,6 +62,7 @@ impl Parser<'_> {
         } else {
             Some(self.table_name()?)
         };
+        let name_start = self.previous_start();
         if self.mysql() {
             self.index_method()?;
         }
@@ -107,6 +108,13 @@ impl Parser<'_> {
             },
             table,
             if_not_exists,
+            sqlite_text: self.sqlite().then(|| {
+                let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
+                format!(
+                    "CREATE {kind} {}",
+                    self.slice(name_start, self.previous_end())
+                )
+            }),
         }))
     }
 

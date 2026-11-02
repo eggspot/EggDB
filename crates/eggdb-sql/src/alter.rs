@@ -94,7 +94,8 @@ pub(crate) fn alter_table(
         )
         .at(alter.name.position));
     }
-    crate::sqlite_schema_text::forget(writer, &alter.name.text)?;
+    let sqlite_texts =
+        crate::sqlite_schema_text::AlteredTexts::take(writer, &alter.name.text, dialect)?;
     let mut name = alter.name.text.clone();
     for action in &alter.actions {
         if let Some(notice) = apply(writer, tables, &mut name, action, dialect)? {
@@ -109,6 +110,7 @@ pub(crate) fn alter_table(
             crate::comments::forget_part(writer, &name, CommentKind::Column, &column.text)?;
         }
     }
+    sqlite_texts.save(writer, &name, &alter.actions)?;
     Ok(result)
 }
 
@@ -143,6 +145,7 @@ fn apply(
         AlterAction::AddColumn {
             column,
             if_not_exists,
+            ..
         } => add_column(writer, tables, name, column, *if_not_exists, dialect),
         AlterAction::DropColumn {
             name: column,
@@ -1800,6 +1803,7 @@ fn add_constraint(
                     position: spec.position,
                 },
                 if_not_exists: false,
+                sqlite_text: None,
             };
             indexes::create_index_as(writer, tables, &create, dialect, true).map(|_| ())
         }

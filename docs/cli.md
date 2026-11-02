@@ -1094,7 +1094,11 @@ Server's error 3702) while any connection uses the database, including the one d
 the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `-` or `$`
 (`42602` otherwise). Serving a single file, or `--read-only`, creates and drops nothing
 (`0A000`). Statements after a `USE` that changes the database in the same batch fail with
-`0A000`: send them in the next batch (D270).
+`0A000`: send them in the next batch (D270). A connection holding a temporary table (`#work`,
+`CREATE TEMPORARY TABLE`) or a session-level lock (`pg_advisory_lock`, `sp_getapplock` with
+`@LockOwner = 'Session'`) does not move: `USE` and `COM_INIT_DB` fail with `0A000` (SQL
+Server's error 40508, MySQL's 1235) naming what it holds, because the switch would drop and
+release them; drop and release them first, or open another connection (D294).
 
 | Option | Meaning |
 |--------|---------|

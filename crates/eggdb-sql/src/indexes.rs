@@ -656,6 +656,7 @@ pub(crate) fn drop_index(
             return Err(index_missing(name, dialect));
         };
         let index = definition.indexes.remove(position);
+        crate::sqlite_schema_text::forget_index(writer, &definition.name, &index.name)?;
         crate::comments::forget_part(
             writer,
             &definition.name,

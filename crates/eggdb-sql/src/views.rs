@@ -543,6 +543,7 @@ fn remove_view(
     }
     crate::store::delete_prefix(writer, &comments_prefix(&view.name))?;
     crate::triggers::remove_table_triggers(writer, &view.name)?;
+    crate::sqlite_schema_text::forget(writer, &view.name)?;
     writer.delete(&table_key(&view.name))?;
     Ok(())
 }
@@ -589,6 +590,7 @@ pub(crate) fn move_view(writer: &mut dyn KeyValueWrite, from: &str, to: &str) ->
     };
     let mut view = ViewDefinition::decode(from, &bytes)?;
     forget_dependencies(writer, &view)?;
+    crate::sqlite_schema_text::forget(writer, from)?;
     writer.delete(&table_key(from))?;
     view.name = to.to_owned();
     writer.put(&table_key(to), &view.encode())?;

@@ -932,10 +932,12 @@ impl Parser<'_> {
     fn add_action(&mut self, actions: &mut Vec<AlterAction>, position: usize) -> SqlResult<()> {
         if self.sqlite() {
             self.take_word("column");
+            let start = self.tokens.get(self.at).map_or(0, |token| token.start);
             let column = self.add_column_definition()?;
             actions.push(AlterAction::AddColumn {
                 column,
                 if_not_exists: false,
+                sqlite_text: Some(self.slice(start, self.previous_end())),
             });
             return Ok(());
         }
@@ -988,6 +990,7 @@ impl Parser<'_> {
                     actions.push(AlterAction::AddColumn {
                         column,
                         if_not_exists: false,
+                        sqlite_text: None,
                     });
                 }
                 if !self.take(&TokenKind::Comma) {
@@ -1014,6 +1017,7 @@ impl Parser<'_> {
         actions.push(AlterAction::AddColumn {
             column,
             if_not_exists,
+            sqlite_text: None,
         });
         if let Some(placement) = placement {
             actions.push(AlterAction::MoveColumn {

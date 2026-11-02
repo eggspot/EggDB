@@ -208,6 +208,7 @@ impl<'t> Parser<'t> {
             return Err(self.unexpected());
         }
         let name = self.table_name()?;
+        let name_start = self.previous_start();
         let columns = if self.peek_kind() == &TokenKind::LeftParen {
             self.name_list()?
         } else {
@@ -268,6 +269,12 @@ impl<'t> Parser<'t> {
             query,
             text,
             check_option,
+            sqlite_text: (self.sqlite() && !temporary).then(|| {
+                format!(
+                    "CREATE VIEW {}",
+                    self.slice(name_start, self.previous_end())
+                )
+            }),
             temporary,
         })))
     }

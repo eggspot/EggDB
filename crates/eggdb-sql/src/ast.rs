@@ -612,6 +612,7 @@ pub(crate) struct CreateView {
     pub(crate) text: String,
     pub(crate) check_option: Option<crate::encoding::CheckOption>,
     pub(crate) temporary: bool,
+    pub(crate) sqlite_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -754,6 +755,7 @@ pub(crate) enum AlterAction {
     AddColumn {
         column: ColumnDefinition,
         if_not_exists: bool,
+        sqlite_text: Option<String>,
     },
     DropColumn {
         name: Name,
@@ -849,6 +851,7 @@ pub(crate) struct CreateIndex {
     pub(crate) index: IndexSpec,
     pub(crate) table: Name,
     pub(crate) if_not_exists: bool,
+    pub(crate) sqlite_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

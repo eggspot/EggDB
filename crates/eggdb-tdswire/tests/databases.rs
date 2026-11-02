@@ -1,6 +1,7 @@
 //! Databases created while the server runs (D270) over TDS: `CREATE DATABASE` and
 //! `DROP DATABASE`, `sys.databases`, a login naming a new database, and `USE` moving a
-//! connection between databases with the database ENVCHANGE.
+//! connection between databases with the database ENVCHANGE, refused (`40508`) while the
+//! connection holds a `#temp` table or a session-owned application lock (D294).
 
 mod common;
 
@@ -122,4 +123,39 @@ fn the_servers_own_login_keeps_its_rights_after_use() {
     assert!(!directory.names().contains(&"scratch".to_owned()));
     let created = client.batch("CREATE DATABASE kept");
     assert!(errors(&created).is_empty(), "{created:?}");
+}
+
+#[test]
+fn use_is_refused_while_a_temp_table_or_a_session_lock_would_be_left_behind() {
+    let directory = MemoryDirectory::with(&[DATABASE]);
+    let server = TestServer::start_directory(directory.clone());
+    let mut client = Client::login(server.address);
+    assert!(errors(&client.batch("CREATE DATABASE audit")).is_empty());
+    assert!(errors(&client.batch("CREATE TABLE #work (id INT)")).is_empty());
+    let refused = client.batch("USE audit");
+    let refusal = errors(&refused);
+    assert_eq!(refusal.first().map(|error| error.0), Some(40508), "{refused:?}");
+    assert!(refusal[0].2.contains("temporary table #work"), "{refusal:?}");
+    assert!(!changed_to(&refused, "audit"), "{refused:?}");
+    assert!(errors(&client.batch("INSERT INTO #work VALUES (1)")).is_empty());
+    assert!(errors(&client.batch("DROP TABLE #work")).is_empty());
+    let locked = client.batch(
+        "EXEC sp_getapplock @Resource = 'nightly', @LockMode = 'Exclusive', @LockOwner = 'Session'",
+    );
+    assert!(errors(&locked).is_empty(), "{locked:?}");
+    let refused = client.batch("USE audit");
+    assert!(
+        errors(&refused)
+            .first()
+            .is_some_and(|error| error.2.contains("application lock 'nightly'")),
+        "{refused:?}"
+    );
+    assert!(
+        errors(&client.batch(
+            "EXEC sp_releaseapplock @Resource = 'nightly', @LockOwner = 'Session'"
+        ))
+        .is_empty()
+    );
+    let used = client.batch("USE audit");
+    assert!(changed_to(&used, "audit"), "{used:?}");
 }

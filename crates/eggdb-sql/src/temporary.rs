@@ -116,6 +116,12 @@ pub(crate) fn next_id(reader: &dyn KeyValueRead) -> SqlResult<u32> {
         })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TemporaryRelation {
+    pub(crate) name: String,
+    pub(crate) is_view: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct TemporaryObjects {
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -130,6 +136,20 @@ fn entry_bytes(key: &[u8], value: &[u8]) -> usize {
 impl TemporaryObjects {
     pub(crate) fn has_objects(&self) -> bool {
         !self.entries.is_empty()
+    }
+
+    pub(crate) fn relations(&self) -> Vec<TemporaryRelation> {
+        let prefix = table_key("");
+        self.entries
+            .range(prefix.clone()..prefix_end(&prefix))
+            .filter_map(|(key, value)| {
+                let name = std::str::from_utf8(key.get(prefix.len()..)?).ok()?;
+                Some(TemporaryRelation {
+                    name: crate::schemas::base_name(name).to_owned(),
+                    is_view: is_view_record(value),
+                })
+            })
+            .collect()
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
@@ -407,6 +427,27 @@ mod tests {
         writer.commit().unwrap();
         objects.rollback();
         assert!(!objects.has_objects());
+    }
+
+    #[test]
+    fn temporary_relations_are_named_without_their_schema() {
+        let store = MemoryStore::default();
+        let mut objects = TemporaryObjects::default();
+        let mut writer = store.begin_write().unwrap();
+        let mut routed = TemporaryWrite {
+            inner: &mut writer,
+            objects: &mut objects,
+        };
+        routed
+            .put(&table_key(&internal_name("#orders")), b"x")
+            .unwrap();
+        routed.put(&rows_prefix(u32::MAX - (1 << 24)), b"row").unwrap();
+        let names: Vec<String> = objects
+            .relations()
+            .into_iter()
+            .map(|relation| relation.name)
+            .collect();
+        assert_eq!(names, ["#orders"]);
     }
 
     #[test]

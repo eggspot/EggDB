@@ -5,7 +5,8 @@ use crate::ast::{
 };
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
-use crate::schema::{ColumnSchema, TableSchema, read_tables};
+use crate::encoding::ViewDefinition;
+use crate::schema::{ColumnSchema, IndexSchema, TableSchema, read_tables};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::collections::BTreeMap;
@@ -143,6 +144,65 @@ pub(crate) fn create_text(table: &TableSchema) -> String {
         identifier(&table.name),
         parts.join(", ")
     )
+}
+
+pub(crate) fn index_text(table: &TableSchema, index: &IndexSchema) -> String {
+    index
+        .create_statement_in(&table.name, crate::Dialect::Sqlite)
+        .trim_end_matches(';')
+        .to_owned()
+}
+
+pub(crate) fn view_text(view: &ViewDefinition) -> String {
+    format!(
+        "CREATE VIEW {} AS {}",
+        identifier(crate::schemas::base_name(&view.name)),
+        view.query
+    )
+}
+
+fn kept_index_text(
+    reader: &dyn KeyValueRead,
+    table: &TableSchema,
+    index: &IndexSchema,
+) -> SqlResult<Option<String>> {
+    if index.name.starts_with("sqlite_autoindex_") {
+        return Ok(None);
+    }
+    let generated = index_text(table, index);
+    if table.schema != crate::schemas::DEFAULT_SCHEMA {
+        return Ok(Some(generated));
+    }
+    Ok(Some(
+        crate::sqlite_schema_text::original_index_text(reader, &table.name, &index.name, &generated)?
+            .unwrap_or(generated),
+    ))
+}
+
+struct ListedView {
+    name: String,
+    text: String,
+}
+
+fn listed_views(reader: &dyn KeyValueRead) -> SqlResult<Vec<ListedView>> {
+    let mut listed = Vec::new();
+    for view in crate::views::every_view(reader)? {
+        if crate::temporary::is_temporary_name(&view.name) {
+            continue;
+        }
+        let generated = view_text(&view);
+        let text = if crate::schemas::schema_of(&view.name) == crate::schemas::DEFAULT_SCHEMA {
+            crate::sqlite_schema_text::original_text(reader, &view.name, &generated)?
+                .unwrap_or(generated)
+        } else {
+            generated
+        };
+        listed.push(ListedView {
+            name: crate::schemas::base_name(&view.name).to_owned(),
+            text,
+        });
+    }
+    Ok(listed)
 }
 
 fn kept_create_text(reader: &dyn KeyValueRead, table: &TableSchema) -> SqlResult<String> {
@@ -438,16 +498,28 @@ impl<'s> Session<'s> {
             ));
         };
         let temporary = from.first.name.text.starts_with("sqlite_temp");
-        let (tables, texts, triggers) = if temporary {
-            (Vec::new(), Vec::new(), Vec::new())
+        let (tables, texts, views, triggers) = if temporary {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
             self.read(|reader, _| {
                 let tables = read_tables(reader)?;
                 let texts = tables
                     .iter()
-                    .map(|table| kept_create_text(reader, table))
+                    .map(|table| {
+                        let indexes = table
+                            .indexes
+                            .iter()
+                            .map(|index| kept_index_text(reader, table, index))
+                            .collect::<SqlResult<Vec<_>>>()?;
+                        Ok((kept_create_text(reader, table)?, indexes))
+                    })
                     .collect::<SqlResult<Vec<_>>>()?;
-                Ok((tables, texts, crate::triggers::every_trigger(reader)?))
+                Ok((
+                    tables,
+                    texts,
+                    listed_views(reader)?,
+                    crate::triggers::every_trigger(reader)?,
+                ))
             })?
         };
         let name = from.first.name.text.clone();
@@ -495,10 +567,10 @@ impl<'s> Session<'s> {
             &create,
             crate::Dialect::PostgreSql,
         )?;
-        if !tables.is_empty() || !triggers.is_empty() {
+        if !tables.is_empty() || !views.is_empty() || !triggers.is_empty() {
             let mut rootpage = 1;
             let mut rows = Vec::new();
-            for (table, text) in tables.iter().zip(texts) {
+            for (table, (text, index_texts)) in tables.iter().zip(texts) {
                 rootpage += 1;
                 rows.push(vec![
                     text_literal("table".to_owned()),
@@ -507,15 +579,9 @@ impl<'s> Session<'s> {
                     integer_literal(rootpage),
                     text_literal(text),
                 ]);
-                for index in &table.indexes {
+                for (index, index_text) in table.indexes.iter().zip(index_texts) {
                     rootpage += 1;
-                    let sql = if index.name.starts_with("sqlite_autoindex_") {
-                        null_literal()
-                    } else {
-                        let statement =
-                            index.create_statement_in(&table.name, crate::Dialect::Sqlite);
-                        text_literal(statement.trim_end_matches(';').to_owned())
-                    };
+                    let sql = index_text.map_or_else(null_literal, text_literal);
                     rows.push(vec![
                         text_literal("index".to_owned()),
                         text_literal(index.name.clone()),
@@ -525,14 +591,28 @@ impl<'s> Session<'s> {
                     ]);
                 }
             }
+            for view in views {
+                rows.push(vec![
+                    text_literal("view".to_owned()),
+                    text_literal(view.name.clone()),
+                    text_literal(view.name),
+                    integer_literal(0),
+                    text_literal(view.text),
+                ]);
+            }
             for listed in &triggers {
                 for trigger in &listed.triggers {
+                    let text = if trigger.dialect == crate::Dialect::Sqlite {
+                        crate::sqlite_schema_text::stored_trigger_text(&trigger.text)
+                    } else {
+                        trigger.text.clone()
+                    };
                     rows.push(vec![
                         text_literal("trigger".to_owned()),
                         text_literal(trigger.name.clone()),
                         text_literal(listed.table.clone()),
                         integer_literal(0),
-                        text_literal(trigger.text.clone()),
+                        text_literal(text),
                     ]);
                 }
             }

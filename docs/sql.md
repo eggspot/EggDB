@@ -237,10 +237,14 @@ What it reads, on top of the statements of "What runs today":
   is built.
 - **The schema table**: `sqlite_schema` and `sqlite_master` (with `type`, `name`, `tbl_name`,
   `rootpage` and `sql`) list the tables; `sqlite_temp_schema`/`sqlite_temp_master` are empty.
-  A table created in SQLite's dialect keeps its `CREATE TABLE` text as SQLite stores it: as
-  written from the table's name on, after `CREATE TABLE ` (without `IF NOT EXISTS`). After an
-  `ALTER TABLE`, and for tables made in another dialect, `sql` is generated from the table's
-  definition. `eggdb shell --dialect sqlite` prints these texts for `.schema [table]`, each
+  A table, index or view created in SQLite's dialect keeps its `CREATE` text as SQLite stores
+  it: as written from the object's name on, after `CREATE TABLE `, `CREATE [UNIQUE] INDEX ` or
+  `CREATE VIEW ` (without `IF NOT EXISTS` or a schema before the name); triggers are shown the
+  same way. `ALTER TABLE ... ADD COLUMN` edits that text as SQLite does, inserting the column
+  as written after the last column definition, and `RENAME TO` writes the new name in double
+  quotes in the table's text and its indexes' `ON` (D294). After any other `ALTER TABLE`, and
+  for objects made in another dialect, `sql` is generated from the definition. Views are
+  listed with `rootpage` 0. `eggdb shell --dialect sqlite` prints these texts for `.schema [table]`, each
   followed by `;`, with the table's indexes and triggers.
 - **PRAGMAs**: `table_info(t)`, `table_list[(t)]`, `index_list(t)`, `index_info(i)`,
   `foreign_keys`, `user_version`, `journal_mode`, `synchronous` and `encoding`; unknown PRAGMAs
@@ -3586,8 +3590,12 @@ under the catalog prefix, `0x15` and the table's internal name (D273): record ve
 generated `CREATE TABLE` text's length as a 32-bit little-endian number, that text, then the
 original text to the end of the value, both UTF-8. `sqlite_schema` shows the original text while
 the table's generated text still equals the saved one, and the generated text otherwise;
-`ALTER TABLE` and `DROP TABLE` delete the record. A damaged record is an error naming it, never
-a panic.
+`DROP TABLE` deletes the record, `ALTER TABLE ... ADD COLUMN` and `RENAME TO` save it again
+edited, and any other `ALTER TABLE` deletes it. A SQLite view's text is a record of the same
+layout under the view's internal name, and an index's under its table's internal name, the
+byte `0xFF` (never part of UTF-8, so never part of a name), `i` and the index's name (D294);
+`DROP VIEW` and `DROP INDEX` delete them. A file written before these records shows the
+generated text. A damaged record is an error naming it, never a panic.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating
@@ -3907,7 +3915,8 @@ And more, not in the suite yet:
 ## Known differences from SQLite
 Views are read-only unless an `INSTEAD OF` trigger makes them writable, as in SQLite,
 `CREATE TEMP VIEW`, `CREATE TEMP TRIGGER` and the `temp` schema are `0A000`, and
-`sqlite_schema` does not list views yet (it lists tables, indexes and triggers).
+`ALTER TABLE ... RENAME COLUMN` and `DROP COLUMN` (and a table rename's references in views and
+triggers) leave `sqlite_schema` showing generated text instead of SQLite's edited text.
 
 The SQLite suite (`crates/eggdb-sql/correctness/sqlite.test`, 234 cases from sqlite.org's
 documentation of SQLite 3.46, never SQLite's source) marks these as differing until they are

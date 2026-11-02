@@ -1,20 +1,48 @@
-use crate::ast::CreateTable;
+use crate::ast::{AlterAction, CreateIndex, CreateTable, CreateView};
 use crate::dialect::Dialect;
-use crate::encoding::{NAMESPACE, table_key};
+use crate::encoding::{NAMESPACE, ViewDefinition, is_view_record, table_key};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
+use crate::lexer::{Token, TokenKind, tokenize_in};
+use crate::schema::{IndexSchema, TableSchema};
+use crate::schemas::{DEFAULT_SCHEMA, base_name};
 use crate::session::QueryResult;
 use crate::store::{KeyValueRead, KeyValueWrite};
 
 pub(crate) const SQLITE_TEXT_SPACE: u8 = 0x15;
 const RECORD_VERSION: u8 = 1;
 const LENGTH_BYTES: usize = 4;
+const PART_SEPARATOR: u8 = 0xFF;
+const INDEX_PART: u8 = b'i';
+const TABLE_CONSTRAINT_WORDS: [&str; 5] = ["constraint", "primary", "unique", "check", "foreign"];
 
-fn text_key(table: &str) -> Vec<u8> {
+fn text_key(relation: &str) -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
     key.push(SQLITE_TEXT_SPACE);
-    key.extend_from_slice(table.as_bytes());
+    key.extend_from_slice(relation.as_bytes());
     key
+}
+
+fn indexes_prefix(table: &str) -> Vec<u8> {
+    let mut key = text_key(table);
+    key.push(PART_SEPARATOR);
+    key.push(INDEX_PART);
+    key
+}
+
+fn index_key(table: &str, index: &str) -> Vec<u8> {
+    let mut key = indexes_prefix(table);
+    key.extend_from_slice(index.as_bytes());
+    key
+}
+
+/// The relation a key of this space belongs to, given the key's bytes after the space number:
+/// a table's or view's own record is its internal name, and an index's record is its table's
+/// internal name followed by a byte that never occurs in UTF-8.
+pub(crate) fn owning_relation(rest: &[u8]) -> &[u8] {
+    rest.split(|&byte| byte == PART_SEPARATOR)
+        .next()
+        .unwrap_or(rest)
 }
 
 fn encode(generated: &str, original: &str) -> Option<Vec<u8>> {
@@ -67,6 +95,25 @@ fn kept_original(bytes: &[u8], generated: &str) -> SqlResult<Option<String>> {
     }
 }
 
+fn remember(
+    writer: &mut dyn KeyValueWrite,
+    key: &[u8],
+    generated: &str,
+    original: &str,
+) -> SqlResult<()> {
+    match encode(generated, original) {
+        Some(record) => writer.put(key, &record),
+        None => Ok(()),
+    }
+}
+
+fn kept(reader: &dyn KeyValueRead, key: &[u8], generated: &str) -> SqlResult<Option<String>> {
+    let Some(bytes) = reader.get(key)? else {
+        return Ok(None);
+    };
+    kept_original(&bytes, generated)
+}
+
 pub(crate) fn create_table(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -79,11 +126,81 @@ pub(crate) fn create_table(
     };
     let existed = writer.get(&table_key(&create.name.text))?.is_some();
     let result = execute::create_table(writer, tables, create, dialect)?;
+    if !existed && let Some(table) = crate::schema::read_table(&*writer, &create.name.text)? {
+        remember(
+            writer,
+            &text_key(&create.name.text),
+            &crate::session::sqlite_create_text(&table),
+            original,
+        )?;
+    }
+    Ok(result)
+}
+
+fn index_of<'t>(table: &'t TableSchema, name: &str) -> Option<&'t IndexSchema> {
+    table.indexes.iter().find(|index| index.name == name)
+}
+
+pub(crate) fn create_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    create: &CreateIndex,
+    dialect: Dialect,
+) -> SqlResult<QueryResult> {
+    let (Some(original), Some(name)) = (&create.sqlite_text, &create.index.name) else {
+        return crate::indexes::create_index(writer, tables, create, dialect);
+    };
+    if dialect != Dialect::Sqlite {
+        return crate::indexes::create_index(writer, tables, create, dialect);
+    }
+    let table_name = &create.table.text;
+    let index_name = base_name(&name.text);
+    let existed = crate::schema::read_table(&*writer, table_name)?
+        .is_some_and(|table| index_of(&table, index_name).is_some());
+    let result = crate::indexes::create_index(writer, tables, create, dialect)?;
     if !existed
-        && let Some(table) = crate::schema::read_table(&*writer, &create.name.text)?
-        && let Some(record) = encode(&crate::session::sqlite_create_text(&table), original)
+        && let Some(table) = crate::schema::read_table(&*writer, table_name)?
+        && let Some(index) = index_of(&table, index_name)
     {
-        writer.put(&text_key(&create.name.text), &record)?;
+        remember(
+            writer,
+            &index_key(table_name, &index.name),
+            &crate::session::sqlite_index_text(&table, index),
+            original,
+        )?;
+    }
+    Ok(result)
+}
+
+fn read_view(reader: &dyn KeyValueRead, internal: &str) -> SqlResult<Option<ViewDefinition>> {
+    match reader.get(&table_key(internal))? {
+        Some(bytes) if is_view_record(&bytes) => ViewDefinition::decode(internal, &bytes).map(Some),
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn create_view(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    create: &CreateView,
+    context: &crate::views::ViewContext<'_>,
+) -> SqlResult<QueryResult> {
+    let original = match &create.sqlite_text {
+        Some(text) if context.dialect == Dialect::Sqlite && !create.temporary => text,
+        _ => return crate::views::create_view(writer, tables, create, context),
+    };
+    let Ok(internal) = crate::schemas::creation_name(&*writer, &create.name) else {
+        return crate::views::create_view(writer, tables, create, context);
+    };
+    let existed = writer.get(&table_key(&internal))?.is_some();
+    let result = crate::views::create_view(writer, tables, create, context)?;
+    if !existed && let Some(view) = read_view(&*writer, &internal)? {
+        remember(
+            writer,
+            &text_key(&internal),
+            &crate::session::sqlite_view_text(&view),
+            original,
+        )?;
     }
     Ok(result)
 }
@@ -93,19 +210,248 @@ pub(crate) fn original_text(
     table: &str,
     generated: &str,
 ) -> SqlResult<Option<String>> {
-    let Some(bytes) = reader.get(&text_key(table))? else {
-        return Ok(None);
-    };
-    kept_original(&bytes, generated)
+    kept(reader, &text_key(table), generated)
 }
 
-pub(crate) fn forget(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
-    writer.delete(&text_key(table)).map(|_| ())
+pub(crate) fn original_index_text(
+    reader: &dyn KeyValueRead,
+    table: &str,
+    index: &str,
+    generated: &str,
+) -> SqlResult<Option<String>> {
+    kept(reader, &index_key(table, index), generated)
+}
+
+pub(crate) fn forget(writer: &mut dyn KeyValueWrite, relation: &str) -> SqlResult<()> {
+    writer.delete(&text_key(relation))?;
+    crate::store::delete_prefix(writer, &indexes_prefix(relation))
+}
+
+pub(crate) fn forget_index(
+    writer: &mut dyn KeyValueWrite,
+    table: &str,
+    index: &str,
+) -> SqlResult<()> {
+    writer.delete(&index_key(table, index)).map(|_| ())
+}
+
+/// The original texts of a SQLite table and its indexes, taken out of the catalog before an
+/// `ALTER TABLE` and saved again, edited the way SQLite edits them, when the change is one
+/// SQLite edits the text for.
+#[derive(Debug, Default)]
+pub(crate) struct AlteredTexts {
+    table: Option<String>,
+    indexes: Vec<(String, String)>,
+}
+
+fn public_table(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Option<TableSchema>> {
+    Ok(crate::schema::read_table(reader, table)?.filter(|schema| schema.schema == DEFAULT_SCHEMA))
+}
+
+impl AlteredTexts {
+    pub(crate) fn take(
+        writer: &mut dyn KeyValueWrite,
+        table: &str,
+        dialect: Dialect,
+    ) -> SqlResult<Self> {
+        let mut taken = Self::default();
+        if dialect == Dialect::Sqlite
+            && let Some(schema) = public_table(&*writer, table)?
+        {
+            taken.table =
+                original_text(&*writer, table, &crate::session::sqlite_create_text(&schema))
+                    .ok()
+                    .flatten();
+            for index in &schema.indexes {
+                let generated = crate::session::sqlite_index_text(&schema, index);
+                if let Some(original) = original_index_text(&*writer, table, &index.name, &generated)
+                    .ok()
+                    .flatten()
+                {
+                    taken.indexes.push((index.name.clone(), original));
+                }
+            }
+        }
+        forget(writer, table)?;
+        Ok(taken)
+    }
+
+    pub(crate) fn save(
+        self,
+        writer: &mut dyn KeyValueWrite,
+        table: &str,
+        actions: &[AlterAction],
+    ) -> SqlResult<()> {
+        if self.table.is_none() && self.indexes.is_empty() {
+            return Ok(());
+        }
+        let Some(schema) = public_table(&*writer, table)? else {
+            return Ok(());
+        };
+        let shown_name = base_name(table);
+        let mut text = self.table;
+        let mut renamed = false;
+        for action in actions {
+            match action {
+                AlterAction::Accepted => {}
+                AlterAction::AddColumn {
+                    sqlite_text: Some(column),
+                    ..
+                } => text = text.and_then(|kept| added_column_text(&kept, column)),
+                AlterAction::RenameTable(_) => {
+                    renamed = true;
+                    text = text.and_then(|kept| renamed_table_text(&kept, shown_name));
+                }
+                _ => return Ok(()),
+            }
+        }
+        if let Some(text) = text {
+            remember(
+                writer,
+                &text_key(table),
+                &crate::session::sqlite_create_text(&schema),
+                &text,
+            )?;
+        }
+        for (name, original) in self.indexes {
+            let Some(index) = index_of(&schema, &name) else {
+                continue;
+            };
+            let edited = if renamed {
+                renamed_index_text(&original, shown_name)
+            } else {
+                Some(original)
+            };
+            if let Some(edited) = edited {
+                remember(
+                    writer,
+                    &index_key(table, &name),
+                    &crate::session::sqlite_index_text(&schema, index),
+                    &edited,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn is_word(token: &Token<'_>, word: &str) -> bool {
+    matches!(&token.kind, TokenKind::Word(text) if text.eq_ignore_ascii_case(word))
+}
+
+fn is_name(token: &Token<'_>) -> bool {
+    matches!(
+        token.kind,
+        TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) | TokenKind::String(_)
+    )
+}
+
+fn replaced(text: &str, start: usize, end: usize, with: &str) -> Option<String> {
+    Some(format!("{}{with}{}", text.get(..start)?, text.get(end..)?))
+}
+
+fn renamed_table_text(text: &str, new_name: &str) -> Option<String> {
+    let tokens = tokenize_in(text, Dialect::Sqlite).ok()?;
+    let name = tokens.get(2).filter(|token| {
+        tokens.first().is_some_and(|first| is_word(first, "create"))
+            && tokens.get(1).is_some_and(|second| is_word(second, "table"))
+            && is_name(token)
+    })?;
+    replaced(text, name.start, name.end, &quoted(new_name))
+}
+
+fn renamed_index_text(text: &str, new_table: &str) -> Option<String> {
+    let tokens = tokenize_in(text, Dialect::Sqlite).ok()?;
+    let on = tokens.iter().position(|token| is_word(token, "on"))?;
+    let table = tokens.get(on + 1).filter(|token| is_name(token))?;
+    replaced(text, table.start, table.end, &quoted(new_table))
+}
+
+fn added_column_text(text: &str, column: &str) -> Option<String> {
+    let tokens = tokenize_in(text, Dialect::Sqlite).ok()?;
+    let open = tokens
+        .iter()
+        .position(|token| token.kind == TokenKind::LeftParen)?;
+    let mut depth = 0usize;
+    let mut element_first: Option<&Token<'_>> = None;
+    let mut previous_end = 0;
+    let mut last_column_end = None;
+    for token in tokens.get(open..)? {
+        match token.kind {
+            TokenKind::LeftParen => {
+                depth += 1;
+                if depth == 1 {
+                    previous_end = token.end;
+                    continue;
+                }
+            }
+            TokenKind::RightParen | TokenKind::Comma if depth == 1 => {
+                if let Some(first) = element_first.take()
+                    && !TABLE_CONSTRAINT_WORDS.iter().any(|word| is_word(first, word))
+                {
+                    last_column_end = Some(previous_end);
+                }
+                if token.kind == TokenKind::RightParen {
+                    let at = last_column_end?;
+                    return Some(format!(
+                        "{}, {column}{}",
+                        text.get(..at)?,
+                        text.get(at..)?
+                    ));
+                }
+                previous_end = token.end;
+                continue;
+            }
+            TokenKind::RightParen => depth = depth.checked_sub(1)?,
+            TokenKind::End => return None,
+            _ => {}
+        }
+        if depth == 1 && element_first.is_none() {
+            element_first = Some(token);
+        }
+        previous_end = token.end;
+    }
+    None
+}
+
+/// A SQLite trigger's text the way `sqlite_schema` stores it: `IF NOT EXISTS` and a schema
+/// before the trigger's name left out, everything else as written. Text that does not start
+/// with `CREATE TRIGGER` is returned unchanged.
+pub(crate) fn stored_trigger_text(text: &str) -> String {
+    let Ok(tokens) = tokenize_in(text, Dialect::Sqlite) else {
+        return text.to_owned();
+    };
+    let starts = tokens.first().is_some_and(|token| is_word(token, "create"))
+        && tokens.get(1).is_some_and(|token| is_word(token, "trigger"));
+    if !starts {
+        return text.to_owned();
+    }
+    let mut at = 2;
+    if tokens.get(at).is_some_and(|token| is_word(token, "if"))
+        && tokens.get(at + 1).is_some_and(|token| is_word(token, "not"))
+        && tokens.get(at + 2).is_some_and(|token| is_word(token, "exists"))
+    {
+        at += 3;
+    }
+    if tokens.get(at + 1).is_some_and(|token| token.kind == TokenKind::Dot) {
+        at += 2;
+    }
+    match tokens.get(at).filter(|token| is_name(token)) {
+        Some(name) => format!("CREATE TRIGGER {}", text.get(name.start..).unwrap_or("")),
+        None => text.to_owned(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Unreadable, decode, encode, kept_original};
+    use super::{
+        Unreadable, added_column_text, decode, encode, index_key, kept_original, owning_relation,
+        renamed_index_text, renamed_table_text, stored_trigger_text, text_key,
+    };
 
     #[test]
     fn a_record_keeps_both_texts() {
@@ -142,5 +488,70 @@ mod tests {
         let error = kept_original(&[7, 0, 0, 0, 0], generated).unwrap_err();
         assert_eq!(error.state().code(), "0A000");
         assert!(error.message().contains("format version 7"), "{error}");
+    }
+
+    #[test]
+    fn an_index_key_belongs_to_its_table_and_never_meets_a_qualified_table_name() {
+        let index = index_key("pets", "by_name");
+        let space = text_key("").len();
+        assert_eq!(owning_relation(&index[space..]), b"pets");
+        let qualified = text_key("pets\0by_name");
+        assert_ne!(index, qualified);
+        assert_eq!(owning_relation(&qualified[space..]), b"pets\0by_name");
+    }
+
+    #[test]
+    fn a_rename_quotes_the_new_name_where_the_old_one_was_written() {
+        assert_eq!(
+            renamed_table_text("CREATE TABLE pets(id integer, \"pets\" text)", "animals")
+                .as_deref(),
+            Some("CREATE TABLE \"animals\"(id integer, \"pets\" text)")
+        );
+        assert_eq!(
+            renamed_table_text("CREATE TABLE \"my pets\" (id)", "a\"b").as_deref(),
+            Some("CREATE TABLE \"a\"\"b\" (id)")
+        );
+        assert_eq!(
+            renamed_index_text("CREATE INDEX on_pets ON pets (name)", "animals").as_deref(),
+            Some("CREATE INDEX on_pets ON \"animals\" (name)")
+        );
+        assert_eq!(renamed_table_text("CREATE", "x"), None);
+    }
+
+    #[test]
+    fn an_added_column_goes_after_the_last_column_and_before_table_constraints() {
+        assert_eq!(
+            added_column_text("CREATE TABLE t(a int)", "b text").as_deref(),
+            Some("CREATE TABLE t(a int, b text)")
+        );
+        assert_eq!(
+            added_column_text(
+                "CREATE TABLE t(a int CHECK (a > 0), b, PRIMARY KEY (a, b)) WITHOUT ROWID",
+                "c DEFAULT (1)"
+            )
+            .as_deref(),
+            Some(
+                "CREATE TABLE t(a int CHECK (a > 0), b, c DEFAULT (1), PRIMARY KEY (a, b)) WITHOUT ROWID"
+            )
+        );
+        assert_eq!(
+            added_column_text("CREATE TABLE t(a int,\n  b text -- note\n)", "c").as_deref(),
+            Some("CREATE TABLE t(a int,\n  b text, c -- note\n)")
+        );
+        assert_eq!(added_column_text("CREATE TABLE t(a int", "b"), None);
+        assert_eq!(added_column_text("CREATE TABLE t AS SELECT 1", "b"), None);
+    }
+
+    #[test]
+    fn a_trigger_text_leaves_out_if_not_exists_and_the_schema() {
+        assert_eq!(
+            stored_trigger_text("CREATE TRIGGER IF NOT EXISTS main.tr AFTER INSERT ON t BEGIN SELECT 1; END"),
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END"
+        );
+        assert_eq!(
+            stored_trigger_text("create  trigger tr after insert on t begin select 1; end"),
+            "CREATE TRIGGER tr after insert on t begin select 1; end"
+        );
+        assert_eq!(stored_trigger_text("not a trigger"), "not a trigger");
     }
 }

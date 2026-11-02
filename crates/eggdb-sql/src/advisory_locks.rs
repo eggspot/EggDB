@@ -15,6 +15,18 @@ enum Key {
     Application(String),
 }
 
+impl Key {
+    fn shown(&self) -> String {
+        match self {
+            Self::Single(key) => format!("advisory lock {key}"),
+            Self::Pair(first, second) => format!("advisory lock ({first}, {second})"),
+            Self::Application(resource) => {
+                format!("application lock '{}'", resource.replace('\'', "''"))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LockName {
     database: usize,
@@ -217,6 +229,21 @@ impl AdvisoryLocks {
 
     pub(crate) fn release_transaction_locks(&self) {
         release(self.database, self.owner, |hold| hold.transaction_count = 0);
+    }
+
+    pub(crate) fn session_lock_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = held()
+            .iter()
+            .filter(|(name, holds)| {
+                name.database == self.database
+                    && holds
+                        .iter()
+                        .any(|hold| hold.owner == self.owner && hold.session_count > 0)
+            })
+            .map(|(name, _)| name.key.shown())
+            .collect();
+        names.sort();
+        names
     }
 
     fn release_everything(&self) {
@@ -713,6 +740,30 @@ mod tests {
         second.release_transaction_locks();
         let _entered = enter(&first, false);
         assert_eq!(call("pg_advisory_unlock", &session_key), Value::Boolean(true));
+    }
+
+    #[test]
+    fn a_session_names_only_its_own_session_locks() {
+        let first = AdvisoryLocks::new(41);
+        let second = AdvisoryLocks::new(41);
+        {
+            let _entered = enter(&first, true);
+            call("pg_advisory_lock", &[Value::Integer(9)]);
+            call("pg_advisory_lock", &[Value::Integer(1), Value::Integer(2)]);
+            call("pg_try_advisory_xact_lock", &[Value::Integer(5)]);
+        }
+        {
+            let _entered = enter(&second, false);
+            call("pg_advisory_lock", &[Value::Integer(7)]);
+        }
+        assert_eq!(
+            first.session_lock_names(),
+            ["advisory lock (1, 2)", "advisory lock 9"]
+        );
+        assert_eq!(second.session_lock_names(), ["advisory lock 7"]);
+        first.release_transaction_locks();
+        drop(first);
+        assert_eq!(second.session_lock_names(), ["advisory lock 7"]);
     }
 
     #[test]

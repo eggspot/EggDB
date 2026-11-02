@@ -16,6 +16,7 @@ pub use sqlserver::{BatchStep, NamedParameter, ParameterDeclaration, StoredProce
 pub(crate) use oracle::create_text as oracle_create_text;
 
 pub(crate) use sqlite::create_text as sqlite_create_text;
+pub(crate) use sqlite::{index_text as sqlite_index_text, view_text as sqlite_view_text};
 
 use crate::ast::{
     CopyDirection, CopySource, CopyStatement, DiscardTarget, Explain, MySqlStatement, Name,
@@ -2921,7 +2922,7 @@ impl<'s> Session<'s> {
                     settings: Some(&settings),
                     dialect,
                 };
-                crate::views::create_view(writer, tables, create, &context)
+                crate::sqlite_schema_text::create_view(writer, tables, create, &context)
             }),
             Statement::DropView {
                 names,
@@ -2966,7 +2967,7 @@ impl<'s> Session<'s> {
             }),
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
-                crate::indexes::create_index(writer, tables, create, dialect)
+                crate::sqlite_schema_text::create_index(writer, tables, create, dialect)
             }),
             Statement::DropIndex(drop) => self.write("DROP INDEX", |writer, tables| {
                 if let Some(table) = &mut drop.table {

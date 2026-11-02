@@ -689,7 +689,10 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   keeps its version and bytes, so older releases refuse only what holds these types. A SQLite
   table's `CREATE TABLE` text as written is one record per table (catalog prefix, `0x15`, the
   table's internal name) with record version 1: the generated text's length (32-bit
-  little-endian), the generated text and the original text (D273). All of these are in
+  little-endian), the generated text and the original text (D273). A SQLite view's text is a
+  record of the same layout under the view's internal name, and an index's under its table's
+  internal name, `0xFF`, `i` and the index name (D294); a file without them shows generated
+  text. All of these are in
   [sql.md](sql.md) "How SQL is stored".
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
