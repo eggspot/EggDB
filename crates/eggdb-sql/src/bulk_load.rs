@@ -1,6 +1,6 @@
 mod bcp;
 
-pub use bcp::{BcpCharacterReader, BcpTerminators};
+pub use bcp::{BcpCharacterReader, BcpTerminators, BcpUnicodeInput};
 
 use crate::ast::Name;
 use crate::constraints::PreparedChecks;

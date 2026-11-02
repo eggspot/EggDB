@@ -267,6 +267,130 @@ impl<'r> BcpCharacterReader<'r> {
     }
 }
 
+/// Reads a data file in bcp's Unicode character format (`bcp ... -w`: UTF-16LE, with or
+/// without a byte order mark) as UTF-8, so [`BcpCharacterReader`] reads it as it reads the
+/// character format: `BcpCharacterReader::new(&mut BcpUnicodeInput::new(file), terminators)`.
+/// The terminators stay written as text (`\t` and `\n` by default). An unpaired surrogate or a
+/// file that ends inside a character is a read error.
+pub struct BcpUnicodeInput<'r> {
+    input: &'r mut dyn Read,
+    pending: Vec<u8>,
+    decoded: Vec<u8>,
+    at: usize,
+    started: bool,
+    ended: bool,
+}
+
+impl std::fmt::Debug for BcpUnicodeInput<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BcpUnicodeInput")
+            .field("ended", &self.ended)
+            .finish()
+    }
+}
+
+fn invalid_unicode(reason: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("the bcp Unicode (-w) data file {reason}"),
+    )
+}
+
+fn is_high_surrogate(unit: u16) -> bool {
+    (0xD800..0xDC00).contains(&unit)
+}
+
+impl<'r> BcpUnicodeInput<'r> {
+    /// An adapter over `input`, a whole data file in UTF-16LE.
+    pub fn new(input: &'r mut dyn Read) -> Self {
+        Self {
+            input,
+            pending: Vec::new(),
+            decoded: Vec::new(),
+            at: 0,
+            started: false,
+            ended: false,
+        }
+    }
+
+    fn read_chunk(&mut self) -> std::io::Result<usize> {
+        let mut chunk = vec![0u8; READ_CHUNK_BYTES];
+        loop {
+            match self.input.read(&mut chunk) {
+                Ok(count) => {
+                    self.pending
+                        .extend_from_slice(chunk.get(..count).unwrap_or_default());
+                    return Ok(count);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn decode_more(&mut self) -> std::io::Result<()> {
+        self.decoded.clear();
+        self.at = 0;
+        if self.read_chunk()? == 0 {
+            self.ended = true;
+            if !self.pending.is_empty() {
+                return Err(invalid_unicode("ends in the middle of a character"));
+            }
+            return Ok(());
+        }
+        let whole = self.pending.len() / 2 * 2;
+        let mut units: Vec<u16> = self
+            .pending
+            .get(..whole)
+            .unwrap_or_default()
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let mut kept: Vec<u8> = self.pending.get(whole..).unwrap_or_default().to_vec();
+        if let Some(&last) = units.last()
+            && is_high_surrogate(last)
+        {
+            units.pop();
+            let mut carried = last.to_le_bytes().to_vec();
+            carried.extend_from_slice(&kept);
+            kept = carried;
+        }
+        let mut skip = 0;
+        if !self.started && !units.is_empty() {
+            self.started = true;
+            if units.first() == Some(&0xFEFF) {
+                skip = 1;
+            }
+        }
+        for decoded in char::decode_utf16(units.iter().skip(skip).copied()) {
+            let character = decoded.map_err(|_| invalid_unicode("holds an unpaired surrogate"))?;
+            let mut buffer = [0u8; 4];
+            self.decoded
+                .extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+        }
+        self.pending = kept;
+        Ok(())
+    }
+}
+
+impl Read for BcpUnicodeInput<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.at >= self.decoded.len() {
+            if self.ended {
+                return Ok(0);
+            }
+            self.decode_more()?;
+        }
+        let available = self.decoded.get(self.at..).unwrap_or_default();
+        let count = available.len().min(out.len());
+        if let (Some(target), Some(source)) = (out.get_mut(..count), available.get(..count)) {
+            target.copy_from_slice(source);
+        }
+        self.at += count;
+        Ok(count)
+    }
+}
+
 impl BulkRows for BcpCharacterReader<'_> {
     fn next_row(&mut self, columns: usize, row: &mut Vec<Value>) -> SqlResult<bool> {
         while self.rows_to_skip > 0 {
@@ -281,7 +405,7 @@ impl BulkRows for BcpCharacterReader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BcpCharacterReader, BcpTerminators};
+    use super::{BcpCharacterReader, BcpTerminators, BcpUnicodeInput};
     use crate::bulk_load::BulkRows;
     use crate::types::Value;
 
@@ -364,5 +488,51 @@ mod tests {
         assert_eq!(read.len(), 2);
         assert_eq!(read[0][1], Value::Text(long));
         assert_eq!(read[1][1], text("short"));
+    }
+
+    fn utf16(text: &str, mark: bool) -> Vec<u8> {
+        let mut bytes = if mark { vec![0xFF, 0xFE] } else { Vec::new() };
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn unicode_rows(data: &[u8], columns: usize) -> Result<Vec<Vec<Value>>, crate::SqlError> {
+        let mut input = data;
+        let mut unicode = BcpUnicodeInput::new(&mut input);
+        let mut reader = BcpCharacterReader::new(&mut unicode, BcpTerminators::default());
+        let mut all = Vec::new();
+        let mut row = Vec::new();
+        while reader.next_row(columns, &mut row)? {
+            all.push(row.clone());
+        }
+        Ok(all)
+    }
+
+    #[test]
+    fn unicode_files_are_utf16_little_endian_with_or_without_a_byte_order_mark() {
+        let expected = vec![
+            vec![text("1"), text("Đà Nẵng 🥚")],
+            vec![text("2"), Value::Null],
+        ];
+        assert_eq!(
+            unicode_rows(&utf16("1\tĐà Nẵng 🥚\r\n2\t\n", true), 2).unwrap(),
+            expected
+        );
+        assert_eq!(
+            unicode_rows(&utf16("1\tĐà Nẵng 🥚\r\n2\t\n", false), 2).unwrap(),
+            expected
+        );
+        let long = "ü".repeat(70_000);
+        let read = unicode_rows(&utf16(&format!("{long}\tx\n"), true), 2).unwrap();
+        assert_eq!(read, vec![vec![Value::Text(long), text("x")]]);
+    }
+
+    #[test]
+    fn broken_unicode_files_are_errors() {
+        assert!(unicode_rows(&[b'a', 0, b'\n'], 1).is_err());
+        assert!(unicode_rows(&[0x00, 0xD8, b'a', 0, b'\n', 0], 1).is_err());
+        assert!(unicode_rows(&[0x00, 0xD8], 1).is_err());
     }
 }

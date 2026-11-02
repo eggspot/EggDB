@@ -1,7 +1,7 @@
 use crate::memory_store::MemoryStore;
 use crate::{
-    BatchStep, BcpCharacterReader, BcpTerminators, BulkRows, Dialect, QueryResult, Session,
-    SqlError, SqlResult, Value,
+    BatchStep, BcpCharacterReader, BcpTerminators, BcpUnicodeInput, BulkRows, Dialect,
+    QueryResult, Session, SqlError, SqlResult, Value,
 };
 
 struct Rows(Vec<Vec<Value>>);
@@ -251,5 +251,90 @@ fn fmtonly_describes_queries_without_rows_and_skips_other_statements() {
     assert_eq!(
         texts(&mut session, "SELECT count(*) AS n FROM t"),
         vec![vec!["1".to_owned()]]
+    );
+}
+
+fn first_error_code(session: &mut Session<'_>, text: &str) -> Option<u16> {
+    let mut found = None;
+    let outcome = session.execute_batch(text, &mut |step| {
+        if found.is_none() {
+            found = code(&step);
+        }
+        true
+    });
+    match outcome {
+        Err(error) => error.vendor_code(),
+        Ok(_) => found,
+    }
+}
+
+#[test]
+fn bcp_unicode_files_load_like_character_files() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    batch(
+        &mut session,
+        "CREATE TABLE cities (id INT PRIMARY KEY, name NVARCHAR(20))",
+    );
+    session.execute("INSERT BULK cities", &mut |_| {}).unwrap();
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in "1\tHà Nội\r\n2\t\n".encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let mut data: &[u8] = &bytes;
+    let mut unicode = BcpUnicodeInput::new(&mut data);
+    let mut reader = BcpCharacterReader::new(&mut unicode, BcpTerminators::default());
+    let steps = load(&mut session, &mut reader);
+    assert_eq!(tag(&steps[0]), "INSERT 0 2");
+    assert_eq!(
+        texts(&mut session, "SELECT id, name FROM cities ORDER BY id"),
+        vec![
+            vec!["1".to_owned(), "Hà Nội".to_owned()],
+            vec!["2".to_owned(), "NULL".to_owned()],
+        ]
+    );
+}
+
+#[test]
+fn bulk_insert_and_openrowset_bulk_never_read_server_files() {
+    let store = MemoryStore::default();
+    let mut session = session_with_items(&store);
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "BULK INSERT items FROM '/etc/passwd' WITH (FORMAT = 'CSV', FIELDTERMINATOR = ',', \
+             ROWTERMINATOR = '0x0a', FIRSTROW = 2, LASTROW = 10, FORMATFILE = 'f.fmt', \
+             CHECK_CONSTRAINTS, KEEPNULLS, KEEPIDENTITY, TABLOCK, ORDER (id ASC))"
+        ),
+        Some(4834)
+    );
+    assert_eq!(
+        first_error_code(&mut session, "BULK INSERT items FROM N'C:\\data\\items.dat'"),
+        Some(4834)
+    );
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "BULK INSERT items FROM 'items.dat' WITH (NO_SUCH_OPTION = 1)"
+        ),
+        Some(195)
+    );
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "SELECT BulkColumn FROM OPENROWSET(BULK '/etc/hosts', SINGLE_CLOB) AS f"
+        ),
+        Some(4834)
+    );
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "SELECT * FROM OPENROWSET(BULK 'items.dat', FORMATFILE = 'items.fmt', FIRSTROW = 2) AS f"
+        ),
+        Some(4834)
+    );
+    assert_eq!(
+        texts(&mut session, "SELECT count(*) AS n FROM items"),
+        vec![vec!["0".to_owned()]]
     );
 }

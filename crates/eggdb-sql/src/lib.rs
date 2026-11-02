@@ -230,7 +230,7 @@ mod window_tests;
 mod with_statement_tests;
 
 pub use arrays::{ArrayElement, ArrayValue};
-pub use bulk_load::{BcpCharacterReader, BcpTerminators, BulkRows};
+pub use bulk_load::{BcpCharacterReader, BcpTerminators, BcpUnicodeInput, BulkRows};
 pub use cancel::CancelSignal;
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{

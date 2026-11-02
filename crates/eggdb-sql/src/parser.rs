@@ -2652,6 +2652,9 @@ impl<'t> Parser<'t> {
         if self.sqlserver() && self.at_openjson() {
             return self.sqlserver_openjson();
         }
+        if self.sqlserver() && self.at_openrowset_bulk() {
+            return self.sqlserver_openrowset_bulk();
+        }
         if self.sqlserver() && self.at_string_split() {
             return self.sqlserver_string_split();
         }

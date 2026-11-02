@@ -756,6 +756,7 @@ impl<'t> Parser<'t> {
                 return Err(not_supported("TOP in UPDATE and DELETE").at(position));
             }
             "insert" if self.is_word_at(1, "bulk") => self.sqlserver_insert_bulk()?,
+            "bulk" if self.is_word_at(1, "insert") => self.sqlserver_bulk_insert()?,
             "merge" => self.sqlserver_merge()?,
             "insert" if self.is_word_at(1, "top") => {
                 return Err(not_supported("TOP in INSERT").at(position));

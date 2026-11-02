@@ -921,8 +921,20 @@ field that is one NUL byte is an empty string, and `--header` skips the first ro
 `-F 2`). The text must be UTF-8 (`bcp ... -c -C 65001`); invalid bytes are error 4864, a row
 cut short 4832. The rows go through `INSERT BULK` and the same load as above, in one
 transaction; values convert as SQL Server converts text (`1`/`0` for `bit`, `2024-05-06
-07:08:09.123` for `datetime2`). `bcp`'s native (`-n`) and Unicode (`-w`) formats and format
-files are not read yet.
+07:08:09.123` for `datetime2`). Embedders read bcp's Unicode format (`bcp ... -w`, UTF-16LE with
+or without a byte order mark) by wrapping the file in `eggdb_sql::BcpUnicodeInput` before
+`BcpCharacterReader`; the command line does not have a switch for it yet. `bcp`'s native (`-n`)
+format and format files (`-f`, non-XML and XML) are not read yet.
+
+`BULK INSERT t FROM 'file' WITH (...)` and `OPENROWSET(BULK 'file', ...)` parse with every option
+SQL Server documents (`FORMAT = 'CSV'`, `FIELDTERMINATOR`, `ROWTERMINATOR`, `FIRSTROW`,
+`LASTROW`, `FORMATFILE`, `CHECK_CONSTRAINTS`, `KEEPNULLS`, `KEEPIDENTITY`, `TABLOCK`, `ORDER`,
+`SINGLE_BLOB`, `SINGLE_CLOB`, `SINGLE_NCLOB` and the rest; an unknown option is error 195), and
+then are refused with error 4834 (SQLSTATE 42501), as `COPY ... FROM 'file'` is: EggDB never reads
+a file on the server from SQL, so a client can't read the server's files through it. Load the file
+from the client instead, with `bcp in`, `SqlBulkCopy` or `eggdb import`. Loads check every
+constraint: SQL Server skips `CHECK` and foreign key constraints without `CHECK_CONSTRAINTS` and
+marks them untrusted, which EggDB has no notion of, so it always checks them.
 
 CI's `tds-apps` job loads the committed bcp file `crates/eggdb/tests/data/sqlserver/bcp/items.dat`
 with `eggdb import --dialect sqlserver` and with `SqlBulkCopy` (in batches of two, with
