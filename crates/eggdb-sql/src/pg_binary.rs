@@ -469,12 +469,6 @@ fn four(bytes: &[u8]) -> [u8; 4] {
 /// `oid`, as the SQL layer reads a constant of that type: `22P03` when the bytes do not fit
 /// the form, `0A000` for a type whose binary form EggDB does not read.
 pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
-    if let Some(element) = ArrayElement::of_array_oid(oid) {
-        let array = decode_array(bytes, element)?;
-        return Ok(Value::Array(Box::new(array))
-            .to_text_in(TimeZone::UTC)
-            .unwrap_or_default());
-    }
     let value = match oid {
         BOOL_OID => match fixed(bytes, 1)?[0] {
             0 => Value::Boolean(false),
@@ -536,7 +530,10 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
             return hstore_from_binary(bytes).map(|hstore| crate::hstore::to_text(&hstore));
         }
         oid if TEXT_INPUT_OIDS.contains(&oid) => return text_of(bytes),
-        _ => return Err(no_binary_form(oid)),
+        oid => match ArrayElement::of_array_oid(oid) {
+            Some(element) => Value::Array(Box::new(decode_array(bytes, element)?)),
+            None => return Err(no_binary_form(oid)),
+        },
     };
     Ok(value.to_text_in(TimeZone::UTC).unwrap_or_default())
 }
