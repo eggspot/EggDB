@@ -1257,9 +1257,11 @@ Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1
 
 Known differences: a query string that the previous dialect cannot split into tokens (an
 Oracle `q'[...]'` literal sent in one psql `-c` with the `SET` before it) fails before anything
-runs, so send the `SET` on its own; psql's backslash commands and pgjdbc's `DatabaseMetaData`
-read PostgreSQL's catalog, which Oracle's dialect does not answer (use the data dictionary); over
-TDS, mssql-jdbc's
+runs, so send the `SET` on its own; a statement that names `pg_catalog.` (the queries of psql's
+backslash commands and pgjdbc's `DatabaseMetaData`) runs in PostgreSQL's dialect on a PostgreSQL
+connection whichever dialect it chose, so it sees the same tables in their stored (lower-case)
+names, and a `SET eggdb.dialect` in the same query string as such a statement is undone after
+it; over TDS, mssql-jdbc's
 `setAutoCommit(false)` sends Transact-SQL (`set implicit_transactions on`) that Oracle's dialect
 refuses, so use plain batches there.
 

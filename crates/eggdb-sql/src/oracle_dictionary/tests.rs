@@ -378,3 +378,42 @@ fn a_transact_sql_batch_switches_to_oracle_for_the_statements_after_the_set() {
     session.reset_connection(false).unwrap();
     assert_eq!(session.dialect(), Dialect::SqlServer);
 }
+
+#[test]
+fn postgresql_catalog_queries_run_as_postgresql_while_the_connection_reads_oracle() {
+    let store = MemoryStore::default();
+    hr_schema(&store);
+    let mut session = hr_session(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT c.relname::text AS relname FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'hr' AND c.relkind = 'r' ORDER BY 1"
+        ),
+        "relname\ncountries\nregions\nSELECT 2"
+    );
+    let catalog = "SELECT c.oid::int8 AS oid FROM pg_catalog.pg_class c WHERE c.relname = $1";
+    assert!(session.prepare(catalog, &[None]).is_ok());
+    assert!(session.describe(catalog, &[None]).is_ok());
+    let mut found = 0;
+    session
+        .execute_prepared(
+            catalog,
+            &[Parameter {
+                declared_type: None,
+                value: Some("countries".to_owned()),
+            }],
+            &mut |result| {
+                found += result.rows.len();
+                true
+            },
+        )
+        .expect("runs");
+    assert_eq!(found, 1);
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) FROM dual"),
+        "COUNT(*)\n1\nSELECT 1"
+    );
+    assert!(run(&mut session, "SELECT 1::int FROM dual").is_err());
+}

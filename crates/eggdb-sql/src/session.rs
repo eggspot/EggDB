@@ -312,6 +312,7 @@ fn inline_data_start(text: &str, ranges: &[std::ops::Range<usize>], stop: CopySt
 
 const NO_TRANSACTION_WARNING: &str = "WARNING:  there is no transaction in progress";
 pub(crate) const PLSQL_BLOCK_TAG: &str = "PL/SQL BLOCK";
+const POSTGRESQL_CATALOG_QUALIFIER: &str = "pg_catalog.";
 
 fn aborted_block() -> SqlError {
     SqlError::new(
@@ -519,6 +520,14 @@ impl<'s> Session<'s> {
     /// in force whichever dialect `eggdb.dialect` chooses.
     pub fn connection_dialect(&self) -> Dialect {
         self.connection_dialect
+    }
+
+    fn reads_the_postgresql_catalog(&self, text: &str) -> bool {
+        self.connection_dialect == Dialect::PostgreSql
+            && self.dialect != Dialect::PostgreSql
+            && text
+                .to_ascii_lowercase()
+                .contains(POSTGRESQL_CATALOG_QUALIFIER)
     }
 
     /// Runs `body` with the session reading its connection's dialect, then reads the dialect
@@ -1051,6 +1060,9 @@ impl<'s> Session<'s> {
         text: &str,
         declared_types: &[Option<SqlType>],
     ) -> SqlResult<PreparedStatement> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self.in_connection_dialect(|session| session.prepare(text, declared_types));
+        }
         self.prepare_in_dialect(text, declared_types)
             .map_err(|error| self.in_dialect(text, error))
     }
@@ -1111,6 +1123,9 @@ impl<'s> Session<'s> {
         text: &str,
         declared_types: &[Option<SqlType>],
     ) -> SqlResult<StatementDescription> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self.in_connection_dialect(|session| session.describe(text, declared_types));
+        }
         self.describe_in_dialect(text, declared_types)
             .map_err(|error| self.in_dialect(text, error))
     }
@@ -1275,6 +1290,11 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         copy: &mut dyn CopyChannel,
     ) -> SqlResult<()> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self.in_connection_dialect(|session| {
+                session.execute_prepared_with_copy(text, parameters, on_result, copy)
+            });
+        }
         let mut client = Client {
             channel: copy,
             script: false,
@@ -1358,6 +1378,10 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         copy: &mut dyn CopyChannel,
     ) -> SqlResult<()> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self
+                .in_connection_dialect(|session| session.execute_with_copy(text, on_result, copy));
+        }
         let mut client = Client {
             channel: copy,
             script: false,
