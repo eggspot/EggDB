@@ -1,3 +1,4 @@
+mod classifier_catalog;
 mod cursors;
 pub(crate) mod database_switch;
 mod mysql;
@@ -1540,13 +1541,7 @@ impl<'s> Session<'s> {
         statement: Option<Statement>,
     ) -> Option<DestructiveStatement> {
         let statement = statement?;
-        crate::destructive::classify(&statement, &mut |table| self.table_keys(table))
-    }
-
-    fn table_keys(&mut self, table: &str) -> Option<crate::destructive::TableKeys> {
-        self.read(|reader, tables| crate::destructive::table_keys(reader, tables, table))
-            .ok()
-            .flatten()
+        crate::destructive::classify(&statement, self)
     }
 
     fn run_checked_statement(

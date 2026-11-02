@@ -482,7 +482,7 @@ pub(crate) fn describe(
 
 pub(crate) fn classify(
     with: &WithStatement,
-    keys: &mut crate::destructive::KeyLookup<'_>,
+    keys: &mut crate::destructive::CatalogLookup<'_>,
 ) -> Option<crate::destructive::DestructiveStatement> {
     let mut found = None;
     for table in &with.tables {

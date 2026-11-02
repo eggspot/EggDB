@@ -1,7 +1,9 @@
 use crate::ast::{
-    AlterAction, AlterTriggerAction, BinaryOperator, Delete, Expr, ExprKind, GeneratedTable,
-    Insert, Literal, Name, OnDuplicate, Query, ReferentialAction, Select, SetExpr,
-    SqlServerStatement, Statement, TableReference, UnaryOperator, Update, VariableSource,
+    AlterAction, AlterTriggerAction, AssignedValue, BinaryOperator, CopySource, CreateRoutine,
+    CursorCommand, Delete, DropRoutine, Expr, ExprKind, GeneratedTable, Insert, InsertSource,
+    InsertValue, Literal, MaterializedViewCommand, MySqlStatement, Name, OnDuplicate, Query,
+    ReferentialAction, RoutineTarget, Select, SelectItem, SetExpr, SqlServerStatement, Statement,
+    TableReference, UnaryOperator, Update, VariableSource,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -191,7 +193,7 @@ pub fn destructive_statement(
 
 pub(crate) fn classify(
     statement: &Statement,
-    keys: &mut KeyLookup<'_>,
+    keys: &mut CatalogLookup<'_>,
 ) -> Option<DestructiveStatement> {
     match statement {
         Statement::DropTable { names, cascade, .. } => {
@@ -224,7 +226,43 @@ pub(crate) fn classify(
         Statement::MaterializedView(crate::ast::MaterializedViewCommand::Drop {
             names, ..
         }) => dropped(DestructiveKind::DropView, names, false),
-        Statement::MaterializedView(_) | Statement::InstallExtension { .. } => None,
+        Statement::MaterializedView(MaterializedViewCommand::Create { query, .. }) => {
+            match keys.parsed(query) {
+                Some(parsed) => statement_running_code(&parsed, keys),
+                None => run_code(vec!["MATERIALIZED VIEW".to_owned()]),
+            }
+        }
+        Statement::MaterializedView(MaterializedViewCommand::Refresh { name, .. }) => {
+            let parsed = keys
+                .materialized_view_query(&name.text)
+                .and_then(|query| keys.parsed(&query));
+            match parsed {
+                Some(parsed) => statement_running_code(&parsed, keys),
+                None => run_code(vec![shown(name)]),
+            }
+        }
+        Statement::Explain(explain) if explain.analyze => classify(&explain.statement, keys),
+        Statement::Cursor(CursorCommand::Declare { query, .. }) => classify(query, keys),
+        Statement::Copy(copy) => match &copy.source {
+            CopySource::Query(query) => {
+                let mut functions = Vec::new();
+                query_user_functions(query, keys, &mut functions);
+                running(functions)
+            }
+            CopySource::Table { .. } => None,
+        },
+        Statement::MySql(MySqlStatement::Set(assignments)) => {
+            let mut functions = Vec::new();
+            for assignment in assignments {
+                if let AssignedValue::Expr(expr) = &assignment.value {
+                    user_functions(expr, keys, &mut functions);
+                }
+            }
+            running(functions)
+        }
+        Statement::DropRoutine(drop) if drop.cascade => routine_drop_cascading(drop, keys),
+        Statement::CreateRoutine(create) if create.replace => routine_replacing(create, keys),
+        Statement::InstallExtension { .. } => None,
         Statement::Database(crate::served_databases::DatabaseStatement::Drop { names, .. }) => {
             dropped(DestructiveKind::DropDatabase, names, false)
         }
@@ -307,7 +345,6 @@ pub(crate) fn classify(
         | Statement::CreateView(_)
         | Statement::AlterView(_)
         | Statement::Comment(_)
-        | Statement::Copy(_)
         | Statement::Ignored { .. }
         | Statement::AlterSession(_)
         | Statement::Discard(_)
@@ -372,7 +409,7 @@ fn run_code(objects: Vec<String>) -> Option<DestructiveStatement> {
 
 fn sqlserver(
     statement: &SqlServerStatement,
-    keys: &mut KeyLookup<'_>,
+    keys: &mut CatalogLookup<'_>,
 ) -> Option<DestructiveStatement> {
     match statement {
         SqlServerStatement::Execute(call)
@@ -499,45 +536,222 @@ fn shown_text(name: &str) -> String {
     name.replace(crate::schemas::QUALIFIER, ".")
 }
 
-fn deleted(delete: &Delete, keys: &mut KeyLookup<'_>) -> Option<DestructiveStatement> {
+fn deleted(delete: &Delete, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let kind = match row_reach(delete.filter.as_ref(), &delete.table, keys) {
-        RowReach::WholeTable => DestructiveKind::DeleteWithoutFilter,
-        RowReach::Pinned(table) if !table.delete_reaches_further => return None,
-        RowReach::Pinned(_) | RowReach::Many => DestructiveKind::DeleteOfManyRows,
+        RowReach::WholeTable => Some(DestructiveKind::DeleteWithoutFilter),
+        RowReach::Pinned(table) if !table.delete_reaches_further => None,
+        RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::DeleteOfManyRows),
     };
-    Some(DestructiveStatement::new(
-        kind,
-        vec![shown(&delete.table.name)],
-        false,
-    ))
+    let mut functions = Vec::new();
+    optional_user_functions(delete.filter.as_ref(), keys, &mut functions);
+    returning_user_functions(delete.returning.as_deref(), keys, &mut functions);
+    DestructiveStatement::combined(
+        kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&delete.table.name)], false)),
+        running(functions),
+    )
 }
 
-fn updated(update: &Update, keys: &mut KeyLookup<'_>) -> Option<DestructiveStatement> {
+fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
     let kind = match row_reach(update.filter.as_ref(), &update.table, keys) {
-        RowReach::WholeTable => DestructiveKind::UpdateWithoutFilter,
-        RowReach::Pinned(table) if !table.update_reaches_further_with(update) => return None,
-        RowReach::Pinned(_) | RowReach::Many => DestructiveKind::UpdateOfManyRows,
+        RowReach::WholeTable => Some(DestructiveKind::UpdateWithoutFilter),
+        RowReach::Pinned(table) if !table.update_reaches_further_with(update) => None,
+        RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::UpdateOfManyRows),
     };
-    Some(DestructiveStatement::new(
-        kind,
-        vec![shown(&update.table.name)],
-        false,
-    ))
+    let mut functions = Vec::new();
+    for (_, value) in &update.assignments {
+        if let InsertValue::Expr(expr) = value {
+            user_functions(expr, keys, &mut functions);
+        }
+    }
+    optional_user_functions(update.filter.as_ref(), keys, &mut functions);
+    returning_user_functions(update.returning.as_deref(), keys, &mut functions);
+    DestructiveStatement::combined(
+        kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&update.table.name)], false)),
+        running(functions),
+    )
 }
 
-fn inserted(insert: &Insert, keys: &mut KeyLookup<'_>) -> Option<DestructiveStatement> {
-    match insert.on_duplicate {
+fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
+    let found = match insert.on_duplicate {
         OnDuplicate::Replace | OnDuplicate::Update(_) => Some(DestructiveStatement::new(
             DestructiveKind::InsertOverwritingRows,
             vec![shown(&insert.table.name)],
             false,
         )),
         OnDuplicate::Fail | OnDuplicate::Ignore => insert_runs_code(&insert.table.name, keys),
+    };
+    let mut functions = Vec::new();
+    match &insert.source {
+        InsertSource::Values(rows) => {
+            for value in rows.iter().flatten() {
+                if let InsertValue::Expr(expr) = value {
+                    user_functions(expr, keys, &mut functions);
+                }
+            }
+        }
+        InsertSource::Query(query) => query_user_functions(query, keys, &mut functions),
+        InsertSource::DefaultValues => {}
+    }
+    if let OnDuplicate::Update(assignments) = &insert.on_duplicate {
+        for (_, expr) in assignments {
+            user_functions(expr, keys, &mut functions);
+        }
+    }
+    returning_user_functions(insert.returning.as_deref(), keys, &mut functions);
+    DestructiveStatement::combined(found, running(functions))
+}
+
+fn optional_user_functions(
+    expr: Option<&Expr>,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut Vec<String>,
+) {
+    if let Some(expr) = expr {
+        user_functions(expr, catalog, functions);
     }
 }
 
-fn insert_runs_code(table: &Name, keys: &mut KeyLookup<'_>) -> Option<DestructiveStatement> {
-    match keys(&table.text) {
+fn returning_user_functions(
+    returning: Option<&[SelectItem]>,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut Vec<String>,
+) {
+    for item in returning.unwrap_or_default() {
+        if let SelectItem::Expr { expr, .. } = item {
+            user_functions(expr, catalog, functions);
+        }
+    }
+}
+
+fn statement_running_code(
+    statement: &Statement,
+    catalog: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    let mut functions = Vec::new();
+    match statement {
+        Statement::Query(query) => query_user_functions(query, catalog, &mut functions),
+        Statement::Select(select) => select_user_functions(select, catalog, &mut functions),
+        other => return classify(other, catalog),
+    }
+    running(functions)
+}
+
+fn query_user_functions(
+    query: &Query,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut Vec<String>,
+) {
+    for common in &query.with {
+        query_user_functions(&common.query, catalog, functions);
+    }
+    body_user_functions(&query.body, catalog, functions);
+}
+
+fn body_user_functions(
+    body: &SetExpr,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut Vec<String>,
+) {
+    match body {
+        SetExpr::Select(select) => select_user_functions(select, catalog, functions),
+        SetExpr::Operation(operation) => {
+            body_user_functions(&operation.left, catalog, functions);
+            body_user_functions(&operation.right, catalog, functions);
+        }
+        SetExpr::Query(query) => query_user_functions(query, catalog, functions),
+    }
+}
+
+fn select_user_functions(
+    select: &Select,
+    catalog: &mut CatalogLookup<'_>,
+    functions: &mut Vec<String>,
+) {
+    for expr in crate::subquery::select_expressions(select) {
+        user_functions(expr, catalog, functions);
+    }
+    let Some(from) = &select.from else {
+        return;
+    };
+    for table in std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)) {
+        if let Some(derived) = &table.derived {
+            query_user_functions(&derived.query, catalog, functions);
+        }
+        if let Some(generated) = &table.generated
+            && let GeneratedTable::Function(function) = generated.as_ref()
+            && catalog.is_user_routine(&function.name)
+        {
+            push_new(functions, shown_text(&function.name));
+        }
+    }
+}
+
+fn user_functions(expr: &Expr, catalog: &mut CatalogLookup<'_>, functions: &mut Vec<String>) {
+    match &expr.kind {
+        ExprKind::Function { name, arguments } if name == crate::routines::ROUTINE_CALL => {
+            if let Some(Expr {
+                kind: ExprKind::Literal(Literal::String(called)),
+                ..
+            }) = arguments.first()
+            {
+                push_new(functions, shown_text(called));
+            }
+        }
+        ExprKind::Function { name, .. }
+            if !name.is_empty() && !name.starts_with('*') && catalog.is_user_routine(name) =>
+        {
+            push_new(functions, shown_text(name));
+        }
+        ExprKind::Subquery(subquery) => query_user_functions(&subquery.query, catalog, functions),
+        _ => {}
+    }
+    for child in crate::eval::children(expr) {
+        user_functions(child, catalog, functions);
+    }
+}
+
+fn push_new(functions: &mut Vec<String>, name: String) {
+    if !functions.contains(&name) {
+        functions.push(name);
+    }
+}
+
+fn routine_drop_cascading(
+    drop: &DropRoutine,
+    catalog: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    let mut triggers = Vec::new();
+    for target in &drop.targets {
+        match catalog.triggers_calling(drop.kind, target) {
+            Some(found) => triggers.extend(found),
+            None => triggers.push(shown(&target.name)),
+        }
+    }
+    (!triggers.is_empty())
+        .then(|| DestructiveStatement::new(DestructiveKind::DropTrigger, triggers, true))
+}
+
+fn routine_replacing(
+    create: &CreateRoutine,
+    catalog: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    if create.definition.kind != crate::routines::RoutineKind::Function
+        || !create.definition.identity().is_empty()
+    {
+        return None;
+    }
+    let target = RoutineTarget {
+        name: create.name.clone(),
+        arguments: Some(Vec::new()),
+    };
+    let triggers =
+        catalog.triggers_calling(Some(crate::routines::RoutineKind::Function), &target)?;
+    (!triggers.is_empty())
+        .then(|| DestructiveStatement::new(DestructiveKind::DisableTrigger, triggers, false))
+}
+
+fn insert_runs_code(table: &Name, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
+    match keys.table_keys(&table.text) {
         Some(found) if !found.insert_reaches_further => None,
         _ => run_code(vec![shown(table)]),
     }
@@ -628,14 +842,18 @@ enum RowReach {
     Pinned(TableKeys),
 }
 
-fn row_reach(filter: Option<&Expr>, table: &TableReference, keys: &mut KeyLookup<'_>) -> RowReach {
+fn row_reach(
+    filter: Option<&Expr>,
+    table: &TableReference,
+    keys: &mut CatalogLookup<'_>,
+) -> RowReach {
     let names_target = |qualifier: Option<&str>| {
         qualifier.is_none_or(|qualifier| qualifies_target(qualifier, table))
     };
     let Some(filter) = filter.filter(|filter| names_column(filter, &names_target)) else {
         return RowReach::WholeTable;
     };
-    match keys(&table.name.text) {
+    match keys.table_keys(&table.name.text) {
         Some(found) if found.pins_rows(filter, table) => RowReach::Pinned(found),
         _ => RowReach::Many,
     }
@@ -643,10 +861,35 @@ fn row_reach(filter: Option<&Expr>, table: &TableReference, keys: &mut KeyLookup
 
 const MOST_PINNED_ROWS: usize = 100;
 
-/// Finds what the classifier needs to know of a table by its internal name, or `None` when it
-/// cannot tell (no database, a view, or a read that failed). A relation that does not exist has
-/// no keys and reaches nothing: a statement naming it fails before it changes anything.
-pub(crate) type KeyLookup<'a> = dyn FnMut(&str) -> Option<TableKeys> + 'a;
+/// What the classifier reads from the database a statement would run against.
+pub(crate) trait ClassifierCatalog {
+    /// Finds what the classifier needs to know of a table by its internal name, or `None` when
+    /// it cannot tell (no database, a view, or a read that failed). A relation that does not
+    /// exist has no keys and reaches nothing: a statement naming it fails before it changes
+    /// anything.
+    fn table_keys(&mut self, table: &str) -> Option<TableKeys>;
+
+    /// Whether a function call written as `name` can call a routine a user created, which can
+    /// write; `true` when it cannot tell.
+    fn is_user_routine(&mut self, name: &str) -> bool;
+
+    /// The triggers, as `table.trigger`, whose action calls the routine `target` names, or
+    /// `None` when it cannot tell.
+    fn triggers_calling(
+        &mut self,
+        kind: Option<crate::routines::RoutineKind>,
+        target: &RoutineTarget,
+    ) -> Option<Vec<String>>;
+
+    /// The query a materialized view stores, or `None` when it cannot tell.
+    fn materialized_view_query(&mut self, name: &str) -> Option<String>;
+
+    /// The one statement `text` holds, parsed as the session parses it, or `None` when it
+    /// does not parse to one.
+    fn parsed(&mut self, text: &str) -> Option<Statement>;
+}
+
+pub(crate) type CatalogLookup<'a> = dyn ClassifierCatalog + 'a;
 
 /// A table's keys and what else a change of its rows reaches, as the classifier needs them to
 /// tell whether a `DELETE` or `UPDATE` changes only a few rows.

@@ -905,3 +905,163 @@ fn dropping_or_disabling_a_trigger_or_row_security_is_destructive() {
         assert_eq!(kind(Dialect::PostgreSql, text), None, "{text}");
     }
 }
+
+fn runs_function(found: Option<DestructiveStatement>, function: &str) -> bool {
+    found.is_some_and(|found| {
+        found.parts.iter().any(|part| {
+            part.kind == DestructiveKind::RunCode && part.objects.iter().any(|o| o == function)
+        })
+    })
+}
+
+#[test]
+fn a_write_calling_a_user_function_anywhere_in_it_runs_code() {
+    let store = reaching_store();
+    for (dialect, text) in [
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t VALUES (5, wipe_now()::text)",
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t SELECT 6, wipe_now()::text",
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t SELECT id + 10, name FROM t WHERE id = wipe_now()",
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t VALUES (7, 'a') RETURNING wipe_now()",
+        ),
+        (
+            Dialect::PostgreSql,
+            "INSERT INTO t VALUES (8, 'a') ON CONFLICT (id) DO UPDATE SET name = wipe_now()::text",
+        ),
+        (
+            Dialect::PostgreSql,
+            "UPDATE t SET name = wipe_now()::text WHERE id = 1",
+        ),
+        (
+            Dialect::PostgreSql,
+            "UPDATE t SET name = 'a' WHERE id = 1 RETURNING wipe_now()",
+        ),
+        (Dialect::PostgreSql, "DELETE FROM t WHERE id = wipe_now()"),
+        (
+            Dialect::PostgreSql,
+            "DELETE FROM t WHERE id = 1 RETURNING wipe_now()",
+        ),
+        (
+            Dialect::PostgreSql,
+            "DELETE FROM t WHERE id = 1 AND EXISTS (SELECT 1 FROM u WHERE u.id = wipe_now())",
+        ),
+        (Dialect::MySql, "INSERT INTO t VALUES (7, wipe_now())"),
+        (
+            Dialect::MySql,
+            "INSERT INTO t VALUES (9, 'a') ON DUPLICATE KEY UPDATE name = wipe_now()",
+        ),
+    ] {
+        assert!(
+            runs_function(classified_with_keys(&store, dialect, text), "wipe_now"),
+            "{dialect:?} {text}"
+        );
+    }
+    for text in [
+        "INSERT INTO t VALUES (5, upper('a'))",
+        "INSERT INTO t SELECT 6, lower('B')",
+        "UPDATE t SET name = lower(name) WHERE id = 1",
+        "DELETE FROM t WHERE id = 1 RETURNING upper(name)",
+    ] {
+        assert_eq!(
+            classified_with_keys(&store, Dialect::PostgreSql, text),
+            None,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn statements_that_run_a_query_classify_the_query_they_run() {
+    let store = reaching_store();
+    Session::new(&store)
+        .execute(
+            "CREATE MATERIALIZED VIEW writes_view AS SELECT id, wipe_now() AS w FROM t; \
+             CREATE MATERIALIZED VIEW plain_view AS SELECT id FROM t",
+            &mut |_| {},
+        )
+        .unwrap();
+    for (dialect, text) in [
+        (Dialect::PostgreSql, "EXPLAIN ANALYZE SELECT wipe_now()"),
+        (
+            Dialect::PostgreSql,
+            "DECLARE c CURSOR WITH HOLD FOR SELECT wipe_now()",
+        ),
+        (
+            Dialect::PostgreSql,
+            "CREATE MATERIALIZED VIEW mv AS SELECT id, wipe_now() FROM t",
+        ),
+        (Dialect::PostgreSql, "REFRESH MATERIALIZED VIEW writes_view"),
+        (Dialect::MySql, "SET @x = wipe_now()"),
+    ] {
+        assert!(
+            runs_function(classified_with_keys(&store, dialect, text), "wipe_now"),
+            "{dialect:?} {text}"
+        );
+    }
+    assert_eq!(
+        kind_with_keys(&store, Dialect::PostgreSql, "EXPLAIN ANALYZE DELETE FROM t"),
+        Some(DestructiveKind::DeleteWithoutFilter)
+    );
+    for text in [
+        "EXPLAIN DELETE FROM t",
+        "EXPLAIN SELECT wipe_now()",
+        "DECLARE c CURSOR WITH HOLD FOR SELECT id FROM t",
+        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t",
+        "REFRESH MATERIALIZED VIEW plain_view",
+    ] {
+        assert_eq!(
+            classified_with_keys(&store, Dialect::PostgreSql, text),
+            None,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn dropping_or_replacing_a_trigger_function_takes_its_triggers_out() {
+    let store = reaching_store();
+    let dropped = classified_with_keys(
+        &store,
+        Dialect::PostgreSql,
+        "DROP FUNCTION wipe_u() CASCADE",
+    )
+    .expect("a cascading drop of a trigger function is destructive");
+    assert_eq!(dropped.parts[0].kind, DestructiveKind::DropTrigger);
+    assert_eq!(
+        dropped.parts[0].objects,
+        ["inserted.inserted_wipes", "measured_eu.measured_eu_wipes"]
+    );
+    let replaced = classified_with_keys(
+        &store,
+        Dialect::PostgreSql,
+        "CREATE OR REPLACE FUNCTION wipe_u() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    )
+    .expect("replacing a trigger function is destructive");
+    assert_eq!(replaced.parts[0].kind, DestructiveKind::DisableTrigger);
+    assert_eq!(
+        replaced.parts[0].objects,
+        ["inserted.inserted_wipes", "measured_eu.measured_eu_wipes"]
+    );
+    for text in [
+        "DROP FUNCTION wipe_now() CASCADE",
+        "DROP FUNCTION wipe_u()",
+        "CREATE OR REPLACE FUNCTION wipe_now() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 2; END $$",
+        "CREATE FUNCTION fresh() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    ] {
+        assert_eq!(
+            classified_with_keys(&store, Dialect::PostgreSql, text),
+            None,
+            "{text}"
+        );
+    }
+}

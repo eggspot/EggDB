@@ -724,6 +724,20 @@ fn names_routine(written: &str, internal: &str) -> bool {
     }
 }
 
+/// The triggers, as `(table, trigger)`, whose action calls the routine `target` names; none
+/// when no such routine exists.
+pub(crate) fn triggers_calling(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    kind: Option<RoutineKind>,
+    target: &RoutineTarget,
+) -> SqlResult<Vec<(String, String)>> {
+    match locate(reader, tables, kind, target)? {
+        Ok(located) => dependent_triggers(reader, &located),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
 fn dependent_triggers(
     reader: &dyn KeyValueRead,
     located: &Located,
