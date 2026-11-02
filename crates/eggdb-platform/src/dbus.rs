@@ -11,6 +11,13 @@ use std::fmt;
 pub const MAX_MESSAGE_LENGTH: usize = 1 << 27;
 /// The largest array the specification allows (64 MiB).
 pub const MAX_ARRAY_LENGTH: usize = 1 << 26;
+/// The largest message [`message_length`] and [`Message::decode`] accept from a peer (1 MiB):
+/// far more than any accessibility call or bus signal carries, and small enough that a peer
+/// cannot make the reader buffer or decode hundreds of megabytes.
+pub const MAX_INCOMING_MESSAGE_LENGTH: usize = 1 << 20;
+/// The most array elements one [`Reader`] reads across all of its arrays (65 536), so that a
+/// peer cannot turn a message of one-byte elements into millions of decoded values.
+pub const MAX_ARRAY_ELEMENTS: usize = 1 << 16;
 /// How deeply containers may nest in one value.
 pub const MAX_DEPTH: usize = 64;
 /// The line that ends authentication and starts the message stream.
@@ -320,15 +327,18 @@ pub struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,
     big_endian: bool,
+    elements_left: usize,
 }
 
 impl<'a> Reader<'a> {
-    /// A reader at the start of `bytes`.
+    /// A reader at the start of `bytes`, which reads at most [`MAX_ARRAY_ELEMENTS`] array
+    /// elements in all.
     pub fn new(bytes: &'a [u8], big_endian: bool) -> Self {
         Self {
             bytes,
             position: 0,
             big_endian,
+            elements_left: MAX_ARRAY_ELEMENTS,
         }
     }
 
@@ -489,6 +499,11 @@ impl<'a> Reader<'a> {
         }
         let mut values = Vec::new();
         while self.position < end {
+            self.elements_left = self.elements_left.checked_sub(1).ok_or_else(|| {
+                DbusError(format!(
+                    "a message holds more than {MAX_ARRAY_ELEMENTS} array elements"
+                ))
+            })?;
             values.push(self.read(element, depth + 1)?);
         }
         if self.position != end {
@@ -701,8 +716,15 @@ impl Message {
         Ok(bytes)
     }
 
-    /// Reads one whole message, as [`message_length`] measured it.
+    /// Reads one whole message, as [`message_length`] measured it, of at most
+    /// [`MAX_INCOMING_MESSAGE_LENGTH`] bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, DbusError> {
+        if bytes.len() > MAX_INCOMING_MESSAGE_LENGTH {
+            return malformed(format!(
+                "a message of {} bytes is longer than the {MAX_INCOMING_MESSAGE_LENGTH} accepted",
+                bytes.len()
+            ));
+        }
         let big_endian = match bytes.first() {
             Some(b'l') => false,
             Some(b'B') => true,
@@ -821,8 +843,10 @@ pub fn message_length(prefix: &[u8]) -> Result<Option<usize>, DbusError> {
         .saturating_add(16)
         .next_multiple_of(8)
         .saturating_add(body);
-    if length > MAX_MESSAGE_LENGTH {
-        return malformed("a message is longer than 128 MiB");
+    if length > MAX_INCOMING_MESSAGE_LENGTH {
+        return malformed(format!(
+            "a message of {length} bytes is longer than the {MAX_INCOMING_MESSAGE_LENGTH} accepted"
+        ));
     }
     Ok(Some(length))
 }
@@ -1033,6 +1057,40 @@ mod tests {
         assert_eq!(message.member.as_deref(), Some("m"));
         assert_eq!(message.body, [Value::UInt32(9)]);
         assert_eq!(message_length(&bytes).unwrap(), Some(bytes.len()));
+    }
+
+    #[test]
+    fn a_peer_cannot_make_the_reader_allocate_without_bound() {
+        let mut header = vec![b'l', 4, 0, 1];
+        header.extend_from_slice(&((MAX_INCOMING_MESSAGE_LENGTH as u32) - 16).to_le_bytes());
+        header.extend_from_slice(&1_u32.to_le_bytes());
+        header.extend_from_slice(&1_u32.to_le_bytes());
+        assert!(message_length(&header).is_err());
+        let mut fits = header.clone();
+        fits[4..8].copy_from_slice(&1000_u32.to_le_bytes());
+        assert_eq!(message_length(&fits).unwrap(), Some(1024));
+        assert!(Message::decode(&vec![b'l'; MAX_INCOMING_MESSAGE_LENGTH + 1]).is_err());
+
+        let mut many = Vec::new();
+        let count = MAX_ARRAY_ELEMENTS + 1;
+        many.extend_from_slice(&(count as u32).to_le_bytes());
+        many.resize(4 + count, 7);
+        let error = Reader::new(&many, false).read_all("ay").unwrap_err();
+        assert!(error.to_string().contains("array elements"), "{error}");
+        many[..4].copy_from_slice(&(MAX_ARRAY_ELEMENTS as u32).to_le_bytes());
+        many.truncate(4 + MAX_ARRAY_ELEMENTS);
+        let read = Reader::new(&many, false).read_all("ay").unwrap();
+        assert!(
+            matches!(&read[..], [Value::Array(_, values)] if values.len() == MAX_ARRAY_ELEMENTS)
+        );
+
+        let mut split = Vec::new();
+        for _ in 0..2 {
+            split.extend_from_slice(&((MAX_ARRAY_ELEMENTS / 2 + 1) as u32).to_le_bytes());
+            split.resize(split.len() + MAX_ARRAY_ELEMENTS / 2 + 1, 1);
+            split.resize(split.len().next_multiple_of(4), 0);
+        }
+        assert!(Reader::new(&split, false).read_all("ayay").is_err());
     }
 
     #[test]
