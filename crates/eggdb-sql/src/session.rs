@@ -1855,6 +1855,7 @@ impl<'s> Session<'s> {
                 match self.read(|reader, _| crate::user_types::load(reader)) {
                     Ok(registry) => {
                         self.pending_user_types = Some(registry);
+                        self.statements_in_text = self.statements_in_text.saturating_sub(1);
                         continue;
                     }
                     Err(error) => {

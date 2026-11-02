@@ -987,8 +987,8 @@ are all-or-nothing together: `COMMIT` keeps both, `ROLLBACK` (or a block left op
 drops both, and `get` sees what the block wrote. In a failed block they are refused until
 `ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, while a `SAVEPOINT` is set
 `put`, `del`, `incr` and `decr` are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
-`RELEASE SAVEPOINT` lifts it), and `expire`, `persist` and `cas` are refused inside a block for now; `scan`, `ttl`, `check`, `stats` and `backup` read the
-last commit (D266).
+`RELEASE SAVEPOINT` lifts it), and `expire`, `persist` and `cas` are refused inside a block for
+now; `scan`, `ttl`, `check`, `stats` and `backup` read the last commit (D266).
 
 ```
 app=> begin;
