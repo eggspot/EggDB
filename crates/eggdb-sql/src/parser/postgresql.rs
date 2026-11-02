@@ -318,9 +318,14 @@ impl Parser<'_> {
         }
         self.expect(&TokenKind::LeftParen)?;
         let mut arguments = Vec::new();
+        let populates = crate::sql_json::POPULATE.contains(&name.text.as_str());
         if !self.take(&TokenKind::RightParen) {
             loop {
-                arguments.push(self.expression()?);
+                arguments.push(if populates && arguments.is_empty() {
+                    self.populate_base()?
+                } else {
+                    self.expression()?
+                });
                 if !self.take(&TokenKind::Comma) {
                     break;
                 }

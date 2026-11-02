@@ -123,6 +123,7 @@ mod session;
 mod set_operations;
 mod set_returning;
 mod settings;
+mod sql_json;
 mod sqlite_datetime;
 mod sqlite_errors;
 mod sqlite_functions;
@@ -212,6 +213,8 @@ mod savepoint_tests;
 mod schema_tests;
 #[cfg(test)]
 mod set_returning_tests;
+#[cfg(test)]
+mod sql_json_tests;
 #[cfg(test)]
 mod sql_speed_tests;
 #[cfg(test)]

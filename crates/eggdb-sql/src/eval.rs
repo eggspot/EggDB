@@ -1455,6 +1455,9 @@ impl Evaluator<'_> {
             crate::json_functions::WHOLE_ROW => {
                 return crate::json_functions::whole_row(self, arguments);
             }
+            name if crate::sql_json::is_query_function(name) => {
+                return crate::sql_json::query_function(self, name, arguments);
+            }
             crate::json_functions::ROW_OBJECT => {
                 return crate::json_functions::row_object(self, arguments);
             }

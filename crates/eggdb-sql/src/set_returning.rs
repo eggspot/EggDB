@@ -18,11 +18,21 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 30] = [
+const FUNCTIONS: [SetReturningFunction; 35] = [
     to_records("json_to_record"),
     to_records("jsonb_to_record"),
     to_records("json_to_recordset"),
     to_records("jsonb_to_recordset"),
+    populates(crate::sql_json::POPULATE[0]),
+    populates(crate::sql_json::POPULATE[1]),
+    populates(crate::sql_json::POPULATE[2]),
+    populates(crate::sql_json::POPULATE[3]),
+    SetReturningFunction {
+        name: crate::sql_json::TABLE,
+        result_type: crate::sql_json::table_type,
+        rows: to_record_rows,
+        fields: true,
+    },
     SetReturningFunction {
         name: "jsonb_path_query",
         result_type: json_path_query_type,
@@ -32,7 +42,7 @@ const FUNCTIONS: [SetReturningFunction; 30] = [
     SetReturningFunction {
         name: "jsonb_path_query_tz",
         result_type: json_path_query_type,
-        rows: json_path_query_rows,
+        rows: json_path_query_tz_rows,
         fields: false,
     },
     SetReturningFunction {
@@ -253,6 +263,15 @@ fn openjson_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlRes
     })
 }
 
+const fn populates(name: &'static str) -> SetReturningFunction {
+    SetReturningFunction {
+        name,
+        result_type: crate::sql_json::populate_type,
+        rows: to_record_rows,
+        fields: true,
+    }
+}
+
 const fn to_records(name: &'static str) -> SetReturningFunction {
     SetReturningFunction {
         name,
@@ -398,7 +417,11 @@ fn json_path_query_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
 }
 
 fn json_path_query_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
-    crate::json_path::query_rows(values, sink)
+    crate::json_path::query_rows(values, false, sink)
+}
+
+fn json_path_query_tz_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_path::query_rows(values, true, sink)
 }
 
 fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {
@@ -1208,6 +1231,8 @@ fn function_columns(
 ) -> Vec<OutputColumn> {
     let mut columns: Vec<OutputColumn> = if crate::json_to_record::is_to_record(found.name) {
         crate::json_to_record::columns(&defined_names(function), types)
+    } else if crate::sql_json::defines_columns(found.name) {
+        crate::sql_json::columns(found.name, &defined_names(function), types)
     } else if found.fields {
         record_columns(found.name)
     } else {
@@ -1373,6 +1398,14 @@ impl BoundFunction {
             };
             let produced = if crate::json_to_record::is_to_record(self.found.name) {
                 crate::json_to_record::rows(
+                    self.found.name,
+                    &self.values,
+                    &self.defined_names,
+                    &self.types,
+                    &mut numbered,
+                )
+            } else if crate::sql_json::defines_columns(self.found.name) {
+                crate::sql_json::rows(
                     self.found.name,
                     &self.values,
                     &self.defined_names,

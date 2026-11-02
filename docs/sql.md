@@ -1865,8 +1865,10 @@ arguments and a `_tz` form, and the operators `jsonb @? path` and `jsonb @@ path
 `.**{1 to 2}`) accessors, filters `? (...)` with comparisons, `&&`, `||`, `!`, `is unknown`,
 `exists`, `like_regex` (with `flag`) and `starts with`, arithmetic (`+ - * / %`, unary signs),
 the methods `type()`, `size()`, `double()`, `number()`, `integer()`, `string()`, `abs()`,
-`floor()`, `ceiling()`, `bigint()`, `boolean()` and `keyvalue()`, and `$name` variables
-(`datetime()` and the other date and time methods are not supported yet). Errors carry PostgreSQL's
+`floor()`, `ceiling()`, `bigint()`, `boolean()` and `keyvalue()`, the datetime methods
+`datetime()`, `datetime(template)`, `date()`, `time([p])`, `time_tz([p])`, `timestamp([p])` and
+`timestamp_tz([p])` (ISO strings or a `to_timestamp` template; comparisons that need the session's
+time zone only in the `_tz` functions, else `22031`), and `$name` variables (D289). Errors carry PostgreSQL's
 SQL/JSON states (`2203A` member not found, `22039` array not found, `22033` subscript, `22036`
 non-numeric item, `22038` singleton required). The `jsonpath` type name is accepted as text, and
 the path is checked when it is used. A path of more than 1,000 nodes fails with
@@ -1878,7 +1880,23 @@ array kept as JSON text in a text column), and without the list they fail with `
 array fills an array column (`c int[]` from `[1,2,3]`) element by element, and a JSON object a
 composite column (`r myrowtype`) member by member, as in PostgreSQL's documented example; a
 nested array fails with `0A000` (arrays have one dimension), an array mixing nested arrays and
-scalars with `22P02`.
+scalars with `22P02`. `json_populate_record`, `jsonb_populate_record`, `json_populate_recordset`
+and `jsonb_populate_recordset` in `FROM` take their columns from the first argument's row type,
+`NULL::t` or `CAST(NULL AS t)` for a table, view or composite type `t` (a base row that is not
+NULL fails with `0A000`).
+
+The SQL/JSON query functions (D289) work as in PostgreSQL 17 and Oracle: `JSON_EXISTS(doc, path
+[PASSING v AS name, ...] [{TRUE | FALSE | UNKNOWN | ERROR} ON ERROR])`, `JSON_VALUE(... [RETURNING
+type] [{NULL | ERROR | DEFAULT expr} ON EMPTY] [... ON ERROR])` for one scalar (several items
+`22034`, an object or array `2203F`, nothing with `ERROR ON EMPTY` `22035`), and `JSON_QUERY(...
+[RETURNING type] [WITH [CONDITIONAL | UNCONDITIONAL] [ARRAY] WRAPPER | WITHOUT WRAPPER] [{KEEP |
+OMIT} QUOTES] [... ON EMPTY] [... ON ERROR])` with `EMPTY ARRAY` and `EMPTY OBJECT` behaviors.
+`JSON_TABLE(doc, 'path' [AS name] [PASSING ...] COLUMNS (...) [{ERROR | EMPTY [ARRAY]} ON ERROR])`
+in `FROM` takes `name FOR ORDINALITY`, `name type [FORMAT JSON] [PATH 'path']` with the wrapper,
+quotes and behavior clauses, `name type EXISTS [PATH 'path']` and `NESTED [PATH] 'path' COLUMNS
+(...)` (children joined to their parent, siblings in a union), may follow another `FROM` item it
+reads, and produces at most 1,000,000 rows (`54000`) with at most 32 nested levels. Oracle's
+dialect accepts the same forms, columns without a type and `NULL ON ERROR`.
 
 **Arrays** (D128) are values of expressions, of `WITH` queries, derived tables and `VALUES` lists,
 and of results, with one dimension and elements of `smallint`, `integer`, `bigint`, `real`,
@@ -3811,8 +3829,9 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   back references explores every way it can match, bounded by the step budget, so a hostile one
   ends with `54000`.
 - `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
-  `jsonb_path_query` and the rest of SQL/JSON path, `json_populate_record`, `json_to_record`,
-  `json_object(text[])` and `JSON_TABLE` are missing.
+  `json_object(text[])`, `json_populate_record` in a select list or with a base row that is not
+  NULL, `JSON_TABLE`'s `PLAN` clause, `JSON_SERIALIZE`, `JSON_SCALAR`, `JSON()` and `IS JSON`
+  are missing.
 - `interval` (D113): only the `postgres` `IntervalStyle` is printed. PostgreSQL 17's `infinity`
   and `-infinity` intervals read, print, compare, add, multiply, divide, `justify`, and give
   `isfinite` false and `date_part` an infinite double as PostgreSQL's do (D153), but a time stamp
@@ -4239,7 +4258,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   temporal tables are Msg 40517.
 
 ## Next parts (roadmap)
-- SQL/JSON path (`jsonb_path_query`, `@?`, `@@`), `json_populate_record` and `JSON_TABLE`.
+- `JSON_TABLE`'s `PLAN` clause, `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
 - `GROUPING SETS`, `ROLLUP` and `CUBE`, `DISTINCT ON`, `NATURAL` joins and the other aggregates

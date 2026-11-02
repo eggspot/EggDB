@@ -783,6 +783,7 @@ impl<'a> Resolver<'a> {
             return Ok(self.opaque_item(reference));
         }
         if let Some(generated) = &mut reference.generated {
+            self.populate_row_type(generated)?;
             if self.walk_expressions || self.columns.has_unreadable() {
                 for expr in crate::set_returning::expressions_mut(generated) {
                     self.walk_expr(expr, ctes)?;
@@ -837,6 +838,32 @@ impl<'a> Resolver<'a> {
             None => self.sequence_reference(reference)?,
         }
         Ok(item)
+    }
+
+    fn populate_row_type(&mut self, generated: &mut GeneratedTable) -> SqlResult<()> {
+        let Some(row_type) = crate::sql_json::populate_row_type(generated) else {
+            return Ok(());
+        };
+        let columns = match row_type {
+            crate::sql_json::RowType::Columns(columns) => columns,
+            crate::sql_json::RowType::Table(name) => {
+                let resolved = self.resolve_name(&name.text)?;
+                match self.tables.relation(self.reader, &resolved)? {
+                    Some(Relation::Table(table)) => table
+                        .columns
+                        .iter()
+                        .map(|column| (column.name.clone(), Some(column.sql_type)))
+                        .collect(),
+                    Some(Relation::View(view)) => view
+                        .columns
+                        .iter()
+                        .map(|column| (column.name.clone(), column.sql_type))
+                        .collect(),
+                    None => return Err(crate::sql_json::undefined_row_type(&name)),
+                }
+            }
+        };
+        crate::sql_json::fill_row_type(generated, columns)
     }
 
     fn sequence_reference(&mut self, reference: &mut TableReference) -> SqlResult<()> {

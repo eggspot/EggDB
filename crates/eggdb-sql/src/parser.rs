@@ -20,6 +20,7 @@ mod roles;
 mod routines;
 mod row_security;
 mod schemas;
+mod sql_json;
 mod sqlite;
 mod sqlserver;
 mod sqlserver_batch;
@@ -2662,6 +2663,9 @@ impl<'t> Parser<'t> {
                 )),
             };
         }
+        if self.at_json_table() {
+            return self.json_table();
+        }
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }
@@ -4401,6 +4405,9 @@ impl<'t> Parser<'t> {
     fn function_call(&mut self, name: Name) -> SqlResult<Expr> {
         if name.text == "extract" && !self.sqlite() {
             return self.extract(name);
+        }
+        if let Some(expr) = self.sql_json_function(&name)? {
+            return Ok(expr);
         }
         if self.mysql()
             && let Some(expr) = self.mysql_function(&name)?
