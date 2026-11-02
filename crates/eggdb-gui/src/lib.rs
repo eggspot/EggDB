@@ -1,11 +1,16 @@
 //! EggDB's own GUI toolkit and the desktop client's screens, designed in `docs/ux/gui.md`
-//! (D15, D191): an RGBA [`Canvas`] with antialiased shapes, text from TrueType fonts read by
-//! our own [`TrueTypeFont`], a [`png`] encoder for offscreen frames, and the client's main
-//! window drawn by [`main_window::draw`]. Windows on each operating system come from the
-//! platform layer later; until then frames are rendered offscreen.
+//! (D15, D191, DNEW-I29): an RGBA [`Canvas`] with antialiased shapes, text from TrueType fonts
+//! read by our own [`TrueTypeFont`], a [`png`] encoder for offscreen frames, the first screen's
+//! connect card drawn by [`connect_screen::draw`] with its keyboard model
+//! [`connect_screen::handle_key`], and the client's main window drawn by
+//! [`main_window::draw`]. Frames are pure functions of the screen's state, the theme, the size
+//! and the scale, so they are tested offscreen; the `eggdb-gui` binary presents them in a
+//! native window from the platform layer (`eggdb_platform::window`).
 
 mod canvas;
 mod color;
+/// The first screen: the connect card, its focus order and keys (`docs/ux/first-screen.md`).
+pub mod connect_screen;
 /// The query editor: text, cursor, selection and editing commands.
 pub mod editor;
 mod font;

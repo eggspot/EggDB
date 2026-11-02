@@ -58,6 +58,15 @@ impl Canvas {
         &self.pixels
     }
 
+    /// The pixels as bytes, four (red, green, blue, alpha) a pixel row by row: what a native
+    /// window presents.
+    pub fn rgba_bytes(&self) -> Vec<u8> {
+        self.pixels
+            .iter()
+            .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
+            .collect()
+    }
+
     /// Mixes `color` into (`x`, `y`) with `coverage`; points outside are ignored.
     pub fn blend(&mut self, x: i64, y: i64, color: Rgba, coverage: f32) {
         if coverage <= 0.0 || x < 0 || y < 0 {
@@ -90,25 +99,53 @@ impl Canvas {
         }
     }
 
+    fn rounded_coverage(rect: Rect, radius: f32, x: i64, y: i64) -> f32 {
+        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
+        let edge = Self::coverage_span(rect.x, rect.x + rect.w, x)
+            * Self::coverage_span(rect.y, rect.y + rect.h, y);
+        if radius <= 0.0 {
+            return edge;
+        }
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        let cx = px.clamp(rect.x + radius, rect.x + rect.w - radius);
+        let cy = py.clamp(rect.y + radius, rect.y + rect.h - radius);
+        let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+        let inside_corner = (radius - distance + 0.5).clamp(0.0, 1.0);
+        inside_corner.min(edge)
+    }
+
     /// Fills `rect` with corners rounded to `radius`.
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, color: Rgba) {
-        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
         let (x0, x1) = (rect.x.floor() as i64, (rect.x + rect.w).ceil() as i64);
         let (y0, y1) = (rect.y.floor() as i64, (rect.y + rect.h).ceil() as i64);
         for y in y0..y1 {
             for x in x0..x1 {
-                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                let cx = px.clamp(rect.x + radius, rect.x + rect.w - radius);
-                let cy = py.clamp(rect.y + radius, rect.y + rect.h - radius);
-                let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
-                let inside_corner = (radius - distance + 0.5).clamp(0.0, 1.0);
-                let edge = Self::coverage_span(rect.x, rect.x + rect.w, x)
-                    * Self::coverage_span(rect.y, rect.y + rect.h, y);
-                let coverage = if radius > 0.0 {
-                    inside_corner.min(edge)
-                } else {
-                    edge
-                };
+                self.blend(x, y, color, Self::rounded_coverage(rect, radius, x, y));
+            }
+        }
+    }
+
+    /// Draws a band `width` wide just outside `rect`, its inner corners rounded to `radius`
+    /// and its outer corners to `radius + width`: a focus ring around a control.
+    pub fn stroke_outside_rounded_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        width: f32,
+        color: Rgba,
+    ) {
+        let outer = Rect::new(
+            rect.x - width,
+            rect.y - width,
+            rect.w + 2.0 * width,
+            rect.h + 2.0 * width,
+        );
+        let (x0, x1) = (outer.x.floor() as i64, (outer.x + outer.w).ceil() as i64);
+        let (y0, y1) = (outer.y.floor() as i64, (outer.y + outer.h).ceil() as i64);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let coverage = Self::rounded_coverage(outer, radius + width, x, y)
+                    - Self::rounded_coverage(rect, radius, x, y);
                 self.blend(x, y, color, coverage);
             }
         }
@@ -205,5 +242,18 @@ mod tests {
         assert_eq!(canvas.pixel(0, 0), Some(WHITE));
         assert_eq!(canvas.pixel(6, 6), Some(BLACK));
         canvas.fill_rect(Rect::new(-5.0, -5.0, 1000.0, 2.0), BLACK);
+    }
+
+    #[test]
+    fn a_ring_outside_a_rect_leaves_the_rect_and_the_far_outside_alone() {
+        let mut canvas = Canvas::new(40, 40, WHITE);
+        canvas.stroke_outside_rounded_rect(Rect::new(10.0, 10.0, 20.0, 20.0), 4.0, 2.0, BLACK);
+        assert_eq!(canvas.pixel(20, 20), Some(WHITE));
+        assert_eq!(canvas.pixel(10, 20), Some(WHITE));
+        assert_eq!(canvas.pixel(9, 20), Some(BLACK));
+        assert_eq!(canvas.pixel(8, 20), Some(BLACK));
+        assert_eq!(canvas.pixel(7, 20), Some(WHITE));
+        assert_eq!(canvas.pixel(20, 31), Some(BLACK));
+        assert_eq!(canvas.pixel(8, 8), Some(WHITE));
     }
 }

@@ -26,7 +26,9 @@
 //! - [`stop_signals`]: `Ctrl-C` and `SIGTERM` turned into a flag a server reads to stop
 //!   gracefully;
 //! - [`connection_limits`]: the login slots, timeouts and memory budget every protocol server
-//!   shares, so no client can lock others out or exhaust the server.
+//!   shares, so no client can lock others out or exhaust the server;
+//! - [`window`]: native windows for the GUI: open one, present RGBA frames, read its keyboard,
+//!   resize, scale and close events.
 //!
 //! Each trait has an implementation backed by the operating system ([`OsFileSystem`],
 //! [`OsIoQueue`], [`OsNetwork`], [`SystemClock`], [`OsMemory`], [`OsCpus`]) and a
@@ -129,6 +131,7 @@ mod topology_sysfs;
 mod topology_windows;
 mod uncached;
 pub mod user_files;
+pub mod window;
 
 pub use aligned::AlignedBuffer;
 pub use allocator::EggAllocator;
