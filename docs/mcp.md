@@ -193,7 +193,9 @@ needs no role in the file, follows triggers and routines, and also stops DDL out
 
 With `--allow-write` the agent gets `write_sql`: one statement per call, in the dialect it names,
 run in a transaction of its own that commits when the statement succeeds and changes nothing
-when it fails (on Oracle the server commits the statement's block itself). The result says
+when it fails (on Oracle the server commits the statement's block itself). A `CALL`, a `DO`
+block or any statement that calls a user-defined routine runs inside that one transaction too,
+so a `COMMIT` or `ROLLBACK` inside a procedure fails with `2D000` and the call keeps nothing. The result says
 `committed` and, for an `INSERT`, `UPDATE`, `DELETE` or Oracle `MERGE`, `rows_changed`. Each call may change at
 most 256 MiB (the bytes it puts and the keys it deletes); a larger change is rolled back with
 `write_too_large`. A failed statement changes nothing but the sequence values it drew, which

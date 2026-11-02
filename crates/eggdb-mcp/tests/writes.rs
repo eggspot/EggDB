@@ -880,3 +880,47 @@ fn confirmed_dynamic_transact_sql_commits_its_change() {
     );
     assert_eq!(scratch_rows(&opener.store), 0);
 }
+
+#[test]
+fn a_confirmed_procedure_runs_in_one_transaction_and_keeps_nothing_when_it_fails() {
+    let audit = TempAudit::new("atomic-call");
+    let store = scratch_store();
+    store.sql(
+        Dialect::PostgreSql,
+        "CREATE PROCEDURE commit_then_fail() LANGUAGE plpgsql AS $$ BEGIN INSERT INTO scratch VALUES (10, 'kept?'); COMMIT; RAISE EXCEPTION 'late failure'; END $$; \
+         CREATE PROCEDURE add_one() LANGUAGE plpgsql AS $$ BEGIN INSERT INTO scratch VALUES (11, 'added'); END $$",
+    );
+    let opener = MapOpener::new(store);
+    let mut server = writing_server(&opener, &audit, "{}");
+    for (id, sql) in (1..).zip([
+        "CALL commit_then_fail()",
+        "DO $$ BEGIN INSERT INTO scratch VALUES (12, 'kept?'); COMMIT; END $$",
+    ]) {
+        let failed = call(
+            &mut server,
+            id,
+            "write_sql",
+            &format!(r#"{{"sql":"{sql}","confirm":true}}"#),
+        );
+        assert!(is_error(&failed), "{sql}: {failed:?}");
+        assert_eq!(
+            text_at(structured(&failed), &["error", "sqlstate"]),
+            "2D000",
+            "{sql}: {failed:?}"
+        );
+        assert_eq!(scratch_rows(&opener.store), 2, "{sql}");
+    }
+    let added = call(
+        &mut server,
+        10,
+        "write_sql",
+        r#"{"sql":"CALL add_one()","confirm":true}"#,
+    );
+    assert!(!is_error(&added), "{added:?}");
+    assert_eq!(
+        text_at(structured(&added), &["committed"]),
+        "true",
+        "{added:?}"
+    );
+    assert_eq!(scratch_rows(&opener.store), 3);
+}

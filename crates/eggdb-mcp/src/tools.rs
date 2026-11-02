@@ -9,9 +9,9 @@ use eggdb_commands::{
 };
 use eggdb_sql::json::{Json, Node};
 use eggdb_sql::{
-    DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead, KeyValueStore,
-    OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX, Relation,
-    RelationKind, ScanDirection, Session, SqlError, SqlState, Value, VisibleTables,
+    DestructiveKind, DestructiveStatement, Dialect, EXACT_ROW_COUNT_UP_TO, KeyValueRead,
+    KeyValueStore, OneStatementError, OneStatementRefusal, QueryResult, RESERVED_KEY_PREFIX,
+    Relation, RelationKind, ScanDirection, Session, SqlError, SqlState, Value, VisibleTables,
     destructive_statement,
 };
 use std::time::{Duration, Instant};
@@ -869,6 +869,10 @@ pub(crate) fn write_sql<O: DatabaseOpener>(
             let _ = session.close();
             return Err(error);
         }
+        if let Err(error) = hold_code_in_one_transaction(&mut session, request.sql, dialect) {
+            let _ = session.close();
+            return Err(call.sql_failure(limits, error));
+        }
         let mut result = None;
         let mut ran =
             session.run_one_statement_if_confirmed(request.sql, confirmed, &mut |returned| {
@@ -908,6 +912,24 @@ pub(crate) fn write_sql<O: DatabaseOpener>(
         committed,
         warning,
     }
+}
+
+fn hold_code_in_one_transaction(
+    session: &mut Session<'_>,
+    sql: &str,
+    dialect: Dialect,
+) -> Result<(), SqlError> {
+    if dialect != Dialect::PostgreSql {
+        return Ok(());
+    }
+    let runs_code = matches!(
+        session.destructive_statement(sql),
+        Ok(Some(found)) if found.parts.iter().any(|part| part.kind == DestructiveKind::RunCode)
+    );
+    if runs_code {
+        session.execute("BEGIN", &mut |_| {})?;
+    }
+    Ok(())
 }
 
 fn run_sql<O: DatabaseOpener>(
