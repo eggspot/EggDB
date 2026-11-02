@@ -289,6 +289,7 @@ struct Report {
     context: Option<String>,
     raised: Option<Raised>,
     declared_exception: Option<String>,
+    procedure: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +319,7 @@ impl SqlError {
                 context: None,
                 raised: None,
                 declared_exception: None,
+                procedure: None,
             }),
         }
     }
@@ -364,6 +366,17 @@ impl SqlError {
     pub(crate) fn with_declared_exception(mut self, identity: impl Into<String>) -> Self {
         self.report.declared_exception = Some(identity.into());
         self
+    }
+
+    pub(crate) fn in_procedure(mut self, procedure: &str) -> Self {
+        if self.report.procedure.is_none() {
+            self.report.procedure = Some(procedure.to_owned());
+        }
+        self
+    }
+
+    pub(crate) fn procedure(&self) -> Option<&str> {
+        self.report.procedure.as_deref()
     }
 
     pub(crate) fn declared_exception(&self) -> Option<&str> {

@@ -358,9 +358,11 @@ impl<'s> Session<'s> {
         let outer_options = self.set_options();
         let scope = self.enter_batch_scope(&program, Parameters::Absent);
         self.dynamic_depth += 1;
+        let procedure_name = base_name(&definition.name).to_owned();
         {
             let context = Arc::make_mut(&mut self.batch_context);
             context.nest_level = self.dynamic_depth;
+            context.procedure = Some(definition.name.clone());
             for (name, value) in arguments {
                 if let Some(variable) = context.variable_mut(&name) {
                     variable.value = value;
@@ -395,7 +397,11 @@ impl<'s> Session<'s> {
         let returned = std::mem::replace(&mut self.returned_value, outer_returned);
         match end? {
             ProgramEnd::Stopped => return Ok(DynamicEnd::Stopped),
-            ProgramEnd::Escaped(error) => return Ok(DynamicEnd::Failed(error.without_position())),
+            ProgramEnd::Escaped(error) => {
+                return Ok(DynamicEnd::Failed(
+                    error.without_position().in_procedure(&procedure_name),
+                ));
+            }
             ProgramEnd::Finished | ProgramEnd::DialectChanged { .. } => {}
         }
         for (parameter, variable) in &outputs {

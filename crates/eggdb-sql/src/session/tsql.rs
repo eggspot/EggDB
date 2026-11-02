@@ -474,7 +474,15 @@ impl<'s> Session<'s> {
                 let line =
                     crate::tsql::line_of(code.text, failure.position().unwrap_or(statement_start));
                 if let Some(slot) = caught.get_mut(index) {
-                    *slot = Some(CaughtError::of(&failure, line));
+                    let mut error = CaughtError::of(&failure, line);
+                    if error.procedure.is_none() {
+                        error.procedure = self
+                            .batch_context
+                            .procedure
+                            .as_deref()
+                            .map(|name| crate::schemas::base_name(name).to_owned());
+                    }
+                    *slot = Some(error);
                 }
                 at_instruction = block.handler.start;
                 continue;

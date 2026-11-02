@@ -1862,10 +1862,7 @@ impl<'t> Parser<'t> {
                 position,
             ),
             "@@langid" => integer(0, position),
-            "@@procid" => integer(
-                i64::from(self.batch.map_or(0, |batch| batch.procedure_id)),
-                position,
-            ),
+            "@@procid" => self.procedure_id(position),
             "@@fetch_status" => integer(i64::from(state.fetch_status.unwrap_or(-1)), position),
             "@@cursor_rows" => integer(i64::from(state.cursor_rows), position),
             "@@lock_timeout" => integer(-1, position),

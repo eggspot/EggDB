@@ -985,7 +985,8 @@ SELECT @odd AS odd_sum
   `@@ROWCOUNT` as the statement before it set it.
 - **Errors**: inside `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` an error moves to the
   `CATCH` block instead of reaching the client; there `ERROR_NUMBER()`, `ERROR_SEVERITY()`,
-  `ERROR_STATE()`, `ERROR_LINE()`, `ERROR_MESSAGE()` and `ERROR_PROCEDURE()` (NULL) describe it,
+  `ERROR_STATE()`, `ERROR_LINE()`, `ERROR_MESSAGE()` and `ERROR_PROCEDURE()` (the procedure
+  the error was raised in, NULL outside one) describe it,
   and they are NULL outside. As in SQL Server, an unknown table or column (Msg 207, 208) in the
   `TRY` block's own statements is not caught, while one inside dynamic SQL is. `THROW number,
   message, state` (numbers 50000 to 2147483647, severity 16) ends the batch unless caught, and
@@ -1096,9 +1097,14 @@ SELECT id, name FROM dbo.in_stock(5)
 - **Limits**: procedures, functions, triggers and the dynamic SQL they run share one nesting
   count of at most 32 levels (Msg 217), as SQL Server's `@@NESTLEVEL` does.
 
-Not yet: a table-valued function after the first `FROM` item (joins and `CROSS APPLY`), a
+Inside a procedure `@@PROCID` is its object id (so `OBJECT_NAME(@@PROCID)` is its name; 0
+outside a procedure), and `ERROR_PROCEDURE()` in a `CATCH` block names the innermost procedure
+the caught error came from.
+
+Not yet: a table-valued function whose arguments read the columns of an earlier `FROM` item
+(`CROSS APPLY dbo.f(t.id)`; constant arguments work), a
 procedure called by its name alone as the first statement of a batch (write `EXEC`), `EXEC
-@result = dbo.scalar_function`, `@@PROCID` (0) and `ERROR_PROCEDURE()` (NULL), numbered and
+@result = dbo.scalar_function`, numbered and
 temporary (`#name`) procedures, CLR routines (`AS EXTERNAL NAME`), `SELECT INTO` in a body, and
 `COMMIT` or `ROLLBACK` of the caller's transaction inside a function.
 
@@ -3920,7 +3926,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   and `sp_unprepare`; rolling back to a save point (`SAVE TRANSACTION` is recorded);
   `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part names and other databases.
 - Errors inside dynamic SQL report the line of the `EXEC` statement, not their line in
-  the dynamic text. `RAISERROR ... WITH LOG` writes no log. `ERROR_PROCEDURE()` is always NULL.
+  the dynamic text. `RAISERROR ... WITH LOG` writes no log.
 - The catalog (D133) shows each column as the SQL Server type its engine type is most often
   declared with: `varchar` and `char` columns as `nvarchar` and `nchar`, `tinyint` as `smallint`,
   `money` as `decimal(19,4)`, `smalldatetime` and `datetime2(0)` as `datetime2(0)`, `datetime2(3)`

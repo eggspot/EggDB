@@ -29,7 +29,7 @@ pub(crate) use statements::{
     filled_rows, matching_of, matching_select, remove_rows, scalar_select, undeclared, value_items,
     variable_column, variable_columns,
 };
-pub(crate) use variables::{BatchContext, DynamicBatch, ScalarVariable};
+pub(crate) use variables::{BatchContext, DynamicBatch, ScalarVariable, procedure_object_name};
 
 #[cfg(test)]
 mod cursors_tests;
