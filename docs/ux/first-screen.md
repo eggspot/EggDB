@@ -234,8 +234,8 @@ pixels; the platform layer converts for the OS where it wants device pixels (UIA
   the canvas and its ARIA DOM in a headless browser and the same tree test runs over the DOM.
 
 ## Left for the next slices
-Opening and creating the file (`Open`, `Browse…` through the OS file dialog, drag-and-drop onto the
-card), the server segment's fields and connecting, the `Error:` line from a real failure, the
+Opening a file, the server segment and the `Error:` line from a real failure are built (D274,
+`docs/ux/workspace.md` 1). Left: the
 layout picker behind `Where are you coming from?`, the sample dataset, recent connections, the
 toolbar and sidebar around the card, right-to-left mirroring, and the `warning` token's light value
 (gui.md's `#B26A00` is 4.2:1 on `bg0`; `#995A00`, 5.5:1, is proposed for its next revision).

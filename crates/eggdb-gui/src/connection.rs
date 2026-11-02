@@ -36,6 +36,8 @@ pub enum FailureField {
     File,
     /// The server segment's `URL` input.
     Url,
+    /// The server segment's protocol menu.
+    Protocol,
     /// The Host input.
     Host,
     /// The Database input.
@@ -475,6 +477,16 @@ pub fn url_failure() -> ConnectFailure {
         "the URL is not a database URL".to_owned(),
         Some("postgresql://user@host:5432/database".to_owned()),
         FailureField::Url,
+    )
+}
+
+/// The failure shown when the protocol menu names a protocol the client cannot connect over
+/// yet (`label` is the menu's text, `MySQL protocol`).
+pub fn unsupported_protocol_failure(label: &str) -> ConnectFailure {
+    ConnectFailure::new(
+        format!("the client cannot connect over {label} yet"),
+        Some("choose \"PostgreSQL protocol\", which eggdb serve always speaks".to_owned()),
+        FailureField::Protocol,
     )
 }
 

@@ -1,10 +1,15 @@
 use eggdb_platform::window::{AccessNode, AccessRect, AccessRole, AccessState};
 
+use super::server_segment::{
+    DATABASE_INPUT, DEFAULT_HOST, DEFAULT_SERVER_USER, HOST_INPUT, PASSWORD_INPUT, PORT_INPUT,
+    PROTOCOL_MENU, Segment, TLS_WARNING, TLS_WARNING_AT, TLS_WARNING_WIDTH, URL_INPUT,
+    URL_PLACEHOLDER, USE_TLS_BOX, USE_TLS_LABEL, USER_INPUT, tls_warning_shown,
+};
 use super::{
     BODY, BROWSE, CANCEL, CARD, CHECK_LABEL_X, CONNECT_TO_A_SERVER, CONNECT_TO_A_SERVER_LABEL,
     CREATE_BOX, CREATE_LABEL, ConnectCard, ERROR_TOP, Focus, HEADLINE, OPEN, OPEN_A_FILE,
     OPEN_A_FILE_LABEL, PLACEHOLDER, READ_ONLY_BOX, READ_ONLY_LABEL, SEGMENTS, STATUS_LINE, TITLE,
-    card_origin, down, file_input, link_rects, offset, panel_shift,
+    TextField, card_origin, down, file_input, link_rects, offset, panel_shift,
 };
 use crate::canvas::Rect;
 use crate::main_window::Faces;
@@ -44,6 +49,24 @@ pub const NODE_SAMPLE: u32 = 16;
 /// The progress or status line (`Opening shop.eggdb…`, `Cancelled`), present only while one
 /// is shown; announced politely.
 pub const NODE_STATUS_LINE: u32 = 17;
+/// The server segment's `URL` input.
+pub const NODE_URL: u32 = 18;
+/// The protocol menu, its value the chosen protocol.
+pub const NODE_PROTOCOL: u32 = 19;
+/// The Host input.
+pub const NODE_HOST: u32 = 20;
+/// The Port input.
+pub const NODE_PORT: u32 = 21;
+/// The Database input.
+pub const NODE_DATABASE: u32 = 22;
+/// The User input.
+pub const NODE_USER: u32 = 23;
+/// The Password input, its value masked.
+pub const NODE_PASSWORD: u32 = 24;
+/// The checkbox `Use TLS`.
+pub const NODE_USE_TLS: u32 = 25;
+/// The warning under `Use TLS` while it is unchecked; announced politely.
+pub const NODE_TLS_WARNING: u32 = 26;
 
 const CARD_NAME: &str = "Connect";
 const SEGMENTS_NAME: &str = "Connection kind";
@@ -51,6 +74,8 @@ const FILE_NAME: &str = "File";
 const BROWSE_NAME: &str = "Browse";
 const CANCEL_NAME: &str = "Cancel";
 const OPEN_NAME: &str = "Open";
+const CONNECT_NAME: &str = "Connect";
+const MASK: char = '●';
 const TITLE_AT: (f32, f32) = (48.0, 24.0);
 const PANEL_LEFT: f32 = 24.0;
 const PANEL_WIDTH: f32 = 512.0;
@@ -102,7 +127,10 @@ impl TreeBuilder {
 
 fn focused_node_id(card: &ConnectCard) -> u32 {
     match card.focus {
-        Focus::Segments => NODE_OPEN_A_FILE,
+        Focus::Segments => match card.segment {
+            Segment::File => NODE_OPEN_A_FILE,
+            Segment::Server => NODE_CONNECT_TO_A_SERVER,
+        },
         Focus::FileInput => NODE_FILE,
         Focus::Browse => NODE_BROWSE,
         Focus::CreateIfMissing => NODE_CREATE_IF_MISSING,
@@ -111,6 +139,14 @@ fn focused_node_id(card: &ConnectCard) -> u32 {
         Focus::Open => NODE_OPEN,
         Focus::WhereFromLink => NODE_WHERE_FROM,
         Focus::SampleLink => NODE_SAMPLE,
+        Focus::Url => NODE_URL,
+        Focus::Protocol => NODE_PROTOCOL,
+        Focus::Host => NODE_HOST,
+        Focus::Port => NODE_PORT,
+        Focus::Database => NODE_DATABASE,
+        Focus::User => NODE_USER,
+        Focus::Password => NODE_PASSWORD,
+        Focus::UseTls => NODE_USE_TLS,
     }
 }
 
@@ -161,13 +197,14 @@ pub fn accessibility_tree(
         SEGMENTS_NAME,
         at(SEGMENTS),
     );
+    let server = card.segment == Segment::Server;
     for (id, label, rect, selected) in [
-        (NODE_OPEN_A_FILE, OPEN_A_FILE_LABEL, OPEN_A_FILE, true),
+        (NODE_OPEN_A_FILE, OPEN_A_FILE_LABEL, OPEN_A_FILE, !server),
         (
             NODE_CONNECT_TO_A_SERVER,
             CONNECT_TO_A_SERVER_LABEL,
             CONNECT_TO_A_SERVER,
-            false,
+            server,
         ),
     ] {
         let state = AccessState {
@@ -183,12 +220,25 @@ pub fn accessibility_tree(
             state,
         );
     }
-    let panel_bottom = READ_ONLY_BOX.y + READ_ONLY_BOX.h + shift;
+    let panel_bottom = if server {
+        if tls_warning_shown(card) {
+            TLS_WARNING_AT.1 + BODY.1 + shift
+        } else {
+            USE_TLS_BOX.y + USE_TLS_BOX.h + shift
+        }
+    } else {
+        READ_ONLY_BOX.y + READ_ONLY_BOX.h + shift
+    };
+    let panel_name = if server {
+        CONNECT_TO_A_SERVER_LABEL
+    } else {
+        OPEN_A_FILE_LABEL
+    };
     tree.add(
         NODE_PANEL,
         Some(NODE_CARD),
         AccessRole::TabPanel,
-        OPEN_A_FILE_LABEL,
+        panel_name,
         at(Rect::new(
             PANEL_LEFT,
             ERROR_TOP,
@@ -205,59 +255,10 @@ pub fn accessibility_tree(
             at(Rect::new(PANEL_LEFT, ERROR_TOP, PANEL_WIDTH, shift)),
         );
     }
-    tree.add(
-        NODE_FILE,
-        Some(NODE_PANEL),
-        AccessRole::TextField,
-        FILE_NAME,
-        at(down(file_input(card), shift)),
-    );
-    if let Some(file) = tree.nodes.last_mut() {
-        file.value = Some(card.file.value().to_owned());
-        file.placeholder = Some(PLACEHOLDER.to_owned());
-    }
-    if card.file_dialog {
-        tree.add(
-            NODE_BROWSE,
-            Some(NODE_PANEL),
-            AccessRole::Button,
-            BROWSE_NAME,
-            at(down(BROWSE, shift)),
-        );
-    }
-    for (id, label, rect, checked) in [
-        (
-            NODE_CREATE_IF_MISSING,
-            CREATE_LABEL,
-            CREATE_BOX,
-            card.create_if_missing,
-        ),
-        (
-            NODE_READ_ONLY,
-            READ_ONLY_LABEL,
-            READ_ONLY_BOX,
-            card.read_only,
-        ),
-    ] {
-        let label_width = faces.ui.width(label, BODY.0);
-        let row = Rect::new(
-            rect.x,
-            rect.y + shift,
-            CHECK_LABEL_X - rect.x + label_width,
-            rect.h,
-        );
-        let state = AccessState {
-            checked: Some(checked),
-            ..AccessState::default()
-        };
-        tree.add_with(
-            id,
-            Some(NODE_PANEL),
-            AccessRole::CheckBox,
-            label,
-            at(row),
-            state,
-        );
+    if server {
+        server_nodes(&mut tree, card, faces, &at, shift);
+    } else {
+        file_nodes(&mut tree, card, faces, &at, shift);
     }
     let cancel = AccessState {
         disabled: !card.can_cancel && !card.disabled(),
@@ -279,7 +280,7 @@ pub fn accessibility_tree(
         NODE_OPEN,
         Some(NODE_CARD),
         AccessRole::Button,
-        OPEN_NAME,
+        if server { CONNECT_NAME } else { OPEN_NAME },
         at(OPEN),
         open,
     );
@@ -316,17 +317,176 @@ pub fn accessibility_tree(
     tree.nodes
 }
 
+fn text_field(
+    tree: &mut TreeBuilder,
+    id: u32,
+    name: &str,
+    rect: Rect,
+    value: String,
+    placeholder: &str,
+) {
+    tree.add(id, Some(NODE_PANEL), AccessRole::TextField, name, rect);
+    if let Some(node) = tree.nodes.last_mut() {
+        node.value = Some(value);
+        node.placeholder = (!placeholder.is_empty()).then(|| placeholder.to_owned());
+    }
+}
+
+struct CheckBoxRow<'l> {
+    id: u32,
+    label: &'l str,
+    rect: Rect,
+    checked: bool,
+}
+
+fn check_box_row(
+    tree: &mut TreeBuilder,
+    faces: Faces<'_>,
+    at: &dyn Fn(Rect) -> Rect,
+    row: CheckBoxRow<'_>,
+) {
+    let label_width = faces.ui.width(row.label, BODY.0);
+    let rect = row.rect;
+    let bounds = Rect::new(rect.x, rect.y, CHECK_LABEL_X - rect.x + label_width, rect.h);
+    let state = AccessState {
+        checked: Some(row.checked),
+        ..AccessState::default()
+    };
+    tree.add_with(
+        row.id,
+        Some(NODE_PANEL),
+        AccessRole::CheckBox,
+        row.label,
+        at(bounds),
+        state,
+    );
+}
+
+fn server_nodes(
+    tree: &mut TreeBuilder,
+    card: &ConnectCard,
+    faces: Faces<'_>,
+    at: &dyn Fn(Rect) -> Rect,
+    shift: f32,
+) {
+    let form = &card.server;
+    let plain = |field: &TextField| field.value().to_owned();
+    text_field(tree, NODE_URL, "URL", at(down(URL_INPUT, shift)), plain(&form.url), URL_PLACEHOLDER);
+    tree.add(
+        NODE_PROTOCOL,
+        Some(NODE_PANEL),
+        AccessRole::Button,
+        "Protocol",
+        at(down(PROTOCOL_MENU, shift)),
+    );
+    if let Some(node) = tree.nodes.last_mut() {
+        node.value = Some(form.protocol.label().to_owned());
+    }
+    for (id, name, rect, value, placeholder) in [
+        (NODE_HOST, "Host", HOST_INPUT, plain(&form.host), DEFAULT_HOST),
+        (NODE_PORT, "Port", PORT_INPUT, plain(&form.port), ""),
+        (NODE_DATABASE, "Database", DATABASE_INPUT, plain(&form.database), ""),
+        (NODE_USER, "User", USER_INPUT, plain(&form.user), DEFAULT_SERVER_USER),
+        (
+            NODE_PASSWORD,
+            "Password",
+            PASSWORD_INPUT,
+            std::iter::repeat_n(MASK, form.password.value().chars().count()).collect(),
+            "",
+        ),
+    ] {
+        text_field(tree, id, name, at(down(rect, shift)), value, placeholder);
+    }
+    let tls_row = CheckBoxRow {
+        id: NODE_USE_TLS,
+        label: USE_TLS_LABEL,
+        rect: down(USE_TLS_BOX, shift),
+        checked: form.use_tls,
+    };
+    check_box_row(tree, faces, at, tls_row);
+    if tls_warning_shown(card) {
+        let width = faces.ui.width(TLS_WARNING, BODY.0).min(TLS_WARNING_WIDTH);
+        let rect = Rect::new(TLS_WARNING_AT.0, TLS_WARNING_AT.1 + shift, width, BODY.1);
+        tree.add(NODE_TLS_WARNING, Some(NODE_PANEL), AccessRole::Status, TLS_WARNING, at(rect));
+    }
+}
+
+fn file_nodes(
+    tree: &mut TreeBuilder,
+    card: &ConnectCard,
+    faces: Faces<'_>,
+    at: &dyn Fn(Rect) -> Rect,
+    shift: f32,
+) {
+    text_field(
+        tree,
+        NODE_FILE,
+        FILE_NAME,
+        at(down(file_input(card), shift)),
+        card.file.value().to_owned(),
+        PLACEHOLDER,
+    );
+    if card.file_dialog {
+        tree.add(
+            NODE_BROWSE,
+            Some(NODE_PANEL),
+            AccessRole::Button,
+            BROWSE_NAME,
+            at(down(BROWSE, shift)),
+        );
+    }
+    for (id, label, rect, checked) in [
+        (
+            NODE_CREATE_IF_MISSING,
+            CREATE_LABEL,
+            CREATE_BOX,
+            card.create_if_missing,
+        ),
+        (
+            NODE_READ_ONLY,
+            READ_ONLY_LABEL,
+            READ_ONLY_BOX,
+            card.read_only,
+        ),
+    ] {
+        let row = CheckBoxRow {
+            id,
+            label,
+            rect: down(rect, shift),
+            checked,
+        };
+        check_box_row(tree, faces, at, row);
+    }
+}
+
 impl ConnectCard {
     /// Moves the keyboard focus to the element of accessibility node `id`, as when a screen
     /// reader or a click focuses it; returns whether the node can take the focus (a disabled
     /// `Cancel`, a group or a heading cannot).
     pub fn focus_node(&mut self, id: u32) -> bool {
+        let file = self.segment == Segment::File;
         let focus = match id {
-            NODE_OPEN_A_FILE | NODE_SEGMENTS => Focus::Segments,
-            NODE_FILE => Focus::FileInput,
-            NODE_BROWSE if self.file_dialog => Focus::Browse,
-            NODE_CREATE_IF_MISSING => Focus::CreateIfMissing,
-            NODE_READ_ONLY => Focus::ReadOnly,
+            NODE_OPEN_A_FILE => {
+                self.show_segment(Segment::File);
+                Focus::Segments
+            }
+            NODE_CONNECT_TO_A_SERVER => {
+                self.show_segment(Segment::Server);
+                Focus::Segments
+            }
+            NODE_SEGMENTS => Focus::Segments,
+            NODE_FILE if file => Focus::FileInput,
+            NODE_BROWSE if file && self.file_dialog => Focus::Browse,
+            NODE_CREATE_IF_MISSING if file => Focus::CreateIfMissing,
+            NODE_READ_ONLY if file => Focus::ReadOnly,
+            NODE_URL if !file => Focus::Url,
+            NODE_PROTOCOL if !file => Focus::Protocol,
+            NODE_HOST if !file => Focus::Host,
+            NODE_PORT if !file => Focus::Port,
+            NODE_DATABASE if !file => Focus::Database,
+            NODE_USER if !file => Focus::User,
+            NODE_PASSWORD if !file => Focus::Password,
+            NODE_USE_TLS if !file => Focus::UseTls,
             NODE_CANCEL if self.can_cancel => Focus::Cancel,
             NODE_OPEN => Focus::Open,
             NODE_WHERE_FROM => Focus::WhereFromLink,

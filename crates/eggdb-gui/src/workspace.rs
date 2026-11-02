@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use eggdb_platform::window::{KeyPress, OpenFileDialog};
 
-use crate::connect_screen::{ConnectAction, ConnectCard, handle_key};
-use crate::connection::{ConnectFailure, ConnectTarget, Connection, Connector, FileTarget};
+use crate::connect_screen::{ConnectAction, ConnectCard, Segment, handle_key};
+use crate::connection::{ConnectFailure, ConnectTarget, Connection, Connector};
 use crate::main_window::MainWindow;
 
 /// How long an open runs before the card shows its progress state, so a quick open never
@@ -38,7 +38,7 @@ pub enum Screen {
 }
 
 struct Opening {
-    target: FileTarget,
+    target: ConnectTarget,
     started: Instant,
     answer: Receiver<Result<Connection, ConnectFailure>>,
 }
@@ -154,6 +154,7 @@ impl Workspace {
     /// it and pressing `Enter` does; for scripted runs.
     pub fn open_typed(&mut self, typed: &str, now: Instant) {
         if let Some(card) = self.card_mut() {
+            card.show_segment(Segment::File);
             card.file.set(typed);
         }
         self.start_open(now);
@@ -195,11 +196,23 @@ impl Workspace {
         let Screen::Connect(card) = &mut self.screen else {
             return;
         };
-        let target = card.file_target(self.home.as_deref(), &self.current);
+        let target = match card.segment {
+            Segment::File => {
+                ConnectTarget::File(card.file_target(self.home.as_deref(), &self.current))
+            }
+            Segment::Server => match card.server.connect_options() {
+                Ok(options) => ConnectTarget::Server(options),
+                Err(failure) => {
+                    card.begin_opening();
+                    card.finish_with_failure(&failure);
+                    return;
+                }
+            },
+        };
         card.begin_opening();
         let (sender, answer) = mpsc::channel();
         let connector = Arc::clone(&self.connector);
-        let request = ConnectTarget::File(target.clone());
+        let request = target.clone();
         std::thread::spawn(move || {
             let _ = sender.send(connector.connect(&request));
         });
@@ -300,7 +313,7 @@ pub fn main_window_for(connection: &mut Connection) -> MainWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connect_screen::Focus;
+    use crate::connect_screen::{Focus, Segment};
     use crate::connection::{EngineConnector, FailureField};
     use eggdb_platform::window::Key;
 
@@ -495,5 +508,48 @@ mod tests {
         );
         assert_eq!(error.fix, None);
         assert_eq!(card.focus, Focus::FileInput);
+    }
+
+    #[test]
+    fn a_slow_connect_shows_connecting_to_the_host_and_port() {
+        let mut workspace = workspace(
+            Arc::new(SlowConnector(Duration::from_millis(400))),
+            scratch("server"),
+        );
+        let start = Instant::now();
+        if let Some(card) = workspace.card_mut() {
+            card.show_segment(Segment::Server);
+            card.focus = Focus::Url;
+        }
+        type_text(&mut workspace, "eggdb://ada@db.example.com/shop", start);
+        workspace.key(KeyPress::plain(Key::Enter), start);
+        assert!(workspace.is_opening());
+        workspace.tick(start + PROGRESS_DELAY);
+        let shown = card(&mut workspace);
+        assert_eq!(
+            shown.progress.as_deref(),
+            Some("Connecting to db.example.com:5432…")
+        );
+        assert!(shown.disabled());
+        workspace.wait_for_open(Duration::from_secs(5));
+        let failed = card(&mut workspace);
+        assert_eq!(failed.focus, Focus::Url);
+        assert_eq!(
+            failed.error.map(|error| error.line).as_deref(),
+            Some("Error: the URL is not a database URL")
+        );
+    }
+
+    #[test]
+    fn typing_a_path_after_the_server_segment_opens_the_file() {
+        let directory = scratch("back-to-file");
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        if let Some(card) = workspace.card_mut() {
+            card.show_segment(Segment::Server);
+        }
+        workspace.open_typed("back.eggdb", Instant::now());
+        workspace.wait_for_open(Duration::from_secs(10));
+        assert!(matches!(workspace.screen(), Screen::Main(_)));
+        let _ = std::fs::remove_file(directory.join("back.eggdb"));
     }
 }

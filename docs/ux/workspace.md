@@ -59,6 +59,15 @@ The status line of 1.5 is also at most 332 px wide. The last control ends 36 px 
 buttons, so two error lines never reach them; the card stays 480 px and the focus order is
 unchanged (D274).
 
+The protocol menu is one focus stop: `Up`/`Down` and `Space` step its value in place (the open
+list is a later slice), and a Port still holding the old protocol's default takes the new one's.
+A password typed into the URL (`user:secret@`) fills the Password input and is taken out of the
+URL when the focus leaves it or `Connect` starts. Empty fields mean libpq's defaults: host
+`localhost`, user `eggdb` (the user `eggdb serve` creates) and the user's name as the database.
+Until the client speaks the other protocols, `Connect` on them shows `Error: the client cannot
+connect over MySQL protocol yet` / `Try: choose "PostgreSQL protocol", which eggdb serve always
+speaks`, with the focus on the menu (D274).
+
 ### 1.5 Progress
 Pressing `Open` or `Connect` at once:
 - disables the whole card (every control `textDisabled`, inputs `bg1`), keeps focus where it was;
