@@ -642,7 +642,7 @@ fn the_sqlite_dialect_reads_sqlite_and_reports_sqlite_errors() {
         b"",
     );
     assert!(
-        text(&schema.stdout).contains("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)"),
+        text(&schema.stdout).contains("CREATE TABLE [items] (id INTEGER PRIMARY KEY, name TEXT)"),
         "{}",
         text(&schema.stdout)
     );

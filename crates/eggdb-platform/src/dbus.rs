@@ -957,7 +957,7 @@ mod tests {
             ]))),
         ];
         assert_eq!(round_trip(&values), values);
-        assert_eq!(signature_of(&values), "ybnqiuxtdsogauaa(so)a{ss}(iiii)v");
+        assert_eq!(signature_of(&values), "ybnqiuxtdsogaua(so)a{ss}(iiii)v");
     }
 
     #[test]

@@ -171,6 +171,10 @@ fn mismatches(expected: &[Reference], actual: &[Reference]) -> Vec<String> {
 fn the_connect_card_renders_the_reference_pixels_in_every_theme_and_scale() {
     let actual = current_frames();
     if std::env::var_os(UPDATE_VARIABLE).is_some_and(|value| value == "1") {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{UPDATE_VARIABLE}=1 rewrites the reference list instead of comparing it, so CI refuses it"
+        );
         std::fs::write(references_path(), format_references(&actual))
             .expect("tests/data/reference-frames.txt is writable");
         return;

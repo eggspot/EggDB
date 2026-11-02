@@ -36,8 +36,13 @@ impl Drop for TempDirectory {
 }
 
 fn eggdb(args: &[&Path]) -> Output {
+    eggdb_with_options(&[], args)
+}
+
+fn eggdb_with_options(options: &[&str], args: &[&Path]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_eggdb"))
         .arg("restore")
+        .args(options)
         .args(args)
         .env("NO_COLOR", "1")
         .output()
@@ -115,7 +120,7 @@ fn a_multi_part_append_only_directory_restores_in_sequence_order() {
     let directory = temp.join("appendonlydir");
     write_multi_part(&directory, MANIFEST);
     let database = temp.join("app.eggdb");
-    let restored = eggdb(&[&database, &directory]);
+    let restored = eggdb_with_options(&["--format", "text"], &[&database, &directory]);
     assert!(restored.status.success(), "{}", text(&restored.stderr));
     let shown = directory.display();
     assert_eq!(
@@ -133,6 +138,10 @@ fn a_multi_part_append_only_directory_restores_in_sequence_order() {
     let by_manifest = temp.join("by-manifest.eggdb");
     let restored = eggdb(&[&by_manifest, &directory.join("appendonly.aof.manifest")]);
     assert!(restored.status.success(), "{}", text(&restored.stderr));
+    assert_eq!(
+        text(&restored.stdout),
+        "{\"format\":\"redis-aof\",\"files\":3,\"commands\":8,\"failed\":0}\n"
+    );
     assert!(present(&by_manifest, "resp2", "moved"));
 }
 
