@@ -440,6 +440,8 @@ name = "eggdb-wasm"
 version = "0.1.0"
 dependencies = [
  "eggdb",
+ "eggdb-gui",
+ "eggdb-platform",
  "eggdb-sql",
 ]
 

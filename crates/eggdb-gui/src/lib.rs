@@ -8,6 +8,9 @@
 //! and the scale, so they are tested offscreen; the `eggdb-gui` binary presents them in a
 //! native window from the platform layer (`eggdb_platform::window`).
 
+/// The browser build's glue: DOM key names, modifier bits, theme and action numbers, and the
+/// accessibility tree as JSON for the ARIA mirror over the canvas (DNEW-I29).
+pub mod browser;
 mod canvas;
 mod color;
 /// The first screen: the connect card, its focus order, keys and accessibility tree

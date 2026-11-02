@@ -57,7 +57,16 @@ encoder, frames tested offscreen). This decision keeps all of D191 and adds the 
   (7:1 in high contrast) and every control boundary and the ring at 3:1. `--theme` overrides;
   following the OS's dark and contrast settings comes with each backend.
 
-Left: Wayland, the clipboard, the accessibility bridges, the
-wasm canvas, pointer input (hover, pressed, mouse focus without a ring), caret blinking,
-remembered window size and position, reading the OS theme, and golden frames with pinned fonts
-(D191).
+Accessibility, as built: the screen produces its tree as a pure function of its state
+(`connect_screen::accessibility_tree`: stable ids, parents, generic roles, names, values and
+states, logical bounds) and hands it to `Window::set_accessibility_tree` after each frame. On
+macOS the backend keeps one `NSAccessibilityElement` per node, updated in place while the tree's
+shape is unchanged, and posts the focus and value notifications. In the browser, `eggdb-wasm`'s
+`gui` feature (off by default, so the database module's size is unchanged) renders the same
+card for `web/card.js`, which puts the frame on a canvas and mirrors the tree into real
+`<input>`, `<button>` and `<a>` elements with ARIA roles over it, carrying the DOM focus.
+
+Left: Wayland, the clipboard, the UI Automation (Windows) and AT-SPI2 (Linux) bridges, pointer
+input in the native windows (hover, pressed, mouse focus without a ring), caret blinking,
+remembered window size and position, reading the OS theme, text in the browser without a font
+URL, and golden frames with pinned fonts (D191).

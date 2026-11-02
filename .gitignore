@@ -4,6 +4,7 @@
 /bench-results
 /compare-results
 /web/eggdb.wasm
+/web/eggdb-gui.wasm
 /crates/eggdb-redis-compare/target
 /drivers/dotnet/*/obj/
 /drivers/dotnet/*/bin/

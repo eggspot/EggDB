@@ -9,11 +9,21 @@
 //! returns a handle, or 0; [`eggdb_wasm_execute`] runs the SQL in the input on a handle;
 //! [`eggdb_wasm_output`] and [`eggdb_wasm_output_len`] locate the last answer;
 //! [`eggdb_wasm_close`] ends a handle; [`eggdb_wasm_version`] answers the version.
+//!
+//! With the `gui` feature the module also carries the desktop client's connect card for the
+//! browser loader in `web/card.js` (DNEW-I29): `eggdb_wasm_card_render` draws its RGBA frame,
+//! `eggdb_wasm_card_key` and `eggdb_wasm_card_focus` answer input, `eggdb_wasm_card_accessibility`
+//! answers the screen-reader tree the loader mirrors into ARIA elements, and
+//! `eggdb_wasm_card_font` takes the TrueType fonts to draw text with. The feature is off by
+//! default, so the database module's size does not carry the GUI (D6).
 
 use eggdb::Database;
 use eggdb::sql::Store;
 use eggdb_sql::{Dialect, QueryResult, Session};
 use std::cell::RefCell;
+
+#[cfg(feature = "gui")]
+mod card;
 
 type OpenSession = Session<'static>;
 

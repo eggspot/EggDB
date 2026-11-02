@@ -54,6 +54,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Lint and test the browser connect card (eggdb-wasm's gui feature, off by default)
+        run: |
+          cargo clippy -p eggdb-wasm --features gui --all-targets -- -D warnings
+          cargo test -p eggdb-wasm --features gui
       - name: Install psql, mysql and the pg8000 and PyMySQL drivers for the smoke test (test tooling, never shipped)
         run: |
           command -v psql || { sudo apt-get update && sudo apt-get install -y postgresql-client; }
@@ -1171,7 +1175,7 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-browser-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Build EggDB for WebAssembly and run it under Node and in headless Chrome
+      - name: Build EggDB for WebAssembly and run it and the connect card under Node and in headless Chrome
         run: |
           cargo build --release -p eggdb-wasm --target wasm32-wasip1
           cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb.wasm
@@ -1182,6 +1186,12 @@ jobs:
           google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/test.html > "$RUNNER_TEMP/dom.html"
           cat "$RUNNER_TEMP/dom.html"
           grep -q "eggdb-browser-test: passed" "$RUNNER_TEMP/dom.html"
+          cargo build --release -p eggdb-wasm --target wasm32-wasip1 --features gui
+          cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb-gui.wasm
+          ls -l web/eggdb-gui.wasm
+          google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/card-test.html > "$RUNNER_TEMP/card.html"
+          grep -o "eggdb-card-test: [^<]*" "$RUNNER_TEMP/card.html" || true
+          grep -q "eggdb-card-test: passed" "$RUNNER_TEMP/card.html"
 
   mobile:
     runs-on: ubuntu-latest

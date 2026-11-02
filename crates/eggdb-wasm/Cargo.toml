@@ -15,3 +15,8 @@ workspace = true
 [dependencies]
 eggdb = { path = "../eggdb" }
 eggdb-sql = { path = "../eggdb-sql" }
+eggdb-gui = { path = "../eggdb-gui", optional = true }
+eggdb-platform = { path = "../eggdb-platform", optional = true }
+
+[features]
+gui = ["dep:eggdb-gui", "dep:eggdb-platform"]
