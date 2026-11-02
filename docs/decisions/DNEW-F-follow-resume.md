@@ -1,0 +1,60 @@
+## DNEW-F-follow-resume `eggdb follow` saves its position in the file, resumes, reconnects, and follows PostgreSQL column changes — Decided by the build loop (by judgement, 2026-11-02); extends D162 and DNEW-F-ss-cdc
+
+D162 made a follow one unbroken run: a temporary slot, the position held in memory, a lost
+connection ending it with exit 3, and DDL on the source not handled. A move that takes days
+needs a follow that survives a restart of either side and a schema change.
+
+**The position lives in the file.**
+- A table `eggdb_follow.state (item, value)` holds the source kind, the source's identity, and
+  the position: for PostgreSQL the slot, the publication, whether the follow created it, and the
+  LSN; for SQL Server one row per table, `change_tracking <version>` or `cdc <LSN>`.
+- It is written after the copy (a follow that dies during its copy leaves no position, and the
+  file is copied afresh), then in the same EggDB transaction as each applied source transaction
+  (PostgreSQL) or poll (SQL Server), and once more at the stop. So the file and its position never
+  disagree. A plain table, not file metadata, because it is written in the same SQL transaction
+  as the rows, and dump, backup and branching carry it with no extra code.
+- The identity is PostgreSQL's `IDENTIFY_SYSTEM` system identifier and database name, or SQL
+  Server's `@@SERVERNAME` (the URL's host and port when the server has none) and database. A file
+  is resumed only from the same identity; anything else is refused with a message.
+
+**PostgreSQL's slot is permanent.**
+- A temporary slot dies with its connection, so it cannot carry a resume. The slot is created
+  permanent (`eggdb_follow_<unix seconds>_<pid>`), and dropped when the copy fails or a follow
+  with `--until caught-up` finishes (the cut-over); Ctrl-C, a lost connection and an apply
+  failure keep it, and every message that leaves it says how to drop it. The publication EggDB
+  created follows the slot.
+- Resuming checks the slot still exists, then starts replication at the saved LSN. Logical
+  decoding skips transactions that committed before the later of that LSN and the slot's
+  confirmed position, so nothing is applied twice.
+
+**Lost connections are retried.** An I/O error, the end of the stream, or a server error of class
+57P or 08 counts as lost. The follow waits 1, 2, 4 … up to 60 seconds between attempts, for
+`--reconnect-for` seconds in all (default 300, 0 for none), each attempt a `reconnecting` event.
+PostgreSQL drops the transaction it was reading and restarts at the last applied LSN. SQL Server
+checks the connection at the start of each poll, where almost all of the time between polls is
+spent; a loss in the middle of a poll ends the follow with exit 3, and the saved positions resume
+it.
+
+**PostgreSQL column changes.** pgoutput sends a `Relation` message before a table's first change
+in a session and after every change to its columns. The applier compares it with the previous
+one for that relation, or, the first time, with the target table's column names (seeded from the
+file, so a change made while the follow was stopped is seen too):
+- same column count, and every differing name is in the same place with the same type and is
+  new on both sides: `RENAME COLUMN`;
+- otherwise names that disappeared are dropped, new names added (type and default from the
+  source catalog's `format_type` and `pg_get_expr`, a `nextval` default left out; built-in types
+  by OID when the catalog cannot be read), and a changed type or modifier is `ALTER COLUMN TYPE`;
+- a renamed table in the same schema is `RENAME TO`; a move to another schema, or a table the
+  target does not have, stops the follow with a message.
+The statements run in the source transaction's own EggDB transaction. A drop and an add of a
+same-typed column in one place between two changes looks like a rename; that is the price of
+keeping renamed columns' data. Changes of tables outside `--schema` are skipped.
+
+**SQL Server column changes stop the follow.** Each poll reads the followed tables' columns
+(one `INFORMATION_SCHEMA.COLUMNS` query) and stops with exit 3, naming what was added or
+dropped, when they differ; resuming compares the source's columns with the file's. Making the
+same change in the file and resuming continues. CDC capture instances keep their old columns
+after DDL, so applying it automatically would need a new capture instance anyway.
+
+**Not done.** pgoutput protocol 2 (streamed in-progress transactions), binary tuples, and
+creating tables that appear on the source during a follow.

@@ -1,3 +1,7 @@
+use super::follow_state::{
+    DEFAULT_RECONNECT_SECONDS, LSN, POSTGRES, PUBLICATION, PUBLICATION_CREATED, READ_STATEMENT,
+    SLOT, SavedFollow, reconnect_delay, update_statement,
+};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, Format};
 use crate::cli::failure::{Exit, Failure};
@@ -5,11 +9,12 @@ use crate::cli::render::{self, JsonObject};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_pgwire::client::{ClientError, ConnectOptions, PgClient, QueryRows, parse_postgres_url};
 use eggdb_pgwire::replication::{
-    Change, ChangeApplier, Lsn, StreamMessage, format_lsn, parse_logical_message, parse_lsn,
-    parse_stream_message, quote_identifier, quote_literal, standby_status_update,
+    Change, ChangeApplier, Lsn, ReshapeStep, StreamMessage, builtin_type_name, format_lsn,
+    parse_logical_message, parse_lsn, parse_stream_message, quote_identifier, quote_literal,
+    standby_status_update,
 };
 use eggdb_platform::stop_signals;
-use eggdb_sql::{CopyChannel, CopyStart, Dialect, SqlError, SqlResult, SqlState};
+use eggdb_sql::{CopyChannel, CopyStart, Dialect, RelationKind, SqlError, SqlResult, SqlState};
 use std::time::{Duration, Instant};
 
 const DEFAULT_PUBLICATION: &str = "eggdb_follow";
@@ -17,6 +22,122 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 const PASSWORD_VARIABLE: &str = "PGPASSWORD";
+const STOP_CHECK: Duration = Duration::from_millis(200);
+const SLOT_DROP_ATTEMPTS: u32 = 25;
+
+fn connection_lost(error: &ClientError) -> bool {
+    match error {
+        ClientError::Io(_) => true,
+        ClientError::Server { code, .. } => code.starts_with("57P") || code.starts_with("08"),
+        _ => false,
+    }
+}
+
+fn start_replication(
+    stream: &mut PgClient,
+    slot_name: &str,
+    publication: &str,
+    at: Lsn,
+) -> Result<(), ClientError> {
+    stream.start_copy_both(&format!(
+        "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names {})",
+        quote_identifier(slot_name),
+        format_lsn(at),
+        quote_literal(&quote_identifier(publication))
+    ))?;
+    stream.set_read_timeout(Some(POLL_TIMEOUT))
+}
+
+fn drop_slot(catalog: &mut PgClient, slot_name: &str) -> bool {
+    for _ in 0..SLOT_DROP_ATTEMPTS {
+        match catalog.simple_query(&format!(
+            "SELECT pg_catalog.pg_drop_replication_slot({})",
+            quote_literal(slot_name)
+        )) {
+            Ok(_) => return true,
+            Err(ClientError::Server { code, .. }) if code == "55006" => {
+                std::thread::sleep(STOP_CHECK);
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn slot_kept_note(slot_name: &str) -> String {
+    format!(
+        "The replication slot {slot_name} is kept, so running the same command again resumes; it holds the source's WAL until then (SELECT pg_drop_replication_slot('{slot_name}'); gives up)"
+    )
+}
+
+fn with_slot_note(failure: Failure, slot_name: &str) -> Failure {
+    match failure {
+        Failure::Database {
+            message,
+            try_command,
+            exit,
+            code,
+        } => Failure::Database {
+            message: format!("{message}. {}", slot_kept_note(slot_name)),
+            try_command,
+            exit,
+            code,
+        },
+        other => other,
+    }
+}
+
+fn applier_for_target(
+    session: &mut eggdb_sql::Session<'_>,
+    schemas: &[String],
+    file_display: &str,
+) -> Result<ChangeApplier, Failure> {
+    let mut applier = ChangeApplier::new();
+    let relations = session.relations().map_err(|error| {
+        source_failed(format!(
+            "cannot read the tables of {file_display}: {}",
+            error.message()
+        ))
+    })?;
+    for relation in relations {
+        if let RelationKind::Table(table) = relation.kind
+            && relation.schema != "eggdb_follow"
+        {
+            applier.know_target_table(
+                &relation.schema,
+                &relation.name,
+                table.columns.into_iter().map(|column| column.name).collect(),
+            );
+        }
+    }
+    applier.only_schemas(schemas.to_vec());
+    Ok(applier)
+}
+
+fn added_column_type(step: &ReshapeStep, source_type: Option<(String, Option<String>)>) -> Option<String> {
+    let (type_oid, type_modifier, adding) = match step {
+        ReshapeStep::AddColumn {
+            type_oid,
+            type_modifier,
+            ..
+        } => (*type_oid, *type_modifier, true),
+        ReshapeStep::ChangeType {
+            type_oid,
+            type_modifier,
+            ..
+        } => (*type_oid, *type_modifier, false),
+        _ => return None,
+    };
+    match source_type {
+        Some((spelled, default)) => Some(match default {
+            Some(default) if adding && !default.contains("nextval(") => {
+                format!("{spelled} DEFAULT {default}")
+            }
+            _ => spelled,
+        }),
+        None => builtin_type_name(type_oid, type_modifier),
+    }
+}
 
 pub(super) fn source_failed(message: String) -> Failure {
     Failure::Database {
@@ -141,6 +262,7 @@ pub(super) struct FollowCounts {
     pub(super) deletes: u64,
     pub(super) truncates: u64,
     pub(super) sequences: u64,
+    pub(super) schema_changes: u64,
 }
 
 impl FollowCounts {
@@ -161,6 +283,13 @@ enum StopReason {
     SourceClosed,
 }
 
+struct Resumed {
+    slot_name: String,
+    publication: String,
+    created_publication: bool,
+    start: Lsn,
+}
+
 impl StopReason {
     fn name(&self) -> &'static str {
         match self {
@@ -174,7 +303,7 @@ impl StopReason {
         match self {
             Self::Interrupt => "stopped by Ctrl-C or SIGTERM",
             Self::CaughtUp => "caught up, --until caught-up",
-            Self::SourceClosed => "the source closed the connection",
+            Self::SourceClosed => "the connection to the source was lost",
         }
     }
 }
@@ -187,6 +316,120 @@ impl Session<'_> {
         };
         shown.text(&line);
         let _ = shown.finish();
+    }
+
+    pub(super) fn saved_follow(&mut self) -> Result<Option<SavedFollow>, Failure> {
+        let db = self.open(Access::Write { create: false }, None)?;
+        let store = DatabaseStore(&db);
+        let mut session = store.session(Dialect::PostgreSql);
+        let mut rows = None;
+        let read = session.execute(READ_STATEMENT, &mut |result| rows = Some(result.rows));
+        let _ = session.close();
+        Ok(match (read, rows) {
+            (Ok(()), Some(rows)) => Some(SavedFollow::from_rows(rows)),
+            _ => None,
+        })
+    }
+
+    pub(super) fn target_table_columns(
+        &mut self,
+    ) -> Result<Vec<(String, String, Vec<String>)>, Failure> {
+        let db = self.open(Access::Write { create: false }, None)?;
+        let store = DatabaseStore(&db);
+        let mut session = store.session(Dialect::PostgreSql);
+        let relations = session.relations();
+        let _ = session.close();
+        let relations = relations.map_err(|error| {
+            source_failed(format!(
+                "cannot read the tables of {}: {}",
+                self.file_display,
+                error.message()
+            ))
+        })?;
+        Ok(relations
+            .into_iter()
+            .filter_map(|relation| match relation.kind {
+                RelationKind::Table(table) if relation.schema != "eggdb_follow" => Some((
+                    relation.schema,
+                    relation.name,
+                    table.columns.into_iter().map(|column| column.name).collect(),
+                )),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub(super) fn save_follow_position(&mut self, statements: &[String]) -> Result<(), Failure> {
+        let db = self.open(Access::Write { create: false }, None)?;
+        let store = DatabaseStore(&db);
+        let mut session = store.session(Dialect::PostgreSql);
+        let mut script = String::from("BEGIN;\n");
+        for statement in statements {
+            script.push_str(statement);
+            script.push_str(";\n");
+        }
+        script.push_str("COMMIT;");
+        let saved = session.execute(&script, &mut |_| {});
+        let _ = session.close();
+        saved.map_err(|error| {
+            source_failed(format!(
+                "cannot save the follow position in {}: {}",
+                self.file_display,
+                error.message()
+            ))
+        })
+    }
+
+    pub(super) fn reconnect_for(&self) -> Duration {
+        Duration::from_secs(
+            self.request
+                .follow
+                .reconnect_seconds
+                .unwrap_or(DEFAULT_RECONNECT_SECONDS),
+        )
+    }
+
+    pub(super) fn wait_to_reconnect(
+        &mut self,
+        attempt: &mut u32,
+        error: &str,
+        deadline: Instant,
+    ) -> bool {
+        *attempt += 1;
+        let delay = reconnect_delay(*attempt);
+        if stop_signals::requested() || Instant::now() + delay > deadline {
+            return false;
+        }
+        self.follow_event(
+            JsonObject::new()
+                .string("event", "reconnecting")
+                .number("attempt", u64::from(*attempt))
+                .number("wait_ms", delay.as_millis() as u64)
+                .string("error", error),
+            &format!(
+                "  reconnecting    attempt {} in {} s: {error}\n",
+                attempt,
+                delay.as_secs()
+            ),
+        );
+        let waited = Instant::now();
+        while waited.elapsed() < delay {
+            if stop_signals::requested() {
+                return false;
+            }
+            std::thread::sleep(STOP_CHECK);
+        }
+        true
+    }
+
+    pub(super) fn reconnected_event(&mut self, attempt: u32, position: &str) {
+        self.follow_event(
+            JsonObject::new()
+                .string("event", "reconnected")
+                .number("attempt", u64::from(attempt))
+                .string("position", position),
+            &format!("  reconnected     after {attempt} attempts, resuming at {position}\n"),
+        );
     }
 
     pub(super) fn source_password(&mut self, variable: &str) -> Result<Option<String>, Failure> {
@@ -297,15 +540,216 @@ impl Session<'_> {
             });
         }
 
-        let (publication, created_publication) = self.prepare_publication(&mut catalog, &target)?;
         let mut replication_options = options.clone();
         replication_options.replication = true;
         let mut stream = PgClient::connect(&replication_options)
             .map_err(|error| client_failure(&target, &error))?;
-        let slot_name = format!("eggdb_follow_{}", std::process::id());
+        let system = rows_of(
+            stream
+                .simple_query("IDENTIFY_SYSTEM")
+                .map_err(|error| client_failure(&target, &error))?,
+        );
+        let system_row = system.into_iter().next().unwrap_or_default();
+        let identity = format!(
+            "system {} database {}",
+            system_row.first().map(text).unwrap_or_default(),
+            system_row.get(3).map(text).unwrap_or_default()
+        );
+        let saved = if existed { self.saved_follow()? } else { None };
+        let mut counts = FollowCounts::default();
+        let resumed = match &saved {
+            Some(saved) => {
+                let resumed = self.resume_postgres(&mut catalog, &target, &identity, saved)?;
+                self.follow_event(
+                    JsonObject::new()
+                        .string("event", "resumed")
+                        .string("slot", &resumed.slot_name)
+                        .string("publication", &resumed.publication)
+                        .string("lsn", &format_lsn(resumed.start)),
+                    &format!(
+                        "  resumed         slot {}, publication {}, from {}\n",
+                        resumed.slot_name,
+                        resumed.publication,
+                        format_lsn(resumed.start)
+                    ),
+                );
+                resumed
+            }
+            None => self.start_postgres(
+                &mut catalog,
+                &mut stream,
+                &options,
+                &target,
+                &identity,
+                existed,
+                started,
+                &mut counts,
+            )?,
+        };
+        let Resumed {
+            slot_name,
+            publication,
+            created_publication,
+            start,
+        } = resumed;
+
+        let _ = stop_signals::watch();
+        let followed = self.stream_changes(
+            &mut stream,
+            &mut catalog,
+            &replication_options,
+            &slot_name,
+            &publication,
+            start,
+            &mut counts,
+        );
+        let (reason, applied) = followed.map_err(|failure| with_slot_note(failure, &slot_name))?;
+        stream.terminate();
+        let ok = !matches!(reason, StopReason::SourceClosed);
+        counts.sequences = match self.copy_sequence_values(&mut catalog) {
+            Ok(sequences) => sequences,
+            Err(_) if !ok => 0,
+            Err(failure) => return Err(with_slot_note(failure, &slot_name)),
+        };
+        self.save_follow_position(&[update_statement(LSN, &format_lsn(applied))])?;
+        let finished = matches!(reason, StopReason::CaughtUp);
+        let slot_dropped = finished && drop_slot(&mut catalog, &slot_name);
+        let publication_dropped = finished
+            && created_publication
+            && catalog
+                .simple_query(&format!(
+                    "DROP PUBLICATION IF EXISTS {}",
+                    quote_identifier(&publication)
+                ))
+                .is_ok();
+        catalog.terminate();
+        let kept = if slot_dropped {
+            String::new()
+        } else {
+            format!(" {}", slot_kept_note(&slot_name))
+        };
+        let verdict = if ok {
+            format!(
+                "{} holds every source transaction committed up to {}; point applications at it now.{kept}",
+                self.file_display,
+                format_lsn(applied)
+            )
+        } else {
+            format!(
+                "the connection to the source was lost for longer than --reconnect-for; {} is consistent at {} but changes after it are not in it.{kept}",
+                self.file_display,
+                format_lsn(applied)
+            )
+        };
+        match self.format {
+            Format::Json => self.out.text(
+                &JsonObject::new()
+                    .string("event", "stopped")
+                    .boolean("ok", ok)
+                    .string("reason", reason.name())
+                    .number("elapsed_ms", started.elapsed().as_millis() as u64)
+                    .number("tables", counts.tables)
+                    .number("rows_copied", counts.rows_copied)
+                    .number("transactions", counts.transactions)
+                    .number("inserts", counts.inserts)
+                    .number("updates", counts.updates)
+                    .number("deletes", counts.deletes)
+                    .number("truncates", counts.truncates)
+                    .number("sequences", counts.sequences)
+                    .number("schema_changes", counts.schema_changes)
+                    .string("lsn", &format_lsn(applied))
+                    .string("slot", &slot_name)
+                    .boolean("slot_dropped", slot_dropped)
+                    .boolean("publication_dropped", publication_dropped)
+                    .string("verdict", &verdict)
+                    .line(),
+            ),
+            _ => self.out.text(&format!(
+                "followed {} into {} for {:.0} s ({})\n  tables          {}, {} rows copied\n  transactions    {} applied (inserts {}, updates {}, deletes {}, truncates {}, schema changes {})\n  sequences       {} copied at stop\n  position        {}\n  slot            {slot_name} {}{}\n{}: {verdict}\n",
+                options.shown(),
+                self.file_display,
+                started.elapsed().as_secs_f64(),
+                reason.shown(),
+                counts.tables,
+                counts.rows_copied,
+                counts.transactions,
+                counts.inserts,
+                counts.updates,
+                counts.deletes,
+                counts.truncates,
+                counts.schema_changes,
+                counts.sequences,
+                format_lsn(applied),
+                if slot_dropped { "dropped" } else { "kept for resuming" },
+                if publication_dropped { format!(", publication {publication} dropped") } else { String::new() },
+                if ok { "ok" } else { "stopped" },
+            )),
+        }
+        Ok(if ok { Exit::Done } else { Exit::DatabaseError })
+    }
+
+    fn resume_postgres(
+        &mut self,
+        catalog: &mut PgClient,
+        target: &str,
+        identity: &str,
+        saved: &SavedFollow,
+    ) -> Result<Resumed, Failure> {
+        let cannot = |reason: String| {
+            source_failed(format!("cannot resume the follow into {}: {reason}", self.file_display))
+        };
+        if let Some(refusal) = saved.refusal(POSTGRES, identity, &self.file_display) {
+            return Err(cannot(refusal));
+        }
+        let slot_name = saved.get(SLOT).unwrap_or_default().to_owned();
+        let publication = saved.get(PUBLICATION).unwrap_or_default().to_owned();
+        let start = saved
+            .get(LSN)
+            .and_then(parse_lsn)
+            .ok_or_else(|| cannot("its saved position is not readable".to_owned()))?;
+        let slot = rows_of(
+            catalog
+                .simple_query(&format!(
+                    "SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = {}",
+                    quote_literal(&slot_name)
+                ))
+                .map_err(|error| client_failure(target, &error))?,
+        );
+        if slot.is_empty() {
+            return Err(cannot(format!(
+                "its replication slot {slot_name} is gone from {target}, so the changes after {} are lost. Follow again into a new file with --create",
+                format_lsn(start)
+            )));
+        }
+        Ok(Resumed {
+            slot_name,
+            publication,
+            created_publication: saved.get(PUBLICATION_CREATED) == Some("true"),
+            start,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_postgres(
+        &mut self,
+        catalog: &mut PgClient,
+        stream: &mut PgClient,
+        options: &ConnectOptions,
+        target: &str,
+        identity: &str,
+        existed: bool,
+        started: Instant,
+        counts: &mut FollowCounts,
+    ) -> Result<Resumed, Failure> {
+        let (publication, created_publication) = self.prepare_publication(catalog, target)?;
+        let slot_name = format!(
+            "eggdb_follow_{}_{}",
+            now_unix_micros() / 1_000_000,
+            std::process::id()
+        );
         let slot = stream
             .simple_query(&format!(
-                "CREATE_REPLICATION_SLOT {} TEMPORARY LOGICAL pgoutput EXPORT_SNAPSHOT",
+                "CREATE_REPLICATION_SLOT {} LOGICAL pgoutput EXPORT_SNAPSHOT",
                 quote_identifier(&slot_name)
             ))
             .map_err(|error| match &error {
@@ -338,27 +782,35 @@ impl Session<'_> {
             JsonObject::new()
                 .string("event", "slot")
                 .string("name", &slot_name)
-                .boolean("temporary", true)
+                .boolean("temporary", false)
                 .string("snapshot_lsn", &format_lsn(consistent_point)),
             &format!(
-                "  publication     {publication}{}\n  slot            {slot_name} (temporary), snapshot at {}\n",
+                "  publication     {publication}{}\n  slot            {slot_name}, snapshot at {}\n",
                 if created_publication { " (created, FOR ALL TABLES)" } else { "" },
                 format_lsn(consistent_point)
             ),
         );
-
-        let mut counts = FollowCounts::default();
+        let mut saved = SavedFollow::new(POSTGRES, identity);
+        saved.set(SLOT, &slot_name);
+        saved.set(PUBLICATION, &publication);
+        saved.set(
+            PUBLICATION_CREATED,
+            if created_publication { "true" } else { "false" },
+        );
+        saved.set(LSN, &format_lsn(consistent_point));
         let copy_outcome =
-            self.copy_snapshot(&mut catalog, &target, &snapshot, &publication, &mut counts);
+            self.copy_snapshot(catalog, target, &snapshot, &publication, &saved, counts);
         if let Err(failure) = copy_outcome {
+            let _ = stream.simple_query(&format!(
+                "DROP_REPLICATION_SLOT {}",
+                quote_identifier(&slot_name)
+            ));
             if created_publication {
                 let _ = catalog.simple_query(&format!(
                     "DROP PUBLICATION IF EXISTS {}",
                     quote_identifier(&publication)
                 ));
             }
-            stream.terminate();
-            catalog.terminate();
             if !existed {
                 let _ = std::fs::remove_file(&self.request.file);
             }
@@ -377,92 +829,12 @@ impl Session<'_> {
                 started.elapsed().as_secs_f64()
             ),
         );
-
-        let _ = stop_signals::watch();
-        let followed = self.stream_changes(
-            &mut stream,
-            &slot_name,
-            &publication,
-            consistent_point,
-            &mut counts,
-        );
-        let (reason, applied) = match followed {
-            Ok(outcome) => outcome,
-            Err(failure) => {
-                if created_publication {
-                    let _ = catalog.simple_query(&format!(
-                        "DROP PUBLICATION IF EXISTS {}",
-                        quote_identifier(&publication)
-                    ));
-                }
-                return Err(failure);
-            }
-        };
-        stream.terminate();
-        counts.sequences = self.copy_sequence_values(&mut catalog)?;
-        let publication_dropped = created_publication
-            && catalog
-                .simple_query(&format!(
-                    "DROP PUBLICATION IF EXISTS {}",
-                    quote_identifier(&publication)
-                ))
-                .is_ok();
-        catalog.terminate();
-        let ok = !matches!(reason, StopReason::SourceClosed);
-        let verdict = if ok {
-            format!(
-                "{} holds every source transaction committed up to {}; point applications at it now",
-                self.file_display,
-                format_lsn(applied)
-            )
-        } else {
-            format!(
-                "the source closed the connection; {} is consistent at {} but changes after it are not in it. The slot was temporary and is gone: follow again into a new file",
-                self.file_display,
-                format_lsn(applied)
-            )
-        };
-        match self.format {
-            Format::Json => self.out.text(
-                &JsonObject::new()
-                    .string("event", "stopped")
-                    .boolean("ok", ok)
-                    .string("reason", reason.name())
-                    .number("elapsed_ms", started.elapsed().as_millis() as u64)
-                    .number("tables", counts.tables)
-                    .number("rows_copied", counts.rows_copied)
-                    .number("transactions", counts.transactions)
-                    .number("inserts", counts.inserts)
-                    .number("updates", counts.updates)
-                    .number("deletes", counts.deletes)
-                    .number("truncates", counts.truncates)
-                    .number("sequences", counts.sequences)
-                    .string("lsn", &format_lsn(applied))
-                    .boolean("slot_dropped", true)
-                    .boolean("publication_dropped", publication_dropped)
-                    .string("verdict", &verdict)
-                    .line(),
-            ),
-            _ => self.out.text(&format!(
-                "followed {} into {} for {:.0} s ({})\n  tables          {}, {} rows copied\n  transactions    {} applied (inserts {}, updates {}, deletes {}, truncates {})\n  sequences       {} copied at stop\n  position        {}\n  cleaned up      slot dropped{}\n{}: {verdict}\n",
-                options.shown(),
-                self.file_display,
-                started.elapsed().as_secs_f64(),
-                reason.shown(),
-                counts.tables,
-                counts.rows_copied,
-                counts.transactions,
-                counts.inserts,
-                counts.updates,
-                counts.deletes,
-                counts.truncates,
-                counts.sequences,
-                format_lsn(applied),
-                if publication_dropped { format!(", publication {publication} dropped") } else { String::new() },
-                if ok { "ok" } else { "stopped" },
-            )),
-        }
-        Ok(if ok { Exit::Done } else { Exit::DatabaseError })
+        Ok(Resumed {
+            slot_name,
+            publication,
+            created_publication,
+            start: consistent_point,
+        })
     }
 
     fn prepare_publication(
@@ -528,6 +900,7 @@ impl Session<'_> {
         target: &str,
         snapshot: &str,
         publication: &str,
+        saved: &SavedFollow,
         counts: &mut FollowCounts,
     ) -> Result<(), Failure> {
         let failed = |error: ClientError| client_failure(target, &error);
@@ -803,7 +1176,12 @@ impl Session<'_> {
                 ))
                 .map_err(failed)?,
         );
-        for statement in indexes.iter().map(|row| text(&row[0])).chain(deferred) {
+        for statement in indexes
+            .iter()
+            .map(|row| text(&row[0]))
+            .chain(deferred)
+            .chain(saved.create_statements())
+        {
             session.execute(&statement, &mut |_| {}).map_err(|error| {
                 source_failed(format!(
                     "cannot create in {}: {} ({statement})",
@@ -817,9 +1195,12 @@ impl Session<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stream_changes(
         &mut self,
         stream: &mut PgClient,
+        catalog: &mut PgClient,
+        replication_options: &ConnectOptions,
         slot_name: &str,
         publication: &str,
         start: Lsn,
@@ -827,21 +1208,12 @@ impl Session<'_> {
     ) -> Result<(StopReason, Lsn), Failure> {
         let failed =
             |error: ClientError| source_failed(format!("the replication stream failed: {error}"));
-        stream
-            .start_copy_both(&format!(
-                "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names {})",
-                quote_identifier(slot_name),
-                format_lsn(start),
-                quote_literal(&quote_identifier(publication))
-            ))
-            .map_err(failed)?;
-        stream
-            .set_read_timeout(Some(POLL_TIMEOUT))
-            .map_err(failed)?;
+        start_replication(stream, slot_name, publication, start).map_err(failed)?;
         let db = self.open(Access::Write { create: false }, None)?;
         let store = DatabaseStore(&db);
         let mut session = store.session(Dialect::PostgreSql);
-        let mut applier = ChangeApplier::new();
+        let schemas = self.request.follow.schemas.clone();
+        let mut applier = applier_for_target(&mut session, &schemas, &self.file_display)?;
         let mut applied = start;
         let mut pending: Vec<String> = Vec::new();
         let mut in_transaction = false;
@@ -853,26 +1225,42 @@ impl Session<'_> {
             if stop_signals::requested() && !in_transaction {
                 return Ok((StopReason::Interrupt, applied));
             }
-            let message = match stream.read_copy_both() {
+            let read = stream.read_copy_both();
+            let lost = match &read {
+                Ok(None) => Some("the source ended the stream".to_owned()),
+                Err(error) if connection_lost(error) => Some(error.to_string()),
+                _ => None,
+            };
+            if let Some(lost) = lost {
+                pending.clear();
+                in_transaction = false;
+                applier = applier_for_target(&mut session, &schemas, &self.file_display)?;
+                match self.reconnect_stream(
+                    stream,
+                    catalog,
+                    replication_options,
+                    slot_name,
+                    publication,
+                    applied,
+                    &lost,
+                ) {
+                    Some(reason) => return Ok((reason, applied)),
+                    None => continue,
+                }
+            }
+            let message = match read {
                 Ok(Some(message)) => message,
-                Ok(None) => return Ok((StopReason::SourceClosed, applied)),
+                Ok(None) => continue,
                 Err(ClientError::TimedOut) => {
                     if last_status.elapsed() >= STATUS_INTERVAL || until_caught_up {
-                        stream
-                            .send_copy_data(&standby_status_update(
-                                applied,
-                                now_unix_micros(),
-                                until_caught_up,
-                            ))
-                            .map_err(failed)?;
+                        let _ = stream.send_copy_data(&standby_status_update(
+                            applied,
+                            now_unix_micros(),
+                            until_caught_up,
+                        ));
                         last_status = Instant::now();
                     }
                     continue;
-                }
-                Err(ClientError::Io(error))
-                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    return Ok((StopReason::SourceClosed, applied));
                 }
                 Err(error) => return Err(failed(error)),
             };
@@ -898,13 +1286,11 @@ impl Session<'_> {
                         }
                     }
                     if reply_requested {
-                        stream
-                            .send_copy_data(&standby_status_update(
-                                applied,
-                                now_unix_micros(),
-                                false,
-                            ))
-                            .map_err(failed)?;
+                        let _ = stream.send_copy_data(&standby_status_update(
+                            applied,
+                            now_unix_micros(),
+                            false,
+                        ));
                         last_status = Instant::now();
                     }
                 }
@@ -912,15 +1298,47 @@ impl Session<'_> {
                     server_end = server_end.max(wal_end);
                     let logical = parse_logical_message(&data)
                         .map_err(|error| source_failed(error.to_string()))?;
-                    match applier
-                        .apply(logical)
-                        .map_err(|error| source_failed(error.to_string()))?
-                    {
+                    match applier.apply(logical).map_err(|error| {
+                        source_failed(format!(
+                            "{error}. {} is consistent at {}; follow again into a new file to take the source's new shape",
+                            self.file_display,
+                            format_lsn(applied)
+                        ))
+                    })? {
                         Change::Begin => {
                             in_transaction = true;
                             pending.clear();
                         }
                         Change::Statement(statement) => pending.push(statement),
+                        Change::Reshape {
+                            relation,
+                            namespace,
+                            name,
+                            steps,
+                        } => {
+                            for step in &steps {
+                                let statement =
+                                    self.reshape_statement(catalog, relation, &namespace, &name, step)?;
+                                self.follow_event(
+                                    JsonObject::new()
+                                        .string("event", "schema_changed")
+                                        .string("table", &format!("{namespace}.{name}"))
+                                        .string("statement", &statement),
+                                    &format!("  schema change   {namespace}.{name}: {statement}\n"),
+                                );
+                                counts.schema_changes += 1;
+                                if in_transaction {
+                                    pending.push(statement);
+                                } else {
+                                    session.execute(&statement, &mut |_| {}).map_err(|error| {
+                                        source_failed(format!(
+                                            "a change to the columns of {namespace}.{name} could not be applied: {} ({statement})",
+                                            error.message()
+                                        ))
+                                    })?;
+                                }
+                            }
+                        }
                         Change::Commit { end_lsn, .. } => {
                             let mut script = String::from("BEGIN;\n");
                             for statement in &pending {
@@ -928,7 +1346,8 @@ impl Session<'_> {
                                 script.push_str(statement);
                                 script.push_str(";\n");
                             }
-                            script.push_str("COMMIT;");
+                            script.push_str(&update_statement(LSN, &format_lsn(end_lsn)));
+                            script.push_str(";\nCOMMIT;");
                             session.execute(&script, &mut |_| {}).map_err(|error| {
                                 let _ = session.execute("ROLLBACK", &mut |_| {});
                                 source_failed(format!(
@@ -958,6 +1377,87 @@ impl Session<'_> {
                 ));
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconnect_stream(
+        &mut self,
+        stream: &mut PgClient,
+        catalog: &mut PgClient,
+        replication_options: &ConnectOptions,
+        slot_name: &str,
+        publication: &str,
+        applied: Lsn,
+        lost: &str,
+    ) -> Option<StopReason> {
+        let deadline = Instant::now() + self.reconnect_for();
+        let mut error = lost.to_owned();
+        let mut attempt = 0u32;
+        while self.wait_to_reconnect(&mut attempt, &error, deadline) {
+            let connected = PgClient::connect(replication_options).and_then(|mut client| {
+                start_replication(&mut client, slot_name, publication, applied)?;
+                Ok(client)
+            });
+            match connected {
+                Ok(client) => {
+                    let _ = std::mem::replace(stream, client);
+                    let mut catalog_options = replication_options.clone();
+                    catalog_options.replication = false;
+                    if let Ok(fresh) = PgClient::connect(&catalog_options) {
+                        let _ = std::mem::replace(catalog, fresh);
+                    }
+                    self.reconnected_event(attempt, &format_lsn(applied));
+                    return None;
+                }
+                Err(failure) => error = failure.to_string(),
+            }
+        }
+        Some(if stop_signals::requested() {
+            StopReason::Interrupt
+        } else {
+            StopReason::SourceClosed
+        })
+    }
+
+    fn reshape_statement(
+        &self,
+        catalog: &mut PgClient,
+        relation: u32,
+        namespace: &str,
+        name: &str,
+        step: &ReshapeStep,
+    ) -> Result<String, Failure> {
+        let column = match step {
+            ReshapeStep::AddColumn { name, .. } | ReshapeStep::ChangeType { name, .. } => {
+                Some(name.as_str())
+            }
+            _ => None,
+        };
+        let source_type = column.and_then(|column| {
+            catalog
+                .simple_query(&format!(
+                    "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod), pg_catalog.pg_get_expr(d.adbin, d.adrelid) \
+                     FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                     WHERE a.attrelid = {relation} AND a.attname = {} AND NOT a.attisdropped",
+                    quote_literal(column)
+                ))
+                .ok()
+                .and_then(|results| rows_of(results).into_iter().next())
+                .map(|row| {
+                    (
+                        row.first().map(text).unwrap_or_default(),
+                        row.get(1).cloned().flatten(),
+                    )
+                })
+                .filter(|(spelled, _)| !spelled.is_empty())
+        });
+        step.sql(namespace, name, added_column_type(step, source_type).as_deref())
+            .map_err(|error| {
+                source_failed(format!(
+                    "cannot follow a change to the columns of {namespace}.{name} on the source: {error}. Apply the same change to the table in {} (eggdb sql), then run this follow again to resume",
+                    self.file_display
+                ))
+            })
     }
 
     fn copy_sequence_values(&mut self, catalog: &mut PgClient) -> Result<u64, Failure> {

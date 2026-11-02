@@ -168,9 +168,9 @@ yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
 ### Moving with no downtime: `eggdb follow`
 
 Instead of a dump, `eggdb follow` copies a running PostgreSQL 10 or newer (with
-`wal_level=logical`) and keeps the copy in step with it. It creates a temporary logical
-replication slot, copies the schema and every table from the slot's snapshot, then applies each
-transaction PostgreSQL commits, until you stop it:
+`wal_level=logical`) and keeps the copy in step with it. It creates a logical replication slot,
+copies the schema and every table from the slot's snapshot, then applies each transaction
+PostgreSQL commits, until you stop it:
 
 ```sh
 PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'
@@ -179,10 +179,26 @@ PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?s
 
 Every table needs a primary key or `REPLICA IDENTITY FULL`, and the user needs `REPLICATION`
 and a publication: an existing one with `--publication <name>`, or `eggdb_follow`, which the
-follow creates `FOR ALL TABLES` and drops at its stop. Sequence values are copied again at the
-stop, because logical replication does not carry them. `--until caught-up` stops by itself once
-the copy has every change committed so far. Details are in [cli.md](cli.md) under `eggdb follow`,
-and the design is decision D162.
+follow creates `FOR ALL TABLES`. Sequence values are copied again at the stop, because logical
+replication does not carry them. `--until caught-up` stops by itself once the copy has every
+change committed so far, and then drops the slot and the publication it created.
+
+**Pausing, lost connections and schema changes.** The file keeps the follow's position (in the
+table `eggdb_follow.state`), saved in the same transaction as each applied source transaction.
+- Ctrl-C keeps the slot: running the same command again (without `--create`) resumes from the
+  saved position instead of copying again. A file is only resumed from the database it was
+  copied from (PostgreSQL's system identifier and database name). Until you resume, the slot
+  holds the source's WAL; `SELECT pg_drop_replication_slot('<slot>')` gives up on it.
+- A lost connection is retried with growing waits (1, 2, 4 … up to 60 seconds) for
+  `--reconnect-for <seconds>` (default 300; 0 stops at once), each attempt shown as a
+  `reconnecting` event; replication restarts from the last applied position.
+- Columns added, dropped, renamed or retyped on the source are changed in the file too, from the
+  `Relation` messages PostgreSQL sends before the table's next change (a `schema_changed` event
+  each). An added column takes its type and default from the source's catalog. Tables created or
+  moved to another schema during a follow stop it with a clear message.
+
+Details are in [cli.md](cli.md) under `eggdb follow`, and the design is decisions D162 and
+DNEW-F-follow-resume.
 
 ## SQL Server
 
@@ -333,10 +349,14 @@ on every table instead.
 The changes of one poll are applied together, so the copy is consistent at each poll's position
 (the change tracking version and the CDC LSN, shown in the summary and in the `stopped` event's
 `change_version` and `lsn`), not at each source transaction. CDC sees a change once the capture
-job has read it from the log, a few seconds after the commit. The position is kept for the
-length of the follow: if CDC's cleanup job (or the change retention) removes changes the follow
-has not applied yet, it stops with exit 3 and says so; follow again into a new file to copy the
-database afresh, and keep the retention longer than any pause in the follow. A CDC table needs a
+job has read it from the log, a few seconds after the commit. Each table's position is saved in
+the file with the changes, so after Ctrl-C (or a crash) the same command resumes without copying
+again, as long as the server and database are the same. A connection lost between polls is
+retried for `--reconnect-for` seconds, like PostgreSQL's. If a followed table's columns change on
+the source, the follow stops with exit 3 and names the change: make the same change to the table
+in the file, then resume. If CDC's cleanup job (or the change retention) removes changes the
+follow has not applied yet, it stops with exit 3 and says so; follow again into a new file to
+copy the database afresh, and keep the retention longer than any pause in the follow. A CDC table needs a
 primary key, and a capture instance that leaves out columns is not used.
 
 ## Oracle

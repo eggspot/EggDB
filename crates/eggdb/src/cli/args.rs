@@ -257,6 +257,7 @@ impl CommandName {
             OptionName::PasswordFile => matches!(self, Self::Serve | Self::Follow),
             OptionName::Publication
             | OptionName::Poll
+            | OptionName::ReconnectFor
             | OptionName::Until
             | OptionName::Changes => self == Self::Follow,
             OptionName::Command => matches!(self, Self::Sql | Self::Shell | Self::Explain),
@@ -430,6 +431,7 @@ enum OptionName {
     TlsMinVersion,
     Publication,
     Poll,
+    ReconnectFor,
     Until,
     Changes,
     KeepGoing,
@@ -529,6 +531,7 @@ impl OptionName {
             b"tls-min-version" => Self::TlsMinVersion,
             b"publication" => Self::Publication,
             b"poll" => Self::Poll,
+            b"reconnect-for" => Self::ReconnectFor,
             b"until" => Self::Until,
             b"changes" => Self::Changes,
             b"keep-going" => Self::KeepGoing,
@@ -708,6 +711,7 @@ pub(crate) struct FollowOptions {
     pub(crate) schemas: Vec<String>,
     pub(crate) publication: Option<String>,
     pub(crate) poll_seconds: Option<u64>,
+    pub(crate) reconnect_seconds: Option<u64>,
     pub(crate) until_caught_up: bool,
     pub(crate) sql_server_changes: Option<SqlServerChanges>,
 }
@@ -1519,6 +1523,16 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                         ))
                     })?;
                 request.follow.poll_seconds = Some(seconds);
+            }
+            OptionName::ReconnectFor => {
+                let seconds = parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
+                    usage(format!(
+                        "{} needs a whole number of seconds (0 to stop at the first lost connection), not {}",
+                        option.spelled,
+                        shown(value)
+                    ))
+                })?;
+                request.follow.reconnect_seconds = Some(seconds);
             }
             OptionName::Until => {
                 if value.as_encoded_bytes() != b"caught-up" {

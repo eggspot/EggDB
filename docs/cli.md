@@ -1241,7 +1241,7 @@ ok: every table and row of the dump is in app.db; 2 objects skipped and 1 conseq
 ## `eggdb follow`
 
 ```
-eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--changes cdc|change-tracking] [--until caught-up]
+eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--changes cdc|change-tracking] [--reconnect-for <seconds>] [--until caught-up]
 ```
 
 Copies a running PostgreSQL or SQL Server database into the file and keeps the file in step with
@@ -1256,10 +1256,11 @@ because process listings show it.
 |--------|---------|
 | `--create` | create the file if it is missing; it must not already hold the source's tables |
 | `--schema <list>` | the schemas to copy, comma-separated; default every non-system schema |
-| `--publication <name>` | PostgreSQL: use this publication; default `eggdb_follow`, created `FOR ALL TABLES` and dropped at the stop |
+| `--publication <name>` | PostgreSQL: use this publication; default `eggdb_follow`, created `FOR ALL TABLES` and dropped when the follow finishes with `--until caught-up` |
 | `--password-file <path>` | the source's password is the file's first line |
 | `--poll <seconds>` | SQL Server: how often to ask CDC or change tracking for changes; default 5 |
 | `--changes cdc\|change-tracking` | SQL Server: read every table through CDC or through change tracking; default CDC for each table with a capture instance of all its columns, change tracking for the rest |
+| `--reconnect-for <seconds>` | how long to keep retrying a lost connection to the source, with waits of 1, 2, 4 … up to 60 seconds; default 300, 0 stops at the first loss |
 | `--until caught-up` | stop by itself once every change committed so far is in the file |
 
 Before anything is copied it checks every precondition, and it names every table that fails one:
@@ -1271,14 +1272,23 @@ Before anything is copied it checks every precondition, and it names every table
 
 Progress goes to stderr on a terminal, as fixed lines (connected, publication, slot, schema, one
 line per copied table) and then a `following` line with the lag. In a pipe each step is one JSON
-line on stdout, with an `event` of `connected`, `slot`, `schema`, `table_copied`, `copied` or
-`stopped`.
+line on stdout, with an `event` of `connected`, `slot`, `schema`, `table_copied`, `copied`,
+`resumed`, `schema_changed`, `reconnecting`, `reconnected` or `stopped`.
 
-Ctrl-C or `SIGTERM` finishes the transaction being applied, copies the sequence values, drops the
-publication it created (the slot is temporary and goes with the connection) and prints a summary
-ending `ok: … holds every source transaction committed up to <position>`. It then exits 0. If
-the source closes the connection, the file is consistent at the last applied position and the
-command exits 3. The design is [ux/cli.md](ux/cli.md), section 30.
+The file keeps the follow's position in `eggdb_follow.state`, written in the same transaction as
+the changes. Running the command again on a file that has one (without `--create`) resumes from
+it without copying, and refuses a different source (PostgreSQL's system identifier and database,
+SQL Server's server and database). With PostgreSQL, columns added, dropped, renamed or retyped on
+the source are changed in the file as well; with SQL Server, a change to a followed table's
+columns stops the follow (exit 3) and names it.
+
+Ctrl-C or `SIGTERM` finishes the transaction being applied, copies the sequence values, saves
+the position and prints a summary ending `ok: … holds every source transaction committed up to
+<position>`. It then exits 0. The replication slot and the publication are kept so the same
+command resumes; `--until caught-up` drops both when it finishes. If the connection to the
+source stays lost for longer than `--reconnect-for`, the file is consistent at the last applied
+position and the command exits 3; running it again resumes. The design is
+[ux/cli.md](ux/cli.md), section 30, and decision DNEW-F-follow-resume.
 
 ## `eggdb mcp`
 

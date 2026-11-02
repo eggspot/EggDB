@@ -22,6 +22,7 @@ mod expiry;
 mod explain;
 mod follow;
 mod follow_sql_server;
+mod follow_state;
 mod foreign;
 mod mcp;
 mod parquet_io;

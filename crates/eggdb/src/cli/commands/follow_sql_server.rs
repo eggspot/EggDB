@@ -1,4 +1,5 @@
 use super::follow::{FollowCounts, source_failed};
+use super::follow_state::{SQL_SERVER, SavedFollow, table_item, update_statement};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, Format, SqlServerChanges};
 use crate::cli::failure::{Exit, Failure};
@@ -435,6 +436,88 @@ fn position_text(version: Option<i64>, lsn: Option<Lsn>) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedPosition {
+    Tracking(i64),
+    Capture(Lsn),
+}
+
+fn table_position(table: &SourceTable, version: Option<i64>) -> String {
+    match &table.changes {
+        ChangeSource::Tracking => format!("change_tracking {}", version.unwrap_or(0)),
+        ChangeSource::Capture { next, .. } => format!("cdc {}", next.literal()),
+    }
+}
+
+fn read_position(text: &str) -> Option<SavedPosition> {
+    match text.split_once(' ')? {
+        ("change_tracking", version) => version.parse().ok().map(SavedPosition::Tracking),
+        ("cdc", lsn) => Lsn::parse(lsn).map(SavedPosition::Capture),
+        _ => None,
+    }
+}
+
+fn column_change(known: &[String], now: &[String]) -> Option<String> {
+    if known == now {
+        return None;
+    }
+    if now.is_empty() {
+        return Some("the table is gone".to_owned());
+    }
+    let added: Vec<&str> = now
+        .iter()
+        .filter(|name| !known.contains(name))
+        .map(String::as_str)
+        .collect();
+    let dropped: Vec<&str> = known
+        .iter()
+        .filter(|name| !now.contains(name))
+        .map(String::as_str)
+        .collect();
+    let mut parts = Vec::new();
+    if !added.is_empty() {
+        parts.push(format!("added {}", added.join(", ")));
+    }
+    if !dropped.is_empty() {
+        parts.push(format!("dropped {}", dropped.join(", ")));
+    }
+    if parts.is_empty() {
+        parts.push("reordered its columns".to_owned());
+    }
+    Some(parts.join("; "))
+}
+
+fn columns_query(tables: &[SourceTable]) -> String {
+    let filters: Vec<String> = tables
+        .iter()
+        .map(|table| {
+            format!(
+                "(TABLE_SCHEMA = {} AND TABLE_NAME = {})",
+                quote_unicode(&table.schema),
+                quote_unicode(&table.name)
+            )
+        })
+        .collect();
+    format!(
+        "SELECT CAST(TABLE_SCHEMA AS nvarchar(max)), CAST(TABLE_NAME AS nvarchar(max)), CAST(COLUMN_NAME AS nvarchar(max)) \
+         FROM INFORMATION_SCHEMA.COLUMNS WHERE {} ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
+        filters.join(" OR ")
+    )
+}
+
+fn columns_of(rows: &[Vec<Option<String>>], table: &SourceTable) -> Vec<String> {
+    rows.iter()
+        .filter(|row| cell(row, 0) == table.schema && cell(row, 1) == table.name)
+        .map(|row| cell(row, 2))
+        .collect()
+}
+
+fn schema_changed(target: &str, table: &str, change: &str, file: &str) -> Failure {
+    source_failed(format!(
+        "cannot follow {target}: the columns of {table} changed on the source ({change}), and follow does not apply SQL Server schema changes. Make the same change to the table in {file} (eggdb sql), then run this follow again to resume; or follow again into a new file"
+    ))
+}
+
 fn count_change(counts: &mut FollowCounts, change: RowChange) {
     match change {
         RowChange::Insert => counts.inserts += 1,
@@ -765,6 +848,83 @@ impl Session<'_> {
             }
         }
 
+        let identity = format!(
+            "server {} database {}",
+            source
+                .batch("SELECT CAST(@@SERVERNAME AS nvarchar(max))")
+                .ok()
+                .and_then(|results| first_value(&first_rows(results), |value| value.clone()))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("{}:{}", options.host, options.port)),
+            options.database
+        );
+        let saved = if existed { self.saved_follow()? } else { None };
+        if let Some(saved) = &saved {
+            let cannot = |reason: String| {
+                source_failed(format!(
+                    "cannot resume the follow into {}: {reason}",
+                    self.file_display
+                ))
+            };
+            if let Some(refusal) = saved.refusal(SQL_SERVER, &identity, &self.file_display) {
+                return Err(cannot(refusal));
+            }
+            let mut resumed_version: Option<i64> = None;
+            for table in &mut tables {
+                let shown = table.shown();
+                match (&mut table.changes, saved.table(&shown).and_then(read_position)) {
+                    (ChangeSource::Tracking, Some(SavedPosition::Tracking(saved_version))) => {
+                        resumed_version = Some(
+                            resumed_version.map_or(saved_version, |least| least.min(saved_version)),
+                        );
+                    }
+                    (ChangeSource::Capture { next, .. }, Some(SavedPosition::Capture(saved_next))) => {
+                        *next = saved_next;
+                    }
+                    (_, None) => {
+                        return Err(cannot(format!(
+                            "the source's table {shown} was not part of it. Follow again into a new file with --create"
+                        )));
+                    }
+                    (changes, Some(_)) => {
+                        return Err(cannot(format!(
+                            "{shown} is now read through {} on the source, not the way the follow saved. Follow again into a new file with --create",
+                            changes.label()
+                        )));
+                    }
+                }
+            }
+            if uses_tracking {
+                version = resumed_version.or(version);
+            }
+            let target_tables = self.target_table_columns()?;
+            for table in &tables {
+                let in_target = target_tables.iter().find(|(schema, name, _)| {
+                    *name == table.name && (*schema == table.schema || table.schema == "dbo")
+                });
+                if let Some((_, _, columns)) = in_target {
+                    let source_columns: Vec<String> =
+                        table.columns.iter().map(|column| column.name.clone()).collect();
+                    if let Some(change) = column_change(columns, &source_columns) {
+                        return Err(schema_changed(
+                            &target,
+                            &table.shown(),
+                            &change,
+                            &self.file_display,
+                        ));
+                    }
+                }
+            }
+            let position = position_text(version, lsn);
+            self.follow_event(
+                JsonObject::new()
+                    .string("event", "resumed")
+                    .number("tables", tables.len() as u64)
+                    .string("position", &position),
+                &format!("  resumed         {} tables from {position}\n", tables.len()),
+            );
+        }
+
         let db = self.open(
             Access::Write {
                 create: self.request.create,
@@ -783,97 +943,119 @@ impl Session<'_> {
             })
         };
         let mut counts = FollowCounts::default();
-        let mut schemas: Vec<&str> = tables.iter().map(|table| table.schema.as_str()).collect();
-        schemas.dedup();
-        for schema in schemas.iter().filter(|schema| **schema != "dbo") {
-            run(&format!("CREATE SCHEMA {}", quote_name(schema)))?;
-        }
-        for table in &tables {
-            let mut definitions: Vec<String> = table
-                .columns
-                .iter()
-                .map(|column| format!("{} {}", quote_name(&column.name), column.declared))
-                .collect();
-            if !table.key.is_empty() {
-                let key: Vec<String> = table.key.iter().map(|name| quote_name(name)).collect();
-                definitions.push(format!("PRIMARY KEY ({})", key.join(", ")));
+        if saved.is_none() {
+            let mut schemas: Vec<&str> = tables.iter().map(|table| table.schema.as_str()).collect();
+            schemas.dedup();
+            for schema in schemas.iter().filter(|schema| **schema != "dbo") {
+                run(&format!("CREATE SCHEMA {}", quote_name(schema)))?;
             }
-            run(&format!("CREATE TABLE {} ({})", table.qualified(), definitions.join(", "))).map_err(|failure| match failure {
-                Failure::Database { message, .. } if message.contains("already") => Failure::Database {
-                    message: format!(
-                        "cannot follow into {}: it already has the source's table {}. Follow into a new file with --create, or drop it first",
-                        self.file_display,
-                        table.shown()
-                    ),
-                    try_command: None,
-                    exit: Exit::DatabaseError,
-                    code: "already_exists",
-                },
-                other => other,
-            })?;
-        }
-        for table in &tables {
-            let copied_at = Instant::now();
-            let selected: Vec<String> = table
-                .columns
-                .iter()
-                .map(|column| text_expression(&quote_name(&column.name), &column.data_type))
-                .collect();
-            let rows = first_rows(query(
-                &mut source,
-                &format!("SELECT {} FROM {}", selected.join(", "), table.qualified()),
-            )?);
-            let names = table.column_names();
-            run("BEGIN TRANSACTION")?;
-            for chunk in rows.chunks(ROWS_PER_INSERT) {
-                let values: Vec<String> = chunk
+            for table in &tables {
+                let mut definitions: Vec<String> = table
+                    .columns
                     .iter()
-                    .map(|row| {
-                        let literals: Vec<String> = row
-                            .iter()
-                            .zip(&table.columns)
-                            .map(|(value, column)| literal(value, &column.data_type))
-                            .collect();
-                        format!("({})", literals.join(", "))
-                    })
+                    .map(|column| format!("{} {}", quote_name(&column.name), column.declared))
                     .collect();
-                run(&format!(
-                    "INSERT INTO {} ({}) VALUES {}",
-                    table.qualified(),
-                    names.join(", "),
-                    values.join(", ")
-                ))?;
+                if !table.key.is_empty() {
+                    let key: Vec<String> = table.key.iter().map(|name| quote_name(name)).collect();
+                    definitions.push(format!("PRIMARY KEY ({})", key.join(", ")));
+                }
+                run(&format!("CREATE TABLE {} ({})", table.qualified(), definitions.join(", "))).map_err(|failure| match failure {
+                    Failure::Database { message, .. } if message.contains("already") => Failure::Database {
+                        message: format!(
+                            "cannot follow into {}: it already has the source's table {}. Follow into a new file with --create, or drop it first",
+                            self.file_display,
+                            table.shown()
+                        ),
+                        try_command: None,
+                        exit: Exit::DatabaseError,
+                        code: "already_exists",
+                    },
+                    other => other,
+                })?;
             }
-            run("COMMIT TRANSACTION")?;
-            counts.tables += 1;
-            counts.rows_copied += rows.len() as u64;
+            for table in &tables {
+                let copied_at = Instant::now();
+                let selected: Vec<String> = table
+                    .columns
+                    .iter()
+                    .map(|column| text_expression(&quote_name(&column.name), &column.data_type))
+                    .collect();
+                let rows = first_rows(query(
+                    &mut source,
+                    &format!("SELECT {} FROM {}", selected.join(", "), table.qualified()),
+                )?);
+                let names = table.column_names();
+                run("BEGIN TRANSACTION")?;
+                for chunk in rows.chunks(ROWS_PER_INSERT) {
+                    let values: Vec<String> = chunk
+                        .iter()
+                        .map(|row| {
+                            let literals: Vec<String> = row
+                                .iter()
+                                .zip(&table.columns)
+                                .map(|(value, column)| literal(value, &column.data_type))
+                                .collect();
+                            format!("({})", literals.join(", "))
+                        })
+                        .collect();
+                    run(&format!(
+                        "INSERT INTO {} ({}) VALUES {}",
+                        table.qualified(),
+                        names.join(", "),
+                        values.join(", ")
+                    ))?;
+                }
+                run("COMMIT TRANSACTION")?;
+                counts.tables += 1;
+                counts.rows_copied += rows.len() as u64;
+                self.follow_event(
+                    JsonObject::new()
+                        .string("event", "table_copied")
+                        .string("table", &table.shown())
+                        .number("rows", rows.len() as u64)
+                        .number("elapsed_ms", copied_at.elapsed().as_millis() as u64)
+                        .string("changes", table.changes.name()),
+                    &format!(
+                        "  copied          {:<28} {:>10} rows   {:.1} s   {}\n",
+                        table.shown(),
+                        rows.len(),
+                        copied_at.elapsed().as_secs_f64(),
+                        table.changes.label()
+                    ),
+                );
+            }
             self.follow_event(
                 JsonObject::new()
-                    .string("event", "table_copied")
-                    .string("table", &table.shown())
-                    .number("rows", rows.len() as u64)
-                    .number("elapsed_ms", copied_at.elapsed().as_millis() as u64)
-                    .string("changes", table.changes.name()),
+                    .string("event", "copied")
+                    .number("tables", counts.tables)
+                    .number("rows", counts.rows_copied)
+                    .number("elapsed_ms", started.elapsed().as_millis() as u64),
                 &format!(
-                    "  copied          {:<28} {:>10} rows   {:.1} s   {}\n",
-                    table.shown(),
-                    rows.len(),
-                    copied_at.elapsed().as_secs_f64(),
-                    table.changes.label()
+                    "  copied          {} tables, {} rows; now following\n",
+                    counts.tables, counts.rows_copied
                 ),
             );
+            let mut state = SavedFollow::new(SQL_SERVER, &identity);
+            for table in &tables {
+                state.set(&table_item(&table.shown()), &table_position(table, version));
+            }
+            let mut script = String::from("BEGIN;\n");
+            for statement in state.create_statements() {
+                script.push_str(&statement);
+                script.push_str(";\n");
+            }
+            script.push_str("COMMIT;");
+            let mut state_session = store.session(Dialect::PostgreSql);
+            let created = state_session.execute(&script, &mut |_| {});
+            let _ = state_session.close();
+            created.map_err(|error| {
+                source_failed(format!(
+                    "cannot save the follow position in {}: {}",
+                    self.file_display,
+                    error.message()
+                ))
+            })?;
         }
-        self.follow_event(
-            JsonObject::new()
-                .string("event", "copied")
-                .number("tables", counts.tables)
-                .number("rows", counts.rows_copied)
-                .number("elapsed_ms", started.elapsed().as_millis() as u64),
-            &format!(
-                "  copied          {} tables, {} rows; now following\n",
-                counts.tables, counts.rows_copied
-            ),
-        );
 
         let _ = stop_signals::watch();
         let poll = Duration::from_secs(
@@ -883,7 +1065,53 @@ impl Session<'_> {
                 .unwrap_or(DEFAULT_POLL_SECONDS),
         );
         let mut polls = 0u64;
+        let mut saved_positions: Vec<String> = tables
+            .iter()
+            .map(|table| table_position(table, version))
+            .collect();
         let reason = loop {
+            if let Err(error) = source.batch("SELECT 1") {
+                if !matches!(error, TdsClientError::Io(_)) {
+                    return Err(tds_failure(&target, &error));
+                }
+                let deadline = Instant::now() + self.reconnect_for();
+                let mut message = error.to_string();
+                let mut attempt = 0u32;
+                let mut reconnected = false;
+                while self.wait_to_reconnect(&mut attempt, &message, deadline) {
+                    match TdsClient::connect(&options) {
+                        Ok(client) => {
+                            source = client;
+                            reconnected = true;
+                            break;
+                        }
+                        Err(error) => message = error.to_string(),
+                    }
+                }
+                if !reconnected {
+                    break if stop_signals::requested() {
+                        "interrupt"
+                    } else {
+                        "source_lost"
+                    };
+                }
+                self.reconnected_event(attempt, &position_text(version, lsn));
+            }
+            if !tables.is_empty() {
+                let columns_now = first_rows(query(&mut source, &columns_query(&tables))?);
+                for table in &tables {
+                    let known: Vec<String> =
+                        table.columns.iter().map(|column| column.name.clone()).collect();
+                    if let Some(change) = column_change(&known, &columns_of(&columns_now, table)) {
+                        return Err(schema_changed(
+                            &target,
+                            &table.shown(),
+                            &change,
+                            &self.file_display,
+                        ));
+                    }
+                }
+            }
             let current_version = match version {
                 Some(version) => Some(
                     first_value(
@@ -1003,16 +1231,26 @@ impl Session<'_> {
             }
             polls += 1;
             let changed = !statements.is_empty();
-            if changed {
+            version = version.max(current_version);
+            lsn = lsn.max(current_lsn);
+            let positions: Vec<String> = tables
+                .iter()
+                .map(|table| table_position(table, version))
+                .collect();
+            if changed || positions != saved_positions {
                 run("BEGIN TRANSACTION")?;
                 for statement in &statements {
                     run(statement)?;
                 }
+                for (table, position) in tables.iter().zip(&positions) {
+                    run(&update_statement(&table_item(&table.shown()), position))?;
+                }
                 run("COMMIT TRANSACTION")?;
-                counts.transactions += 1;
+                if changed {
+                    counts.transactions += 1;
+                }
+                saved_positions = positions;
             }
-            version = version.max(current_version);
-            lsn = lsn.max(current_lsn);
             if self.request.follow.until_caught_up && !changed {
                 break "caught_up";
             }
@@ -1035,15 +1273,23 @@ impl Session<'_> {
         drop(run);
         let _ = session.close();
         let position = position_text(version, lsn);
-        let verdict = format!(
-            "{} holds every change SQL Server recorded up to {position}; point applications at it now",
-            self.file_display
-        );
+        let ok = reason != "source_lost";
+        let verdict = if ok {
+            format!(
+                "{} holds every change SQL Server recorded up to {position}; point applications at it now",
+                self.file_display
+            )
+        } else {
+            format!(
+                "the connection to the source was lost for longer than --reconnect-for; {} holds the changes up to {position}. Run the same command again to resume",
+                self.file_display
+            )
+        };
         match self.format {
             Format::Json => {
                 let summary = JsonObject::new()
                     .string("event", "stopped")
-                    .boolean("ok", true)
+                    .boolean("ok", ok)
                     .string("reason", reason)
                     .number("elapsed_ms", started.elapsed().as_millis() as u64)
                     .number("tables", counts.tables)
@@ -1067,20 +1313,25 @@ impl Session<'_> {
                 )
             }
             _ => self.out.text(&format!(
-                "followed {} into {} for {:.0} s ({})\n  tables          {}, {} rows copied\n  changes         {} polls applied inserts {}, updates {}, deletes {}\n  position        {position}\nok: {verdict}\n",
+                "followed {} into {} for {:.0} s ({})\n  tables          {}, {} rows copied\n  changes         {} polls applied inserts {}, updates {}, deletes {}\n  position        {position}\n{}: {verdict}\n",
                 options.shown(),
                 self.file_display,
                 started.elapsed().as_secs_f64(),
-                if reason == "caught_up" { "caught up, --until caught-up" } else { "stopped by Ctrl-C or SIGTERM" },
+                match reason {
+                    "caught_up" => "caught up, --until caught-up",
+                    "source_lost" => "the connection to the source was lost",
+                    _ => "stopped by Ctrl-C or SIGTERM",
+                },
                 counts.tables,
                 counts.rows_copied,
                 polls,
                 counts.inserts,
                 counts.updates,
                 counts.deletes,
+                if ok { "ok" } else { "stopped" },
             )),
         }
-        Ok(Exit::Done)
+        Ok(if ok { Exit::Done } else { Exit::DatabaseError })
     }
 }
 
@@ -1174,6 +1425,48 @@ mod tests {
                 next: Lsn(1),
             },
         }
+    }
+
+    #[test]
+    fn each_table_saves_its_position_and_reads_it_back() {
+        let mut table = orders();
+        let saved = table_position(&table, Some(9));
+        assert_eq!(read_position(&saved), Some(SavedPosition::Capture(Lsn(1))));
+        table.changes = ChangeSource::Tracking;
+        assert_eq!(table_position(&table, Some(9)), "change_tracking 9");
+        assert_eq!(
+            read_position("change_tracking 9"),
+            Some(SavedPosition::Tracking(9))
+        );
+        assert_eq!(read_position("change_tracking nine"), None);
+        assert_eq!(read_position("nothing"), None);
+    }
+
+    #[test]
+    fn changed_columns_are_named() {
+        let known = vec!["id".to_owned(), "note".to_owned()];
+        assert_eq!(column_change(&known, &known), None);
+        assert_eq!(
+            column_change(&known, &["id".to_owned(), "amount".to_owned()]).as_deref(),
+            Some("added amount; dropped note")
+        );
+        assert_eq!(
+            column_change(&known, &["note".to_owned(), "id".to_owned()]).as_deref(),
+            Some("reordered its columns")
+        );
+        assert_eq!(column_change(&known, &[]).as_deref(), Some("the table is gone"));
+    }
+
+    #[test]
+    fn one_query_reads_the_columns_of_every_followed_table() {
+        let table = orders();
+        let query = columns_query(std::slice::from_ref(&table));
+        assert!(query.contains("(TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'orders')"));
+        let rows = vec![
+            vec![Some("dbo".to_owned()), Some("orders".to_owned()), Some("id".to_owned())],
+            vec![Some("dbo".to_owned()), Some("other".to_owned()), Some("x".to_owned())],
+        ];
+        assert_eq!(columns_of(&rows, &table), vec!["id".to_owned()]);
     }
 
     #[test]

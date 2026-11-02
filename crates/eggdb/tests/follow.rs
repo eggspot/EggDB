@@ -100,6 +100,17 @@ fn follow_refuses_bad_sources_and_options_before_connecting() {
             vec![
                 "follow",
                 path.as_str(),
+                "postgres://ada@db/app",
+                "--reconnect-for",
+                "soon",
+            ],
+            "--reconnect-for needs a whole number of seconds",
+        ),
+
+        (
+            vec![
+                "follow",
+                path.as_str(),
                 "postgres://ada@db/app?sslmode=verify-full",
             ],
             "needs sslrootcert",
