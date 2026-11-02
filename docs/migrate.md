@@ -531,9 +531,15 @@ afterwards with `ALTER TABLE ... ADD CONSTRAINT`.
 commands, its name ending in `.aof`) into the RESP databases of the file (D193): each `SELECT`
 switches databases, each `MULTI`/`EXEC` block runs as one transaction, and the report counts the
 commands and the ones that failed. Serve the result with `eggdb serve app.eggdb --resp-listen`.
-For Redis 7's multi-part AOF, restore the incremental `.aof` files in order. RDB snapshots are
-not read yet: Redis does not publish a specification of the RDB format, so `BGREWRITEAOF` (or
-`appendonly yes`) in the old server is the way to get a file to restore.
+For Redis 7's multi-part AOF, point it at the directory: `eggdb restore app.eggdb
+appendonlydir/` reads the manifest (`appendonly.aof.manifest`, or give the manifest file itself)
+and replays the base file, then the incremental files in `seq` order, as one client, so a
+`SELECT` in one file holds in the next; history files (`type h`) are skipped. A manifest whose
+names are paths rather than file names in its directory, whose `seq` is not a number, or that
+lists a file the directory does not have is refused before anything is written. RDB snapshots
+are not read: Redis does not publish a specification of the RDB format, so a base file (or a
+single `.aof`) that starts with an RDB preamble is refused; set `aof-use-rdb-preamble no` and run
+`BGREWRITEAOF` in the old server to get files to restore.
 
 ## From MongoDB: a `mongodump` directory
 
