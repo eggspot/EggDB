@@ -298,6 +298,7 @@ pub(crate) struct Parser<'t> {
     declared_tables: Vec<String>,
     variables_read: Vec<String>,
     select_targets: Option<Vec<(crate::ast::AssignmentTarget, Vec<String>)>>,
+    assigned_per_row: Option<String>,
     select_windows: Option<Vec<(String, crate::window::WindowDefinition)>>,
     trigger_frame: Option<&'t crate::triggers::TriggerFrame>,
     routine_frame: Option<&'t crate::plpgsql::RoutineFrame>,
@@ -421,6 +422,7 @@ impl<'t> Parser<'t> {
             declared_tables: Vec::new(),
             variables_read: Vec::new(),
             select_targets: None,
+            assigned_per_row: None,
             select_windows: None,
             trigger_frame: None,
             routine_frame: None,
@@ -613,7 +615,9 @@ impl<'t> Parser<'t> {
             TokenKind::End => Ok(statement),
             TokenKind::Word(word)
                 if self.sqlserver()
-                    && (sqlserver::starts_statement(word) || sqlserver::ends_a_block(word)) =>
+                    && (sqlserver::starts_statement(word)
+                        || sqlserver::ends_a_block(word)
+                        || self.at_label()) =>
             {
                 Ok(statement)
             }

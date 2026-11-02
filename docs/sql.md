@@ -789,7 +789,9 @@ What the server does:
   still logging in; the next gets error 17809. `--log-batches` logs the first 200 characters of
   each batch, to see what a client sends.
 
-Not yet: TLS, MARS, cancelling a running batch (attention is answered when the batch ends), and SSMS's and Azure Data Studio's own catalog queries (the `sys`
+A client's attention (cancel) stops the running batch or `sp_executesql` call at once: a watcher
+thread notices it on the socket while the request runs, the request ends without an error, and
+its last `DONE` token carries the attention acknowledgement. Not yet: TLS, MARS, and SSMS's and Azure Data Studio's own catalog queries (the `sys`
 views and catalog procedures drivers use are in [SQL Server metadata for
 tools](#sql-server-metadata-for-tools)).
 
@@ -953,7 +955,30 @@ SELECT @odd AS odd_sum
   checks its range). `SET @v = expression`, `SET @v += expression` (and `-=`, `*=`, `/=`, `%=`),
   and `SELECT @a = expression, @b = ... [FROM ... WHERE ... ORDER BY ...]`, which takes the last
   row's values, leaves the variables unchanged when there is no row, and with `+=` accumulates
-  row by row (`SELECT @names += name + N',' FROM t`).
+  row by row (`SELECT @names += name + N',' FROM t`). A value that reads the variable it assigns
+  is worked out row by row too, so `SELECT @s = @s + name FROM t ORDER BY id` and `SELECT @csv =
+  COALESCE(@csv + N',', N'') + name FROM t` concatenate (without aggregates, subqueries or
+  `DISTINCT` in that value; reading another variable the same `SELECT` assigns stays 40517).
+- **Cursors**: `DECLARE name CURSOR [LOCAL | GLOBAL] [FORWARD_ONLY | SCROLL] [STATIC | KEYSET |
+  DYNAMIC | FAST_FORWARD] [READ_ONLY | SCROLL_LOCKS | OPTIMISTIC] [TYPE_WARNING] FOR select [FOR
+  READ ONLY]` (and the ISO form `DECLARE name [INSENSITIVE] [SCROLL] CURSOR FOR ...`), `OPEN`,
+  `FETCH [NEXT | PRIOR | FIRST | LAST | ABSOLUTE n | RELATIVE n] FROM [GLOBAL] name [INTO @a, @b,
+  ...]` (`n` a number or a variable; without `INTO` the row comes back as a result set),
+  `@@FETCH_STATUS` (0, or -1 past either end; -1 before the first fetch), `@@CURSOR_ROWS`,
+  `CLOSE`, `DEALLOCATE` and `CURSOR_STATUS('local' | 'global' | 'variable', 'name')` (1, 0, -1,
+  -3). Every cursor reads its rows when it is opened, as a `STATIC` cursor does, so later changes
+  to the tables do not show in it; variables in its query keep the values they had at `DECLARE`.
+  Cursors are `GLOBAL` unless declared `LOCAL`; a local one ends with its batch, procedure or
+  dynamic SQL. Only `NEXT` moves a forward-only (or `FAST_FORWARD`) cursor (Msg 16911); the other
+  mistakes are SQL Server's errors (16905, 16915, 16916, 16917, 16924). A connection holds at most
+  1,000 cursors. Not yet: cursor variables (`DECLARE @c CURSOR`), `FOR UPDATE` and `WHERE CURRENT
+  OF`, and `sp_cursor*` server cursors over RPC.
+- **`GOTO label`** jumps to `label:` anywhere in the batch or procedure, forward or backward (an
+  unknown label is Msg 133, a repeated one 132, and a jump into a `TRY` or `CATCH` block 1026).
+- **`WAITFOR DELAY 'hh:mm[:ss[.fff]]'`** waits that long and **`WAITFOR TIME 'hh:mm[:ss]'`**
+  until that time of day (session time zone); a cancel (TDS attention, PostgreSQL cancel
+  request) or the statement timeout ends the wait, and a malformed time is Msg 148.
+  `WAITFOR (RECEIVE ...)` is 40517.
 - **Control of flow**: `IF condition statement [ELSE statement]` with any condition (subqueries,
   `[NOT] EXISTS (...)`, `OBJECT_ID(...) IS NULL`, `@@ROWCOUNT`), `BEGIN ... END`, `WHILE
   condition statement` with `BREAK` and `CONTINUE`, and `RETURN`. A condition leaves
@@ -3885,18 +3910,16 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   an `UPDATE` of an identity column (SQL Server's 8102), and `ROLLBACK TRAN <name>` ignores the
   name. Divide by zero and arithmetic overflow end the batch, where SQL Server ends only the
   statement.
-- Batch logic (D137): cursors (`DECLARE CURSOR`), `GOTO` and labels, `WAITFOR`, DDL
+- Batch logic (D137): DDL
   triggers, `INSERT ... EXEC` of dynamic SQL, `SET eggdb.dialect` inside a block or dynamic SQL, and a `DECLARE` whose value
-  reads a variable the same `DECLARE` declares are 40517. A `SELECT` whose value reads a variable
-  the same `SELECT` assigns (`SELECT @s = @s + name FROM t`) is 40517; `SELECT @s += name FROM t`
-  gives SQL Server's result. A table variable's columns take `NOT NULL`, `PRIMARY KEY` and
+  reads a variable the same `DECLARE` declares are 40517. A `SELECT` whose value reads another
+  variable the same `SELECT` assigns is 40517. Every Transact-SQL cursor is a static snapshot
+  taken at `OPEN` (`DYNAMIC` and `KEYSET` cursors do not see later changes). A table variable's columns take `NOT NULL`, `PRIMARY KEY` and
   `UNIQUE` (on a column or over several), checked on every `INSERT` and `UPDATE` (515, 2627), but
   no defaults, checks or identity. `EXEC` of anything but the catalog procedures, `sp_executesql`
   and `sp_unprepare`; rolling back to a save point (`SAVE TRANSACTION` is recorded);
   `QUOTED_IDENTIFIER OFF` and `ANSI_PADDING OFF`; three-part names and other databases.
-- A batch that loops forever over TDS cannot be stopped by the client's attention signal while it
-  runs (the connection reads its next request only when the batch ends); closing the server
-  stops it. Errors inside dynamic SQL report the line of the `EXEC` statement, not their line in
+- Errors inside dynamic SQL report the line of the `EXEC` statement, not their line in
   the dynamic text. `RAISERROR ... WITH LOG` writes no log. `ERROR_PROCEDURE()` is always NULL.
 - The catalog (D133) shows each column as the SQL Server type its engine type is most often
   declared with: `varchar` and `char` columns as `nvarchar` and `nchar`, `tinyint` as `smallint`,

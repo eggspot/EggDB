@@ -60,6 +60,10 @@ impl<'t> Lexer<'t> {
             b'"' => self.delimited_sqlserver_identifier(b'"'),
             b'[' => self.delimited_sqlserver_identifier(b']'),
             b'@' => self.sqlserver_variable(),
+            b':' => {
+                self.at += 1;
+                Ok(TokenKind::Colon)
+            }
             _ if is_sqlserver_identifier_start(byte) => self.sqlserver_word(),
             _ => {
                 let rest = &self.text[self.at..];

@@ -37,6 +37,7 @@
 //! The guides are "Connecting with sqlcmd", ".NET and Java apps over TDS" and "Bulk loads
 //! with bcp and SqlBulkCopy" in `docs/sql.md` in the repository.
 
+mod attention;
 mod auth;
 pub mod bulk;
 pub mod client;

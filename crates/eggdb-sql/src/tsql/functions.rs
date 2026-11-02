@@ -164,7 +164,13 @@ pub(crate) fn refused_in_function(
             | SqlServerStatement::FormatOnly(_)
             | SqlServerStatement::XactAbort(_) => "SET ON/OFF",
             SqlServerStatement::InsertBulk(_) => "INSERT BULK",
-            SqlServerStatement::Use(_) => first_word,
+            SqlServerStatement::Use(_)
+            | SqlServerStatement::DeclareCursor(_)
+            | SqlServerStatement::OpenCursor(_)
+            | SqlServerStatement::FetchCursor { .. }
+            | SqlServerStatement::CloseCursor(_)
+            | SqlServerStatement::DeallocateCursor(_) => first_word,
+            SqlServerStatement::WaitFor { .. } => "WAITFOR",
         },
         Statement::Insert(_) => "INSERT",
         Statement::Update(_) => "UPDATE",
@@ -451,7 +457,12 @@ impl FunctionRun<'_, '_> {
         let mut at_instruction = 0usize;
         while let Some(&instruction) = program.instructions.get(at_instruction) {
             match instruction {
-                Instruction::Jump { to } => at_instruction = to,
+                Instruction::Jump { to } => {
+                    if to <= at_instruction {
+                        crate::cancel::check()?;
+                    }
+                    at_instruction = to;
+                }
                 Instruction::Return => return Ok(()),
                 Instruction::Run { at } => {
                     self.step(at)?;
@@ -539,8 +550,16 @@ impl FunctionRun<'_, '_> {
                 let value = self.evaluate(&value)?;
                 self.assign(&variable, value)
             }
-            SqlServerStatement::SelectAssign { targets, query } => {
-                self.select_assign(&targets, *query)
+            SqlServerStatement::SelectAssign {
+                targets,
+                query,
+                per_row: false,
+            } => self.select_assign(&targets, *query),
+            SqlServerStatement::SelectAssign { per_row: true, .. } => {
+                Err(SqlError::not_supported(
+                    "A SELECT in a function that assigns a variable from itself row by row",
+                )
+                .at(position))
             }
             SqlServerStatement::InsertVariable {
                 variable,

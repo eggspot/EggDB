@@ -245,7 +245,9 @@ impl Parser<'_> {
     fn at_procedure_end(&self) -> bool {
         match self.peek_kind() {
             TokenKind::Semicolon | TokenKind::End => true,
-            TokenKind::Word(word) => starts_statement(word) || ends_a_block(word) || word == "with",
+            TokenKind::Word(word) => {
+                starts_statement(word) || ends_a_block(word) || word == "with" || self.at_label()
+            }
             _ => false,
         }
     }
@@ -254,7 +256,7 @@ impl Parser<'_> {
         matches!(self.peek_kind_at(ahead), TokenKind::Variable(name) if !name.starts_with("@@"))
     }
 
-    fn variable_name(&mut self) -> SqlResult<Name> {
+    pub(super) fn variable_name(&mut self) -> SqlResult<Name> {
         let TokenKind::Variable(name) = self.peek_kind() else {
             return Err(self.unexpected());
         };
@@ -734,9 +736,14 @@ impl Parser<'_> {
                 .at(position));
             }
         }
+        let per_row = crate::tsql::reads_assigned_variables(&query);
+        if per_row && let Some(refused) = crate::tsql::refuses_per_row(&query) {
+            return Err(not_supported(refused).at(position));
+        }
         Ok(Statement::SqlServer(SqlServerStatement::SelectAssign {
             targets: targets.into_iter().map(|(target, _)| target).collect(),
             query: Box::new(query),
+            per_row,
         }))
     }
 
@@ -750,7 +757,10 @@ impl Parser<'_> {
         let read_before = self.variables_read.len();
         self.variable_reference(&variable.text, variable.position)?;
         self.variables_read.truncate(read_before);
-        let expr = self.expression()?;
+        let outer = self.assigned_per_row.replace(variable.text.clone());
+        let parsed = self.expression();
+        self.assigned_per_row = outer;
+        let expr = parsed?;
         let reads = self
             .variables_read
             .get(read_before..)
@@ -827,7 +837,7 @@ impl Parser<'_> {
     pub(super) fn at_statement_end(&self) -> bool {
         match self.peek_kind() {
             TokenKind::Semicolon | TokenKind::End => true,
-            TokenKind::Word(word) => starts_statement(word) || ends_a_block(word),
+            TokenKind::Word(word) => starts_statement(word) || ends_a_block(word) || self.at_label(),
             _ => false,
         }
     }

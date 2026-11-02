@@ -545,9 +545,11 @@ impl<'s> Session<'s> {
             SqlServerStatement::SetVariable { variable, value } => {
                 self.run_set_variable(variable, value)
             }
-            SqlServerStatement::SelectAssign { targets, query } => {
-                self.run_select_assignment(targets, query)
-            }
+            SqlServerStatement::SelectAssign {
+                targets,
+                query,
+                per_row,
+            } => self.run_select_assignment(targets, query, *per_row),
             SqlServerStatement::Condition(condition) => self.run_condition(condition),
             SqlServerStatement::Print(message) => self.run_print(message),
             SqlServerStatement::RaiseError(raise) => self.run_raiserror(raise),
@@ -556,6 +558,16 @@ impl<'s> Session<'s> {
             SqlServerStatement::SaveTransaction(name) => self.save_transaction(name),
             SqlServerStatement::RollbackTo(name) => self.roll_back_to(name),
             SqlServerStatement::Return(value) => self.run_return(value),
+            SqlServerStatement::DeclareCursor(declaration) => self.run_declare_cursor(declaration),
+            SqlServerStatement::OpenCursor(cursor) => self.run_open_cursor(cursor),
+            SqlServerStatement::FetchCursor {
+                cursor,
+                orientation,
+                into,
+            } => self.run_fetch_cursor(cursor, orientation, into),
+            SqlServerStatement::CloseCursor(cursor) => self.run_close_cursor(cursor),
+            SqlServerStatement::DeallocateCursor(cursor) => self.run_deallocate_cursor(cursor),
+            SqlServerStatement::WaitFor { until_time, time } => self.run_waitfor(*until_time, time),
         }
     }
 

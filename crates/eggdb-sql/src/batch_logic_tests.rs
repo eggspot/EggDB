@@ -94,7 +94,7 @@ fn compile_errors_of_batch_logic_run_nothing() {
         ("BEGIN SELECT 1", 102),
         ("BEGIN END", 156),
         ("BEGIN TRY SELECT 1 END TRY", 102),
-        ("GOTO done", 40517),
+        ("GOTO done", 133),
         ("DECLARE @a int = 1, @b int = @a", 40517),
         ("DECLARE @x int; SELECT @x = 1, 2", 141),
     ] {
@@ -195,9 +195,14 @@ SELECT @n AS n, @s AS s, @total AS total, @none AS none, @@ROWCOUNT AS counted",
             Value::Integer(0)
         ]]
     );
+    let steps = batch(
+        &mut session,
+        "DECLARE @s int = 0; SELECT @s = @s + id FROM t; SELECT @s AS s",
+    );
+    assert_eq!(last_rows(&steps), vec![vec![Value::Integer(6)]]);
     let error = refused(
         &mut session,
-        "DECLARE @s int = 0; SELECT @s = @s + id FROM t",
+        "DECLARE @a int = 0, @b int = 0; SELECT @a = 1, @b = @a + id FROM t",
     );
     assert_eq!(error.vendor_code(), Some(40517));
 }

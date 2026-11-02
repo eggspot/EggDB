@@ -1,3 +1,4 @@
+use crate::attention::AttentionWatch;
 use crate::bulk::{BulkInput, BulkLoadError, BulkReader};
 use crate::messages::{
     ATTENTION, BULK_LOAD, ENCRYPT_CLIENT_CERT, ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON,
@@ -592,6 +593,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     session.identify(&user, &config.database);
     session.set_connection_id(connection_id);
     shared.register(connection_id, session.cancel_signal());
+    let attention = AttentionWatch::new(wire.socket(), session.cancel_signal());
     let mut connection = Connection {
         wire,
         shared,
@@ -599,6 +601,8 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         transaction: None,
         prepared: PreparedBatches::default(),
         acknowledge_reset: false,
+        attention,
+        attention_acknowledged: false,
     };
     connection.run(&mut session);
     shared.unregister(connection_id);
@@ -612,6 +616,8 @@ pub(crate) struct Connection<'a> {
     transaction: Option<u64>,
     pub(crate) prepared: PreparedBatches,
     acknowledge_reset: bool,
+    attention: AttentionWatch,
+    attention_acknowledged: bool,
 }
 
 pub(crate) struct PendingDone {
@@ -671,7 +677,7 @@ impl Connection<'_> {
                 SQL_BATCH => self.batch(session, &message.body),
                 RPC => self.rpc(session, &message.body),
                 TRANSACTION_MANAGER => self.transaction_request(session, &message.body),
-                ATTENTION => self.send_done(DONE_ATTENTION),
+                ATTENTION => self.acknowledge_attention(session),
                 _ => {
                     report_wire_error(
                         self.shared,
@@ -685,6 +691,15 @@ impl Connection<'_> {
                 return;
             }
         }
+    }
+
+    fn acknowledge_attention(&mut self, session: &Session<'_>) -> bool {
+        session.cancel_signal().clear();
+        if std::mem::take(&mut self.attention_acknowledged) {
+            return true;
+        }
+        self.attention.take_seen();
+        self.send_done(DONE_ATTENTION)
     }
 
     fn next_message(&mut self) -> Result<Incoming, WireError> {
@@ -912,10 +927,12 @@ impl Connection<'_> {
         done_token: u8,
     ) -> Ran {
         let database = session.database().to_owned();
+        self.attention.begin();
         let ran = self.write_steps(text, database, done_token, |on_step| match parameters {
             None => session.execute_batch(text, on_step),
             Some(parameters) => session.execute_parameterized_batch(text, parameters, on_step),
         });
+        self.attention.end();
         self.forget_unprepared(session);
         ran
     }
@@ -973,7 +990,14 @@ impl Connection<'_> {
             command: 0,
             rows: 0,
         });
+        let attention = if self.attention.take_seen() {
+            self.attention_acknowledged = true;
+            DONE_ATTENTION
+        } else {
+            0
+        };
         let status = (last.status & !DONE_MORE)
+            | attention
             | if in_transaction {
                 DONE_IN_TRANSACTION
             } else {
@@ -1168,6 +1192,9 @@ impl StepWriter<'_, '_> {
     }
 
     fn error(&mut self, error: &SqlError, statement_start: usize) {
+        if error.state() == SqlState::QUERY_CANCELED && self.connection.attention.seen() {
+            return;
+        }
         let line = self
             .lines
             .line_at(self.text, error.position().unwrap_or(statement_start));

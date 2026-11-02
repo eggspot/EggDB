@@ -350,6 +350,9 @@ pub(crate) struct SqlServerState {
     pub(crate) format_only: bool,
     pub(crate) xact_abort: bool,
     pub(crate) uncommittable: bool,
+    pub(crate) fetch_status: Option<i32>,
+    pub(crate) cursor_rows: i32,
+    pub(crate) cursors: Vec<crate::tsql::CursorState>,
 }
 
 #[derive(Debug, Clone)]

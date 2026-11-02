@@ -470,6 +470,7 @@ pub(crate) enum SqlServerStatement {
     SelectAssign {
         targets: Vec<AssignmentTarget>,
         query: Box<Statement>,
+        per_row: bool,
     },
     Condition(Expr),
     Print(Expr),
@@ -479,6 +480,44 @@ pub(crate) enum SqlServerStatement {
     SaveTransaction(Name),
     RollbackTo(Name),
     Return(Expr),
+    DeclareCursor(CursorDeclaration),
+    OpenCursor(CursorName),
+    FetchCursor {
+        cursor: CursorName,
+        orientation: FetchOrientation,
+        into: Vec<Name>,
+    },
+    CloseCursor(CursorName),
+    DeallocateCursor(CursorName),
+    WaitFor {
+        until_time: bool,
+        time: Expr,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CursorName {
+    pub(crate) name: Name,
+    pub(crate) global: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CursorDeclaration {
+    pub(crate) name: Name,
+    pub(crate) global: bool,
+    pub(crate) scroll: bool,
+    pub(crate) dynamic: bool,
+    pub(crate) query: Box<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FetchOrientation {
+    Next,
+    Prior,
+    First,
+    Last,
+    Absolute(Expr),
+    Relative(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

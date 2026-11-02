@@ -21,12 +21,25 @@ struct Loop {
     breaks: Vec<usize>,
 }
 
+struct Label {
+    name: String,
+    at: usize,
+}
+
+struct Goto {
+    label: String,
+    jump: usize,
+    position: usize,
+}
+
 #[derive(Default)]
 struct Builder {
     instructions: Vec<Instruction>,
     tries: Vec<TryBlock>,
     tables: Vec<Declaration>,
     loops: Vec<Loop>,
+    labels: Vec<Label>,
+    gotos: Vec<Goto>,
     catch_depth: usize,
     depth: usize,
 }
@@ -56,6 +69,56 @@ impl Builder {
             *end = here;
         }
     }
+
+    fn enters_a_try_scope(&self, jump: usize, target: usize) -> bool {
+        self.tries.iter().any(|block| {
+            (block.body.contains(&target) && !block.body.contains(&jump))
+                || (block.handler.contains(&target) && !block.handler.contains(&jump))
+        })
+    }
+
+    fn resolve_gotos(&mut self) -> SqlResult<()> {
+        for goto in std::mem::take(&mut self.gotos) {
+            let Some(target) = self
+                .labels
+                .iter()
+                .find(|label| label.name.eq_ignore_ascii_case(&goto.label))
+                .map(|label| label.at)
+            else {
+                return Err(undeclared_label(&goto.label, goto.position));
+            };
+            if self.enters_a_try_scope(goto.jump, target) {
+                return Err(SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    "GOTO cannot be used to jump into a TRY or CATCH scope.",
+                )
+                .with_sqlserver_code(1026)
+                .at(goto.position));
+            }
+            if let Some(Instruction::Jump { to }) = self.instructions.get_mut(goto.jump) {
+                *to = target;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn undeclared_label(label: &str, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        format!("A GOTO statement references the label '{label}' but the label has not been declared."),
+    )
+    .with_sqlserver_code(133)
+    .at(position)
+}
+
+fn duplicate_label(label: &str, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::SYNTAX_ERROR,
+        format!("The label '{label}' has already been declared. Label names must be unique within a query batch or stored procedure."),
+    )
+    .with_sqlserver_code(132)
+    .at(position)
 }
 
 fn outside_loop(statement: &str, code: u16, position: usize) -> SqlError {
@@ -91,6 +154,7 @@ impl Parser<'_> {
                 break;
             }
         }
+        builder.resolve_gotos()?;
         let mut declarations: Vec<Declaration> = std::mem::take(&mut self.declared_variables)
             .into_iter()
             .map(Declaration::Scalar)
@@ -170,7 +234,32 @@ impl Parser<'_> {
                     self.take(&TokenKind::Semicolon);
                     return Ok(false);
                 }
-                "goto" => return Err(not_supported("GOTO").at(position)),
+                "goto" => {
+                    self.at += 1;
+                    let label = self.label_name()?;
+                    let jump = builder.push(Instruction::Jump { to: UNSET });
+                    builder.gotos.push(Goto {
+                        label,
+                        jump,
+                        position,
+                    });
+                    self.take(&TokenKind::Semicolon);
+                    return Ok(false);
+                }
+                _ if self.at_label() => {
+                    let label = self.label_name()?;
+                    self.at += 1;
+                    if builder
+                        .labels
+                        .iter()
+                        .any(|known| known.name.eq_ignore_ascii_case(&label))
+                    {
+                        return Err(duplicate_label(&label, position));
+                    }
+                    let at = builder.next();
+                    builder.labels.push(Label { name: label, at });
+                    return Ok(false);
+                }
                 "throw" if builder.catch_depth == 0 && self.throws_again() => {
                     return Err(SqlError::new(
                         SqlState::SYNTAX_ERROR,
@@ -223,6 +312,24 @@ impl Parser<'_> {
             .at(position));
         }
         Ok(chooses)
+    }
+
+    pub(super) fn at_label(&self) -> bool {
+        self.sqlserver()
+            && matches!(self.peek_kind(), TokenKind::Word(word)
+                if !super::sqlserver::is_reserved(word))
+            && self.peek_kind_at(1) == &TokenKind::Colon
+    }
+
+    fn label_name(&mut self) -> SqlResult<String> {
+        match self.peek_kind() {
+            TokenKind::Word(word) if !super::sqlserver::is_reserved(word) => {
+                let name = word.as_ref().to_owned();
+                self.at += 1;
+                Ok(name)
+            }
+            _ => Err(self.unexpected()),
+        }
     }
 
     fn first_word_upper(&self) -> String {

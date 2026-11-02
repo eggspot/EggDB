@@ -81,6 +81,7 @@ pub(crate) struct BatchContext {
     pub(crate) transition_tables: Vec<String>,
     pub(crate) updated_columns: Option<Vec<String>>,
     pub(crate) nest_level: u8,
+    pub(crate) procedure_id: i32,
 }
 
 impl BatchContext {

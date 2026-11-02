@@ -389,6 +389,7 @@ impl<'s> Session<'s> {
         );
         self.dynamic_depth -= 1;
         let finished = self.leave_batch_scope(scope);
+        self.drop_local_cursors(self.dynamic_depth.saturating_add(1));
         self.statement_start = outer_start;
         self.restore_set_options(outer_options);
         let returned = std::mem::replace(&mut self.returned_value, outer_returned);
