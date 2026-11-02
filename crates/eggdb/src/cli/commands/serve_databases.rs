@@ -182,20 +182,29 @@ impl ServedDatabases for ServedDirectory<'_> {
     }
 
     fn is_superuser_in(&self, name: &str, role: &str) -> bool {
+        self.stored_role_in(name, role)
+            .is_some_and(|stored| stored.login && stored.superuser)
+    }
+
+    fn may_log_in(&self, name: &str, role: &str) -> bool {
+        self.stored_role_in(name, role)
+            .is_some_and(|stored| stored.login)
+    }
+}
+
+impl ServedDirectory<'_> {
+    fn stored_role_in(&self, name: &str, role: &str) -> Option<eggdb_sql::StoredRole> {
         let database = if name.eq_ignore_ascii_case(&self.default_name) {
             AttachedDatabase::Default(self.default)
         } else {
             let others = self.others();
-            let Some(store) = served_key(&others, name).and_then(|key| others.get(key)) else {
-                return false;
-            };
+            let store = served_key(&others, name).and_then(|key| others.get(key))?;
             AttachedDatabase::Other(Arc::clone(store))
         };
         database
             .begin_read()
             .ok()
             .and_then(|reader| eggdb_sql::stored_role(&reader, role).ok().flatten())
-            .is_some_and(|stored| stored.login && stored.superuser)
     }
 }
 

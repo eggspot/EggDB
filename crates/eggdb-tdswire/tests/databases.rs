@@ -107,3 +107,19 @@ fn a_login_reaches_a_new_database_which_is_not_dropped_while_in_use() {
         "{refused:?}"
     );
 }
+
+#[test]
+fn the_servers_own_login_keeps_its_rights_after_use() {
+    let directory = MemoryDirectory::with(&[DATABASE]);
+    let server = TestServer::start_directory(directory.clone());
+    let mut client = Client::login(server.address);
+    assert!(errors(&client.batch("CREATE DATABASE audit")).is_empty());
+    assert!(errors(&client.batch("CREATE DATABASE scratch")).is_empty());
+    let used = client.batch("USE audit");
+    assert!(changed_to(&used, "audit"), "{used:?}");
+    let dropped = client.batch("DROP DATABASE scratch");
+    assert!(errors(&dropped).is_empty(), "{dropped:?}");
+    assert!(!directory.names().contains(&"scratch".to_owned()));
+    let created = client.batch("CREATE DATABASE kept");
+    assert!(errors(&created).is_empty(), "{created:?}");
+}

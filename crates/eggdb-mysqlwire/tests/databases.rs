@@ -104,3 +104,25 @@ fn a_new_database_is_reached_from_the_handshake_and_not_dropped_while_in_use() {
         "{refused:?}"
     );
 }
+
+#[test]
+fn the_servers_own_user_keeps_its_rights_after_use_and_init_db() {
+    let directory = MemoryDirectory::with(&[DATABASE]);
+    let server = TestServer::start_directory(directory.clone());
+    let mut client = Client::login(server.address);
+    for name in ["audit", "scratch", "spare"] {
+        let created = client.query(&format!("CREATE DATABASE {name}"));
+        assert!(matches!(created, Reply::Ok { .. }), "{created:?}");
+    }
+    assert!(matches!(client.query("USE audit"), Reply::Ok { .. }));
+    let dropped = client.query("DROP DATABASE scratch");
+    assert!(matches!(dropped, Reply::Ok { .. }), "{dropped:?}");
+    client.command(INIT_DB, DATABASE.as_bytes());
+    assert!(matches!(client.next_reply(), Reply::Ok { .. }));
+    let dropped = client.query("DROP DATABASE spare");
+    assert!(matches!(dropped, Reply::Ok { .. }), "{dropped:?}");
+    assert_eq!(
+        database_list(&mut client),
+        vec!["audit".to_owned(), DATABASE.to_owned()]
+    );
+}

@@ -60,6 +60,15 @@ pub trait ServedDatabases: Sync {
         false
     }
 
+    /// Whether `role` is a stored role that may log in to the served database named `name`
+    /// (ignoring ASCII case), whose own roles decide: `USE` by a session that logged in as a
+    /// stored role needs it, since each database keeps its own roles. `false`, the default,
+    /// for a server that cannot read another database's roles.
+    fn may_log_in(&self, name: &str, role: &str) -> bool {
+        let _ = (name, role);
+        false
+    }
+
     /// The served name equal to `name` ignoring ASCII case, as MySQL and SQL Server compare
     /// database names, or `None` when no database has it.
     fn matching_name(&self, name: &str) -> Option<String> {
