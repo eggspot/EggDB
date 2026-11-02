@@ -814,6 +814,10 @@ fn apply_action(
             }
             _ => None,
         };
+        let defers_after_rows = firing
+            .as_deref()
+            .is_some_and(crate::triggers::Firing::defers_cascaded_after_rows);
+        let mut deferred_after_rows: Vec<(Vec<Value>, Option<Vec<Value>>)> = Vec::new();
         for (row_key, row) in batch {
             match action {
                 ReferentialAction::NoAction if deferred_now(child, key) => {
@@ -867,7 +871,9 @@ fn apply_action(
                         None => row,
                     };
                     execute::delete_stored_row(writer, child, &row_key, &row)?;
-                    if let Some(firing) = firing.as_deref_mut() {
+                    if defers_after_rows {
+                        deferred_after_rows.push((row.clone(), None));
+                    } else if let Some(firing) = firing.as_deref_mut() {
                         firing.after_row(writer, tables, Some(row.as_slice()), None)?;
                     }
                     memory.charge_row(&row)?;
@@ -935,7 +941,9 @@ fn apply_action(
                     } else if action == ReferentialAction::SetDefault {
                         check_parent(writer, tables, child, key, &updated, true)?;
                     }
-                    if let Some(firing) = firing.as_deref_mut() {
+                    if defers_after_rows {
+                        deferred_after_rows.push((row.clone(), Some(updated.clone())));
+                    } else if let Some(firing) = firing.as_deref_mut() {
                         firing.after_row(
                             writer,
                             tables,
@@ -953,6 +961,11 @@ fn apply_action(
                         depth + 1,
                     ));
                 }
+            }
+        }
+        if let Some(firing) = firing {
+            for (old, new) in &deferred_after_rows {
+                firing.after_row(writer, tables, Some(old.as_slice()), new.as_deref())?;
             }
         }
         memory.release(charged);

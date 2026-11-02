@@ -2268,8 +2268,9 @@ resolved as PostgreSQL resolves a `regclass` (lower case unless quoted, `public.
 spellings work. Past its limit a sequence fails with `2200H` (`nextval: reached maximum value of
 sequence "s" (9223372036854775807)`) or, with `CYCLE`, starts again; arithmetic never wraps.
 `nextval` is not undone by a rollback, as in PostgreSQL, and is durable with the commit of any
-transaction that used the value. Not yet: reading a sequence as a one-row relation (`SELECT
-last_value, is_called FROM s`, which `pg_dump` sends) and the `pg_sequences` view (`42P01`).
+transaction that used the value. A sequence reads as PostgreSQL's one-row relation (`SELECT
+last_value, log_cnt, is_called FROM s`, which `pg_dump` sends), and the `pg_sequences` view lists
+every sequence.
 `INSERT`, `UPDATE` and `DELETE` on a sequence fail with `42809` (`cannot change sequence "s"`), as
 in PostgreSQL. Oracle's sequences are the same objects: `CREATE SEQUENCE s
 START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE` (with `NOMAXVALUE`, `NOMINVALUE`, `ORDER` and the
@@ -2413,7 +2414,9 @@ foreign key changes or removes (`ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT`, 
 CASCADE`) fire the child table's `UPDATE` or `DELETE` triggers, as in PostgreSQL, SQL Server,
 SQLite and Oracle: row triggers once per row, statement triggers (and a Transact-SQL trigger's
 `deleted` and `inserted` tables) once per statement and child table with every cascaded row.
-Triggers written in the MySQL dialect don't fire for cascades, as MySQL's own don't. A `BEFORE`
+A PostgreSQL-dialect `AFTER` row trigger fires once its cascaded action has written all its rows
+(after that action's `BEFORE` triggers), as PostgreSQL's queued events do; SQLite's and Oracle's
+fire as each row is written. Triggers written in the MySQL dialect don't fire for cascades, as MySQL's own don't. A `BEFORE`
 trigger may change a cascaded row's new values; one that skips a cascaded row fails the statement
 with `23503` (the row would point at nothing), where PostgreSQL completes the statement and leaves
 the row behind as an orphan, and one that changes or removes the row it fires
@@ -3246,7 +3249,8 @@ its names (FNV-1a over its kind, its table for an index, constraint or default, 
 folded into 16385 to 4294967295, a collision taking the next free number in a fixed order), so
 it is the same in every statement and after a restart, and changes when the object is renamed.
 
-**Types and functions.** `oid`, `xid`, `name`, `pg_node_tree`, `aclitem` (always NULL),
+**Types and functions.** `oid`, `xid`, `name`, `pg_node_tree`, `aclitem` (PostgreSQL's `grantee=privileges/grantor` text, as `pg_class.relacl`
+and `\dp` show a table's grants; NULL where EggDB keeps no grants, such as `attacl`),
 `int2vector` and `oidvector` (subscripts from 0, written separated by spaces), and `regclass`,
 `regtype`, `regnamespace`, `regrole` and `regproc` work in expressions and casts but are not
 column types of tables; `"char"` is the type of the catalog's kind columns only, and `"char"`

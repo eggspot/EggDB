@@ -1168,6 +1168,17 @@ impl Firing {
         !self.before.is_empty() || self.replaces_writes
     }
 
+    /// Whether a cascaded action's `AFTER` row triggers wait until the action has written all
+    /// its rows: PostgreSQL queues them and fires them at the end of the action's query, where
+    /// SQLite and Oracle fire them as each row is written.
+    pub(crate) fn defers_cascaded_after_rows(&self) -> bool {
+        !self.after.is_empty()
+            && self
+                .after
+                .iter()
+                .all(|trigger| trigger.dialect == Dialect::PostgreSql)
+    }
+
     fn record(&mut self, timing: TriggerTiming, old: Option<&[Value]>, new: Option<&[Value]>) {
         for call in &mut self.calls {
             let records = match timing {

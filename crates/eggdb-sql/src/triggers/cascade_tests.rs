@@ -101,6 +101,49 @@ END $$",
 }
 
 #[test]
+fn postgresql_cascaded_after_row_triggers_fire_once_their_action_has_written_every_row() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_family(&store);
+    answer(
+        &mut session,
+        "CREATE FUNCTION log_remaining() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO log (what) VALUES (format('%s %s %s remaining %s', TG_WHEN, TG_OP, OLD.id,
+        (SELECT count(*) FROM child WHERE parent_id = OLD.parent_id)));
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END $$",
+    );
+    answer(
+        &mut session,
+        "CREATE TRIGGER child_before BEFORE DELETE OR UPDATE ON child FOR EACH ROW EXECUTE FUNCTION log_remaining()",
+    );
+    answer(
+        &mut session,
+        "CREATE TRIGGER child_after AFTER DELETE OR UPDATE ON child FOR EACH ROW EXECUTE FUNCTION log_remaining()",
+    );
+    answer(&mut session, "DELETE FROM parent WHERE id = 1");
+    answer(&mut session, "INSERT INTO parent VALUES (1)");
+    answer(&mut session, "INSERT INTO child VALUES (12, 2, NULL)");
+    answer(&mut session, "UPDATE parent SET id = 3 WHERE id = 2");
+    assert_eq!(
+        rows(&mut session, "SELECT what FROM log ORDER BY seq"),
+        vec![
+            "BEFORE DELETE 10 remaining 2",
+            "BEFORE DELETE 11 remaining 1",
+            "AFTER DELETE 10 remaining 0",
+            "AFTER DELETE 11 remaining 0",
+            "BEFORE UPDATE 12 remaining 2",
+            "BEFORE UPDATE 20 remaining 1",
+            "AFTER UPDATE 12 remaining 0",
+            "AFTER UPDATE 20 remaining 0",
+        ]
+    );
+}
+
+#[test]
 fn postgresql_set_null_and_set_default_fire_before_update_triggers_that_change_the_row() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
@@ -264,6 +307,32 @@ fn sqlite_cascaded_deletes_fire_delete_triggers() {
     assert_eq!(
         rows(&mut session, "SELECT what FROM log ORDER BY what"),
         vec!["gone 10", "moved 20 null"]
+    );
+}
+
+#[test]
+fn sqlite_cascaded_after_row_triggers_fire_as_each_row_is_written() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    answer(&mut session, "PRAGMA foreign_keys = ON");
+    answer(
+        &mut session,
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY);
+         CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent (id) ON DELETE CASCADE);
+         CREATE TABLE log (what TEXT);
+         INSERT INTO parent VALUES (1);
+         INSERT INTO child VALUES (10, 1), (11, 1)",
+    );
+    answer(
+        &mut session,
+        "CREATE TRIGGER child_gone AFTER DELETE ON child BEGIN
+           INSERT INTO log VALUES ('gone ' || old.id || ' remaining ' || (SELECT count(*) FROM child WHERE parent_id = old.parent_id));
+         END",
+    );
+    answer(&mut session, "DELETE FROM parent WHERE id = 1");
+    assert_eq!(
+        rows(&mut session, "SELECT what FROM log ORDER BY what"),
+        vec!["gone 10 remaining 1", "gone 11 remaining 0"]
     );
 }
 
