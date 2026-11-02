@@ -162,8 +162,14 @@ have tests of their own on each SQL protocol, in `tests/limits.rs` of `eggdb-pgw
 `Parse` messages end in `54000` after 4,096 prepared statements, portals stop at 4,096, a message
 or prepared statements past the server's memory budget fail with `53200` (MySQL 1041, SQL Server
 701) and give their bytes back, and an idle connection is closed at the idle timeout while a busy
-one is not. The login slots and the budget have unit tests in `eggdb-platform`'s
-`connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
+one is not. A suspended portal's rows hold their bytes until the portal closes, and a second
+session's portal past the budget fails with `53200` while the first goes on (D284). The other
+protocol servers test the same budget in their own crates (D284): RESP (`-OOM`, a request too
+large ends its connection, a reply too large is replaced), MongoDB (`ExceededMemoryLimit`, 146, for
+a message or a cursor), CQL (`Overloaded`, `0x1001`, for a frame or a result) and memcached
+(`SERVER_ERROR out of memory`, the connection goes on); `crates/eggdb/tests/serve.rs` checks
+`--max-connection-memory` through the real binary. The login slots and the budget have unit tests
+in `eggdb-platform`'s `connection_limits`. The T-SQL lexer, parser, functions and batches have a seeded mutator in
 `crates/eggdb-sql/src/tests.rs` (`hostile_tsql_input_returns_errors_and_never_panics`, 35,000
 statements per run) like the other dialects, and SQL Server is in the typed-statements fuzzer's
 dialect list.

@@ -516,6 +516,11 @@ Fable. The choices:
    stop; a second Ctrl-C ends the process at once (exit 130).
 8. **The file is open for writing the whole time**, so every other `eggdb` command gets the
    busy message and exit 5 meanwhile; `--read-only` serves beside readers instead.
+9. **Limits read as `--max-<what>`**: `--max-connections <count>` for the logged-in
+   connections and `--max-connection-memory <size>` for the memory they hold together on every
+   listener (default `4g`, at least `1m`, D284). Sizes take the `64k`, `16m`, `1g` forms that
+   `--resp-max-memory` takes; the name says "connection" because the budget counts what
+   connections hold (requests, portals, cursors, replies), not the page cache or the keyspace.
 
 ## 15. `eggdb shell`: the interactive prompt (item 20)
 
