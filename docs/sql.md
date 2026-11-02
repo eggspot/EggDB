@@ -1779,8 +1779,10 @@ infinite, `infinity - infinity` and `infinity + '-infinity'` fail with `22008`, 
 with a finite time stamp is an infinite interval, subtracting infinite dates fails with `22008`,
 and `to_char` returns NULL for them (D271). `date_part` of an epoch, `julian`, `year`,
 `isoyear`, `decade`, `century` or `millennium` field is `Infinity` or `-Infinity` and of any other
-field NULL, as in PostgreSQL 16; `extract` gives the same NULLs, but the infinite fields fail with
-`0A000`, since `numeric` holds no infinity yet. `age` with one infinite argument is an infinite
+field NULL, as in PostgreSQL 16; `extract` gives the same NULLs and, for the infinite fields,
+the `numeric` `Infinity` or `-Infinity` (D290). SQL Server's and Oracle's own date functions,
+conversions and arithmetic refuse an infinite value as out of range (SQL Server error 242,
+`ORA-01841`), since those databases have none. `age` with one infinite argument is an infinite
 interval (`age('infinity'::timestamp, t)` is `infinity`, `age(t, 'infinity')` `-infinity`) and
 with two equal infinities fails with `22008`, as in PostgreSQL 17. `date_trunc`, `date_bin` and
 `time_bucket` return an infinite input unchanged, and `date_bin` with an infinite origin fails
@@ -3784,8 +3786,11 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   (`out of memory`) instead of exhausting the process; nothing spills to disk yet.
   A `FROM` clause joins at most 64 tables (`54000`).
 - `numeric` holds at most 1,000 digits before the point and 1,000 after (PostgreSQL: 131,072
-  and 16,383), input with more fails with `22003`; `Infinity` is not a `numeric` yet (`22P02`;
-  PostgreSQL 14 added it). `^` with a non-integer exponent, or an integer one whose exact result
+  and 16,383), input with more fails with `22003`. `Infinity`, `-Infinity` and `inf` are
+  `numeric` values, as in PostgreSQL 14: they sort between the finite values and `NaN`, follow
+  PostgreSQL's arithmetic (`Infinity - Infinity` is `NaN`, `x / Infinity` is 0), cast to and from
+  `double precision`, fail with `0A000` when cast to an integer and with `22003` in a
+  `numeric(p,s)` column (D290). `^` with a non-integer exponent, or an integer one whose exact result
   would need more than 2,000 digits, is computed in double precision (15 significant digits).
 - `date` and time stamps take ISO 8601 and PostgreSQL's ISO style only: `infinity`, `epoch`,
   `now`, `today`, month names (`Feb 29 2024`) and `MDY`/`DMY` forms (`02/29/2024`) answer
@@ -4128,6 +4133,13 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   length nor pad. `CAST` and `CONVERT` apply each type's own rules exactly.
 - A `datetimeoffset` keeps its instant but not its offset: values come back in UTC with
   `+00:00`. `datetime2(7)`, `time(7)` and `datetimeoffset(7)` keep six fractional digits.
+- `value AT TIME ZONE 'Pacific Standard Time'` reads the 142 Windows time zone names SQL Server
+  lists in `sys.time_zone_info` (in any letter case), each following the IANA region the Unicode
+  CLDR mapping gives it; a `datetime2`, `datetime` or `smalldatetime` is read as a local time
+  there (a skipped time with the offset before the change, a repeated one as the earlier
+  instant, as SQL Server does) and a `datetimeoffset` keeps its instant. The result is a
+  `datetimeoffset`, shown in UTC like every other. An unknown name is error 9820, and a `date`
+  or string argument error 8116 (D290).
 - A `uniqueidentifier` sorts by its bytes in order, not in SQL Server's group order;
   `NEWSEQUENTIALID()` gives random values, not increasing ones.
 - TDS sends `money` as `decimal(19,4)`, `datetime` as `datetime2(3)` and `tinyint` as

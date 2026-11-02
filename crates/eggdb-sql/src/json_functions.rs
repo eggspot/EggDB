@@ -101,7 +101,9 @@ pub(crate) fn to_json_text(value: &Value) -> SqlResult<String> {
         Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Oid(_) => {
             value.to_text().unwrap_or_default()
         }
-        Value::Numeric(number) if number.is_nan() => quoted("NaN"),
+        Value::Numeric(number) if number.is_nan() || number.is_infinite() => {
+            quoted(&number.to_string())
+        }
         Value::Numeric(number) => number.to_string(),
         Value::Real(_) | Value::Double(_) => {
             let number = value.as_float().unwrap_or(f64::NAN);

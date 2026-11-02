@@ -129,6 +129,7 @@ pub(crate) enum Function {
     },
     Number(NumberFunction),
     Format,
+    AtTimeZone,
 }
 
 impl Function {
@@ -153,6 +154,7 @@ impl Function {
             Self::Text { function, .. } => function.name(),
             Self::Number(function) => function.name(),
             Self::Format => "format",
+            Self::AtTimeZone => "AT TIME ZONE",
         }
     }
 
@@ -202,6 +204,10 @@ impl Function {
             Self::Text { function, .. } => function.result_type(first_argument),
             Self::Number(function) => function.result_type(first_argument),
             Self::Format => Some(SqlType::Text),
+            Self::AtTimeZone => Some(SqlType::TimestampTz(match first_argument {
+                Some(SqlType::Timestamp(scale) | SqlType::TimestampTz(scale)) => scale,
+                _ => None,
+            })),
         }
     }
 }
@@ -706,6 +712,9 @@ pub(crate) fn call_declared(
     declared: Option<SqlType>,
 ) -> SqlResult<Value> {
     let argument = |index: usize| arguments.get(index).unwrap_or(&Value::Null);
+    for value in arguments {
+        crate::sqlserver_conversion::refuse_infinite(value, "datetime2")?;
+    }
     match function {
         Function::Convert { target, style } => {
             crate::sqlserver_conversion::convert(argument(0).clone(), target, style, None)
@@ -745,6 +754,36 @@ pub(crate) fn call_declared(
         }
         Function::Number(function) => crate::sqlserver_numbers::call(function, arguments, declared),
         Function::Format => crate::sqlserver_format::format(arguments),
+        Function::AtTimeZone => at_time_zone(argument(0), argument(1)),
+    }
+}
+
+fn unknown_time_zone(name: &str) -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        format!("The time zone parameter '{name}' provided to AT TIME ZONE clause is invalid."),
+    )
+    .with_sqlserver_code(9820)
+}
+
+fn at_time_zone(value: &Value, zone: &Value) -> SqlResult<Value> {
+    let function = Function::AtTimeZone.name();
+    if !matches!(zone, Value::Null) && zone.character_text().is_none() {
+        return Err(argument_type_invalid(zone, 2, function));
+    }
+    if value.is_null() || zone.is_null() {
+        return Ok(Value::Null);
+    }
+    let name = zone.character_text().unwrap_or_default();
+    let Some((_, zone)) = crate::time_zones::TimeZone::windows(name) else {
+        return Err(unknown_time_zone(name));
+    };
+    match value {
+        Value::Timestamp(local) => {
+            datetime::checked_timestamp(zone.utc_of_local_earlier(*local)).map(Value::TimestampTz)
+        }
+        Value::TimestampTz(utc) => Ok(Value::TimestampTz(*utc)),
+        other => Err(argument_type_invalid(other, 1, function)),
     }
 }
 

@@ -83,7 +83,7 @@ fn difference(left: &Value, right: &Value) -> Option<SqlResult<Value>> {
     }))
 }
 
-fn infinity_sign(value: &Value) -> Option<bool> {
+pub(crate) fn infinity_sign(value: &Value) -> Option<bool> {
     match value {
         Value::Date(days) if datetime::is_infinite_date(*days) => Some(*days > 0),
         Value::Timestamp(micros) | Value::TimestampTz(micros)
@@ -774,10 +774,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 Err(error) => Err(error),
                 Ok(None) => Ok(Value::Null),
                 Ok(Some(infinite)) if name == "date_part" => Ok(Value::Double(infinite)),
-                Ok(Some(_)) => Err(SqlError::new(
-                    SqlState::FEATURE_NOT_SUPPORTED,
-                    "numeric does not hold infinity yet; date_part gives it as double precision",
-                )),
+                Ok(Some(infinite)) => Ok(Value::Numeric(crate::numeric::Numeric::infinity(
+                    infinite < 0.0,
+                ))),
             }
         }
         ("extract" | "date_part", [Value::Text(field), value]) => {
@@ -802,6 +801,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 
 #[cfg(test)]
 mod tests {
+    use crate::datetime::{self, MICROS_PER_DAY, MICROS_PER_SECOND};
     use crate::memory_store::MemoryStore;
     use crate::{Session, SqlError};
 
@@ -890,9 +890,50 @@ mod tests {
         ] {
             assert_eq!(value(&mut session, sql).unwrap(), shown, "{sql}");
         }
+        for (sql, shown) in [
+            ("SELECT extract(epoch FROM 'infinity'::timestamp)", "Infinity"),
+            ("SELECT extract(year FROM '-infinity'::timestamptz)", "-Infinity"),
+            ("SELECT extract(julian FROM 'infinity'::date)", "Infinity"),
+            ("SELECT extract(century FROM '-infinity'::date)", "-Infinity"),
+            ("SELECT extract(epoch FROM 'infinity'::interval)", "Infinity"),
+            ("SELECT extract(epoch FROM '-infinity'::interval)", "-Infinity"),
+            (
+                "SELECT pg_typeof(extract(epoch FROM 'infinity'::timestamp))::text",
+                "numeric",
+            ),
+            (
+                "SELECT extract(epoch FROM 'infinity'::timestamp) > 1e300",
+                "t",
+            ),
+            (
+                "SELECT (extract(year FROM '-infinity'::date) + 1)::text",
+                "-Infinity",
+            ),
+            (
+                "SELECT extract(epoch FROM 'infinity'::timestamp)::float8::text",
+                "Infinity",
+            ),
+            ("SELECT 'Infinity'::numeric::text", "Infinity"),
+            ("SELECT '-inf'::numeric::text", "-Infinity"),
+            (
+                "SELECT to_json(extract(epoch FROM 'infinity'::timestamp))::text",
+                "\"Infinity\"",
+            ),
+            ("SELECT 'infinity'::float8::numeric::text", "Infinity"),
+            (
+                "SELECT date_trunc('hour', '-infinity'::timestamp)::text",
+                "-infinity",
+            ),
+        ] {
+            assert_eq!(value(&mut session, sql).unwrap(), shown, "{sql}");
+        }
         for (sql, code) in [
-            ("SELECT extract(epoch FROM 'infinity'::timestamp)", "0A000"),
             ("SELECT extract(hour FROM 'infinity'::date)", "0A000"),
+            (
+                "SELECT extract(epoch FROM 'infinity'::timestamp)::integer",
+                "0A000",
+            ),
+            ("SELECT 'Infinity'::numeric(10, 2)", "22003"),
             (
                 "SELECT date_part('timezone', 'infinity'::timestamp)",
                 "0A000",
@@ -914,5 +955,171 @@ mod tests {
             let error = value(&mut session, sql).unwrap_err();
             assert_eq!(error.state().code(), code, "{sql}");
         }
+    }
+
+    fn rows(session: &mut Session<'_>, sql: &str) -> Vec<Vec<crate::Value>> {
+        let mut last = None;
+        session
+            .execute(sql, &mut |result| last = Some(result.rows))
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        last.unwrap_or_default()
+    }
+
+    fn vendor_code(session: &mut Session<'_>, sql: &str) -> Option<u16> {
+        session
+            .execute(sql, &mut |_| {})
+            .expect_err(sql)
+            .vendor_code()
+    }
+
+    fn moments(store: &MemoryStore) {
+        let mut setup = Session::new(store);
+        rows(
+            &mut setup,
+            "CREATE SCHEMA hr; CREATE TABLE hr.moments (id integer PRIMARY KEY, stamp timestamp, zoned timestamptz, d date)",
+        );
+        rows(
+            &mut setup,
+            "INSERT INTO hr.moments VALUES (1, 'infinity', '-infinity', 'infinity'), (2, '2024-01-01 10:00', '2024-01-01 10:00+00', '2024-01-01')",
+        );
+    }
+
+    fn utc(year: i64, month: i64, day: i64, hour: i64, minute: i64) -> i64 {
+        datetime::days_from_civil(year, month, day) * MICROS_PER_DAY
+            + (hour * 3600 + minute * 60) * MICROS_PER_SECOND
+    }
+
+    #[test]
+    fn sql_server_date_functions_refuse_infinite_dates_as_out_of_range() {
+        let store = MemoryStore::default();
+        moments(&store);
+        let mut session = Session::with_dialect(&store, crate::Dialect::SqlServer);
+        for sql in [
+            "SELECT DATEADD(day, 1, stamp) FROM hr.moments WHERE id = 1",
+            "SELECT DATEDIFF(day, d, '2024-01-01') FROM hr.moments WHERE id = 1",
+            "SELECT DATEPART(year, zoned) FROM hr.moments WHERE id = 1",
+            "SELECT DATENAME(month, d) FROM hr.moments WHERE id = 1",
+            "SELECT EOMONTH(d) FROM hr.moments WHERE id = 1",
+            "SELECT CONVERT(varchar(30), stamp, 121) FROM hr.moments WHERE id = 1",
+            "SELECT CONVERT(date, stamp) FROM hr.moments WHERE id = 1",
+            "SELECT CAST(d AS datetime2) FROM hr.moments WHERE id = 1",
+            "SELECT stamp AT TIME ZONE 'UTC' FROM hr.moments WHERE id = 1",
+        ] {
+            assert_eq!(vendor_code(&mut session, sql), Some(242), "{sql}");
+        }
+        assert_eq!(
+            rows(
+                &mut session,
+                "SELECT DATEPART(year, stamp) FROM hr.moments WHERE id = 2"
+            ),
+            vec![vec![crate::Value::Integer(2024)]]
+        );
+    }
+
+    #[test]
+    fn oracle_date_functions_refuse_infinite_dates_with_ora_01841() {
+        let store = MemoryStore::default();
+        moments(&store);
+        let mut session = Session::with_dialect(&store, crate::Dialect::Oracle);
+        rows(&mut session, "ALTER SESSION SET CURRENT_SCHEMA = HR");
+        for sql in [
+            "SELECT TO_CHAR(d, 'YYYY-MM-DD') FROM moments WHERE id = 1",
+            "SELECT ADD_MONTHS(d, 1) FROM moments WHERE id = 1",
+            "SELECT LAST_DAY(stamp) FROM moments WHERE id = 1",
+            "SELECT TRUNC(stamp) FROM moments WHERE id = 1",
+            "SELECT MONTHS_BETWEEN(d, DATE '2024-01-01') FROM moments WHERE id = 1",
+            "SELECT EXTRACT(YEAR FROM stamp) FROM moments WHERE id = 1",
+            "SELECT SYS_EXTRACT_UTC(zoned) FROM moments WHERE id = 1",
+            "SELECT stamp + 1 FROM moments WHERE id = 1",
+            "SELECT d - DATE '2024-01-01' FROM moments WHERE id = 1",
+        ] {
+            assert_eq!(vendor_code(&mut session, sql), Some(1841), "{sql}");
+        }
+        assert_eq!(
+            rows(&mut session, "SELECT TO_CHAR(d, 'YYYY') FROM moments WHERE id = 2"),
+            vec![vec![crate::Value::Text("2024".into())]]
+        );
+    }
+
+    #[test]
+    fn sql_server_at_time_zone_reads_the_windows_zone_names() {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, crate::Dialect::SqlServer);
+        for (sql, instant) in [
+            (
+                "SELECT CAST('2022-03-27T02:01:00' AS datetime2(0)) AT TIME ZONE 'Central European Standard Time'",
+                utc(2022, 3, 27, 1, 1),
+            ),
+            (
+                "SELECT CAST('2022-10-30T02:00:00' AS datetime2(0)) AT TIME ZONE 'Central European Standard Time'",
+                utc(2022, 10, 30, 0, 0),
+            ),
+            (
+                "SELECT CAST('2022-07-01T12:00:00' AS datetime2) AT TIME ZONE 'pacific standard time'",
+                utc(2022, 7, 1, 19, 0),
+            ),
+            (
+                "SELECT CAST('2022-01-15T08:00:00' AS datetime) AT TIME ZONE 'India Standard Time'",
+                utc(2022, 1, 15, 2, 30),
+            ),
+            (
+                "SELECT CAST('2022-07-01T12:00:00+02:00' AS datetimeoffset) AT TIME ZONE 'Tokyo Standard Time'",
+                utc(2022, 7, 1, 10, 0),
+            ),
+            (
+                "SELECT (CAST('2022-07-01T12:00:00' AS datetime2) AT TIME ZONE 'UTC') AT TIME ZONE 'W. Europe Standard Time'",
+                utc(2022, 7, 1, 12, 0),
+            ),
+        ] {
+            assert_eq!(
+                rows(&mut session, sql),
+                vec![vec![crate::Value::TimestampTz(instant)]],
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            rows(
+                &mut session,
+                "SELECT CAST(NULL AS datetime2) AT TIME ZONE 'UTC'"
+            ),
+            vec![vec![crate::Value::Null]]
+        );
+        for (sql, code) in [
+            (
+                "SELECT CAST('2022-01-01' AS datetime2) AT TIME ZONE 'Europe/Paris'",
+                9820,
+            ),
+            (
+                "SELECT CAST('2022-01-01' AS datetime2) AT TIME ZONE 'PST'",
+                9820,
+            ),
+            ("SELECT '2022-01-01' AT TIME ZONE 'UTC'", 8116),
+            ("SELECT CAST('2022-01-01' AS date) AT TIME ZONE 'UTC'", 8116),
+            ("SELECT CAST('2022-01-01' AS datetime2) AT TIME ZONE 5", 8116),
+        ] {
+            assert_eq!(vendor_code(&mut session, sql), Some(code), "{sql}");
+        }
+    }
+
+    #[test]
+    fn sys_time_zone_info_lists_the_windows_zones_with_their_offsets_now() {
+        let store = MemoryStore::default();
+        let mut session = Session::with_dialect(&store, crate::Dialect::SqlServer);
+        assert_eq!(
+            rows(&mut session, "SELECT COUNT(*) FROM sys.time_zone_info"),
+            vec![vec![crate::Value::Integer(142)]]
+        );
+        assert_eq!(
+            rows(
+                &mut session,
+                "SELECT current_utc_offset, is_currently_dst FROM sys.time_zone_info WHERE name IN ('UTC', 'India Standard Time', 'Nepal Standard Time', 'Dateline Standard Time') ORDER BY name"
+            ),
+            vec![
+                vec![crate::Value::Text("-12:00".into()), crate::Value::Boolean(false)],
+                vec![crate::Value::Text("+05:30".into()), crate::Value::Boolean(false)],
+                vec![crate::Value::Text("+05:45".into()), crate::Value::Boolean(false)],
+                vec![crate::Value::Text("+00:00".into()), crate::Value::Boolean(false)],
+            ]
+        );
     }
 }

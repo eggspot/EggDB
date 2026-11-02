@@ -2037,6 +2037,9 @@ fn infinite_instant(value: &Value) -> Option<(DateTimeKind, bool)> {
 
 fn extract_of_infinity(name: &str, field: &str, value: &Value) -> Option<SqlResult<Value>> {
     let (kind, positive) = infinite_instant(value)?;
+    if crate::constraints::current_dialect() == crate::Dialect::Oracle {
+        return Some(Err(crate::oracle_datetime::year_out_of_range()));
+    }
     Some(
         match datetime::extract_of_infinity_is_infinite(field, kind) {
             Err(error) => Err(error),
@@ -2046,10 +2049,7 @@ fn extract_of_infinity(name: &str, field: &str, value: &Value) -> Option<SqlResu
             } else {
                 f64::NEG_INFINITY
             })),
-            Ok(true) => Err(SqlError::new(
-                SqlState::FEATURE_NOT_SUPPORTED,
-                "numeric does not hold infinity yet; date_part gives it as double precision",
-            )),
+            Ok(true) => Ok(Value::Numeric(Numeric::infinity(!positive))),
         },
     )
 }

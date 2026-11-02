@@ -921,21 +921,22 @@ fn format_number(value: &Value, template_text: &str) -> SqlResult<String> {
     {
         return Ok(roman_text(&number, *lower, template.fill));
     }
-    if template.pieces.contains(&NumberPiece::Exponent) {
+    let special = number.is_nan() || number.is_infinite();
+    if template.pieces.contains(&NumberPiece::Exponent) && !number.is_infinite() {
         return exponent_text(&number, &template);
     }
-    let shifted = if template.shift > 0 && !number.is_nan() {
+    let shifted = if template.shift > 0 && !special {
         number.multiply(&power_of_ten(template.shift)?)?
     } else {
         number.clone()
     };
-    let rounded = if number.is_nan() {
+    let rounded = if special {
         shifted
     } else {
         shifted.rounded(template.fraction_digits as i64)?
     };
     let (negative, whole, fraction) = digits_of(&rounded);
-    let overflow = number.is_nan() || whole.len() > template.integer_digits;
+    let overflow = special || whole.len() > template.integer_digits;
     let whole_digits: Vec<char> = whole.chars().collect();
     let fraction_digits: Vec<char> = fraction.chars().collect();
     let first_zero = first_zero_position(&template.pieces);

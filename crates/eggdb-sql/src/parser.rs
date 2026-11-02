@@ -3878,6 +3878,22 @@ impl<'t> Parser<'t> {
                     },
                     position,
                 };
+            } else if self.is_word("at") && self.is_word_at(1, "time") && self.sqlserver() {
+                self.at += 2;
+                self.expect_word("zone")?;
+                self.depth += 1;
+                if self.depth > MAX_NESTING {
+                    return Err(too_deep(self.position()));
+                }
+                let zone = self.primary()?;
+                let position = expr.position;
+                expr = Expr {
+                    kind: ExprKind::SqlServerFunction {
+                        function: crate::sqlserver_functions::Function::AtTimeZone,
+                        arguments: vec![expr, zone],
+                    },
+                    position,
+                };
             } else if self.is_word("at") && self.is_word_at(1, "time") {
                 return Err(self.not_supported("AT TIME ZONE"));
             } else {

@@ -844,6 +844,12 @@ fn date_unit(values: &[Value]) -> Option<String> {
 }
 
 pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -> SqlResult<Value> {
+    if values
+        .iter()
+        .any(|value| crate::temporal::infinity_sign(value).is_some())
+    {
+        return Err(crate::oracle_datetime::year_out_of_range());
+    }
     let unary_text = |change: fn(&str) -> String,
                       changed_bytes: fn(&str) -> usize|
      -> SqlResult<Value> {

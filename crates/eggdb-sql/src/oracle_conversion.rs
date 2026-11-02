@@ -93,6 +93,9 @@ fn text_for_column(value: &Value) -> Option<String> {
 }
 
 pub(crate) fn assign(value: Value, column: &Column) -> SqlResult<Value> {
+    if crate::temporal::infinity_sign(&value).is_some() {
+        return Err(crate::oracle_datetime::year_out_of_range());
+    }
     let target = column.sql_type;
     let converted = match &value {
         Value::Text(text) | Value::Bpchar(text) if !target.is_character() => {
@@ -216,6 +219,9 @@ fn days_between(left: i64, right: i64) -> SqlResult<Value> {
 }
 
 fn local_micros(value: &Value) -> Option<SqlResult<i64>> {
+    if crate::temporal::infinity_sign(value).is_some() {
+        return Some(Err(crate::oracle_datetime::year_out_of_range()));
+    }
     Some(match value {
         Value::Timestamp(micros) => Ok(*micros),
         Value::TimestampTz(micros) => datetime::utc_to_local(*micros),

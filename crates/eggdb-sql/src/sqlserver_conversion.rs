@@ -509,6 +509,13 @@ fn civil_micros(year: i64, month: i64, day: i64) -> i64 {
     datetime::days_from_civil(year, month, day) * MICROS_PER_DAY
 }
 
+pub(crate) fn refuse_infinite(value: &Value, target: &str) -> SqlResult<()> {
+    match crate::temporal::infinity_sign(value) {
+        Some(_) => Err(out_of_range_date(value_type_name(value), target)),
+        None => Ok(()),
+    }
+}
+
 fn within_dates(local: i64, from: i64, until: i64, source: &str, target: &str) -> SqlResult<i64> {
     if local < from || local >= until {
         Err(out_of_range_date(source, target))
@@ -643,6 +650,7 @@ fn to_temporal(value: &Value, target: Temporal, scale: u8, style: Option<u16>) -
     if refused {
         return Err(explicit_conversion_refused(source, target.name()));
     }
+    refuse_infinite(value, target.name())?;
     if target == Temporal::DateTimeOffset
         && let Some(style) = style.filter(|style| *style > 1)
     {
@@ -798,6 +806,7 @@ fn temporal_text(
     style: Option<u16>,
     scale: Option<u8>,
 ) -> SqlResult<Option<String>> {
+    refuse_infinite(value, "varchar")?;
     let (local, has_date, has_time, offset) = match value {
         Value::Date(days) => (i64::from(*days) * MICROS_PER_DAY, true, false, None),
         Value::Time(micros) => (base_date() * MICROS_PER_DAY + *micros, false, true, None),

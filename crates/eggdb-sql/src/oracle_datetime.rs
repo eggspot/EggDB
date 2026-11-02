@@ -1950,6 +1950,9 @@ fn nls_output(declared: Option<SqlType>, value: &Value) -> (String, Option<u8>) 
 }
 
 pub(crate) fn local_of(value: &Value) -> SqlResult<Option<i64>> {
+    if crate::temporal::infinity_sign(value).is_some() {
+        return Err(year_out_of_range());
+    }
     Ok(Some(match value {
         Value::Timestamp(micros) => *micros,
         Value::TimestampTz(micros) => datetime::utc_to_local(*micros)?,
