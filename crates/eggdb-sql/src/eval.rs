@@ -609,11 +609,14 @@ impl Evaluator<'_> {
             } => {
                 let value = as_text_if_character(self.eval(expr, Some(SqlType::Text))?);
                 let pattern = as_text_if_character(self.eval(pattern, Some(SqlType::Text))?);
+                let (value, pattern, folded) = crate::citext::like_operands(value, pattern);
                 let operator = if *case_insensitive { "~~*" } else { "~~" };
                 match (&value, &pattern) {
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                     (Value::Text(text), Value::Text(pattern)) => {
-                        let matched = if *case_insensitive {
+                        let matched = if folded {
+                            like(&crate::citext::fold(text), &crate::citext::fold(pattern))?
+                        } else if *case_insensitive {
                             like(&text.to_lowercase(), &pattern.to_lowercase())?
                         } else {
                             like(text, pattern)?
@@ -859,6 +862,10 @@ impl Evaluator<'_> {
                     let right_value = self.eval(right, None)?;
                     return crate::json_functions::subtract(&left_value, &right_value);
                 }
+                if crate::hstore::hstore_of(&left_value).is_some() {
+                    let right_value = self.eval(right, Some(SqlType::Text))?;
+                    return crate::hstore_functions::subtract(&left_value, &right_value);
+                }
                 let right_value = self.eval(right, left_type)?;
                 if crate::constraints::current_dialect() == crate::Dialect::Oracle
                     && self.oracle_timestamp_operands(left, right)
@@ -874,6 +881,9 @@ impl Evaluator<'_> {
             | BinaryOperator::JsonHasAllKeys => {
                 let document = self.eval(left, Some(SqlType::Jsonb))?;
                 let keys = self.eval(right, Some(SqlType::Text))?;
+                if crate::hstore::hstore_of(&document).is_some() {
+                    return crate::hstore_functions::has_key(operator.symbol(), &document, &keys);
+                }
                 crate::json_functions::has_key(operator.symbol(), &document, &keys)
             }
             BinaryOperator::TextSearchMatch => {
@@ -931,6 +941,13 @@ impl Evaluator<'_> {
                 ) {
                     return result;
                 }
+                if let Some(result) = crate::hstore_functions::containment(
+                    operator == BinaryOperator::JsonContains,
+                    &left,
+                    &right,
+                ) {
+                    return result;
+                }
                 let (container, contained) = if operator == BinaryOperator::JsonContains {
                     (&left, &right)
                 } else {
@@ -960,6 +977,11 @@ impl Evaluator<'_> {
             | BinaryOperator::JsonPathText => {
                 let document = self.eval(left, None)?;
                 let selector = self.eval(right, Some(SqlType::Text))?;
+                if operator == BinaryOperator::JsonField
+                    && crate::hstore::hstore_of(&document).is_some()
+                {
+                    return crate::hstore_functions::fetch(&document, &selector);
+                }
                 json_select(operator, &document, &selector)
             }
         }
@@ -975,6 +997,12 @@ impl Evaluator<'_> {
                 (left, left_operand),
                 (right, right_operand),
             );
+        }
+        if let Some(joined) = crate::hstore_functions::concatenated(
+            (&left_operand.value, is_unknown_literal(left)),
+            (&right_operand.value, is_unknown_literal(right)),
+        ) {
+            return joined.map(Concatenated::scalar);
         }
         let jsonb_pair = match (&left_operand.value, &right_operand.value) {
             (Value::Jsonb(_), Value::Jsonb(_) | Value::Null) | (Value::Null, Value::Jsonb(_)) => {
@@ -1372,6 +1400,7 @@ impl Evaluator<'_> {
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
         let declared = declared_argument_types(name)
+            .or_else(|| crate::hstore_functions::argument_types(name))
             .or_else(|| crate::pg_catalog::argument_types(name))
             .or_else(|| crate::advisory_locks::argument_types(name, arguments.len()));
         let mut held = crate::memory::RowBytes::default();
@@ -1418,6 +1447,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::ranges::operator(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::hstore_functions::function(name, &values) {
             return result;
         }
         if let Some(result) = self.datetime_function(name, &values) {

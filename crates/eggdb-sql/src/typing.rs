@@ -286,6 +286,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if let Some(sql_type) = crate::arrays::function_type(name, arguments, scope) {
         return sql_type;
     }
+    if let Some(sql_type) = crate::hstore_functions::result_type(name, arguments.len()) {
+        return Some(sql_type);
+    }
     match (name, arguments) {
         ("btrim" | "ltrim" | "rtrim" | "quote_ident", [_, ..]) => Some(SqlType::Text),
         ("collate", [argument]) => static_type(argument, scope),
@@ -370,6 +373,12 @@ fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
         || (jsonb(right_type) && is_untyped_literal(left))
     {
         return SqlType::Jsonb;
+    }
+    let hstore = crate::hstore_functions::is_hstore_type;
+    if (hstore(left_type) && (hstore(right_type) || is_untyped_literal(right)))
+        || (hstore(right_type) && (hstore(left_type) || is_untyped_literal(left)))
+    {
+        return SqlType::Defined(crate::types::DefinedType::HSTORE);
     }
     if let Some(array) = crate::arrays::concat_type(left_type, right_type) {
         return array;
@@ -475,6 +484,18 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::VectorL1Distance => Some(SqlType::Double),
             BinaryOperator::Subtract if static_type(left, scope) == Some(SqlType::Jsonb) => {
                 Some(SqlType::Jsonb)
+            }
+            BinaryOperator::Subtract
+                if crate::hstore_functions::is_hstore_type(static_type(left, scope)) =>
+            {
+                static_type(left, scope)
+            }
+            BinaryOperator::JsonField
+                if crate::hstore_functions::is_hstore_type(static_type(left, scope)) =>
+            {
+                Some(crate::hstore_functions::fetch_type(static_type(
+                    right, scope,
+                )))
             }
             BinaryOperator::Concat => Some(concatenation_type(left, right, scope)),
             BinaryOperator::JsonFieldText | BinaryOperator::JsonPathText => Some(SqlType::Text),

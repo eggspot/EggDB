@@ -28,6 +28,7 @@ mod baseline;
 mod bench_file;
 mod btree;
 mod checkpoint;
+mod citext;
 mod copy;
 mod database;
 mod egg_allocator;
@@ -55,7 +56,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 34] = [
+const COUNTED: [(&str, Counted); 36] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -83,6 +84,8 @@ const COUNTED: [(&str, Counted); 34] = [
     (copy::TO, copy::to_stdout),
     (copy::FROM_BINARY, copy::from_stdin_binary),
     (copy::TO_BINARY, copy::to_stdout_binary),
+    (citext::COMPARE, citext::compare),
+    (citext::INDEX_LOOKUP, citext::index_lookup),
     (mcp::TOOLS_CALL, mcp::tools_call),
     (mcp::WRITE_CALL, mcp::write_call),
     (tls::RECORD_SEAL, tls::record_seal),

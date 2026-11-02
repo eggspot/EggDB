@@ -2276,6 +2276,26 @@ Geometries of two different SRIDs are refused, as in PostGIS. Not yet: a stored 
 coordinates, geography measures on the spheroid, transformations between other SRIDs, set operations
 (`ST_Union`, `ST_Intersection`, `ST_Buffer`), and SQL Server's `geometry` methods.
 
+## citext and hstore
+
+`citext` and `hstore` are built in (DNEW-F-citext): `CREATE EXTENSION citext` and
+`CREATE EXTENSION hstore` succeed and list in `pg_extension`, and the types keep PostgreSQL's
+names in `pg_type` (OIDs 9000 to 9003, with their array types) and its text and binary forms
+on the wire.
+
+- `citext` keeps the text as written and compares, orders, groups, hashes and indexes by one
+  full case fold, so a unique `citext` index refuses `'Ann'` next to `'ANN'`, and `LIKE` and
+  `ILIKE` on a `citext` value ignore case.
+- `hstore` keeps its pairs sorted as PostgreSQL does and prints `"a"=>"1", "b"=>NULL`. Its
+  operators `->` (a key or an array of keys), `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-` (a key,
+  an array of keys or an `hstore`) and its functions `akeys`, `avals`, `skeys`, `svals`, `each`,
+  `exist`, `defined`, `delete`, `slice`, `hstore(text, text)`, `hstore(text[], text[])`,
+  `hstore(text[])`, `hstore_to_json`, `hstore_to_jsonb` and `hstore_to_array` work as in
+  PostgreSQL. `?` is an operator only in the PostgreSQL dialect.
+
+Not yet: `citext[]` and `hstore[]` columns, the `%%` and `%#` operators, `hstore_to_matrix`,
+`populate_record` and `#=`.
+
 ## Vectors (pgvector)
 
 Vectors are written as pgvector writes them, `'[1,2,3]'` (D203). `CREATE EXTENSION vector` is

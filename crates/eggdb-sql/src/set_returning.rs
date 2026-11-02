@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 20] = [
+const FUNCTIONS: [SetReturningFunction; 23] = [
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -111,7 +111,83 @@ const FUNCTIONS: [SetReturningFunction; 20] = [
         rows: crate::records::expanded_array_rows,
         fields: false,
     },
+    SetReturningFunction {
+        name: "skeys",
+        result_type: hstore_keys_type,
+        rows: hstore_keys_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "svals",
+        result_type: hstore_values_type,
+        rows: hstore_values_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: crate::hstore_functions::EACH,
+        result_type: hstore_each_type,
+        rows: hstore_each_rows,
+        fields: true,
+    },
 ];
+
+fn hstore_keys_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::hstore_functions::set_result_type("skeys", types)
+}
+
+fn hstore_values_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::hstore_functions::set_result_type("svals", types)
+}
+
+fn hstore_each_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::hstore_functions::set_result_type(crate::hstore_functions::EACH, types)
+}
+
+fn hstore_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::hstore_functions::key_rows(values, sink)
+}
+
+fn hstore_values_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::hstore_functions::value_rows(values, sink)
+}
+
+fn hstore_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::hstore_functions::each_records(values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
+}
+
+fn record_columns(name: &str) -> Vec<OutputColumn> {
+    if name == crate::hstore_functions::EACH {
+        return crate::hstore_functions::EACH_COLUMNS
+            .iter()
+            .map(|column| OutputColumn {
+                name: (*column).to_owned(),
+                sql_type: Some(SqlType::Text),
+            })
+            .collect();
+    }
+    crate::json_functions::record_names(name)
+        .iter()
+        .zip(crate::json_functions::record_types(name))
+        .map(|(column, sql_type)| OutputColumn {
+            name: (*column).to_owned(),
+            sql_type: Some(sql_type),
+        })
+        .collect()
+}
+
+fn record_rows(
+    name: &str,
+    values: &[Value],
+    sink: &mut crate::json_functions::RecordSink<'_>,
+) -> SqlResult<()> {
+    if name == crate::hstore_functions::EACH {
+        crate::hstore_functions::each_records(values, sink)
+    } else {
+        crate::json_functions::record_rows(name, values, sink)
+    }
+}
 
 pub(crate) const OPENJSON_FUNCTION: &str = "*openjson*";
 pub(crate) const STRING_SPLIT_FUNCTION: &str = "*string_split*";
@@ -1055,14 +1131,7 @@ fn function_columns(
     sql_type: SqlType,
 ) -> Vec<OutputColumn> {
     let mut columns: Vec<OutputColumn> = if found.fields {
-        crate::json_functions::record_names(found.name)
-            .iter()
-            .zip(crate::json_functions::record_types(found.name))
-            .map(|(name, sql_type)| OutputColumn {
-                name: (*name).to_owned(),
-                sql_type: Some(sql_type),
-            })
-            .collect()
+        record_columns(found.name)
     } else {
         vec![OutputColumn {
             name: if alias_given {
@@ -1166,7 +1235,7 @@ impl BoundFunction {
     ) -> SqlResult<()> {
         let mut ordinal: i64 = 0;
         if self.found.fields {
-            return crate::json_functions::record_rows(
+            return record_rows(
                 self.found.name,
                 &self.values,
                 &mut |mut record| {

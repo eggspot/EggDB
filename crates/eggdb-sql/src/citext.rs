@@ -53,6 +53,18 @@ pub(crate) fn compare_with_text(left: &Value, right: &Value) -> Ordering {
     }
 }
 
+pub(crate) fn like_operands(value: Value, pattern: Value) -> (Value, Value, bool) {
+    let folded = text_of(&value).is_some() || text_of(&pattern).is_some();
+    if !folded {
+        return (value, pattern, false);
+    }
+    let as_text = |value: Value| match text_of(&value) {
+        Some(text) => Value::Text(text.to_owned()),
+        None => value,
+    };
+    (as_text(value), as_text(pattern), true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{compare, compare_with_text, fold, text_of, value};

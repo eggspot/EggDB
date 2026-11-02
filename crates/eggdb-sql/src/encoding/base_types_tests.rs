@@ -273,3 +273,42 @@ fn a_type_record_of_the_base_kind_is_damage() {
     bytes[1] = 5;
     assert!(decode_user_type("settings", &bytes).is_err());
 }
+
+#[test]
+fn seeded_fuzzing_of_citext_and_hstore_rows_never_panics_and_what_decodes_re_encodes() {
+    let columns = vec![
+        column("c", SqlType::Defined(DefinedType::CITEXT)),
+        column("h", SqlType::Defined(DefinedType::HSTORE)),
+    ];
+    let alphabet = [0u8, 1, 2, 3, 0x7F, 0x80, 0xC3, 0xA9, 0xFF, b'a', b'b', CITEXT_TAG, HSTORE_TAG];
+    let mut state = 0xF022_C17E_4857_0DE0u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..30_000 {
+        let length = (next() % 24) as usize;
+        let mut bytes = vec![FORMAT_VERSION, 2];
+        for _ in 0..length {
+            bytes.push(alphabet[(next() % alphabet.len() as u64) as usize]);
+        }
+        if let Ok(decoded) = decode_row(&bytes, &columns) {
+            assert_eq!(decoded.len(), columns.len());
+            assert_eq!(decode_row(&encode_row(&decoded), &columns), Ok(decoded));
+        }
+    }
+    let seed = encode_row(&[
+        crate::citext::value("Ünïcode".into()),
+        hstore("a=>1, bb=>NULL, ccc=>\"x y\""),
+    ]);
+    for _ in 0..30_000 {
+        let mut bytes = seed.clone();
+        for _ in 0..(1 + next() % 3) {
+            let at = (next() as usize) % bytes.len();
+            bytes[at] = alphabet[(next() % alphabet.len() as u64) as usize];
+        }
+        let _ = decode_row(&bytes, &columns);
+    }
+}

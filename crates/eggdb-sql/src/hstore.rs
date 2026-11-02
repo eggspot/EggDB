@@ -291,6 +291,13 @@ impl Parser<'_> {
     }
 }
 
+pub(crate) fn checked(pairs: Vec<(String, Option<String>)>) -> SqlResult<HstoreValue> {
+    if pairs.iter().any(|(key, _)| key.len() > MAX_KEY_BYTES) {
+        return Err(key_too_long());
+    }
+    Ok(HstoreValue::from_pairs(pairs))
+}
+
 pub(crate) fn parse_text(text: &str) -> SqlResult<HstoreValue> {
     let mut parser = Parser { text, at: 0 };
     parser.pairs().map(HstoreValue::from_pairs)

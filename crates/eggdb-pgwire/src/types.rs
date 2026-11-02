@@ -1,7 +1,9 @@
 //! PostgreSQL's type OIDs for EggDB's SQL types, and values in their text and binary forms.
 
 use crate::messages::{ColumnDescription, Format};
-use eggdb_sql::{ArrayElement, OutputColumn, SqlError, SqlState, SqlType, TimeZone, Value};
+use eggdb_sql::{
+    ArrayElement, DefinedType, OutputColumn, SqlError, SqlState, SqlType, TimeZone, Value,
+};
 
 /// `bool`.
 pub const BOOL_OID: u32 = 16;
@@ -47,6 +49,10 @@ pub const UUID_OID: u32 = 2950;
 pub const NUMERIC_OID: u32 = 1700;
 /// `jsonb`.
 pub const JSONB_OID: u32 = 3802;
+/// `citext`, a built-in type in EggDB with the OID it keeps for every database.
+pub const CITEXT_OID: u32 = 9000;
+/// `hstore`, a built-in type in EggDB with the OID it keeps for every database.
+pub const HSTORE_OID: u32 = 9002;
 /// `bool[]`.
 pub const BOOL_ARRAY_OID: u32 = 1000;
 /// `int2[]`.
@@ -151,6 +157,8 @@ pub fn sql_type_of(oid: u32) -> Option<SqlType> {
         TIMESTAMPTZ_OID => SqlType::TimestampTz(None),
         JSON_OID => SqlType::Json,
         JSONB_OID => SqlType::Jsonb,
+        CITEXT_OID => SqlType::Defined(DefinedType::CITEXT),
+        HSTORE_OID => SqlType::Defined(DefinedType::HSTORE),
         _ => return None,
     })
 }

@@ -29,6 +29,12 @@ are represented, before any code is written, because the choice changes the file
   kind code 5. A table or type that uses either type is written with format version 11
   (`BASE_TYPES_FORMAT_VERSION`); every other table keeps writing version 10, so files without
   these types stay readable by the previous release, which refuses version 11 cleanly.
+- **Views.** A view record whose column types include `citext` or `hstore` starts with version
+  byte 12 (`BASE_TYPES_VIEW_FORMAT_VERSION`); every other view keeps byte 8. The previous release
+  reads byte 12 as a table record of a newer format and refuses it as newer, never as damaged.
+  Table format versions therefore skip 12, as they already skip 8.
+- **Wire.** `citext` travels as its text in both formats; `hstore`'s binary form is PostgreSQL's
+  (a count, then each key's length and bytes and each value's length, -1 for `NULL`, and bytes).
 - **Review.** Because it changes the file format, the PR merges under D35: a second review on
   security only, format compatibility tests (version 10 files still read; version 11 refused
   cleanly by the old reader), and fuzzing of the hstore text parser and the new row decoders.

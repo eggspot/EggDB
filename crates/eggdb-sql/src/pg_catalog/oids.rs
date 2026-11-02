@@ -107,7 +107,7 @@ pub(crate) struct BuiltinType {
     pub(crate) collation: u32,
 }
 
-pub(crate) const BUILTIN_TYPES: [BuiltinType; 66] = [
+pub(crate) const BUILTIN_TYPES: [BuiltinType; 70] = [
     BuiltinType {
         oid: 16,
         typname: "bool",
@@ -1098,7 +1098,69 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 66] = [
         storage: 'x',
         collation: 0,
     },
+    BuiltinType {
+        oid: 9000,
+        typname: "citext",
+        shown: "citext",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'S',
+        preferred: false,
+        element: 0,
+        array: 9001,
+        align: 'i',
+        storage: 'x',
+        collation: 100,
+    },
+    BuiltinType {
+        oid: 9001,
+        typname: "_citext",
+        shown: "citext[]",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'A',
+        preferred: false,
+        element: 9000,
+        array: 0,
+        align: 'i',
+        storage: 'x',
+        collation: 100,
+    },
+    BuiltinType {
+        oid: 9002,
+        typname: "hstore",
+        shown: "hstore",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'U',
+        preferred: false,
+        element: 0,
+        array: 9003,
+        align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 9003,
+        typname: "_hstore",
+        shown: "hstore[]",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'A',
+        preferred: false,
+        element: 9002,
+        array: 0,
+        align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
 ];
+
+pub(crate) const EXTENSION_TYPES: [u32; 4] = [9000, 9001, 9002, 9003];
 
 pub(crate) fn builtin_type(oid: u32) -> Option<&'static BuiltinType> {
     BUILTIN_TYPES

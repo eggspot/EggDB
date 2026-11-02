@@ -40,6 +40,11 @@ const IDENTITY_AND_INDEX_OPTIONS_FORMAT_VERSION: u8 = 9;
 const DEFINED_TYPES_FORMAT_VERSION: u8 = 10;
 const BASE_TYPES_FORMAT_VERSION: u8 = 11;
 const NEWEST_TABLE_FORMAT_VERSION: u8 = BASE_TYPES_FORMAT_VERSION;
+pub(crate) const BASE_TYPES_VIEW_FORMAT_VERSION: u8 = 12;
+const _: () = assert!(
+    NEWEST_TABLE_FORMAT_VERSION != VIEW_FORMAT_VERSION
+        && NEWEST_TABLE_FORMAT_VERSION != BASE_TYPES_VIEW_FORMAT_VERSION
+);
 const CONSTRAINT_NOT_VALIDATED: u8 = 1;
 const CONSTRAINT_INITIALLY_DEFERRED: u8 = 2;
 const FIRST_USER_TYPE_OID: u32 = 16_384;
@@ -1082,11 +1087,11 @@ impl TableDefinition {
     }
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
-        let mut reader = Reader::new(bytes, "table definition");
-        let version = reader.version_up_to(NEWEST_TABLE_FORMAT_VERSION)?;
-        if version == VIEW_FORMAT_VERSION {
+        if is_view_record(bytes) {
             return Err(crate::views::not_a_table(name));
         }
+        let mut reader = Reader::new(bytes, "table definition");
+        let version = reader.version_up_to(NEWEST_TABLE_FORMAT_VERSION)?;
         let qualified = crate::schemas::is_qualified(name);
         let name_fits_version = match version {
             SCHEMA_FORMAT_VERSION => qualified,

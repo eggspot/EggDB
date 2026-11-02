@@ -50,6 +50,7 @@ mod foreign;
 mod geo_functions;
 mod hash_index;
 mod hstore;
+mod hstore_functions;
 mod hyperloglog;
 mod indexes;
 mod information_schema;

@@ -39,6 +39,10 @@ pub(crate) use snapshot::{
 };
 pub use types::{CatalogType, RegKind, RegValue};
 
+pub(crate) fn is_extension_type(oid: u32) -> bool {
+    oids::EXTENSION_TYPES.contains(&oid)
+}
+
 /// The type OID PostgreSQL gives `sql_type`, such as 23 for `integer`, 1007 for `integer[]`
 /// and 2205 for `regclass`.
 pub fn type_oid(sql_type: SqlType) -> u32 {

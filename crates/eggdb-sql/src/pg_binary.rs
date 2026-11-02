@@ -27,6 +27,8 @@ const TIMETZ_OID: u32 = 1266;
 const NUMERIC_OID: u32 = 1700;
 const UUID_OID: u32 = 2950;
 const JSONB_OID: u32 = 3802;
+const CITEXT_OID: u32 = crate::citext::CITEXT_OID;
+const HSTORE_OID: u32 = crate::hstore::HSTORE_OID;
 
 const IDENTIFIER_OIDS: [u32; 7] = [26, 28, 24, 2205, 2206, 4089, 4096];
 
@@ -34,7 +36,7 @@ const ARRAY_OIDS: [u32; 16] = [
     1000, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1231, 1028, 1003, 1002, 1034, 22, 30,
 ];
 
-const TEXT_INPUT_OIDS: [u32; 7] = [
+const TEXT_INPUT_OIDS: [u32; 8] = [
     0,
     JSON_OID,
     TEXT_OID,
@@ -42,6 +44,7 @@ const TEXT_INPUT_OIDS: [u32; 7] = [
     NAME_OID,
     BPCHAR_OID,
     UNKNOWN_OID,
+    CITEXT_OID,
 ];
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
@@ -187,9 +190,82 @@ pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Op
             bytes.extend_from_slice(text.as_bytes());
             bytes
         }
+        HSTORE_OID => match crate::hstore::hstore_of(value) {
+            Some(hstore) => hstore_binary(hstore).ok_or_else(|| cannot_send(value, oid))?,
+            None => return Err(cannot_send(value, oid)),
+        },
         _ => text.into_bytes(),
     };
     Ok(Some(bytes))
+}
+
+fn put_length(out: &mut Vec<u8>, length: usize) -> Option<()> {
+    out.extend_from_slice(&i32::try_from(length).ok()?.to_be_bytes());
+    Some(())
+}
+
+fn hstore_binary(hstore: &crate::hstore::HstoreValue) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    put_length(&mut out, hstore.pairs().len())?;
+    for (key, value) in hstore.pairs() {
+        put_length(&mut out, key.len())?;
+        out.extend_from_slice(key.as_bytes());
+        match value {
+            Some(value) => {
+                put_length(&mut out, value.len())?;
+                out.extend_from_slice(value.as_bytes());
+            }
+            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    Some(out)
+}
+
+fn hstore_length(bytes: &[u8], at: &mut usize) -> SqlResult<i32> {
+    let word: [u8; 4] = bytes
+        .get(*at..at.saturating_add(4))
+        .and_then(|word| word.try_into().ok())
+        .ok_or_else(incorrect_binary)?;
+    *at += 4;
+    Ok(i32::from_be_bytes(word))
+}
+
+fn hstore_text_at(bytes: &[u8], at: &mut usize, length: i32) -> SqlResult<String> {
+    let length = usize::try_from(length).map_err(|_| incorrect_binary())?;
+    let end = at.checked_add(length).ok_or_else(incorrect_binary)?;
+    let slice = bytes.get(*at..end).ok_or_else(incorrect_binary)?;
+    *at = end;
+    text_of(slice)
+}
+
+fn hstore_from_binary(bytes: &[u8]) -> SqlResult<crate::hstore::HstoreValue> {
+    let mut at = 0;
+    let count = usize::try_from(hstore_length(bytes, &mut at)?).map_err(|_| incorrect_binary())?;
+    if count > bytes.len() / 8 {
+        return Err(incorrect_binary());
+    }
+    let mut pairs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let key_length = hstore_length(bytes, &mut at)?;
+        if key_length < 0 {
+            return Err(SqlError::new(
+                SqlState::NULL_VALUE_NOT_ALLOWED,
+                "null value not allowed for hstore key",
+            ));
+        }
+        let key = hstore_text_at(bytes, &mut at, key_length)?;
+        let value_length = hstore_length(bytes, &mut at)?;
+        let value = if value_length == -1 {
+            None
+        } else {
+            Some(hstore_text_at(bytes, &mut at, value_length)?)
+        };
+        pairs.push((key, value));
+    }
+    if at != bytes.len() {
+        return Err(incorrect_binary());
+    }
+    crate::hstore::checked(pairs)
 }
 
 fn array_binary(array: &ArrayValue, zone: TimeZone) -> SqlResult<Vec<u8>> {
@@ -450,6 +526,9 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
             Some((&JSONB_VERSION, rest)) => return text_of(rest),
             _ => return Err(incorrect_binary()),
         },
+        HSTORE_OID => {
+            return hstore_from_binary(bytes).map(|hstore| crate::hstore::to_text(&hstore));
+        }
         oid if TEXT_INPUT_OIDS.contains(&oid) => return text_of(bytes),
         _ => return Err(no_binary_form(oid)),
     };
@@ -458,7 +537,7 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
 
 pub(crate) fn writes_binary(sql_type: SqlType) -> bool {
     match sql_type {
-        SqlType::Defined(defined) => defined.kind == DefinedKind::Enum,
+        SqlType::Defined(defined) => matches!(defined.kind, DefinedKind::Enum | DefinedKind::Base),
         SqlType::Catalog(kind) => !matches!(
             kind,
             CatalogType::NodeTree | CatalogType::AclItem | CatalogType::AnyArray
@@ -470,7 +549,7 @@ pub(crate) fn writes_binary(sql_type: SqlType) -> bool {
 
 pub(crate) fn reads_binary(sql_type: SqlType) -> bool {
     match sql_type {
-        SqlType::Defined(defined) => defined.kind == DefinedKind::Enum,
+        SqlType::Defined(defined) => matches!(defined.kind, DefinedKind::Enum | DefinedKind::Base),
         SqlType::Array(element) => {
             !matches!(element.sql_type(), SqlType::Array(_)) && reads_binary(element.sql_type())
         }
@@ -618,6 +697,94 @@ mod tests {
             0u8, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 23, 0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 1,
         ];
         assert!(decode_array_texts(&huge, ArrayElement::Integer).is_err());
+    }
+
+    #[test]
+    fn citext_travels_as_its_text_and_hstore_in_postgresql_binary_layout() {
+        let citext = crate::citext::value("MiXed".into());
+        assert_eq!(
+            encode_pg_binary(&citext, CITEXT_OID, TimeZone::UTC).unwrap(),
+            Some(b"MiXed".to_vec())
+        );
+        assert_eq!(decode_pg_binary_text(b"MiXed", CITEXT_OID).unwrap(), "MiXed");
+        let hstore = crate::hstore::value(crate::hstore::HstoreValue::from_pairs([
+            ("b".to_owned(), None),
+            ("a".to_owned(), Some("1".to_owned())),
+        ]));
+        let bytes = encode_pg_binary(&hstore, HSTORE_OID, TimeZone::UTC)
+            .unwrap()
+            .unwrap();
+        let expected: Vec<u8> = [
+            &2i32.to_be_bytes()[..],
+            &1i32.to_be_bytes(),
+            b"a",
+            &1i32.to_be_bytes(),
+            b"1",
+            &1i32.to_be_bytes(),
+            b"b",
+            &(-1i32).to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(bytes, expected);
+        assert_eq!(
+            decode_pg_binary_text(&bytes, HSTORE_OID).unwrap(),
+            "\"a\"=>\"1\", \"b\"=>NULL"
+        );
+        assert!(writes_binary(SqlType::Defined(crate::types::DefinedType::HSTORE)));
+        assert!(reads_binary(SqlType::Defined(crate::types::DefinedType::CITEXT)));
+    }
+
+    #[test]
+    fn hostile_hstore_bytes_are_errors_never_panics() {
+        let null_key = [&1i32.to_be_bytes()[..], &(-1i32).to_be_bytes()].concat();
+        assert_eq!(
+            decode_pg_binary_text(&null_key, HSTORE_OID)
+                .unwrap_err()
+                .state()
+                .code(),
+            "22004"
+        );
+        let huge_count = i32::MAX.to_be_bytes();
+        assert!(decode_pg_binary_text(&huge_count, HSTORE_OID).is_err());
+        let trailing = [&0i32.to_be_bytes()[..], &[0]].concat();
+        assert!(decode_pg_binary_text(&trailing, HSTORE_OID).is_err());
+        let bad_utf8 = [
+            &1i32.to_be_bytes()[..],
+            &1i32.to_be_bytes(),
+            &[0xFF],
+            &(-1i32).to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(
+            decode_pg_binary_text(&bad_utf8, HSTORE_OID)
+                .unwrap_err()
+                .state()
+                .code(),
+            "22021"
+        );
+        let mut seed = 0x4853_544f_5245_u64;
+        for _ in 0..20_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let length = (seed % 32) as usize;
+            let mut bytes: Vec<u8> = (0..length)
+                .map(|shift| match (seed >> (shift % 8 * 8)) as u8 % 4 {
+                    0 => 0,
+                    1 => 0xFF,
+                    2 => 1,
+                    _ => b'k',
+                })
+                .collect();
+            if bytes.len() >= 4 {
+                bytes[..4].copy_from_slice(&((seed % 3) as i32).to_be_bytes());
+            }
+            if let Ok(text) = decode_pg_binary_text(&bytes, HSTORE_OID) {
+                let parsed = crate::hstore::parse_text(&text).unwrap();
+                let again = hstore_binary(&parsed).unwrap();
+                assert_eq!(decode_pg_binary_text(&again, HSTORE_OID).unwrap(), text);
+            }
+        }
     }
 
     #[test]

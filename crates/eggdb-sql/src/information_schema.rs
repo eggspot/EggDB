@@ -690,7 +690,7 @@ pub(crate) fn describe_type(sql_type: SqlType) -> TypeDescription {
     let is_array = builtin.is_some_and(|found| found.element != 0 && found.length == -1);
     let data_type = if is_array {
         "ARRAY".to_owned()
-    } else if builtin.is_some() {
+    } else if builtin.is_some() && !crate::pg_catalog::is_extension_type(oid) {
         format_type(oid, None)
     } else {
         "USER-DEFINED".to_owned()
