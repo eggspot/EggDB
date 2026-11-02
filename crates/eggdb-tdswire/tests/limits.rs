@@ -9,6 +9,8 @@ use eggdb_platform::connection_limits::MemoryBudget;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const IDLE_TIMEOUT: Duration = Duration::from_millis(1500);
+
 #[test]
 fn idle_sockets_cannot_lock_a_real_login_out() {
     let server = TestServer::start(64);
@@ -31,14 +33,15 @@ fn an_idle_connection_is_closed_after_the_idle_timeout() {
     let server = TestServer::start_limited(
         8,
         Limits {
-            idle_timeout: Some(Duration::from_millis(400)),
+            idle_timeout: Some(IDLE_TIMEOUT),
             memory_budget: Arc::default(),
         },
     );
     let mut busy = Client::login(server.address);
     let mut idle = Client::login(server.address);
-    for _ in 0..8 {
-        std::thread::sleep(Duration::from_millis(150));
+    let busy_until = Instant::now() + 2 * IDLE_TIMEOUT;
+    while Instant::now() < busy_until {
+        std::thread::sleep(Duration::from_millis(50));
         assert_eq!(rows(&busy.batch("SELECT 1")), [vec![Some("1".to_owned())]]);
     }
     assert!(idle.read_message().is_none());

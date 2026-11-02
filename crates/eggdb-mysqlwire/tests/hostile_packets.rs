@@ -143,6 +143,7 @@ fn framed(sequence: u8, payload: &[u8]) -> Vec<u8> {
 
 fn drain(client: &mut Client, limit: Duration) {
     let deadline = Instant::now() + limit;
+    let _ = client.stream.shutdown(std::net::Shutdown::Write);
     if client
         .stream
         .set_read_timeout(Some(Duration::from_millis(200)))
@@ -169,7 +170,7 @@ fn drain(client: &mut Client, limit: Duration) {
 fn hostile_clients_over_sockets_leave_the_server_serving() {
     let cases = setting("EGGDB_FUZZ_CASES", 20_000) / 250;
     let seed = setting("EGGDB_FUZZ_SEED", 0x5eed_2026);
-    let server = TestServer::start_with(16, Duration::from_millis(400));
+    let server = TestServer::start(16);
     let mut rng = Rng(seed ^ 0xface);
     let seeds = command_seeds();
     for _ in 0..cases {

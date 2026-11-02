@@ -10,6 +10,8 @@ use eggdb_platform::connection_limits::MemoryBudget;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const IDLE_TIMEOUT: Duration = Duration::from_millis(1500);
+
 fn parse(name: &str, query: &str) -> Vec<u8> {
     let mut body = cstring(name);
     body.extend(cstring(query));
@@ -166,14 +168,15 @@ fn an_idle_session_is_ended_with_57p05_and_a_busy_one_is_not() {
     let server = TestServer::start_limited(
         8,
         Limits {
-            idle_timeout: Some(Duration::from_millis(400)),
+            idle_timeout: Some(IDLE_TIMEOUT),
             memory_budget: Arc::default(),
         },
     );
     let (mut busy, _) = Client::login(server.address);
     let (mut idle, _) = Client::login(server.address);
-    for _ in 0..8 {
-        std::thread::sleep(Duration::from_millis(150));
+    let busy_until = Instant::now() + 2 * IDLE_TIMEOUT;
+    while Instant::now() < busy_until {
+        std::thread::sleep(Duration::from_millis(50));
         assert_eq!(tags(&busy.query("SELECT 1")), "TDCZ");
     }
     let ended = idle.read().expect("a FATAL before the connection closes");
