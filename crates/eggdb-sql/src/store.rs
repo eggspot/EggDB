@@ -133,6 +133,59 @@ pub trait KeyValueStore {
 
     /// Begins the write transaction, waiting for another writer as the store does.
     fn begin_write(&self) -> SqlResult<Self::Write<'_>>;
+
+    /// A number naming this store among the stores of the process, the same through every
+    /// handle on it (a reference, an [`Arc`](std::sync::Arc)): sessions on one store share its
+    /// advisory locks. By default the store's address.
+    fn store_id(&self) -> usize {
+        std::ptr::from_ref(self).addr()
+    }
+}
+
+impl<S: KeyValueStore> KeyValueStore for &S {
+    type Read<'s>
+        = S::Read<'s>
+    where
+        Self: 's;
+    type Write<'s>
+        = S::Write<'s>
+    where
+        Self: 's;
+
+    fn begin_read(&self) -> SqlResult<S::Read<'_>> {
+        (**self).begin_read()
+    }
+
+    fn begin_write(&self) -> SqlResult<S::Write<'_>> {
+        (**self).begin_write()
+    }
+
+    fn store_id(&self) -> usize {
+        (**self).store_id()
+    }
+}
+
+impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
+    type Read<'s>
+        = S::Read<'s>
+    where
+        Self: 's;
+    type Write<'s>
+        = S::Write<'s>
+    where
+        Self: 's;
+
+    fn begin_read(&self) -> SqlResult<S::Read<'_>> {
+        (**self).begin_read()
+    }
+
+    fn begin_write(&self) -> SqlResult<S::Write<'_>> {
+        (**self).begin_write()
+    }
+
+    fn store_id(&self) -> usize {
+        (**self).store_id()
+    }
 }
 
 pub(crate) trait BoxedWrite: KeyValueWrite {

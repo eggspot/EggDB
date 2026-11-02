@@ -6,6 +6,7 @@ use crate::ast::Name;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
+use crate::store::KeyValueStore;
 
 const MAX_DATABASE_NAME_BYTES: usize = 63;
 const RESERVED_FILE_NAMES: [&str; 22] = [
@@ -32,7 +33,7 @@ pub enum ServedDatabaseError {
 /// them for `CREATE DATABASE`, `DROP DATABASE`, `pg_database`, `SHOW DATABASES` and
 /// `sys.databases`.
 pub trait ServedDatabases: Sync {
-    /// The names of the served databases, in name order.
+    /// The names of the served databases, in the order the catalogs list them.
     fn names(&self) -> Vec<String>;
 
     /// Creates an empty database named `name`, which [`is_valid_database_name`] accepts.
@@ -41,6 +42,95 @@ pub trait ServedDatabases: Sync {
     /// Drops the database named `name` and removes its data, unless a session is connected to
     /// it.
     fn drop_database(&self, name: &str) -> Result<(), ServedDatabaseError>;
+
+    /// A number that changes whenever the list of databases does, so a session reads
+    /// [`ServedDatabases::names`] again only then; `None`, the default, reads it at every
+    /// statement.
+    fn listing_version(&self) -> Option<u64> {
+        None
+    }
+
+    /// The served name equal to `name` ignoring ASCII case, as MySQL and SQL Server compare
+    /// database names, or `None` when no database has it.
+    fn matching_name(&self, name: &str) -> Option<String> {
+        let names = self.names();
+        if names.iter().any(|served| served == name) {
+            return Some(name.to_owned());
+        }
+        names
+            .into_iter()
+            .find(|served| served.eq_ignore_ascii_case(name))
+    }
+}
+
+/// [`ServedDatabases`] that a server's connections attach to by name: a connection runs its
+/// session on the store [`DatabaseDirectory::attach`] hands out and holds it while it is
+/// connected, which keeps the database from being dropped under it.
+pub trait DatabaseDirectory: ServedDatabases {
+    /// The store a connection holds while its session runs on one database.
+    type Attached<'d>: KeyValueStore
+    where
+        Self: 'd;
+
+    /// The database named exactly `name`, or `None` when none is served by that name.
+    fn attach(&self, name: &str) -> Option<Self::Attached<'_>>;
+}
+
+/// A fixed list of databases, each reached by name, for a server that neither creates nor
+/// drops databases while it runs: `CREATE DATABASE` and `DROP DATABASE` fail with `0A000`.
+#[derive(Debug)]
+pub struct FixedDatabases<'a, S> {
+    databases: &'a [(&'a str, &'a S)],
+}
+
+impl<'a, S> FixedDatabases<'a, S> {
+    /// The databases `databases` lists, the server's default first.
+    #[must_use]
+    pub fn new(databases: &'a [(&'a str, &'a S)]) -> Self {
+        Self { databases }
+    }
+}
+
+impl<S: Sync> ServedDatabases for FixedDatabases<'_, S> {
+    fn names(&self) -> Vec<String> {
+        self.databases
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect()
+    }
+
+    fn create(&self, _name: &str) -> Result<(), ServedDatabaseError> {
+        Err(fixed_list())
+    }
+
+    fn listing_version(&self) -> Option<u64> {
+        Some(0)
+    }
+
+    fn drop_database(&self, _name: &str) -> Result<(), ServedDatabaseError> {
+        Err(fixed_list())
+    }
+}
+
+impl<'a, S: KeyValueStore + Sync> DatabaseDirectory for FixedDatabases<'a, S> {
+    type Attached<'d>
+        = &'a S
+    where
+        Self: 'd;
+
+    fn attach(&self, name: &str) -> Option<&'a S> {
+        self.databases
+            .iter()
+            .find(|(served, _)| *served == name)
+            .map(|(_, store)| *store)
+    }
+}
+
+fn fixed_list() -> ServedDatabaseError {
+    ServedDatabaseError::Unsupported(
+        "CREATE DATABASE and DROP DATABASE are not supported by a server with a fixed list of databases; eggdb serve <directory> serves one database per .eggdb file and creates and drops them"
+            .to_owned(),
+    )
 }
 
 /// Whether `name` may name a served database: 1 to 63 bytes of letters, digits, `_`, `-` and

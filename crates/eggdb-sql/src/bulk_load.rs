@@ -1,6 +1,10 @@
 mod bcp;
+mod bcp_format;
 
 pub use bcp::{BcpCharacterReader, BcpTerminators, BcpUnicodeInput};
+pub use bcp_format::{
+    BcpFileFormat, BcpFileReader, BcpFileWriter, BcpFormat, BcpTableWritten, write_bcp_table,
+};
 
 use crate::ast::Name;
 use crate::constraints::PreparedChecks;
@@ -11,16 +15,34 @@ use crate::execute::{
 };
 use crate::session::QueryResult;
 use crate::store::{KeyValueRead, KeyValueWrite};
-use crate::types::Value;
+use crate::types::{SqlType, Value};
 
 const FOREIGN_KEY_BATCH_ROWS: usize = 4096;
 const WRONG_COLUMN_COUNT: u16 = 4815;
+
+/// A column a bulk load fills, as [`BulkRows::columns_known`] learns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkColumn {
+    /// The column's name.
+    pub name: String,
+    /// The column's type.
+    pub sql_type: SqlType,
+    /// Whether the column allows NULL.
+    pub nullable: bool,
+}
 
 /// The rows of a bulk load: what SQL Server's `bcp in` and `SqlBulkCopy` send after an
 /// `INSERT BULK` statement, read by [`crate::Session::execute_bulk_load`]. A TDS server reads
 /// them from the bulk load message that follows the statement; [`BcpCharacterReader`] reads
 /// them from a file in bcp's character format.
 pub trait BulkRows {
+    /// Learns the columns the load fills, in the order of the values of each row, before the
+    /// first row is read. Readers whose layout depends on the table, such as bcp's native
+    /// format ([`BcpFileReader`]), use it; the others need nothing from it.
+    fn columns_known(&mut self, _columns: &[BulkColumn]) -> SqlResult<()> {
+        Ok(())
+    }
+
     /// Reads the next row into `row`, replacing what it held: `columns` values, one for each
     /// column the `INSERT BULK` named (every column of the table when it named none), in that
     /// order, NULL for a missing value. A value of another type converts to its column's type
@@ -81,6 +103,16 @@ pub(crate) fn load(
 ) -> SqlResult<QueryResult> {
     let table = tables.require_target(writer, &bulk.table, "insert into")?;
     let targets = targets_of(&table, &bulk.columns)?;
+    let described: Vec<BulkColumn> = targets
+        .iter()
+        .filter_map(|&index| table.columns.get(index))
+        .map(|column| BulkColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            nullable: !column.not_null,
+        })
+        .collect();
+    rows.columns_known(&described)?;
     if crate::sequences::mentions_nextval(&table) {
         crate::sequences::load_all(writer)?;
     }

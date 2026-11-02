@@ -481,7 +481,7 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         match statement {
             SqlServerStatement::Use(name) => {
-                if !name.text.eq_ignore_ascii_case(&self.settings.database) {
+                let Some(database) = self.use_database(&name.text)? else {
                     return Err(SqlError::new(
                         SqlState::INVALID_CATALOG_NAME,
                         format!(
@@ -491,11 +491,8 @@ impl<'s> Session<'s> {
                     )
                     .with_sqlserver_code(911)
                     .at(name.position));
-                }
-                Ok(QueryResult::command(format!(
-                    "USE {}",
-                    self.settings.database
-                )))
+                };
+                Ok(QueryResult::command(format!("USE {database}")))
             }
             SqlServerStatement::NoCount(on) => {
                 Arc::make_mut(&mut self.settings).sqlserver.no_count = *on;

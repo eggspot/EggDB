@@ -231,7 +231,10 @@ mod window_tests;
 mod with_statement_tests;
 
 pub use arrays::{ArrayElement, ArrayValue};
-pub use bulk_load::{BcpCharacterReader, BcpTerminators, BcpUnicodeInput, BulkRows};
+pub use bulk_load::{
+    BcpCharacterReader, BcpFileFormat, BcpFileReader, BcpFileWriter, BcpFormat, BcpTableWritten,
+    BcpTerminators, BcpUnicodeInput, BulkColumn, BulkRows, write_bcp_table,
+};
 pub use cancel::CancelSignal;
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{
@@ -272,12 +275,16 @@ pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use schema::{
     ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,
 };
+pub use session::database_switch::DatabaseSwitch;
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
     Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
     StoredProcedure, TransactionStatus,
 };
-pub use served_databases::{ServedDatabaseError, ServedDatabases, is_valid_database_name};
+pub use served_databases::{
+    DatabaseDirectory, FixedDatabases, ServedDatabaseError, ServedDatabases,
+    is_valid_database_name,
+};
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
 pub use sqlserver_catalog::is_catalog_procedure;

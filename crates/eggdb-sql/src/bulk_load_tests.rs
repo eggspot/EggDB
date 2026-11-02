@@ -1,7 +1,8 @@
 use crate::memory_store::MemoryStore;
 use crate::{
-    BatchStep, BcpCharacterReader, BcpTerminators, BcpUnicodeInput, BulkRows, Dialect,
-    QueryResult, Session, SqlError, SqlResult, Value,
+    BatchStep, BcpCharacterReader, BcpFileFormat, BcpFileReader, BcpFormat, BcpTerminators,
+    BcpUnicodeInput, BulkRows, Dialect, QueryResult, Session, SqlError, SqlResult, Value,
+    write_bcp_table,
 };
 
 struct Rows(Vec<Vec<Value>>);
@@ -337,4 +338,51 @@ fn bulk_insert_and_openrowset_bulk_never_read_server_files() {
         texts(&mut session, "SELECT count(*) AS n FROM items"),
         vec![vec!["0".to_owned()]]
     );
+}
+
+#[test]
+fn bcp_native_files_and_format_files_written_from_a_table_load_back() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    batch(
+        &mut session,
+        "CREATE TABLE goods (id INT PRIMARY KEY, name NVARCHAR(20), price DECIMAL(10,2), qty SMALLINT NOT NULL, added DATETIME2(0), code UNIQUEIDENTIFIER); \
+         CREATE TABLE native_copy (id INT PRIMARY KEY, name NVARCHAR(20), price DECIMAL(10,2), qty SMALLINT NOT NULL, added DATETIME2(0), code UNIQUEIDENTIFIER); \
+         CREATE TABLE format_copy (id INT PRIMARY KEY, name NVARCHAR(20), price DECIMAL(10,2), qty SMALLINT NOT NULL, added DATETIME2(0), code UNIQUEIDENTIFIER); \
+         INSERT INTO goods VALUES (1, N'Bánh mì', 12.50, 3, '2024-05-06 07:08:09', '6F9619FF-8B86-D011-B42D-00C04FC964FF'), (2, NULL, NULL, -4, NULL, NULL), (3, N'', -0.01, 0, '1999-12-31 23:59:59', NULL)",
+    );
+    let mut native = Vec::new();
+    let written = write_bcp_table(&mut session, "goods", &BcpFileFormat::Native, &mut native)
+        .unwrap_or_else(|error| panic!("bcp out: {error}"));
+    assert_eq!(written.rows, 3);
+    assert_eq!(&native[..4], &[1, 0, 0, 0]);
+    let format_file = written.format.to_format_file();
+    assert!(format_file.starts_with("14.0\n6\n1\tSQLINT\t0\t4\t\"\"\t1\tid\t\"\"\n"));
+    assert!(format_file.contains("\tSQLSMALLINT\t0\t2\t"));
+
+    session.execute("INSERT BULK native_copy", &mut |_| {}).unwrap();
+    let mut data: &[u8] = &native;
+    let mut reader = BcpFileReader::native(&mut data);
+    assert_eq!(tag(&load(&mut session, &mut reader)[0]), "INSERT 0 3");
+
+    session.execute("INSERT BULK format_copy WITH (KEEP_NULLS)", &mut |_| {}).unwrap();
+    let mut data: &[u8] = &native;
+    let mut reader = BcpFileReader::new(&mut data, BcpFormat::parse(&format_file).unwrap());
+    assert_eq!(tag(&load(&mut session, &mut reader)[0]), "INSERT 0 3");
+
+    let original = texts(&mut session, "SELECT * FROM goods ORDER BY id");
+    assert_eq!(original[0][1], "Bánh mì");
+    assert_eq!(original[2][1], "");
+    assert_eq!(texts(&mut session, "SELECT * FROM native_copy ORDER BY id"), original);
+    assert_eq!(texts(&mut session, "SELECT * FROM format_copy ORDER BY id"), original);
+
+    let mut character = Vec::new();
+    write_bcp_table(
+        &mut session,
+        "goods",
+        &BcpFileFormat::Character(BcpTerminators::default()),
+        &mut character,
+    )
+    .unwrap();
+    assert!(character.starts_with(b"1\tB\xc3\xa1nh m\xc3\xac\t12.50\t3\t"));
 }

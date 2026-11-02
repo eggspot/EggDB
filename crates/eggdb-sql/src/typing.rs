@@ -314,6 +314,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         ("date_trunc", [_, argument]) => match static_type(argument, scope)? {
             SqlType::Timestamp(_) => Some(SqlType::Timestamp(None)),
             SqlType::Date | SqlType::TimestampTz(_) => Some(SqlType::TimestampTz(None)),
+            SqlType::Interval { .. } => Some(SqlType::INTERVAL),
             _ => None,
         },
         ("json_typeof" | "jsonb_typeof", [_]) => Some(SqlType::Text),

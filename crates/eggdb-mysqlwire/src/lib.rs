@@ -34,5 +34,5 @@ pub use eggdb_platform::connection_limits::MemoryBudget;
 pub use server::{
     DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
     MAX_UNAUTHENTICATED_CONNECTIONS, ServerConfig, listen, listen_on_loopback, serve,
-    serve_with_local,
+    serve_directory, serve_with_local,
 };

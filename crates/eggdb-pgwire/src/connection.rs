@@ -12,8 +12,9 @@ use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
 use eggdb_platform::connection_limits::Reservation;
 use eggdb_sql::{
-    CancelSignal, CopyChannel, CopyFormat, CopyStart, KeyValueStore, OutputColumn, Parameter,
-    QueryResult, Session, SqlError, SqlResult, SqlState, SqlType, TransactionStatus,
+    CancelSignal, CopyChannel, CopyFormat, CopyStart, DatabaseDirectory, KeyValueStore,
+    OutputColumn, Parameter, QueryResult, Session, SqlError, SqlResult, SqlState, SqlType,
+    TransactionStatus,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -836,10 +837,10 @@ pub(crate) struct Connection<'a, 's> {
     listening: bool,
 }
 
-pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
+pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     mut wire: Wire<'a>,
     shared: &'a Shared<'a>,
-    databases: &[(&str, &'s S)],
+    directory: &D,
     process_id: i32,
 ) {
     let Some(login) = shared.logins.admit(wire.peer_ip()) else {
@@ -855,11 +856,17 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let Some(startup) = read_startup(&mut wire, shared) else {
         return;
     };
-    let chosen = databases
-        .iter()
-        .find(|(name, _)| *name == startup.database)
-        .map(|(_, store)| *store);
-    let Some(&(_, first)) = databases.first() else {
+    let chosen = directory.attach(&startup.database);
+    let fallback = match &chosen {
+        Some(_) => None,
+        None => directory.attach(&shared.config.database).or_else(|| {
+            directory
+                .names()
+                .first()
+                .and_then(|name| directory.attach(name))
+        }),
+    };
+    let Some(roles_store) = chosen.as_ref().or(fallback.as_ref()) else {
         return;
     };
     let own_user = startup.user == shared.config.user;
@@ -871,7 +878,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let outcome = match method {
         eggdb_auth::AuthMethod::ScramSha256 => {
             let stored_role = (!own_user)
-                .then(|| stored_role_verifier(chosen.unwrap_or(first), &startup.user))
+                .then(|| stored_role_verifier(roles_store, &startup.user))
                 .flatten();
             authenticate(&mut wire, shared, &startup.user, stored_role)
         }
@@ -880,7 +887,7 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
             shared,
             &startup.user,
             &external,
-            chosen.unwrap_or(first),
+            roles_store,
         ),
     };
     match outcome {
@@ -890,15 +897,17 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     wire.login = None;
     wire.deadline = None;
     wire.budget = Some(&*shared.config.memory_budget);
+    drop(fallback);
     let Some(store) = chosen else {
         (shared.log)(&format!(
             "{}  database \"{}\" does not exist",
             wire.peer(),
             printable(&startup.database)
         ));
-        let served: Vec<String> = databases
+        let served: Vec<String> = directory
+            .names()
             .iter()
-            .map(|(name, _)| format!("\"{name}\""))
+            .map(|name| format!("\"{name}\""))
             .collect();
         fatal(
             &mut wire,
@@ -911,13 +920,8 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
         );
         return;
     };
-    let mut session = Session::new(store);
-    session.set_database_names(
-        databases
-            .iter()
-            .map(|(name, _)| (*name).to_owned())
-            .collect(),
-    );
+    let mut session = Session::new(&store);
+    session.set_served_databases(directory);
     if is_stored_role {
         if let Err(error) = session.identify_role(&startup.user, &startup.database) {
             fatal(&mut wire, error.state(), error.message());

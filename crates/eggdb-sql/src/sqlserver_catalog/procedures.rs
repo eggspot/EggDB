@@ -519,6 +519,15 @@ impl<'a> Scope<'a> {
     }
 }
 
+fn database_list(scope: &Scope<'_>) -> Vec<String> {
+    let mut names = scope.snapshot.settings.database_names.clone();
+    if !names.iter().any(|name| name == scope.database) {
+        names.push(scope.database.to_owned());
+    }
+    names.sort();
+    names
+}
+
 /// Runs a catalog procedure on its bound arguments ([`bind_arguments`]) and returns its
 /// result sets in order.
 pub(crate) fn run_procedure(
@@ -566,7 +575,10 @@ pub(crate) fn run_procedure(
         CatalogProcedure::HelpIndex => vec![help_index(&scope, &arguments)?],
         CatalogProcedure::Databases => vec![result(
             DATABASE_COLUMNS,
-            vec![vec![text(scope.database), Value::Integer(0), Value::Null]],
+            database_list(&scope)
+                .into_iter()
+                .map(|name| vec![text(&name), Value::Integer(0), Value::Null])
+                .collect(),
         )],
         CatalogProcedure::ColumnsManaged => vec![columns_managed(&scope, &arguments)],
         CatalogProcedure::IndexesManaged => vec![indexes_managed(&scope, &arguments)],

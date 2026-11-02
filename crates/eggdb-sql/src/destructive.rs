@@ -348,6 +348,7 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::DropIdentity { .. }
             | AlterAction::AttachPartition { .. }
             | AlterAction::DetachPartition(_)
+            | AlterAction::MoveColumn { .. }
             | AlterAction::Accepted => continue,
         };
         match &mut found {

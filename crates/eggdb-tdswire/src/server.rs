@@ -2,7 +2,7 @@ use crate::auth::TdsCredentials;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
 use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
-use eggdb_sql::{CancelSignal, KeyValueStore};
+use eggdb_sql::{CancelSignal, DatabaseDirectory, FixedDatabases, KeyValueStore};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
@@ -199,6 +199,27 @@ pub fn serve<S: KeyValueStore + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_directory(
+        &FixedDatabases::new(&[(config.database.as_str(), store)]),
+        listener,
+        config,
+        stop,
+        log,
+    )
+}
+
+/// [`serve`] for the databases of `directory`, including databases created while the server
+/// runs (DNEW-R-M6a-db): the login's database and `USE` pick one by name (ignoring ASCII
+/// case), each connection holds its database while it uses it, and its session creates and
+/// drops databases through `directory`. A login without a database starts on
+/// [`ServerConfig::database`].
+pub fn serve_directory<D: DatabaseDirectory + Sync>(
+    directory: &D,
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     if config.credentials.is_for_empty_password() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -246,7 +267,7 @@ pub fn serve<S: KeyValueStore + Sync>(
                         .spawn_scoped(scope, move || {
                             eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
                             let _slot = slot;
-                            run_connection(stream, shared, store, connection_id);
+                            run_connection(stream, shared, directory, connection_id);
                         });
                     if let Err(error) = started {
                         log(&format!("starting a connection thread failed: {error}"));
@@ -277,17 +298,17 @@ pub fn serve<S: KeyValueStore + Sync>(
     Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }
 
-fn run_connection<S: KeyValueStore>(
+fn run_connection<D: DatabaseDirectory>(
     stream: TcpStream,
     shared: &Shared<'_>,
-    store: &S,
+    directory: &D,
     connection_id: u32,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;
     };
-    serve_connection(wire, shared, store, connection_id);
+    serve_connection(wire, shared, directory, connection_id);
 }
 
 fn refuse_connection(stream: TcpStream, shared: &Shared<'_>) {

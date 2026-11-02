@@ -641,7 +641,7 @@ pub(super) fn rows(snapshot: &CatalogSnapshot, view: SystemView) -> Vec<Vec<Valu
         SystemView::DefaultConstraints => default_constraint_rows(snapshot, objects),
         SystemView::CheckConstraints => check_constraint_rows(snapshot, objects),
         SystemView::Sequences => sequence_rows(snapshot, objects),
-        SystemView::Databases => vec![database_row(snapshot)],
+        SystemView::Databases => database_rows(snapshot),
         SystemView::SqlModules => sql_module_rows(snapshot, objects),
         SystemView::ExtendedProperties => extended_property_rows(snapshot, objects),
         SystemView::Triggers => trigger_rows(snapshot, objects),
@@ -1267,10 +1267,27 @@ fn sequence_rows(snapshot: &CatalogSnapshot, objects: &SqlServerObjects) -> Vec<
         .collect()
 }
 
-pub(super) fn database_row(snapshot: &CatalogSnapshot) -> Vec<Value> {
+fn database_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = vec![database_row(&snapshot.database, DATABASE_ID)];
+    for name in &snapshot.settings.database_names {
+        if name != &snapshot.database {
+            rows.push(database_row(name, other_database_id(name)));
+        }
+    }
+    rows
+}
+
+fn other_database_id(name: &str) -> i32 {
+    let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    DATABASE_ID + 1 + i32::try_from(hash % 32_000).unwrap_or(0)
+}
+
+fn database_row(name: &str, database_id: i32) -> Vec<Value> {
     let row = CatalogRow::new(DATABASE_COLUMNS)
-        .set("name", text(&snapshot.database))
-        .set("database_id", Value::Integer(DATABASE_ID))
+        .set("name", text(name))
+        .set("database_id", Value::Integer(database_id))
         .set("owner_sid", Value::Bytea(vec![1]))
         .set("create_date", UNKNOWN_DATE)
         .set("compatibility_level", small(160))

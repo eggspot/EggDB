@@ -1120,6 +1120,9 @@ impl Evaluator<'_> {
                     extracted.map(|number| Value::Double(number.to_f64()))
                 }
             }
+            ("date_trunc", [Value::Text(field), Value::Interval(interval)]) => {
+                interval.truncate(field).map(Value::Interval)
+            }
             ("date_trunc", [Value::Text(field), value]) => {
                 let (kind, local, _) = match local_instant(value) {
                     Ok(Some(found)) => found,

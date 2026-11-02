@@ -4,7 +4,7 @@ use crate::wire::Wire;
 use eggdb_auth::scram::ScramVerifier;
 use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
 use eggdb_platform::local_socket::LocalListener;
-use eggdb_sql::KeyValueStore;
+use eggdb_sql::{DatabaseDirectory, FixedDatabases, KeyValueStore};
 use eggdb_tls::ServerConnection;
 use std::collections::VecDeque;
 use std::fmt;
@@ -221,6 +221,29 @@ pub fn serve_databases<S: KeyValueStore + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_directory(
+        &FixedDatabases::new(databases),
+        listener,
+        local,
+        config,
+        stop,
+        log,
+    )
+}
+
+/// [`serve_with_local`] for the databases of `directory`, each reached by its name in the
+/// startup packet, including databases created while the server runs (`CREATE DATABASE`,
+/// DNEW-R-M6a-db): each connection holds its database for as long as it is connected, and
+/// its session creates and drops databases through `directory`. [`ServerConfig::database`]
+/// names the database whose stored roles a login to a missing database is checked against.
+pub fn serve_directory<D: DatabaseDirectory + Sync>(
+    directory: &D,
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     listener.set_nonblocking(true)?;
     if let Some(local) = local {
         local.set_nonblocking(true)?;
@@ -258,7 +281,7 @@ pub fn serve_databases<S: KeyValueStore + Sync>(
                         .spawn_scoped(scope, move || {
                             eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
                             let _slot = slot;
-                            run_connection(stream, shared, databases, process_id);
+                            run_connection(stream, shared, directory, process_id);
                         });
                     if let Err(error) = started {
                         log(&format!("starting a connection thread failed: {error}"));
@@ -314,17 +337,17 @@ fn accept_next(
     }
 }
 
-fn run_connection<S: KeyValueStore>(
+fn run_connection<D: DatabaseDirectory>(
     stream: ServerConnection,
     shared: &Shared<'_>,
-    databases: &[(&str, &S)],
+    directory: &D,
     process_id: u32,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;
     };
-    serve_connection(wire, shared, databases, process_id as i32);
+    serve_connection(wire, shared, directory, process_id as i32);
 }
 
 fn refuse_connection(stream: ServerConnection, shared: &Shared<'_>) {

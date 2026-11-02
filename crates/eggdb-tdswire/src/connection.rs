@@ -17,8 +17,9 @@ use crate::tokens::{
 use crate::types::{declared_wire_columns, push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, Message, POLL_INTERVAL, Packet, Wire, WireError};
 use eggdb_sql::{
-    BatchStep, BulkRows, Dialect, InfoMessage, KeyValueStore, NamedParameter, QueryResult,
-    SQLSERVER_COMPATIBLE_VERSION, Session, SqlError, SqlResult, SqlState, Value,
+    BatchStep, BulkRows, DatabaseDirectory, DatabaseSwitch, Dialect, InfoMessage,
+    NamedParameter, QueryResult, SQLSERVER_COMPATIBLE_VERSION, ServedDatabases, Session,
+    SqlError, SqlResult, SqlState, Value,
 };
 use std::time::{Duration, Instant};
 
@@ -382,8 +383,17 @@ pub(crate) fn refuse_too_many(shared: &Shared<'_>, wire: &mut Wire<'_>) {
 }
 
 enum Login {
-    Accepted { user: String, packet_size: usize },
+    Accepted {
+        user: String,
+        packet_size: usize,
+        database: String,
+    },
     Refused,
+}
+
+enum Exit {
+    Closed,
+    Switch(String),
 }
 
 fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &str) {
@@ -395,7 +405,12 @@ fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &
     refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(user))]);
 }
 
-fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>, encryption: Encryption) -> Login {
+fn log_in(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    encryption: Encryption,
+    served: &dyn ServedDatabases,
+) -> Login {
     let mut message = match wire.read_message(MAX_LOGIN_BYTES) {
         Ok(message) => message,
         Err(error) => {
@@ -434,10 +449,15 @@ fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>, encryption: Encryption) -> L
             return Login::Refused;
         }
     };
-    check_login(shared, wire, login)
+    check_login(shared, wire, login, served)
 }
 
-fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login {
+fn check_login(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    login: Login7,
+    served: &dyn ServedDatabases,
+) -> Login {
     let user = login.user_name.clone();
     if login.tds_version < TDS_7_4 && login.tds_version != TDS_8_0 {
         let reason = format!(
@@ -497,15 +517,19 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
         refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(&user))]);
         return Login::Refused;
     }
-    if !login.database.is_empty() && !login.database.eq_ignore_ascii_case(&config.database) {
+    let requested = if login.database.is_empty() {
+        config.database.clone()
+    } else {
+        login.database.clone()
+    };
+    let Some(database) = served.matching_name(&requested) else {
         (shared.log)(&format!(
             "{}  unknown database \"{}\"",
             wire.peer(),
-            printable(&login.database)
+            printable(&requested)
         ));
         let cannot_open = format!(
-            "Cannot open database \"{}\" requested by the login. The login failed.",
-            login.database
+            "Cannot open database \"{requested}\" requested by the login. The login failed."
         );
         refuse(
             wire,
@@ -515,7 +539,7 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
             ],
         );
         return Login::Refused;
-    }
+    };
     let packet_size = match login.packet_size {
         0 => DEFAULT_PACKET_SIZE as u32,
         size => size.clamp(SMALLEST_PACKET_SIZE, LARGEST_PACKET_SIZE),
@@ -523,6 +547,7 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
     Login::Accepted {
         user,
         packet_size: packet_size as usize,
+        database,
     }
 }
 
@@ -555,10 +580,10 @@ fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
     body
 }
 
-pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
+pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     mut wire: Wire<'a>,
     shared: &'a Shared<'a>,
-    store: &'s S,
+    directory: &D,
     connection_id: u32,
 ) {
     let Some(login) = shared.logins.admit(wire.peer_ip()) else {
@@ -574,42 +599,119 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     let Some(encryption) = read_prelogin(shared, &mut wire) else {
         return;
     };
-    let Login::Accepted { user, packet_size } = log_in(shared, &mut wire, encryption) else {
+    let Login::Accepted {
+        user,
+        packet_size,
+        database,
+    } = log_in(shared, &mut wire, encryption, directory)
+    else {
+        return;
+    };
+    let Some(attached) = directory.attach(&database) else {
+        let cannot_open =
+            format!("Cannot open database \"{database}\" requested by the login. The login failed.");
+        refuse(
+            &mut wire,
+            &[
+                (CANNOT_OPEN_DATABASE, 11, &cannot_open),
+                (LOGIN_FAILED, 14, &login_failed(&user)),
+            ],
+        );
         return;
     };
     wire.login = None;
     wire.deadline = None;
     wire.budget = Some(&*shared.config.memory_budget);
     wire.spid = connection_id as u16;
-    let config = shared.config;
     if wire
-        .send_message(
-            TABULAR_RESULT,
-            &login_response(&config.database, packet_size),
-        )
+        .send_message(TABULAR_RESULT, &login_response(&database, packet_size))
         .is_err()
     {
         return;
     }
     wire.packet_size = packet_size;
-    let mut session = Session::with_dialect(store, Dialect::SqlServer);
-    session.identify(&user, &config.database);
-    session.set_connection_id(connection_id);
-    shared.register(connection_id, session.cancel_signal());
-    let attention = AttentionWatch::new(wire.socket(), session.cancel_signal());
-    let mut connection = Connection {
-        wire,
+    serve_databases(
         shared,
-        next_transaction: 1,
-        transaction: None,
-        prepared: PreparedBatches::default(),
-        acknowledge_reset: false,
-        attention,
-        attention_acknowledged: false,
-    };
-    connection.run(&mut session);
-    shared.unregister(connection_id);
-    let _ = session.close();
+        directory,
+        connection_id,
+        wire,
+        attached,
+        (user, database),
+    );
+}
+
+fn serve_databases<'a, 'd, D: DatabaseDirectory>(
+    shared: &'a Shared<'a>,
+    directory: &'d D,
+    connection_id: u32,
+    wire: Wire<'a>,
+    mut attached: D::Attached<'d>,
+    (user, database): (String, String),
+) {
+    let mut wire = Some(wire);
+    let mut connection: Option<Connection<'a>> = None;
+    let mut switch: Option<DatabaseSwitch> = None;
+    loop {
+        let mut session = match switch.take() {
+            Some(switch) => switch.into_session(&attached),
+            None => {
+                let mut session = Session::with_dialect(&attached, Dialect::SqlServer);
+                session.identify(&user, &database);
+                session.set_connection_id(connection_id);
+                session
+            }
+        };
+        session.set_served_databases(directory);
+        if connection.is_none()
+            && let Some(wire) = wire.take()
+        {
+            shared.register(connection_id, session.cancel_signal());
+            let attention = AttentionWatch::new(wire.socket(), session.cancel_signal());
+            connection = Some(Connection {
+                wire,
+                shared,
+                next_transaction: 1,
+                transaction: None,
+                prepared: PreparedBatches::default(),
+                acknowledge_reset: false,
+                attention,
+                attention_acknowledged: false,
+            });
+        }
+        let Some(link) = connection.as_mut() else {
+            let _ = session.close();
+            return;
+        };
+        let target = match link.run(&mut session) {
+            Exit::Closed => None,
+            Exit::Switch(target) => {
+                let prepared = directory
+                    .attach(&target)
+                    .ok_or_else(|| format!("database \"{target}\" is no longer served"))
+                    .and_then(|next| {
+                        session
+                            .switch_to(&next, &target)
+                            .map(|switched| (next, switched))
+                            .map_err(|error| error.message().to_owned())
+                    });
+                if let Err(reason) = &prepared {
+                    (shared.log)(&format!(
+                        "{}  switching to database \"{}\" failed: {reason}",
+                        link.wire.peer(),
+                        printable(&target)
+                    ));
+                }
+                prepared.ok()
+            }
+        };
+        let _ = session.close();
+        let Some((next, switched)) = target else {
+            shared.unregister(connection_id);
+            return;
+        };
+        attached = next;
+        switch = Some(switched);
+    }
 }
 
 pub(crate) struct Connection<'a> {
@@ -636,7 +738,7 @@ pub(crate) struct Ran {
 }
 
 impl Connection<'_> {
-    fn run(&mut self, session: &mut Session<'_>) {
+    fn run(&mut self, session: &mut Session<'_>) -> Exit {
         loop {
             self.wire.deadline = self
                 .shared
@@ -652,11 +754,11 @@ impl Connection<'_> {
                         "{}  closed after the idle timeout",
                         self.wire.peer()
                     ));
-                    return;
+                    return Exit::Closed;
                 }
                 Ok(Incoming::BulkLoad { first, body }) => {
                     if !self.bulk_load(session, first, body) {
-                        return;
+                        return Exit::Closed;
                     }
                     continue;
                 }
@@ -664,11 +766,11 @@ impl Connection<'_> {
                     self.shared
                         .ended_by_stop
                         .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    return;
+                    return Exit::Closed;
                 }
                 Err(error) => {
                     report_wire_error(self.shared, &mut self.wire, &error);
-                    return;
+                    return Exit::Closed;
                 }
             };
             if matches!(message.kind, SQL_BATCH | RPC | TRANSACTION_MANAGER)
@@ -691,7 +793,10 @@ impl Connection<'_> {
                 }
             };
             if !keep_going {
-                return;
+                return Exit::Closed;
+            }
+            if let Some(database) = session.take_database_switch() {
+                return Exit::Switch(database);
             }
         }
     }

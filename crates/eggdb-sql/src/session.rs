@@ -1,4 +1,5 @@
 mod cursors;
+pub(crate) mod database_switch;
 mod mysql;
 mod oracle;
 mod nonatomic;
@@ -394,6 +395,8 @@ pub struct Session<'s> {
     plan_cache: crate::plan_cache::PlanCache,
     trigger_transaction: bool,
     served_databases: Option<&'s dyn crate::served_databases::ServedDatabases>,
+    database_switch: Option<String>,
+    database_listing_version: Option<u64>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -458,7 +461,7 @@ impl<'s> Session<'s> {
             save_points: Vec::new(),
             savepoints: savepoints::Savepoints::default(),
             advisory_locks: crate::advisory_locks::AdvisoryLocks::new(
-                std::ptr::from_ref(store).addr(),
+                store.store_id(),
             ),
             temporary: crate::temporary::TemporaryObjects::default(),
             portals: crate::portals::Portals::default(),
@@ -470,6 +473,8 @@ impl<'s> Session<'s> {
             plan_cache: crate::plan_cache::PlanCache::default(),
             trigger_transaction: false,
             served_databases: None,
+            database_switch: None,
+            database_listing_version: None,
         }
     }
 
@@ -735,13 +740,24 @@ impl<'s> Session<'s> {
         served: &'s dyn crate::served_databases::ServedDatabases,
     ) {
         self.served_databases = Some(served);
+        self.database_listing_version = None;
         self.refresh_database_names();
+    }
+
+    /// The server's databases [`Session::set_served_databases`] gave this session, if any.
+    pub fn served_databases(&self) -> Option<&'s dyn crate::served_databases::ServedDatabases> {
+        self.served_databases
     }
 
     fn refresh_database_names(&mut self) {
         let Some(served) = self.served_databases else {
             return;
         };
+        let version = served.listing_version();
+        if version.is_some() && version == self.database_listing_version {
+            return;
+        }
+        self.database_listing_version = version;
         let names = served.names();
         if names != self.settings.database_names {
             self.set_database_names(names);
@@ -2537,6 +2553,7 @@ impl<'s> Session<'s> {
         statement: &mut Statement,
         io: &mut CopyIo<'_, '_>,
     ) -> SqlResult<QueryResult> {
+        self.refuse_after_database_switch()?;
         match statement {
             Statement::Set { name, value } if is_dialect_setting(name) => {
                 return self

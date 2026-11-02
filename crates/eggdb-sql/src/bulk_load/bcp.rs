@@ -59,6 +59,14 @@ fn written_terminator(text: &str, option: &str) -> SqlResult<Vec<u8>> {
 }
 
 impl BcpTerminators {
+    pub(crate) fn field(&self) -> &[u8] {
+        &self.field
+    }
+
+    pub(crate) fn row(&self) -> &[u8] {
+        &self.row
+    }
+
     /// The terminators as bcp's `-t` and `-r` options write them, with bcp's escapes: `\t`
     /// (tab), `\n` (newline), `\r` (carriage return), `\0` (the NUL byte) and `\\`; any other
     /// character stands for itself. `None` keeps the default. An empty terminator is an error.

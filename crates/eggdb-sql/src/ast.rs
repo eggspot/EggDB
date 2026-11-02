@@ -821,7 +821,17 @@ pub(crate) enum AlterAction {
         bound: PartitionBoundSpec,
     },
     DetachPartition(Name),
+    MoveColumn {
+        column: Name,
+        placement: ColumnPlacement,
+    },
     Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ColumnPlacement {
+    First,
+    After(Name),
 }
 
 #[derive(Debug, Clone, PartialEq)]
