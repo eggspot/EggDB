@@ -10,6 +10,8 @@ mod types;
 #[cfg(test)]
 mod deparse_tests;
 #[cfg(test)]
+mod describe_tests;
+#[cfg(test)]
 mod routine_tests;
 #[cfg(test)]
 mod tests;

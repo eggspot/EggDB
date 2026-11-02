@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub(crate) const TEMP_TABLE_MARKER: char = '\u{1}';
 pub(crate) const HIDDEN_COLUMN_MARKER: char = '\u{2}';
+pub(crate) const TABLE_OID_COLUMN: &str = "\u{2}tableoid";
 const MOST_TEMP_TABLES: u32 = 1 << 20;
 const ID_SPACE: u64 = 1 << 24;
 const ENTRY_OVERHEAD: usize = 64;
@@ -70,6 +71,10 @@ pub(crate) fn temp_definition_and_catalog_need(name: &str) -> Option<(Arc<TableD
 
 pub(crate) fn is_hidden_column(name: &str) -> bool {
     name.starts_with(HIDDEN_COLUMN_MARKER)
+}
+
+pub(crate) fn system_column(name: &str) -> Option<&'static str> {
+    (name == "tableoid").then_some(TABLE_OID_COLUMN)
 }
 
 pub(crate) fn display_name(name: &str) -> &str {

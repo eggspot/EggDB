@@ -310,12 +310,23 @@ const PARTITIONED_TABLE: [CatalogColumn; 3] = [
     column("partnatts", SqlType::SmallInt),
 ];
 
-const SUBSCRIPTION: [CatalogColumn; 5] = [
+const SUBSCRIPTION: [CatalogColumn; 16] = [
     column("oid", OID),
     column("subdbid", OID),
     column("subname", NAME),
     column("subowner", OID),
     column("subenabled", SqlType::Boolean),
+    column("subbinary", SqlType::Boolean),
+    column("substream", CHAR),
+    column("subtwophasestate", CHAR),
+    column("subdisableonerr", SqlType::Boolean),
+    column("subpasswordrequired", SqlType::Boolean),
+    column("subrunasowner", SqlType::Boolean),
+    column("subconninfo", SqlType::Text),
+    column("subslotname", NAME),
+    column("subsynccommit", SqlType::Text),
+    column("subpublications", TEXTS),
+    column("suborigin", SqlType::Text),
 ];
 
 const STAT_USER_TABLES: [CatalogColumn; 16] = [
@@ -547,6 +558,21 @@ fn started_at() -> &'static Value {
 
 fn session_user_name() -> String {
     snapshot::session_user().unwrap_or_else(|| "eggdb".to_owned())
+}
+
+/// Each installed extension's OID and the description `pg_description` holds for it.
+pub(crate) fn extension_descriptions() -> [(u32, &'static str); 3] {
+    [
+        (PLPGSQL_EXTENSION, "PL/pgSQL procedural language"),
+        (
+            CITEXT_EXTENSION,
+            "data type for case-insensitive character strings",
+        ),
+        (
+            HSTORE_EXTENSION,
+            "data type for storing sets of (key, value) pairs",
+        ),
+    ]
 }
 
 pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> Vec<Vec<Value>> {

@@ -467,6 +467,88 @@ fn granted_tables(reader: &dyn KeyValueRead, grantee: &str) -> SqlResult<Vec<Str
     Ok(tables)
 }
 
+const ACL_LETTERS: [(Privilege, char); 7] = [
+    (Privilege::Insert, 'a'),
+    (Privilege::Select, 'r'),
+    (Privilege::Update, 'w'),
+    (Privilege::Delete, 'd'),
+    (Privilege::Truncate, 'D'),
+    (Privilege::References, 'x'),
+    (Privilege::Trigger, 't'),
+];
+
+/// The privileges one grantee holds on one table, as `GRANT` stored them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableGrant {
+    pub(crate) table: String,
+    pub(crate) grantee: String,
+    pub(crate) privileges: u8,
+}
+
+impl TableGrant {
+    /// The grant in PostgreSQL's `aclitem` text form, `grantee=privileges/grantor`, with an
+    /// empty grantee for `PUBLIC`.
+    pub(crate) fn acl_item(&self, grantor: &str) -> String {
+        let letters: String = ACL_LETTERS
+            .iter()
+            .filter(|(privilege, _)| self.privileges & privilege.bit() != 0)
+            .map(|(_, letter)| *letter)
+            .collect();
+        let grantee = if self.grantee == PUBLIC {
+            String::new()
+        } else {
+            acl_role_name(&self.grantee)
+        };
+        format!("{grantee}={letters}/{}", acl_role_name(grantor))
+    }
+}
+
+/// The owner's implicit entry that PostgreSQL lists first once a table has any grant.
+pub(crate) fn owner_acl_item(owner: &str) -> String {
+    let letters: String = ACL_LETTERS.iter().map(|(_, letter)| *letter).collect();
+    let name = acl_role_name(owner);
+    format!("{name}={letters}/{name}")
+}
+
+fn acl_role_name(name: &str) -> String {
+    if !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        name.to_owned()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+/// Every stored table grant, in table and then grantee order.
+pub(crate) fn every_grant(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableGrant>> {
+    let mut prefix = NAMESPACE.to_vec();
+    prefix.push(GRANT_SPACE);
+    let mut grants = Vec::new();
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            let rest = key.get(prefix.len()..).unwrap_or_default();
+            if let Some(split) = rest.iter().position(|byte| *byte == 0)
+                && let (Some(table), Some(grantee)) = (rest.get(..split), rest.get(split + 1..))
+                && let [RECORD_VERSION, held] = value
+            {
+                grants.push(TableGrant {
+                    table: String::from_utf8_lossy(table).into_owned(),
+                    grantee: String::from_utf8_lossy(grantee).into_owned(),
+                    privileges: *held,
+                });
+            }
+            Ok(true)
+        },
+    )?;
+    Ok(grants)
+}
+
 fn change_privileges(
     writer: &mut dyn KeyValueWrite,
     granting: bool,

@@ -29,7 +29,7 @@ pub(crate) fn generated_rows(
     relation: CatalogRelation,
     columns_only: bool,
 ) -> SqlResult<GeneratedRows> {
-    let columns: Vec<OutputColumn> = relation
+    let mut columns: Vec<OutputColumn> = relation
         .columns()
         .iter()
         .map(|column| OutputColumn {
@@ -37,6 +37,13 @@ pub(crate) fn generated_rows(
             sql_type: Some(column.sql_type),
         })
         .collect();
+    let table_oid = has_table_oid(relation).then(|| relation.oid());
+    if table_oid.is_some() {
+        columns.push(OutputColumn {
+            name: crate::temp_tables::TABLE_OID_COLUMN.to_owned(),
+            sql_type: Some(SqlType::Catalog(super::CatalogType::Oid)),
+        });
+    }
     if columns_only {
         return Ok(GeneratedRows::empty(columns));
     }
@@ -45,14 +52,24 @@ pub(crate) fn generated_rows(
     let mut charge = WorkMemory::new();
     let mut rows = Vec::with_capacity(built.len());
     for row in built.iter() {
-        charge.charge_row(row)?;
-        rows.push(row.clone());
+        let mut row = row.clone();
+        if let Some(table_oid) = table_oid {
+            row.push(Value::Oid(table_oid));
+        }
+        charge.charge_row(&row)?;
+        rows.push(row);
     }
     Ok(GeneratedRows {
         columns,
         rows,
         charge,
     })
+}
+
+fn has_table_oid(relation: CatalogRelation) -> bool {
+    !relation.is_view()
+        && (matches!(relation, CatalogRelation::Monitoring(_))
+            || CatalogRelation::IN_PG_CATALOG.contains(&relation))
 }
 
 struct Row {
@@ -163,7 +180,11 @@ pub(crate) fn build(
         CatalogRelation::Type => type_rows(snapshot),
         CatalogRelation::Namespace => namespace_rows(snapshot),
         CatalogRelation::Index => index_rows(snapshot),
-        CatalogRelation::Constraint => constraint_rows(snapshot),
+        CatalogRelation::Constraint => {
+            let mut rows = constraint_rows(snapshot);
+            rows.extend(domain_constraint_rows(snapshot));
+            rows
+        }
         CatalogRelation::AttrDef => attrdef_rows(snapshot),
         CatalogRelation::Description => description_rows(snapshot),
         CatalogRelation::Database => database_rows(snapshot),
@@ -416,10 +437,25 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("relrewrite", oid(0))
                 .set("relfrozenxid", oid(0))
                 .set("relminmxid", oid(0))
+                .set("relacl", table_acl(snapshot, &entry.internal))
                 .done(),
         );
     }
     rows
+}
+
+fn table_acl(snapshot: &CatalogSnapshot, internal: &str) -> Value {
+    let mut items: Vec<Value> = snapshot
+        .grants
+        .iter()
+        .filter(|grant| grant.table == internal)
+        .map(|grant| Value::Text(grant.acl_item(&snapshot.user)))
+        .collect();
+    if items.is_empty() {
+        return Value::Null;
+    }
+    items.insert(0, Value::Text(crate::roles::owner_acl_item(&snapshot.user)));
+    Value::Array(Box::new(ArrayValue::new(ArrayElement::AclItem, items)))
 }
 
 struct AttributeRow<'a> {
@@ -1265,6 +1301,84 @@ fn constraint_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     rows
 }
 
+fn domain_constraint_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    domain_constraints(snapshot)
+        .into_iter()
+        .map(|constraint| {
+            Row::new(CatalogRelation::Constraint)
+                .set("oid", oid(constraint.oid))
+                .set("conname", text(&constraint.check.name))
+                .set("connamespace", oid(constraint.namespace))
+                .set("contype", text("c"))
+                .set("condeferrable", flag(false))
+                .set("condeferred", flag(false))
+                .set("convalidated", flag(constraint.check.validated))
+                .set("conrelid", oid(0))
+                .set("contypid", oid(constraint.domain))
+                .set("conindid", oid(0))
+                .set("conparentid", oid(0))
+                .set("confrelid", oid(0))
+                .set("confupdtype", text(" "))
+                .set("confdeltype", text(" "))
+                .set("confmatchtype", text(" "))
+                .set("conislocal", flag(true))
+                .set("coninhcount", small(0))
+                .set("connoinherit", flag(false))
+                .set("conbin", text(&constraint.check.expression))
+                .done()
+        })
+        .collect()
+}
+
+pub(crate) struct DomainConstraint<'a> {
+    pub(crate) oid: u32,
+    pub(crate) domain: u32,
+    pub(crate) namespace: u32,
+    pub(crate) check: &'a crate::user_types::DomainCheck,
+}
+
+impl DomainConstraint<'_> {
+    pub(crate) fn definition(&self) -> String {
+        let mut shown = format!("CHECK ({})", self.check.expression);
+        if !self.check.validated {
+            shown.push_str(" NOT VALID");
+        }
+        shown
+    }
+}
+
+pub(crate) fn domain_constraints(snapshot: &CatalogSnapshot) -> Vec<DomainConstraint<'_>> {
+    let mut requests = Vec::new();
+    let mut checks = Vec::new();
+    for found in snapshot.user_types.types() {
+        let Some(domain) = found.domain() else {
+            continue;
+        };
+        let namespace = snapshot
+            .schema_named(crate::schemas::schema_of(&found.name))
+            .map_or(oids::PUBLIC, |schema| schema.oid);
+        for check in &domain.checks {
+            requests.push(oids::OidRequest {
+                kind: b'd',
+                owner: found.name.clone(),
+                name: check.name.clone(),
+            });
+            checks.push((found.oid, namespace, check));
+        }
+    }
+    let assigned = oids::assign(oids::Space::Constraint, &requests);
+    checks
+        .into_iter()
+        .zip(assigned)
+        .map(|((domain, namespace, check), oid)| DomainConstraint {
+            oid,
+            domain,
+            namespace,
+            check,
+        })
+        .collect()
+}
+
 fn attrdef_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     snapshot
         .defaults
@@ -1347,6 +1461,11 @@ fn description_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             }),
         };
         rows.extend(row);
+    }
+    let extension_class =
+        CatalogRelation::Monitoring(super::monitoring::MonitoringRelation::Extension).oid();
+    for (extension, comment) in super::monitoring::extension_descriptions() {
+        rows.push(description(extension, extension_class, 0, comment));
     }
     rows
 }
