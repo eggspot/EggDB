@@ -507,7 +507,8 @@ fn application_name(database: usize, resource: &str) -> LockName {
 
 /// Takes the application lock `resource` of the active session in `mode`, as SQL Server's
 /// `sp_getapplock` does: waiting for other sessions to release it for at most `timeout`, or
-/// for as long as it takes when `timeout` is `None`. Resource names compare byte for byte.
+/// for as long as it takes when `timeout` is `None` or too long to have a deadline. Resource
+/// names compare byte for byte.
 pub(crate) fn take_application_lock(
     resource: &str,
     mode: Mode,
@@ -516,7 +517,7 @@ pub(crate) fn take_application_lock(
 ) -> SqlResult<ApplicationLockGrant> {
     let owner = active()?;
     let name = application_name(owner.database, resource);
-    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
     let mut held = held();
     if take(&mut held, name.clone(), owner.owner, mode, lasts) {
         return Ok(ApplicationLockGrant::AtOnce);

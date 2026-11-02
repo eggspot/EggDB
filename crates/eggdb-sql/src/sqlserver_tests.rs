@@ -1295,6 +1295,43 @@ fn a_connection_reset_rolls_back_and_restores_the_options_of_a_new_login() {
     );
 }
 
+#[test]
+fn a_connection_reset_deallocates_cursors_and_drops_temporary_procedures() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    batch(&mut session, "CREATE PROCEDURE #answer AS SELECT 42 AS n").unwrap();
+    batch(
+        &mut session,
+        "DECLARE c CURSOR GLOBAL FOR SELECT 1 AS n; OPEN c",
+    )
+    .unwrap();
+    let status = |session: &mut Session<'_>| {
+        rows_of(&batch(session, "SELECT CURSOR_STATUS('global', 'c') AS s").unwrap())
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.to_text())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(status(&mut session), ["1"]);
+    assert_eq!(
+        rows_of(&batch(&mut session, "EXEC #answer").unwrap()),
+        vec![vec![Value::Integer(42)]]
+    );
+    session.reset_connection(false).unwrap();
+    assert_eq!(status(&mut session), ["-3"]);
+    assert_eq!(
+        codes(&batch(&mut session, "EXEC #answer").unwrap()),
+        vec![Some(2812)]
+    );
+    let redeclared = batch(
+        &mut session,
+        "DECLARE c CURSOR GLOBAL FOR SELECT 2 AS n; OPEN c",
+    )
+    .unwrap();
+    assert!(codes(&redeclared).iter().all(Option::is_none));
+    assert_eq!(status(&mut session), ["1"]);
+}
+
 fn column_types(session: &mut Session<'_>, text: &str) -> Vec<Option<crate::SqlType>> {
     let mut last = None;
     session

@@ -267,3 +267,16 @@ fn invalid_arguments_return_minus_999_with_sql_servers_numbers() {
     );
     assert_eq!(errors(&steps), vec![Some(1224)]);
 }
+
+#[test]
+fn a_time_out_too_long_for_a_deadline_waits_without_one() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    assert_eq!(
+        status(
+            &mut session,
+            "sp_getapplock @Resource = N'Forever', @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 9223372036854775807"
+        ),
+        (Value::Integer(0), vec![])
+    );
+}

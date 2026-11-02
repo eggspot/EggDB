@@ -249,20 +249,24 @@ impl BcpFormat {
         }
     }
 
-    /// The layout of bcp's native format (`bcp ... -n`) for these columns, as `bcp format
-    /// ... -n` describes it: integers, `bit`, floats, `money`, `datetime` and
+    /// The layout of bcp's native format (`bcp ... -n`) for these columns: each column laid
+    /// out as `bcp format ... -n` lays out the SQL Server type EggDB reports for it in
+    /// `sys.columns`. `smallint`, `int`, `bigint`, `bit`, `real`, `float`, `datetime` and
     /// `uniqueidentifier` in their fixed sizes (with a one-byte length prefix when the column
-    /// allows NULL), `decimal` and the date and time types always with a one-byte prefix,
-    /// text as UTF-16 (`SQLNCHAR`) with a two-byte prefix (an eight-byte one for `max`), and
-    /// binary data with an eight-byte prefix. A length prefix of all `0xFF` bytes is NULL.
-    pub fn native(columns: &[BulkColumn]) -> Self {
-        Self {
+    /// allows NULL), `decimal`, `numeric` and the date and time types always with a one-byte
+    /// prefix, `nvarchar(n)` and `nchar(n)` as UTF-16 (`SQLNCHAR`) with a two-byte prefix,
+    /// `nvarchar(max)` with an eight-byte one, and `varbinary(max)` with an eight-byte one. A
+    /// length prefix of all `0xFF` bytes is NULL. A column of a type SQL Server has no native
+    /// layout for (an interval, an array, a user-defined type) is an error: such a file needs
+    /// a format file.
+    pub fn native(columns: &[BulkColumn]) -> SqlResult<Self> {
+        Ok(Self {
             fields: columns
                 .iter()
                 .enumerate()
                 .map(|(index, column)| native_field(column, index))
-                .collect(),
-        }
+                .collect::<SqlResult<_>>()?,
+        })
     }
 
     /// The layout of bcp's character formats for these columns: `SQLCHAR` (UTF-8, `-c`) or,
@@ -276,7 +280,7 @@ impl BcpFormat {
         };
         let encode = |bytes: &[u8]| -> Vec<u8> {
             if unicode {
-                bytes.iter().flat_map(|byte| [*byte, 0]).collect()
+                widened_terminator(bytes)
             } else {
                 bytes.to_vec()
             }
@@ -346,28 +350,57 @@ impl BcpFormat {
     }
 }
 
+fn push_escaped(character: char, text: &mut String) {
+    match character {
+        '\t' => text.push_str("\\t"),
+        '\n' => text.push_str("\\n"),
+        '\r' => text.push_str("\\r"),
+        '\0' => text.push_str("\\0"),
+        '\\' => text.push_str("\\\\"),
+        '"' => text.push_str("\\\""),
+        other => text.push(other),
+    }
+}
+
+fn is_ascii_utf16(bytes: &[u8]) -> bool {
+    bytes.len().is_multiple_of(2)
+        && bytes.iter().step_by(2).all(u8::is_ascii)
+        && bytes.iter().skip(1).step_by(2).all(|byte| *byte == 0)
+}
+
 fn escaped_terminator(terminator: &[u8], data: FieldData) -> String {
-    let characters: Vec<u8> = if data == FieldData::NChar {
-        terminator.iter().step_by(2).copied().collect()
-    } else {
-        terminator.to_vec()
-    };
     let mut text = String::new();
-    for byte in characters {
-        match byte {
-            b'\t' => text.push_str("\\t"),
-            b'\n' => text.push_str("\\n"),
-            b'\r' => text.push_str("\\r"),
-            0 => text.push_str("\\0"),
-            b'\\' => text.push_str("\\\\"),
-            b'"' => text.push_str("\\\""),
-            other => text.push(char::from(other)),
-        }
+    let decoded = match data {
+        FieldData::NChar if !is_ascii_utf16(terminator) => utf16_text(terminator).ok(),
+        FieldData::NChar => None,
+        _ => std::str::from_utf8(terminator).ok().map(str::to_owned),
+    };
+    match decoded {
+        Some(characters) => characters
+            .chars()
+            .for_each(|character| push_escaped(character, &mut text)),
+        None => terminator
+            .iter()
+            .for_each(|byte| push_escaped(char::from(*byte), &mut text)),
     }
     text
 }
 
-fn native_field(column: &BulkColumn, index: usize) -> BcpField {
+fn no_native_layout(column: &BulkColumn) -> SqlError {
+    SqlError::new(
+        SqlState::FEATURE_NOT_SUPPORTED,
+        format!(
+            "the column {} is of type {}, which bcp's native format has no layout for",
+            column.name,
+            column.sql_type.name()
+        ),
+    )
+    .with_hint(
+        "Describe the data file with a bcp format file (bcp's -f, eggdb import's --format-file).",
+    )
+}
+
+fn native_field(column: &BulkColumn, index: usize) -> SqlResult<BcpField> {
     let native = |native: NativeType| {
         let mut field = BcpField::new(FieldData::Native(native), Some(index), &column.name);
         field.prefix = u8::from(column.nullable || native.always_prefixed());
@@ -385,14 +418,15 @@ fn native_field(column: &BulkColumn, index: usize) -> BcpField {
         }
         field
     };
-    match column.sql_type {
+    Ok(match column.sql_type {
         SqlType::SmallInt => native(NativeType::SmallInt),
         SqlType::Integer => native(NativeType::Int),
         SqlType::BigInt => native(NativeType::BigInt),
         SqlType::Boolean => native(NativeType::Bit),
         SqlType::Real => native(NativeType::Real),
         SqlType::Double => native(NativeType::Float),
-        SqlType::Numeric(_) => native(NativeType::Decimal),
+        SqlType::Numeric(Some(_)) => native(NativeType::Decimal),
+        SqlType::Numeric(None) => native(NativeType::Numeric),
         SqlType::Date => native(NativeType::Date),
         SqlType::Time(_) => native(NativeType::Time),
         SqlType::Timestamp(Some(3)) => native(NativeType::DateTime),
@@ -405,8 +439,9 @@ fn native_field(column: &BulkColumn, index: usize) -> BcpField {
             field
         }
         SqlType::Varchar(length) | SqlType::Bpchar(length) => text(length),
-        _ => text(None),
-    }
+        SqlType::Text | SqlType::Json | SqlType::Jsonb => text(None),
+        _ => return Err(no_native_layout(column)),
+    })
 }
 
 fn format_file_terminator(text: &str) -> SqlResult<Vec<u8>> {
@@ -436,14 +471,33 @@ fn format_file_terminator(text: &str) -> SqlResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn unicode_terminator(bytes: Vec<u8>, data: FieldData) -> Vec<u8> {
-    if data != FieldData::NChar {
-        return bytes;
-    }
-    match std::str::from_utf8(&bytes) {
+fn widened_terminator(bytes: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(bytes) {
         Ok(text) => text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
-        Err(_) => bytes,
+        Err(_) => bytes.iter().flat_map(|byte| [*byte, 0]).collect(),
     }
+}
+
+fn is_utf16_shaped(bytes: &[u8]) -> bool {
+    bytes.len().is_multiple_of(2) && bytes.iter().skip(1).step_by(2).all(|byte| *byte == 0)
+}
+
+fn unicode_terminator(bytes: Vec<u8>, data: FieldData) -> Vec<u8> {
+    if data != FieldData::NChar || is_utf16_shaped(&bytes) {
+        bytes
+    } else {
+        widened_terminator(&bytes)
+    }
+}
+
+fn reads_bytes(field: &BcpField) -> bool {
+    field.prefix > 0 || !field.terminator.is_empty() || field.fixed_length() > 0
+}
+
+fn reads_nothing(described: &str) -> SqlError {
+    format_error(format!(
+        "{described} has no length prefix, no terminator and a length of 0, so it reads nothing from the data file"
+    ))
 }
 
 fn line_tokens(line: &str) -> SqlResult<Vec<String>> {
@@ -520,6 +574,11 @@ fn parse_non_xml(text: &str) -> SqlResult<BcpFormat> {
             "the format file's second line is '{count_line}', not its number of fields"
         ))
     })?;
+    if count == 0 {
+        return Err(format_error(
+            "the format file describes 0 fields; a row needs at least one",
+        ));
+    }
     let mut fields = Vec::with_capacity(count.min(4096));
     for line in lines {
         if fields.len() == count {
@@ -550,6 +609,9 @@ fn parse_non_xml(text: &str) -> SqlResult<BcpFormat> {
             ))
         })?;
         field.column = order.checked_sub(1);
+        if !reads_bytes(&field) {
+            return Err(reads_nothing(&format!("the format file line '{line}'")));
+        }
         fields.push(field);
     }
     if fields.len() != count {
@@ -727,6 +789,12 @@ fn parse_xml(text: &str) -> SqlResult<BcpFormat> {
         return Err(format_error(
             "the XML format file's <RECORD> has no <FIELD>",
         ));
+    }
+    if let Some(at) = fields.iter().position(|field| !reads_bytes(field)) {
+        let id = ids.get(at).map_or("", String::as_str);
+        return Err(reads_nothing(&format!(
+            "the <FIELD ID=\"{id}\"> of the XML format file"
+        )));
     }
     Ok(BcpFormat { fields })
 }
@@ -1002,6 +1070,11 @@ impl<'r> BcpFileReader<'r> {
                 }
             };
         }
+        if self.bytes.start == row_start {
+            return Err(format_error(format!(
+                "row {number} of the bcp data file read no bytes, so the layout cannot read the file"
+            )));
+        }
         self.rows_read = number;
         Ok(true)
     }
@@ -1029,7 +1102,7 @@ impl BulkRows for BcpFileReader<'_> {
     fn columns_known(&mut self, columns: &[BulkColumn]) -> SqlResult<()> {
         match &mut self.format {
             Some(format) => format.learn_columns(columns),
-            None => self.format = Some(BcpFormat::native(columns)),
+            None => self.format = Some(BcpFormat::native(columns)?),
         }
         Ok(())
     }
@@ -1670,7 +1743,7 @@ pub fn write_bcp_table(
     let layout = match format {
         BcpFileFormat::Character(terminators) => BcpFormat::character(&columns, terminators, false),
         BcpFileFormat::Unicode(terminators) => BcpFormat::character(&columns, terminators, true),
-        BcpFileFormat::Native => BcpFormat::native(&columns),
+        BcpFileFormat::Native => BcpFormat::native(&columns)?,
     };
     let mut writer = BcpFileWriter::new(output, layout.clone());
     for row in &result.rows {
@@ -1778,7 +1851,7 @@ mod tests {
     #[test]
     fn native_files_write_the_bytes_they_read() {
         let mut written = Vec::new();
-        let mut writer = BcpFileWriter::new(&mut written, BcpFormat::native(&table()));
+        let mut writer = BcpFileWriter::new(&mut written, BcpFormat::native(&table()).unwrap());
         writer.write_row(&expected_row()).unwrap();
         let mut nulls = vec![Value::Integer(8)];
         nulls.extend(std::iter::repeat_n(Value::Null, 7));
@@ -1788,7 +1861,7 @@ mod tests {
         expected.extend_from_slice(NATIVE_NULL_ROW);
         assert_eq!(written, expected);
         let mut no_null = Vec::new();
-        let mut writer = BcpFileWriter::new(&mut no_null, BcpFormat::native(&table()));
+        let mut writer = BcpFileWriter::new(&mut no_null, BcpFormat::native(&table()).unwrap());
         assert!(writer.write_row(&[Value::Null]).is_err());
     }
 
@@ -1815,7 +1888,7 @@ mod tests {
             Value::Text(String::new()),
         ];
         let mut written = Vec::new();
-        BcpFileWriter::new(&mut written, BcpFormat::native(&columns))
+        BcpFileWriter::new(&mut written, BcpFormat::native(&columns).unwrap())
             .write_row(&row)
             .unwrap();
         assert_eq!(&written[..6], &[5, 0xC8, 0x7C, 0xFD, 0x76, 0x69]);
@@ -1960,6 +2033,119 @@ mod tests {
                 Value::Text(String::new())
             ]]
         );
+    }
+
+    #[test]
+    fn layouts_that_read_no_bytes_for_a_row_are_refused_instead_of_looping() {
+        for text in [
+            "14.0\n0\n",
+            "14.0\n1\n1 SQLCHAR 0 0 \"\" 1 id \"\"\n",
+            "<BCPFORMAT><RECORD><FIELD ID=\"1\" xsi:type=\"CharFixed\"/></RECORD><ROW><COLUMN SOURCE=\"1\" NAME=\"a\" xsi:type=\"SQLVARYCHAR\"/></ROW></BCPFORMAT>",
+            "<BCPFORMAT><RECORD><FIELD ID=\"1\" xsi:type=\"NativeFixed\"/></RECORD><ROW></ROW></BCPFORMAT>",
+            "<BCPFORMAT><RECORD><FIELD ID=\"1\" xsi:type=\"NativeFixed\"/></RECORD><ROW><COLUMN SOURCE=\"1\" NAME=\"a\" xsi:type=\"SQLVARYBIN\"/></ROW></BCPFORMAT>",
+        ] {
+            assert_eq!(
+                BcpFormat::parse(text).unwrap_err().vendor_code(),
+                Some(4823),
+                "{text}"
+            );
+        }
+        let fixed_int = BcpFormat::parse(
+            "<BCPFORMAT><RECORD><FIELD ID=\"1\" xsi:type=\"NativeFixed\"/></RECORD><ROW><COLUMN SOURCE=\"1\" NAME=\"a\" xsi:type=\"SQLINT\"/></ROW></BCPFORMAT>",
+        )
+        .unwrap();
+        let mut input: &[u8] = &[3, 0, 0, 0];
+        let mut reader = BcpFileReader::new(&mut input, fixed_int);
+        assert_eq!(
+            read_all(&mut reader, 1).unwrap(),
+            vec![vec![Value::Integer(3)]]
+        );
+        let mut input: &[u8] = &[1, 2, 3];
+        let mut reader = BcpFileReader::new(&mut input, BcpFormat { fields: Vec::new() });
+        assert_eq!(
+            read_all(&mut reader, 1).unwrap_err().vendor_code(),
+            Some(4823)
+        );
+        let mut input: &[u8] = &[1, 2, 3];
+        let mut reader = BcpFileReader::native(&mut input);
+        reader.columns_known(&[]).unwrap();
+        assert_eq!(
+            read_all(&mut reader, 0).unwrap_err().vendor_code(),
+            Some(4823)
+        );
+    }
+
+    #[test]
+    fn unicode_format_files_keep_the_utf16_terminators_bcp_format_w_writes() {
+        let text = "14.0\n2\n1       SQLNCHAR            0       14      \"\\t\\0\"     1     id     \"\"\n2       SQLNCHAR            0       100     \"\\r\\0\\n\\0\"   2     name   SQL_Latin1_General_CP1_CI_AS\n";
+        let format = BcpFormat::parse(text).unwrap();
+        let data: Vec<u8> = "7\t\u{e9}t\u{e9}\r\n8\t\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut input = data.as_slice();
+        let mut reader = BcpFileReader::new(&mut input, format.clone());
+        assert_eq!(
+            read_all(&mut reader, 2).unwrap(),
+            vec![
+                vec![
+                    Value::Text("7".to_owned()),
+                    Value::Text("\u{e9}t\u{e9}".to_owned())
+                ],
+                vec![Value::Text("8".to_owned()), Value::Null],
+            ]
+        );
+        let written = format.to_format_file();
+        assert!(written.contains("\t\"\\t\\0\"\t"), "{written}");
+        assert!(written.contains("\t\"\\r\\0\\n\\0\"\t"), "{written}");
+        assert_eq!(BcpFormat::parse(&written).unwrap(), format);
+        let xml = BcpFormat::parse(
+            r#"<BCPFORMAT xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><RECORD><FIELD ID="1" xsi:type="NCharTerm" TERMINATOR="\t\0" MAX_LENGTH="14"/><FIELD ID="2" xsi:type="NCharTerm" TERMINATOR="\r\0\n\0" MAX_LENGTH="100"/></RECORD><ROW><COLUMN SOURCE="1" NAME="id" xsi:type="SQLNVARCHAR"/><COLUMN SOURCE="2" NAME="name" xsi:type="SQLNVARCHAR"/></ROW></BCPFORMAT>"#,
+        )
+        .unwrap();
+        let mut input = data.as_slice();
+        let mut reader = BcpFileReader::new(&mut input, xml);
+        assert_eq!(read_all(&mut reader, 2).unwrap().len(), 2);
+        let narrow = BcpFormat::parse(
+            "14.0\n2\n1 SQLNCHAR 0 14 \"\\t\" 1 id \"\"\n2 SQLNCHAR 0 100 \"\\r\\n\" 2 name \"\"\n",
+        )
+        .unwrap();
+        assert_eq!(narrow, format);
+        let unicode = BcpFormat::character(
+            &[
+                column("id", SqlType::Integer, false),
+                column("name", SqlType::Text, true),
+            ],
+            &BcpTerminators::default(),
+            true,
+        );
+        let file = unicode.to_format_file();
+        assert!(file.contains("\t\"\\t\\0\"\t"), "{file}");
+        assert!(file.contains("\t\"\\n\\0\"\t"), "{file}");
+        assert_eq!(BcpFormat::parse(&file).unwrap(), unicode);
+    }
+
+    #[test]
+    fn native_layouts_refuse_columns_bcp_has_no_native_layout_for() {
+        let columns = vec![
+            column("id", SqlType::Integer, false),
+            column(
+                "span",
+                SqlType::Interval {
+                    fields: None,
+                    precision: None,
+                },
+                true,
+            ),
+        ];
+        let error = BcpFormat::native(&columns).unwrap_err();
+        assert_eq!(error.state().code(), "0A000");
+        assert!(error.message().contains("span"), "{error}");
+        let mut input: &[u8] = &[1, 0, 0, 0];
+        let mut reader = BcpFileReader::native(&mut input);
+        assert!(reader.columns_known(&columns).is_err());
+        let numeric = BcpFormat::native(&[column("n", SqlType::Numeric(None), true)]).unwrap();
+        assert!(numeric.to_format_file().contains("\tSQLNUMERIC\t1\t19\t"));
     }
 
     #[test]

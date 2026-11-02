@@ -185,3 +185,58 @@ fn member_as_a_column_alias_still_parses() {
     let mut session = session(&store);
     assert_eq!(column(&mut session, "SELECT 1 member FROM dual"), ["1"]);
 }
+
+fn three_valued(condition: &str) -> String {
+    format!(
+        "IF {condition} THEN INSERT INTO log VALUES (0, 'TRUE'); \
+         ELSIF NOT ({condition}) THEN INSERT INTO log VALUES (0, 'FALSE'); \
+         ELSE INSERT INTO log VALUES (0, 'NULL'); END IF;"
+    )
+}
+
+#[test]
+fn submultiset_of_and_member_of_follow_oracles_null_rules() {
+    let cases = [
+        ("empty SUBMULTISET OF nul", "TRUE"),
+        ("empty SUBMULTISET OF v", "TRUE"),
+        ("v SUBMULTISET OF nul", "NULL"),
+        ("nul SUBMULTISET OF v", "NULL"),
+        ("with_null SUBMULTISET OF v", "NULL"),
+        ("one_seven SUBMULTISET OF v_null", "NULL"),
+        ("one_seven SUBMULTISET OF v", "FALSE"),
+        ("one_two SUBMULTISET OF v_null", "TRUE"),
+        ("v SUBMULTISET OF with_null", "FALSE"),
+        ("n MEMBER OF empty", "FALSE"),
+        ("1 MEMBER OF empty", "FALSE"),
+        ("n MEMBER OF v", "NULL"),
+        ("5 MEMBER OF with_null", "NULL"),
+        ("1 MEMBER OF with_null", "TRUE"),
+        ("1 MEMBER OF nul", "NULL"),
+    ];
+    for (condition, expected) in cases {
+        let store = MemoryStore::default();
+        let mut session = session(&store);
+        run(
+            &mut session,
+            &format!(
+                "DECLARE \
+                   TYPE num_tab IS TABLE OF NUMBER; \
+                   v num_tab := num_tab(1, 2, 2, 3); \
+                   v_null num_tab := num_tab(1, 2, NULL); \
+                   with_null num_tab := num_tab(1, NULL); \
+                   one_seven num_tab := num_tab(1, 7); \
+                   one_two num_tab := num_tab(1, 2); \
+                   empty num_tab := num_tab(); \
+                   nul num_tab; \
+                   n NUMBER; \
+                 BEGIN {} END;",
+                three_valued(condition)
+            ),
+        );
+        assert_eq!(
+            column(&mut session, "SELECT msg FROM log"),
+            [expected],
+            "{condition}"
+        );
+    }
+}

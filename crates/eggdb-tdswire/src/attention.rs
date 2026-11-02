@@ -8,6 +8,7 @@ const WATCHER_STACK_BYTES: usize = 64 * 1024;
 #[derive(Default)]
 struct WatchState {
     running: bool,
+    batch: u64,
     seen: bool,
     closed: bool,
 }
@@ -41,15 +42,29 @@ pub(crate) struct AttentionWatch {
     signal: CancelSignal,
 }
 
+fn batch_to_watch(shared: &Shared) -> Option<u64> {
+    let guard = shared.wait_while(shared.lock(), |state| !state.running && !state.closed);
+    (!guard.closed).then_some(guard.batch)
+}
+
+fn bytes_arrived_during(shared: &Shared, batch: u64, signal: &CancelSignal) -> bool {
+    let mut guard = shared.lock();
+    if guard.running && guard.batch == batch {
+        guard.seen = true;
+        signal.cancel();
+    }
+    let guard = shared.wait_while(guard, |state| {
+        state.running && state.batch == batch && !state.closed
+    });
+    !guard.closed
+}
+
 fn watch(shared: &Shared, socket: &TcpStream, signal: &CancelSignal) {
     let mut probe = [0u8; 1];
     loop {
-        {
-            let guard = shared.wait_while(shared.lock(), |state| !state.running && !state.closed);
-            if guard.closed {
-                return;
-            }
-        }
+        let Some(batch) = batch_to_watch(shared) else {
+            return;
+        };
         let arrived = match socket.peek(&mut probe) {
             Ok(_) => true,
             Err(error)
@@ -62,16 +77,7 @@ fn watch(shared: &Shared, socket: &TcpStream, signal: &CancelSignal) {
             }
             Err(_) => true,
         };
-        if !arrived {
-            continue;
-        }
-        let mut guard = shared.lock();
-        if guard.running {
-            guard.seen = true;
-            signal.cancel();
-        }
-        let guard = shared.wait_while(guard, |state| state.running && !state.closed);
-        if guard.closed {
+        if arrived && !bytes_arrived_during(shared, batch, signal) {
             return;
         }
     }
@@ -113,6 +119,7 @@ impl AttentionWatch {
         }
         let mut state = self.shared.lock();
         state.running = true;
+        state.batch = state.batch.wrapping_add(1);
         state.seen = false;
         self.shared.changed.notify_all();
     }
@@ -145,5 +152,55 @@ impl Drop for AttentionWatch {
         {
             let _ = socket.shutdown(Shutdown::Both);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Shared, batch_to_watch, bytes_arrived_during};
+    use eggdb_sql::CancelSignal;
+
+    fn begin(shared: &Shared) {
+        let mut state = shared.lock();
+        state.running = true;
+        state.batch = state.batch.wrapping_add(1);
+        state.seen = false;
+    }
+
+    fn end(shared: &Shared) {
+        shared.lock().running = false;
+    }
+
+    #[test]
+    fn bytes_that_arrive_during_a_batch_cancel_it() {
+        let shared = Shared::default();
+        let signal = CancelSignal::default();
+        begin(&shared);
+        let batch = batch_to_watch(&shared).unwrap();
+        let watching_on = std::thread::scope(|scope| {
+            let watcher = scope.spawn(|| bytes_arrived_during(&shared, batch, &signal));
+            while !signal.is_cancelled() {
+                std::thread::yield_now();
+            }
+            end(&shared);
+            shared.changed.notify_all();
+            watcher.join().unwrap()
+        });
+        assert!(watching_on);
+        assert!(shared.lock().seen);
+    }
+
+    #[test]
+    fn bytes_seen_after_the_batch_ended_do_not_cancel_the_next_one() {
+        let shared = Shared::default();
+        let signal = CancelSignal::default();
+        begin(&shared);
+        let batch = batch_to_watch(&shared).unwrap();
+        end(&shared);
+        begin(&shared);
+        assert!(bytes_arrived_during(&shared, batch, &signal));
+        assert!(!signal.is_cancelled());
+        assert!(!shared.lock().seen);
+        assert_eq!(batch_to_watch(&shared), Some(batch + 1));
     }
 }

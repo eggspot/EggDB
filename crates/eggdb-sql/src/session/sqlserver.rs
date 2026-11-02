@@ -306,9 +306,10 @@ impl<'s> Session<'s> {
     }
 
     /// Resets the session as SQL Server resets a connection a pool hands out again: an open
-    /// transaction rolls back unless `keep_transaction`, and the `SET` options (`eggdb.dialect`
+    /// transaction rolls back unless `keep_transaction`, the `SET` options (`eggdb.dialect`
     /// among them), `IDENTITY_INSERT`, `@@ROWCOUNT` and `SCOPE_IDENTITY()` return to their
-    /// state after login. The user, the database and `@@SPID` stay. An error is the rollback's.
+    /// state after login, cursors are deallocated and temporary procedures (`#name`) dropped.
+    /// The user, the database and `@@SPID` stay. An error is the rollback's.
     pub fn reset_connection(&mut self, keep_transaction: bool) -> SqlResult<()> {
         let rolled_back = if keep_transaction || !self.in_block() {
             Ok(())
@@ -320,6 +321,14 @@ impl<'s> Session<'s> {
         settings.sqlserver.no_count = false;
         settings.sqlserver.implicit_transactions = false;
         settings.sqlserver.format_only = false;
+        settings.sqlserver.cursors.clear();
+        self.tsql_cursors.clear();
+        self.temporary.discard_prefix(&crate::encoding::routine_key(
+            &crate::temporary::internal_name("#"),
+        ));
+        if !self.in_block() {
+            self.temporary.commit();
+        }
         self.pending_bulk_load = None;
         self.dialect = self.connection_dialect;
         self.sync_transaction_count();

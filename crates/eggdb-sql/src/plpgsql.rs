@@ -13,7 +13,10 @@ mod run_tests;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use collections::{CollectionShape, bulk_exceptions_shape, bulk_rowcount_shape};
+pub(crate) use collections::{
+    CollectionShape, MAX_COLLECTION_ELEMENTS, bulk_exceptions_shape, bulk_rowcount_shape,
+    too_many_elements,
+};
 pub(crate) use conditions::{condition_name, condition_states};
 pub(crate) use frame::{FrameVariable, RoutineFrame};
 pub(crate) use raise::take_raised_notices;

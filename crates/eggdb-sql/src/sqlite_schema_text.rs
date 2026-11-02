@@ -1,7 +1,7 @@
 use crate::ast::CreateTable;
 use crate::dialect::Dialect;
-use crate::encoding::{NAMESPACE, corrupt, table_key};
-use crate::error::SqlResult;
+use crate::encoding::{NAMESPACE, table_key};
+use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
 use crate::session::QueryResult;
 use crate::store::{KeyValueRead, KeyValueWrite};
@@ -27,16 +27,44 @@ fn encode(generated: &str, original: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn decode(bytes: &[u8]) -> Option<(&str, &str)> {
-    let (&version, rest) = bytes.split_first()?;
-    if version != RECORD_VERSION {
-        return None;
+#[derive(Debug, PartialEq, Eq)]
+enum Unreadable {
+    Damaged,
+    NewerVersion(u8),
+}
+
+fn decode(bytes: &[u8]) -> Result<(&str, &str), Unreadable> {
+    let (&version, rest) = bytes.split_first().ok_or(Unreadable::Damaged)?;
+    if version > RECORD_VERSION {
+        return Err(Unreadable::NewerVersion(version));
     }
-    let (length, rest) = rest.split_first_chunk::<LENGTH_BYTES>()?;
-    let length = usize::try_from(u32::from_le_bytes(*length)).ok()?;
-    let generated = std::str::from_utf8(rest.get(..length)?).ok()?;
-    let original = std::str::from_utf8(rest.get(length..)?).ok()?;
-    Some((generated, original))
+    if version != RECORD_VERSION {
+        return Err(Unreadable::Damaged);
+    }
+    let texts = || {
+        let (length, rest) = rest.split_first_chunk::<LENGTH_BYTES>()?;
+        let length = usize::try_from(u32::from_le_bytes(*length)).ok()?;
+        let generated = std::str::from_utf8(rest.get(..length)?).ok()?;
+        let original = std::str::from_utf8(rest.get(length..)?).ok()?;
+        Some((generated, original))
+    };
+    texts().ok_or(Unreadable::Damaged)
+}
+
+fn kept_original(bytes: &[u8], generated: &str) -> SqlResult<Option<String>> {
+    match decode(bytes) {
+        Ok((kept_generated, original)) => {
+            Ok((kept_generated == generated).then(|| original.to_owned()))
+        }
+        Err(Unreadable::Damaged) => Ok(None),
+        Err(Unreadable::NewerVersion(version)) => Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            format!(
+                "the SQL CREATE TABLE text was written in format version {version}, which this EggDB cannot read"
+            ),
+        )
+        .with_hint("Open the file with the EggDB release that wrote it, or a newer one.")),
+    }
 }
 
 pub(crate) fn create_table(
@@ -68,8 +96,7 @@ pub(crate) fn original_text(
     let Some(bytes) = reader.get(&text_key(table))? else {
         return Ok(None);
     };
-    let (kept_generated, original) = decode(&bytes).ok_or_else(|| corrupt("CREATE TABLE text"))?;
-    Ok((kept_generated == generated).then(|| original.to_owned()))
+    kept_original(&bytes, generated)
 }
 
 pub(crate) fn forget(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
@@ -78,14 +105,14 @@ pub(crate) fn forget(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, encode};
+    use super::{Unreadable, decode, encode, kept_original};
 
     #[test]
     fn a_record_keeps_both_texts() {
         let record = encode("CREATE TABLE t (a INTEGER)", "CREATE TABLE t(a int)");
         assert_eq!(
-            record.as_deref().and_then(decode),
-            Some(("CREATE TABLE t (a INTEGER)", "CREATE TABLE t(a int)"))
+            record.as_deref().map(decode),
+            Some(Ok(("CREATE TABLE t (a INTEGER)", "CREATE TABLE t(a int)")))
         );
     }
 
@@ -93,12 +120,27 @@ mod tests {
     fn a_damaged_record_is_refused_without_a_panic() {
         for damaged in [
             &[][..],
-            &[2, 0, 0, 0, 0][..],
+            &[0, 0, 0, 0, 0][..],
             &[1, 9, 0, 0][..],
             &[1, 9, 0, 0, 0, b'a'][..],
             &[1, 1, 0, 0, 0, 0xFF][..],
         ] {
-            assert_eq!(decode(damaged), None);
+            assert_eq!(decode(damaged), Err(Unreadable::Damaged));
         }
+        assert_eq!(decode(&[2, 0, 0, 0, 0]), Err(Unreadable::NewerVersion(2)));
+    }
+
+    #[test]
+    fn a_damaged_record_falls_back_to_the_generated_text_and_a_newer_one_is_named() {
+        let generated = "CREATE TABLE t (a INTEGER)";
+        assert_eq!(kept_original(&[1, 9, 0, 0], generated).unwrap(), None);
+        let record = encode(generated, "CREATE TABLE t(a int)").unwrap();
+        assert_eq!(
+            kept_original(&record, generated).unwrap().as_deref(),
+            Some("CREATE TABLE t(a int)")
+        );
+        let error = kept_original(&[7, 0, 0, 0, 0], generated).unwrap_err();
+        assert_eq!(error.state().code(), "0A000");
+        assert!(error.message().contains("format version 7"), "{error}");
     }
 }

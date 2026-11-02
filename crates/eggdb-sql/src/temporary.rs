@@ -223,6 +223,17 @@ impl TemporaryObjects {
         }
     }
 
+    pub(crate) fn discard_prefix(&mut self, prefix: &[u8]) {
+        let keys: Vec<Vec<u8>> = self
+            .entries
+            .range(prefix.to_vec()..prefix_end(prefix))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            self.delete(&key);
+        }
+    }
+
     pub(crate) fn discard(&mut self) {
         let keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
         for key in keys {

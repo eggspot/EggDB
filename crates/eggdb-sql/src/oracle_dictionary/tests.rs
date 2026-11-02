@@ -417,3 +417,39 @@ fn postgresql_catalog_queries_run_as_postgresql_while_the_connection_reads_oracl
     );
     assert!(run(&mut session, "SELECT 1::int FROM dual").is_err());
 }
+
+#[test]
+fn only_a_single_statement_qualifying_pg_catalog_runs_as_postgresql() {
+    let store = MemoryStore::default();
+    hr_schema(&store);
+    let mut session = hr_session(&store);
+    assert_eq!(
+        last(&mut session, "SELECT 'pg_catalog.pg_class' AS s FROM dual"),
+        "S\npg_catalog.pg_class\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT 1 AS n FROM dual -- reads pg_catalog.pg_class\n"
+        ),
+        "N\n1\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT 1 AS n FROM dual /* pg_catalog.x */"),
+        "N\n1\nSELECT 1"
+    );
+    let mut outputs = Vec::new();
+    let _ = session.execute(
+        "SELECT 1 AS n FROM dual; SELECT c.relname AS r FROM pg_catalog.pg_class c WHERE 1 = 0",
+        &mut |result| outputs.push(render(&result)),
+    );
+    assert_eq!(outputs.first().map(String::as_str), Some("N\n1\nSELECT 1"));
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*)::int AS n FROM \"pg_catalog\".pg_namespace WHERE nspname = 'hr';"
+        ),
+        "n\n1\nSELECT 1"
+    );
+    assert_eq!(session.dialect(), Dialect::Oracle);
+}

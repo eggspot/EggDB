@@ -938,6 +938,7 @@ fn move_column(
         ColumnPlacement::After(anchor) => {
             let after = table
                 .column_index(&anchor.text)
+                .filter(|&after| after != from)
                 .ok_or_else(|| unknown_mysql_column(&table, anchor))?;
             if after < from { after + 1 } else { after }
         }

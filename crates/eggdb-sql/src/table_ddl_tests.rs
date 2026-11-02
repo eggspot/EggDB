@@ -68,6 +68,9 @@ fn mysql_first_and_after_move_columns_with_their_values() {
     assert_eq!(duplicate.vendor_code(), Some(1062));
     let missing = fails(&mut session, "ALTER TABLE t ADD COLUMN e INT AFTER nope");
     assert_eq!(missing.vendor_code(), Some(1054));
+    let itself = fails(&mut session, "ALTER TABLE t MODIFY a BIGINT AFTER a");
+    assert_eq!(itself.vendor_code(), Some(1054));
+    assert_eq!(itself.message(), "Unknown column 'a' in 't'");
     assert_eq!(
         last(&mut session, "SELECT * FROM t WHERE id = 1"),
         "d|a|b|id\nNULL|7|10|1\nSELECT 1"
