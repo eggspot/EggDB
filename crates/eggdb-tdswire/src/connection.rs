@@ -1,3 +1,4 @@
+use crate::attention::AttentionWatch;
 use crate::bulk::{BulkInput, BulkLoadError, BulkReader};
 use crate::messages::{
     ATTENTION, BULK_LOAD, ENCRYPT_CLIENT_CERT, ENCRYPT_NOT_SUP, ENCRYPT_OFF, ENCRYPT_ON,
@@ -7,7 +8,7 @@ use crate::messages::{
     parse_transaction_manager_request, prelogin_response,
 };
 use crate::procedures::PreparedBatches;
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
+use crate::server::{Shared, take_slot};
 use crate::tokens::{
     self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
     ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE, ENV_ROLLBACK_TRANSACTION,
@@ -15,9 +16,11 @@ use crate::tokens::{
 };
 use crate::types::{declared_wire_columns, push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, Message, POLL_INTERVAL, Packet, Wire, WireError};
+use eggdb_platform::connection_limits::LoginTicket;
 use eggdb_sql::{
-    BatchStep, BulkRows, Dialect, InfoMessage, KeyValueStore, NamedParameter, QueryResult,
-    SQLSERVER_COMPATIBLE_VERSION, Session, SqlError, SqlResult, SqlState, Value,
+    BatchStep, BulkRows, DatabaseDirectory, DatabaseSwitch, Dialect, InfoMessage, NamedParameter,
+    QueryResult, SQLSERVER_COMPATIBLE_VERSION, ServedDatabases, Session, SqlError, SqlResult,
+    SqlState, Value,
 };
 use std::time::{Duration, Instant};
 
@@ -39,6 +42,7 @@ const CANNOT_OPEN_DATABASE: u32 = 4060;
 const TOO_MANY_CONNECTIONS: u32 = 17_809;
 pub(crate) const NOT_SUPPORTED: u32 = 40_517;
 const PROTOCOL_ERROR: u32 = 4002;
+const INSUFFICIENT_MEMORY: u32 = 701;
 pub(crate) const LOGGED_BATCH_CHARACTERS: usize = 200;
 const MAX_RESULT_COLUMNS: usize = 4096;
 const TOO_MANY_RESULT_COLUMNS: u32 = 1056;
@@ -146,6 +150,7 @@ fn send_errors(wire: &mut Wire<'_>, errors: &[(u32, u8, &str)]) {
             severity: *severity,
             text,
             line: 1,
+            procedure: "",
         }));
     }
     body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
@@ -191,6 +196,20 @@ pub(crate) fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error:
         }
         WireError::TimedOut => {
             (shared.log)(&format!("{}  login timed out", wire.peer()));
+        }
+        WireError::OverBudget => {
+            (shared.log)(&format!(
+                "{}  message refused: the connections hold the server's memory budget",
+                wire.peer()
+            ));
+            refuse(
+                wire,
+                &[(
+                    INSUFFICIENT_MEMORY,
+                    17,
+                    "There is insufficient memory to read this message: the server's connections already hold their memory budget.",
+                )],
+            );
         }
         WireError::Closed | WireError::Stopping | WireError::Io => {}
     }
@@ -357,16 +376,28 @@ pub(crate) fn refuse_too_many(shared: &Shared<'_>, wire: &mut Wire<'_>) {
     }
     message.body.fill(0);
     std::hint::black_box(&message.body);
-    let text = format!(
+    refuse(wire, &[(TOO_MANY_CONNECTIONS, 20, &too_many_text(shared))]);
+}
+
+fn too_many_text(shared: &Shared<'_>) -> String {
+    format!(
         "Could not connect because the maximum number of '{}' user connections has already been reached. The connection has been closed.",
         shared.config.max_connections
-    );
-    refuse(wire, &[(TOO_MANY_CONNECTIONS, 20, &text)]);
+    )
 }
 
 enum Login {
-    Accepted { user: String, packet_size: usize },
+    Accepted {
+        user: String,
+        packet_size: usize,
+        database: String,
+    },
     Refused,
+}
+
+enum Exit {
+    Closed,
+    Switch(String),
 }
 
 fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &str) {
@@ -378,7 +409,12 @@ fn login_refusal(shared: &Shared<'_>, wire: &mut Wire<'_>, user: &str, reason: &
     refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(user))]);
 }
 
-fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>, encryption: Encryption) -> Login {
+fn log_in(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    encryption: Encryption,
+    served: &dyn ServedDatabases,
+) -> Login {
     let mut message = match wire.read_message(MAX_LOGIN_BYTES) {
         Ok(message) => message,
         Err(error) => {
@@ -417,10 +453,15 @@ fn log_in(shared: &Shared<'_>, wire: &mut Wire<'_>, encryption: Encryption) -> L
             return Login::Refused;
         }
     };
-    check_login(shared, wire, login)
+    check_login(shared, wire, login, served)
 }
 
-fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login {
+fn check_login(
+    shared: &Shared<'_>,
+    wire: &mut Wire<'_>,
+    login: Login7,
+    served: &dyn ServedDatabases,
+) -> Login {
     let user = login.user_name.clone();
     if login.tds_version < TDS_7_4 && login.tds_version != TDS_8_0 {
         let reason = format!(
@@ -480,15 +521,19 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
         refuse(wire, &[(LOGIN_FAILED, 14, &login_failed(&user))]);
         return Login::Refused;
     }
-    if !login.database.is_empty() && !login.database.eq_ignore_ascii_case(&config.database) {
+    let requested = if login.database.is_empty() {
+        config.database.clone()
+    } else {
+        login.database.clone()
+    };
+    let Some(database) = served.matching_name(&requested) else {
         (shared.log)(&format!(
             "{}  unknown database \"{}\"",
             wire.peer(),
-            printable(&login.database)
+            printable(&requested)
         ));
         let cannot_open = format!(
-            "Cannot open database \"{}\" requested by the login. The login failed.",
-            login.database
+            "Cannot open database \"{requested}\" requested by the login. The login failed."
         );
         refuse(
             wire,
@@ -498,7 +543,7 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
             ],
         );
         return Login::Refused;
-    }
+    };
     let packet_size = match login.packet_size {
         0 => DEFAULT_PACKET_SIZE as u32,
         size => size.clamp(SMALLEST_PACKET_SIZE, LARGEST_PACKET_SIZE),
@@ -506,6 +551,7 @@ fn check_login(shared: &Shared<'_>, wire: &mut Wire<'_>, login: Login7) -> Login
     Login::Accepted {
         user,
         packet_size: packet_size as usize,
+        database,
     }
 }
 
@@ -517,6 +563,7 @@ fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
         severity: 0,
         text: &format!("Changed database context to '{database}'."),
         line: 0,
+        procedure: "",
     }));
     body.extend(tokens::env_change_text(ENV_LANGUAGE, "us_english", ""));
     body.extend(tokens::info(&ServerMessage {
@@ -524,6 +571,7 @@ fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
         severity: 0,
         text: "Changed language setting to us_english.",
         line: 0,
+        procedure: "",
     }));
     body.extend(tokens::env_change_collation());
     body.extend(tokens::env_change_text(
@@ -536,57 +584,143 @@ fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
     body
 }
 
-pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
+pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     mut wire: Wire<'a>,
     shared: &'a Shared<'a>,
-    store: &'s S,
+    directory: &D,
     connection_id: u32,
+    login: LoginTicket<'a>,
 ) {
-    let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
-    else {
-        (shared.log)(&format!(
-            "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
-            wire.peer()
-        ));
-        wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
-        refuse_too_many(shared, &mut wire);
-        return;
-    };
+    wire.login = Some(login);
     let Some(encryption) = read_prelogin(shared, &mut wire) else {
         return;
     };
-    let Login::Accepted { user, packet_size } = log_in(shared, &mut wire, encryption) else {
+    let Login::Accepted {
+        user,
+        packet_size,
+        database,
+    } = log_in(shared, &mut wire, encryption, directory)
+    else {
         return;
     };
-    drop(login_slot);
+    let Some(attached) = directory.attach(&database) else {
+        let cannot_open = format!(
+            "Cannot open database \"{database}\" requested by the login. The login failed."
+        );
+        refuse(
+            &mut wire,
+            &[
+                (CANNOT_OPEN_DATABASE, 11, &cannot_open),
+                (LOGIN_FAILED, 14, &login_failed(&user)),
+            ],
+        );
+        return;
+    };
+    let Some(_connection) = take_slot(&shared.connections, shared.config.max_connections) else {
+        (shared.log)(&format!(
+            "{}  connection refused: {} connections are open (--max-connections)",
+            wire.peer(),
+            shared.config.max_connections
+        ));
+        refuse(
+            &mut wire,
+            &[(TOO_MANY_CONNECTIONS, 20, &too_many_text(shared))],
+        );
+        return;
+    };
+    wire.login = None;
     wire.deadline = None;
+    wire.budget = Some(&*shared.config.memory_budget);
     wire.spid = connection_id as u16;
-    let config = shared.config;
     if wire
-        .send_message(
-            TABULAR_RESULT,
-            &login_response(&config.database, packet_size),
-        )
+        .send_message(TABULAR_RESULT, &login_response(&database, packet_size))
         .is_err()
     {
         return;
     }
     wire.packet_size = packet_size;
-    let mut session = Session::with_dialect(store, Dialect::SqlServer);
-    session.identify(&user, &config.database);
-    session.set_connection_id(connection_id);
-    shared.register(connection_id, session.cancel_signal());
-    let mut connection = Connection {
-        wire,
+    serve_databases(
         shared,
-        next_transaction: 1,
-        transaction: None,
-        prepared: PreparedBatches::default(),
-        acknowledge_reset: false,
-    };
-    connection.run(&mut session);
-    shared.unregister(connection_id);
-    let _ = session.close();
+        directory,
+        connection_id,
+        wire,
+        attached,
+        (user, database),
+    );
+}
+
+fn serve_databases<'a, 'd, D: DatabaseDirectory>(
+    shared: &'a Shared<'a>,
+    directory: &'d D,
+    connection_id: u32,
+    wire: Wire<'a>,
+    mut attached: D::Attached<'d>,
+    (user, database): (String, String),
+) {
+    let mut wire = Some(wire);
+    let mut connection: Option<Connection<'a>> = None;
+    let mut switch: Option<DatabaseSwitch> = None;
+    loop {
+        let mut session = match switch.take() {
+            Some(switch) => switch.into_session(&attached),
+            None => {
+                let mut session = Session::with_dialect(&attached, Dialect::SqlServer);
+                session.identify(&user, &database);
+                session.set_connection_id(connection_id);
+                session
+            }
+        };
+        session.set_served_databases(directory);
+        if connection.is_none()
+            && let Some(wire) = wire.take()
+        {
+            shared.register(connection_id, session.cancel_signal());
+            let attention = AttentionWatch::new(wire.socket(), session.cancel_signal());
+            connection = Some(Connection {
+                wire,
+                shared,
+                next_transaction: 1,
+                transaction: None,
+                prepared: PreparedBatches::default(),
+                acknowledge_reset: false,
+                attention,
+                attention_acknowledged: false,
+            });
+        }
+        let Some(link) = connection.as_mut() else {
+            let _ = session.close();
+            return;
+        };
+        let target = match link.run(&mut session) {
+            Exit::Closed => None,
+            Exit::Switch(target) => {
+                let prepared = directory
+                    .attach(&target)
+                    .ok_or_else(|| format!("database \"{target}\" is no longer served"))
+                    .and_then(|next| {
+                        session
+                            .switch_to(&next, &target)
+                            .map(|switched| (next, switched))
+                            .map_err(|error| error.message().to_owned())
+                    });
+                if let Err(reason) = &prepared {
+                    (shared.log)(&format!(
+                        "{}  switching to database \"{}\" failed: {reason}",
+                        link.wire.peer(),
+                        printable(&target)
+                    ));
+                }
+                prepared.ok()
+            }
+        };
+        let _ = session.close();
+        let Some((next, switched)) = target else {
+            shared.unregister(connection_id);
+            return;
+        };
+        attached = next;
+        switch = Some(switched);
+    }
 }
 
 pub(crate) struct Connection<'a> {
@@ -596,6 +730,8 @@ pub(crate) struct Connection<'a> {
     transaction: Option<u64>,
     pub(crate) prepared: PreparedBatches,
     acknowledge_reset: bool,
+    attention: AttentionWatch,
+    attention_acknowledged: bool,
 }
 
 pub(crate) struct PendingDone {
@@ -611,13 +747,28 @@ pub(crate) struct Ran {
 }
 
 impl Connection<'_> {
-    fn run(&mut self, session: &mut Session<'_>) {
+    fn run(&mut self, session: &mut Session<'_>) -> Exit {
         loop {
-            let message = match self.next_message() {
+            self.wire.release_message_reservation();
+            self.wire.deadline = self
+                .shared
+                .config
+                .idle_timeout
+                .and_then(|timeout| Instant::now().checked_add(timeout));
+            let next = self.next_message();
+            self.wire.deadline = None;
+            let message = match next {
                 Ok(Incoming::Message(message)) => message,
+                Err(WireError::TimedOut) => {
+                    (self.shared.log)(&format!(
+                        "{}  closed after the idle timeout",
+                        self.wire.peer()
+                    ));
+                    return Exit::Closed;
+                }
                 Ok(Incoming::BulkLoad { first, body }) => {
                     if !self.bulk_load(session, first, body) {
-                        return;
+                        return Exit::Closed;
                     }
                     continue;
                 }
@@ -625,11 +776,11 @@ impl Connection<'_> {
                     self.shared
                         .ended_by_stop
                         .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    return;
+                    return Exit::Closed;
                 }
                 Err(error) => {
                     report_wire_error(self.shared, &mut self.wire, &error);
-                    return;
+                    return Exit::Closed;
                 }
             };
             if matches!(message.kind, SQL_BATCH | RPC | TRANSACTION_MANAGER)
@@ -641,7 +792,7 @@ impl Connection<'_> {
                 SQL_BATCH => self.batch(session, &message.body),
                 RPC => self.rpc(session, &message.body),
                 TRANSACTION_MANAGER => self.transaction_request(session, &message.body),
-                ATTENTION => self.send_done(DONE_ATTENTION),
+                ATTENTION => self.acknowledge_attention(session),
                 _ => {
                     report_wire_error(
                         self.shared,
@@ -652,9 +803,21 @@ impl Connection<'_> {
                 }
             };
             if !keep_going {
-                return;
+                return Exit::Closed;
+            }
+            if let Some(database) = session.take_database_switch() {
+                return Exit::Switch(database);
             }
         }
+    }
+
+    fn acknowledge_attention(&mut self, session: &Session<'_>) -> bool {
+        session.cancel_signal().clear();
+        if std::mem::take(&mut self.attention_acknowledged) {
+            return true;
+        }
+        self.attention.take_seen();
+        self.send_done(DONE_ATTENTION)
     }
 
     fn next_message(&mut self) -> Result<Incoming, WireError> {
@@ -793,6 +956,7 @@ impl Connection<'_> {
             severity,
             text,
             line: 1,
+            procedure: "",
         });
         body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
         self.send_response(&body)
@@ -882,10 +1046,12 @@ impl Connection<'_> {
         done_token: u8,
     ) -> Ran {
         let database = session.database().to_owned();
+        self.attention.begin();
         let ran = self.write_steps(text, database, done_token, |on_step| match parameters {
             None => session.execute_batch(text, on_step),
             Some(parameters) => session.execute_parameterized_batch(text, parameters, on_step),
         });
+        self.attention.end();
         self.forget_unprepared(session);
         ran
     }
@@ -943,7 +1109,14 @@ impl Connection<'_> {
             command: 0,
             rows: 0,
         });
+        let attention = if self.attention.take_seen() {
+            self.attention_acknowledged = true;
+            DONE_ATTENTION
+        } else {
+            0
+        };
         let status = (last.status & !DONE_MORE)
+            | attention
             | if in_transaction {
                 DONE_IN_TRANSACTION
             } else {
@@ -1138,6 +1311,9 @@ impl StepWriter<'_, '_> {
     }
 
     fn error(&mut self, error: &SqlError, statement_start: usize) {
+        if error.state() == SqlState::QUERY_CANCELED && self.connection.attention.seen() {
+            return;
+        }
         let line = self
             .lines
             .line_at(self.text, error.position().unwrap_or(statement_start));
@@ -1149,6 +1325,7 @@ impl StepWriter<'_, '_> {
                 severity,
                 text: error.message(),
                 line,
+                procedure: error.procedure().unwrap_or(""),
             },
             error.sqlserver_state().unwrap_or(1),
         );
@@ -1196,6 +1373,7 @@ impl StepWriter<'_, '_> {
                     severity: message.severity,
                     text: &message.text,
                     line,
+                    procedure: "",
                 },
                 message.state,
             ));
@@ -1213,6 +1391,7 @@ impl StepWriter<'_, '_> {
                 severity: 0,
                 text: &format!("Changed database context to '{database}'."),
                 line: 1,
+                procedure: "",
             }));
             if !self.write(&body) {
                 return false;
@@ -1231,6 +1410,7 @@ impl StepWriter<'_, '_> {
                     severity: 15,
                     text: "The number of elements in the select list exceeds the maximum allowed number of 4096 elements.",
                     line: 1,
+                    procedure: "",
                 });
                 if !self.write(&token) {
                     return false;

@@ -118,6 +118,15 @@ fn added_function_type(
     if let Some(sql_type) = crate::advisory_locks::result_type(name) {
         return Some(Some(sql_type));
     }
+    if let Some(sql_type) = crate::advisory_locks::application_function_type(name) {
+        return Some(Some(sql_type));
+    }
+    if let Some(sql_type) = crate::json_path::result_type(name) {
+        return Some(Some(sql_type));
+    }
+    if matches!(name, "pg_sleep" | "pg_notify") {
+        return Some(Some(SqlType::VOID));
+    }
     let argument_type = |at: usize| {
         arguments
             .get(at)
@@ -150,8 +159,6 @@ fn added_function_type(
         | "jsonb_pretty"
         | "json_extract_path_text"
         | "jsonb_extract_path_text"
-        | "pg_sleep"
-        | "pg_notify"
         | "to_tsvector"
         | "to_tsquery"
         | "plainto_tsquery"
@@ -264,7 +271,10 @@ fn defined_function_type(
     if crate::enums::FUNCTIONS.contains(&name) {
         return Some(crate::enums::result_type(name, first()));
     }
-    crate::ranges::function_type(name, first())
+    let second = arguments
+        .get(1)
+        .and_then(|argument| static_type(argument, scope));
+    crate::ranges::function_type(name, first(), second)
 }
 
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
@@ -285,6 +295,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     }
     if let Some(sql_type) = crate::arrays::function_type(name, arguments, scope) {
         return sql_type;
+    }
+    if let Some(sql_type) = crate::hstore_functions::result_type(name, arguments.len()) {
+        return Some(sql_type);
     }
     match (name, arguments) {
         ("btrim" | "ltrim" | "rtrim" | "quote_ident", [_, ..]) => Some(SqlType::Text),
@@ -310,6 +323,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         ("date_trunc", [_, argument]) => match static_type(argument, scope)? {
             SqlType::Timestamp(_) => Some(SqlType::Timestamp(None)),
             SqlType::Date | SqlType::TimestampTz(_) => Some(SqlType::TimestampTz(None)),
+            SqlType::Interval { .. } => Some(SqlType::INTERVAL),
             _ => None,
         },
         ("json_typeof" | "jsonb_typeof", [_]) => Some(SqlType::Text),
@@ -371,6 +385,12 @@ fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
     {
         return SqlType::Jsonb;
     }
+    let hstore = crate::hstore_functions::is_hstore_type;
+    if (hstore(left_type) && (hstore(right_type) || is_untyped_literal(right)))
+        || (hstore(right_type) && (hstore(left_type) || is_untyped_literal(left)))
+    {
+        return SqlType::Defined(crate::types::DefinedType::HSTORE);
+    }
     if let Some(array) = crate::arrays::concat_type(left_type, right_type) {
         return array;
     }
@@ -394,6 +414,9 @@ fn oracle_function_type(name: &str, arguments: &[Expr]) -> Option<SqlType> {
         "oracle_next_day" => Some(SqlType::Timestamp(Some(0))),
         "oracle_to_timestamp_tz" | "oracle_from_tz" => Some(SqlType::TimestampTz(Some(6))),
         "oracle_months_between" => Some(SqlType::Numeric(None)),
+        crate::oracle_collections::MEMBER_OF | crate::oracle_collections::SUBMULTISET_OF => {
+            Some(SqlType::Boolean)
+        }
         "oracle_hextoraw" => Some(SqlType::Bytea),
         "oracle_rawtohex" => Some(SqlType::Text),
         "oracle_tz_offset" | "oracle_listagg" => Some(SqlType::Text),
@@ -468,13 +491,27 @@ pub(crate) fn static_type(expr: &Expr, scope: Scope<'_>) -> Option<SqlType> {
             | BinaryOperator::JsonHasAnyKey
             | BinaryOperator::JsonHasAllKeys => Some(SqlType::Boolean),
             BinaryOperator::JsonDeletePath => Some(SqlType::Jsonb),
-            BinaryOperator::TextSearchMatch => Some(SqlType::Boolean),
+            BinaryOperator::TextSearchMatch | BinaryOperator::JsonPathExists => {
+                Some(SqlType::Boolean)
+            }
             BinaryOperator::VectorL2Distance
             | BinaryOperator::VectorCosineDistance
             | BinaryOperator::VectorNegativeInnerProduct
             | BinaryOperator::VectorL1Distance => Some(SqlType::Double),
             BinaryOperator::Subtract if static_type(left, scope) == Some(SqlType::Jsonb) => {
                 Some(SqlType::Jsonb)
+            }
+            BinaryOperator::Subtract
+                if crate::hstore_functions::is_hstore_type(static_type(left, scope)) =>
+            {
+                static_type(left, scope)
+            }
+            BinaryOperator::JsonField
+                if crate::hstore_functions::is_hstore_type(static_type(left, scope)) =>
+            {
+                Some(crate::hstore_functions::fetch_type(static_type(
+                    right, scope,
+                )))
             }
             BinaryOperator::Concat => Some(concatenation_type(left, right, scope)),
             BinaryOperator::JsonFieldText | BinaryOperator::JsonPathText => Some(SqlType::Text),

@@ -22,6 +22,7 @@ mod expiry;
 mod explain;
 mod follow;
 mod follow_sql_server;
+mod follow_state;
 mod foreign;
 mod mcp;
 mod parquet_io;
@@ -30,6 +31,7 @@ mod restore_aof;
 mod restore_mongodump;
 mod row;
 mod serve;
+mod serve_databases;
 mod serve_jobs;
 mod serve_mcp;
 mod serve_metrics;
@@ -37,12 +39,14 @@ mod serve_mongo;
 mod serve_resp;
 mod serve_tls;
 mod shell;
+mod shell_block;
 mod shell_copy;
 pub(super) mod sql;
 mod table;
 mod transfer;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
+const DEFAULT_BUSY_TIMEOUT_MS: u64 = 5_000;
 const CACHE_HEADROOM_BYTES: usize = 1 << 20;
 const SCAN_VALUE_SHOWN_BYTES: usize = 128;
 const EXPIRY_KEY_OVERHEAD_BYTES: usize = 14;
@@ -782,7 +786,13 @@ impl<'a> Session<'a> {
             .cache_bytes
             .or(cache_for_command)
             .unwrap_or(DEFAULT_CACHE_BYTES);
-        let mut options = Options::new().cache_bytes(cache);
+        let busy_timeout = self
+            .request
+            .busy_timeout_ms
+            .unwrap_or(DEFAULT_BUSY_TIMEOUT_MS);
+        let mut options = Options::new()
+            .cache_bytes(cache)
+            .busy_timeout(std::time::Duration::from_millis(busy_timeout));
         options = match access {
             Access::ReadOnly => options.read_only(true).create_if_missing(false),
             Access::Write { create } => options.create_if_missing(create),

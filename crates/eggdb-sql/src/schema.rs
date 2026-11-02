@@ -321,6 +321,21 @@ pub(crate) fn read_tables(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableSchem
     Ok(tables)
 }
 
+pub(crate) fn read_table(
+    reader: &dyn KeyValueRead,
+    internal: &str,
+) -> SqlResult<Option<TableSchema>> {
+    let Some(bytes) = reader.get(&table_key(internal))? else {
+        return Ok(None);
+    };
+    if crate::encoding::is_view_record(&bytes) {
+        return Ok(None);
+    }
+    let mut table = schema_of(&TableDefinition::decode(internal, &bytes)?);
+    table.name = crate::schemas::display(internal);
+    Ok(Some(table))
+}
+
 fn schema_of(definition: &TableDefinition) -> TableSchema {
     TableSchema {
         name: crate::schemas::base_name(&definition.name).to_owned(),

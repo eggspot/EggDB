@@ -23,6 +23,16 @@ pass() {
   passed=$((passed + 1))
   echo "ok   $*"
 }
+skipped=""
+skip() {
+  local name=$1
+  shift
+  case " ${EGGDB_SMOKE_REQUIRE:-} " in
+    *" $name "*) fail "$name is in EGGDB_SMOKE_REQUIRE but was skipped: $*" ;;
+  esac
+  skipped="$skipped $name"
+  echo "skip $name: $*"
+}
 expect_exit() {
   local expected=$1 status=0
   shift
@@ -47,7 +57,39 @@ expect_output "$version" "$eggdb" --version
 expect_exit 0 "$eggdb" help
 grep -q '^Usage: eggdb <command> <file>' last.out || fail "eggdb help has no usage line"
 expect_exit 2 "$eggdb" frobnicate
-pass "help, --version and an unknown command"
+expect_exit 0 "$eggdb"
+grep -q '^Usage: eggdb <command> <file>' last.out || fail "eggdb with no arguments printed no usage line on stdout"
+[ ! -s last.err ] || fail "eggdb with no arguments wrote to stderr: $(cat last.err)"
+grep -q 'https://github.com/eggspot/EggDB' last.out || fail "eggdb help gives no URL for the guide"
+for dialect in PostgreSQL MySQL SQLite Oracle 'SQL Server'; do
+  grep -q "$dialect" last.out || fail "eggdb help does not name $dialect"
+done
+pass "help, no arguments, --version and an unknown command"
+
+mkdir readme
+cd readme
+expect_exit 0 "$eggdb" create app.db
+expect_exit 0 "$eggdb" put app.db user:1 Ada
+expect_output Ada "$eggdb" get app.db user:1
+expect_output "$(printf 'user:1\tAda')" "$eggdb" scan app.db --prefix user: --format text
+printf 'not really a photo\n' > photo.jpg
+cat photo.jpg | "$eggdb" put app.db photo > /dev/null || fail "cat photo.jpg | eggdb put app.db photo failed"
+expect_exit 0 "$eggdb" get app.db photo
+cmp -s last.out photo.jpg || fail "the photo came back different"
+expect_exit 0 "$eggdb" scan app.db --format json
+grep -q '^{"key":"photo",' last.out || fail "scan --format json printed $(cat last.out)"
+expect_exit 0 "$eggdb" check app.db --format text
+grep -q '^ok: every page passed its checksum' last.out || fail "check printed $(cat last.out)"
+expect_exit 0 "$eggdb" export app.db backup.jsonl
+expect_exit 0 "$eggdb" import --create copy.db backup.jsonl
+expect_output Ada "$eggdb" get copy.db user:1
+expect_exit 0 "$eggdb" sql shop.db --create -c "CREATE TABLE items (id integer PRIMARY KEY, name text)"
+expect_exit 0 "$eggdb" restore --create app-restored.db "$samples/pg_dump-sample.sql"
+expect_output "$(printf '4\t10')" "$eggdb" sql app-restored.db -c "COPY (SELECT count(*), sum(quantity) FROM bakery.orders) TO STDOUT"
+expect_exit 0 sh -c "\"$eggdb\" restore --create app-piped.db < \"$samples/pg_dump-sample.sql\""
+expect_output "$(printf '4')" "$eggdb" sql app-piped.db -c "COPY (SELECT count(*) FROM bakery.orders) TO STDOUT"
+cd "$work"
+pass "the README's shell commands: create, put, get, scan, a piped value, check, export and import, sql --create, and restore from a file and from stdin"
 
 expect_exit 0 "$eggdb" create app.db
 expect_exit 3 "$eggdb" create app.db
@@ -321,7 +363,7 @@ grep -q 'not a loopback address' last.err || fail "eggdb serve on 0.0.0.0 said $
 expect_exit 2 env EGGDB_PASSWORD=secret "$eggdb" serve shop.db --listen 127.0.0.1:0 --tds-listen 0.0.0.0:1433
 grep -q 'not a loopback address' last.err || fail "eggdb serve --tds-listen on 0.0.0.0 said $(cat last.err)"
 if [ "${OS:-}" = Windows_NT ]; then
-  echo "skip serve with clients: stopping a server gracefully needs SIGTERM, which Windows lacks"
+  skip serve-clients "stopping a server gracefully needs SIGTERM, which Windows lacks, so psql, mysql, sqlcmd and the drivers do not run here"
 else
   printf 'pg-secret\n' > password.txt
   "$eggdb" sql --create pg.db -c "CREATE TABLE items (id integer PRIMARY KEY, name text NOT NULL)" > /dev/null
@@ -361,7 +403,7 @@ else
       fail "psql -f of the pg_dump sample left $(psql "$connection" -At -c 'SELECT count(*) FROM bakery.orders' 2>&1)"
     pass "serve: psql -f restores the pg_dump sample"
   else
-    echo "skip psql: psql is not on PATH (CI's Linux job installs postgresql-client)"
+    skip psql "psql is not on PATH (CI's Linux job installs postgresql-client)"
   fi
   python="${EGGDB_SMOKE_PYTHON:-python3}"
   if command -v "$python" > /dev/null 2>&1 && "$python" -c 'import pg8000' > /dev/null 2>&1; then
@@ -409,7 +451,7 @@ PYTHON
     [ "$(tr -d '\n' < driver.out)" = "$expected_pg8000" ] || fail "pg8000 printed $(cat driver.out)"
     pass "serve: the pg8000 driver runs parameterized queries and round-trips numeric, date, time stamp, jsonb, bytea, uuid, time, interval and character values"
   else
-    echo "skip driver: pg8000 is not installed (CI's Linux job installs it)"
+    skip pg8000 "the pg8000 driver is not installed (CI's Linux job installs it)"
   fi
   mysql_port=$(sed -n 's/.*"mysql_port":\([0-9]*\).*/\1/p' serve.out | head -n 1)
   [ -n "$mysql_port" ] || fail "eggdb serve printed no MySQL port: $(cat serve.out)"
@@ -426,7 +468,7 @@ PYTHON
     grep -q 'ERROR 1045' mysql.err || fail "a wrong MySQL password said $(cat mysql.err)"
     pass "serve: mysql inserts and selects; errors and a wrong password are refused"
   else
-    echo "skip mysql: the mysql client is not on PATH (CI's Linux job installs mysql-client)"
+    skip mysql "the mysql client is not on PATH (CI's Linux job installs mysql-client)"
   fi
   if command -v "$python" > /dev/null 2>&1 && "$python" -c 'import pymysql' > /dev/null 2>&1; then
     "$python" - "$mysql_port" > driver.out 2> driver.err << 'PYTHON' || fail "PyMySQL failed: $(cat driver.err)"
@@ -467,7 +509,7 @@ PYTHON
     [ "$(tr -d '\n' < driver.out)" = "$expected_pymysql" ] || fail "PyMySQL printed $(cat driver.out)"
     pass "serve: the PyMySQL driver runs parameterized queries and round-trips DECIMAL, DATE, DATETIME, JSON, TIME and BLOB values"
   else
-    echo "skip driver: PyMySQL is not installed (CI's Linux job installs it)"
+    skip pymysql "the PyMySQL driver is not installed (CI's Linux job installs it)"
   fi
   tds_port=$(sed -n 's/.*"tds_port":\([0-9]*\).*/\1/p' serve.out | head -n 1)
   [ -n "$tds_port" ] || fail "eggdb serve printed no TDS port: $(cat serve.out)"
@@ -505,7 +547,7 @@ SELECT CONVERT(varchar(10), [at], 103) + '|' + CONVERT(varchar(36), [guid]) + '|
     grep -q "Login failed for user 'eggdb'" sqlcmd.out || fail "a wrong sqlcmd password said $(cat sqlcmd.out)"
     pass "serve: sqlcmd (go-sqlcmd) runs T-SQL batches, SQL Server types, an -i script with GO, the UTF-16 SSMS sample with its stored procedure and batch logic with a loop, PRINT and TRY ... CATCH; errors and a wrong password are refused"
   else
-    echo "skip sqlcmd: EGGDB_SMOKE_SQLCMD names no go-sqlcmd binary (CI's Linux job downloads one; a sqlcmd on PATH is never used)"
+    skip sqlcmd "EGGDB_SMOKE_SQLCMD names no go-sqlcmd binary (CI's Linux job downloads one; a sqlcmd on PATH is never used)"
   fi
   kill -TERM "$server_pid"
   status=0
@@ -599,7 +641,7 @@ run_in_terminal() {
 }
 
 if ! command -v script > /dev/null 2>&1 || [ "${OS:-}" = Windows_NT ]; then
-  echo "skip ui in a terminal: no pseudo-terminal through script(1) on this system"
+  skip ui-terminal "no pseudo-terminal through script(1) on this system"
 else
   expect_exit 0 "$eggdb" create ui.db
   for key in a:1 a:2 a:3; do expect_exit 0 "$eggdb" put ui.db "$key" "value of $key"; done
@@ -658,3 +700,8 @@ else
 fi
 
 echo "smoke test passed: $passed groups against $eggdb"
+if [ -n "$skipped" ]; then
+  echo "skipped:$skipped"
+else
+  echo "skipped: nothing"
+fi

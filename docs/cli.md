@@ -2,8 +2,9 @@
 
 `eggdb` works with an EggDB database file from a shell, a script or an AI agent: create a file,
 store, read and remove values, list entries in key order, check the file's health, see its
-statistics, export it to a text file that another database imports, run SQL on it, and serve it
-to psql and PostgreSQL drivers with `eggdb serve`. Every other command opens the file in its own
+statistics, export it to a text file that another database imports, restore another database's
+dump into it, run SQL on it in the PostgreSQL, MySQL, SQLite, Oracle or SQL Server dialect, and
+serve it to PostgreSQL, MySQL and SQL Server clients with `eggdb serve`. Every other command opens the file in its own
 process, like `sqlite3`. The design behind every choice here is
 [ux/cli.md](ux/cli.md) (D15, D90, D93); the embedded Rust API is [embedded.md](embedded.md).
 Installing it is downloading one file: see the README, "Install".
@@ -55,11 +56,11 @@ eggdb <command> <file> [arguments] [options]
 | `ui <file>` | yes (`--read-only`: no) | browse and edit keys and values full screen in the terminal (below) |
 | `export <file> [<out> \| -]` | read-only | writes every entry to `<out>`, or stdout, as JSON lines (below); with `--table <name> --parquet <out>`, the table's rows as a Parquet file (D202); with `--table <name> --arrow <out>`, as an Apache Arrow IPC stream that pyarrow, Polars and DuckDB read (D240); with `--sql postgresql\|mysql\|sqlserver\|oracle\|sqlite`, every table as plain SQL in that dialect (`CREATE TABLE`, multi-row `INSERT`, `CREATE INDEX`) that the dialect's own client or `eggdb restore` loads; views are counted, not written yet |
 | `import <file> [<in> \| -]` | for writing; `--create` makes it | loads an export from `<in>`, or stdin (below); with `--csv <file> --table <name>`, a CSV file into a SQL table; with `--parquet <file> --table <name>`, a Parquet file into a SQL table, created from the file's columns when it does not exist (D202) |
-| `sql <file> [-c <sql> \| <script> \| -]` | for writing (`--read-only`: no); `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with `--dialect` (below, and [sql.md](sql.md)) |
+| `sql <file> [-c <sql> \| <script> \| -]` | for writing (`--read-only`: no); `--create` makes it | runs SQL statements, PostgreSQL dialect, or MySQL's, SQLite's, Oracle's or SQL Server's (Transact-SQL) with `--dialect` (below, and [sql.md](sql.md)) |
 | `explain <file> -c <sql>` | read-only | shows the plan for one statement, in its dialect's EXPLAIN form, without running it (below) |
 | `table list\|show\|sample <file> [<table>]` | read-only | lists the tables and views, shows one in full, or prints its first rows (below) |
 | `row list <file> <table>` | read-only | the rows of one table in the order they are stored, a page at a time with `--limit` and `--after` (below) |
-| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers on a loopback address (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184) |
+| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the `mysql` client and MySQL drivers, and with `--tds-listen` to `sqlcmd` and SQL Server drivers over TDS; on a loopback address without TLS, on any address with TLS (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184), and `CREATE DATABASE` and `DROP DATABASE` add and remove such files while it runs (D270) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, or with `--dialect mysql` a `mysqldump` file, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
@@ -88,6 +89,12 @@ collection instead of the default key space (see "Collections" below).
 
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
 without an option. `--cache <bytes>` sets the cache for any command (`--cache 64m`).
+
+**A file another program has open.** Every command waits up to five seconds for the file when
+another program has it open (an `eggdb mcp` call, another `eggdb` command), trying again every
+few milliseconds, and exits 5 (busy) only when the file is still taken after that.
+`--busy-timeout <ms>` sets the wait for any command (0 to 3,600,000; `--busy-timeout 0` fails at
+once). Programs using the Rust API set it with `Options::busy_timeout` (D258).
 
 ## Keys and values
 
@@ -916,12 +923,12 @@ $ eggdb row list app.db orders --limit 2 --json
 ## `eggdb shell`
 
 ```
-eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle] [--read-only] [--create]
+eggdb shell <file> [-c <text>]... [--keep-going] [--mode table|expanded|csv] [--dialect postgresql|mysql|sqlite|oracle|sqlserver] [--read-only] [--create]
 ```
 
 One prompt for everything this page and [sql.md](sql.md) do with a file: the key-value
 commands without their `eggdb <command> <file>` prefix, SQL in the PostgreSQL dialect (or
-MySQL's, SQLite's or Oracle's with `--dialect mysql`, `sqlite` or `oracle`; `.schema` then prints
+MySQL's, SQLite's, Oracle's or SQL Server's with `--dialect mysql`, `sqlite`, `oracle` or `sqlserver`; `.schema` then prints
 that dialect's `CREATE TABLE`, and in Oracle's the open transaction is committed when the shell
 ends, as SQL*Plus does; a PL/SQL block or `CREATE PROCEDURE` ends at a line holding `/`,
 `EXEC p` runs a procedure, `SET SERVEROUTPUT ON|OFF` switches the `DBMS_OUTPUT` lines printed
@@ -974,8 +981,24 @@ lines.
 one continues, `app'>` and `app">` inside an unfinished string or quoted name, `app=*>` inside a
 `BEGIN` block and `app=!>` in a failed one (every statement answers `25P02` until `ROLLBACK`).
 `BEGIN` holds the database's write transaction across prompts until `COMMIT` or `ROLLBACK`; a
-block still open when the shell ends is rolled back with a `WARNING:`. Key-value writes inside a
-block fail with the busy error (exit 5): the block holds the one write transaction.
+block still open when the shell ends is rolled back with a `WARNING:`. Inside a block, `put`,
+`get`, `del`, `incr` and `decr` run in the block's own transaction, so key-value writes and SQL
+are all-or-nothing together: `COMMIT` keeps both, `ROLLBACK` (or a block left open at the end)
+drops both, and `get` sees what the block wrote. In a failed block they are refused until
+`ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, while a `SAVEPOINT` is set
+`put`, `del`, `incr` and `decr` are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
+`RELEASE SAVEPOINT` lifts it), and `expire`, `persist` and `cas` are refused inside a block for
+now; `scan`, `ttl`, `check`, `stats` and `backup` read the last commit (D266).
+
+```
+app=> begin;
+BEGIN
+app=*> put stock:egg 11
+app=*> insert into sales (item_id, quantity) values (1, 1);
+INSERT 0 1
+app=*> commit;
+COMMIT
+```
 
 | Shell command | Does |
 |---------------|------|
@@ -1033,7 +1056,7 @@ eggdb shell app.db --mode csv -c "select * from items" > items.csv
 ## `eggdb serve`
 
 ```
-eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
+eggdb serve <file|directory> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--idle-timeout <seconds>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--auth-rules <file>] [--metrics-listen <address>] [--mcp-listen <address> --mcp-token-file <file>] [--resp-listen <address> [--resp-max-memory <size>] [--resp-eviction <policy>]] [--memcached-listen <address>] [--es-listen <address>] [--mongo-listen <address>] [--bolt-listen <address>] [--cdc-webhook <url>] [--kafka-listen <address>] [--amqp-listen <address>] [--mqtt-listen <address>] [--sqs-listen <address>] [--nats-listen <address>] [--stomp-listen <address>] [--cql-listen <address>] [--s3-listen <address>] [--dynamodb-listen <address>] [--observability-listen <address>] [--rest-listen <address>] [--restore-from s3://bucket/prefix] [--cdc-queue <name>] [--read-only] [--create]
 ```
 
 Serves the file over the PostgreSQL wire protocol v3, so psql, pgAdmin-style tools and every
@@ -1055,6 +1078,20 @@ eggdb serve --create app.db
 #   connect      psql postgresql://eggdb@127.0.0.1:5432/app
 #   stop         Ctrl-C
 ```
+
+Given a directory, the server serves each `<name>.eggdb` file in it as the database `<name>`,
+and the first in name order is the default database the other protocols use. While it runs,
+a superuser (or a stored role with `CREATEDB`) runs `CREATE DATABASE shop`, which makes
+`shop.eggdb` in the directory; clients then connect to `shop` by name over every protocol
+(`psql -d shop`, the MySQL handshake's database, the TDS login's database), MySQL's `USE shop`
+and `COM_INIT_DB` and T-SQL's `USE shop` move a connection there (SQL Server clients get the
+database ENVCHANGE), and `\l`, `pg_database`, `SHOW DATABASES` and `sys.databases` list it at
+once. `DROP DATABASE shop` closes and removes the file, and is refused with `55006` (SQL
+Server's error 3702) while any connection uses the database, including the one dropping it;
+the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `-` or `$`
+(`42602` otherwise). Serving a single file, or `--read-only`, creates and drops nothing
+(`0A000`). Statements after a `USE` that changes the database in the same batch fail with
+`0A000`: send them in the next batch (D270).
 
 | Option | Meaning |
 |--------|---------|
@@ -1088,9 +1125,10 @@ eggdb serve --create app.db
 | `--stomp-listen <address>` | serves STOMP 1.2, 1.1 and 1.0 (default port 61613): `CONNECT` or `STOMP` with `login` as `--user` and `passcode` as the server's password, `SEND`, `SUBSCRIBE` with `ack:auto`, `client` (cumulative) or `client-individual` and an optional `prefetch-count`, `ACK`, `NACK`, transactions (`BEGIN`, `COMMIT`, `ABORT`; a commit's queue messages are stored all or none), receipts and `DISCONNECT`; `/queue/<name>` destinations are the durable queues `--amqp-listen` and `--sqs-listen` serve, `/topic/<name>` destinations go to every current subscriber; no heart-beats yet; loopback only for now (D217) |
 | `--cql-listen <address>` | serves Cassandra's CQL native protocol v4 (default port 9042) for Cassandra drivers: the password authenticator with `--user` and the server's password, `QUERY`, `PREPARE`, `EXECUTE` and `BATCH`, and the `system.local`, `system.peers` and `system_schema` tables drivers read; a keyspace is a SQL schema and a CQL table is a SQL table of the same name, so SQL reads and writes the same rows; `CREATE`/`DROP KEYSPACE`, `CREATE`/`DROP TABLE` (with partition and clustering keys and `CLUSTERING ORDER`), `TRUNCATE`, `INSERT` and `UPDATE` as upserts (counters with `c = c + n`), `INSERT ... IF NOT EXISTS`, `DELETE` of rows or columns, `SELECT` with `WHERE`, `IN`, `ORDER BY`, `LIMIT` and `count(*)`, and batches as one transaction; scalar types only (no collections, user-defined types, TTL, `USING TIMESTAMP` or other lightweight transactions yet), every result in one page; loopback only for now (D218) |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
-| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, so slow or failing logins cannot take every slot; a 17th gets `53300` too |
-| `--socket-dir <directory>` | also accept PostgreSQL connections on a Unix socket in that directory, named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory> -p <port>` connects; the socket is readable and writable by its owner only, a stale socket file is replaced, and it is removed at stop. Not on Windows yet |
-| `--mysql-socket <file>` | also accept MySQL connections on that Unix socket (`mysql --socket=<file>`); needs `--mysql-listen`. Not on Windows yet |
+| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, and each has 5 seconds to finish its login. When all 16 are taken, a new connection takes the slot of the oldest that has waited a second or more, and that one is dropped, so idle sockets from another program cannot lock real logins out; only when every one is younger is the new connection refused with `53300` (MySQL 1040, SQL Server 17809). A peer on another machine (over TLS) holds at most 8 of the 16, an IPv6 peer counted by its `/64`. The same limits hold on `--mysql-listen` and `--tds-listen`. A PostgreSQL connection keeps at most 4,096 prepared statements, 4,096 portals and 1 GiB of their text and bound parameters; one more is refused with `54000` and the connection goes on. Messages over 64 KiB, prepared statements and portals of every connection on every SQL listener share one memory budget of 4 GiB (all of memory on 32-bit machines): a request past it gets `53200 out of memory` (MySQL 1041, SQL Server 701), and a message too large for what is left ends its connection (D254) |
+| `--idle-timeout <seconds>` | close a logged-in connection that sends nothing for that long; default 3600 (one hour), `0` never closes it. PostgreSQL clients get `FATAL 57P05 terminating connection due to idle-session timeout`, MySQL clients error 4031, and a TDS connection is closed; the log gets a line. The same value holds on every SQL listener (D254) |
+| `--socket-dir <directory>` | also accept PostgreSQL connections on a Unix socket in that directory, named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory> -p <port>` connects; the socket is readable and writable by its owner only, a stale socket file is replaced, and it is removed at stop. On Windows (10 version 1803 or later) it is an `AF_UNIX` socket file whose access list lets only the user running the server in, the stand-in for mode 0600; libpq 14 and later reach it with `psql -h C:\path\to\directory -p <port>`; older Windows gets exit 2 (D267) |
+| `--mysql-socket <file>` | also accept MySQL connections on that Unix socket (`mysql --socket=<file>`); needs `--mysql-listen`. On Windows (10 version 1803 or later) it is an owner-only `AF_UNIX` socket file; the mysql client there reads `--socket` as a named pipe, so only drivers that open `AF_UNIX` paths reach it (D267) |
 | `--tls-certificate <file>` | PEM certificate chain, the server's first, for TLS on every listener; needs `--tls-key` |
 | `--tls-key <file>` | PEM private key for `--tls-certificate`: PKCS#8, SEC 1 or PKCS#1, P-256 or RSA; read once at start, never on the command line |
 | `--tls-self-signed` | make a P-256 certificate at start, in memory, for the listen hosts and `localhost`; a new one each start. Its SHA-256 fingerprint is printed so clients can pin it |
@@ -1233,7 +1271,7 @@ ok: every table and row of the dump is in app.db; 2 objects skipped and 1 conseq
 ## `eggdb follow`
 
 ```
-eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--until caught-up]
+eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--changes cdc|change-tracking] [--reconnect-for <seconds>] [--until caught-up]
 ```
 
 Copies a running PostgreSQL or SQL Server database into the file and keeps the file in step with
@@ -1248,27 +1286,39 @@ because process listings show it.
 |--------|---------|
 | `--create` | create the file if it is missing; it must not already hold the source's tables |
 | `--schema <list>` | the schemas to copy, comma-separated; default every non-system schema |
-| `--publication <name>` | PostgreSQL: use this publication; default `eggdb_follow`, created `FOR ALL TABLES` and dropped at the stop |
+| `--publication <name>` | PostgreSQL: use this publication; default `eggdb_follow`, created `FOR ALL TABLES` and dropped when the follow finishes with `--until caught-up` |
 | `--password-file <path>` | the source's password is the file's first line |
-| `--poll <seconds>` | SQL Server: how often to ask change tracking for changes; default 5 |
+| `--poll <seconds>` | SQL Server: how often to ask CDC or change tracking for changes; default 5 |
+| `--changes cdc\|change-tracking` | SQL Server: read every table through CDC or through change tracking; default CDC for each table with a capture instance of all its columns, change tracking for the rest |
+| `--reconnect-for <seconds>` | how long to keep retrying a lost connection to the source, with waits of 1, 2, 4 … up to 60 seconds; default 300, 0 stops at the first loss |
 | `--until caught-up` | stop by itself once every change committed so far is in the file |
 
 Before anything is copied it checks every precondition, and it names every table that fails one:
 - `wal_level=logical`, and the right to create a replication slot and, unless `--publication` is
   given, a publication;
 - a primary key or `REPLICA IDENTITY FULL` on every table;
-- with SQL Server, change tracking on the database and on every table.
+- with SQL Server, CDC or change tracking on the database, and a capture instance of all its
+  columns or change tracking on every table; a table read through CDC needs a primary key.
 
 Progress goes to stderr on a terminal, as fixed lines (connected, publication, slot, schema, one
 line per copied table) and then a `following` line with the lag. In a pipe each step is one JSON
-line on stdout, with an `event` of `connected`, `slot`, `schema`, `table_copied`, `copied` or
-`stopped`.
+line on stdout, with an `event` of `connected`, `slot`, `schema`, `table_copied`, `copied`,
+`resumed`, `schema_changed`, `reconnecting`, `reconnected` or `stopped`.
 
-Ctrl-C or `SIGTERM` finishes the transaction being applied, copies the sequence values, drops the
-publication it created (the slot is temporary and goes with the connection) and prints a summary
-ending `ok: … holds every source transaction committed up to <position>`. It then exits 0. If
-the source closes the connection, the file is consistent at the last applied position and the
-command exits 3. The design is [ux/cli.md](ux/cli.md), section 30.
+The file keeps the follow's position in `eggdb_follow.state`, written in the same transaction as
+the changes. Running the command again on a file that has one (without `--create`) resumes from
+it without copying, and refuses a different source (PostgreSQL's system identifier and database,
+SQL Server's server and database). With PostgreSQL, columns added, dropped, renamed or retyped on
+the source are changed in the file as well; with SQL Server, a change to a followed table's
+columns stops the follow (exit 3) and names it.
+
+Ctrl-C or `SIGTERM` finishes the transaction being applied, copies the sequence values, saves
+the position and prints a summary ending `ok: … holds every source transaction committed up to
+<position>`. It then exits 0. The replication slot and the publication are kept so the same
+command resumes; `--until caught-up` drops both when it finishes. If the connection to the
+source stays lost for longer than `--reconnect-for`, the file is consistent at the last applied
+position and the command exits 3; running it again resumes. The design is
+[ux/cli.md](ux/cli.md), section 30, and decision D263.
 
 ## `eggdb mcp`
 
@@ -1289,7 +1339,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
 - **`--allow-write`** adds `write_sql`: one statement per call that may change the file, in a
   transaction of its own, the file opened read-write for that call only. Destructive statements
   (`DROP`, `TRUNCATE`, dropping a column, constraint or primary key, a column's type change, a
-  `DELETE` or `UPDATE` whose `WHERE` names no column of its table) run only after the user
+  `DELETE` or `UPDATE` whose `WHERE` does not pin every column of a primary or unique key to
+  values, `REPLACE` and upserts, a `MERGE` that updates or deletes) run only after the user
   confirms them: through the client's question when it can ask, otherwise through the agent's
   `confirm: true`. `run_sql` stays read-only.
 - **`--tables <names>`** shows the agent only those tables and views (comma-separated, `name` or
@@ -1298,8 +1349,13 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   dialect and catalog, a listed view that reads an unlisted table fails as missing, and
   `kv_get` and `kv_scan` are withdrawn (`limited_to_tables` if called). A sequence comes with the
   table that owns it. Every name must exist when the server starts (exit 1, `table_not_found`,
-  with the stored name when only the case differs). Read-only servers only: with
-  `--allow-write` it is a usage error (D156).
+  with the stored name when only the case differs; with `--allow-write` a name not there yet is
+  allowed, for the agent to create) (D156). With `--allow-write` the agent changes only those
+  tables: creating, renaming to or changing anything else (a table, view, sequence, schema, type,
+  routine or role) is refused with `42501`, a trigger or routine that reaches an unlisted table
+  fails as missing, and a listed table that a foreign key or an unlisted view ties to an unlisted
+  table cannot change where the change could reach it; the banner lists those ties
+  (D257).
 - **`--call-gap <ms>`** (default 100, 0 to 10000, 0 for none): after each call the next one that
   opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,

@@ -56,15 +56,33 @@ pub(crate) const RIGHT_OF: &str = "*range_right_of*";
 pub(crate) const NOT_RIGHT_OF: &str = "*range_not_right_of*";
 pub(crate) const NOT_LEFT_OF: &str = "*range_not_left_of*";
 pub(crate) const ADJACENT: &str = "*range_adjacent*";
+const INTEGER_AND: &str = "*integer_and*";
+const INTEGER_OR: &str = "*integer_or*";
 
-pub(crate) const OPERATORS: [(&str, &str); 6] = [
+pub(crate) const OPERATORS: [(&str, &str); 8] = [
     ("&&", OVERLAPS),
     ("<<", LEFT_OF),
     (">>", RIGHT_OF),
     ("&<", NOT_RIGHT_OF),
     ("&>", NOT_LEFT_OF),
     ("-|-", ADJACENT),
+    ("&", INTEGER_AND),
+    ("|", INTEGER_OR),
 ];
+
+fn bitwise(name: &str, left: &Value, right: &Value) -> Option<SqlResult<Value>> {
+    if !matches!(name, INTEGER_AND | INTEGER_OR) {
+        return None;
+    }
+    let (a, b) = (left.as_integer()?, right.as_integer()?);
+    let combined = if name == INTEGER_AND { a & b } else { a | b };
+    let sql_type = match (left, right) {
+        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => SqlType::BigInt,
+        (Value::Integer(_), _) | (_, Value::Integer(_)) => SqlType::Integer,
+        _ => SqlType::SmallInt,
+    };
+    Some(crate::types::integer_value(combined, sql_type))
+}
 
 const FUNCTIONS: [&str; 7] = [
     "lower",
@@ -629,6 +647,9 @@ pub(crate) fn operator(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if left.is_null() || right.is_null() {
         return Some(Ok(Value::Null));
     }
+    if let Some(result) = bitwise(name, left, right) {
+        return Some(result);
+    }
     if name == OVERLAPS
         && let (Value::Array(a), Value::Array(b)) = (left, right)
     {
@@ -900,10 +921,42 @@ fn bounded(type_oid: u32, low: Value, high: Value, flags: &str) -> SqlResult<Val
     )
 }
 
-pub(crate) fn function_type(name: &str, argument: Option<SqlType>) -> Option<Option<SqlType>> {
+fn integer_rank(sql_type: Option<SqlType>) -> Option<u8> {
+    match sql_type? {
+        SqlType::SmallInt => Some(1),
+        SqlType::Integer => Some(2),
+        SqlType::BigInt => Some(3),
+        _ => None,
+    }
+}
+
+fn bitwise_type(left: Option<SqlType>, right: Option<SqlType>) -> Option<SqlType> {
+    let rank = match (integer_rank(left), integer_rank(right)) {
+        (Some(left), Some(right)) => left.max(right),
+        (Some(only), None) if right.is_none() => only,
+        (None, Some(only)) if left.is_none() => only,
+        _ => return None,
+    };
+    Some(match rank {
+        1 => SqlType::SmallInt,
+        2 => SqlType::Integer,
+        _ => SqlType::BigInt,
+    })
+}
+
+/// The result type of a range or integer operator, or of a range function, given the types of
+/// its first two arguments.
+pub(crate) fn function_type(
+    name: &str,
+    argument: Option<SqlType>,
+    second: Option<SqlType>,
+) -> Option<Option<SqlType>> {
     if OPERATORS.iter().any(|(_, internal)| *internal == name) {
         return Some(match (name, argument) {
             (LEFT_OF | RIGHT_OF, Some(sql_type)) if sql_type.is_numeric() => Some(sql_type),
+            (INTEGER_AND | INTEGER_OR, _) if bitwise_type(argument, second).is_some() => {
+                bitwise_type(argument, second)
+            }
             _ => Some(SqlType::Boolean),
         });
     }
@@ -984,5 +1037,60 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(format_text(&made), "[1,2)");
+    }
+
+    #[test]
+    fn integer_and_and_or_take_the_wider_operand_type_in_the_description_and_the_value() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::new(&store);
+        session
+            .execute(
+                "CREATE TABLE bits (s smallint, i integer, b bigint); \
+                 INSERT INTO bits VALUES (6, 3, 5)",
+                &mut |_| {},
+            )
+            .unwrap();
+        let sql = "SELECT s & s AS ss, s & 1 AS sl, 1 | s AS ls, s | i AS si, \
+                   i & s AS is_, s & b AS sb, b | i AS bi FROM bits";
+        let expected = [
+            SqlType::SmallInt,
+            SqlType::Integer,
+            SqlType::Integer,
+            SqlType::Integer,
+            SqlType::Integer,
+            SqlType::BigInt,
+            SqlType::BigInt,
+        ];
+        let described: Vec<Option<SqlType>> = session
+            .describe(sql, &[])
+            .unwrap()
+            .columns
+            .unwrap()
+            .iter()
+            .map(|column| column.sql_type)
+            .collect();
+        assert_eq!(described, expected.map(Some));
+        let mut row = Vec::new();
+        session
+            .execute(sql, &mut |result| {
+                if let Some(first) = result.rows.first() {
+                    row = first.clone();
+                }
+            })
+            .unwrap();
+        let found: Vec<Option<SqlType>> = row.iter().map(Value::sql_type).collect();
+        assert_eq!(found, expected.map(Some));
+        assert_eq!(
+            row,
+            [
+                Value::SmallInt(6),
+                Value::Integer(0),
+                Value::Integer(7),
+                Value::Integer(7),
+                Value::Integer(2),
+                Value::BigInt(4),
+                Value::BigInt(7),
+            ]
+        );
     }
 }

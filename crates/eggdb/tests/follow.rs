@@ -71,10 +71,40 @@ fn follow_refuses_bad_sources_and_options_before_connecting() {
                 "follow",
                 path.as_str(),
                 "postgres://ada@db/app",
+                "--changes",
+                "cdc",
+            ],
+            "--changes is for SQL Server sources",
+        ),
+        (
+            vec![
+                "follow",
+                path.as_str(),
+                "sqlserver://sa@db/app?encrypt=no",
+                "--changes",
+                "replication",
+            ],
+            "--changes takes cdc or change-tracking",
+        ),
+        (
+            vec![
+                "follow",
+                path.as_str(),
+                "postgres://ada@db/app",
                 "--until",
                 "later",
             ],
             "--until takes caught-up",
+        ),
+        (
+            vec![
+                "follow",
+                path.as_str(),
+                "postgres://ada@db/app",
+                "--reconnect-for",
+                "soon",
+            ],
+            "--reconnect-for needs a whole number of seconds",
         ),
         (
             vec![
@@ -187,6 +217,11 @@ fn follow_from_a_sql_server_without_change_tracking_says_how_to_turn_it_on() {
     );
     assert!(
         stderr(&refused).contains("SET CHANGE_TRACKING = ON"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("change data capture"),
         "{}",
         stderr(&refused)
     );

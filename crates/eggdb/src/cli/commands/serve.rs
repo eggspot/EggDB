@@ -1,3 +1,4 @@
+use super::serve_databases::{ServedDirectory, ServedDirectorySetup};
 use super::serve_tls::{CertificateSource, TlsSetup, tls_setup};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, ExportFile, Format};
@@ -5,8 +6,8 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject, TimeStyle};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_pgwire::{
-    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError, MIN_SCRAM_ITERATIONS,
-    SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,
+    DEFAULT_AUTHENTICATION_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_CONNECTIONS, ListenError,
+    MIN_SCRAM_ITERATIONS, MemoryBudget, SCRAM_SALT_BYTES, ScramVerifier, ServerConfig,
 };
 use eggdb_platform::{secure_random, stop_signals};
 use std::io::BufRead;
@@ -540,12 +541,20 @@ impl Session<'_> {
             let (name, first) = directory.remove(0);
             (super::Opened::Owned(Box::new(first)), name)
         };
+        let idle_timeout = match options.idle_timeout_seconds {
+            None => Some(DEFAULT_IDLE_TIMEOUT),
+            Some(0) => None,
+            Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        };
+        let memory_budget = Arc::new(MemoryBudget::default());
         let config = ServerConfig {
             user,
             verifier,
             database: options.database.unwrap_or(served_name),
             max_connections,
             authentication_timeout: DEFAULT_AUTHENTICATION_TIMEOUT,
+            idle_timeout,
+            memory_budget: Arc::clone(&memory_budget),
             auth_rules: self.auth_rules()?,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
         };
@@ -556,6 +565,8 @@ impl Session<'_> {
             database: config.database.clone(),
             max_connections: config.max_connections,
             authentication_timeout: eggdb_mysqlwire::DEFAULT_AUTHENTICATION_TIMEOUT,
+            idle_timeout,
+            memory_budget: Arc::clone(&memory_budget),
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.mysql)),
         });
         let tds_config = tds_credentials.map(|credentials| eggdb_tdswire::ServerConfig {
@@ -564,6 +575,8 @@ impl Session<'_> {
             database: config.database.clone(),
             max_connections: config.max_connections,
             authentication_timeout: eggdb_tdswire::DEFAULT_AUTHENTICATION_TIMEOUT,
+            idle_timeout,
+            memory_budget: Arc::clone(&memory_budget),
             log_batches: options.log_batches,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.tds)),
         });
@@ -580,24 +593,21 @@ impl Session<'_> {
         self.out.finish()?;
         let _ = stop_signals::watch();
         let store = DatabaseStore(&db);
-        let other_stores: Vec<(String, DatabaseStore<'_>)> = directory
-            .iter()
-            .map(|(name, other)| (name.clone(), DatabaseStore(other)))
-            .collect();
-        let mut pg_databases: Vec<(&str, &DatabaseStore<'_>)> =
-            vec![(config.database.as_str(), &store)];
-        pg_databases.extend(
-            other_stores
-                .iter()
-                .map(|(name, other)| (name.as_str(), other)),
-        );
+        let served_databases = ServedDirectory::new(ServedDirectorySetup {
+            default_name: &config.database,
+            default: &store,
+            directory: self
+                .request
+                .file
+                .is_dir()
+                .then(|| self.request.file.clone()),
+            options: self.database_options(Access::Write { create: true }, None),
+            read_only,
+            others: directory,
+        });
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
-        let metrics_databases: Vec<(&str, &eggdb::Database)> =
-            std::iter::once((config.database.as_str(), &*db))
-                .chain(directory.iter().map(|(name, other)| (name.as_str(), other)))
-                .collect();
         let observability_endpoint = eggdb_observability::Endpoint::new(
             &store,
             &config.user,
@@ -707,8 +717,8 @@ impl Session<'_> {
                 let log = move |line: &str| {
                     let _ = events.send(stamped(line));
                 };
-                eggdb_pgwire::serve_databases(
-                    &pg_databases,
+                eggdb_pgwire::serve_directory(
+                    &served_databases,
                     &listener,
                     local_listener.as_ref(),
                     &config,
@@ -721,8 +731,8 @@ impl Session<'_> {
                     let log = move |line: &str| {
                         let _ = mysql_events.send(stamped(&format!("mysql {line}")));
                     };
-                    eggdb_mysqlwire::serve_with_local(
-                        &store,
+                    eggdb_mysqlwire::serve_directory(
+                        &served_databases,
                         listener,
                         mysql_local_listener.as_ref(),
                         config,
@@ -776,7 +786,11 @@ impl Session<'_> {
             let metrics_server = scope.spawn(|| match &metrics_listener {
                 Some(listener) => eggdb_http::serve(
                     listener,
-                    &|request| super::serve_metrics::answer(request, &metrics_databases),
+                    &|request| {
+                        served_databases.with_databases(|databases| {
+                            super::serve_metrics::answer(request, databases)
+                        })
+                    },
                     &stop_signals::requested,
                 ),
                 None => Ok(()),
@@ -921,7 +935,13 @@ impl Session<'_> {
                     let log = move |line: &str| {
                         let _ = tds_events.send(stamped(&format!("tds {line}")));
                     };
-                    eggdb_tdswire::serve(&store, listener, config, &stop_signals::requested, &log)
+                    eggdb_tdswire::serve_directory(
+                        &served_databases,
+                        listener,
+                        config,
+                        &stop_signals::requested,
+                        &log,
+                    )
                 }
                 _ => {
                     drop(tds_events);
@@ -995,8 +1015,7 @@ impl Session<'_> {
                 self.out.text("stopped\n");
             }
         }
-        drop(other_stores);
-        for (_, other) in directory {
+        for other in served_databases.into_databases() {
             self.close_database(other)?;
         }
         self.close(db)?;
@@ -1442,7 +1461,7 @@ impl Session<'_> {
                 ),
                 Exit::DatabaseError,
             ),
-            LocalBindError::Unsupported => usage(format!("{option} is not available on Windows yet; connect over --listen instead")),
+            LocalBindError::Unsupported => usage(format!("{option} needs Windows 10 version 1803 or later, whose Unix sockets it uses; connect over --listen instead")),
             LocalBindError::Io(error) => Failure::database(format!("cannot listen on {}: {error}", path.display()), Exit::DatabaseError),
         })
     }

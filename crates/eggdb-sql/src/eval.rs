@@ -609,11 +609,14 @@ impl Evaluator<'_> {
             } => {
                 let value = as_text_if_character(self.eval(expr, Some(SqlType::Text))?);
                 let pattern = as_text_if_character(self.eval(pattern, Some(SqlType::Text))?);
+                let (value, pattern, folded) = crate::citext::like_operands(value, pattern);
                 let operator = if *case_insensitive { "~~*" } else { "~~" };
                 match (&value, &pattern) {
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                     (Value::Text(text), Value::Text(pattern)) => {
-                        let matched = if *case_insensitive {
+                        let matched = if folded {
+                            like(&crate::citext::fold(text), &crate::citext::fold(pattern))?
+                        } else if *case_insensitive {
                             like(&text.to_lowercase(), &pattern.to_lowercase())?
                         } else {
                             like(text, pattern)?
@@ -859,6 +862,10 @@ impl Evaluator<'_> {
                     let right_value = self.eval(right, None)?;
                     return crate::json_functions::subtract(&left_value, &right_value);
                 }
+                if crate::hstore::hstore_of(&left_value).is_some() {
+                    let right_value = self.eval(right, Some(SqlType::Text))?;
+                    return crate::hstore_functions::subtract(&left_value, &right_value);
+                }
                 let right_value = self.eval(right, left_type)?;
                 if crate::constraints::current_dialect() == crate::Dialect::Oracle
                     && self.oracle_timestamp_operands(left, right)
@@ -874,11 +881,28 @@ impl Evaluator<'_> {
             | BinaryOperator::JsonHasAllKeys => {
                 let document = self.eval(left, Some(SqlType::Jsonb))?;
                 let keys = self.eval(right, Some(SqlType::Text))?;
+                if crate::hstore::hstore_of(&document).is_some() {
+                    return crate::hstore_functions::has_key(operator.symbol(), &document, &keys);
+                }
                 crate::json_functions::has_key(operator.symbol(), &document, &keys)
             }
             BinaryOperator::TextSearchMatch => {
+                if !is_unknown_literal(left) {
+                    let left_value = self.eval(left, None)?;
+                    if matches!(left_value, Value::Jsonb(_)) {
+                        let path = self.eval(right, Some(SqlType::Text))?;
+                        return crate::json_path::match_operator(&left_value, &path);
+                    }
+                    let right_value = self.eval(right, self.type_of(&left_value, left))?;
+                    return crate::text_search::matches(&left_value, &right_value);
+                }
                 let (left, right) = self.pair(left, right)?;
                 crate::text_search::matches(&left, &right)
+            }
+            BinaryOperator::JsonPathExists => {
+                let document = self.eval(left, Some(SqlType::Jsonb))?;
+                let path = self.eval(right, Some(SqlType::Text))?;
+                crate::json_path::exists_operator(&document, &path)
             }
             BinaryOperator::VectorL2Distance
             | BinaryOperator::VectorCosineDistance
@@ -931,6 +955,13 @@ impl Evaluator<'_> {
                 ) {
                     return result;
                 }
+                if let Some(result) = crate::hstore_functions::containment(
+                    operator == BinaryOperator::JsonContains,
+                    &left,
+                    &right,
+                ) {
+                    return result;
+                }
                 let (container, contained) = if operator == BinaryOperator::JsonContains {
                     (&left, &right)
                 } else {
@@ -960,6 +991,11 @@ impl Evaluator<'_> {
             | BinaryOperator::JsonPathText => {
                 let document = self.eval(left, None)?;
                 let selector = self.eval(right, Some(SqlType::Text))?;
+                if operator == BinaryOperator::JsonField
+                    && crate::hstore::hstore_of(&document).is_some()
+                {
+                    return crate::hstore_functions::fetch(&document, &selector);
+                }
                 json_select(operator, &document, &selector)
             }
         }
@@ -975,6 +1011,12 @@ impl Evaluator<'_> {
                 (left, left_operand),
                 (right, right_operand),
             );
+        }
+        if let Some(joined) = crate::hstore_functions::concatenated(
+            (&left_operand.value, is_unknown_literal(left)),
+            (&right_operand.value, is_unknown_literal(right)),
+        ) {
+            return joined.map(Concatenated::scalar);
         }
         let jsonb_pair = match (&left_operand.value, &right_operand.value) {
             (Value::Jsonb(_), Value::Jsonb(_) | Value::Null) | (Value::Null, Value::Jsonb(_)) => {
@@ -1079,6 +1121,11 @@ impl Evaluator<'_> {
                         SqlError::syntax(format!("syntax error at or near \"{unit}\""), 0)
                     })
             }
+            ("extract" | "date_part", [Value::Text(field), value])
+                if infinite_instant(value).is_some() =>
+            {
+                extract_of_infinity(name, field, value)?
+            }
             ("extract" | "date_part", [Value::Text(field), value]) => {
                 let (kind, local, offset) = match local_instant(value) {
                     Ok(Some(found)) => found,
@@ -1090,6 +1137,19 @@ impl Evaluator<'_> {
                     extracted.map(Value::Numeric)
                 } else {
                     extracted.map(|number| Value::Double(number.to_f64()))
+                }
+            }
+            ("date_trunc", [Value::Text(field), Value::Interval(interval)]) => {
+                interval.truncate(field).map(Value::Interval)
+            }
+            ("date_trunc", [Value::Text(_), value]) if infinite_instant(value).is_some() => {
+                match value {
+                    Value::Date(days) => Ok(Value::TimestampTz(if *days > 0 {
+                        datetime::INFINITE_TIMESTAMP
+                    } else {
+                        datetime::NEGATIVE_INFINITE_TIMESTAMP
+                    })),
+                    other => Ok(other.clone()),
                 }
             }
             ("date_trunc", [Value::Text(field), value]) => {
@@ -1372,7 +1432,9 @@ impl Evaluator<'_> {
         let mut values = Vec::with_capacity(arguments.len());
         let mut hint = None;
         let declared = declared_argument_types(name)
+            .or_else(|| crate::hstore_functions::argument_types(name))
             .or_else(|| crate::pg_catalog::argument_types(name))
+            .or_else(|| crate::json_path::argument_types(name))
             .or_else(|| crate::advisory_locks::argument_types(name, arguments.len()));
         let mut held = crate::memory::RowBytes::default();
         for (position, argument) in arguments.iter().enumerate() {
@@ -1408,6 +1470,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::advisory_locks::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::advisory_locks::application_function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::pg_catalog::function(name, &values) {
             return result;
         }
@@ -1420,6 +1485,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::ranges::operator(name, &values) {
             return result;
         }
+        if let Some(result) = crate::hstore_functions::function(name, &values) {
+            return result;
+        }
         if let Some(result) = self.datetime_function(name, &values) {
             return result;
         }
@@ -1430,6 +1498,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::json_functions::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::json_path::function(name, &values) {
             return result;
         }
         if let Some(result) = crate::regexp_functions::function(name, &values) {
@@ -1449,6 +1520,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::bytea::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::oracle_collections::cardinality(name, &values) {
             return result;
         }
         if let Some(result) = crate::arrays::function(name, &values) {
@@ -1528,8 +1602,8 @@ impl Evaluator<'_> {
             ("length" | "char_length" | "character_length", [Value::Text(text)]) => {
                 integer_value(text.chars().count() as i64, SqlType::Integer)
             }
-            ("lower", [Value::Text(text)]) => Ok(Value::Text(text.to_lowercase())),
-            ("upper", [Value::Text(text)]) => Ok(Value::Text(text.to_uppercase())),
+            ("lower", [Value::Text(text)]) => crate::string_functions::case_mapped(text, false),
+            ("upper", [Value::Text(text)]) => crate::string_functions::case_mapped(text, true),
             ("pg_notify", [channel, payload]) => {
                 let text = |value: &Value| match value {
                     Value::Null => String::new(),
@@ -1549,12 +1623,51 @@ impl Evaluator<'_> {
             _ => match (crate::ranges::constructor(name), self.correlation) {
                 (Some(oid), _) => crate::ranges::construct_from_values(oid, &values),
                 (None, Some(correlation)) if crate::set_returning::named(name).is_none() => {
-                    correlation.call_routine(name, &vec![None; values.len()], values.clone())
+                    correlation.call_routine(
+                        name,
+                        &vec![None; values.len()],
+                        values.clone(),
+                        &crate::routines::untyped_arguments(arguments),
+                    )
                 }
                 (None, _) => Err(unknown()),
             },
         }
     }
+}
+
+/// Whether EggDB itself provides a function called `name` (in any case), which a user routine
+/// of that name would take over for every unqualified call.
+pub(crate) fn is_builtin_function(name: &str) -> bool {
+    let name = name.to_lowercase();
+    if crate::advisory_locks::result_type(&name).is_some()
+        || crate::advisory_locks::application_function_type(&name).is_some()
+        || crate::set_returning::named(&name).is_some()
+    {
+        return true;
+    }
+    let evaluator = Evaluator {
+        scope: Scope::empty(),
+        row: &[],
+        correlation: None,
+    };
+    let undefined = format!("function {name}(");
+    let samples = [Literal::Null, Literal::String(String::new())];
+    (0..=3).any(|count| {
+        samples.iter().any(|sample| {
+            let argument = Expr {
+                kind: ExprKind::Literal(sample.clone()),
+                position: 0,
+            };
+            match evaluator.function(&name, &vec![argument; count]) {
+                Ok(_) => true,
+                Err(error) => {
+                    error.state() != SqlState::UNDEFINED_FUNCTION
+                        || !error.message().starts_with(&undefined)
+                }
+            }
+        })
+    })
 }
 
 fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
@@ -1866,6 +1979,40 @@ fn local_instant(value: &Value) -> SqlResult<Option<(DateTimeKind, LocalTime, i3
         ),
         _ => return Ok(None),
     }))
+}
+
+fn infinite_instant(value: &Value) -> Option<(DateTimeKind, bool)> {
+    match value {
+        Value::Date(days) if datetime::is_infinite_date(*days) => {
+            Some((DateTimeKind::Date, *days > 0))
+        }
+        Value::Timestamp(micros) if datetime::is_infinite_timestamp(*micros) => {
+            Some((DateTimeKind::Timestamp, *micros > 0))
+        }
+        Value::TimestampTz(micros) if datetime::is_infinite_timestamp(*micros) => {
+            Some((DateTimeKind::TimestampTz, *micros > 0))
+        }
+        _ => None,
+    }
+}
+
+fn extract_of_infinity(name: &str, field: &str, value: &Value) -> Option<SqlResult<Value>> {
+    let (kind, positive) = infinite_instant(value)?;
+    Some(
+        match datetime::extract_of_infinity_is_infinite(field, kind) {
+            Err(error) => Err(error),
+            Ok(false) => Ok(Value::Null),
+            Ok(true) if name == "date_part" => Ok(Value::Double(if positive {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            })),
+            Ok(true) => Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "numeric does not hold infinity yet; date_part gives it as double precision",
+            )),
+        },
+    )
 }
 
 fn invalid_extract_field() -> SqlError {

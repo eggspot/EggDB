@@ -809,6 +809,7 @@ impl<'p, 't> Compiler<'p, 't> {
         self.scopes.pop();
         self.units.pop();
         let block = block?;
+        super::plsql_goto::check_gotos(&block)?;
         self.take(&TokenKind::Semicolon);
         Ok(program_of(block))
     }
@@ -853,6 +854,7 @@ impl<'p, 't> Compiler<'p, 't> {
         self.scopes.pop();
         self.units.pop();
         let block = block?;
+        super::plsql_goto::check_gotos(&block)?;
         let definition = heading.definition(self.parser.slice(start, self.parser.previous_end()));
         Ok(CompiledSubprogram {
             heading,
@@ -1076,6 +1078,7 @@ impl<'p, 't> Compiler<'p, 't> {
         self.units.pop();
         self.lenient = was_lenient;
         let block = block?;
+        super::plsql_goto::check_gotos(&block)?;
         Ok(PlsqlPackage {
             name,
             body,
@@ -1237,9 +1240,13 @@ impl<'p, 't> Compiler<'p, 't> {
         let word = self.any_word()?;
         match word.as_str() {
             "exception_init" => self.exception_init(earlier),
-            "autonomous_transaction" => {
-                Err(not_supported("PRAGMA AUTONOMOUS_TRANSACTION", position))
-            }
+            "autonomous_transaction" => Err(not_supported(
+                "PRAGMA AUTONOMOUS_TRANSACTION",
+                position,
+            )
+            .with_hint(
+                "EggDB runs one write transaction at a time, so a routine cannot commit on its own while its caller's transaction is open; remove the pragma to run the routine in the caller's transaction.",
+            )),
             other if IGNORED_PRAGMAS.contains(&other) => {
                 self.skip_to_semicolon();
                 self.expect_semicolon()
@@ -1830,16 +1837,37 @@ impl<'p, 't> Compiler<'p, 't> {
                 return Err(self.unexpected());
             }
             self.count_step()?;
-            steps.push(self.step(depth)?);
+            let position = self.position();
+            let mut labels = Vec::new();
+            while let Some(label) = self.label()? {
+                labels.push(label);
+            }
+            if !labels.is_empty() && stops.iter().any(|stop| self.is_word(stop)) {
+                return Err(self.unexpected());
+            }
+            steps.extend(labels.iter().map(|label| Step {
+                kind: StepKind::Label(label.clone()),
+                position,
+            }));
+            steps.push(self.step_after_label(labels.pop(), depth, position)?);
         }
     }
 
     fn step(&mut self, depth: usize) -> SqlResult<Step> {
         let position = self.position();
+        let label = self.label()?;
+        self.step_after_label(label, depth, position)
+    }
+
+    fn step_after_label(
+        &mut self,
+        label: Option<String>,
+        depth: usize,
+        position: usize,
+    ) -> SqlResult<Step> {
         if depth > MAX_NESTING {
             return Err(nested_too_deeply(position));
         }
-        let label = self.label()?;
         let kind = match label {
             Some(label) => self.labelled_step(label, depth)?,
             None => self.unlabelled_step(depth)?,
@@ -2008,7 +2036,7 @@ impl<'p, 't> Compiler<'p, 't> {
                 Ok(StepKind::Rollback { chain: false })
             }
             "rollback" => self.sql_step(),
-            "goto" => Err(not_supported("GOTO", self.position())),
+            "goto" => self.goto_step(),
             "end" | "else" | "elsif" | "when" | "then" | "exception" | "call" => {
                 Err(self.unexpected())
             }
@@ -2511,6 +2539,13 @@ impl<'p, 't> Compiler<'p, 't> {
             )),
             _ => Ok(StepKind::Return(value)),
         }
+    }
+
+    fn goto_step(&mut self) -> SqlResult<StepKind> {
+        self.advance();
+        let label = self.parser.name()?.text;
+        self.expect_semicolon()?;
+        Ok(StepKind::Goto(label))
     }
 
     fn pipe_step(&mut self) -> SqlResult<StepKind> {

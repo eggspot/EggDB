@@ -371,7 +371,12 @@ fn normalization_form(name: &str) -> SqlResult<eggdb_text::Form> {
     })
 }
 
-fn initcap(text: &str) -> String {
+fn initcap(text: &str) -> SqlResult<Value> {
+    crate::memory::check_grown_value_bytes(text.len().saturating_mul(3), || {
+        text.chars()
+            .map(|character| character.to_uppercase().map(char::len_utf8).sum::<usize>())
+            .fold(0, usize::saturating_add)
+    })?;
     let mut out = String::with_capacity(text.len());
     let mut in_word = false;
     for character in text.chars() {
@@ -382,20 +387,47 @@ fn initcap(text: &str) -> String {
         }
         in_word = character.is_alphanumeric();
     }
-    out
+    Ok(Value::Text(out))
 }
 
-fn translated(text: &str, from: &str, to: &str) -> String {
+fn translated(text: &str, from: &str, to: &str) -> SqlResult<Value> {
     let from: Vec<char> = from.chars().collect();
     let to: Vec<char> = to.chars().collect();
-    text.chars()
-        .filter_map(
-            |character| match from.iter().position(|found| *found == character) {
-                Some(at) => to.get(at).copied(),
-                None => Some(character),
-            },
-        )
-        .collect()
+    let replacement = |character: char| match from.iter().position(|found| *found == character) {
+        Some(at) => to.get(at).copied(),
+        None => Some(character),
+    };
+    let widest = to
+        .iter()
+        .map(|character| character.len_utf8())
+        .max()
+        .unwrap_or(1);
+    crate::memory::check_grown_value_bytes(text.len().saturating_mul(widest), || {
+        text.chars()
+            .filter_map(replacement)
+            .map(char::len_utf8)
+            .fold(0, usize::saturating_add)
+    })?;
+    Ok(Value::Text(text.chars().filter_map(replacement).collect()))
+}
+
+pub(crate) fn case_mapped(text: &str, upper: bool) -> SqlResult<Value> {
+    crate::memory::check_grown_value_bytes(text.len().saturating_mul(3), || {
+        text.chars()
+            .map(|character| {
+                if upper {
+                    character.to_uppercase().map(char::len_utf8).sum::<usize>()
+                } else {
+                    character.to_lowercase().map(char::len_utf8).sum::<usize>()
+                }
+            })
+            .fold(0, usize::saturating_add)
+    })?;
+    Ok(Value::Text(if upper {
+        text.to_uppercase()
+    } else {
+        text.to_lowercase()
+    }))
 }
 
 fn character_of(code: i64) -> SqlResult<Value> {
@@ -533,8 +565,8 @@ fn text_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         ("lpad" | "rpad", 2) => padded_to(text(0)?, number(1)?, " ", name == "lpad"),
         ("lpad" | "rpad", 3) => padded_to(text(0)?, number(1)?, text(2)?, name == "lpad"),
         ("repeat", 2) => repeated(text(0)?, number(1)?),
-        ("initcap", 1) => Ok(Value::Text(initcap(text(0)?))),
-        ("translate", 3) => Ok(Value::Text(translated(text(0)?, text(1)?, text(2)?))),
+        ("initcap", 1) => initcap(text(0)?),
+        ("translate", 3) => translated(text(0)?, text(1)?, text(2)?),
         ("reverse", 1) => Ok(Value::Text(text(0)?.chars().rev().collect())),
         ("chr", 1) => character_of(number(0)?),
         ("ascii", 1) => Ok(Value::Integer(

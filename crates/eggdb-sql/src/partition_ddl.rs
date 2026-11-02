@@ -126,6 +126,7 @@ fn copy_of(parent: &TableDefinition, name: Name) -> SqlResult<CreateTable> {
         comment: None,
         partition_by: None,
         partition_of: None,
+        sqlite_text: None,
     })
 }
 

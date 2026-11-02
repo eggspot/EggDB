@@ -18,7 +18,23 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 20] = [
+const FUNCTIONS: [SetReturningFunction; 29] = [
+    to_records("json_to_record"),
+    to_records("jsonb_to_record"),
+    to_records("json_to_recordset"),
+    to_records("jsonb_to_recordset"),
+    SetReturningFunction {
+        name: "jsonb_path_query",
+        result_type: json_path_query_type,
+        rows: json_path_query_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "jsonb_path_query_tz",
+        result_type: json_path_query_type,
+        rows: json_path_query_rows,
+        fields: false,
+    },
     SetReturningFunction {
         name: "generate_series",
         result_type: series_type,
@@ -111,7 +127,83 @@ const FUNCTIONS: [SetReturningFunction; 20] = [
         rows: crate::records::expanded_array_rows,
         fields: false,
     },
+    SetReturningFunction {
+        name: "skeys",
+        result_type: hstore_keys_type,
+        rows: hstore_keys_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: "svals",
+        result_type: hstore_values_type,
+        rows: hstore_values_rows,
+        fields: false,
+    },
+    SetReturningFunction {
+        name: crate::hstore_functions::EACH,
+        result_type: hstore_each_type,
+        rows: hstore_each_rows,
+        fields: true,
+    },
 ];
+
+fn hstore_keys_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::hstore_functions::set_result_type("skeys", types)
+}
+
+fn hstore_values_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::hstore_functions::set_result_type("svals", types)
+}
+
+fn hstore_each_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::hstore_functions::set_result_type(crate::hstore_functions::EACH, types)
+}
+
+fn hstore_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::hstore_functions::key_rows(values, sink)
+}
+
+fn hstore_values_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::hstore_functions::value_rows(values, sink)
+}
+
+fn hstore_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::hstore_functions::each_records(values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
+}
+
+fn record_columns(name: &str) -> Vec<OutputColumn> {
+    if name == crate::hstore_functions::EACH {
+        return crate::hstore_functions::EACH_COLUMNS
+            .iter()
+            .map(|column| OutputColumn {
+                name: (*column).to_owned(),
+                sql_type: Some(SqlType::Text),
+            })
+            .collect();
+    }
+    crate::json_functions::record_names(name)
+        .iter()
+        .zip(crate::json_functions::record_types(name))
+        .map(|(column, sql_type)| OutputColumn {
+            name: (*column).to_owned(),
+            sql_type: Some(sql_type),
+        })
+        .collect()
+}
+
+fn record_rows(
+    name: &str,
+    values: &[Value],
+    sink: &mut crate::json_functions::RecordSink<'_>,
+) -> SqlResult<()> {
+    if name == crate::hstore_functions::EACH {
+        crate::hstore_functions::each_records(values, sink)
+    } else {
+        crate::json_functions::record_rows(name, values, sink)
+    }
+}
 
 pub(crate) const OPENJSON_FUNCTION: &str = "*openjson*";
 pub(crate) const STRING_SPLIT_FUNCTION: &str = "*string_split*";
@@ -141,6 +233,19 @@ fn openjson_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlRes
     crate::json_functions::openjson_rows(values, &mut |record| {
         sink(crate::json_functions::record_text(&record))
     })
+}
+
+const fn to_records(name: &'static str) -> SetReturningFunction {
+    SetReturningFunction {
+        name,
+        result_type: crate::json_to_record::result_type,
+        rows: to_record_rows,
+        fields: true,
+    }
+}
+
+fn to_record_rows(_: &[Value], _: SqlType, _: &mut RowSink<'_>) -> SqlResult<()> {
+    Err(crate::json_to_record::definition_list_required())
 }
 
 const fn json_records(
@@ -248,6 +353,34 @@ fn json_object_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -
 
 fn jsonb_object_keys_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
     json_rows_of("jsonb_object_keys", values, sink)
+}
+
+fn json_path_query_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    let document = |sql_type: &Option<SqlType>| {
+        sql_type.is_none_or(|sql_type| {
+            matches!(sql_type, SqlType::Jsonb | SqlType::Json) || sql_type.is_character()
+        })
+    };
+    let path = |sql_type: &Option<SqlType>| sql_type.is_none_or(SqlType::is_character);
+    let silent =
+        |sql_type: &Option<SqlType>| sql_type.is_none_or(|sql_type| sql_type == SqlType::Boolean);
+    let accepted = match types {
+        [target, path_type] => document(target) && path(path_type),
+        [target, path_type, vars] => document(target) && path(path_type) && document(vars),
+        [target, path_type, vars, flag] => {
+            document(target) && path(path_type) && document(vars) && silent(flag)
+        }
+        _ => false,
+    };
+    if accepted {
+        Ok(SqlType::Jsonb)
+    } else {
+        Err(does_not_exist("jsonb_path_query", types))
+    }
+}
+
+fn json_path_query_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_path::query_rows(values, sink)
 }
 
 fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {
@@ -1053,16 +1186,12 @@ fn function_columns(
     label: &str,
     alias_given: bool,
     sql_type: SqlType,
+    types: &[Option<SqlType>],
 ) -> Vec<OutputColumn> {
-    let mut columns: Vec<OutputColumn> = if found.fields {
-        crate::json_functions::record_names(found.name)
-            .iter()
-            .zip(crate::json_functions::record_types(found.name))
-            .map(|(name, sql_type)| OutputColumn {
-                name: (*name).to_owned(),
-                sql_type: Some(sql_type),
-            })
-            .collect()
+    let mut columns: Vec<OutputColumn> = if crate::json_to_record::is_to_record(found.name) {
+        crate::json_to_record::columns(&defined_names(function), types)
+    } else if found.fields {
+        record_columns(found.name)
     } else {
         vec![OutputColumn {
             name: if alias_given {
@@ -1098,12 +1227,23 @@ pub(crate) fn table_function_columns(
         label,
         alias_given,
         sql_type,
+        &types,
     ))
+}
+
+fn defined_names(function: &TableFunction) -> Vec<String> {
+    function
+        .column_names
+        .iter()
+        .map(|name| name.text.clone())
+        .collect()
 }
 
 pub(crate) struct BoundFunction {
     found: &'static SetReturningFunction,
     values: Vec<Value>,
+    types: Vec<Option<SqlType>>,
+    defined_names: Vec<String>,
     sql_type: SqlType,
     ordinality: bool,
     position: usize,
@@ -1144,6 +1284,8 @@ pub(crate) fn bind_function(
     Ok(BoundFunction {
         found,
         values,
+        types,
+        defined_names: defined_names(function),
         sql_type,
         ordinality: function.ordinality,
         position: function.position,
@@ -1157,7 +1299,14 @@ impl BoundFunction {
         label: &str,
         alias_given: bool,
     ) -> Vec<OutputColumn> {
-        function_columns(function, self.found, label, alias_given, self.sql_type)
+        function_columns(
+            function,
+            self.found,
+            label,
+            alias_given,
+            self.sql_type,
+            &self.types,
+        )
     }
 
     pub(crate) fn generate(
@@ -1166,18 +1315,25 @@ impl BoundFunction {
     ) -> SqlResult<()> {
         let mut ordinal: i64 = 0;
         if self.found.fields {
-            return crate::json_functions::record_rows(
-                self.found.name,
-                &self.values,
-                &mut |mut record| {
-                    ordinal += 1;
-                    if self.ordinality {
-                        record.push(Value::BigInt(ordinal));
-                    }
-                    store(record)
-                },
-            )
-            .map_err(|error| error.at_if_unplaced(self.position));
+            let mut numbered = |mut record: Vec<Value>| {
+                ordinal += 1;
+                if self.ordinality {
+                    record.push(Value::BigInt(ordinal));
+                }
+                store(record)
+            };
+            let produced = if crate::json_to_record::is_to_record(self.found.name) {
+                crate::json_to_record::rows(
+                    self.found.name,
+                    &self.values,
+                    &self.defined_names,
+                    &self.types,
+                    &mut numbered,
+                )
+            } else {
+                record_rows(self.found.name, &self.values, &mut numbered)
+            };
+            return produced.map_err(|error| error.at_if_unplaced(self.position));
         }
         (self.found.rows)(&self.values, self.sql_type, &mut |value| {
             ordinal += 1;
@@ -1674,9 +1830,10 @@ pub(crate) fn expressions(generated: &GeneratedTable) -> Vec<&Expr> {
     match generated {
         GeneratedTable::Values(list) => list.rows.iter().flatten().collect(),
         GeneratedTable::Function(function) => function.arguments.iter().collect(),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
-            Vec::new()
-        }
+        GeneratedTable::Expansion(_)
+        | GeneratedTable::Catalog(_)
+        | GeneratedTable::Variable(_)
+        | GeneratedTable::Sequence(_) => Vec::new(),
     }
 }
 
@@ -1684,9 +1841,10 @@ pub(crate) fn expressions_mut(generated: &mut GeneratedTable) -> Vec<&mut Expr> 
     match generated {
         GeneratedTable::Values(list) => list.rows.iter_mut().flatten().collect(),
         GeneratedTable::Function(function) => function.arguments.iter_mut().collect(),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
-            Vec::new()
-        }
+        GeneratedTable::Expansion(_)
+        | GeneratedTable::Catalog(_)
+        | GeneratedTable::Variable(_)
+        | GeneratedTable::Sequence(_) => Vec::new(),
     }
 }
 
@@ -1713,8 +1871,9 @@ pub(crate) fn generate_rows(
             .into_iter()
             .try_for_each(store),
         GeneratedTable::Function(function) => bind_function(function, evaluator)?.generate(store),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
-            Ok(())
-        }
+        GeneratedTable::Expansion(_)
+        | GeneratedTable::Catalog(_)
+        | GeneratedTable::Variable(_)
+        | GeneratedTable::Sequence(_) => Ok(()),
     }
 }

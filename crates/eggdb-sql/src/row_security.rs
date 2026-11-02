@@ -5,8 +5,8 @@ use crate::session::QueryResult;
 use crate::settings::Settings;
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 
-const POLICY_SPACE: u8 = 0x13;
-const ROW_SECURITY_SPACE: u8 = 0x14;
+pub(crate) const POLICY_SPACE: u8 = 0x13;
+pub(crate) const ROW_SECURITY_SPACE: u8 = 0x14;
 const RECORD_VERSION: u8 = 1;
 const ENABLED: u8 = 1;
 

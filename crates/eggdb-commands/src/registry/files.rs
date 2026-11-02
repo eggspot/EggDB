@@ -193,7 +193,7 @@ pub(super) const IMPORT: CommandDefinition = CommandDefinition {
     synopsis: "<file> [in]",
     summary: "load an export, or a CSV file into a table with --csv",
     description: "Loads an eggdb export from a file or stdin, every line checked, or with --csv loads a CSV or bcp file into an existing SQL table, all rows or none. --dry-run checks an export and changes nothing.",
-    usage: "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] [-C <name>] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dry-run] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls]",
+    usage: "eggdb import <file> [<in> | -] [--create [--page-size <bytes>]] [--on-conflict error|overwrite|skip] [--dry-run] [-C <name>] | eggdb import <file> --csv <file> --table <name> [--header] [--delimiter <c>] [--null <text>] [--dry-run] [--dialect postgresql|oracle|sqlserver] [--row-terminator <text>] [--keep-nulls] [--unicode | --native | --format-file <file>]",
     help: "\
 Loads an export made by eggdb export into the file, from <in> or, without it or with -, from
 stdin. Every line is checked: the header, the trailer's count, the escapes, keys in ascending
@@ -242,6 +242,11 @@ string, values convert as SQL Server's INSERT converts text, and the text is UTF
       --row-terminator <text>    the row terminator, bcp's -r: a newline (or \\r\\n) by default
       --header                   skip the first row, as bcp's -F 2
       --keep-nulls               keep empty fields NULL rather than the column's default, bcp's -k
+      --unicode                  the file is in bcp's Unicode character format (bcp -w): UTF-16LE
+      --native                   the file is in bcp's native format (bcp -n), laid out by the
+                                 table's column types; no terminators
+      --format-file <file>       lay the file out as this bcp format file says (bcp -f),
+                                 non-XML or XML
 
 Examples:
   eggdb import --create copy.db backup.jsonl
@@ -304,6 +309,19 @@ Examples:
         flag(
             "keep-nulls",
             "with --dialect sqlserver, keep empty fields NULL, bcp's -k",
+        ),
+        flag(
+            "unicode",
+            "with --dialect sqlserver, a bcp Unicode character file (UTF-16LE), bcp's -w",
+        ),
+        flag(
+            "native",
+            "with --dialect sqlserver, a bcp native-format file, bcp's -n",
+        ),
+        valued(
+            "format-file",
+            "file",
+            "with --dialect sqlserver, the bcp format file that lays out the data, bcp's -f",
         ),
     ],
     operands: &[

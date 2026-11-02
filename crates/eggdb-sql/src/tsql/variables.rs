@@ -81,6 +81,18 @@ pub(crate) struct BatchContext {
     pub(crate) transition_tables: Vec<String>,
     pub(crate) updated_columns: Option<Vec<String>>,
     pub(crate) nest_level: u8,
+    pub(crate) procedure: Option<String>,
+}
+
+pub(crate) fn procedure_object_name(internal: &str) -> String {
+    let bracketed = |part: &str| format!("[{}]", part.replace(']', "]]"));
+    let schema = crate::schemas::schema_of(internal);
+    let name = bracketed(crate::schemas::base_name(internal));
+    if schema == crate::schemas::DEFAULT_SCHEMA {
+        name
+    } else {
+        format!("{}.{name}", bracketed(schema))
+    }
 }
 
 impl BatchContext {

@@ -28,6 +28,8 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         | "pg_table_is_visible"
         | "pg_type_is_visible"
         | "pg_function_is_visible"
+        | "pg_opclass_is_visible"
+        | "pg_opfamily_is_visible"
         | "pg_get_functiondef"
         | "pg_get_function_arguments"
         | "pg_get_function_identity_arguments"
@@ -55,6 +57,8 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "pg_table_is_visible"
         | "pg_type_is_visible"
         | "pg_function_is_visible"
+        | "pg_opclass_is_visible"
+        | "pg_opfamily_is_visible"
         | "pg_relation_is_publishable" => SqlType::Boolean,
         "format_type"
         | "pg_get_expr"
@@ -163,6 +167,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             _ => Value::Null,
         }),
         ("pg_get_ruledef" | "pg_get_statisticsobjdef_columns", _) => Ok(Value::Null),
+        ("pg_opclass_is_visible" | "pg_opfamily_is_visible", _) => Ok(Value::Null),
         ("shobj_description", _) => Ok(Value::Null),
         ("pg_get_serial_sequence", [table, column]) => serial_sequence(table, column),
         ("to_regclass", [text]) => registered(RegKind::Class, text),
@@ -381,7 +386,12 @@ pub(crate) fn constraint_definition(
     oid: u32,
     pretty: bool,
 ) -> Option<String> {
-    let constraint = snapshot.constraint(oid)?;
+    let Some(constraint) = snapshot.constraint(oid) else {
+        return super::relations::domain_constraints(snapshot)
+            .into_iter()
+            .find(|constraint| constraint.oid == oid)
+            .map(|constraint| constraint.definition());
+    };
     let table = snapshot.relations.get(constraint.table)?.table()?;
     Some(match constraint.source {
         ConstraintSource::Primary => {

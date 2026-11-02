@@ -14,6 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+const FIRST_BUSY_PAUSE: Duration = Duration::from_millis(1);
+const LONGEST_BUSY_PAUSE: Duration = Duration::from_millis(50);
+
 const NANOS_PER_MICRO: u64 = 1_000;
 const BACKUP_STAGING_SUFFIX: &str = ".backing-up";
 const COMPACTION_STAGING_SUFFIX: &str = ".compacting";
@@ -284,8 +287,7 @@ impl Database {
     fn open_file(path: &Path, options: &Options) -> Result<Self> {
         let new_file_page_size = options.new_file_page_size()?;
         options.check_cache_holds(new_file_page_size)?;
-        let file = open_or_create(path, options, new_file_page_size)
-            .map_err(|error| explain_open_error(error, options))?;
+        let file = open_waiting_while_busy(path, options, new_file_page_size)?;
         Self::with_page_file(file, path, options)
     }
 
@@ -834,6 +836,38 @@ impl Database {
             last_commit.unix_micros()
         };
         Moment::from_unix_micros(wall.max(committed))
+    }
+}
+
+fn open_waiting_while_busy(
+    path: &Path,
+    options: &Options,
+    page_size: PageSize,
+) -> Result<PageFile<DatabaseFile>> {
+    let open = || {
+        open_or_create(path, options, page_size).map_err(|error| explain_open_error(error, options))
+    };
+    let first = open();
+    let busy = matches!(&first, Err(error) if error.kind() == ErrorKind::Locked);
+    if !busy || options.busy_timeout.is_zero() {
+        return first;
+    }
+    let give_up = std::time::Instant::now().checked_add(options.busy_timeout);
+    let mut pause = FIRST_BUSY_PAUSE;
+    loop {
+        let remaining = match give_up {
+            Some(give_up) => give_up.saturating_duration_since(std::time::Instant::now()),
+            None => LONGEST_BUSY_PAUSE,
+        };
+        if remaining.is_zero() {
+            return open();
+        }
+        std::thread::sleep(pause.min(remaining));
+        pause = pause.saturating_mul(2).min(LONGEST_BUSY_PAUSE);
+        match open() {
+            Err(error) if error.kind() == ErrorKind::Locked => {}
+            opened => return opened,
+        }
     }
 }
 

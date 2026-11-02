@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use eggdb_sql::{
-    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, SqlError, SqlResult,
-    StoreFailure,
+    DatabaseDirectory, EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection,
+    ServedDatabaseError, ServedDatabases, SqlError, SqlResult, StoreFailure,
 };
 use eggdb_tdswire::{ServerConfig, TdsCredentials};
 use std::collections::BTreeMap;
@@ -138,6 +138,75 @@ impl KeyValueStore for SharedMemoryStore {
     }
 }
 
+#[derive(Default)]
+pub struct MemoryDirectory {
+    databases: Mutex<BTreeMap<String, Arc<SharedMemoryStore>>>,
+}
+
+impl MemoryDirectory {
+    pub fn with(names: &[&str]) -> Arc<Self> {
+        let directory = Self::default();
+        for name in names {
+            directory.create(name).unwrap();
+        }
+        Arc::new(directory)
+    }
+}
+
+impl ServedDatabases for MemoryDirectory {
+    fn names(&self) -> Vec<String> {
+        self.databases.lock().unwrap().keys().cloned().collect()
+    }
+
+    fn create(&self, name: &str) -> Result<(), ServedDatabaseError> {
+        let mut databases = self.databases.lock().unwrap();
+        if databases
+            .keys()
+            .any(|served| served.eq_ignore_ascii_case(name))
+        {
+            return Err(ServedDatabaseError::Exists);
+        }
+        databases.insert(name.to_owned(), Arc::default());
+        Ok(())
+    }
+
+    fn drop_database(&self, name: &str) -> Result<(), ServedDatabaseError> {
+        let mut databases = self.databases.lock().unwrap();
+        let Some(served) = databases
+            .keys()
+            .find(|served| served.eq_ignore_ascii_case(name))
+            .cloned()
+        else {
+            return Err(ServedDatabaseError::Missing);
+        };
+        if databases
+            .get(&served)
+            .is_some_and(|store| Arc::strong_count(store) > 1)
+        {
+            return Err(ServedDatabaseError::InUse);
+        }
+        databases.remove(&served);
+        Ok(())
+    }
+}
+
+impl DatabaseDirectory for MemoryDirectory {
+    type Attached<'d>
+        = Arc<SharedMemoryStore>
+    where
+        Self: 'd;
+
+    fn attach(&self, name: &str) -> Option<Arc<SharedMemoryStore>> {
+        self.databases.lock().unwrap().get(name).cloned()
+    }
+}
+
+#[derive(Default)]
+pub struct Limits {
+    pub idle_timeout: Option<Duration>,
+    pub memory_budget: Arc<eggdb_platform::connection_limits::MemoryBudget>,
+}
+
 pub struct TestServer {
     pub address: SocketAddr,
     pub stop: Arc<AtomicBool>,
@@ -151,17 +220,27 @@ impl TestServer {
     }
 
     pub fn start_with(max_connections: usize, authentication_timeout: Duration) -> Self {
-        Self::start_configured(max_connections, authentication_timeout, None)
+        Self::start_configured(
+            max_connections,
+            authentication_timeout,
+            None,
+            Limits::default(),
+        )
     }
 
     pub fn start_with_tls(tls: Arc<eggdb_tls::ServerConfig>) -> Self {
-        Self::start_configured(8, Duration::from_secs(5), Some(tls))
+        Self::start_configured(8, Duration::from_secs(5), Some(tls), Limits::default())
+    }
+
+    pub fn start_limited(max_connections: usize, limits: Limits) -> Self {
+        Self::start_configured(max_connections, Duration::from_secs(5), None, limits)
     }
 
     fn start_configured(
         max_connections: usize,
         authentication_timeout: Duration,
         tls: Option<Arc<eggdb_tls::ServerConfig>>,
+        limits: Limits,
     ) -> Self {
         let listener: TcpListener =
             eggdb_tdswire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -174,6 +253,8 @@ impl TestServer {
             database: DATABASE.to_owned(),
             max_connections,
             authentication_timeout,
+            idle_timeout: limits.idle_timeout,
+            memory_budget: limits.memory_budget,
             log_batches: true,
             tls,
         };
@@ -184,6 +265,38 @@ impl TestServer {
             let stop = move || thread_stop.load(Ordering::Acquire);
             let log = move |line: &str| thread_logged.lock().unwrap().push(line.to_owned());
             eggdb_tdswire::serve(&store, &listener, &config, &stop, &log).unwrap()
+        });
+        Self {
+            address,
+            stop,
+            logged,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn start_directory(directory: Arc<MemoryDirectory>) -> Self {
+        let listener: TcpListener =
+            eggdb_tdswire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let logged = Arc::new(Mutex::new(Vec::new()));
+        let config = ServerConfig {
+            user: USER.to_owned(),
+            credentials: TdsCredentials::derive_with_salt(PASSWORD.as_bytes(), [3; 16], 2),
+            database: DATABASE.to_owned(),
+            max_connections: 8,
+            authentication_timeout: Duration::from_secs(5),
+            idle_timeout: None,
+            memory_budget: Arc::default(),
+            log_batches: true,
+            tls: None,
+        };
+        let thread_stop = Arc::clone(&stop);
+        let thread_logged = Arc::clone(&logged);
+        let thread = std::thread::spawn(move || {
+            let stop = move || thread_stop.load(Ordering::Acquire);
+            let log = move |line: &str| thread_logged.lock().unwrap().push(line.to_owned());
+            eggdb_tdswire::serve_directory(&*directory, &listener, &config, &stop, &log).unwrap()
         });
         Self {
             address,

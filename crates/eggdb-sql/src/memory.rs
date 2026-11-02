@@ -51,6 +51,8 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
                     })
                     .sum()
             }),
+            crate::types::DefinedValue::Citext(text) => text.len(),
+            crate::types::DefinedValue::Hstore(hstore) => hstore.held_bytes(),
         },
         _ => 0,
     }
@@ -140,6 +142,16 @@ pub(crate) fn check_value_bytes(bytes: usize) -> SqlResult<()> {
     .with_hint(
         "Build smaller values: the session that runs this statement limits the size of one value.",
     ))
+}
+
+pub(crate) fn check_grown_value_bytes(
+    most_bytes: usize,
+    exact_bytes: impl FnOnce() -> usize,
+) -> SqlResult<()> {
+    if most_bytes <= VALUE_LIMIT.with(std::cell::Cell::get) {
+        return Ok(());
+    }
+    check_value_bytes(exact_bytes())
 }
 
 pub(crate) struct SharedStatementMemory {

@@ -1,0 +1,6 @@
+connect_light_1x 1280x800 81967426d5329533
+connect_dark_1x 1280x800 560efeb8699a5825
+connect_high_contrast_1x 1280x800 5a769edef2e83f4d
+connect_light_2x 2560x1600 ff7461c10945e6e3
+connect_dark_2x 2560x1600 adddf08ccab46b81
+connect_high_contrast_2x 2560x1600 a98ef36d4326528a

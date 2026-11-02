@@ -241,9 +241,7 @@ fn garbage_instead_of_a_client_hello_is_refused_without_panicking() {
         let config = server_config.clone();
         let server = thread::spawn(move || TlsStream::accept(server_socket, &config));
         client_socket.write_all(garbage).expect("write");
-        client_socket
-            .shutdown(std::net::Shutdown::Write)
-            .expect("shutdown");
+        let _ = client_socket.shutdown(std::net::Shutdown::Write);
         assert!(
             server
                 .join()

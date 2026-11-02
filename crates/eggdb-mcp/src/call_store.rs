@@ -1,7 +1,7 @@
 use crate::watchdog::Watchdog;
 use eggdb_sql::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, SqlError, SqlResult,
-    SqlState, StoreFailure, VisibleRead, VisibleTables,
+    SqlState, StoreFailure, VisibleRead, VisibleTables, VisibleWrite,
 };
 use std::cell::Cell;
 use std::time::Instant;
@@ -217,6 +217,7 @@ pub(crate) struct WritingCallStore<'c, S: KeyValueStore> {
     inner: &'c S,
     limits: &'c CallLimits,
     watchdog: Option<&'c Watchdog>,
+    tables: Option<&'c VisibleTables>,
 }
 
 impl<'c, S: KeyValueStore> WritingCallStore<'c, S> {
@@ -224,11 +225,13 @@ impl<'c, S: KeyValueStore> WritingCallStore<'c, S> {
         inner: &'c S,
         limits: &'c CallLimits,
         watchdog: Option<&'c Watchdog>,
+        tables: Option<&'c VisibleTables>,
     ) -> Self {
         Self {
             inner,
             limits,
             watchdog,
+            tables,
         }
     }
 }
@@ -313,29 +316,37 @@ impl<W: KeyValueWrite> KeyValueWrite for LimitedWrite<'_, W> {
 
 impl<'c, S: KeyValueStore> KeyValueStore for WritingCallStore<'c, S> {
     type Read<'s>
-        = LimitedRead<'c, S::Read<'s>>
+        = VisibleRead<LimitedRead<'c, S::Read<'s>>>
     where
         Self: 's;
     type Write<'s>
-        = LimitedWrite<'c, S::Write<'s>>
+        = VisibleWrite<LimitedWrite<'c, S::Write<'s>>>
     where
         Self: 's;
 
     fn begin_read(&self) -> SqlResult<Self::Read<'_>> {
         self.limits.check()?;
-        Ok(LimitedRead {
+        let limited = LimitedRead {
             inner: self.inner.begin_read()?,
             limits: self.limits,
-        })
+        };
+        match self.tables {
+            Some(tables) => tables.read(limited),
+            None => Ok(VisibleRead::everything(limited)),
+        }
     }
 
     fn begin_write(&self) -> SqlResult<Self::Write<'_>> {
         self.limits.check()?;
-        Ok(LimitedWrite {
+        let limited = LimitedWrite {
             inner: self.inner.begin_write()?,
             limits: self.limits,
             watchdog: self.watchdog,
-        })
+        };
+        match self.tables {
+            Some(tables) => tables.write(limited),
+            None => Ok(VisibleWrite::everything(limited)),
+        }
     }
 }
 
@@ -486,7 +497,7 @@ mod tests {
         use eggdb_sql::KeyValueWrite;
         let counted = Counted::default();
         let limits = CallLimits::new(Instant::now() + Duration::from_secs(600));
-        let store = super::WritingCallStore::new(&counted, &limits, None);
+        let store = super::WritingCallStore::new(&counted, &limits, None, None);
         let mut writer = store.begin_write().unwrap();
         let value = vec![0u8; 1 << 20];
         for _ in 0..255 {
@@ -518,7 +529,7 @@ mod tests {
         received.recv_timeout(Duration::from_secs(30)).unwrap();
         let counted = Counted::default();
         let limits = CallLimits::new(Instant::now() + Duration::from_secs(600));
-        let store = super::WritingCallStore::new(&counted, &limits, Some(&watchdog));
+        let store = super::WritingCallStore::new(&counted, &limits, Some(&watchdog), None);
         let writer = store.begin_write().unwrap();
         assert_eq!(writer.commit().unwrap_err().state().code(), "57014");
         assert_eq!(counted.committed.get(), 0);

@@ -201,6 +201,20 @@ fn replace_in_statement(statement: &mut Statement, materialized: &[Materialized]
     }
 }
 
+pub(crate) fn replace_named_tables(
+    statement: &mut Statement,
+    variables: &[(String, String)],
+) -> SqlResult<()> {
+    let materialized: Vec<Materialized> = variables
+        .iter()
+        .map(|(name, variable)| Materialized {
+            name: name.clone(),
+            variable: Some(variable.clone()),
+        })
+        .collect();
+    replace_in_statement(statement, &materialized)
+}
+
 fn table_query(table: &CommonTable, recursive: bool) -> Query {
     let position = table.name.position;
     let select = Select {
@@ -466,11 +480,18 @@ pub(crate) fn describe(
     described(reader, tables, &body)
 }
 
-pub(crate) fn classify(with: &WithStatement) -> Option<crate::destructive::DestructiveStatement> {
-    crate::destructive::classify(&with.body).or_else(|| {
-        with.tables.iter().find_map(|table| match table {
-            WithTable::Modifying { statement, .. } => crate::destructive::classify(statement),
-            WithTable::Query(_) => None,
-        })
-    })
+pub(crate) fn classify(
+    with: &WithStatement,
+    keys: &mut crate::destructive::CatalogLookup<'_>,
+) -> Option<crate::destructive::DestructiveStatement> {
+    let mut found = None;
+    for table in &with.tables {
+        let part = match table {
+            WithTable::Modifying { statement, .. } => crate::destructive::classify(statement, keys),
+            WithTable::Query(common) => crate::destructive::query_runs_code(&common.query),
+        };
+        found = crate::destructive::DestructiveStatement::combined(found, part);
+    }
+    let body = crate::destructive::classify(&with.body, keys);
+    crate::destructive::DestructiveStatement::combined(found, body)
 }

@@ -9,10 +9,11 @@ use eggdb_crypto::{base64_encode, hmac_sha256, pbkdf2_hmac_sha256, sha256};
 use std::collections::BTreeSet;
 
 const ROLE_SPACE: u8 = 0x11;
-const GRANT_SPACE: u8 = 0x12;
+pub(crate) const GRANT_SPACE: u8 = 0x12;
 const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
 const SUPERUSER: u8 = 2;
+const CREATE_DATABASE: u8 = 4;
 const SCRAM_ITERATIONS: u32 = 4096;
 const SCRAM_SALT_BYTES: usize = 16;
 const MAX_MEMBERSHIP_DEPTH: usize = 32;
@@ -63,6 +64,7 @@ impl Privilege {
 pub(crate) struct RoleOptions {
     pub(crate) login: Option<bool>,
     pub(crate) superuser: Option<bool>,
+    pub(crate) create_database: Option<bool>,
     pub(crate) password: Option<Option<String>>,
     pub(crate) member_of: Vec<String>,
 }
@@ -125,6 +127,8 @@ pub struct StoredRole {
     pub login: bool,
     /// Whether the role bypasses every privilege check.
     pub superuser: bool,
+    /// Whether the role may create databases (`CREATEDB`).
+    pub create_database: bool,
     /// The SCRAM-SHA-256 verifier in PostgreSQL's `pg_authid.rolpassword` form
     /// (`SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`), when the role has a password.
     pub scram_verifier: Option<String>,
@@ -160,7 +164,15 @@ fn put_text(out: &mut Vec<u8>, text: &str) {
 
 fn encode_role(role: &StoredRole) -> Vec<u8> {
     let mut out = vec![RECORD_VERSION];
-    out.push(if role.login { LOGIN } else { 0 } | if role.superuser { SUPERUSER } else { 0 });
+    out.push(
+        if role.login { LOGIN } else { 0 }
+            | if role.superuser { SUPERUSER } else { 0 }
+            | if role.create_database {
+                CREATE_DATABASE
+            } else {
+                0
+            },
+    );
     put_text(&mut out, role.scram_verifier.as_deref().unwrap_or(""));
     out.extend_from_slice(&(role.member_of.len() as u32).to_le_bytes());
     for parent in &role.member_of {
@@ -209,6 +221,7 @@ fn decode_role(name: &str, bytes: &[u8]) -> SqlResult<StoredRole> {
         name: name.to_owned(),
         login: flags & LOGIN != 0,
         superuser: flags & SUPERUSER != 0,
+        create_database: flags & CREATE_DATABASE != 0,
         scram_verifier: (!verifier.is_empty()).then_some(verifier),
         member_of,
     })
@@ -312,6 +325,9 @@ fn apply_options(role: &mut StoredRole, options: &RoleOptions) -> SqlResult<()> 
     if let Some(superuser) = options.superuser {
         role.superuser = superuser;
     }
+    if let Some(create_database) = options.create_database {
+        role.create_database = create_database;
+    }
     if let Some(password) = &options.password {
         role.scram_verifier = password.as_deref().map(scram_verifier_text).transpose()?;
     }
@@ -357,6 +373,7 @@ pub(crate) fn run(
                 name: name.text.clone(),
                 login: false,
                 superuser: false,
+                create_database: false,
                 scram_verifier: None,
                 member_of: Vec::new(),
             };
@@ -448,6 +465,88 @@ fn granted_tables(reader: &dyn KeyValueRead, grantee: &str) -> SqlResult<Vec<Str
         },
     )?;
     Ok(tables)
+}
+
+const ACL_LETTERS: [(Privilege, char); 7] = [
+    (Privilege::Insert, 'a'),
+    (Privilege::Select, 'r'),
+    (Privilege::Update, 'w'),
+    (Privilege::Delete, 'd'),
+    (Privilege::Truncate, 'D'),
+    (Privilege::References, 'x'),
+    (Privilege::Trigger, 't'),
+];
+
+/// The privileges one grantee holds on one table, as `GRANT` stored them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableGrant {
+    pub(crate) table: String,
+    pub(crate) grantee: String,
+    pub(crate) privileges: u8,
+}
+
+impl TableGrant {
+    /// The grant in PostgreSQL's `aclitem` text form, `grantee=privileges/grantor`, with an
+    /// empty grantee for `PUBLIC`.
+    pub(crate) fn acl_item(&self, grantor: &str) -> String {
+        let letters: String = ACL_LETTERS
+            .iter()
+            .filter(|(privilege, _)| self.privileges & privilege.bit() != 0)
+            .map(|(_, letter)| *letter)
+            .collect();
+        let grantee = if self.grantee == PUBLIC {
+            String::new()
+        } else {
+            acl_role_name(&self.grantee)
+        };
+        format!("{grantee}={letters}/{}", acl_role_name(grantor))
+    }
+}
+
+/// The owner's implicit entry that PostgreSQL lists first once a table has any grant.
+pub(crate) fn owner_acl_item(owner: &str) -> String {
+    let letters: String = ACL_LETTERS.iter().map(|(_, letter)| *letter).collect();
+    let name = acl_role_name(owner);
+    format!("{name}={letters}/{name}")
+}
+
+fn acl_role_name(name: &str) -> String {
+    if !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        name.to_owned()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+/// Every stored table grant, in table and then grantee order.
+pub(crate) fn every_grant(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableGrant>> {
+    let mut prefix = NAMESPACE.to_vec();
+    prefix.push(GRANT_SPACE);
+    let mut grants = Vec::new();
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            let rest = key.get(prefix.len()..).unwrap_or_default();
+            if let Some(split) = rest.iter().position(|byte| *byte == 0)
+                && let (Some(table), Some(grantee)) = (rest.get(..split), rest.get(split + 1..))
+                && let [RECORD_VERSION, held] = value
+            {
+                grants.push(TableGrant {
+                    table: String::from_utf8_lossy(table).into_owned(),
+                    grantee: String::from_utf8_lossy(grantee).into_owned(),
+                    privileges: *held,
+                });
+            }
+            Ok(true)
+        },
+    )?;
+    Ok(grants)
 }
 
 fn change_privileges(

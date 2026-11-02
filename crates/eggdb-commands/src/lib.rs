@@ -561,8 +561,10 @@ pub struct ArgumentDefinition {
 /// The per-call check that decides whether a call needs the user's confirmation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmCheck {
-    /// The statement is destructive (D121): `DROP`, `TRUNCATE`, a column dropped or retyped,
-    /// or a `DELETE` or `UPDATE` whose `WHERE` names no column of its table.
+    /// The statement is destructive (D121, D255): `DROP`, `TRUNCATE`, a column dropped or
+    /// retyped, a `DELETE` or `UPDATE` whose `WHERE` does not pin every column of the primary
+    /// key or of a unique key to values, `REPLACE` or an upsert, or a `MERGE` that updates or
+    /// deletes.
     DestructiveStatement,
 }
 
@@ -579,7 +581,7 @@ impl ConfirmCheck {
     pub const fn when(self) -> &'static str {
         match self {
             Self::DestructiveStatement => {
-                "the statement is destructive: DROP, TRUNCATE, a column dropped or retyped, or a DELETE or UPDATE whose WHERE names no column of its table"
+                "the statement is destructive: DROP, TRUNCATE, a column dropped or retyped, a DELETE or UPDATE whose WHERE does not pin every column of the primary key or of a unique key to values, REPLACE or an upsert, or a MERGE that updates or deletes"
             }
         }
     }

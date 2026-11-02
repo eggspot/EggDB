@@ -943,6 +943,87 @@ impl Interval {
         }
     }
 
+    pub(crate) fn truncate(self, name: &str) -> SqlResult<Self> {
+        let field = datetime::Field::named(name).ok_or_else(|| {
+            SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!("unit \"{name}\" not recognized for type interval"),
+            )
+        })?;
+        let week = || {
+            SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                format!("unit \"{name}\" not supported for type interval"),
+            )
+            .with_detail("Months usually have fractional weeks.")
+        };
+        if !self.is_finite() {
+            return match field {
+                datetime::Field::Week => Err(week()),
+                datetime::Field::Microseconds
+                | datetime::Field::Milliseconds
+                | datetime::Field::Second
+                | datetime::Field::Minute
+                | datetime::Field::Hour
+                | datetime::Field::Day
+                | datetime::Field::Month
+                | datetime::Field::Quarter
+                | datetime::Field::Year
+                | datetime::Field::Decade
+                | datetime::Field::Century
+                | datetime::Field::Millennium => Ok(self),
+                _ => Err(SqlError::new(
+                    SqlState::FEATURE_NOT_SUPPORTED,
+                    format!("unit \"{name}\" not supported for type interval"),
+                )),
+            };
+        }
+        let years = self.months / 12;
+        let in_years = |unit: i32| Self {
+            months: years / unit * unit * 12,
+            days: 0,
+            micros: 0,
+        };
+        let in_time = |unit: i64| Self {
+            months: self.months,
+            days: self.days,
+            micros: self.micros / unit * unit,
+        };
+        Ok(match field {
+            datetime::Field::Microseconds => self,
+            datetime::Field::Milliseconds => in_time(1000),
+            datetime::Field::Second => in_time(MICROS_PER_SECOND),
+            datetime::Field::Minute => in_time(MICROS_PER_MINUTE),
+            datetime::Field::Hour => in_time(MICROS_PER_HOUR),
+            datetime::Field::Day => Self {
+                months: self.months,
+                days: self.days,
+                micros: 0,
+            },
+            datetime::Field::Month => Self {
+                months: self.months,
+                days: 0,
+                micros: 0,
+            },
+            datetime::Field::Quarter => Self {
+                months: years * 12 + self.months % 12 / 3 * 3,
+                days: 0,
+                micros: 0,
+            },
+            datetime::Field::Year => in_years(1),
+            datetime::Field::Decade => in_years(10),
+            datetime::Field::Century => in_years(100),
+            datetime::Field::Millennium => in_years(1000),
+            datetime::Field::Week => return Err(week()),
+            _ => {
+                return Err(SqlError::new(
+                    SqlState::FEATURE_NOT_SUPPORTED,
+                    format!("unit \"{name}\" not supported for type interval"),
+                ));
+            }
+        })
+    }
+
     pub(crate) fn extract(self, name: &str) -> SqlResult<Numeric> {
         let field = datetime::Field::named(name).ok_or_else(|| {
             SqlError::new(
@@ -1422,6 +1503,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn truncate_zeroes_every_field_below_the_unit() {
+        let value = interval("1234 years 7 mons 3 days 25:30:15.123456");
+        let truncated = |name: &str| value.truncate(name).unwrap().to_string();
+        assert_eq!(truncated("millennium"), "1000 years");
+        assert_eq!(truncated("century"), "1200 years");
+        assert_eq!(truncated("decade"), "1230 years");
+        assert_eq!(truncated("year"), "1234 years");
+        assert_eq!(truncated("quarter"), "1234 years 6 mons");
+        assert_eq!(truncated("month"), "1234 years 7 mons");
+        assert_eq!(truncated("day"), "1234 years 7 mons 3 days");
+        assert_eq!(truncated("hour"), "1234 years 7 mons 3 days 25:00:00");
+        assert_eq!(truncated("minute"), "1234 years 7 mons 3 days 25:30:00");
+        assert_eq!(truncated("second"), "1234 years 7 mons 3 days 25:30:15");
+        assert_eq!(
+            truncated("milliseconds"),
+            "1234 years 7 mons 3 days 25:30:15.123"
+        );
+        assert_eq!(
+            interval("-1 day -02:30:45.5")
+                .truncate("minute")
+                .unwrap()
+                .to_string(),
+            "-1 days -02:30:00"
+        );
+        let week = value.truncate("week").unwrap_err();
+        assert_eq!(week.state().code(), "0A000");
+        assert!(value.truncate("dow").is_err());
+        assert!(value.truncate("nonsense").is_err());
+        assert_eq!(
+            Interval::INFINITY.truncate("hour").unwrap(),
+            Interval::INFINITY
+        );
+        assert!(Interval::NEG_INFINITY.truncate("week").is_err());
     }
 
     #[test]

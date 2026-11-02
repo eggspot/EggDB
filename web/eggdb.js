@@ -52,7 +52,7 @@ function touch(path) {
   removed.delete(path);
 }
 
-class Wasi {
+export class Wasi {
   constructor() {
     this.memory = null;
     this.fds = new Map([
@@ -397,7 +397,7 @@ async function saveToOpfs(root) {
   }
 }
 
-async function compile(wasm) {
+export async function compile(wasm) {
   if (wasm instanceof WebAssembly.Module) return wasm;
   if (wasm instanceof ArrayBuffer || ArrayBuffer.isView(wasm)) return WebAssembly.compile(wasm);
   const response = await fetch(wasm);

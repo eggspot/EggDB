@@ -17,6 +17,7 @@ pub(crate) struct CaughtError {
     pub(crate) state: u8,
     pub(crate) message: String,
     pub(crate) line: u32,
+    pub(crate) procedure: Option<String>,
 }
 
 impl CaughtError {
@@ -27,6 +28,7 @@ impl CaughtError {
             state: error.sqlserver_state().unwrap_or(1),
             message: error.message().to_owned(),
             line,
+            procedure: error.procedure().map(str::to_owned),
         }
     }
 

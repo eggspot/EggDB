@@ -1106,3 +1106,240 @@ fn an_unknown_dialect_in_the_startup_options_ends_the_connection() {
     );
     assert_eq!(client.read(), None);
 }
+
+#[test]
+fn a_client_sees_citext_and_hstore_columns_by_their_type_oids_and_names() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query(
+        "CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS hstore; CREATE TABLE people (email citext PRIMARY KEY, tags hstore)",
+    );
+    client.send(
+        b'P',
+        &parse("", "INSERT INTO people VALUES ($1, $2)", &[9000, 9002]),
+    );
+    let tags_binary: Vec<u8> = [
+        &1i32.to_be_bytes()[..],
+        &4i32.to_be_bytes(),
+        b"role",
+        &5i32.to_be_bytes(),
+        b"admin",
+    ]
+    .concat();
+    client.send(
+        b'B',
+        &bind(
+            "",
+            "",
+            &[0, 1],
+            &[Some(&b"Ann@Example.com"[..]), Some(&tags_binary[..])],
+            &[],
+        ),
+    );
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12CZ", "{answer:?}");
+    client.send(
+        b'P',
+        &parse(
+            "read",
+            "SELECT email, tags, tags -> 'role' AS role FROM people WHERE email = 'ann@example.COM'",
+            &[],
+        ),
+    );
+    client.send(b'B', &bind("text", "read", &[], &[], &[0]));
+    client.send(b'D', b"Ptext\0");
+    client.send(b'E', &execute("text", 0));
+    client.send(b'B', &bind("binary", "read", &[], &[], &[1]));
+    client.send(b'E', &execute("binary", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12TDC2DCZ", "{answer:?}");
+    assert_eq!(
+        answer[2].column_types(),
+        [
+            ("email".to_owned(), 9000, 0),
+            ("tags".to_owned(), 9002, 0),
+            ("role".to_owned(), 25, 0),
+        ]
+    );
+    assert_eq!(
+        answer[3].row(),
+        [
+            Some("Ann@Example.com".to_owned()),
+            Some("\"role\"=>\"admin\"".to_owned()),
+            Some("admin".to_owned()),
+        ]
+    );
+    assert_eq!(
+        answer[6].raw_row(),
+        [
+            Some(b"Ann@Example.com".to_vec()),
+            Some(tags_binary),
+            Some(b"admin".to_vec()),
+        ]
+    );
+    let names = client.query(
+        "SELECT oid, typname, typarray FROM pg_type WHERE oid IN (9000, 9001, 9002, 9003) ORDER BY oid",
+    );
+    assert_eq!(
+        rows(&names),
+        [
+            vec![
+                Some("9000".to_owned()),
+                Some("citext".to_owned()),
+                Some("9001".to_owned())
+            ],
+            vec![
+                Some("9001".to_owned()),
+                Some("_citext".to_owned()),
+                Some("0".to_owned())
+            ],
+            vec![
+                Some("9002".to_owned()),
+                Some("hstore".to_owned()),
+                Some("9003".to_owned())
+            ],
+            vec![
+                Some("9003".to_owned()),
+                Some("_hstore".to_owned()),
+                Some("0".to_owned())
+            ],
+        ]
+    );
+}
+
+fn binary_int4_array(items: &[Option<i32>]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let has_nulls = i32::from(items.iter().any(Option::is_none));
+    for word in [1, has_nulls, 23, items.len() as i32, 1] {
+        bytes.extend_from_slice(&word.to_be_bytes());
+    }
+    for item in items {
+        match item {
+            Some(number) => {
+                bytes.extend_from_slice(&4i32.to_be_bytes());
+                bytes.extend_from_slice(&number.to_be_bytes());
+            }
+            None => bytes.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    bytes
+}
+
+#[test]
+fn array_parameters_bind_in_text_and_binary_with_postgresqls_array_oids() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query("CREATE TABLE tagged (id integer PRIMARY KEY, tags text[], scores integer[])");
+    client.send(
+        b'P',
+        &parse(
+            "insert",
+            "INSERT INTO tagged VALUES ($1, $2, $3)",
+            &[23, 1009, 1007],
+        ),
+    );
+    client.send(b'D', b"Sinsert\0");
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "1tnZ");
+    let mut described = vec![0, 3];
+    for oid in [23u32, 1009, 1007] {
+        described.extend_from_slice(&oid.to_be_bytes());
+    }
+    assert_eq!(answer[1].body, described);
+    let scores = binary_int4_array(&[Some(7), None, Some(-3)]);
+    client.send(
+        b'B',
+        &bind(
+            "",
+            "insert",
+            &[0, 0, 1],
+            &[Some(b"1"), Some(b"{a,\"b c\"}"), Some(&scores)],
+            &[],
+        ),
+    );
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    assert_eq!(tags(&client.read_until_ready()), "2CZ");
+
+    client.send(
+        b'P',
+        &parse(
+            "",
+            "SELECT id, tags, scores FROM tagged WHERE id = ANY($1)",
+            &[1007],
+        ),
+    );
+    let wanted = binary_int4_array(&[Some(5), Some(1)]);
+    client.send(b'B', &bind("", "", &[1], &[Some(&wanted)], &[0, 0, 1]));
+    client.send(b'D', b"P\0");
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12TDCZ");
+    assert_eq!(
+        answer[2].column_types(),
+        [
+            ("id".to_owned(), 23, 0),
+            ("tags".to_owned(), 1009, 0),
+            ("scores".to_owned(), 1007, 1)
+        ]
+    );
+    assert_eq!(
+        answer[3].raw_row(),
+        [
+            Some(b"1".to_vec()),
+            Some(b"{a,\"b c\"}".to_vec()),
+            Some(scores)
+        ]
+    );
+
+    client.send(b'P', &parse("", "SELECT $1", &[1007]));
+    let mut wrong_element = Vec::new();
+    for word in [1i32, 0, 25, 1, 1, 1] {
+        wrong_element.extend_from_slice(&word.to_be_bytes());
+    }
+    wrong_element.push(b'x');
+    client.send(b'B', &bind("", "", &[1], &[Some(&wrong_element)], &[]));
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "1EZ");
+    assert_eq!(answer[1].code(), "42804");
+    client.send(b'P', &parse("", "SELECT $1", &[1007]));
+    client.send(b'B', &bind("", "", &[0], &[Some(b"{1,x}")], &[]));
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    let error = answer
+        .iter()
+        .find(|message| message.tag == b'E')
+        .expect("ErrorResponse");
+    assert_eq!(error.code(), "22P02");
+    assert_eq!(ready_status(&answer), b'I');
+}
+
+#[test]
+fn functions_that_return_nothing_describe_their_column_as_void() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    let answer = client.query("SELECT pg_sleep(0)");
+    assert_eq!(tags(&answer), "TDCZ");
+    assert_eq!(answer[0].column_types(), [("pg_sleep".to_owned(), 2278, 0)]);
+    assert_eq!(answer[1].raw_row(), [Some(Vec::new())]);
+    client.send(b'P', &parse("", "SELECT pg_advisory_unlock_all()", &[]));
+    client.send(b'B', &bind("", "", &[], &[], &[1]));
+    client.send(b'D', b"P\0");
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12TDCZ");
+    assert_eq!(
+        answer[2].column_types(),
+        [("pg_advisory_unlock_all".to_owned(), 2278, 1)]
+    );
+    assert_eq!(answer[3].raw_row(), [Some(Vec::new())]);
+}

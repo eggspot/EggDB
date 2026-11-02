@@ -1,5 +1,6 @@
 use super::collection::collections_count;
 use super::compact::shell_holds_the_file;
+use super::shell_block::{BlockState, InBlock, key_value_in_block};
 use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
@@ -10,7 +11,7 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::output::{Output, Style};
 use crate::cli::{Console, Terminal, help, report};
 use eggdb::Database;
-use eggdb::sql::Store as DatabaseStore;
+use eggdb::sql::SharedWriteStore;
 use eggdb_platform::user_files;
 use eggdb_sql::{
     Dialect, QueryResult, ServerOutputSetting, TableSchema, TransactionStatus, starts_plsql_unit,
@@ -152,7 +153,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
             .map_err(|error| session.open_failure(&error, access))?
     };
     let (exit, left_open, color_err, file) = {
-        let store = DatabaseStore(&db);
+        let store = SharedWriteStore::new(&db);
         let mut shell = Shell::new(request, &db, &store, console.terminal, interactive);
         let exit = if interactive {
             shell.interactive(console)
@@ -191,11 +192,12 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     Ok(exit)
 }
 
-struct Shell<'s> {
+struct Shell<'s, 'db: 's> {
     request: Request,
     file: String,
     stem: String,
-    db: &'s Database,
+    db: &'db Database,
+    store: &'s SharedWriteStore<'db>,
     sql: eggdb_sql::Session<'s>,
     buffer: String,
     entry: String,
@@ -218,11 +220,11 @@ struct CopyFiles {
     show_copy_tag: bool,
 }
 
-impl<'s> Shell<'s> {
+impl<'s, 'db: 's> Shell<'s, 'db> {
     fn new(
         request: Request,
-        db: &'s Database,
-        store: &'s DatabaseStore<'s>,
+        db: &'db Database,
+        store: &'s SharedWriteStore<'db>,
         terminal: Terminal,
         interactive: bool,
     ) -> Self {
@@ -243,6 +245,7 @@ impl<'s> Shell<'s> {
             file,
             stem,
             db,
+            store,
             sql: eggdb_sql::Session::with_dialect(store, dialect),
             buffer: String::new(),
             entry: String::new(),
@@ -834,6 +837,9 @@ impl<'s> Shell<'s> {
             }
         };
         let dialect = self.sql.dialect();
+        if dialect == eggdb_sql::Dialect::Sqlite {
+            return self.sqlite_schema(console, &chosen);
+        }
         let text: String = chosen
             .iter()
             .map(|table| {
@@ -847,6 +853,35 @@ impl<'s> Shell<'s> {
             .collect();
         self.print(console, &text);
         Step::Continue(Exit::Done)
+    }
+
+    fn sqlite_schema(&mut self, console: &mut Console<'_>, chosen: &[&TableSchema]) -> Step {
+        let names: Vec<&str> = chosen.iter().map(|table| table.name.as_str()).collect();
+        let mut text = String::new();
+        let outcome = self.sql.execute(
+            "SELECT tbl_name, sql FROM sqlite_schema WHERE sql IS NOT NULL",
+            &mut |result: QueryResult| {
+                for row in &result.rows {
+                    if let [eggdb_sql::Value::Text(table), eggdb_sql::Value::Text(sql)] =
+                        row.as_slice()
+                        && names.contains(&table.as_str())
+                    {
+                        text.push_str(sql);
+                        text.push_str(";\n");
+                    }
+                }
+            },
+        );
+        match outcome {
+            Ok(()) => {
+                self.print(console, &text);
+                Step::Continue(Exit::Done)
+            }
+            Err(error) => {
+                self.print_sql_error(console, &error, "");
+                Step::Continue(exit_for(&error))
+            }
+        }
     }
 
     fn collection_names(&self) -> Vec<String> {
@@ -945,6 +980,8 @@ impl<'s> Shell<'s> {
 SQL: the PostgreSQL dialect, or MySQL's, SQLite's or Oracle's with --dialect, statements ended by ;
   (docs/sql.md; in Oracle's a PL/SQL block or CREATE PROCEDURE ends at a line holding /); BEGIN spans prompts:
   {stem}=*> is inside a transaction block, {stem}=!> a failed one (ROLLBACK ends it).
+  Inside a block put, get, del, incr and decr join its transaction: COMMIT keeps them with the
+  SQL, ROLLBACK drops both; scan, ttl, check, stats and backup read the last commit.
   'delete' starts a DELETE statement here; the key-value command is 'del'.
 Shell commands:
   .tables                      list the tables
@@ -1005,6 +1042,12 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             arguments.push(OsString::from(name));
         }
         arguments.extend(words[1..].iter().map(OsString::from));
+        if self.sql.transaction_status() != TransactionStatus::Idle
+            && let Some(step) = self.key_value_in_block(console, &arguments)
+        {
+            self.time(console, started.elapsed());
+            return step;
+        }
         let terminal = Terminal {
             stdin: true,
             stdout: true,
@@ -1039,6 +1082,40 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
         };
         self.time(console, started.elapsed());
         Step::Continue(exit)
+    }
+
+    fn key_value_in_block(
+        &mut self,
+        console: &mut Console<'_>,
+        arguments: &[OsString],
+    ) -> Option<Step> {
+        let request = match args::parse(arguments) {
+            Ok(Invocation::Run(request)) => request,
+            _ => return None,
+        };
+        let block = BlockState {
+            status: self.sql.transaction_status(),
+            has_savepoints: self.sql.has_savepoints(),
+        };
+        let exit = match key_value_in_block(self.store, block, &request, &self.file) {
+            Ok(InBlock::ReadsTheLastCommit) => return None,
+            Ok(InBlock::Ran {
+                printed,
+                message,
+                exit,
+            }) => {
+                let mut out = Output::new(&mut *console.stdout, false);
+                if out.write_through(&printed).is_err() || out.finish().is_err() {
+                    return Some(Step::Quit);
+                }
+                if let Some(message) = message {
+                    return Some(self.fail(console, &message, exit));
+                }
+                exit
+            }
+            Err(failure) => report(&failure, console, self.request.color),
+        };
+        Some(Step::Continue(exit))
     }
 
     fn complete(&mut self, text: &str, cursor: usize) -> Completion {

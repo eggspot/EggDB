@@ -687,6 +687,7 @@ pub(crate) fn propagate(
         queue.push_back((change, 0));
     }
     let mut links_of: Vec<(String, Arc<Vec<ChildLink>>)> = Vec::new();
+    let mut firings = crate::triggers::CascadeFirings::default();
     while let Some((change, depth)) = queue.pop_front() {
         if depth > MAX_CASCADE_DEPTH {
             return Err(SqlError::new(
@@ -711,10 +712,12 @@ pub(crate) fn propagate(
                 depth,
                 &mut queue,
                 &mut memory,
+                &mut firings,
             )?;
         }
         memory.release(WorkMemory::row_bytes(&change.old));
     }
+    firings.finish();
     Ok(())
 }
 
@@ -727,6 +730,7 @@ fn apply_action(
     depth: usize,
     queue: &mut VecDeque<(RowChange, usize)>,
     memory: &mut WorkMemory,
+    firings: &mut crate::triggers::CascadeFirings,
 ) -> SqlResult<()> {
     let key = &link.child.foreign_keys[link.key];
     let Some(old_key) = key_values(&change.old, &link.parent_columns) else {
@@ -775,6 +779,22 @@ fn apply_action(
     } else {
         None
     };
+    let event = event_of_action(action, change.new.is_none());
+    let triggers_may_fire = match event {
+        Some(event) => crate::triggers::fire_on(&*writer, tables, &child.name, event)?,
+        None => false,
+    };
+    let batch_rows = if triggers_may_fire {
+        usize::MAX
+    } else {
+        CHILD_BATCH
+    };
+    let changed_columns: &[usize] = if change.new.is_none() && action == ReferentialAction::Cascade
+    {
+        &[]
+    } else {
+        &key.columns
+    };
     loop {
         let mut batch: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
         let mut charged = 0;
@@ -783,20 +803,21 @@ fn apply_action(
             memory.charge(size)?;
             charged += size;
             batch.push((row_key.to_vec(), row));
-            Ok(batch.len() < CHILD_BATCH)
+            Ok(batch.len() < batch_rows)
         })?;
         if batch.is_empty() {
             return Ok(());
         }
-        if let Some(event) = event_of_action(action, change.new.is_none())
-            && crate::triggers::row_triggers_fire_on(&*writer, tables, &child.name, event)?
-        {
-            return Err(crate::triggers::unfired(
-                event,
-                &child.name,
-                "a cascading foreign key",
-            ));
-        }
+        let mut firing = match event {
+            Some(event) if triggers_may_fire => {
+                firings.firing_for(writer, tables, child, event, changed_columns)?
+            }
+            _ => None,
+        };
+        let defers_after_rows = firing
+            .as_deref()
+            .is_some_and(crate::triggers::Firing::defers_cascaded_after_rows);
+        let mut deferred_after_rows: Vec<(Vec<Value>, Option<Vec<Value>>)> = Vec::new();
         for (row_key, row) in batch {
             match action {
                 ReferentialAction::NoAction if deferred_now(child, key) => {
@@ -819,7 +840,42 @@ fn apply_action(
                     ));
                 }
                 ReferentialAction::Cascade if change.new.is_none() => {
+                    let row = match firing.as_deref_mut() {
+                        Some(firing) => {
+                            let Some(row) = still_referencing(&*writer, child, &row_key, &pairs)?
+                            else {
+                                continue;
+                            };
+                            if firing.has_before() {
+                                let outcome = firing.before_row(
+                                    writer,
+                                    tables,
+                                    Some(row.as_slice()),
+                                    None,
+                                )?;
+                                if outcome == crate::triggers::RowOutcome::Skip {
+                                    return Err(still_referenced(
+                                        &change.table,
+                                        child,
+                                        key,
+                                        &change.old,
+                                        &link.parent_columns,
+                                    ));
+                                }
+                                unchanged_by_before_triggers(
+                                    &*writer, child, &row_key, &row, "deleted",
+                                )?;
+                            }
+                            row
+                        }
+                        None => row,
+                    };
                     execute::delete_stored_row(writer, child, &row_key, &row)?;
+                    if defers_after_rows {
+                        deferred_after_rows.push((row.clone(), None));
+                    } else if let Some(firing) = firing.as_deref_mut() {
+                        firing.after_row(writer, tables, Some(row.as_slice()), None)?;
+                    }
                     memory.charge_row(&row)?;
                     queue.push_back((
                         RowChange {
@@ -831,6 +887,15 @@ fn apply_action(
                     ));
                 }
                 _ => {
+                    let row = if firing.is_some() {
+                        let Some(row) = still_referencing(&*writer, child, &row_key, &pairs)?
+                        else {
+                            continue;
+                        };
+                        row
+                    } else {
+                        row
+                    };
                     let mut updated = row.clone();
                     for (position, &column) in key.columns.iter().enumerate() {
                         updated[column] = match (action, &new_key) {
@@ -844,13 +909,47 @@ fn apply_action(
                             _ => Value::Null,
                         };
                     }
+                    let mut changed_by_before_triggers = false;
+                    if let Some(firing) = firing.as_deref_mut()
+                        && firing.has_before()
+                    {
+                        let outcome = firing.before_row(
+                            writer,
+                            tables,
+                            Some(row.as_slice()),
+                            Some(&mut updated),
+                        )?;
+                        if outcome == crate::triggers::RowOutcome::Skip {
+                            return Err(still_referenced(
+                                &change.table,
+                                child,
+                                key,
+                                &change.old,
+                                &link.parent_columns,
+                            ));
+                        }
+                        unchanged_by_before_triggers(&*writer, child, &row_key, &row, "updated")?;
+                        changed_by_before_triggers = true;
+                    }
                     execute::check_not_null_of(child, &updated)?;
                     if let Some(checks) = &checks {
                         checks.check(child, &updated)?;
                     }
                     execute::replace_stored_row(writer, child, &row_key, &row, &updated)?;
-                    if action == ReferentialAction::SetDefault {
+                    if changed_by_before_triggers {
+                        check_parents(writer, tables, child, &updated, Some(&row))?;
+                    } else if action == ReferentialAction::SetDefault {
                         check_parent(writer, tables, child, key, &updated, true)?;
+                    }
+                    if defers_after_rows {
+                        deferred_after_rows.push((row.clone(), Some(updated.clone())));
+                    } else if let Some(firing) = firing.as_deref_mut() {
+                        firing.after_row(
+                            writer,
+                            tables,
+                            Some(row.as_slice()),
+                            Some(updated.as_slice()),
+                        )?;
                     }
                     memory.charge_row(&row)?;
                     queue.push_back((
@@ -864,8 +963,58 @@ fn apply_action(
                 }
             }
         }
+        if let Some(firing) = firing {
+            for (old, new) in &deferred_after_rows {
+                firing.after_row(writer, tables, Some(old.as_slice()), new.as_deref())?;
+            }
+        }
         memory.release(charged);
+        if triggers_may_fire {
+            return Ok(());
+        }
     }
+}
+
+fn still_referencing(
+    reader: &dyn KeyValueRead,
+    child: &TableDefinition,
+    row_key: &[u8],
+    pairs: &[(usize, Value)],
+) -> SqlResult<Option<Vec<Value>>> {
+    let Some(row) = execute::stored_row(reader, child, row_key)? else {
+        return Ok(None);
+    };
+    let references = pairs
+        .iter()
+        .all(|(index, value)| same_value(row.get(*index), Some(value)));
+    Ok(references.then_some(row))
+}
+
+fn unchanged_by_before_triggers(
+    reader: &dyn KeyValueRead,
+    child: &TableDefinition,
+    row_key: &[u8],
+    row: &[Value],
+    verb: &str,
+) -> SqlResult<()> {
+    match execute::stored_row(reader, child, row_key)? {
+        Some(current) if current.as_slice() == row => Ok(()),
+        _ => Err(modified_by_before_trigger(verb)),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn modified_by_before_trigger(verb: &str) -> SqlError {
+    SqlError::new(
+        SqlState::TRIGGERED_DATA_CHANGE_VIOLATION,
+        format!(
+            "tuple to be {verb} was already modified by an operation triggered by the current command"
+        ),
+    )
+    .with_hint(
+        "Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.",
+    )
 }
 
 fn event_of_action(

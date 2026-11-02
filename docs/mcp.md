@@ -72,7 +72,10 @@ The resource `eggdb://schema` is the whole catalog as one JSON document. Every t
 
 Results come back as structured JSON (`structuredContent`, with the same JSON as text): column
 names and types, rows, how many rows there were and whether the result was cut (`truncated`,
-`truncated_by`: `max_rows` or `bytes`). Integers are JSON numbers; other values are text as the
+`truncated_by`: `max_rows` or `bytes`). The engine itself stops a `SELECT` of `run_sql` or
+`write_sql` once it has `max_rows` + 1 rows, as a `LIMIT` would, so a query that would produce
+millions of rows never builds them; `row_count` then counts at most `max_rows` + 1 rows (a
+statement's own lower `LIMIT` stays, and statements that write are never cut). Integers are JSON numbers; other values are text as the
 dialect prints them. A value over 16 KiB comes back as `{"cut": true, "text": ..., "bytes": n}`.
 `row_list` answers in pages: `{"columns": [...], "items": [{column: value, ...}], "truncated":
 true, "truncated_by": "limit" | "bytes", "next_cursor": "r1.…"}`, the last two only on a cut
@@ -92,7 +95,9 @@ that check says.
   `BEGIN`, `START TRANSACTION`, `COMMIT` and `ROLLBACK` are refused, since each call is a
   transaction of its own, so `COMMIT; DROP TABLE t` runs nothing. `COPY` is refused too: use
   `SELECT`.
-- **Build huge values.** A value a statement builds (`||`, `CONCAT`, `REPLACE`, padding) may be
+- **Build huge values.** A value a statement builds (`||`, `CONCAT`, `REPLACE`, padding,
+  `repeat`, `translate`, `upper`/`lower`, `format`, the JSON and array builders, and aggregates
+  such as `string_agg`, `array_agg` and `json_agg` as they grow) may be
   at most 16 MiB in a call (SQLSTATE `54000`), so a call cannot take gigabytes of memory by
   doubling a string; stored values of any size are still read. Every other session has EggDB's
   own limits: 1 GiB for one value, as in PostgreSQL, and 2 GiB for one row (D156), besides
@@ -101,10 +106,11 @@ that check says.
   statement copying a large value many times stops early. One consequence: a single stored value
   over 64 MiB cannot be read through `eggdb mcp`, since the row that holds it is over the limit;
   read it with `eggdb get` or `eggdb sql`.
-- **Run longer than the time limit.** A statement past the limit is stopped and the call
-  answers `time_limit`. A statement that cannot be stopped (a long computation that reads
-  nothing) is still running a second after the limit: the server records it in the audit file
-  and exits, and the client starts it again on its next call.
+- **Run longer than the time limit.** A statement past the limit is stopped by the engine
+  itself, as it reads rows, joins them or holds them, and the call answers `time_limit`. A
+  statement that still cannot be stopped (a long computation inside one function call) is
+  still running a second after the limit: the server records it in the audit file and exits,
+  and the client starts it again on its next call.
 - **See tables you did not list.** With `--tables` the agent sees only the tables and views
   you named (below); without it, it reads every table, and the keys outside SQL's tables.
 - **Reach it over the network.** MCP inside `eggdb serve` waits for EggDB's own TLS (D102).
@@ -140,15 +146,58 @@ or is named itself.
 - **Checked at start.** Every name must be a table, view or sequence of the file when the server
   starts (skipped while another program has the file open for writing); otherwise it exits 1
   with `table_not_found`, naming the stored name when only the letter case differs.
-- **Read-only servers only, for now.** `--tables` with `--allow-write` is a usage error.
+- **With `--allow-write`, only the listed tables change.** See below.
 
 The audit's `server_started` record lists the names (`"tables"`), and `eggdb audit` shows them.
+
+### Letting the agent write only some tables
+
+```sh
+claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write --tables orders,order_lines
+```
+
+With both options the agent reads and changes only the tables you name (D257).
+The same filter that hides the other tables sits under the writer too, so every way a statement
+can reach another table is covered, not a list of statement kinds:
+
+- **Other tables are missing.** `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `COPY` or a
+  `SELECT` that names an unlisted table fails as missing (`42P01`), as it does on a read-only
+  server. So does a trigger on a listed table whose function writes an unlisted one, a
+  procedure or function whose body reads or writes one, and `nextval` on a sequence that is
+  neither listed nor owned by a listed table. The statement fails and nothing is changed.
+- **New objects only under listed names.** `CREATE TABLE` or `CREATE VIEW` works for a name in
+  `--tables` (the name need not exist when the server starts), and a sequence a listed table
+  owns (`serial`, identity) comes with it. Any other name, renaming a listed table to an
+  unlisted name, and creating or replacing a schema, type, function, procedure, package or role
+  is refused with SQLSTATE `42501`, naming the object. So is creating, changing, disabling or
+  dropping a trigger, even on a listed table, since its function would run in your own later
+  sessions, unfiltered, and dropping it switches off what it guards; dropping the table takes
+  its triggers with it.
+- **Ties to unlisted tables freeze what they tie.** When an unlisted table has a foreign key to a
+  listed one, or a listed one has a foreign key to an unlisted one, the listed table's rows and
+  definition cannot change, since a delete could cascade or a check would read the other table;
+  when an unlisted view reads a listed table, its definition (`ALTER`, `DROP`) cannot change.
+  The refusal (`42501`) names both tables, and the banner lists these ties when the server
+  starts: list the other table too to allow the change.
+- **A refusal rolls everything back.** A transaction in which any change was refused is rolled
+  back at commit, even when a procedure caught the error.
+- **The keys stay off**, and listed tables may be granted and analyzed as usual.
+- **Not covered yet.** A new or changed column default, generated column or `CHECK` that calls
+  a user-defined routine is refused (`42501`, D257), but the ones a listed table already had are
+  not checked again, nor are its row security policies: such a definition may call a function
+  that already exists, which then runs in your own sessions when they change that table. Review
+  those definitions before trusting the data. Indexes have no expressions, so none calls one.
+
+A server that acts as a stored role (D190) limits an agent through `GRANT`s instead; `--tables`
+needs no role in the file, follows triggers and routines, and also stops DDL outside the list.
 
 ## Letting the agent write
 
 With `--allow-write` the agent gets `write_sql`: one statement per call, in the dialect it names,
 run in a transaction of its own that commits when the statement succeeds and changes nothing
-when it fails (on Oracle the server commits the statement's block itself). The result says
+when it fails (on Oracle the server commits the statement's block itself). A `CALL`, a `DO`
+block or any statement that calls a user-defined routine runs inside that one transaction too,
+so a `COMMIT` or `ROLLBACK` inside a procedure fails with `2D000` and the call keeps nothing. The result says
 `committed` and, for an `INSERT`, `UPDATE`, `DELETE` or Oracle `MERGE`, `rows_changed`. Each call may change at
 most 256 MiB (the bytes it puts and the keys it deletes); a larger change is rolled back with
 `write_too_large`. A failed statement changes nothing but the sequence values it drew, which
@@ -156,18 +205,47 @@ stay drawn, as in the database itself. Only `write_sql` opens the file read-writ
 statement runs (the time limit bounds it), commits and closes the file, other programs cannot
 open the file at all.
 
-**Destructive statements need your confirmation**: `DROP` of anything, `TRUNCATE`, `ALTER TABLE
-... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change, and a `DELETE`
-or `UPDATE` whose `WHERE` names no column of its table (or that has no `WHERE`), and an Oracle
-`MERGE` that updates or deletes unless a top-level `AND` part of its `ON` equates a target column,
-qualified with the target's name or alias, with an expression that names no target column
-(`ON (t.id = s.id)`). A statement
-that can run other statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`)
-counts as destructive too; EggDB does not run any of them yet. `INSERT` in every form, `CREATE`,
-renames, `ADD COLUMN` and the like run without asking.
+**Destructive statements need your confirmation** (D255): `DROP` of anything (a trigger and a
+row security policy too), `TRUNCATE`, `ALTER TABLE ... DROP COLUMN`, `DROP CONSTRAINT` or
+`DROP PRIMARY KEY`, a column's type change, disabling a trigger or row level security, any
+statement that can change or delete many rows, and a statement that can run other statements:
+an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`, Transact-SQL's `EXEC` of a
+procedure or of dynamic SQL (`EXEC('...')`, `sp_executesql`), a `SELECT` of a user-defined
+function (`SELECT f()`, `SELECT * FROM f()`), and an `INSERT` into a table with an enabled
+`INSERT` trigger, into a view, or into a table whose definition `eggdb mcp` cannot read. A `WITH` lists every
+statement it runs: each data-modifying part and its body. A `DELETE` or
+`UPDATE` runs without asking only when its `WHERE` pins every column of the table's primary key,
+or of one of its unique indexes, to values, in parts joined by a top-level `AND`:
+
+- each such column is compared with `=` to a literal (`id = 7`, `7 = id`, `t.id = -7`,
+  `id = CAST('7' AS integer)`), or is `IN` a list of literals; across the key's columns the lists
+  allow at most 100 rows. Other `AND` parts may be anything, since they can only narrow it;
+- a text column compared with a number (`code = 1`) does not count, since some dialects compare
+  it as a number and match `'1'`, `'01'` and `' 1'`;
+- and the statement reaches no other rows: no `ON DELETE` (or, for an `UPDATE` of a referenced
+  column, `ON UPDATE`) `CASCADE`, `SET NULL` or `SET DEFAULT` foreign key points at the table,
+  and no trigger fires on it for that statement. For a partitioned table this holds for every
+  partition, at any depth, too.
+
+So `DELETE FROM t WHERE id = 7` runs, while `WHERE id = id`, `WHERE id IS NOT NULL`,
+`WHERE id >= 0 OR id < 0`, `WHERE id > 5`, `WHERE NOT (id <> 7)`, `WHERE id IN (SELECT ...)`,
+a `WHERE` on a column outside every key, and any `DELETE` or `UPDATE` of a table without a key
+ask first. `REPLACE`, `INSERT OR REPLACE`, `ON DUPLICATE KEY UPDATE`, `ON CONFLICT ... DO UPDATE`
+and a `MERGE` that updates or deletes always ask, since they overwrite rows chosen by the data.
+Other `INSERT`s into a table without an `INSERT` trigger (`ON CONFLICT DO NOTHING`,
+`INSERT IGNORE` and an insert-only `MERGE` too), `CREATE`, renames, `ADD COLUMN` and the like
+run without asking. Code that runs later asks first: `CREATE OR REPLACE` (Transact-SQL's `ALTER
+PROCEDURE` and `CREATE OR ALTER`), `ALTER ... RENAME` or `SET SCHEMA` and `DROP` of an existing
+function, procedure or package, and a `CREATE` of a routine named like one an unqualified call
+already finds or like the function a trigger names (re-creating a renamed trigger function);
+when a trigger calls that name it is shown as disabling the trigger. Only a routine of a new name
+no trigger names is created without asking. A function called anywhere in a write (`VALUES`,
+`SET`, `WHERE`, `RETURNING`, a `MERGE`'s source, `ON` and actions) asks too. To tell, `eggdb mcp` reads the table's keys,
+foreign keys and triggers from the file before it asks you, and closes it again; when it cannot
+read them it asks.
 
 - **Clients that can ask you** (they declare MCP form elicitation in `initialize`)
-  get a question from `eggdb mcp` itself before anything is opened: what the statement does, to
+  get a question from `eggdb mcp` itself before anything runs: what the statement does, to
   what, whether `CASCADE` takes more with it, and the SQL, with a yes-or-no field that defaults
   to no. Yes runs it; no, closing the question or cancelling the call runs nothing, and the agent
   is told you declined. While you think, the database is not open, no lock is held and the time
@@ -182,10 +260,14 @@ to it, even when the SQL shown is cut. Names are as the statement gives them: an
 (which needs no confirmation) can make a familiar name stand for another table, so read the
 question with the agent's recent calls in mind.
 
-The confirmation guards against accidents. It is not a security boundary: a `DELETE` with an
-always-true condition that names a column (`WHERE id IS NOT NULL`) runs without asking, and a
-client may be set to accept for you. Give `--allow-write` only to agents you would let change the
-data, and keep a backup.
+**What `confirm: true` protects, and what it does not.** With a client that asks you, nothing
+destructive runs until you say yes. With a client that cannot ask, `confirm: true` is sent by the
+agent itself: it stops an agent that did not mean to destroy data, not one that decides to (or is
+talked into it by text it read, a prompt injection). Without a client that asks you,
+`--allow-write` lets the agent change or drop anything in the file. A client may also be set to
+accept for you. And with `--allow-write` alone the agent can change every table; add `--tables` to limit it to
+some (above). Give unattended agents a read-only server, give `--allow-write` only to agents you
+would let change all the data they can see, and keep a backup.
 
 ## Over HTTP, from eggdb serve
 
@@ -246,14 +328,16 @@ Each call opens the file read-only for at most the time limit and closes it agai
 calls `eggdb mcp` holds nothing. So:
 
 - your app, `eggdb sql` or `eggdb put` can write the file **between** the agent's calls;
-- **while** a call runs, a program that opens the file for writing is **refused** (exit 5 for
-  `eggdb` commands, `ErrorKind::Locked` for the Rust API), and is told it may be an `eggdb mcp`
-  call; retry. A call holds the file for at most its time limit plus one second (up to 301 s
+- **while** a call runs, a program that opens the file for writing **waits** for it: `eggdb`
+  commands wait up to five seconds (`--busy-timeout <ms>` changes it), and programs on the Rust
+  API wait as long as `Options::busy_timeout` says (by default they fail at once with
+  `ErrorKind::Locked`). A writer still refused after its wait exits 5 and is told it may be an
+  `eggdb mcp` call (D258). A call holds the file for at most its time limit plus one second (up to 301 s
   with `--time-limit 300`), after which the watchdog ends the server;
 - after each call the next one waits `--call-gap` milliseconds (100 by default, at most 10,000)
-  before it opens the file, so an agent calling again and again leaves your writers, which do
-  not wait for a lock, that gap to get in; `--call-gap 0` turns it off. The wait is not part of
-  the call's time limit. Writers that wait for the lock are a follow-up;
+  before it opens the file, so an agent calling again and again leaves your writers that are
+  waiting for the file, or that do not wait (`--busy-timeout 0`, the Rust API's default), that
+  gap to get in; `--call-gap 0` turns it off. The wait is not part of the call's time limit;
 - a call made while a program has the file open for writing answers `database_busy` after a
   second of retrying, and the agent is told to try again;
 - other read-only programs (`eggdb get`, `scan`, `ui --read-only`, `serve --read-only`) run beside

@@ -573,6 +573,8 @@ fn the_server_refuses_to_serve_an_empty_password() {
         database: DATABASE.to_owned(),
         max_connections: 4,
         authentication_timeout: std::time::Duration::from_secs(1),
+        idle_timeout: None,
+        memory_budget: std::sync::Arc::default(),
         tls: None,
     };
     let refused = eggdb_mysqlwire::serve(&store, &listener, &config, &|| false, &|_| {});

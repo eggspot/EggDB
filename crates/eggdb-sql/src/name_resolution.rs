@@ -550,8 +550,24 @@ impl<'a> Resolver<'a> {
         match relation {
             Some(Relation::View(view)) => self.expand(reference, view),
             Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter),
-            None => Ok(()),
+            None => self.sequence_reference(reference),
         }
+    }
+
+    fn sequence_reference(&mut self, reference: &mut TableReference) -> SqlResult<()> {
+        if crate::constraints::current_dialect() != Dialect::PostgreSql
+            || !crate::sequences::readable_as_relation(self.reader, &reference.name.text)?
+        {
+            return Ok(());
+        }
+        self.check_privilege(&reference.name.text, crate::roles::Privilege::Select)?;
+        if reference.alias.is_none() {
+            reference.alias = Some(base_name(&reference.name.text).to_owned());
+        }
+        reference.generated = Some(Box::new(GeneratedTable::Sequence(
+            reference.name.text.clone(),
+        )));
+        Ok(())
     }
 
     fn expand_partitioned(

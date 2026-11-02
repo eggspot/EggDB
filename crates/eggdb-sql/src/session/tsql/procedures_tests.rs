@@ -278,3 +278,83 @@ fn stored_procedures_are_found_by_the_names_clients_write() {
         None
     );
 }
+
+#[test]
+fn error_procedure_names_the_procedure_that_raised_the_caught_error() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE dbo.failing AS THROW 50001, N'boom', 1;",
+    );
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE dbo.calls_failing AS EXEC dbo.failing;",
+    );
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE dbo.self_catching AS \
+         BEGIN TRY THROW 50002, N'inner', 1; END TRY \
+         BEGIN CATCH PRINT ERROR_PROCEDURE(); END CATCH",
+    );
+    let steps = succeeds(
+        &mut session,
+        "BEGIN TRY EXEC dbo.calls_failing; END TRY BEGIN CATCH PRINT ERROR_PROCEDURE(); END CATCH; \
+         EXEC dbo.self_catching; \
+         BEGIN TRY THROW 50003, N'outer', 1; END TRY \
+         BEGIN CATCH PRINT ISNULL(ERROR_PROCEDURE(), N'none'); END CATCH",
+    );
+    assert_eq!(printed(&steps), vec!["failing", "self_catching", "none"]);
+}
+
+#[test]
+fn procid_is_the_running_procedures_object_id_and_zero_outside() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    succeeds(
+        &mut session,
+        "CREATE PROCEDURE dbo.who_am_i AS \
+         PRINT OBJECT_NAME(@@PROCID); \
+         IF @@PROCID = OBJECT_ID(N'dbo.who_am_i') PRINT N'same';",
+    );
+    let steps = succeeds(&mut session, "EXEC dbo.who_am_i; PRINT @@PROCID");
+    assert_eq!(printed(&steps), vec!["who_am_i", "same", "0"]);
+}
+
+#[test]
+fn temporary_procedures_belong_to_the_session_that_created_them() {
+    let store = MemoryStore::default();
+    let mut first = session(&store);
+    succeeds(
+        &mut first,
+        "CREATE PROCEDURE #greet @name NVARCHAR(20) AS PRINT N'hello ' + @name",
+    );
+    succeeds(&mut first, "CREATE PROCEDURE ##shared AS PRINT N'shared'");
+    let steps = succeeds(&mut first, "EXEC #greet N'ann'; EXEC ##shared");
+    assert_eq!(printed(&steps), vec!["hello ann", "shared"]);
+    let mut second = session(&store);
+    fails_with(&mut second, "EXEC #greet N'bob'", 2812);
+    succeeds(&mut second, "CREATE PROCEDURE #greet AS PRINT N'other'");
+    let steps = succeeds(&mut second, "EXEC #greet");
+    assert_eq!(printed(&steps), vec!["other"]);
+    succeeds(&mut first, "DROP PROCEDURE #greet");
+    fails_with(&mut first, "EXEC #greet N'ann'", 2812);
+    drop(first);
+    let mut third = session(&store);
+    fails_with(&mut third, "EXEC ##shared", 2812);
+}
+
+#[test]
+fn temporary_functions_are_refused() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    let mut failed = false;
+    let outcome = session.execute_batch(
+        "CREATE FUNCTION #f() RETURNS INT AS BEGIN RETURN 1 END",
+        &mut |step| {
+            failed |= step.outcome.is_err();
+            true
+        },
+    );
+    assert!(failed || outcome.is_err());
+}

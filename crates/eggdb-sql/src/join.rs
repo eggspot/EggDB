@@ -84,6 +84,7 @@ pub(crate) fn type_family(sql_type: SqlType) -> u8 {
             crate::types::DefinedKind::Composite => 18,
             crate::types::DefinedKind::Range => 19,
             crate::types::DefinedKind::Domain => 20,
+            crate::types::DefinedKind::Base => 22,
         },
         SqlType::Dynamic => 21,
     }
@@ -792,6 +793,158 @@ fn scan_table(
     )
 }
 
+fn mark_column(list: &[Source<'_>], needed: &mut [Vec<bool>], qualifier: Option<&str>, name: &str) {
+    for (source, columns) in list.iter().zip(needed.iter_mut()) {
+        if qualifier.is_some_and(|qualifier| qualifier != source.label) {
+            continue;
+        }
+        match name {
+            "*" => columns.iter_mut().for_each(|column| *column = true),
+            _ => {
+                if let Some(slot) = source
+                    .table
+                    .column_index(name)
+                    .and_then(|index| columns.get_mut(index))
+                {
+                    *slot = true;
+                }
+            }
+        }
+    }
+}
+
+fn mark_exprs(list: &[Source<'_>], needed: &mut [Vec<bool>], exprs: &[&Expr]) {
+    for expr in exprs {
+        if crate::subquery::mentions_subquery(expr) {
+            mark_column(list, needed, None, "*");
+            continue;
+        }
+        visit_exprs(expr, &mut |node| {
+            if let ExprKind::Column { qualifier, name } = &node.kind {
+                mark_column(list, needed, qualifier.as_deref(), name);
+            }
+        });
+    }
+}
+
+/// The columns of each source a joined `SELECT` decodes, and the subset read once the join
+/// conditions and `WHERE` have been applied: the select list, `GROUP BY`, `HAVING`, `ORDER BY`
+/// and the correlated part of `WHERE` evaluated after the join.
+pub(crate) struct NeededColumns {
+    read: Vec<Vec<bool>>,
+    output: Vec<Vec<bool>>,
+}
+
+struct SlotMarks {
+    marked: Vec<bool>,
+    unknown: bool,
+}
+
+impl SlotMarks {
+    fn new(width: usize) -> Self {
+        Self {
+            marked: vec![false; width],
+            unknown: false,
+        }
+    }
+
+    fn slot(&mut self, index: usize) {
+        match self.marked.get_mut(index) {
+            Some(marked) => *marked = true,
+            None => self.unknown = true,
+        }
+    }
+
+    fn expr(&mut self, expr: &Expr) {
+        if crate::subquery::mentions_subquery(expr) {
+            self.unknown = true;
+            return;
+        }
+        let marked = &mut self.marked;
+        let unknown = &mut self.unknown;
+        visit_exprs(expr, &mut |node| match node.kind {
+            ExprKind::Slot { index, .. } => match marked.get_mut(index) {
+                Some(slot) => *slot = true,
+                None => *unknown = true,
+            },
+            ExprKind::Column { .. } => *unknown = true,
+            _ => {}
+        });
+    }
+
+    fn stored_columns(
+        &self,
+        own: &std::ops::Range<usize>,
+        on: Option<&Expr>,
+        using: &[(usize, usize)],
+    ) -> Option<Vec<usize>> {
+        let mut marks = Self {
+            marked: self.marked.clone(),
+            unknown: self.unknown,
+        };
+        if let Some(on) = on {
+            marks.expr(on);
+        }
+        for &(outer, inner) in using {
+            marks.slot(outer);
+            marks.slot(inner);
+        }
+        if marks.unknown {
+            return None;
+        }
+        Some(
+            own.clone()
+                .enumerate()
+                .filter(|&(_, slot)| marks.marked.get(slot).copied().unwrap_or(true))
+                .map(|(column, _)| column)
+                .collect(),
+        )
+    }
+}
+
+fn read_after_step(
+    joined: &JoinedFrom<'_>,
+    index: usize,
+    output: &[bool],
+    filters: &[Vec<Expr>],
+    later_ons: &[Option<Expr>],
+) -> SlotMarks {
+    let mut marks = SlotMarks::new(Scope::Many(&joined.sources).width());
+    let Some(shape) = joined.shapes.get(index) else {
+        marks.unknown = true;
+        return marks;
+    };
+    let offset = shape.source.offset;
+    let own = offset..offset + shape.source.table.columns.len();
+    for (column, &shown) in output.iter().enumerate() {
+        if shown {
+            marks.slot(offset + column);
+        }
+    }
+    let consumes_own_filters = matches!(
+        shape.kind,
+        JoinKind::Inner | JoinKind::Comma | JoinKind::Cross
+    );
+    for (level, level_filters) in filters.iter().enumerate().skip(index + 1) {
+        for filter in level_filters {
+            if level == index + 1 && consumes_own_filters && touches_only(filter, &own) {
+                continue;
+            }
+            marks.expr(filter);
+        }
+    }
+    for on in later_ons.iter().flatten() {
+        marks.expr(on);
+    }
+    for later in joined.shapes.iter().skip(index + 1) {
+        for &(outer, inner) in &later.using {
+            marks.slot(outer);
+            marks.slot(inner);
+        }
+    }
+    marks
+}
+
 fn touches_only(expr: &Expr, own: &std::ops::Range<usize>) -> bool {
     let mut inside = true;
     let mut any = false;
@@ -853,6 +1006,7 @@ const LOOKUP_HASH_LIMIT: usize = 64 << 20;
 struct HashBuild<'b> {
     pairs: &'b [(usize, usize)],
     needed: &'b [bool],
+    stored: Option<Vec<usize>>,
     keep: &'b [Expr],
     limit: Option<usize>,
 }
@@ -868,6 +1022,7 @@ fn build_hash(
     let HashBuild {
         pairs,
         needed,
+        stored,
         keep,
         limit,
     } = plan;
@@ -877,7 +1032,12 @@ fn build_hash(
     let version = reader.committed_version();
     let table_id = shape.source.table.id;
     let expected = hints.expected(table_id, version, limit.map(|bytes| bytes / 256));
-    let mut index = HashIndex::new(integer_keys, shape.source.table.columns.len(), expected);
+    let mut index = HashIndex::new(
+        integer_keys,
+        shape.source.table.columns.len(),
+        stored,
+        expected,
+    );
     let mut bounded = limit.map(WorkMemory::with_limit);
     let mut over = false;
     let table = shape.source.table;
@@ -957,13 +1117,27 @@ impl<'a> JoinedRows<'a> {
         reader: &'a dyn KeyValueRead,
         joined: &'a JoinedFrom<'a>,
         first_key: Option<Vec<u8>>,
-        mut needed: Vec<Vec<bool>>,
+        needed: NeededColumns,
         mut filters: Vec<Vec<Expr>>,
         hints: &mut RowCountHints,
         memory: &mut WorkMemory,
     ) -> SqlResult<Self> {
+        let NeededColumns {
+            read: mut needed,
+            output,
+        } = needed;
         let outer_is_scanned = first_key.is_none();
         let mut steps = Vec::with_capacity(joined.shapes.len());
+        let mut bound_ons: Vec<Option<Expr>> = joined
+            .shapes
+            .iter()
+            .map(|shape| {
+                shape
+                    .on
+                    .map(|on| bind(on, Scope::Many(&shape.visible)))
+                    .transpose()
+            })
+            .collect::<SqlResult<_>>()?;
         for (index, shape) in joined.shapes.iter().enumerate() {
             let table = shape.source.table;
             let offset = shape.source.offset;
@@ -991,10 +1165,14 @@ impl<'a> JoinedRows<'a> {
             } else {
                 None
             };
-            let mut on = shape
-                .on
-                .map(|on| bind(on, Scope::Many(&shape.visible)))
-                .transpose()?;
+            let read_after = read_after_step(
+                joined,
+                index,
+                output.get(index + 1).map(Vec::as_slice).unwrap_or(&[]),
+                &filters,
+                bound_ons.get(index + 1..).unwrap_or(&[]),
+            );
+            let mut on = bound_ons.get_mut(index).and_then(Option::take);
             let mut using = shape.using.as_slice();
             let preserves_right = matches!(shape.kind, JoinKind::Right | JoinKind::Full);
             let access = if preserves_right {
@@ -1034,6 +1212,7 @@ impl<'a> JoinedRows<'a> {
                         HashBuild {
                             pairs: &probe_build,
                             needed: &step_needed,
+                            stored: read_after.stored_columns(&own, on.as_ref(), using),
                             keep: &keep,
                             limit: Some(LOOKUP_HASH_LIMIT),
                         },
@@ -1062,6 +1241,7 @@ impl<'a> JoinedRows<'a> {
                         HashBuild {
                             pairs: hash_keys,
                             needed: &step_needed,
+                            stored: read_after.stored_columns(&own, on.as_ref(), using),
                             keep: &keep,
                             limit: Some(LOOKUP_HASH_LIMIT),
                         },
@@ -1089,13 +1269,14 @@ impl<'a> JoinedRows<'a> {
                     HashBuild {
                         pairs: hash_keys,
                         needed: &step_needed,
+                        stored: read_after.stored_columns(&own, on.as_ref(), using),
                         keep: &keep,
                         limit: None,
                     },
                     hints,
                     memory,
                 )?
-                .unwrap_or_else(|| HashIndex::new(false, table.columns.len(), 0));
+                .unwrap_or_else(|| HashIndex::new(false, table.columns.len(), None, 0));
                 if !keep.is_empty() {
                     filters[index + 1].retain(|filter| !touches_only(filter, &own));
                 }
@@ -1236,6 +1417,7 @@ impl<'a> JoinedRows<'a> {
         row: &mut Vec<Value>,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<bool> {
+        crate::cancel::check()?;
         if !self.passes(level, row)? {
             return Ok(true);
         }
@@ -1325,7 +1507,7 @@ impl<'a> JoinedRows<'a> {
                 let mut at = index.first(row, probe, &mut key);
                 drop(key);
                 while !HashIndex::is_end(at) {
-                    row.extend_from_slice(index.row(at));
+                    index.push_row(at, row);
                     if !attempt(row)? {
                         return Ok(false);
                     }
@@ -1467,63 +1649,46 @@ fn visit_exprs<'e>(expr: &'e Expr, visit: &mut dyn FnMut(&'e Expr)) {
 }
 
 impl JoinedFrom<'_> {
-    pub(crate) fn needed_columns(&self, select: &Select) -> Vec<Vec<bool>> {
+    pub(crate) fn needed_columns(&self, select: &Select, late: Option<&Expr>) -> NeededColumns {
         let list = &self.sources.list;
         let mut needed: Vec<Vec<bool>> = list
             .iter()
             .map(|source| vec![false; source.table.columns.len()])
             .collect();
-        let mut mark = |qualifier: Option<&str>, name: &str| {
-            for (source, columns) in list.iter().zip(needed.iter_mut()) {
-                if qualifier.is_some_and(|qualifier| qualifier != source.label) {
-                    continue;
-                }
-                match name {
-                    "*" => columns.iter_mut().for_each(|column| *column = true),
-                    _ => {
-                        if let Some(index) = source.table.column_index(name) {
-                            columns[index] = true;
-                        }
-                    }
-                }
-            }
-        };
-        let mut exprs: Vec<&Expr> = Vec::new();
+        let mut output_exprs: Vec<&Expr> = Vec::new();
         for item in &select.items {
             match item {
-                SelectItem::Wildcard { qualifier, .. } => mark(qualifier.as_deref(), "*"),
-                SelectItem::Expr { expr, .. } => exprs.push(expr),
+                SelectItem::Wildcard { qualifier, .. } => {
+                    mark_column(list, &mut needed, qualifier.as_deref(), "*");
+                }
+                SelectItem::Expr { expr, .. } => output_exprs.push(expr),
             }
         }
-        exprs.extend(select.filter.iter());
-        exprs.extend(select.group_by.iter());
-        exprs.extend(select.having.iter());
-        exprs.extend(select.order_by.iter().map(|item| &item.expr));
+        output_exprs.extend(select.group_by.iter());
+        output_exprs.extend(select.having.iter());
+        output_exprs.extend(select.order_by.iter().map(|item| &item.expr));
+        output_exprs.extend(late);
+        mark_exprs(list, &mut needed, &output_exprs);
+        let output = needed.clone();
+        let mut condition_exprs: Vec<&Expr> = select.filter.iter().collect();
         if let Some(from) = &select.from {
             for join in &from.joins {
                 match &join.condition {
-                    JoinCondition::On(expr) => exprs.push(expr),
+                    JoinCondition::On(expr) => condition_exprs.push(expr),
                     JoinCondition::Using(names) => {
                         for name in names {
-                            mark(None, &name.text);
+                            mark_column(list, &mut needed, None, &name.text);
                         }
                     }
                     JoinCondition::Always => {}
                 }
             }
         }
-        for expr in exprs {
-            if crate::subquery::mentions_subquery(expr) {
-                mark(None, "*");
-                continue;
-            }
-            visit_exprs(expr, &mut |node| {
-                if let ExprKind::Column { qualifier, name } = &node.kind {
-                    mark(qualifier.as_deref(), name);
-                }
-            });
+        mark_exprs(list, &mut needed, &condition_exprs);
+        NeededColumns {
+            read: needed,
+            output,
         }
-        needed
     }
 
     pub(crate) fn preserves_right(&self) -> bool {

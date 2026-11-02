@@ -736,8 +736,8 @@ impl<'t> Parser<'t> {
             "changes" => ("changes", &[0]),
             "total_changes" => ("total_changes", &[0]),
             "random" => ("sqlite_random", &[0]),
-            "ifnull" => ("coalesce", &[2]),
-            "coalesce" => ("coalesce", &[]),
+            "ifnull" => ("sqlite_coalesce", &[2]),
+            "coalesce" => ("sqlite_coalesce", &[]),
             "nullif" => ("nullif", &[2]),
             "iif" => ("iif", &[3]),
             "typeof" => ("sqlite_typeof", &[1]),
@@ -772,7 +772,7 @@ impl<'t> Parser<'t> {
         let arguments = self.call_arguments()?;
         let count_ok = if counts.is_empty() {
             match internal {
-                "coalesce" => arguments.len() >= 2,
+                "sqlite_coalesce" => arguments.len() >= 2,
                 "sqlite_date" | "sqlite_time" | "sqlite_datetime" | "sqlite_julianday"
                 | "sqlite_unixepoch" | "sqlite_char" => true,
                 _ => !arguments.is_empty(),

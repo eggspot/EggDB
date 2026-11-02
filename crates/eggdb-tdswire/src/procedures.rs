@@ -485,6 +485,7 @@ impl Connection<'_> {
                     severity: error.severity,
                     text: &error.text,
                     line: 1,
+                    procedure: "",
                 });
                 tokens_out.extend(tokens::done(
                     DONE_PROC,
@@ -709,6 +710,17 @@ impl Connection<'_> {
     }
 
     fn stored_procedure(
+        &mut self,
+        session: &mut Session<'_>,
+        procedure: &Procedure,
+        parameters: &[RpcParameter],
+    ) -> Result<Called, CallError> {
+        session.in_connection_dialect(|session| {
+            self.transact_sql_procedure(session, procedure, parameters)
+        })
+    }
+
+    fn transact_sql_procedure(
         &mut self,
         session: &mut Session<'_>,
         procedure: &Procedure,

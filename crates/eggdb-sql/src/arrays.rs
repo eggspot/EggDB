@@ -140,6 +140,16 @@ impl ArrayElement {
             .map(|(element, _)| *element)
     }
 
+    /// The element type of the array type PostgreSQL numbers `oid`, such as `Integer` for
+    /// 1007 (`int4[]`), for the arrays a table column can hold; `None` for any other OID.
+    pub fn of_array_oid(oid: u32) -> Option<Self> {
+        ELEMENT_CODES
+            .iter()
+            .map(|(element, _)| *element)
+            .filter(|element| element.is_storable())
+            .find(|element| crate::pg_catalog::type_oid(SqlType::Array(*element)) == oid)
+    }
+
     pub(crate) fn is_storable(self) -> bool {
         !matches!(
             self,
@@ -248,6 +258,10 @@ impl ArrayValue {
     }
 }
 
+pub(crate) fn item_bytes(item: &Value) -> usize {
+    ITEM_OVERHEAD.saturating_add(crate::memory::held_bytes(item))
+}
+
 pub(crate) fn held_bytes(array: &ArrayValue) -> usize {
     array
         .items
@@ -320,7 +334,8 @@ fn element_value(value: Value, element: ArrayElement, conversion: Conversion) ->
             ArrayElement::Text
             | ArrayElement::Varchar
             | ArrayElement::Name
-            | ArrayElement::InternalChar,
+            | ArrayElement::InternalChar
+            | ArrayElement::AclItem,
         ) => Ok(Value::Text(text)),
         (value, element) => convert(value, element.sql_type(), conversion),
     }
@@ -410,7 +425,8 @@ fn element_from_text(text: &str, element: ArrayElement) -> SqlResult<Value> {
         ArrayElement::Text
         | ArrayElement::Varchar
         | ArrayElement::Name
-        | ArrayElement::InternalChar => Ok(Value::Text(text.to_owned())),
+        | ArrayElement::InternalChar
+        | ArrayElement::AclItem => Ok(Value::Text(text.to_owned())),
         ArrayElement::Bpchar => Ok(Value::Bpchar(text.to_owned())),
         other => crate::types::parse_input(text, other.sql_type()),
     }

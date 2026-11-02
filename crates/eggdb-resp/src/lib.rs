@@ -5,6 +5,7 @@
 
 mod aggregates;
 mod aof;
+mod aof_manifest;
 mod commands;
 mod eviction;
 use eggdb_keyspace as keyspace;
@@ -15,7 +16,8 @@ mod streams;
 mod transactions;
 mod value;
 
-pub use aof::{AofReport, replay_aof};
+pub use aof::{AofReplay, AofReport, replay_aof};
+pub use aof_manifest::{AofFileKind, AofManifest, AofManifestFile, parse_aof_manifest};
 pub use commands::{Client, Context, execute};
 pub use eviction::{EvictingKeyspace, EvictionPolicy};
 pub use keyspace::{KeysRead, KeysWrite, Keyspace, MemoryKeyspace};

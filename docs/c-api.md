@@ -76,12 +76,13 @@ int main(void) {
   until the next failing call on that thread. The functions that end a handle
   (`eggdb_scan_free`, `eggdb_free`) return nothing.
 - **Opaque handles.** `eggdb_db` (from `eggdb_open`), `eggdb_txn` (from `eggdb_begin_read` and
-  `eggdb_begin_write`), `eggdb_scan` (from `eggdb_scan_open`) and `eggdb_sql` (from
-  `eggdb_sql_open`). On a failure the handle written back is NULL. Ending a handle with NULL
+  `eggdb_begin_write`), `eggdb_scan` (from `eggdb_scan_open`), `eggdb_sql` (from
+  `eggdb_sql_open`) and `eggdb_stmt` (from `eggdb_sql_prepare`). On a failure the handle written back is NULL. Ending a handle with NULL
   does nothing.
 - **Bytes have lengths.** Keys and values are bytes with a length and may hold zeros; a NULL
   pointer is allowed only with a length of 0. Paths, collection names, dialects and SQL text are
-  NUL-terminated UTF-8; text that is not UTF-8 fails with `EGGDB_ERR_INVALID_ARGUMENT`.
+  NUL-terminated UTF-8 (the text given to `eggdb_sql_prepare` and the `eggdb_stmt_bind_text`
+  values have a length instead); text that is not UTF-8 fails with `EGGDB_ERR_INVALID_ARGUMENT`.
 - **Who frees what.** A value from `eggdb_get` and the names from `eggdb_collection_names` are
   the caller's: free each with `eggdb_free(pointer, length)` exactly once. A scan's batch and a
   SQL statement's results belong to their handle and are read in place until that handle's
@@ -92,7 +93,9 @@ int main(void) {
   may be NULL when the caller does not want them; pointers for results the call exists to give
   (a value, a handle, a batch) may not.
 - **Threads.** An `eggdb_db` may be used by any number of threads at once. A transaction, a scan
-  or a SQL session is used by one call at a time, from any thread. Read transactions run beside
+  or a SQL session and the statements prepared on it are used by one call at a time, from any
+  thread; `eggdb_sql_cancel` is the one call that may reach a session from another thread
+  while it runs a statement. Read transactions run beside
   each other and beside the one write transaction. `eggdb_begin_write` waits up to five seconds
   for the open write transaction to end, then fails with `EGGDB_ERR_WRITER_ACTIVE`; on the thread
   that began the open one it fails at once, since it would wait for itself. SQL takes the calling
@@ -234,6 +237,71 @@ eggdb_sql_close(sql);
   its SQLSTATE (`42P01` for a missing table) and `eggdb_last_error()` its message. The
   statements before it keep their effects.
 
+### Prepared statements
+
+```c
+const char *text = "INSERT INTO items VALUES ($1, $2)";
+eggdb_stmt *insert = NULL;
+eggdb_sql_prepare(sql, text, strlen(text), &insert);
+for (int64_t id = 10; id < 1000; id++) {
+    eggdb_stmt_bind_int64(insert, 1, id);
+    eggdb_stmt_bind_text(insert, 2, "tea", 3);
+    eggdb_stmt_execute(insert, &results, &count);
+}
+eggdb_stmt_finalize(insert);
+```
+
+- `eggdb_sql_prepare(sql, text, len, &stmt)` checks one statement (UTF-8, `len` bytes, no NUL
+  needed) once: a syntax error, a second statement, or a table or column that does not exist
+  fails there with `EGGDB_ERR_SQL`. `eggdb_stmt_parameter_count` gives how many parameters it
+  takes, and `eggdb_stmt_column_count`, `eggdb_stmt_column_name` and `eggdb_stmt_column_type`
+  the columns of its rows when they are known before it runs (the kind their values come back
+  with, `EGGDB_NULL` when only the run tells; 0 columns for a statement that returns no rows).
+- Parameters are numbered from 1 (`$1`, or the first `?` in SQLite's and MySQL's dialects) and
+  are NULL until bound: `eggdb_stmt_bind_null`, `eggdb_stmt_bind_int64` (a `bigint`),
+  `eggdb_stmt_bind_double` (a `double precision`, exactly, infinities and NaN included),
+  `eggdb_stmt_bind_bool`, `eggdb_stmt_bind_text` (read as a literal of the type its place asks
+  for, so dates, numerics and JSON bind as text) and `eggdb_stmt_bind_blob` (any bytes, as
+  binary data). Each value is copied, so the caller's buffer may change right after the call.
+  The statement converts a typed value to the type its place asks for, as PostgreSQL's
+  extended protocol does with a typed parameter. An index out of range fails with
+  `EGGDB_ERR_INVALID_ARGUMENT`.
+- `eggdb_stmt_execute(stmt, &results, &count)` runs it with the values bound now and gives its
+  result as `eggdb_sql_execute` does. The results belong to the statement, so they stay valid
+  until its next `eggdb_stmt_execute`, `eggdb_stmt_reset` or `eggdb_stmt_finalize`, whatever
+  the session runs meanwhile. Bindings stay for the next run; `eggdb_stmt_clear_bindings` sets
+  them back to NULL, and `eggdb_stmt_reset` frees the last results.
+- A statement belongs to its session: a call on it counts as a call on the session, and
+  `eggdb_sql_close` fails with `EGGDB_ERR_IN_USE` while statements prepared on it are not
+  finalized. Today the statement is parsed again at each run (the engine does not keep a
+  parsed plan between runs yet, D268); preparing still saves checking, quoting and
+  converting values, and one crossing per value.
+
+### Cancelling a statement
+
+`eggdb_sql_cancel(sql)` may be called from any thread while another thread runs a statement on
+the session (`eggdb_sql_execute`, `eggdb_sql_execute_with_parameters`, `eggdb_sql_copy_in` or
+`eggdb_stmt_execute`). The statement stops at its next row (within ten milliseconds in
+`pg_sleep`), and its call returns `EGGDB_ERR_SQL` with SQLSTATE `57014`; it is rolled back as
+any failing statement is, and a `BEGIN` block it was in fails as PostgreSQL's does. A cancel
+that comes while nothing runs does nothing. The session must stay open while
+`eggdb_sql_cancel` runs.
+
+### Bulk loading with COPY
+
+```c
+const char *rows = "1\tAda\n2\tGrace\n";
+eggdb_sql_copy_in(sql, "COPY people FROM STDIN", (const uint8_t *)rows, strlen(rows),
+                  &results, &count);
+```
+
+`eggdb_sql_copy_in(sql, text, data, len, &results, &count)` runs `text` with `data` as the data
+of its `COPY ... FROM STDIN`, in the text, CSV or binary format the `COPY`'s options name, the
+same machinery `psql` and `pg_dump` files use ([sql.md](sql.md)). The `COPY` loads every row or
+none, and its result's tag is `"COPY <rows>"`. Load a large file in pieces of whole rows, one
+call each, inside a `BEGIN` block when they must commit together. A second `COPY ... FROM
+STDIN` in the same text and `COPY ... TO STDOUT` fail with `EGGDB_ERR_SQL`.
+
 ### On a server
 
 `eggdb_sql_connect("postgresql://user:password@host:5432/db?sslmode=require", &sql)` gives a
@@ -243,7 +311,9 @@ client (D192). It takes the same calls as a session from `eggdb_sql_open`:
 extended one with the parameters bound as text to `$1`, `$2`, ..., and values come back typed
 from the columns' types (integers, reals, `bytea` as a blob, the rest as text).
 `eggdb_sql_close` ends the connection. The official drivers use it when they are given a
-`postgresql://` URL instead of a file.
+`postgresql://` URL instead of a file. Prepared statements, `eggdb_sql_cancel` and
+`eggdb_sql_copy_in` take a session from `eggdb_sql_open` only for now, and fail with
+`EGGDB_ERR_INVALID_ARGUMENT` on one from `eggdb_sql_connect`.
 
 ## Backup and compaction
 `eggdb_backup(db, path, &report)` writes a copy of the last commit to a new file while readers
@@ -342,6 +412,10 @@ is rolled back when the file opens next. Keep the database in the app's own file
   to live, counters and compare-and-set, SQL in two dialects with parameters and blocks,
   backup and compaction, refusing to close while in use, threads sharing a handle, and every
   misuse (NULL pointers, bad UTF-8, unknown flags and dialects) answered with a status.
+- `crates/eggdb-capi/tests/statements.rs` prepares statements once and runs them many times
+  with every typed binding, reads their column outlines, cancels a running `pg_sleep` from
+  another thread, bulk-loads rows with `COPY` (text, CSV, a failing row, more data than one
+  piece), and checks every misuse of a statement.
 - `crates/eggdb-capi/tests/header.rs` reads `eggdb.h` and checks it against the Rust code:
   every constant and its value, every exported function and its number of parameters, every
   struct's fields and types in order.
@@ -351,8 +425,10 @@ is rolled back when the file opens next. Keep the database in the app's own file
   release workflow on every release library its runner can load.
 
 ## Not yet
-Prepared statement handles that keep their parsed form between calls (D17's fifth rule; today a
-parameterized statement is parsed at each call), parameter types declared by the caller, typed
-parameter buffers instead of text, `COPY`, asynchronous calls, the options `write_timeout`,
-`snapshot_memory_bytes`, `auto_checkpoint_log_bytes` and `page_size_bytes`, `eggdb_check` and
-`eggdb_stats`, cancelling a running statement, and the official per-language drivers (D16).
+Prepared statements that keep their parsed plan between runs (D17's fifth rule; today a
+prepared statement is checked once and parsed again at each run), prepared statements, `COPY`
+and cancelling on a session from `eggdb_sql_connect`, `COPY ... TO STDOUT` and a streaming
+`COPY ... FROM STDIN` fed piece by piece, results read row by row, asynchronous calls, the
+options `write_timeout`, `snapshot_memory_bytes`, `auto_checkpoint_log_bytes` and
+`page_size_bytes`, `eggdb_check` and `eggdb_stats`, and the official per-language drivers
+(D16).

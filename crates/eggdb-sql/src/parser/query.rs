@@ -556,6 +556,8 @@ impl Parser<'_> {
                 self.at += 2;
                 self.expect_word("share")?;
                 self.expect_word("mode")?;
+            } else if self.sqlserver() && self.is_word("for") && self.is_word_at(1, "read") {
+                break;
             } else if self.is_word("for") || self.mysql() && self.is_word("lock") {
                 return Err(self.not_supported("row locking (FOR UPDATE, FOR SHARE)"));
             } else {

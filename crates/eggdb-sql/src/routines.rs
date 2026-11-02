@@ -18,15 +18,18 @@ use std::sync::Arc;
 
 mod calls;
 mod oracle;
+pub(crate) mod polymorphic;
 mod sqlserver;
 
 pub(crate) use calls::{
-    DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_outputs,
-    called_name, default_argument, default_value, evaluate, exprs_call_marked_routine,
-    insert_calls_marked_routine, is_default_argument, marked_call, mentions_routine_call,
-    prepare_delete, prepare_insert, prepare_query, prepare_select, prepare_update,
-    query_calls_marked_routine, run_do, select_calls_marked_routine, select_calls_volatile,
-    select_may_write,
+    DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure,
+    call_procedure_nonatomic, call_procedure_outputs, called_name,
+    correlated_table_function_columns, correlated_table_function_rows, default_argument,
+    default_value, evaluate, exprs_call_marked_routine, insert_calls_marked_routine,
+    is_default_argument, marked_call, mentions_routine_call, prepare_delete, prepare_insert,
+    prepare_oracle_table_function, prepare_query, prepare_select, prepare_update,
+    query_calls_marked_routine, run_do, run_do_nonatomic, select_calls_marked_routine,
+    select_calls_volatile, select_may_write, untyped_arguments,
 };
 
 pub(crate) const MAX_ROUTINE_TEXT: usize = 1 << 20;
@@ -260,6 +263,7 @@ pub(crate) struct RoutineCache {
     entries: HashMap<String, CachedRoutines>,
     programs: Vec<(Arc<RoutineDefinition>, Arc<crate::plpgsql::Program>)>,
     tsql_programs: Vec<(Arc<RoutineDefinition>, Arc<crate::tsql::Program>)>,
+    specializations: Vec<polymorphic::Specialization>,
     pub(crate) packages: crate::plsql::PackageCache,
 }
 
@@ -387,6 +391,9 @@ pub(crate) fn resolve(
     }
     if let Some(members) = crate::plsql::current_package_routines(reader, tables, name)? {
         return Ok(Some(members));
+    }
+    if crate::temporary::is_sqlserver_temporary(name) {
+        return of_name(reader, tables, &crate::temporary::internal_name(name));
     }
     let plain = normalized(name);
     if is_qualified(plain) || plain.len() != name.len() {
@@ -536,6 +543,7 @@ fn check_returns(
     tables: &mut TableCache,
     definition: &RoutineDefinition,
 ) -> SqlResult<()> {
+    polymorphic::check_result(definition)?;
     let relation = match &definition.returns {
         RoutineReturns::One(ReturnType::Relation(name))
         | RoutineReturns::Set(ReturnType::Relation(name)) => name,
@@ -716,6 +724,20 @@ fn names_routine(written: &str, internal: &str) -> bool {
     }
 }
 
+/// The triggers, as `(table, trigger)`, whose action calls the routine `target` names; none
+/// when no such routine exists.
+pub(crate) fn triggers_calling(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    kind: Option<RoutineKind>,
+    target: &RoutineTarget,
+) -> SqlResult<Vec<(String, String)>> {
+    match locate(reader, tables, kind, target)? {
+        Ok(located) => dependent_triggers(reader, &located),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
 fn dependent_triggers(
     reader: &dyn KeyValueRead,
     located: &Located,
@@ -723,11 +745,20 @@ fn dependent_triggers(
     if located.kind != RoutineKind::Function || !located.identity.is_empty() {
         return Ok(Vec::new());
     }
+    triggers_naming(reader, &located.name)
+}
+
+/// The triggers, as `(table, trigger)`, whose action names the routine `internal`, whether or
+/// not it exists.
+pub(crate) fn triggers_naming(
+    reader: &dyn KeyValueRead,
+    internal: &str,
+) -> SqlResult<Vec<(String, String)>> {
     let mut found = Vec::new();
     for table in crate::triggers::every_trigger(reader)? {
         for trigger in &table.triggers {
             if let TriggerAction::Function { name, .. } = &trigger.action
-                && names_routine(name, &located.name)
+                && names_routine(name, internal)
             {
                 found.push((table.table.clone(), trigger.name.clone()));
             }
@@ -884,6 +915,10 @@ mod calls_tests;
 #[cfg(test)]
 mod mysql_tests;
 #[cfg(test)]
+mod polymorphic_tests;
+#[cfg(test)]
 mod sqlserver_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transaction_control_tests;

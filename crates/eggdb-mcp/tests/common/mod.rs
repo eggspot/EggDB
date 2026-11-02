@@ -147,7 +147,8 @@ pub struct MapOpener {
     pub not_writable: Cell<bool>,
     pub close_fails: Cell<bool>,
     pub close_delay: Cell<Duration>,
-    pub after_close: RefCell<Option<Box<dyn Fn()>>>,
+    pub after_write_close: RefCell<Option<Box<dyn Fn()>>>,
+    open_for_writing: Cell<bool>,
 }
 
 impl MapOpener {
@@ -160,7 +161,8 @@ impl MapOpener {
             not_writable: Cell::new(false),
             close_fails: Cell::new(false),
             close_delay: Cell::new(Duration::ZERO),
-            after_close: RefCell::new(None),
+            after_write_close: RefCell::new(None),
+            open_for_writing: Cell::new(false),
         }
     }
 }
@@ -173,6 +175,7 @@ impl DatabaseOpener for MapOpener {
             return Err(OpenRefusal::Busy);
         }
         self.opens.set(self.opens.get() + 1);
+        self.open_for_writing.set(false);
         Ok(self.store.clone())
     }
 
@@ -184,12 +187,15 @@ impl DatabaseOpener for MapOpener {
             return Err(OpenRefusal::NotWritable("permission denied".to_owned()));
         }
         self.write_opens.set(self.write_opens.get() + 1);
+        self.open_for_writing.set(true);
         Ok(self.store.clone())
     }
 
     fn close(&self, _store: MapStore) -> Result<(), OpenRefusal> {
         std::thread::sleep(self.close_delay.get());
-        if let Some(after) = self.after_close.borrow().as_ref() {
+        if self.open_for_writing.get()
+            && let Some(after) = self.after_write_close.borrow().as_ref()
+        {
             after();
         }
         if self.close_fails.get() {

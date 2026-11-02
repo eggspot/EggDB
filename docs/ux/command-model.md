@@ -126,7 +126,7 @@ command of the parser that is not. `eggdb help --json` prints these definitions;
 | `list_tables` | `table list --json` | read | | yes | | `notice`; `schemas` (the records' `schema` values); `tables` and `views` become records with `kind` |
 | `describe_table` | `table show --json` | read | | yes | | `notice` |
 | `run_sql` | `sql --read-only --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
-| `write_sql` | `sql --json` | destroy | `--allow-write` | no | `destructive_statement`: the statement is destructive (DROP, TRUNCATE, a column dropped or retyped, or a DELETE or UPDATE whose WHERE names no column of its table) (D121) | the same, and `rows_changed`, `committed`, `warning` |
+| `write_sql` | `sql --json` | destroy | `--allow-write` | no | `destructive_statement`: the statement is destructive (DROP, TRUNCATE, a column dropped or retyped, a DELETE or UPDATE whose WHERE does not pin every column of the primary key or of a unique key to values, REPLACE or an upsert, or a MERGE that updates or deletes) (D121, D255) | the same, and `rows_changed`, `committed`, `warning` |
 | `explain_query` | `explain --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated`, `truncated_by` |
 | `sample_rows` | `table sample --json` | read | | yes | | `notice`, `dialect`, `returned_rows`, `truncated_by`; `tag` and `row_count` count the rows shown, not the `LIMIT n+1` read |
 | `kv_get` | `get --json` | read | | yes | | `notice`, `found`; in `entry`, `key_hex` when `key` is there, and `value_bytes` |

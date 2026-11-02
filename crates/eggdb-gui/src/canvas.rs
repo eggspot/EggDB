@@ -28,14 +28,48 @@ pub struct Canvas {
     pixels: Vec<Rgba>,
 }
 
+fn fitted_size(width: usize, height: usize) -> (usize, usize) {
+    if width
+        .checked_mul(height)
+        .is_some_and(|count| count <= Canvas::MAX_PIXELS)
+    {
+        return (width, height);
+    }
+    let ratio = (Canvas::MAX_PIXELS as f64 / (width as f64 * height as f64)).sqrt();
+    let fit = |side: usize| ((side as f64 * ratio).floor() as usize).clamp(1, Canvas::MAX_PIXELS);
+    let height = fit(height);
+    (fit(width).min(Canvas::MAX_PIXELS / height), height)
+}
+
 impl Canvas {
-    /// A `width` × `height` canvas filled with `background`.
+    /// The most pixels a canvas holds: 64 Mi (256 MiB of RGBA), more than an 8K display at
+    /// full density, and few enough that its byte count fits a 32-bit `usize`.
+    pub const MAX_PIXELS: usize = 64 * 1024 * 1024;
+
+    /// A `width` × `height` canvas filled with `background`. A size of more than
+    /// [`Canvas::MAX_PIXELS`] is reduced to fit, keeping its proportions, so a size that a
+    /// window system or a host asks for can never force a giant allocation; [`Canvas::width`]
+    /// and [`Canvas::height`] tell the size made.
     pub fn new(width: usize, height: usize, background: Rgba) -> Self {
+        let (width, height) = fitted_size(width, height);
         Self {
             width,
             height,
             pixels: vec![background; width * height],
         }
+    }
+
+    /// A `width` × `height` canvas filled with `background`, or `None` when it would hold
+    /// more than [`Canvas::MAX_PIXELS`].
+    pub fn try_new(width: usize, height: usize, background: Rgba) -> Option<Self> {
+        let count = width
+            .checked_mul(height)
+            .filter(|count| *count <= Self::MAX_PIXELS)?;
+        Some(Self {
+            width,
+            height,
+            pixels: vec![background; count],
+        })
     }
 
     /// The width in pixels.
@@ -56,6 +90,15 @@ impl Canvas {
     /// The pixels, row by row.
     pub fn pixels(&self) -> &[Rgba] {
         &self.pixels
+    }
+
+    /// The pixels as bytes, four (red, green, blue, alpha) a pixel row by row: what a native
+    /// window presents.
+    pub fn rgba_bytes(&self) -> Vec<u8> {
+        self.pixels
+            .iter()
+            .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
+            .collect()
     }
 
     /// Mixes `color` into (`x`, `y`) with `coverage`; points outside are ignored.
@@ -90,25 +133,53 @@ impl Canvas {
         }
     }
 
+    fn rounded_coverage(rect: Rect, radius: f32, x: i64, y: i64) -> f32 {
+        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
+        let edge = Self::coverage_span(rect.x, rect.x + rect.w, x)
+            * Self::coverage_span(rect.y, rect.y + rect.h, y);
+        if radius <= 0.0 {
+            return edge;
+        }
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        let cx = px.clamp(rect.x + radius, rect.x + rect.w - radius);
+        let cy = py.clamp(rect.y + radius, rect.y + rect.h - radius);
+        let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+        let inside_corner = (radius - distance + 0.5).clamp(0.0, 1.0);
+        inside_corner.min(edge)
+    }
+
     /// Fills `rect` with corners rounded to `radius`.
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, color: Rgba) {
-        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
         let (x0, x1) = (rect.x.floor() as i64, (rect.x + rect.w).ceil() as i64);
         let (y0, y1) = (rect.y.floor() as i64, (rect.y + rect.h).ceil() as i64);
         for y in y0..y1 {
             for x in x0..x1 {
-                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                let cx = px.clamp(rect.x + radius, rect.x + rect.w - radius);
-                let cy = py.clamp(rect.y + radius, rect.y + rect.h - radius);
-                let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
-                let inside_corner = (radius - distance + 0.5).clamp(0.0, 1.0);
-                let edge = Self::coverage_span(rect.x, rect.x + rect.w, x)
-                    * Self::coverage_span(rect.y, rect.y + rect.h, y);
-                let coverage = if radius > 0.0 {
-                    inside_corner.min(edge)
-                } else {
-                    edge
-                };
+                self.blend(x, y, color, Self::rounded_coverage(rect, radius, x, y));
+            }
+        }
+    }
+
+    /// Draws a band `width` wide just outside `rect`, its inner corners rounded to `radius`
+    /// and its outer corners to `radius + width`: a focus ring around a control.
+    pub fn stroke_outside_rounded_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        width: f32,
+        color: Rgba,
+    ) {
+        let outer = Rect::new(
+            rect.x - width,
+            rect.y - width,
+            rect.w + 2.0 * width,
+            rect.h + 2.0 * width,
+        );
+        let (x0, x1) = (outer.x.floor() as i64, (outer.x + outer.w).ceil() as i64);
+        let (y0, y1) = (outer.y.floor() as i64, (outer.y + outer.h).ceil() as i64);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let coverage = Self::rounded_coverage(outer, radius + width, x, y)
+                    - Self::rounded_coverage(rect, radius, x, y);
                 self.blend(x, y, color, coverage);
             }
         }
@@ -183,6 +254,41 @@ mod tests {
     const BLACK: Rgba = Rgba::hex(0x000000);
 
     #[test]
+    fn a_size_past_the_pixel_limit_is_refused_or_fitted_without_overflow() {
+        assert!(Canvas::try_new(usize::MAX, 2, WHITE).is_none());
+        assert!(Canvas::try_new(Canvas::MAX_PIXELS + 1, 1, WHITE).is_none());
+        assert!(Canvas::try_new(131_072, 131_072, WHITE).is_none());
+        assert_eq!(
+            Canvas::try_new(3, 2, WHITE).map(|canvas| canvas.pixels().len()),
+            Some(6)
+        );
+        assert_eq!(fitted_size(1280, 800), (1280, 800));
+        assert_eq!(fitted_size(0, 5), (0, 5));
+        for (width, height) in [
+            (usize::MAX, usize::MAX),
+            (usize::MAX, 1),
+            (1, usize::MAX),
+            (131_072, 131_072),
+            (65_535, 65_535),
+            (100_000, 3),
+        ] {
+            let (fitted_width, fitted_height) = fitted_size(width, height);
+            assert!(
+                fitted_width >= 1 && fitted_height >= 1,
+                "{width} x {height}"
+            );
+            assert!(
+                fitted_width
+                    .checked_mul(fitted_height)
+                    .is_some_and(|count| count <= Canvas::MAX_PIXELS),
+                "{width} x {height}"
+            );
+        }
+        assert_eq!(fitted_size(131_072, 131_072), (8192, 8192));
+        assert!(Canvas::new(usize::MAX, 0, WHITE).pixels().is_empty());
+    }
+
+    #[test]
     fn whole_pixel_rects_are_exact_and_half_pixels_blend() {
         let mut canvas = Canvas::new(10, 10, WHITE);
         canvas.fill_rect(Rect::new(2.0, 2.0, 3.0, 3.0), BLACK);
@@ -205,5 +311,18 @@ mod tests {
         assert_eq!(canvas.pixel(0, 0), Some(WHITE));
         assert_eq!(canvas.pixel(6, 6), Some(BLACK));
         canvas.fill_rect(Rect::new(-5.0, -5.0, 1000.0, 2.0), BLACK);
+    }
+
+    #[test]
+    fn a_ring_outside_a_rect_leaves_the_rect_and_the_far_outside_alone() {
+        let mut canvas = Canvas::new(40, 40, WHITE);
+        canvas.stroke_outside_rounded_rect(Rect::new(10.0, 10.0, 20.0, 20.0), 4.0, 2.0, BLACK);
+        assert_eq!(canvas.pixel(20, 20), Some(WHITE));
+        assert_eq!(canvas.pixel(10, 20), Some(WHITE));
+        assert_eq!(canvas.pixel(9, 20), Some(BLACK));
+        assert_eq!(canvas.pixel(8, 20), Some(BLACK));
+        assert_eq!(canvas.pixel(7, 20), Some(WHITE));
+        assert_eq!(canvas.pixel(20, 31), Some(BLACK));
+        assert_eq!(canvas.pixel(8, 8), Some(WHITE));
     }
 }

@@ -172,3 +172,18 @@ module when it has been built) and the `full` binary in release, strips them, an
 size against `benchmarks/footprint.txt` (D6, D34, D230). CI runs it on Linux and macOS; a size
 over its budget fails until the budget is raised with a stated reason, and `--update` rewrites
 the current system's lines.
+
+Budgets raised under D253, with their reasons:
+- 2026-11-02, the batch that finished what was still open (D254 to D273): `citext` and `hstore`
+  as base types with their operators and binary forms, SQL/JSON path, `json_to_record`, time zone
+  abbreviations and POSIX rules, T-SQL cursors and dynamic SQL, `bcp` format files, Oracle
+  `GOTO`, pipelined functions and collections, `eggdb follow` over SQL Server CDC with saved
+  positions, databases created and dropped while serving, login slots and the shared memory
+  budget, the agent write guards, and the C API's prepared statements, cancelling and `COPY`
+  (D268). About 33,000 lines of engine, CLI and protocol code. Measured sizes, before and after:
+  the `full` binary 14,208,184 to 15,009,440 bytes on Linux (CI) and 10,931,288 to 11,610,104
+  on macOS (local); the C API library 8,510,576 to 9,024,912 on Linux (CI) and 6,709,808 to
+  7,141,296 on macOS (local). The new budgets are those sizes plus about 1% for the batch's last
+  fixes. The GUI toolkit's window code in `eggdb-platform` (D256) is linked only into
+  `eggdb-gui`: the release `eggdb` binary and the C API library link no window system and hold
+  none of its strings.

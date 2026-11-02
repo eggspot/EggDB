@@ -22,6 +22,8 @@ impl SqlState {
     pub const INVALID_CATALOG_NAME: Self = Self(*b"3D000");
     /// `42P03` duplicate_cursor: a portal by that name exists.
     pub const DUPLICATE_CURSOR: Self = Self(*b"42P03");
+    /// `42P11` invalid_cursor_definition: a cursor's query is not one a cursor can hold.
+    pub const INVALID_CURSOR_DEFINITION: Self = Self(*b"42P11");
     /// `42P05` duplicate_prepared_statement.
     pub const DUPLICATE_PREPARED_STATEMENT: Self = Self(*b"42P05");
     /// `53300` too_many_connections.
@@ -32,11 +34,16 @@ impl SqlState {
     pub const INSUFFICIENT_PRIVILEGE: Self = Self(*b"42501");
     /// `57P01` admin_shutdown: the server is stopping.
     pub const ADMIN_SHUTDOWN: Self = Self(*b"57P01");
+    /// `57P05` idle_session_timeout: a connection waited longer than the server's idle timeout.
+    pub const IDLE_SESSION_TIMEOUT: Self = Self(*b"57P05");
     /// `0A000` feature_not_supported: valid SQL that this release does not run yet.
     pub const FEATURE_NOT_SUPPORTED: Self = Self(*b"0A000");
     /// `09000` triggered_action_exception: a trigger's body ended the statement that fired
     /// it, as SQLite's `RAISE(IGNORE)` does for the row being changed.
     pub const TRIGGERED_ACTION_EXCEPTION: Self = Self(*b"09000");
+    /// `27000` triggered_data_change_violation: a `BEFORE` trigger changed or removed the row
+    /// that the statement firing it was about to change.
+    pub const TRIGGERED_DATA_CHANGE_VIOLATION: Self = Self(*b"27000");
     /// `45000`: the SQLSTATE MySQL's `SIGNAL` uses for an unhandled user-defined condition.
     pub const USER_DEFINED_CONDITION: Self = Self(*b"45000");
     /// `P0001` raise_exception: an error a statement raised on purpose, such as Transact-SQL's
@@ -86,6 +93,22 @@ impl SqlState {
     pub const INVALID_REGULAR_EXPRESSION: Self = Self(*b"2201B");
     /// `22012` division_by_zero.
     pub const DIVISION_BY_ZERO: Self = Self(*b"22012");
+    /// `22033` invalid_sql_json_subscript: an array subscript outside a strict path's array.
+    pub const INVALID_SQL_JSON_SUBSCRIPT: Self = Self(*b"22033");
+    /// `22036` non_numeric_sql_json_item: arithmetic or a numeric method on a non-number.
+    pub const NON_NUMERIC_SQL_JSON_ITEM: Self = Self(*b"22036");
+    /// `22038` singleton_sql_json_item_required: a path that must yield exactly one item.
+    pub const SINGLETON_SQL_JSON_ITEM_REQUIRED: Self = Self(*b"22038");
+    /// `22039` sql_json_array_not_found: an array accessor applied to a non-array.
+    pub const SQL_JSON_ARRAY_NOT_FOUND: Self = Self(*b"22039");
+    /// `2203A` sql_json_member_not_found: a strict path's member is missing.
+    pub const SQL_JSON_MEMBER_NOT_FOUND: Self = Self(*b"2203A");
+    /// `2203B` sql_json_number_not_found: a string that is not a number.
+    pub const SQL_JSON_NUMBER_NOT_FOUND: Self = Self(*b"2203B");
+    /// `2203C` sql_json_object_not_found: a member accessor applied to a non-object.
+    pub const SQL_JSON_OBJECT_NOT_FOUND: Self = Self(*b"2203C");
+    /// `2203G` sql_json_item_cannot_be_cast_to_target_type.
+    pub const SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE: Self = Self(*b"2203G");
     /// `22019` invalid_escape_character.
     pub const INVALID_ESCAPE_CHARACTER: Self = Self(*b"22019");
     /// `2201F` invalid_argument_for_power_function.
@@ -125,6 +148,10 @@ impl SqlState {
     pub const INVALID_SCHEMA_NAME: Self = Self(*b"3F000");
     /// `42602` invalid_name.
     pub const INVALID_NAME: Self = Self(*b"42602");
+    /// `42P04` duplicate_database.
+    pub const DUPLICATE_DATABASE: Self = Self(*b"42P04");
+    /// `55006` object_in_use.
+    pub const OBJECT_IN_USE: Self = Self(*b"55006");
     /// `25001` active_sql_transaction.
     pub const ACTIVE_SQL_TRANSACTION: Self = Self(*b"25001");
     /// `25006` read_only_sql_transaction.
@@ -282,6 +309,7 @@ struct Report {
     context: Option<String>,
     raised: Option<Raised>,
     declared_exception: Option<String>,
+    procedure: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +339,7 @@ impl SqlError {
                 context: None,
                 raised: None,
                 declared_exception: None,
+                procedure: None,
             }),
         }
     }
@@ -357,6 +386,19 @@ impl SqlError {
     pub(crate) fn with_declared_exception(mut self, identity: impl Into<String>) -> Self {
         self.report.declared_exception = Some(identity.into());
         self
+    }
+
+    pub(crate) fn in_procedure(mut self, procedure: &str) -> Self {
+        if self.report.procedure.is_none() {
+            self.report.procedure = Some(procedure.to_owned());
+        }
+        self
+    }
+
+    /// The name of the innermost procedure the error escaped, as SQL Server reports it in
+    /// `ERROR_PROCEDURE()` and in a TDS `ERROR` token, or `None` outside a procedure.
+    pub fn procedure(&self) -> Option<&str> {
+        self.report.procedure.as_deref()
     }
 
     pub(crate) fn declared_exception(&self) -> Option<&str> {

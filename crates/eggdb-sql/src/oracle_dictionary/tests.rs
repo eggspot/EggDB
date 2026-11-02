@@ -96,6 +96,42 @@ fn a_user_with_a_schema_of_its_own_sees_it_as_its_own_objects() {
 }
 
 #[test]
+fn dropping_a_listed_generated_not_null_constraint_drops_the_not_null() {
+    let store = MemoryStore::default();
+    hr_schema(&store);
+    let mut session = hr_session(&store);
+    let listed = last(
+        &mut session,
+        "SELECT constraint_name FROM user_constraints
+         WHERE table_name = 'COUNTRIES' AND constraint_type = 'C' AND generated = 'GENERATED NAME'",
+    );
+    let name = listed.lines().nth(1).unwrap_or_default().to_owned();
+    assert!(name.starts_with("SYS_C"), "{listed}");
+    let error = fails(&mut session, "INSERT INTO countries VALUES ('FR', NULL, 1)");
+    assert_eq!(error.state().code(), "23502", "{error}");
+    last(
+        &mut session,
+        &format!("ALTER TABLE countries DROP CONSTRAINT {name}"),
+    );
+    last(&mut session, "INSERT INTO countries VALUES ('FR', NULL, 1)");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT COUNT(*) FROM user_constraints WHERE table_name = 'COUNTRIES' AND generated = 'GENERATED NAME'"
+        ),
+        "COUNT(*)\n0\nSELECT 1"
+    );
+    let error = fails(
+        &mut session,
+        &format!("ALTER TABLE countries DROP CONSTRAINT {name}"),
+    );
+    assert!(
+        error.message().contains("nonexistent constraint"),
+        "{error}"
+    );
+}
+
+#[test]
 fn constraints_indexes_sequences_views_and_objects_are_listed_and_joined() {
     let store = MemoryStore::default();
     hr_schema(&store);
@@ -117,6 +153,22 @@ fn constraints_indexes_sequences_views_and_objects_are_listed_and_joined() {
         .lines()
         .count(),
         3
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT c.constraint_type, c.search_condition, c.generated, cc.column_name, cc.position
+             FROM user_constraints c JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name
+             WHERE c.table_name = 'COUNTRIES' AND c.constraint_type = 'C' AND c.constraint_name <> 'COUNTRY_NAME_CK'"
+        ),
+        "CONSTRAINT_TYPE|SEARCH_CONDITION|GENERATED|COLUMN_NAME|POSITION\nC|\"COUNTRY_NAME\" IS NOT NULL|GENERATED NAME|COUNTRY_NAME|NULL\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT COUNT(*) FROM all_constraints WHERE table_name = 'REGIONS' AND constraint_type = 'C'"
+        ),
+        "COUNT(*)\n0\nSELECT 1"
     );
     assert_eq!(
         last(
@@ -361,4 +413,79 @@ fn a_transact_sql_batch_switches_to_oracle_for_the_statements_after_the_set() {
     assert_eq!(session.dialect(), Dialect::Oracle);
     session.reset_connection(false).unwrap();
     assert_eq!(session.dialect(), Dialect::SqlServer);
+}
+
+#[test]
+fn postgresql_catalog_queries_run_as_postgresql_while_the_connection_reads_oracle() {
+    let store = MemoryStore::default();
+    hr_schema(&store);
+    let mut session = hr_session(&store);
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT c.relname::text AS relname FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'hr' AND c.relkind = 'r' ORDER BY 1"
+        ),
+        "relname\ncountries\nregions\nSELECT 2"
+    );
+    let catalog = "SELECT c.oid::int8 AS oid FROM pg_catalog.pg_class c WHERE c.relname = $1";
+    assert!(session.prepare(catalog, &[None]).is_ok());
+    assert!(session.describe(catalog, &[None]).is_ok());
+    let mut found = 0;
+    session
+        .execute_prepared(
+            catalog,
+            &[Parameter {
+                declared_type: None,
+                value: Some("countries".to_owned()),
+            }],
+            &mut |result| {
+                found += result.rows.len();
+                true
+            },
+        )
+        .expect("runs");
+    assert_eq!(found, 1);
+    assert_eq!(
+        last(&mut session, "SELECT COUNT(*) FROM dual"),
+        "COUNT(*)\n1\nSELECT 1"
+    );
+    assert!(run(&mut session, "SELECT 1::int FROM dual").is_err());
+}
+
+#[test]
+fn only_a_single_statement_qualifying_pg_catalog_runs_as_postgresql() {
+    let store = MemoryStore::default();
+    hr_schema(&store);
+    let mut session = hr_session(&store);
+    assert_eq!(
+        last(&mut session, "SELECT 'pg_catalog.pg_class' AS s FROM dual"),
+        "S\npg_catalog.pg_class\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT 1 AS n FROM dual -- reads pg_catalog.pg_class\n"
+        ),
+        "N\n1\nSELECT 1"
+    );
+    assert_eq!(
+        last(&mut session, "SELECT 1 AS n FROM dual /* pg_catalog.x */"),
+        "N\n1\nSELECT 1"
+    );
+    let mut outputs = Vec::new();
+    let _ = session.execute(
+        "SELECT 1 AS n FROM dual; SELECT c.relname AS r FROM pg_catalog.pg_class c WHERE 1 = 0",
+        &mut |result| outputs.push(render(&result)),
+    );
+    assert_eq!(outputs.first().map(String::as_str), Some("N\n1\nSELECT 1"));
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT count(*)::int AS n FROM \"pg_catalog\".pg_namespace WHERE nspname = 'hr';"
+        ),
+        "n\n1\nSELECT 1"
+    );
+    assert_eq!(session.dialect(), Dialect::Oracle);
 }

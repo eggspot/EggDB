@@ -44,8 +44,13 @@ dialect on the same file: tables, joins, `GROUP BY` with aggregates ([docs/sql.m
 writer at a time. `eggdb sql --dialect sqlite` and the embedded API run SQLite's SQL on the same
 file, and `--dialect oracle` Oracle's (no Oracle wire protocol). `eggdb mcp` lets AI agents
 such as Claude Code read the file over MCP, read-only, every call in an audit log
-([docs/mcp.md](docs/mcp.md)). What is in it and what
-is not: [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md);
+([docs/mcp.md](docs/mcp.md)). With `--allow-write` an agent may also change it; a statement that
+can drop data or change many rows waits for your yes, but a client that cannot ask you lets the
+agent answer for you (`confirm: true`), so `--allow-write` then lets the agent change anything
+it can see: add `--tables a,b` to limit it to those tables, and give unattended agents read-only
+access. What is in it:
+[docs/releases/v0.2.0.md](docs/releases/v0.2.0.md); everything it doesn't do yet, in one list:
+its [Limits](docs/releases/v0.2.0.md#limits);
 what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:
 [docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
 
@@ -81,6 +86,13 @@ silicon), `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc` or `aarch64-pc-win
 `.zip`. `SHA256SUMS` and `gh attestation verify <archive> -R eggspot/EggDB` check a download. To
 build it instead: `cargo build --release -p eggdb`, and the binary is `target/release/eggdb`.
 
+The binaries are not signed. On macOS, a file downloaded with a browser is quarantined: run
+`xattr -d com.apple.quarantine eggdb` once (`curl` and the install script don't set it). On
+Windows, unzip the archive and add its folder to your PATH (System Properties, Environment
+Variables, Path); SmartScreen may ask once before the first run. Put `eggdb` on your PATH on
+every system, so that tools which start it by name, such as `claude mcp add mydb -- eggdb mcp
+app.db`, find it.
+
 ### Use it from a shell
 
 ```sh
@@ -99,6 +111,10 @@ PGPASSWORD=choose-one psql -h 127.0.0.1 -U eggdb shop -c "SELECT * FROM items"
 MYSQL_PWD=choose-one mysql -h 127.0.0.1 -P 3306 -u eggdb shop -e "SHOW TABLES"
 SQLCMDPASSWORD=choose-one sqlcmd -S 127.0.0.1,1433 -U eggdb -d shop -Q "SELECT TOP 1 * FROM items"
 ```
+
+`sqlcmd` here is Microsoft's go-sqlcmd, the one CI runs: without TLS, connect with its default
+or `-N disable`. In PowerShell, set each variable on its own line first, such as
+`$env:EGGDB_PASSWORD = "choose-one"`.
 
 Or work in one session, with history and tab completion:
 
@@ -122,6 +138,19 @@ shop=> .quit
 ```
 
 Every command, the output formats, exit codes and the UI's keys: [docs/cli.md](docs/cli.md).
+
+### Migrate: restore the dump you already make
+
+```sh
+pg_dump --dbname=app > app.sql                                # from PostgreSQL, plain SQL format
+eggdb restore --create app.db app.sql                         # prints what was restored and skipped
+eggdb restore --dialect mysql --create sales.db sales.sql     # a mysqldump file
+eggdb restore --dialect sqlserver --create crm.db crm.sql     # an SSMS Generate Scripts script
+eggdb restore --dialect oracle --create hr.db hr_export.sql   # a SQL Developer or SQLcl export
+```
+
+What each format restores, and the ones that are refused with the command to use instead:
+[docs/migrate.md](docs/migrate.md).
 
 ### Use it from Rust
 

@@ -59,6 +59,7 @@ typedef struct eggdb_db eggdb_db;
 typedef struct eggdb_txn eggdb_txn;
 typedef struct eggdb_scan eggdb_scan;
 typedef struct eggdb_sql eggdb_sql;
+typedef struct eggdb_stmt eggdb_stmt;
 
 typedef struct eggdb_options {
     uint32_t flags;
@@ -176,7 +177,26 @@ int eggdb_sql_execute(eggdb_sql *sql, const char *text, const eggdb_result **res
 int eggdb_sql_execute_with_parameters(eggdb_sql *sql, const char *text,
                                       const eggdb_parameter *parameters, size_t parameter_count,
                                       const eggdb_result **results, size_t *count);
+int eggdb_sql_copy_in(eggdb_sql *sql, const char *text, const uint8_t *data, size_t len,
+                      const eggdb_result **results, size_t *count);
+int eggdb_sql_cancel(eggdb_sql *sql);
 int eggdb_sql_close(eggdb_sql *sql);
+
+int eggdb_sql_prepare(eggdb_sql *sql, const char *text, size_t len, eggdb_stmt **stmt);
+int eggdb_stmt_parameter_count(eggdb_stmt *stmt, size_t *count);
+int eggdb_stmt_bind_null(eggdb_stmt *stmt, size_t index);
+int eggdb_stmt_bind_int64(eggdb_stmt *stmt, size_t index, int64_t value);
+int eggdb_stmt_bind_double(eggdb_stmt *stmt, size_t index, double value);
+int eggdb_stmt_bind_bool(eggdb_stmt *stmt, size_t index, int value);
+int eggdb_stmt_bind_text(eggdb_stmt *stmt, size_t index, const char *text, size_t len);
+int eggdb_stmt_bind_blob(eggdb_stmt *stmt, size_t index, const uint8_t *data, size_t len);
+int eggdb_stmt_clear_bindings(eggdb_stmt *stmt);
+int eggdb_stmt_execute(eggdb_stmt *stmt, const eggdb_result **results, size_t *count);
+int eggdb_stmt_reset(eggdb_stmt *stmt);
+int eggdb_stmt_column_count(eggdb_stmt *stmt, size_t *count);
+int eggdb_stmt_column_name(eggdb_stmt *stmt, size_t column, const char **name);
+int eggdb_stmt_column_type(eggdb_stmt *stmt, size_t column, int32_t *kind);
+int eggdb_stmt_finalize(eggdb_stmt *stmt);
 
 #ifdef __cplusplus
 }

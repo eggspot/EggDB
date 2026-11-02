@@ -220,6 +220,53 @@ mod tests {
     }
 
     #[test]
+    fn rows_changed_by_cascades_and_replace_are_captured() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for statement in [
+            "CREATE EXTENSION eggdb_cdc",
+            "CREATE TABLE owners (id int PRIMARY KEY)",
+            "CREATE TABLE pets (id int PRIMARY KEY, owner_id int REFERENCES owners ON DELETE CASCADE ON UPDATE SET NULL)",
+            "CREATE TRIGGER pets_cdc AFTER INSERT OR UPDATE OR DELETE ON pets FOR EACH ROW EXECUTE FUNCTION eggdb_cdc.capture()",
+            "INSERT INTO owners VALUES (1), (2)",
+            "INSERT INTO pets VALUES (10, 1), (20, 2)",
+            "DELETE FROM eggdb_cdc.outbox",
+            "DELETE FROM owners WHERE id = 1",
+            "UPDATE owners SET id = 3 WHERE id = 2",
+        ] {
+            session
+                .execute(statement, &mut |_| {})
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        let mut sqlite = Session::with_dialect(&store, crate::dialect::Dialect::Sqlite);
+        sqlite
+            .execute("INSERT OR REPLACE INTO pets VALUES (20, NULL)", &mut |_| {})
+            .unwrap();
+        let mut seen = Vec::new();
+        deliver_changes(&store, "app", 10, &mut |event| {
+            seen.push(event.to_owned());
+            true
+        })
+        .unwrap();
+        let ops: Vec<&str> = seen
+            .iter()
+            .map(|event| {
+                ["c", "u", "d"]
+                    .into_iter()
+                    .find(|op| event.contains(&format!("\"op\":\"{op}\"")))
+                    .unwrap_or("?")
+            })
+            .collect();
+        assert_eq!(ops, vec!["d", "u", "d", "c"], "{seen:?}");
+        assert!(seen[0].contains("10"), "{}", seen[0]);
+        assert!(
+            seen[1].contains("\"owner_id\": null") || seen[1].contains("\"owner_id\":null"),
+            "{}",
+            seen[1]
+        );
+    }
+
+    #[test]
     fn events_escape_names() {
         let event = debezium_event("a\"b", "public", "t", "c", None, Some("{}"), 5);
         assert!(event.starts_with("{\"before\":null,\"after\":{},\"source\":{\"connector\":\"eggdb\",\"db\":\"a\\\"b\""), "{event}");

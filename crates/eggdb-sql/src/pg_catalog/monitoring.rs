@@ -1,9 +1,11 @@
 //! The statistics views, extension catalogs and administration functions that PostgreSQL
 //! administration tools such as pgAdmin read on every connection and dashboard refresh. EggDB
 //! answers them truthfully: one database, one user with every privilege, this session as the
-//! only activity, no foreign data, no replication, no extensions but `plpgsql`.
+//! only activity, no foreign data, no replication, and as extensions `plpgsql` and the built-in
+//! types of `citext` and `hstore`.
 
 use super::snapshot::{self, CatalogSnapshot};
+use super::types::{RegKind, RegValue};
 use super::{CatalogColumn, CatalogRow, CatalogType, oids};
 use crate::arrays::ArrayElement;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -19,6 +21,8 @@ const OIDS: SqlType = SqlType::Array(ArrayElement::Oid);
 const ACL_ITEMS: SqlType = SqlType::Array(ArrayElement::AclItem);
 const STAMP: SqlType = SqlType::TimestampTz(None);
 const PLPGSQL_EXTENSION: u32 = 13_581;
+const CITEXT_EXTENSION: u32 = 9_100;
+const HSTORE_EXTENSION: u32 = 9_101;
 const FIRST_OID: u32 = 12_500;
 
 const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
@@ -58,6 +62,7 @@ pub(crate) enum MonitoringRelation {
     Tables,
     Views,
     Matviews,
+    Sequences,
 }
 
 const TABLES: [CatalogColumn; 8] = [
@@ -76,6 +81,23 @@ const VIEWS: [CatalogColumn; 4] = [
     column("viewname", NAME),
     column("viewowner", NAME),
     column("definition", SqlType::Text),
+];
+
+const SEQUENCES: [CatalogColumn; 11] = [
+    column("schemaname", NAME),
+    column("sequencename", NAME),
+    column("sequenceowner", NAME),
+    column(
+        "data_type",
+        SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
+    ),
+    column("start_value", SqlType::BigInt),
+    column("min_value", SqlType::BigInt),
+    column("max_value", SqlType::BigInt),
+    column("increment_by", SqlType::BigInt),
+    column("cycle", SqlType::Boolean),
+    column("cache_size", SqlType::BigInt),
+    column("last_value", SqlType::BigInt),
 ];
 
 const MATVIEWS: [CatalogColumn; 7] = [
@@ -291,12 +313,23 @@ const PARTITIONED_TABLE: [CatalogColumn; 3] = [
     column("partnatts", SqlType::SmallInt),
 ];
 
-const SUBSCRIPTION: [CatalogColumn; 5] = [
+const SUBSCRIPTION: [CatalogColumn; 16] = [
     column("oid", OID),
     column("subdbid", OID),
     column("subname", NAME),
     column("subowner", OID),
     column("subenabled", SqlType::Boolean),
+    column("subbinary", SqlType::Boolean),
+    column("substream", CHAR),
+    column("subtwophasestate", CHAR),
+    column("subdisableonerr", SqlType::Boolean),
+    column("subpasswordrequired", SqlType::Boolean),
+    column("subrunasowner", SqlType::Boolean),
+    column("subconninfo", SqlType::Text),
+    column("subslotname", NAME),
+    column("subsynccommit", SqlType::Text),
+    column("subpublications", TEXTS),
+    column("suborigin", SqlType::Text),
 ];
 
 const STAT_USER_TABLES: [CatalogColumn; 16] = [
@@ -377,7 +410,7 @@ const OPFAMILY: [CatalogColumn; 5] = [
 ];
 
 impl MonitoringRelation {
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::StatActivity,
         Self::StatDatabase,
         Self::Locks,
@@ -408,6 +441,7 @@ impl MonitoringRelation {
         Self::Tables,
         Self::Views,
         Self::Matviews,
+        Self::Sequences,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -442,6 +476,7 @@ impl MonitoringRelation {
             Self::Tables => "pg_tables",
             Self::Views => "pg_views",
             Self::Matviews => "pg_matviews",
+            Self::Sequences => "pg_sequences",
         }
     }
 
@@ -491,6 +526,7 @@ impl MonitoringRelation {
             Self::Tables => &TABLES,
             Self::Views => &VIEWS,
             Self::Matviews => &MATVIEWS,
+            Self::Sequences => &SEQUENCES,
         }
     }
 
@@ -508,6 +544,7 @@ impl MonitoringRelation {
                 | Self::Tables
                 | Self::Views
                 | Self::Matviews
+                | Self::Sequences
                 | Self::StatUserIndexes
         )
     }
@@ -524,6 +561,21 @@ fn started_at() -> &'static Value {
 
 fn session_user_name() -> String {
     snapshot::session_user().unwrap_or_else(|| "eggdb".to_owned())
+}
+
+/// Each installed extension's OID and the description `pg_description` holds for it.
+pub(crate) fn extension_descriptions() -> [(u32, &'static str); 3] {
+    [
+        (PLPGSQL_EXTENSION, "PL/pgSQL procedural language"),
+        (
+            CITEXT_EXTENSION,
+            "data type for case-insensitive character strings",
+        ),
+        (
+            HSTORE_EXTENSION,
+            "data type for storing sets of (key, value) pairs",
+        ),
+    ]
 }
 
 pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> Vec<Vec<Value>> {
@@ -573,16 +625,23 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             }
             vec![built.done()]
         }
-        MonitoringRelation::Extension => vec![
+        MonitoringRelation::Extension => [
+            (PLPGSQL_EXTENSION, "plpgsql", oids::PG_CATALOG, false, "1.0"),
+            (CITEXT_EXTENSION, "citext", oids::PUBLIC, true, "1.6"),
+            (HSTORE_EXTENSION, "hstore", oids::PUBLIC, true, "1.8"),
+        ]
+        .into_iter()
+        .map(|(oid, name, namespace, relocatable, version)| {
             row()
-                .set("oid", Value::Oid(PLPGSQL_EXTENSION))
-                .set("extname", Value::Text("plpgsql".to_owned()))
+                .set("oid", Value::Oid(oid))
+                .set("extname", Value::Text(name.to_owned()))
                 .set("extowner", Value::Oid(oids::SESSION_USER))
-                .set("extnamespace", Value::Oid(oids::PG_CATALOG))
-                .set("extrelocatable", Value::Boolean(false))
-                .set("extversion", Value::Text("1.0".to_owned()))
-                .done(),
-        ],
+                .set("extnamespace", Value::Oid(namespace))
+                .set("extrelocatable", Value::Boolean(relocatable))
+                .set("extversion", Value::Text(version.to_owned()))
+                .done()
+        })
+        .collect(),
         MonitoringRelation::User => vec![
             row()
                 .set("usename", Value::Text(session_user_name()))
@@ -609,6 +668,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             .collect(),
         MonitoringRelation::Tables => table_rows(snapshot),
         MonitoringRelation::Views => view_rows(snapshot),
+        MonitoringRelation::Sequences => sequence_rows(snapshot),
         _ => Vec::new(),
     }
 }
@@ -653,6 +713,48 @@ fn view_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .set("definition", Value::Text(view.query.clone()))
                     .done(),
             ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn sequence_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .relations
+        .iter()
+        .filter_map(|entry| match &entry.source {
+            super::snapshot::RelationSource::Sequence(sequence) => {
+                let type_oid = oids::type_oid(sequence.sql_type);
+                Some(
+                    CatalogRow::new(&SEQUENCES)
+                        .set("schemaname", Value::Text(entry.schema.clone()))
+                        .set("sequencename", Value::Text(entry.name.clone()))
+                        .set("sequenceowner", Value::Text(session_user_name()))
+                        .set(
+                            "data_type",
+                            Value::Reg(Box::new(RegValue {
+                                kind: RegKind::Type,
+                                oid: type_oid,
+                                name: oids::format_type(type_oid, None),
+                            })),
+                        )
+                        .set("start_value", Value::BigInt(sequence.start))
+                        .set("min_value", Value::BigInt(sequence.min))
+                        .set("max_value", Value::BigInt(sequence.max))
+                        .set("increment_by", Value::BigInt(sequence.increment))
+                        .set("cycle", Value::Boolean(sequence.cycle))
+                        .set("cache_size", Value::BigInt(sequence.cache))
+                        .set(
+                            "last_value",
+                            if sequence.is_called {
+                                Value::BigInt(sequence.last_value)
+                            } else {
+                                Value::Null
+                            },
+                        )
+                        .done(),
+                )
+            }
             _ => None,
         })
         .collect()

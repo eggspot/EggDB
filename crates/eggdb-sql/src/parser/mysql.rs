@@ -228,10 +228,13 @@ impl<'t> Parser<'t> {
                 self.at += 2;
                 Statement::MySql(MySqlStatement::Accepted("UNLOCK TABLES"))
             }
-            "create" | "drop" if self.is_word_at(1, "database") || self.is_word_at(1, "schema") => {
-                return Err(self.not_supported(
-                    "CREATE DATABASE and DROP DATABASE (a server serves one database)",
-                ));
+            "create" if self.is_word_at(1, "database") || self.is_word_at(1, "schema") => {
+                self.at += 1;
+                self.create_database()?
+            }
+            "drop" if self.is_word_at(1, "database") || self.is_word_at(1, "schema") => {
+                self.at += 1;
+                self.drop_database()?
             }
             _ => return Ok(None),
         };

@@ -1,6 +1,7 @@
 use super::{Block, OutputColumn, QueryResult, Session};
 use crate::ast::{AssignedValue, MySqlStatement, Name, VariableTarget};
 use crate::dialect::Dialect;
+use crate::encoding::{TableDefinition, is_view_record, table_key};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::{Evaluator, Scope, like};
 use crate::mysql_variables::SetRefused;
@@ -77,7 +78,52 @@ fn backticked(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
 }
 
-fn create_statement(table: &TableSchema) -> String {
+fn referential_rule(event: &str, action: crate::ast::ReferentialAction) -> String {
+    let rule = match action {
+        crate::ast::ReferentialAction::NoAction => return String::new(),
+        crate::ast::ReferentialAction::Restrict => "RESTRICT",
+        crate::ast::ReferentialAction::Cascade => "CASCADE",
+        crate::ast::ReferentialAction::SetNull => "SET NULL",
+        crate::ast::ReferentialAction::SetDefault => "SET DEFAULT",
+    };
+    format!(" ON {event} {rule}")
+}
+
+fn constraint_lines(table: &TableDefinition) -> Vec<String> {
+    let mut lines = Vec::new();
+    for key in &table.foreign_keys {
+        let columns: Vec<String> = key
+            .columns
+            .iter()
+            .filter_map(|&index| table.columns.get(index))
+            .map(|column| backticked(&column.name))
+            .collect();
+        let parent_columns: Vec<String> = key
+            .parent_columns
+            .iter()
+            .map(|column| backticked(column))
+            .collect();
+        lines.push(format!(
+            "  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){}{}",
+            backticked(&key.name),
+            columns.join(","),
+            backticked(&key.parent),
+            parent_columns.join(","),
+            referential_rule("DELETE", key.on_delete),
+            referential_rule("UPDATE", key.on_update)
+        ));
+    }
+    for check in &table.checks {
+        lines.push(format!(
+            "  CONSTRAINT {} CHECK ({})",
+            backticked(&check.name),
+            check.expression
+        ));
+    }
+    lines
+}
+
+fn create_statement(table: &TableSchema, constraints: &[String]) -> String {
     let mut lines: Vec<String> = table
         .columns
         .iter()
@@ -115,6 +161,7 @@ fn create_statement(table: &TableSchema) -> String {
             columns.join(",")
         ));
     }
+    lines.extend(constraints.iter().cloned());
     let comment = table
         .comment
         .as_ref()
@@ -299,12 +346,17 @@ impl<'s> Session<'s> {
                 ))
             }
             MySqlStatement::ShowDatabases { like } => {
-                let database = self.settings.database.clone();
-                let rows = if matches_pattern(&database, like.as_deref())? {
-                    vec![vec![Value::Text(database)]]
-                } else {
-                    Vec::new()
-                };
+                let mut databases = self.settings.database_names.clone();
+                if !databases.contains(&self.settings.database) {
+                    databases.push(self.settings.database.clone());
+                }
+                databases.sort();
+                let mut rows = Vec::new();
+                for database in databases {
+                    if matches_pattern(&database, like.as_deref())? {
+                        rows.push(vec![Value::Text(database)]);
+                    }
+                }
                 Ok(rows_result(vec![text_column("Database")], rows))
             }
             MySqlStatement::ShowColumns { table, like, full } => {
@@ -359,9 +411,10 @@ impl<'s> Session<'s> {
             }
             MySqlStatement::ShowCreateTable(table) => {
                 let schema = self.table_schema(table)?;
+                let constraints = self.table_constraint_lines(&schema.name)?;
                 let rows = vec![vec![
                     Value::Text(schema.name.clone()),
-                    Value::Text(create_statement(&schema)),
+                    Value::Text(create_statement(&schema, &constraints)),
                 ]];
                 Ok(rows_result(
                     vec![text_column("Table"), text_column("Create Table")],
@@ -430,8 +483,7 @@ impl<'s> Session<'s> {
                 ))
             }
             MySqlStatement::Use(name) => {
-                let database = &self.settings.database;
-                if name.text != *database && name.text != database.to_lowercase() {
+                if self.use_database(&name.text)?.is_none() {
                     return Err(SqlError::new(
                         SqlState::INVALID_CATALOG_NAME,
                         format!("database \"{}\" does not exist", name.text),
@@ -447,6 +499,18 @@ impl<'s> Session<'s> {
             }
             MySqlStatement::Accepted(tag) => Ok(QueryResult::command(*tag)),
         }
+    }
+
+    fn table_constraint_lines(&mut self, table: &str) -> SqlResult<Vec<String>> {
+        let definition = self.read(|reader, _| match reader.get(&table_key(table))? {
+            Some(bytes) if !is_view_record(&bytes) => {
+                TableDefinition::decode(table, &bytes).map(Some)
+            }
+            _ => Ok(None),
+        })?;
+        Ok(definition
+            .map(|definition| constraint_lines(&definition))
+            .unwrap_or_default())
     }
 
     fn table_schema(&mut self, table: &Name) -> SqlResult<TableSchema> {

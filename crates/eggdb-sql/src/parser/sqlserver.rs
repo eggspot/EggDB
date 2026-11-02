@@ -1,3 +1,5 @@
+mod cursors;
+
 use super::{Parameters, Parser};
 use crate::ast::{
     AlterSequence, ColumnDefinition, Comment, CommentTarget, CreateSequence, Expr, ExprKind,
@@ -209,22 +211,27 @@ const RESERVED: [&str; 184] = [
     "writetext",
 ];
 
-const STATEMENT_WORDS: [&str; 29] = [
+const STATEMENT_WORDS: [&str; 35] = [
     "alter",
     "begin",
+    "close",
     "commit",
     "create",
+    "deallocate",
     "declare",
     "delete",
     "deny",
     "drop",
     "exec",
     "execute",
+    "fetch",
     "go",
+    "goto",
     "grant",
     "if",
     "insert",
     "merge",
+    "open",
     "print",
     "raiserror",
     "return",
@@ -237,16 +244,16 @@ const STATEMENT_WORDS: [&str; 29] = [
     "truncate",
     "update",
     "use",
+    "waitfor",
     "while",
     "with",
 ];
 
-const NOT_SUPPORTED_STATEMENTS: [&str; 12] = [
-    "goto", "waitfor", "grant", "revoke", "deny", "backup", "restore", "dbcc", "kill", "open",
-    "fetch", "bulk",
+const NOT_SUPPORTED_STATEMENTS: [&str; 8] = [
+    "grant", "revoke", "deny", "backup", "restore", "dbcc", "kill", "bulk",
 ];
 
-const BATCH_LOGIC_STATEMENTS: [&str; 5] = ["if", "while", "break", "continue", "return"];
+const BATCH_LOGIC_STATEMENTS: [&str; 6] = ["if", "while", "break", "continue", "return", "goto"];
 
 const BLOCK_ENDS: [&str; 4] = ["end", "else", "break", "continue"];
 
@@ -273,8 +280,19 @@ const NOT_TRANSACT_SQL_STATEMENTS: [&str; 20] = [
     "pragma",
 ];
 
-const ENGINE_FUNCTIONS: [&str; 10] = [
-    "coalesce", "nullif", "upper", "lower", "abs", "count", "sum", "avg", "min", "max",
+const ENGINE_FUNCTIONS: [&str; 12] = [
+    "coalesce",
+    "nullif",
+    "upper",
+    "lower",
+    "abs",
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "applock_mode",
+    "applock_test",
 ];
 
 const ON_ONLY_OPTIONS: [&str; 7] = [
@@ -689,7 +707,13 @@ impl<'t> Parser<'t> {
                 return Err(outside_a_batch(&self.keyword_text()).at(position));
             }
             "exec" | "execute" => self.sqlserver_execute()?,
+            "declare" if self.at_cursor_declaration() => self.tsql_declare_cursor()?,
             "declare" => self.sqlserver_declare()?,
+            "open" => self.tsql_open_cursor()?,
+            "fetch" => self.tsql_fetch()?,
+            "close" => self.tsql_close_cursor()?,
+            "deallocate" => self.tsql_deallocate_cursor()?,
+            "waitfor" => self.tsql_waitfor()?,
             "print" => self.sqlserver_print()?,
             "raiserror" => self.sqlserver_raiserror()?,
             "throw" => self.sqlserver_throw()?,
@@ -743,6 +767,7 @@ impl<'t> Parser<'t> {
                 return Err(not_supported("TOP in UPDATE and DELETE").at(position));
             }
             "insert" if self.is_word_at(1, "bulk") => self.sqlserver_insert_bulk()?,
+            "bulk" if self.is_word_at(1, "insert") => self.sqlserver_bulk_insert()?,
             "merge" => self.sqlserver_merge()?,
             "insert" if self.is_word_at(1, "top") => {
                 return Err(not_supported("TOP in INSERT").at(position));
@@ -757,6 +782,15 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn variable_reference(&mut self, name: &str, position: usize) -> SqlResult<Expr> {
+        if self.assigned_per_row.as_deref() == Some(name) {
+            return Ok(Expr {
+                kind: ExprKind::Column {
+                    qualifier: Some(crate::tsql::ASSIGNED_VARIABLE.to_owned()),
+                    name: name.to_owned(),
+                },
+                position,
+            });
+        }
         let constant = match self.batch.and_then(|batch| batch.variable(name)) {
             Some(variable) => Some(variable.constant(position)),
             None => self
@@ -772,7 +806,7 @@ impl<'t> Parser<'t> {
         self.bound_parameter(name, position)
     }
 
-    fn bound_parameter(&self, name: &str, position: usize) -> SqlResult<Expr> {
+    pub(super) fn bound_parameter(&self, name: &str, position: usize) -> SqlResult<Expr> {
         let Parameters::Named(parameters) = self.parameters else {
             return Err(undeclared_variable(name, position));
         };
@@ -1839,7 +1873,10 @@ impl<'t> Parser<'t> {
                 i64::from(self.batch.map_or(0, |batch| batch.nest_level)),
                 position,
             ),
-            "@@langid" | "@@procid" => integer(0, position),
+            "@@langid" => integer(0, position),
+            "@@procid" => self.procedure_id(position),
+            "@@fetch_status" => integer(i64::from(state.fetch_status.unwrap_or(-1)), position),
+            "@@cursor_rows" => integer(i64::from(state.cursor_rows), position),
             "@@lock_timeout" => integer(-1, position),
             "@@textsize" => integer(i64::from(i32::MAX), position),
             "@@max_connections" => integer(32_767, position),

@@ -41,6 +41,7 @@ impl Parser<'_> {
             comment: None,
             partition_by,
             partition_of: Some(PartitionOf { parent, bound }),
+            sqlite_text: None,
         }))
     }
 

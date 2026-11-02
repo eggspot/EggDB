@@ -7,11 +7,13 @@
 //! - every call returns a status, `EGGDB_OK` (0) or an `EGGDB_ERR_*` code, and on failure
 //!   [`eggdb_last_error`] gives the message for the calling thread;
 //! - handles are opaque: [`EggdbDb`] from [`eggdb_open`], [`EggdbTxn`] from
-//!   [`eggdb_begin_read`] and [`eggdb_begin_write`], [`EggdbScan`] from [`eggdb_scan_open`] and
-//!   [`EggdbSql`] from [`eggdb_sql_open`];
+//!   [`eggdb_begin_read`] and [`eggdb_begin_write`], [`EggdbScan`] from [`eggdb_scan_open`],
+//!   [`EggdbSql`] from [`eggdb_sql_open`] and [`EggdbStmt`] from [`eggdb_sql_prepare`];
 //! - a value [`eggdb_get`] returns and the names [`eggdb_collection_names`] returns are the
 //!   caller's, freed with [`eggdb_free`]; a scan's entries and a SQL statement's results are
 //!   batches the handle owns, read in place until the next call on that handle;
+//! - [`eggdb_sql_cancel`] stops a session's running statement from another thread, and
+//!   [`eggdb_sql_copy_in`] bulk-loads rows through `COPY ... FROM STDIN`;
 //! - no input reaches a panic (D9), and a panic never unwinds into the caller: a build that
 //!   unwinds turns it into `EGGDB_ERR_INTERNAL`, and a release build, which aborts on panic,
 //!   stops the process instead.
@@ -20,6 +22,7 @@ mod args;
 mod database;
 mod scan;
 mod sql;
+mod statement;
 mod status;
 mod transaction;
 
@@ -34,8 +37,15 @@ pub use scan::{
 };
 pub use sql::{
     EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbParameter, EggdbResult,
-    EggdbSql, EggdbValue, eggdb_sql_close, eggdb_sql_connect, eggdb_sql_execute,
-    eggdb_sql_execute_with_parameters, eggdb_sql_open,
+    EggdbSql, EggdbValue, eggdb_sql_cancel, eggdb_sql_close, eggdb_sql_connect, eggdb_sql_copy_in,
+    eggdb_sql_execute, eggdb_sql_execute_with_parameters, eggdb_sql_open,
+};
+pub use statement::{
+    EggdbStmt, eggdb_sql_prepare, eggdb_stmt_bind_blob, eggdb_stmt_bind_bool,
+    eggdb_stmt_bind_double, eggdb_stmt_bind_int64, eggdb_stmt_bind_null, eggdb_stmt_bind_text,
+    eggdb_stmt_clear_bindings, eggdb_stmt_column_count, eggdb_stmt_column_name,
+    eggdb_stmt_column_type, eggdb_stmt_execute, eggdb_stmt_finalize, eggdb_stmt_parameter_count,
+    eggdb_stmt_reset,
 };
 pub use status::{
     EGGDB_ERR_ALREADY_EXISTS, EGGDB_ERR_CACHE_FULL, EGGDB_ERR_COLLECTION_NOT_FOUND,

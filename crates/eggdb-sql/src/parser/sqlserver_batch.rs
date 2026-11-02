@@ -20,6 +20,63 @@ const ACCEPTED_BULK_OPTIONS: [&str; 4] = [
     "keepidentity",
 ];
 
+const BULK_INSERT_FLAGS: [&str; 5] = [
+    "check_constraints",
+    "fire_triggers",
+    "keepidentity",
+    "keepnulls",
+    "tablock",
+];
+
+const BULK_INSERT_VALUED_OPTIONS: [&str; 17] = [
+    "batchsize",
+    "codepage",
+    "data_source",
+    "datafiletype",
+    "errorfile",
+    "errorfile_data_source",
+    "fieldquote",
+    "fieldterminator",
+    "firstrow",
+    "format",
+    "formatfile",
+    "formatfile_data_source",
+    "kilobytes_per_batch",
+    "lastrow",
+    "maxerrors",
+    "rows_per_batch",
+    "rowterminator",
+];
+
+const OPENROWSET_BULK_FORMS: [&str; 3] = ["single_blob", "single_clob", "single_nclob"];
+
+const OPENROWSET_BULK_OPTIONS: [&str; 12] = [
+    "codepage",
+    "data_source",
+    "datafiletype",
+    "errorfile",
+    "errorfile_data_source",
+    "fieldquote",
+    "firstrow",
+    "format",
+    "formatfile",
+    "formatfile_data_source",
+    "lastrow",
+    "maxerrors",
+];
+
+const SERVER_FILE_HINT: &str = "Load the file from the client instead: bcp in, SqlBulkCopy, or eggdb import --dialect sqlserver --csv <file> --table <name>.";
+
+fn server_file_refused(statement: &str, position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        format!("{statement} is not allowed: EggDB never reads files on the server from SQL."),
+    )
+    .with_sqlserver_code(4834)
+    .with_hint(SERVER_FILE_HINT)
+    .at(position)
+}
+
 fn unknown_bulk_option(shown: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::SYNTAX_ERROR,
@@ -245,7 +302,9 @@ impl Parser<'_> {
     fn at_procedure_end(&self) -> bool {
         match self.peek_kind() {
             TokenKind::Semicolon | TokenKind::End => true,
-            TokenKind::Word(word) => starts_statement(word) || ends_a_block(word) || word == "with",
+            TokenKind::Word(word) => {
+                starts_statement(word) || ends_a_block(word) || word == "with" || self.at_label()
+            }
             _ => false,
         }
     }
@@ -254,7 +313,7 @@ impl Parser<'_> {
         matches!(self.peek_kind_at(ahead), TokenKind::Variable(name) if !name.starts_with("@@"))
     }
 
-    fn variable_name(&mut self) -> SqlResult<Name> {
+    pub(super) fn variable_name(&mut self) -> SqlResult<Name> {
         let TokenKind::Variable(name) = self.peek_kind() else {
             return Err(self.unexpected());
         };
@@ -734,9 +793,14 @@ impl Parser<'_> {
                 .at(position));
             }
         }
+        let per_row = crate::tsql::reads_assigned_variables(&query);
+        if per_row && let Some(refused) = crate::tsql::refuses_per_row(&query) {
+            return Err(not_supported(refused).at(position));
+        }
         Ok(Statement::SqlServer(SqlServerStatement::SelectAssign {
             targets: targets.into_iter().map(|(target, _)| target).collect(),
             query: Box::new(query),
+            per_row,
         }))
     }
 
@@ -750,7 +814,10 @@ impl Parser<'_> {
         let read_before = self.variables_read.len();
         self.variable_reference(&variable.text, variable.position)?;
         self.variables_read.truncate(read_before);
-        let expr = self.expression()?;
+        let outer = self.assigned_per_row.replace(variable.text.clone());
+        let parsed = self.expression();
+        self.assigned_per_row = outer;
+        let expr = parsed?;
         let reads = self
             .variables_read
             .get(read_before..)
@@ -827,7 +894,9 @@ impl Parser<'_> {
     pub(super) fn at_statement_end(&self) -> bool {
         match self.peek_kind() {
             TokenKind::Semicolon | TokenKind::End => true,
-            TokenKind::Word(word) => starts_statement(word) || ends_a_block(word),
+            TokenKind::Word(word) => {
+                starts_statement(word) || ends_a_block(word) || self.at_label()
+            }
             _ => false,
         }
     }
@@ -933,6 +1002,79 @@ impl Parser<'_> {
                 keep_nulls,
             },
         )))
+    }
+
+    pub(super) fn sqlserver_bulk_insert(&mut self) -> SqlResult<Statement> {
+        let position = self.position();
+        self.at += 2;
+        self.table_name()?;
+        self.expect_word("from")?;
+        self.expression()?;
+        if self.take_word("with") {
+            self.expect(&TokenKind::LeftParen)?;
+            loop {
+                self.bulk_load_option(&BULK_INSERT_FLAGS, &BULK_INSERT_VALUED_OPTIONS, true)?;
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Err(server_file_refused("BULK INSERT", position))
+    }
+
+    pub(super) fn at_openrowset_bulk(&self) -> bool {
+        self.is_word("openrowset")
+            && self.peek_kind_at(1) == &TokenKind::LeftParen
+            && self.is_word_at(2, "bulk")
+    }
+
+    pub(super) fn sqlserver_openrowset_bulk(&mut self) -> SqlResult<TableReference> {
+        let position = self.position();
+        self.at += 3;
+        self.expression()?;
+        self.expect(&TokenKind::Comma)?;
+        loop {
+            self.bulk_load_option(&OPENROWSET_BULK_FORMS, &OPENROWSET_BULK_OPTIONS, false)?;
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Err(server_file_refused("OPENROWSET(BULK ...)", position))
+    }
+
+    fn bulk_load_option(
+        &mut self,
+        flags: &[&str],
+        valued: &[&str],
+        takes_order: bool,
+    ) -> SqlResult<()> {
+        let position = self.position();
+        let shown = self
+            .text
+            .get(self.peek().start..self.peek().end)
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let TokenKind::Word(option) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let option = option.as_ref().to_owned();
+        self.at += 1;
+        if flags.contains(&option.as_str()) {
+            return Ok(());
+        }
+        if takes_order && option == "order" {
+            return self.skip_bulk_order();
+        }
+        if !valued.contains(&option.as_str()) {
+            return Err(unknown_bulk_option(&shown, position));
+        }
+        if !self.take_operator("=") {
+            return Err(self.unexpected());
+        }
+        self.expression()?;
+        Ok(())
     }
 
     fn skip_bulk_column_type(&mut self) -> SqlResult<()> {

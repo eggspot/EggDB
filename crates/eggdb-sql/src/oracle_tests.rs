@@ -166,87 +166,49 @@ fn to_char_is_refused_before_it_builds_past_the_value_limit() {
 }
 
 #[test]
-fn merge_is_destructive_when_on_does_not_restrict_the_rows_it_updates_or_deletes() {
+fn merge_that_updates_or_deletes_is_destructive_and_one_that_only_inserts_is_not() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    session
+        .execute(
+            "CREATE TABLE t (id NUMBER PRIMARY KEY, v NUMBER, k NUMBER); CREATE TABLE s (id NUMBER, v NUMBER, k NUMBER)",
+            &mut |_| {},
+        )
+        .unwrap();
     let classify = |session: &mut Session<'_>, text: &str| {
         session
             .destructive_statement(text)
             .map(|found| found.is_some())
             .unwrap_or_else(|_| panic!("{text}"))
     };
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v DELETE WHERE s.v > 1"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO t USING s ON (1 = 1) WHEN MATCHED THEN UPDATE SET t.v = s.v DELETE WHERE s.v > 1"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts a USING dual ON (1 = 1) WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO t USING s ON (1 = 1) WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts a USING dual ON (dummy = 'X') WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts a USING (SELECT 1 x FROM dual) s ON (x = 1) WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO accounts a USING (SELECT 1 x FROM dual) s ON (a.id = s.x) WHEN MATCHED THEN UPDATE SET a.balance = 0"
-    ));
-    assert!(!classify(
-        &mut session,
-        "MERGE INTO accounts USING (SELECT 1 x FROM dual) s ON (accounts.id = s.x) WHEN MATCHED THEN UPDATE SET balance = 0"
-    ));
-    assert!(classify(
-        &mut session,
-        "MERGE INTO accounts t USING (SELECT 1 id FROM dual) accounts ON (accounts.id = 1) WHEN MATCHED THEN UPDATE SET t.balance = 0"
-    ));
-    for always_true in [
+    for on in [
+        "t.id = s.id",
+        "t.id = s.id AND t.v > 0",
+        "s.id = t.id",
+        "t.id = 5",
+        "(t.id = s.id AND t.k = s.k)",
+        "1 = 1",
         "t.id = t.id",
         "t.id IS NOT NULL",
         "t.id = s.id OR 1 = 1",
         "t.id = id",
     ] {
-        assert!(
-            classify(
-                &mut session,
-                &format!(
-                    "MERGE INTO t USING s ON ({always_true}) WHEN MATCHED THEN UPDATE SET t.v = s.v"
-                )
-            ),
-            "{always_true}"
-        );
+        for then in [
+            "UPDATE SET t.v = s.v",
+            "UPDATE SET t.v = s.v DELETE WHERE s.v > 1",
+        ] {
+            let text = format!("MERGE INTO t USING s ON ({on}) WHEN MATCHED THEN {then}");
+            assert!(classify(&mut session, &text), "{text}");
+        }
     }
-    for pinned in [
-        "t.id = s.id AND t.v > 0",
-        "s.id = t.id",
-        "t.id = 5",
-        "(t.id = s.id AND t.k = s.k)",
-    ] {
-        assert!(
-            !classify(
-                &mut session,
-                &format!(
-                    "MERGE INTO t USING s ON ({pinned}) WHEN MATCHED THEN UPDATE SET t.v = s.v"
-                )
-            ),
-            "{pinned}"
-        );
-    }
+    assert!(classify(
+        &mut session,
+        "MERGE INTO accounts a USING (SELECT 1 x FROM dual) s ON (a.id = s.x) WHEN MATCHED THEN UPDATE SET a.balance = 0"
+    ));
+    assert!(!classify(
+        &mut session,
+        "MERGE INTO t USING s ON (1 = 1) WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)"
+    ));
 }
 
 #[test]
@@ -577,4 +539,220 @@ fn a_key_using_an_index_of_another_name_takes_it_over_when_the_columns_match() {
         "INSERT INTO emp VALUES (1, 'grace@example.com', 20)",
     );
     assert_eq!(duplicate.vendor_code(), Some(1));
+}
+
+#[test]
+fn a_function_date_language_names_months_and_days_in_that_language() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(DATE '2024-03-05', 'DD MONTH DAY', 'NLS_DATE_LANGUAGE = German'), \
+             TO_CHAR(DATE '2024-03-05', 'fmmonth Dy', 'NLS_DATE_LANGUAGE = German') FROM dual"
+        ),
+        vec![vec![
+            text(&format!("05 {:<9} {:<10}", "MÄRZ", "DIENSTAG")),
+            text("märz Di"),
+        ]]
+    );
+    for language in [
+        "German",
+        "French",
+        "Spanish",
+        "Italian",
+        "Portuguese",
+        "Dutch",
+    ] {
+        let round_trip = format!(
+            "SELECT TO_CHAR(DATE '2024-02-07', 'DD MON YYYY DY', 'NLS_DATE_LANGUAGE = {language}'), \
+             TO_CHAR(TO_DATE(TO_CHAR(DATE '2024-02-07', 'fmDD Mon YYYY Day', 'NLS_DATE_LANGUAGE = {language}'), \
+             'fmDD Mon YYYY Day', 'NLS_DATE_LANGUAGE = {language}'), 'YYYY-MM-DD') FROM dual"
+        );
+        let rows = values(&mut session, &round_trip);
+        assert_eq!(rows[0][1], text("2024-02-07"), "{language}");
+        let expected = match language {
+            "German" => "07 FEB 2024 MI",
+            "French" => "07 FÉVR. 2024 MER.",
+            "Spanish" => "07 FEB 2024 MIÉ",
+            "Italian" => "07 FEB 2024 MER",
+            "Portuguese" => "07 FEV 2024 QUA",
+            _ => "07 FEB 2024 WO",
+        };
+        assert_eq!(rows[0][0], text(expected), "{language}");
+    }
+    assert_eq!(
+        failure(
+            &mut session,
+            "SELECT TO_CHAR(SYSDATE, 'MON', 'NLS_DATE_LANGUAGE = Klingon') FROM dual"
+        )
+        .vendor_code(),
+        Some(12702)
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(DATE '2024-03-05', 'MON') FROM dual"
+        ),
+        vec![vec![text("MAR")]]
+    );
+}
+
+#[test]
+fn the_session_date_language_reaches_conversions_next_day_and_the_nls_views() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut session,
+        "ALTER SESSION SET NLS_DATE_LANGUAGE = SPANISH",
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(DATE '2024-01-15', 'fmDay DD Month'), \
+             TO_CHAR(TO_DATE('15-ENE-24'), 'YYYY-MM-DD'), \
+             TO_CHAR(NEXT_DAY(DATE '2024-01-15', 'miércoles'), 'YYYY-MM-DD') FROM dual"
+        ),
+        vec![vec![
+            text("Lunes 15 Enero"),
+            text("2024-01-15"),
+            text("2024-01-17"),
+        ]]
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT value FROM nls_session_parameters WHERE parameter = 'NLS_DATE_LANGUAGE'"
+        ),
+        vec![vec![text("SPANISH")]]
+    );
+    values(&mut session, "ALTER SESSION SET NLS_LANGUAGE = 'FRENCH'");
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(DATE '2024-08-01', 'MON') FROM dual"
+        ),
+        vec![vec![text("AOÛT")]]
+    );
+    assert_eq!(
+        failure(
+            &mut session,
+            "ALTER SESSION SET NLS_DATE_LANGUAGE = KLINGON"
+        )
+        .vendor_code(),
+        Some(12705)
+    );
+}
+
+#[test]
+fn session_currency_and_numeric_characters_shape_to_char_and_to_number() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(1234.5, '9G999D99', 'NLS_NUMERIC_CHARACTERS = '',.'''), \
+             TO_CHAR(1234.5, '9,999.99', 'NLS_NUMERIC_CHARACTERS = '',.''') FROM dual"
+        ),
+        vec![vec![text(" 1.234,50"), text(" 1,234.50")]]
+    );
+    values(
+        &mut session,
+        "ALTER SESSION SET NLS_CURRENCY = '€' NLS_ISO_CURRENCY = GERMANY NLS_NUMERIC_CHARACTERS = ',.'",
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(1234.5, 'FML9G999D99'), TO_CHAR(1234.5, 'FMC9G999D99'), \
+             TO_CHAR(TO_NUMBER('€1.234,50', 'L9G999D99'), 'FM9999D99'), \
+             TO_CHAR(TO_NUMBER('1.234,50', '9G999D99'), 'FM9999D99') FROM dual"
+        ),
+        vec![vec![
+            text("€1.234,5"),
+            text("EUR1.234,5"),
+            text("1234,5"),
+            text("1234,5"),
+        ]]
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(9.5, 'FML9D99', 'NLS_CURRENCY = ''CHF'' NLS_NUMERIC_CHARACTERS = ''.,''') FROM dual"
+        ),
+        vec![vec![text("CHF9.5")]]
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT parameter, value FROM nls_session_parameters \
+             WHERE parameter IN ('NLS_CURRENCY', 'NLS_ISO_CURRENCY', 'NLS_NUMERIC_CHARACTERS') \
+             ORDER BY parameter"
+        ),
+        vec![
+            vec![text("NLS_CURRENCY"), text("€")],
+            vec![text("NLS_ISO_CURRENCY"), text("GERMANY")],
+            vec![text("NLS_NUMERIC_CHARACTERS"), text(",.")],
+        ]
+    );
+    values(&mut session, "ALTER SESSION SET NLS_TERRITORY = AMERICA");
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT TO_CHAR(1234.5, 'FML9G999D99') FROM dual"
+        ),
+        vec![vec![text("$1,234.5")]]
+    );
+}
+
+fn parameterized(
+    session: &mut Session<'_>,
+    text: &str,
+    parameters: &[crate::NamedParameter],
+) -> Vec<Result<Vec<Vec<Value>>, SqlError>> {
+    let mut outcomes = Vec::new();
+    let ran = session.execute_parameterized_batch(text, parameters, &mut |step| {
+        outcomes.push(step.outcome.map(|result| result.rows));
+        true
+    });
+    if let Err(error) = ran {
+        outcomes.push(Err(error));
+    }
+    outcomes
+}
+
+#[test]
+fn at_sign_parameters_bind_by_name_in_any_order_in_oracle_sql() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut session,
+        "CREATE TABLE emp (id NUMBER PRIMARY KEY, name VARCHAR2(20))",
+    );
+    let parameters = [
+        crate::NamedParameter {
+            name: "@P1".to_owned(),
+            declared_type: Some(SqlType::Text),
+            value: text("Ada"),
+        },
+        crate::NamedParameter {
+            name: "@P0".to_owned(),
+            declared_type: Some(SqlType::BigInt),
+            value: Value::BigInt(1),
+        },
+    ];
+    let inserted = parameterized(
+        &mut session,
+        "INSERT INTO emp VALUES (@P0, @P1)",
+        &parameters,
+    );
+    assert!(inserted.iter().all(Result::is_ok), "{inserted:?}");
+    let selected = parameterized(
+        &mut session,
+        "SELECT NVL(name, 'x') FROM emp WHERE id = @p0 AND name = @P1",
+        &parameters,
+    );
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].as_ref().ok(), Some(&vec![vec![text("Ada")]]));
+    let missing = parameterized(&mut session, "SELECT @P2 FROM dual", &parameters);
+    assert!(missing.iter().any(Result::is_err), "{missing:?}");
 }

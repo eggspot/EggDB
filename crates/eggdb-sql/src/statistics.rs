@@ -7,7 +7,7 @@ use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::Value;
 use std::collections::HashMap;
 
-const STATISTICS_SPACE: u8 = 0x10;
+pub(crate) const STATISTICS_SPACE: u8 = 0x10;
 const RECORD_VERSION: u8 = 1;
 
 fn statistics_key(table: &str) -> Vec<u8> {

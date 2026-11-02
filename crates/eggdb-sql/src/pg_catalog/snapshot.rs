@@ -382,6 +382,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) partitions: crate::partitions::PartitionCatalog,
     pub(crate) row_counts: std::collections::HashMap<String, u64>,
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
+    pub(crate) grants: Vec<crate::roles::TableGrant>,
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -663,6 +664,7 @@ impl CatalogSnapshot {
             partitions: crate::partitions::load(reader)?,
             row_counts: crate::statistics::every_row_count(reader)?,
             stored_roles: crate::roles::stored_roles(reader)?,
+            grants: crate::roles::every_grant(reader)?,
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();

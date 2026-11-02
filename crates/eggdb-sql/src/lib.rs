@@ -29,6 +29,7 @@ mod bytea;
 mod cancel;
 mod catalog;
 pub mod cdc;
+mod citext;
 mod comments;
 mod console;
 mod constraints;
@@ -48,6 +49,8 @@ mod explain;
 mod foreign;
 mod geo_functions;
 mod hash_index;
+mod hstore;
+mod hstore_functions;
 mod hyperloglog;
 mod indexes;
 mod information_schema;
@@ -56,6 +59,8 @@ pub mod jobs;
 mod join;
 pub mod json;
 mod json_functions;
+mod json_path;
+mod json_to_record;
 mod ledger;
 mod lexer;
 mod md5;
@@ -68,8 +73,10 @@ mod mysql_variables;
 mod name_resolution;
 mod notifications;
 mod numeric;
+mod oracle_collections;
 mod oracle_conversion;
 mod oracle_date_functions;
+mod oracle_date_language;
 mod oracle_datetime;
 mod oracle_dictionary;
 mod oracle_errors;
@@ -91,6 +98,7 @@ mod plan;
 mod plan_cache;
 mod plpgsql;
 mod plsql;
+mod portals;
 mod privacy;
 mod pushdown;
 mod random;
@@ -101,6 +109,7 @@ mod regexp_functions;
 mod relations;
 pub mod reports;
 mod restore;
+mod result_row_cap;
 mod retention;
 mod roles;
 mod routines;
@@ -108,6 +117,7 @@ mod row_security;
 mod schema;
 mod schemas;
 mod sequences;
+mod served_databases;
 mod session;
 mod set_operations;
 mod set_returning;
@@ -115,6 +125,7 @@ mod settings;
 mod sqlite_datetime;
 mod sqlite_errors;
 mod sqlite_functions;
+mod sqlite_schema_text;
 mod sqlserver_catalog;
 mod sqlserver_conversion;
 mod sqlserver_errors;
@@ -156,6 +167,8 @@ mod batch_logic_tests;
 #[cfg(test)]
 mod bulk_load_tests;
 #[cfg(test)]
+mod citext_tests;
+#[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]
 mod copy_tests;
@@ -164,6 +177,8 @@ mod correctness;
 #[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]
+mod engine_limits_tests;
+#[cfg(test)]
 mod geo_tests;
 #[cfg(test)]
 mod implicit_transaction_tests;
@@ -171,6 +186,8 @@ mod implicit_transaction_tests;
 mod index_tests;
 #[cfg(test)]
 mod insert_select_tests;
+#[cfg(test)]
+mod json_path_tests;
 #[cfg(test)]
 mod lateral_tests;
 #[cfg(test)]
@@ -200,6 +217,8 @@ mod sqlserver_tests;
 #[cfg(test)]
 mod subquery_tests;
 #[cfg(test)]
+mod table_ddl_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod time_series_tests;
@@ -212,12 +231,17 @@ mod view_change_tests;
 #[cfg(test)]
 mod visible_tables_tests;
 #[cfg(test)]
+mod visible_writes_tests;
+#[cfg(test)]
 mod window_tests;
 #[cfg(test)]
 mod with_statement_tests;
 
 pub use arrays::{ArrayElement, ArrayValue};
-pub use bulk_load::{BcpCharacterReader, BcpTerminators, BulkRows};
+pub use bulk_load::{
+    BcpCharacterReader, BcpFileFormat, BcpFileReader, BcpFileWriter, BcpFormat, BcpTableWritten,
+    BcpTerminators, BcpUnicodeInput, BulkColumn, BulkRows, write_bcp_table,
+};
 pub use cancel::CancelSignal;
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{
@@ -229,6 +253,7 @@ pub use eggdb_auth::scram::{ScramParts, parse_scram_verifier};
 pub use enums::EnumValue;
 pub use error::{SqlError, SqlResult, SqlState};
 pub use foreign::{ForeignSource, set_foreign_source};
+pub use hstore::HstoreValue;
 pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};
 pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES};
@@ -257,6 +282,10 @@ pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
 pub use schema::{
     ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema, ViewSchema, quoted,
 };
+pub use served_databases::{
+    DatabaseDirectory, FixedDatabases, ServedDatabaseError, ServedDatabases, is_valid_database_name,
+};
+pub use session::database_switch::DatabaseSwitch;
 pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
     Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
@@ -271,7 +300,9 @@ pub use store::{
 };
 pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
-pub use visible_tables::{UnknownTableName, VisibleRead, VisibleTables};
+pub use visible_tables::{
+    OutsideLink, OutsideLinkKind, UnknownTableName, VisibleRead, VisibleTables, VisibleWrite,
+};
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's
 /// rows. Other keys of the same database never start with them unless written there on

@@ -7,8 +7,9 @@ use eggdb_commands::{
 };
 
 pub(crate) const MAIN: &str = "\
-eggdb: one database for every kind of data. This release: an embedded key-value store in one file,
-with a first part of SQL, served over the PostgreSQL protocol.
+eggdb: one database for every kind of data. This release: a key-value store in one file, with SQL
+in the PostgreSQL, MySQL, SQLite, Oracle and SQL Server dialects. eggdb serve speaks the PostgreSQL,
+MySQL and SQL Server (TDS) protocols; eggdb mcp serves AI agents over MCP.
 
 Usage: eggdb <command> <file> [arguments] [options]
 
@@ -32,12 +33,12 @@ Commands:
   ui     <file>                 browse and edit keys full screen in the terminal
   export <file> [out]           write every entry to a JSON-lines file, or to stdout
   import <file> [in]            load an export, or a CSV file into a table with --csv
-  sql    <file> [script]        run SQL (PostgreSQL or MySQL) from -c, a script or stdin
+  sql    <file> [script]        run SQL from -c, a script or stdin; --dialect picks the dialect
   explain <file>                show the plan for one statement given with -c, without running it
   table  list|show|sample <file> [table]
                                 tables and views: list them, show one, sample rows; see eggdb help table
   row    list <file> <table>    the rows of one table, as stored, a page at a time; see eggdb help row
-  serve  <file>                 serve the file to PostgreSQL and MySQL clients; see --listen
+  serve  <file>                 serve the file to PostgreSQL, MySQL and SQL Server clients; see --listen
   shell  <file>                 an interactive prompt for key-value commands and SQL; see -c
   restore <file> [dump]         restore a PostgreSQL dump, or a SQL Server or Oracle script
   follow <file> <source-url>    copy a running PostgreSQL or SQL Server database into the file and keep it in step
@@ -55,11 +56,13 @@ Options for every command:
   -F, --format <text|json|hex|raw>   default: text on a terminal, json in a pipe (raw for get)
       --color <auto|always|never>    default: auto (a terminal, unless NO_COLOR is set)
       --cache <bytes>                page cache size, e.g. 64m (default fits the value)
+      --busy-timeout <ms>            wait this long for a file another program has open
+                                     (default 5000; 0 fails at once)
   -h, --help                         help for eggdb or for one command
   -V, --version                      print the version
 
 Exit codes: 0 ok, 1 not found, 2 usage, 3 database error, 4 damaged, 5 busy.
-Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
+Guide: https://github.com/eggspot/EggDB/blob/main/docs/cli.md
 ";
 
 pub(crate) fn definitions(command: CommandName) -> Vec<&'static CommandDefinition> {

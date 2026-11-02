@@ -1,7 +1,8 @@
 use super::Parser;
 use crate::ast::{
-    AlterAction, AlterSequence, AlterTable, ColumnDefinition, ConstraintKind, ConstraintSpec,
-    CreateSequence, ForeignKeySpec, Name, ReferentialAction, SequenceOptions, Statement,
+    AlterAction, AlterSequence, AlterTable, ColumnDefinition, ColumnPlacement, ConstraintKind,
+    ConstraintSpec, CreateSequence, ForeignKeySpec, Name, ReferentialAction, SequenceOptions,
+    Statement,
 };
 use crate::encoding::{IdentityGeneration, IdentitySeed, integer_type_range};
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -811,13 +812,18 @@ impl Parser<'_> {
             self.take_word("column");
             let old_name = if change { Some(self.name()?) } else { None };
             let column = self.column_definition()?;
-            if self.is_word("first") || self.is_word("after") {
-                return Err(self.not_supported("FIRST and AFTER"));
-            }
+            let moved = column.name.clone();
+            let placement = self.column_placement()?;
             actions.push(AlterAction::Redefine {
                 old_name: old_name.unwrap_or_else(|| column.name.clone()),
                 column,
             });
+            if let Some(placement) = placement {
+                actions.push(AlterAction::MoveColumn {
+                    column: moved,
+                    placement,
+                });
+            }
             return Ok(());
         }
         if self.mysql() && self.take_word("auto_increment") {
@@ -1003,14 +1009,32 @@ impl Parser<'_> {
             false
         };
         let column = self.add_column_definition()?;
-        if self.mysql() && (self.is_word("first") || self.is_word("after")) {
-            return Err(self.not_supported("FIRST and AFTER"));
-        }
+        let moved = column.name.clone();
+        let placement = self.column_placement()?;
         actions.push(AlterAction::AddColumn {
             column,
             if_not_exists,
         });
+        if let Some(placement) = placement {
+            actions.push(AlterAction::MoveColumn {
+                column: moved,
+                placement,
+            });
+        }
         Ok(())
+    }
+
+    fn column_placement(&mut self) -> SqlResult<Option<ColumnPlacement>> {
+        if !self.mysql() {
+            return Ok(None);
+        }
+        if self.take_word("first") {
+            return Ok(Some(ColumnPlacement::First));
+        }
+        if self.take_word("after") {
+            return Ok(Some(ColumnPlacement::After(self.name()?)));
+        }
+        Ok(None)
     }
 
     fn drop_action(&mut self, actions: &mut Vec<AlterAction>, position: usize) -> SqlResult<()> {

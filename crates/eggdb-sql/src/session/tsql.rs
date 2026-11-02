@@ -15,15 +15,23 @@ use crate::table_variables::{TableVariable, TableVariableRules, TableVariables};
 use crate::triggers::{DELETED_TABLE, INSERTED_TABLE, StatementTriggerCall, TriggerAction};
 use crate::tsql::{
     BatchContext, CaughtError, DynamicBatch, Instruction, MatchingRow, ProcedureRun, Program,
-    ProgramEnd, ScalarVariable, columns_mismatch, combined, declare, scalar_select, undeclared,
+    ProgramEnd, RowAssignment, ScalarVariable, columns_mismatch, combined, declare, scalar_select,
+    undeclared,
 };
 use crate::types::{SqlType, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod application_locks;
+#[cfg(test)]
+mod application_locks_tests;
+mod cursors;
+#[cfg(test)]
+mod cursors_tests;
 mod procedures;
 #[cfg(test)]
 mod procedures_tests;
+mod waitfor;
 
 const MAX_PRINT_CHARACTERS: usize = 8000;
 const NAME_RESOLUTION_ERRORS: [u16; 2] = [207, 208];
@@ -82,8 +90,18 @@ fn ends_sqlserver_batch(error: &SqlError) -> bool {
 fn assigns_only(result: &QueryResult) -> bool {
     result.columns.is_none()
         && result.info_messages.is_empty()
-        && (matches!(result.tag.as_str(), "DECLARE" | "SET 1" | "RETURN")
-            || result.tag.starts_with("SELECT "))
+        && (matches!(
+            result.tag.as_str(),
+            "DECLARE"
+                | "SET 1"
+                | "RETURN"
+                | "DECLARE CURSOR"
+                | "OPEN CURSOR"
+                | "FETCH"
+                | "CLOSE CURSOR"
+                | "DEALLOCATE CURSOR"
+                | "WAITFOR"
+        ) || result.tag.starts_with("SELECT "))
 }
 
 fn resolves_names(error: &SqlError) -> bool {
@@ -220,6 +238,7 @@ impl<'s> Session<'s> {
         };
         let outcome = outcome.and_then(|()| self.end_uncommittable_transaction(text, on_step));
         let finished = self.leave_batch_scope(scope);
+        self.drop_local_cursors(self.batch_context.nest_level);
         if let Parameters::Named(given) = parameters {
             self.parameter_values = given
                 .iter()
@@ -310,6 +329,17 @@ impl<'s> Session<'s> {
         while let Some(&instruction) = code.program.instructions.get(at_instruction) {
             let (at, test) = match instruction {
                 Instruction::Jump { to } => {
+                    if to <= at_instruction && self.cancel.is_cancelled() {
+                        let error = self.in_dialect(
+                            code.text,
+                            SqlError::new(
+                                SqlState::QUERY_CANCELED,
+                                "canceling statement due to user request",
+                            ),
+                        );
+                        on_step(self.batch_step(Err(error), code.text.len()));
+                        return Ok(ProgramEnd::Stopped);
+                    }
                     at_instruction = to;
                     continue;
                 }
@@ -446,7 +476,15 @@ impl<'s> Session<'s> {
                 let line =
                     crate::tsql::line_of(code.text, failure.position().unwrap_or(statement_start));
                 if let Some(slot) = caught.get_mut(index) {
-                    *slot = Some(CaughtError::of(&failure, line));
+                    let mut error = CaughtError::of(&failure, line);
+                    if error.procedure.is_none() {
+                        error.procedure = self
+                            .batch_context
+                            .procedure
+                            .as_deref()
+                            .map(|name| crate::schemas::base_name(name).to_owned());
+                    }
+                    *slot = Some(error);
                 }
                 at_instruction = block.handler.start;
                 continue;
@@ -536,6 +574,7 @@ impl<'s> Session<'s> {
         );
         self.dynamic_depth -= 1;
         let finished = self.leave_batch_scope(scope);
+        self.drop_local_cursors(self.dynamic_depth.saturating_add(1));
         self.statement_start = outer_start;
         for (parameter, variable) in &outputs {
             if let Some(value) = finished
@@ -793,13 +832,48 @@ impl<'s> Session<'s> {
         &mut self,
         targets: &[AssignmentTarget],
         query: &Statement,
+        per_row: bool,
     ) -> SqlResult<QueryResult> {
+        if per_row && let Some(plan) = RowAssignment::plan(query) {
+            return self.run_row_assignment(targets, plan);
+        }
         let mut query = query.clone();
         let result = self.run_query_statement(&mut query)?;
         let mut assigned = 0usize;
         for row in result.rows {
             assigned += 1;
             for (target, value) in targets.iter().zip(row) {
+                let value = match target.operator {
+                    None => value,
+                    Some(operator) => {
+                        let current = self
+                            .batch_context
+                            .variable(&target.variable.text)
+                            .map_or(Value::Null, |variable| variable.value.clone());
+                        combined(operator, current, value)?
+                    }
+                };
+                self.assign_variable(&target.variable.text, value)
+                    .map_err(|error| error.at_if_unplaced(target.variable.position))?;
+            }
+        }
+        Ok(QueryResult::command(format!("SELECT {assigned}")))
+    }
+
+    fn run_row_assignment(
+        &mut self,
+        targets: &[AssignmentTarget],
+        plan: RowAssignment,
+    ) -> SqlResult<QueryResult> {
+        let mut inputs = plan.inputs.clone();
+        let result = self.run_query_statement(&mut inputs)?;
+        let output = result.columns.unwrap_or_default();
+        let mut assigned = 0usize;
+        for row in result.rows {
+            assigned += 1;
+            for (target, value) in targets.iter().zip(&plan.values) {
+                let bound = plan.bound(value, &output, &row, &self.batch_context);
+                let value = self.evaluate(&bound)?;
                 let value = match target.operator {
                     None => value,
                     Some(operator) => {

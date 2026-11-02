@@ -12,6 +12,33 @@ pub(crate) const MAX_DATE: i64 = 2_145_031_948;
 pub(crate) const MIN_TIMESTAMP: i64 = MIN_DATE * MICROS_PER_DAY;
 pub(crate) const END_TIMESTAMP: i64 = 106_751_983 * MICROS_PER_DAY;
 const MAX_OFFSET_SECONDS: i64 = 15 * 3600 + 59 * 60 + 59;
+pub(crate) const INFINITE_TIMESTAMP: i64 = i64::MAX;
+pub(crate) const NEGATIVE_INFINITE_TIMESTAMP: i64 = i64::MIN;
+pub(crate) const INFINITE_DATE: i32 = i32::MAX;
+pub(crate) const NEGATIVE_INFINITE_DATE: i32 = i32::MIN;
+
+pub(crate) fn is_infinite_timestamp(micros: i64) -> bool {
+    micros == INFINITE_TIMESTAMP || micros == NEGATIVE_INFINITE_TIMESTAMP
+}
+
+pub(crate) fn is_infinite_date(days: i32) -> bool {
+    days == INFINITE_DATE || days == NEGATIVE_INFINITE_DATE
+}
+
+fn infinity_text(positive: bool) -> String {
+    if positive { "infinity" } else { "-infinity" }.to_owned()
+}
+
+fn infinite_input(text: &str) -> Option<bool> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("infinity") || trimmed.eq_ignore_ascii_case("+infinity") {
+        Some(true)
+    } else if trimmed.eq_ignore_ascii_case("-infinity") {
+        Some(false)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StatementClock {
@@ -346,7 +373,7 @@ fn region_at(scan: &mut Scanner<'_>) -> Option<TimeZone> {
     if word.eq_ignore_ascii_case("bc") || word.eq_ignore_ascii_case("ad") {
         return None;
     }
-    let zone = TimeZone::region(word)?;
+    let zone = TimeZone::abbreviation(word).or_else(|| TimeZone::region(word))?;
     scan.at = end;
     Some(zone)
 }
@@ -467,13 +494,35 @@ pub(crate) fn valid_date(days: i32) -> bool {
     (MIN_DATE..=MAX_DATE).contains(&i64::from(days))
 }
 
+pub(crate) fn valid_stored_timestamp(micros: i64) -> bool {
+    valid_timestamp(micros) || is_infinite_timestamp(micros)
+}
+
+pub(crate) fn valid_stored_date(days: i32) -> bool {
+    valid_date(days) || is_infinite_date(days)
+}
+
 pub(crate) fn parse_date(text: &str) -> SqlResult<i32> {
+    if let Some(positive) = infinite_input(text) {
+        return Ok(if positive {
+            INFINITE_DATE
+        } else {
+            NEGATIVE_INFINITE_DATE
+        });
+    }
     let kind = DateTimeKind::Date;
     let parsed = parse_parts(text).map_err(|failure| input_error(kind, text, failure))?;
     checked_date(parsed.days).map_err(|_| out_of_range_input(kind, text))
 }
 
 pub(crate) fn parse_timestamp(text: &str, with_zone: bool) -> SqlResult<i64> {
+    if let Some(positive) = infinite_input(text) {
+        return Ok(if positive {
+            INFINITE_TIMESTAMP
+        } else {
+            NEGATIVE_INFINITE_TIMESTAMP
+        });
+    }
     let kind = if with_zone {
         DateTimeKind::TimestampTz
     } else {
@@ -767,6 +816,9 @@ fn year_text(year: i64) -> (String, bool) {
 }
 
 pub(crate) fn format_date(days: i32) -> String {
+    if is_infinite_date(days) {
+        return infinity_text(days > 0);
+    }
     let (year, month, day) = civil_from_days(i64::from(days));
     let (year, bc) = year_text(year);
     let era = if bc { " BC" } else { "" };
@@ -812,6 +864,9 @@ pub(crate) fn format_offset(offset: i32) -> String {
 }
 
 pub(crate) fn format_timestamp(micros: i64) -> String {
+    if is_infinite_timestamp(micros) {
+        return infinity_text(micros > 0);
+    }
     format_local(micros, None)
 }
 
@@ -820,10 +875,16 @@ pub(crate) fn format_timestamptz(micros: i64) -> String {
 }
 
 pub(crate) fn format_timestamptz_in(micros: i64, zone: TimeZone) -> String {
+    if is_infinite_timestamp(micros) {
+        return infinity_text(micros > 0);
+    }
     format_timestamptz_at(micros, zone.offset_at(micros))
 }
 
 pub(crate) fn format_timestamptz_at(micros: i64, offset: i32) -> String {
+    if is_infinite_timestamp(micros) {
+        return infinity_text(micros > 0);
+    }
     format_local(to_local(micros, offset), Some(offset))
 }
 
@@ -832,15 +893,21 @@ pub(crate) fn to_local(micros: i64, offset: i32) -> i64 {
 }
 
 pub(crate) fn local_to_utc(micros: i64) -> SqlResult<i64> {
+    if is_infinite_timestamp(micros) {
+        return Ok(micros);
+    }
     checked_timestamp(session_zone().utc_of_local(micros))
 }
 
 pub(crate) fn utc_to_local(micros: i64) -> SqlResult<i64> {
+    if is_infinite_timestamp(micros) {
+        return Ok(micros);
+    }
     checked_timestamp(session_zone().local_of_utc(micros))
 }
 
 pub(crate) fn round_to_precision(micros: i64, precision: u8) -> SqlResult<i64> {
-    if precision >= 6 {
+    if precision >= 6 || is_infinite_timestamp(micros) {
         return Ok(micros);
     }
     let unit = 10i64.pow(u32::from(6 - precision));
@@ -854,11 +921,19 @@ pub(crate) fn round_to_precision(micros: i64, precision: u8) -> SqlResult<i64> {
 }
 
 pub(crate) fn date_to_timestamp(days: i32) -> SqlResult<i64> {
-    checked_timestamp(i128::from(days) * i128::from(MICROS_PER_DAY))
+    match days {
+        INFINITE_DATE => Ok(INFINITE_TIMESTAMP),
+        NEGATIVE_INFINITE_DATE => Ok(NEGATIVE_INFINITE_TIMESTAMP),
+        _ => checked_timestamp(i128::from(days) * i128::from(MICROS_PER_DAY)),
+    }
 }
 
 pub(crate) fn timestamp_to_date(micros: i64) -> i32 {
-    micros.div_euclid(MICROS_PER_DAY) as i32
+    match micros {
+        INFINITE_TIMESTAMP => INFINITE_DATE,
+        NEGATIVE_INFINITE_TIMESTAMP => NEGATIVE_INFINITE_DATE,
+        _ => micros.div_euclid(MICROS_PER_DAY) as i32,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1013,6 +1088,29 @@ fn millennium_start(year: i64) -> i64 {
     } else {
         -((999 - (year - 1)) / 1000) * 1000 + 1
     }
+}
+
+/// What `extract` and `date_part` give for an infinite date or timestamp, as PostgreSQL 16 does:
+/// `Ok(true)` for the fields that grow with time (epoch, julian, year, isoyear, decade, century,
+/// millennium), whose result is the infinity of the input's sign, `Ok(false)` for every other
+/// field, whose result is NULL, and an error for a unit the type doesn't have.
+pub(crate) fn extract_of_infinity_is_infinite(name: &str, kind: DateTimeKind) -> SqlResult<bool> {
+    let field = Field::named(name).ok_or_else(|| unknown_unit(name, kind))?;
+    if (kind == DateTimeKind::Date && field.is_time_of_day())
+        || (kind != DateTimeKind::TimestampTz && field.is_zone())
+    {
+        return Err(unit_error(name, kind));
+    }
+    Ok(matches!(
+        field,
+        Field::Epoch
+            | Field::Julian
+            | Field::Year
+            | Field::IsoYear
+            | Field::Decade
+            | Field::Century
+            | Field::Millennium
+    ))
 }
 
 pub(crate) fn extract(

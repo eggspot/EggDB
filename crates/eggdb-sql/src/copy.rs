@@ -325,17 +325,7 @@ fn text_value(bytes: &[u8], column: &Column) -> SqlResult<Value> {
 fn binary_value(bytes: &[u8], column: &Column) -> SqlResult<Value> {
     let value = match column.sql_type {
         SqlType::Array(element) => {
-            let (lower_bound, texts) = crate::pg_binary::decode_array_texts(bytes, element)?;
-            let items = texts
-                .iter()
-                .map(|text| match text {
-                    None => Ok(Value::Null),
-                    Some(text) => crate::eval::string_constant(text, Some(element.sql_type())),
-                })
-                .collect::<SqlResult<Vec<_>>>()?;
-            let mut array = crate::arrays::ArrayValue::new(element, items);
-            array.lower_bound = lower_bound;
-            Value::Array(Box::new(array))
+            Value::Array(Box::new(crate::pg_binary::decode_array(bytes, element)?))
         }
         SqlType::Defined(defined) if defined.kind == DefinedKind::Enum => {
             crate::eval::string_constant(format::utf8_text(bytes)?, Some(column.sql_type))?

@@ -1,4 +1,5 @@
 use crate::messages::{MAX_STARTUP_PACKET_BYTES, Outbox};
+use eggdb_platform::connection_limits::{LoginTicket, MemoryBudget, Reservation};
 use eggdb_tls::{ServerConnection, SessionInfo};
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ const CLOSE_LINGER: Duration = Duration::from_millis(200);
 const CLOSE_LINGER_BYTES: usize = 256 * 1024;
 const FLUSH_ABOVE_BYTES: usize = 256 * 1024;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const UNBUDGETED_MESSAGE_BYTES: usize = READ_CHUNK_BYTES;
 
 #[derive(Debug)]
 pub(crate) enum WireError {
@@ -18,6 +20,7 @@ pub(crate) enum WireError {
     Stopping,
     TimedOut,
     TooLarge(usize),
+    OverBudget(usize),
     Io,
 }
 
@@ -27,6 +30,9 @@ pub(crate) struct Wire<'a> {
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
     pub(crate) outbox: Outbox,
+    pub(crate) login: Option<LoginTicket<'a>>,
+    pub(crate) budget: Option<&'a MemoryBudget>,
+    message_reservation: Option<Reservation<'a>>,
     read_timeout: Duration,
     closed: bool,
 }
@@ -53,6 +59,9 @@ impl<'a> Wire<'a> {
             stop,
             deadline,
             outbox: Outbox::new(),
+            login: None,
+            budget: None,
+            message_reservation: None,
             read_timeout: POLL_INTERVAL,
             closed: false,
         })
@@ -61,6 +70,9 @@ impl<'a> Wire<'a> {
     fn next_wait(&self) -> Result<Duration, WireError> {
         if (self.stop)() {
             return Err(WireError::Stopping);
+        }
+        if self.login.as_ref().is_some_and(LoginTicket::is_evicted) {
+            return Err(WireError::TimedOut);
         }
         match self.deadline {
             None => Ok(POLL_INTERVAL),
@@ -138,8 +150,36 @@ impl<'a> Wire<'a> {
         if length < 4 || length - 4 > limit {
             return Err(WireError::TooLarge(length));
         }
+        self.reserve_message(length)?;
         let body = self.read_body(length - 4)?;
         Ok((header[0], body))
+    }
+
+    /// Gives back the memory budget a large message held, once the message is handled.
+    pub(crate) fn release_message_reservation(&mut self) {
+        self.message_reservation = None;
+    }
+
+    fn reserve_message(&mut self, length: usize) -> Result<(), WireError> {
+        let Some(budget) = self.budget else {
+            return Ok(());
+        };
+        if length <= UNBUDGETED_MESSAGE_BYTES {
+            self.message_reservation = None;
+            return Ok(());
+        }
+        let reserved = match &mut self.message_reservation {
+            Some(reservation) => reservation.resize(length),
+            None => {
+                self.message_reservation = budget.reserve(length);
+                self.message_reservation.is_some()
+            }
+        };
+        if reserved {
+            Ok(())
+        } else {
+            Err(WireError::OverBudget(length))
+        }
     }
 
     pub(crate) fn flush(&mut self) -> io::Result<()> {

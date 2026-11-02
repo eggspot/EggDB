@@ -1841,6 +1841,100 @@ fn every_join_method_agrees_on_random_tables() {
 }
 
 #[test]
+fn hash_joins_keep_every_column_read_after_the_join() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE l (id integer PRIMARY KEY, k integer, v text);
+         CREATE TABLE r (id integer PRIMARY KEY, k integer, w integer, t text);
+         CREATE TABLE h (k integer, w integer, t text)",
+    );
+    let mut random = Seeded(0x2545_F491_4F6C_DD1D);
+    let value = |random: &mut Seeded| {
+        if random.below(5) == 0 {
+            "NULL".to_owned()
+        } else {
+            random.below(15).to_string()
+        }
+    };
+    for id in 0..80 {
+        let k = value(&mut random);
+        last(
+            &mut session,
+            &format!("INSERT INTO l VALUES ({id}, {k}, 'v{id}')"),
+        );
+        let k = value(&mut random);
+        let w = value(&mut random);
+        last(
+            &mut session,
+            &format!(
+                "INSERT INTO r VALUES ({id}, {k}, {w}, 'r{id}'); INSERT INTO h VALUES ({k}, {w}, 'h{id}')"
+            ),
+        );
+    }
+    let pairs = [
+        (
+            "SELECT count(*), sum(l.id) FROM l JOIN r ON r.id = l.k WHERE r.w > 3",
+            "SELECT count(*), sum(l.id) FROM l JOIN r ON r.id + 0 = l.k WHERE r.w > 3",
+        ),
+        (
+            "SELECT l.id, r.w, r.t FROM l JOIN r ON r.id = l.k WHERE r.w > 3 ORDER BY 1",
+            "SELECT l.id, r.w, r.t FROM l JOIN r ON r.id + 0 = l.k WHERE r.w > 3 ORDER BY 1",
+        ),
+        (
+            "SELECT l.id, m.t FROM l JOIN r ON r.id = l.k JOIN r m ON m.id = r.k ORDER BY 1, 2",
+            "SELECT l.id, m.t FROM l JOIN r ON r.id + 0 = l.k JOIN r m ON m.id + 0 = r.k ORDER BY 1, 2",
+        ),
+        (
+            "SELECT l.id FROM l JOIN r ON r.id = l.k JOIN h ON h.k = l.id WHERE r.w = h.w ORDER BY 1",
+            "SELECT l.id FROM l JOIN r ON r.id + 0 = l.k JOIN h ON h.k + 0 = l.id WHERE r.w = h.w ORDER BY 1",
+        ),
+        (
+            "SELECT count(*) FROM l JOIN r ON r.id = l.k GROUP BY r.w ORDER BY r.w",
+            "SELECT count(*) FROM l JOIN r ON r.id + 0 = l.k GROUP BY r.w ORDER BY r.w",
+        ),
+        (
+            "SELECT l.id FROM l JOIN r ON r.id = l.k ORDER BY r.t, l.id",
+            "SELECT l.id FROM l JOIN r ON r.id + 0 = l.k ORDER BY r.t, l.id",
+        ),
+        (
+            "SELECT r.* FROM l JOIN r ON r.id = l.k ORDER BY r.id, l.id",
+            "SELECT r.* FROM l JOIN r ON r.id + 0 = l.k ORDER BY r.id, l.id",
+        ),
+        (
+            "SELECT l.id, r.w FROM l LEFT JOIN r ON r.id = l.k WHERE r.w IS NULL ORDER BY 1",
+            "SELECT l.id, r.w FROM l LEFT JOIN r ON r.id + 0 = l.k WHERE r.w IS NULL ORDER BY 1",
+        ),
+        (
+            "SELECT count(*), sum(l.id), max(h.t) FROM l JOIN h ON h.k = l.k WHERE h.w > 5",
+            "SELECT count(*), sum(l.id), max(h.t) FROM l JOIN h ON h.k + 0 = l.k WHERE h.w > 5",
+        ),
+        (
+            "SELECT l.id, h.t FROM l JOIN h ON h.k = l.k AND h.w < l.id ORDER BY 1, 2",
+            "SELECT l.id, h.t FROM l JOIN h ON h.k + 0 = l.k AND h.w < l.id ORDER BY 1, 2",
+        ),
+        (
+            "SELECT l.id FROM l JOIN r ON r.id = l.k WHERE EXISTS (SELECT 1 FROM h WHERE h.w = r.w) ORDER BY 1",
+            "SELECT l.id FROM l JOIN r ON r.id + 0 = l.k WHERE EXISTS (SELECT 1 FROM h WHERE h.w = r.w) ORDER BY 1",
+        ),
+        (
+            "SELECT l.id FROM l WHERE EXISTS (SELECT 1 FROM h JOIN r ON r.id = h.k WHERE r.id = l.k) ORDER BY 1",
+            "SELECT l.id FROM l WHERE EXISTS (SELECT 1 FROM h JOIN r ON r.id + 0 = h.k WHERE r.id = l.k) ORDER BY 1",
+        ),
+        (
+            "SELECT l.id, (SELECT count(*) FROM h JOIN r ON r.id = h.k WHERE r.id = l.k) FROM l ORDER BY 1",
+            "SELECT l.id, (SELECT count(*) FROM h JOIN r ON r.id + 0 = h.k WHERE r.id = l.k) FROM l ORDER BY 1",
+        ),
+    ];
+    for (hashed, looped) in pairs {
+        let expected = last(&mut session, looped);
+        assert!(expected.contains("SELECT"), "{looped}: {expected}");
+        assert_eq!(last(&mut session, hashed), expected, "{hashed}");
+    }
+}
+
+#[test]
 fn where_equalities_join_comma_and_cross_joined_tables_like_on_conditions() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
@@ -2402,7 +2496,7 @@ fn sqlite_replace_runs_beside_delete_triggers_as_sqlite_does() {
 }
 
 #[test]
-fn sqlite_replace_is_refused_where_a_trigger_of_another_dialect_watches_deletes() {
+fn sqlite_replace_fires_delete_triggers_of_another_dialect() {
     let store = MemoryStore::default();
     let mut postgresql = Session::new(&store);
     for sql in [
@@ -2415,9 +2509,14 @@ fn sqlite_replace_is_refused_where_a_trigger_of_another_dialect_watches_deletes(
         last(&mut postgresql, sql);
     }
     let mut sqlite = Session::with_dialect(&store, crate::Dialect::Sqlite);
-    let refused = fails(&mut sqlite, "INSERT OR REPLACE INTO kv VALUES ('a', 2)");
-    assert_eq!(refused.state(), crate::SqlState::FEATURE_NOT_SUPPORTED);
-    assert_eq!(last(&mut postgresql, "SELECT v FROM kv"), "v\n1\nSELECT 1");
+    last(&mut sqlite, "INSERT OR REPLACE INTO kv VALUES ('a', 2)");
+    assert_eq!(
+        last(
+            &mut postgresql,
+            "SELECT v, (SELECT k FROM gone) AS g FROM kv"
+        ),
+        "v|g\n2|a\nSELECT 1"
+    );
 }
 
 #[test]
@@ -3146,6 +3245,323 @@ fn hostile_oracle_input_returns_errors_and_never_panics() {
     );
 }
 
+fn fuzz_batches(session: &mut Session<'_>, fragments: &[&str]) {
+    let mut random = Seeded(0x5EED_7501_0000_0079);
+    for _ in 0..10_000 {
+        let length = 1 + random.below(16);
+        let mut text = String::new();
+        for _ in 0..length {
+            text.push_str(fragments[random.below(fragments.len() as u64) as usize]);
+            text.push(if random.below(4) == 0 { '\n' } else { ' ' });
+        }
+        if let Err(error) = session.execute_batch(&text, &mut |_| true)
+            && let Some(position) = error.position()
+        {
+            assert!(position <= text.len(), "{text}: {error}");
+        }
+        if session.in_block() {
+            let _ = run(session, "ROLLBACK");
+        }
+    }
+}
+
+#[test]
+fn hostile_tsql_input_returns_errors_and_never_panics() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, crate::Dialect::SqlServer);
+    last(
+        &mut session,
+        "CREATE TABLE people (id INT IDENTITY(1, 1) PRIMARY KEY, name NVARCHAR(20) NOT NULL, age INT, score FLOAT, joined DATETIME2(3), code UNIQUEIDENTIFIER)",
+    );
+    last(
+        &mut session,
+        "INSERT INTO people (name, age, score) VALUES (N'alice', 30, 9.25), (N'bob', NULL, NULL)",
+    );
+    let fragments = [
+        "SELECT",
+        "TOP (1)",
+        "TOP 100 PERCENT",
+        "TOP (-1)",
+        "TOP (9223372036854775807) WITH TIES",
+        "DISTINCT",
+        "FROM people",
+        "FROM [dbo].[people] AS p",
+        "FROM sys.tables",
+        "FROM sys.objects o JOIN sys.columns c ON c.object_id = o.object_id",
+        "FROM INFORMATION_SCHEMA.COLUMNS",
+        "FROM sys.databases",
+        "WHERE",
+        "ORDER BY",
+        "GROUP BY",
+        "HAVING",
+        "OFFSET 1 ROWS FETCH NEXT 9223372036854775807 ROWS ONLY",
+        "OFFSET -1 ROWS",
+        "FETCH FIRST 1 ROW ONLY",
+        "INSERT INTO people (name) VALUES (N'x')",
+        "INSERT INTO people VALUES",
+        "INSERT INTO people (name) OUTPUT inserted.id VALUES (N'y')",
+        "UPDATE people SET age =",
+        "UPDATE TOP (1) people SET name = N'z'",
+        "DELETE FROM people",
+        "DELETE TOP (1) FROM people OUTPUT deleted.*",
+        "TRUNCATE TABLE people",
+        "DROP TABLE people",
+        "DROP TABLE IF EXISTS t",
+        "CREATE TABLE t (",
+        "id INT IDENTITY(1, 0)",
+        "IDENTITY(9223372036854775807, 1)",
+        "NVARCHAR(MAX)",
+        "NVARCHAR(0)",
+        "VARCHAR(8001)",
+        "DECIMAL(38, 38)",
+        "DECIMAL(39, 0)",
+        "NUMERIC(1, 2)",
+        "DATETIME2(8)",
+        "DATETIMEOFFSET(7)",
+        "SMALLDATETIME",
+        "MONEY",
+        "BIT",
+        "VARBINARY(MAX)",
+        "ROWVERSION",
+        "SET IDENTITY_INSERT people ON",
+        "SET NOCOUNT ON",
+        "SET XACT_ABORT ON",
+        "SET ANSI_NULLS OFF",
+        "SET DATEFORMAT dmy",
+        "SET LANGUAGE us_english",
+        "USE master",
+        "DECLARE @x INT",
+        "DECLARE @s NVARCHAR(MAX) = N'abc'",
+        "DECLARE @t TABLE (id INT)",
+        "SET @x =",
+        "SELECT @x =",
+        "@x",
+        "@s",
+        "@t",
+        "@@ROWCOUNT",
+        "@@IDENTITY",
+        "@@TRANCOUNT",
+        "@@ERROR",
+        "@@VERSION",
+        "@@SPID",
+        "IF",
+        "IF 1 = 1",
+        "IF EXISTS (SELECT 1 FROM people)",
+        "ELSE",
+        "BEGIN",
+        "END",
+        "BREAK",
+        "CONTINUE",
+        "RETURN",
+        "BEGIN TRAN",
+        "BEGIN TRANSACTION t1",
+        "COMMIT",
+        "COMMIT TRAN",
+        "ROLLBACK",
+        "ROLLBACK TRAN s1",
+        "SAVE TRAN s1",
+        "BEGIN TRY",
+        "END TRY",
+        "BEGIN CATCH",
+        "END CATCH",
+        "THROW 50000, N'x', 1",
+        "THROW 2147483647, N'x', 255",
+        "THROW",
+        "ERROR_MESSAGE()",
+        "ERROR_NUMBER()",
+        "RAISERROR('%d %s', 16, 1, 5)",
+        "RAISERROR('%*.*s %I64d %%', 25, 1)",
+        "RAISERROR(N'x', -1, 300) WITH NOWAIT",
+        "PRINT",
+        "PRINT N'hello'",
+        "EXEC sp_executesql N'SELECT @p', N'@p INT', @p = 1",
+        "EXEC sp_executesql N'EXEC sp_executesql N''SELECT 1'''",
+        "EXEC sp_help",
+        "EXEC sp_columns people",
+        "EXEC",
+        "EXECUTE (N'SELECT 1')",
+        "GO",
+        "GO 2",
+        ";",
+        "(",
+        ")",
+        ",",
+        ".",
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "=",
+        "<>",
+        "!=",
+        "!<",
+        "!>",
+        "+=",
+        "&",
+        "|",
+        "^",
+        "~",
+        "::",
+        "[",
+        "]",
+        "]]",
+        "[a]]b]",
+        "[]",
+        "\"",
+        "\"\"",
+        "'",
+        "''",
+        "N'",
+        "N'ü'",
+        "N''''",
+        "0x",
+        "0xZZ",
+        "0x00FF",
+        "/*",
+        "*/",
+        "/* /* */",
+        "--",
+        "\n",
+        "\r\n",
+        "\t",
+        "NULL",
+        "1",
+        "0",
+        "-1",
+        "2147483647",
+        "-2147483648",
+        "-9223372036854775808",
+        "9223372036854775808",
+        "1e308",
+        "1e999",
+        "0.5",
+        "$1",
+        "$",
+        "?",
+        ":x",
+        "LIKE",
+        "LIKE '[a-'",
+        "LIKE '%[^]%'",
+        "LIKE N'_' ESCAPE N''",
+        "COLLATE Latin1_General_CI_AS",
+        "COLLATE",
+        "AND",
+        "OR",
+        "NOT",
+        "IS NULL",
+        "BETWEEN",
+        "IN (",
+        "CASE WHEN",
+        "THEN",
+        "CAST(",
+        "AS INT)",
+        "AS NVARCHAR(MAX))",
+        "CONVERT(INT, 'x')",
+        "CONVERT(VARCHAR(10), GETDATE(), 999)",
+        "CONVERT(DATETIME, '9999-12-31 23:59:59.998', 121)",
+        "CONVERT(VARBINARY(4), N'abcd', 2)",
+        "TRY_CAST('x' AS INT)",
+        "TRY_CONVERT(DECIMAL(38, 38), 1e38)",
+        "PARSE('x' AS DATE USING 'en-US')",
+        "ISNULL(",
+        "COALESCE(",
+        "NULLIF(1, 1)",
+        "IIF(1 = 1, 'a', 2)",
+        "CHOOSE(-1, 'a')",
+        "LEN(REPLICATE('ab', 2147483647))",
+        "REPLICATE(CAST('ab' AS VARCHAR(MAX)), 2147483647)",
+        "REPLICATE(N'ß', 100000000)",
+        "SPACE(2147483647)",
+        "STUFF('abc', -1, 9223372036854775807, 'x')",
+        "SUBSTRING('abc', -2147483648, 2147483647)",
+        "LEFT('abc', -1)",
+        "RIGHT(N'abc', 2147483647)",
+        "CHARINDEX('b', 'abc', -5)",
+        "PATINDEX('%[', 'abc')",
+        "REPLACE('aaaa', 'a', REPLICATE('b', 8000))",
+        "TRANSLATE('abc', 'ab', 'x')",
+        "CONCAT_WS(NULL, 1)",
+        "QUOTENAME(REPLICATE(']', 200))",
+        "FORMAT(1234.5, 'N2')",
+        "FORMAT(GETDATE(), 'yyyy-MM-dd HH:mm:ss.fffffff')",
+        "FORMAT(1, '#,##0.00;(#);zero', 'xx-YY')",
+        "GETDATE()",
+        "SYSDATETIMEOFFSET()",
+        "DATEADD(year, 2147483647, GETDATE())",
+        "DATEADD(nanosecond, -9223372036854775808, SYSDATETIME())",
+        "DATEDIFF(nanosecond, '0001-01-01', '9999-12-31')",
+        "DATEDIFF_BIG(nanosecond, '0001-01-01', '9999-12-31')",
+        "DATEFROMPARTS(9999, 13, 32)",
+        "DATETIME2FROMPARTS(1, 1, 1, 0, 0, 0, 9999999, 8)",
+        "EOMONTH('9999-12-31', 1)",
+        "DATENAME(weekday, 0)",
+        "DATEPART(iso_week, '0001-01-01')",
+        "SWITCHOFFSET(SYSDATETIMEOFFSET(), '+15:00')",
+        "AT TIME ZONE 'Pacific Standard Time'",
+        "ROUND(1e308, -400)",
+        "ROUND(-2147483648, -10, 1)",
+        "POWER(10, 400)",
+        "POWER(-8, 0.333)",
+        "ABS(-2147483648)",
+        "-2147483648 / -1",
+        "CAST(-9223372036854775808 AS BIGINT) / -1",
+        "CAST(1 AS TINYINT) - 2",
+        "CAST(922337203685477.5807 AS MONEY) * 2",
+        "SQRT(-1)",
+        "LOG(0)",
+        "LOG(1, 1)",
+        "CHAR(256)",
+        "NCHAR(1114112)",
+        "UNICODE(N'')",
+        "ASCII('')",
+        "NEWID()",
+        "SCOPE_IDENTITY()",
+        "IDENT_CURRENT('people')",
+        "OBJECT_ID('people')",
+        "OBJECT_NAME(-1)",
+        "DB_NAME()",
+        "SUSER_SNAME()",
+        "STRING_AGG(name, ',') WITHIN GROUP (ORDER BY name)",
+        "STRING_SPLIT('a,b', ',')",
+        "OPENJSON(N'[1,2]')",
+        "JSON_VALUE(N'{', '$.a')",
+        "JSON_QUERY(N'[[[[', '$[0]')",
+        "ISJSON(N'{\"a\":')",
+        "ROW_NUMBER() OVER (ORDER BY id)",
+        "SUM(age) OVER (PARTITION BY name ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+        "COUNT_BIG(*)",
+        "MERGE people AS t USING (SELECT 1 AS id) AS s ON t.id = s.id",
+        "WHEN MATCHED THEN UPDATE SET age = 1",
+        "WHEN NOT MATCHED THEN INSERT (name) VALUES (N'm')",
+        "WITH cte AS (SELECT 1 AS n)",
+        "WITH r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 5)",
+        "OPTION (MAXRECURSION 0)",
+        "CROSS APPLY",
+        "OUTER APPLY",
+        "PIVOT (SUM(age) FOR name IN ([a], [b])) AS p",
+        "UNION ALL",
+        "EXCEPT",
+        "INTERSECT",
+        "WITH (NOLOCK)",
+        "FOR JSON PATH",
+        "FOR XML PATH('')",
+        "CREATE PROCEDURE p AS SELECT 1",
+        "CREATE FUNCTION f (@a INT) RETURNS INT AS BEGIN RETURN @a END",
+        "dbo.f(1)",
+        "EXEC p",
+        "DROP PROCEDURE p",
+        "id",
+        "name",
+        "age",
+        "people",
+    ];
+    fuzz(&mut session, &fragments);
+    fuzz_batches(&mut session, &fragments);
+    assert!(run(&mut session, "SELECT 1 / 0").is_err());
+    assert!(run(&mut session, "SELECT 1").is_ok());
+}
+
 #[test]
 fn oracle_functions_stay_inside_the_oracle_dialect() {
     let store = MemoryStore::default();
@@ -3389,7 +3805,24 @@ fn hostile_typed_statements_never_panic_in_any_dialect() {
         "localtime",
         "current_date",
     ];
-    let per_dialect: [(crate::Dialect, &str, &[&str]); 4] = [
+    let per_dialect: [(crate::Dialect, &str, &[&str]); 5] = [
+        (
+            crate::Dialect::SqlServer,
+            "CREATE TABLE typed (id INT IDENTITY PRIMARY KEY, n DECIMAL(12,3), d DATE, t DATETIME2(3), z DATETIMEOFFSET(3), j NVARCHAR(MAX))",
+            &[
+                "DECIMAL(",
+                "DECIMAL(38,",
+                "DATETIME2(7)",
+                "DATETIMEOFFSET",
+                "SMALLDATETIME",
+                "MONEY",
+                "GETDATE()",
+                "SYSDATETIMEOFFSET()",
+                "CONVERT(DATETIME2, ",
+                "TOP (1)",
+                "N'",
+            ],
+        ),
         (
             crate::Dialect::PostgreSql,
             "CREATE TABLE typed (id serial PRIMARY KEY, n numeric(12,3), d date, t timestamp(3), z timestamptz, j jsonb)",
@@ -4083,5 +4516,208 @@ fn normalize_and_is_normalized_follow_unicode() {
             .state()
             .code(),
         "22023"
+    );
+}
+
+fn one_value(session: &mut Session<'_>, sql: &str) -> String {
+    let rendered = last(session, sql);
+    rendered.lines().nth(1).unwrap_or_default().to_owned()
+}
+
+#[test]
+fn time_zone_abbreviations_read_in_input_at_time_zone_and_pg_timezone_abbrevs() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "SET TimeZone = 'UTC'");
+    for (written, shown) in [
+        ("2024-01-01 10:00 PST", "2024-01-01 18:00:00+00"),
+        ("2024-07-01 10:00 PDT", "2024-07-01 17:00:00+00"),
+        ("2024-01-01 10:00 est", "2024-01-01 15:00:00+00"),
+        ("2024-07-01 10:00 CEST", "2024-07-01 08:00:00+00"),
+        ("2024-01-01 10:00 CET", "2024-01-01 09:00:00+00"),
+        ("2024-01-01 09:00 JST", "2024-01-01 00:00:00+00"),
+        ("2024-01-01 10:00 GMT", "2024-01-01 10:00:00+00"),
+        ("2024-01-01 12:00 MSK", "2024-01-01 09:00:00+00"),
+        ("2024-01-01T10:00:00Z", "2024-01-01 10:00:00+00"),
+    ] {
+        assert_eq!(
+            one_value(
+                &mut session,
+                &format!("SELECT '{written}'::timestamptz::text AS t")
+            ),
+            shown,
+            "{written}"
+        );
+    }
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT ('2024-01-01 12:00:00+00'::timestamptz AT TIME ZONE 'PST')::text AS t"
+        ),
+        "2024-01-01 04:00:00"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT abbrev, utc_offset::text AS o FROM pg_timezone_abbrevs \
+             WHERE abbrev IN ('CET', 'PDT', 'NPT') ORDER BY abbrev"
+        ),
+        "abbrev|o\nCET|01:00:00\nNPT|05:45:00\nPDT|-07:00:00\nSELECT 3"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT abbrev FROM pg_catalog.pg_timezone_abbrevs \
+             WHERE is_dst AND abbrev IN ('CET', 'CEST') ORDER BY abbrev"
+        ),
+        "abbrev\nCEST\nSELECT 1"
+    );
+    assert!(
+        one_value(
+            &mut session,
+            "SELECT count(*) AS n FROM pg_timezone_abbrevs"
+        )
+        .parse::<u32>()
+        .is_ok_and(|count| count > 150)
+    );
+    assert_eq!(state(&mut session, "SET TimeZone = 'PST'"), "22023");
+}
+
+#[test]
+fn posix_rule_strings_set_the_session_time_zone() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "SET TimeZone = 'EST5EDT,M3.2.0,M11.1.0'");
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT '2024-07-01 12:00:00+00'::timestamptz::text AS t"
+        ),
+        "2024-07-01 08:00:00-04"
+    );
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"
+        ),
+        "2024-01-01 07:00:00-05"
+    );
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT '2024-03-10 02:30:00'::timestamptz::text AS t"
+        ),
+        "2024-03-10 03:30:00-04"
+    );
+    last(&mut session, "SET TimeZone = '<+03>-3'");
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"
+        ),
+        "2024-01-01 15:00:00+03"
+    );
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT ('2024-07-01 12:00:00+00'::timestamptz AT TIME ZONE 'AEST-10AEDT,M10.1.0,M4.1.0/3')::text AS t"
+        ),
+        "2024-07-01 22:00:00"
+    );
+    for invalid in [
+        "SET TimeZone = 'EST5EDT,M13.1.0,M11.1.0'",
+        "SET TimeZone = 'EST5EDT,M3.2.0'",
+        "SET TimeZone = '<+03-3'",
+    ] {
+        assert_eq!(state(&mut session, invalid), "22023", "{invalid}");
+    }
+}
+
+#[test]
+fn infinite_time_stamps_and_dates_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE moments (id integer PRIMARY KEY, at timestamp, zoned timestamptz, day date);
+         INSERT INTO moments VALUES
+           (1, 'infinity', '-infinity', 'infinity'),
+           (2, '2024-01-01 10:00', '2024-01-01 10:00+00', '2024-01-01'),
+           (3, '-INFINITY', '+infinity', '-infinity')",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT id, at::text AS a, zoned::text AS z, day::text AS d FROM moments ORDER BY at"
+        ),
+        "id|a|z|d\n3|-infinity|infinity|-infinity\n2|2024-01-01 10:00:00|2024-01-01 10:00:00+00|2024-01-01\n1|infinity|-infinity|infinity\nSELECT 3"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT id, isfinite(at) AS a, isfinite(day) AS d FROM moments ORDER BY id"
+        ),
+        "id|a|d\n1|f|f\n2|t|t\n3|f|f\nSELECT 3"
+    );
+    for (sql, shown) in [
+        (
+            "SELECT ('infinity'::timestamp + interval '1 day')::text AS v",
+            "infinity",
+        ),
+        (
+            "SELECT ('-infinity'::timestamptz - interval '1 year')::text AS v",
+            "-infinity",
+        ),
+        (
+            "SELECT ('2024-01-01'::timestamp + 'infinity'::interval)::text AS v",
+            "infinity",
+        ),
+        ("SELECT ('infinity'::date + 7)::text AS v", "infinity"),
+        (
+            "SELECT ('infinity'::date)::timestamp::text AS v",
+            "infinity",
+        ),
+        (
+            "SELECT ('-infinity'::timestamp)::date::text AS v",
+            "-infinity",
+        ),
+        (
+            "SELECT ('infinity'::timestamp)::timestamptz::text AS v",
+            "infinity",
+        ),
+        ("SELECT ('infinity'::timestamp(3))::text AS v", "infinity"),
+        (
+            "SELECT ('infinity'::timestamp - '2024-01-01'::timestamp)::text AS v",
+            "infinity",
+        ),
+        (
+            "SELECT ('2024-01-01'::timestamp - 'infinity'::timestamp)::text AS v",
+            "-infinity",
+        ),
+        (
+            "SELECT ('infinity'::timestamptz AT TIME ZONE 'Europe/Paris')::text AS v",
+            "infinity",
+        ),
+        ("SELECT 'infinity'::date = 'infinity'::timestamp AS v", "t"),
+        (
+            "SELECT '-infinity'::timestamp < '0001-01-01 BC'::timestamp AS v",
+            "t",
+        ),
+    ] {
+        assert_eq!(one_value(&mut session, sql), shown, "{sql}");
+    }
+    for sql in [
+        "SELECT 'infinity'::timestamp + '-infinity'::interval",
+        "SELECT 'infinity'::timestamp - 'infinity'::timestamp",
+        "SELECT 'infinity'::date - '2024-01-01'::date",
+    ] {
+        assert_eq!(state(&mut session, sql), "22008", "{sql}");
+    }
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT count(*) AS n FROM moments WHERE at > '2100-01-01'"
+        ),
+        "1"
     );
 }

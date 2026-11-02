@@ -68,7 +68,8 @@ pub enum SqlType {
     /// A type of PostgreSQL's system catalog, such as `oid`, `name` or `regclass`: a value of
     /// expressions and of the catalog's rows, not stored in table columns.
     Catalog(CatalogType),
-    /// A type known by its definition: an enum, a composite type, a range type or a domain.
+    /// A type known by its definition: an enum, a composite type, a range type, a domain, or
+    /// one of the base types `citext` and `hstore`.
     Defined(DefinedType),
     /// A value of any of SQLite's storage classes (an integer, a real, text or a blob), kept as
     /// it is given: the type of a SQLite column declared `BLOB`, whose rows may hold different
@@ -99,6 +100,8 @@ pub enum DefinedKind {
     Range,
     /// A domain: a base type with `NOT NULL`, `CHECK` constraints and a default of its own.
     Domain,
+    /// A built-in base type that PostgreSQL adds with an extension: `citext` or `hstore`.
+    Base,
 }
 
 impl DefinedType {
@@ -107,6 +110,34 @@ impl DefinedType {
         kind: DefinedKind::Composite,
         oid: crate::records::RECORD_OID,
     };
+
+    /// The type `citext`: text that compares by its case fold.
+    pub const CITEXT: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::citext::CITEXT_OID,
+    };
+
+    /// The type `hstore`: text keys, each with a text value or `NULL`.
+    pub const HSTORE: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::hstore::HSTORE_OID,
+    };
+
+    pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
+        match name {
+            "citext" => Some(Self::CITEXT),
+            "hstore" => Some(Self::HSTORE),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn builtin_base_name(oid: u32) -> Option<&'static str> {
+        match oid {
+            crate::citext::CITEXT_OID => Some("citext"),
+            crate::hstore::HSTORE_OID => Some("hstore"),
+            _ => None,
+        }
+    }
 
     pub(crate) fn enumerated(oid: u32) -> SqlType {
         SqlType::Defined(Self {
@@ -132,6 +163,10 @@ pub enum DefinedValue {
     Record(crate::records::RecordValue),
     /// A range.
     Range(crate::ranges::RangeValue),
+    /// A `citext` value, kept as written.
+    Citext(String),
+    /// An `hstore` value.
+    Hstore(crate::hstore::HstoreValue),
 }
 
 impl DefinedValue {
@@ -144,6 +179,8 @@ impl DefinedValue {
                 oid: record.type_oid,
             }),
             Self::Range(range) => DefinedType::range(range.type_oid),
+            Self::Citext(_) => SqlType::Defined(DefinedType::CITEXT),
+            Self::Hstore(_) => SqlType::Defined(DefinedType::HSTORE),
         }
     }
 
@@ -153,6 +190,8 @@ impl DefinedValue {
             Self::Enum(value) => value.label.clone(),
             Self::Record(record) => crate::records::format_text(record),
             Self::Range(range) => crate::ranges::format_text(range),
+            Self::Citext(text) => text.clone(),
+            Self::Hstore(hstore) => crate::hstore::to_text(hstore),
         }
     }
 }
@@ -244,6 +283,7 @@ impl SqlType {
                 DefinedKind::Composite => "record",
                 DefinedKind::Range => "anyrange",
                 DefinedKind::Domain => "domain",
+                DefinedKind::Base => DefinedType::builtin_base_name(defined.oid).unwrap_or("text"),
             },
             Self::Dynamic => "blob",
         }
@@ -309,6 +349,8 @@ impl SqlType {
         fields: None,
         precision: None,
     };
+
+    pub(crate) const VOID: Self = Self::Catalog(crate::pg_catalog::CatalogType::Void);
 
     fn integer_range(self) -> Option<(i64, i64)> {
         match self {
@@ -933,6 +975,15 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     if target == SqlType::Dynamic {
         return Ok(storage_class_value(value));
     }
+    if let Some(converted) = crate::hstore::convert_to_json(&value, target) {
+        return converted;
+    }
+    if conversion == Conversion::Explicit
+        && !target.is_character()
+        && let Some(text) = crate::citext::text_of(&value)
+    {
+        return parse_input(text, target);
+    }
     if target.is_character() {
         let text = match value {
             Value::Text(text) => text,
@@ -1089,6 +1140,14 @@ fn time_tz_order(micros: i64, offset: i32) -> (i64, std::cmp::Reverse<i32>) {
 
 fn instant(value: &Value, zoned: bool) -> i128 {
     let local = match value {
+        Value::Date(days) if datetime::is_infinite_date(*days) => {
+            return i128::from(datetime::date_to_timestamp(*days).unwrap_or_default());
+        }
+        Value::Timestamp(micros) | Value::TimestampTz(micros)
+            if datetime::is_infinite_timestamp(*micros) =>
+        {
+            return i128::from(*micros);
+        }
         Value::Date(days) => i128::from(*days) * i128::from(datetime::MICROS_PER_DAY),
         Value::Timestamp(micros) => i128::from(*micros),
         Value::TimestampTz(micros) => return i128::from(*micros),
@@ -1180,6 +1239,10 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
         (Value::Text(a), Value::Text(b)) | (Value::Json(a), Value::Json(b)) => {
             a.as_bytes().cmp(b.as_bytes())
         }
+        (Value::Defined(_), Value::Text(_) | Value::Bpchar(_))
+        | (Value::Text(_) | Value::Bpchar(_), Value::Defined(_)) => {
+            crate::citext::compare_with_text(left, right)
+        }
         (Value::Bpchar(_), _) | (_, Value::Bpchar(_)) => {
             match (left.character_text(), right.character_text()) {
                 (Some(a), Some(b)) => a.as_bytes().cmp(b.as_bytes()),
@@ -1242,10 +1305,16 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         }
         (DefinedValue::Record(a), DefinedValue::Record(b)) => crate::records::compare(a, b),
         (DefinedValue::Range(a), DefinedValue::Range(b)) => crate::ranges::compare(a, b),
+        (DefinedValue::Citext(a), DefinedValue::Citext(b)) => crate::citext::compare(a, b),
+        (DefinedValue::Hstore(a), DefinedValue::Hstore(b)) => crate::hstore::compare(a, b),
         (DefinedValue::Enum(_), _) => Ordering::Less,
         (_, DefinedValue::Enum(_)) => Ordering::Greater,
         (DefinedValue::Record(_), _) => Ordering::Less,
         (_, DefinedValue::Record(_)) => Ordering::Greater,
+        (DefinedValue::Range(_), _) => Ordering::Less,
+        (_, DefinedValue::Range(_)) => Ordering::Greater,
+        (DefinedValue::Citext(_), _) => Ordering::Less,
+        (_, DefinedValue::Citext(_)) => Ordering::Greater,
     }
 }
 
@@ -1267,6 +1336,28 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Range(range) => {
                 out.push(17);
                 crate::ranges::equality_key_of(out, range);
+            }
+            DefinedValue::Citext(text) => {
+                let folded = crate::citext::fold(text);
+                out.push(18);
+                out.extend_from_slice(&(folded.len() as u64).to_le_bytes());
+                out.extend_from_slice(folded.as_bytes());
+            }
+            DefinedValue::Hstore(hstore) => {
+                out.push(19);
+                out.extend_from_slice(&(hstore.pairs().len() as u64).to_le_bytes());
+                for (key, value) in hstore.pairs() {
+                    out.extend_from_slice(&(key.len() as u64).to_le_bytes());
+                    out.extend_from_slice(key.as_bytes());
+                    match value {
+                        Some(value) => {
+                            out.push(1);
+                            out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                            out.extend_from_slice(value.as_bytes());
+                        }
+                        None => out.push(0),
+                    }
+                }
             }
         },
         Value::Null => out.push(0),

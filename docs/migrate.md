@@ -168,9 +168,9 @@ yet; [sql.md](sql.md#the-postgresql-catalog) has the details.
 ### Moving with no downtime: `eggdb follow`
 
 Instead of a dump, `eggdb follow` copies a running PostgreSQL 10 or newer (with
-`wal_level=logical`) and keeps the copy in step with it. It creates a temporary logical
-replication slot, copies the schema and every table from the slot's snapshot, then applies each
-transaction PostgreSQL commits, until you stop it:
+`wal_level=logical`) and keeps the copy in step with it. It creates a logical replication slot,
+copies the schema and every table from the slot's snapshot, then applies each transaction
+PostgreSQL commits, until you stop it:
 
 ```sh
 PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'
@@ -179,10 +179,26 @@ PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?s
 
 Every table needs a primary key or `REPLICA IDENTITY FULL`, and the user needs `REPLICATION`
 and a publication: an existing one with `--publication <name>`, or `eggdb_follow`, which the
-follow creates `FOR ALL TABLES` and drops at its stop. Sequence values are copied again at the
-stop, because logical replication does not carry them. `--until caught-up` stops by itself once
-the copy has every change committed so far. Details are in [cli.md](cli.md) under `eggdb follow`,
-and the design is decision D162.
+follow creates `FOR ALL TABLES`. Sequence values are copied again at the stop, because logical
+replication does not carry them. `--until caught-up` stops by itself once the copy has every
+change committed so far, and then drops the slot and the publication it created.
+
+**Pausing, lost connections and schema changes.** The file keeps the follow's position (in the
+table `eggdb_follow.state`), saved in the same transaction as each applied source transaction.
+- Ctrl-C keeps the slot: running the same command again (without `--create`) resumes from the
+  saved position instead of copying again. A file is only resumed from the database it was
+  copied from (PostgreSQL's system identifier and database name). Until you resume, the slot
+  holds the source's WAL; `SELECT pg_drop_replication_slot('<slot>')` gives up on it.
+- A lost connection is retried with growing waits (1, 2, 4 … up to 60 seconds) for
+  `--reconnect-for <seconds>` (default 300; 0 stops at once), each attempt shown as a
+  `reconnecting` event; replication restarts from the last applied position.
+- Columns added, dropped, renamed or retyped on the source are changed in the file too, from the
+  `Relation` messages PostgreSQL sends before the table's next change (a `schema_changed` event
+  each). An added column takes its type and default from the source's catalog. Tables created or
+  moved to another schema during a follow stop it with a clear message.
+
+Details are in [cli.md](cli.md) under `eggdb follow`, and the design is decisions D162 and
+D263.
 
 ## SQL Server
 
@@ -300,17 +316,48 @@ the other objects created, and `MS_Description` properties with the comments.
 
 ### Moving with no downtime: `eggdb follow`
 
-`eggdb follow` also copies a running SQL Server database whose change tracking is on
-(`ALTER DATABASE ... SET CHANGE_TRACKING = ON`, and `ENABLE CHANGE_TRACKING` on every table). It
-copies the tables, then asks `CHANGETABLE(CHANGES ...)` for changes every `--poll` seconds
-(default 5), until you stop it:
+`eggdb follow` also copies a running SQL Server database whose change data capture (CDC) or change
+tracking is on. It copies the tables, then asks for the changes every `--poll` seconds (default
+5), until you stop it:
 
 ```sh
 SQLCMDPASSWORD=... eggdb follow --create shop.db 'sqlserver://sa@sql.example.com/Shop?encrypt=strict&sslrootcert=ca.pem'
 ```
 
-The changes of one poll are applied together, so the copy is consistent at each poll's change
-version, not at each source transaction. Change data capture (CDC) is not read yet.
+Each table is read the way the source records its changes:
+- **CDC** when the database has CDC on (`sys.databases.is_cdc_enabled`) and the table has a
+  capture instance of all its columns (`cdc.change_tables`). EggDB reads
+  `cdc.fn_cdc_get_all_changes_<capture_instance>` for the LSN range from the last one it applied
+  (`sys.fn_cdc_increment_lsn`) to `sys.fn_cdc_get_max_lsn()`. A delete removes the row by its
+  primary key, an insert or an update's new image replaces it, and an update's old image removes
+  the old key, so a changed primary key moves too.
+- **Change tracking** otherwise, when the database and the table have it on: `CHANGETABLE(CHANGES
+  ...)` from the last version applied.
+
+`--changes cdc` or `--changes change-tracking` reads every table one way, and names every table
+that lacks it before anything is copied. To turn CDC on (it needs SQL Server Agent running, for
+the capture job; in the Linux container set `MSSQL_AGENT_ENABLED=true`):
+
+```sql
+EXEC sys.sp_cdc_enable_db;
+EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL;
+```
+
+Change tracking needs `ALTER DATABASE ... SET CHANGE_TRACKING = ON` and `ENABLE CHANGE_TRACKING`
+on every table instead.
+
+The changes of one poll are applied together, so the copy is consistent at each poll's position
+(the change tracking version and the CDC LSN, shown in the summary and in the `stopped` event's
+`change_version` and `lsn`), not at each source transaction. CDC sees a change once the capture
+job has read it from the log, a few seconds after the commit. Each table's position is saved in
+the file with the changes, so after Ctrl-C (or a crash) the same command resumes without copying
+again, as long as the server and database are the same. A connection lost between polls is
+retried for `--reconnect-for` seconds, like PostgreSQL's. If a followed table's columns change on
+the source, the follow stops with exit 3 and names the change: make the same change to the table
+in the file, then resume. If CDC's cleanup job (or the change retention) removes changes the
+follow has not applied yet, it stops with exit 3 and says so; follow again into a new file to
+copy the database afresh, and keep the retention longer than any pause in the follow. A CDC table needs a
+primary key, and a capture instance that leaves out columns is not used.
 
 ## Oracle
 
@@ -484,9 +531,15 @@ afterwards with `ALTER TABLE ... ADD CONSTRAINT`.
 commands, its name ending in `.aof`) into the RESP databases of the file (D193): each `SELECT`
 switches databases, each `MULTI`/`EXEC` block runs as one transaction, and the report counts the
 commands and the ones that failed. Serve the result with `eggdb serve app.eggdb --resp-listen`.
-For Redis 7's multi-part AOF, restore the incremental `.aof` files in order. RDB snapshots are
-not read yet: Redis does not publish a specification of the RDB format, so `BGREWRITEAOF` (or
-`appendonly yes`) in the old server is the way to get a file to restore.
+For Redis 7's multi-part AOF, point it at the directory: `eggdb restore app.eggdb
+appendonlydir/` reads the manifest (`appendonly.aof.manifest`, or give the manifest file itself)
+and replays the base file, then the incremental files in `seq` order, as one client, so a
+`SELECT` in one file holds in the next; history files (`type h`) are skipped. A manifest whose
+names are paths rather than file names in its directory, whose `seq` is not a number, or that
+lists a file the directory does not have is refused before anything is written. RDB snapshots
+are not read: Redis does not publish a specification of the RDB format, so a base file (or a
+single `.aof`) that starts with an RDB preamble is refused; set `aof-use-rdb-preamble no` and run
+`BGREWRITEAOF` in the old server to get files to restore.
 
 ## From MongoDB: a `mongodump` directory
 

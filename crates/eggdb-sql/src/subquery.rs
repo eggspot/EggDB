@@ -1,7 +1,7 @@
 use crate::ast::{
     BinaryOperator, CommonTable, Expr, ExprKind, FromClause, GeneratedTable, JoinCondition,
     Literal, Query, Select, SelectItem, SetExpr, Subquery, SubqueryRows, SubqueryState,
-    SubqueryTest, TableReference,
+    SubqueryTest, TableFunction, TableReference,
 };
 use crate::dialect::Dialect;
 use crate::encoding::{TableDefinition, encode_row};
@@ -834,12 +834,13 @@ impl<'a> Correlation<'a> {
         name: &str,
         names: &[Option<String>],
         values: Vec<Value>,
+        untyped: &[bool],
     ) -> SqlResult<Value> {
         let mut tables = self
             .tables
             .try_borrow_mut()
             .map_err(|_| internal("a routine call found the statement's tables in use"))?;
-        crate::routines::call_in_row(self.reader, &mut tables, name, names, values)
+        crate::routines::call_in_row(self.reader, &mut tables, name, names, values, untyped)
     }
 
     fn value_at(&self, row: &[Value], depth: usize, index: usize) -> Value {
@@ -886,7 +887,10 @@ impl<'a> Correlation<'a> {
         let mut enclosing = Vec::with_capacity(self.enclosing.len() + 1);
         enclosing.push(row.to_vec());
         enclosing.extend(self.enclosing.iter().cloned());
-        let generated = generated_rows(&mut instance)?;
+        let generated = match self.tables.try_borrow_mut() {
+            Ok(mut tables) => generated_rows(&mut instance, self.reader, &mut tables)?,
+            Err(_) => generated_rows(&mut instance, self.reader, &mut TableCache::default())?,
+        };
         let overlay = Overlay::new(self.reader, &found.prepared.temp);
         let instance_overlay;
         let reader: &dyn KeyValueRead = match &generated {
@@ -927,7 +931,46 @@ impl<'a> Correlation<'a> {
     }
 }
 
-fn generated_rows(query: &mut Query) -> SqlResult<Option<TempTables>> {
+fn deferred_function_columns(
+    env: &Env<'_>,
+    tables: &mut TableCache,
+    function: &TableFunction,
+    label: &str,
+    alias_given: bool,
+) -> SqlResult<Vec<OutputColumn>> {
+    if crate::set_returning::named(&function.name).is_none()
+        && let Some(columns) =
+            crate::routines::correlated_table_function_columns(env.reader, tables, function)?
+    {
+        return Ok(columns);
+    }
+    crate::set_returning::table_function_columns(function, label, alias_given, Scope::empty())
+}
+
+fn generate_from(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    generated: &GeneratedTable,
+    evaluator: &Evaluator<'_>,
+    store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
+) -> SqlResult<()> {
+    match generated {
+        GeneratedTable::Function(function)
+            if crate::set_returning::named(&function.name).is_none() =>
+        {
+            crate::routines::correlated_table_function_rows(reader, tables, function, evaluator)?
+                .into_iter()
+                .try_for_each(store)
+        }
+        _ => crate::set_returning::generate_rows(generated, evaluator, store),
+    }
+}
+
+fn generated_rows(
+    query: &mut Query,
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+) -> SqlResult<Option<TempTables>> {
     let mut temp: Option<TempTables> = None;
     let mut failure = None;
     for_each_select_mut(query, &mut |select| {
@@ -955,7 +998,7 @@ fn generated_rows(query: &mut Query) -> SqlResult<Option<TempTables>> {
                 };
                 temp.get_or_insert_with(TempTables::new)
                     .fill_streamed(&definition, |store| {
-                        crate::set_returning::generate_rows(generated, &evaluator, store)
+                        generate_from(reader, tables, generated, &evaluator, store)
                     })
             })();
             if let Err(error) = filled {
@@ -2311,7 +2354,7 @@ fn lateral_rows(
                 substitute(expr, &synthetic, &[]);
             }
         });
-        let generated = generated_rows(&mut instance)?;
+        let generated = generated_rows(&mut instance, &overlay, tables)?;
         let base = Overlay::new(&overlay, &inner.temp);
         let instance_overlay;
         let reader: &dyn KeyValueRead = match &generated {
@@ -2555,6 +2598,11 @@ fn prepare_generated(
             name,
             env.columns_only,
         )?),
+        GeneratedTable::Sequence(name) => Filling::Rows(crate::sequences::relation_rows(
+            env.reader,
+            name,
+            env.columns_only,
+        )?),
         GeneratedTable::Values(_) | GeneratedTable::Function(_) => {
             lateral_reference(env, tables, prepared, &generated, siblings)?;
             let mut correlated = false;
@@ -2598,12 +2646,7 @@ fn prepare_generated(
             match &generated {
                 GeneratedTable::Function(function) if correlated || env.columns_only => {
                     Filling::Rows(crate::set_returning::GeneratedRows::empty(
-                        crate::set_returning::table_function_columns(
-                            function,
-                            &label,
-                            alias_given,
-                            Scope::empty(),
-                        )?,
+                        deferred_function_columns(env, tables, function, &label, alias_given)?,
                     ))
                 }
                 GeneratedTable::Values(list) if correlated || env.columns_only => {
@@ -2623,7 +2666,8 @@ fn prepare_generated(
                 }
                 GeneratedTable::Expansion(_)
                 | GeneratedTable::Catalog(_)
-                | GeneratedTable::Variable(_) => {
+                | GeneratedTable::Variable(_)
+                | GeneratedTable::Sequence(_) => {
                     Filling::Rows(crate::set_returning::GeneratedRows::empty(Vec::new()))
                 }
             }
@@ -2632,9 +2676,10 @@ fn prepare_generated(
     let renamed = match &generated {
         GeneratedTable::Function(function) => function.column_names.clone(),
         GeneratedTable::Values(list) => list.column_names.clone(),
-        GeneratedTable::Expansion(_) | GeneratedTable::Catalog(_) | GeneratedTable::Variable(_) => {
-            Vec::new()
-        }
+        GeneratedTable::Expansion(_)
+        | GeneratedTable::Catalog(_)
+        | GeneratedTable::Variable(_)
+        | GeneratedTable::Sequence(_) => Vec::new(),
     };
     let (columns, rows, streamed, charge) = match built {
         Filling::Rows(built) => (built.columns, built.rows, None, Some(built.charge)),

@@ -1,7 +1,8 @@
 use crate::memory_store::MemoryStore;
 use crate::{
-    BatchStep, BcpCharacterReader, BcpTerminators, BulkRows, Dialect, QueryResult, Session,
-    SqlError, SqlResult, Value,
+    BatchStep, BcpCharacterReader, BcpFileFormat, BcpFileReader, BcpFormat, BcpTerminators,
+    BcpUnicodeInput, BulkRows, Dialect, QueryResult, Session, SqlError, SqlResult, Value,
+    write_bcp_table,
 };
 
 struct Rows(Vec<Vec<Value>>);
@@ -252,4 +253,149 @@ fn fmtonly_describes_queries_without_rows_and_skips_other_statements() {
         texts(&mut session, "SELECT count(*) AS n FROM t"),
         vec![vec!["1".to_owned()]]
     );
+}
+
+fn first_error_code(session: &mut Session<'_>, text: &str) -> Option<u16> {
+    let mut found = None;
+    let outcome = session.execute_batch(text, &mut |step| {
+        if found.is_none() {
+            found = code(&step);
+        }
+        true
+    });
+    match outcome {
+        Err(error) => error.vendor_code(),
+        Ok(_) => found,
+    }
+}
+
+#[test]
+fn bcp_unicode_files_load_like_character_files() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    batch(
+        &mut session,
+        "CREATE TABLE cities (id INT PRIMARY KEY, name NVARCHAR(20))",
+    );
+    session.execute("INSERT BULK cities", &mut |_| {}).unwrap();
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in "1\tHà Nội\r\n2\t\n".encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let mut data: &[u8] = &bytes;
+    let mut unicode = BcpUnicodeInput::new(&mut data);
+    let mut reader = BcpCharacterReader::new(&mut unicode, BcpTerminators::default());
+    let steps = load(&mut session, &mut reader);
+    assert_eq!(tag(&steps[0]), "INSERT 0 2");
+    assert_eq!(
+        texts(&mut session, "SELECT id, name FROM cities ORDER BY id"),
+        vec![
+            vec!["1".to_owned(), "Hà Nội".to_owned()],
+            vec!["2".to_owned(), "NULL".to_owned()],
+        ]
+    );
+}
+
+#[test]
+fn bulk_insert_and_openrowset_bulk_never_read_server_files() {
+    let store = MemoryStore::default();
+    let mut session = session_with_items(&store);
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "BULK INSERT items FROM '/etc/passwd' WITH (FORMAT = 'CSV', FIELDTERMINATOR = ',', \
+             ROWTERMINATOR = '0x0a', FIRSTROW = 2, LASTROW = 10, FORMATFILE = 'f.fmt', \
+             CHECK_CONSTRAINTS, KEEPNULLS, KEEPIDENTITY, TABLOCK, ORDER (id ASC))"
+        ),
+        Some(4834)
+    );
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "BULK INSERT items FROM N'C:\\data\\items.dat'"
+        ),
+        Some(4834)
+    );
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "BULK INSERT items FROM 'items.dat' WITH (NO_SUCH_OPTION = 1)"
+        ),
+        Some(195)
+    );
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "SELECT BulkColumn FROM OPENROWSET(BULK '/etc/hosts', SINGLE_CLOB) AS f"
+        ),
+        Some(4834)
+    );
+    assert_eq!(
+        first_error_code(
+            &mut session,
+            "SELECT * FROM OPENROWSET(BULK 'items.dat', FORMATFILE = 'items.fmt', FIRSTROW = 2) AS f"
+        ),
+        Some(4834)
+    );
+    assert_eq!(
+        texts(&mut session, "SELECT count(*) AS n FROM items"),
+        vec![vec!["0".to_owned()]]
+    );
+}
+
+#[test]
+fn bcp_native_files_and_format_files_written_from_a_table_load_back() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    batch(
+        &mut session,
+        "CREATE TABLE goods (id INT PRIMARY KEY, name NVARCHAR(20), price DECIMAL(10,2), qty SMALLINT NOT NULL, added DATETIME2(0), code UNIQUEIDENTIFIER); \
+         CREATE TABLE native_copy (id INT PRIMARY KEY, name NVARCHAR(20), price DECIMAL(10,2), qty SMALLINT NOT NULL, added DATETIME2(0), code UNIQUEIDENTIFIER); \
+         CREATE TABLE format_copy (id INT PRIMARY KEY, name NVARCHAR(20), price DECIMAL(10,2), qty SMALLINT NOT NULL, added DATETIME2(0), code UNIQUEIDENTIFIER); \
+         INSERT INTO goods VALUES (1, N'Bánh mì', 12.50, 3, '2024-05-06 07:08:09', '6F9619FF-8B86-D011-B42D-00C04FC964FF'), (2, NULL, NULL, -4, NULL, NULL), (3, N'', -0.01, 0, '1999-12-31 23:59:59', NULL)",
+    );
+    let mut native = Vec::new();
+    let written = write_bcp_table(&mut session, "goods", &BcpFileFormat::Native, &mut native)
+        .unwrap_or_else(|error| panic!("bcp out: {error}"));
+    assert_eq!(written.rows, 3);
+    assert_eq!(&native[..4], &[1, 0, 0, 0]);
+    let format_file = written.format.to_format_file();
+    assert!(format_file.starts_with("14.0\n6\n1\tSQLINT\t0\t4\t\"\"\t1\tid\t\"\"\n"));
+    assert!(format_file.contains("\tSQLSMALLINT\t0\t2\t"));
+
+    session
+        .execute("INSERT BULK native_copy", &mut |_| {})
+        .unwrap();
+    let mut data: &[u8] = &native;
+    let mut reader = BcpFileReader::native(&mut data);
+    assert_eq!(tag(&load(&mut session, &mut reader)[0]), "INSERT 0 3");
+
+    session
+        .execute("INSERT BULK format_copy WITH (KEEP_NULLS)", &mut |_| {})
+        .unwrap();
+    let mut data: &[u8] = &native;
+    let mut reader = BcpFileReader::new(&mut data, BcpFormat::parse(&format_file).unwrap());
+    assert_eq!(tag(&load(&mut session, &mut reader)[0]), "INSERT 0 3");
+
+    let original = texts(&mut session, "SELECT * FROM goods ORDER BY id");
+    assert_eq!(original[0][1], "Bánh mì");
+    assert_eq!(original[2][1], "");
+    assert_eq!(
+        texts(&mut session, "SELECT * FROM native_copy ORDER BY id"),
+        original
+    );
+    assert_eq!(
+        texts(&mut session, "SELECT * FROM format_copy ORDER BY id"),
+        original
+    );
+
+    let mut character = Vec::new();
+    write_bcp_table(
+        &mut session,
+        "goods",
+        &BcpFileFormat::Character(BcpTerminators::default()),
+        &mut character,
+    )
+    .unwrap();
+    assert!(character.starts_with(b"1\tB\xc3\xa1nh m\xc3\xac\t12.50\t3\t"));
 }

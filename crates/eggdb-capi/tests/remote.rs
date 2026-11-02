@@ -67,6 +67,8 @@ fn a_session_on_a_server_runs_statements_with_typed_values() {
         database: "eggdb".to_owned(),
         max_connections: 4,
         authentication_timeout: Duration::from_secs(5),
+        idle_timeout: None,
+        memory_budget: Arc::default(),
         auth_rules: None,
         tls: None,
     };

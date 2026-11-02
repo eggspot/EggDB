@@ -66,6 +66,42 @@ mod tests {
     }
 
     #[test]
+    fn cascading_foreign_keys_change_isolated_tables() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_tenancy",
+            "CREATE TABLE projects (id integer PRIMARY KEY, tenant text NOT NULL)",
+            "CREATE TABLE tasks (id integer PRIMARY KEY, tenant text NOT NULL, project_id integer REFERENCES projects ON DELETE CASCADE ON UPDATE CASCADE)",
+            "SELECT eggdb_tenancy.isolate('public', 'projects', 'tenant')",
+            "SELECT eggdb_tenancy.isolate('public', 'tasks', 'tenant')",
+            "INSERT INTO eggdb_tenancy.tenants (tenant, max_rows) VALUES ('acme', 10)",
+            "CREATE ROLE app LOGIN",
+            "GRANT ALL ON projects, tasks TO app",
+            "GRANT SELECT ON eggdb_tenancy.tenants, eggdb_tenancy.isolated TO app",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        drop(session);
+        crate::memory_store::use_seeded_random_bytes();
+        let mut session = Session::new(&store);
+        session.identify_role("app", "eggdb").unwrap();
+        for sql in [
+            "SET eggdb.tenant = 'acme'",
+            "INSERT INTO projects VALUES (1, 'acme'), (2, 'acme')",
+            "INSERT INTO tasks VALUES (10, 'acme', 1), (20, 'acme', 2)",
+            "UPDATE projects SET id = 3 WHERE id = 2",
+            "DELETE FROM projects WHERE id = 1",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT id, project_id FROM tasks").unwrap(),
+            "id|project_id\n20|3\nSELECT 1"
+        );
+    }
+
+    #[test]
     fn each_tenant_sees_and_writes_only_its_own_rows_within_its_quota() {
         let store = MemoryStore::default();
         let mut session = Session::new(&store);

@@ -1,6 +1,6 @@
 use crate::ast::{
-    AlterAction, AlterTable, ColumnDefinition, ConstraintKind, ConstraintSpec, CreateIndex,
-    CreateSequence, IndexSpec, Name, SequenceOptions,
+    AlterAction, AlterTable, ColumnDefinition, ColumnPlacement, ConstraintKind, ConstraintSpec,
+    CreateIndex, CreateSequence, IndexSpec, Name, SequenceOptions,
 };
 use crate::constraints::{self, PreparedChecks};
 use crate::dialect::Dialect;
@@ -94,6 +94,7 @@ pub(crate) fn alter_table(
         )
         .at(alter.name.position));
     }
+    crate::sqlite_schema_text::forget(writer, &alter.name.text)?;
     let mut name = alter.name.text.clone();
     for action in &alter.actions {
         if let Some(notice) = apply(writer, tables, &mut name, action, dialect)? {
@@ -175,6 +176,9 @@ fn apply(
             let parent = current(writer, tables, name)?;
             crate::partition_ddl::detach(writer, tables, &parent, partition)?;
             Ok(None)
+        }
+        AlterAction::MoveColumn { column, placement } => {
+            move_column(writer, tables, name, column, placement).map(|()| None)
         }
         AlterAction::SetSchema(schema) => {
             if crate::temporary::is_temporary_name(name) || schema.text == crate::temporary::SCHEMA
@@ -898,6 +902,89 @@ fn drop_column(
     constraints::register_references(writer, tables, &rebuilt)?;
     crate::sequences::drop_owned_by(writer, tables, &table.name, Some(column.text.as_str()))?;
     Ok(notices.into_iter().next())
+}
+
+fn unknown_mysql_column(table: &TableDefinition, name: &Name) -> SqlError {
+    SqlError::new(
+        SqlState::MYSQL_COLUMN_NOT_FOUND,
+        format!("Unknown column '{}' in '{}'", name.text, table.name),
+    )
+    .with_vendor_code(1054)
+    .at(name.position)
+}
+
+fn moved_order(count: usize, from: usize, to: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).collect();
+    if from < count && to < count {
+        let moved = order.remove(from);
+        order.insert(to, moved);
+    }
+    order
+}
+
+fn move_column(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    column: &Name,
+    placement: &ColumnPlacement,
+) -> SqlResult<()> {
+    let table = current(writer, tables, name)?;
+    let from = table
+        .column_index(&column.text)
+        .ok_or_else(|| unknown_mysql_column(&table, column))?;
+    let to = match placement {
+        ColumnPlacement::First => 0,
+        ColumnPlacement::After(anchor) => {
+            let after = table
+                .column_index(&anchor.text)
+                .filter(|&after| after != from)
+                .ok_or_else(|| unknown_mysql_column(&table, anchor))?;
+            if after < from { after + 1 } else { after }
+        }
+    };
+    if to == from {
+        return Ok(());
+    }
+    let order = moved_order(table.columns.len(), from, to);
+    let mut new_position = vec![0; order.len()];
+    for (position, &old) in order.iter().enumerate() {
+        if let Some(slot) = new_position.get_mut(old) {
+            *slot = position;
+        }
+    }
+    let at = |old: usize| new_position.get(old).copied().unwrap_or(old);
+    let mut new = table.clone();
+    new.columns = order
+        .iter()
+        .filter_map(|&old| table.columns.get(old).cloned())
+        .collect();
+    new.primary_key = table.primary_key.iter().map(|&old| at(old)).collect();
+    for index in &mut new.indexes {
+        index.columns = index.columns.iter().map(|&old| at(old)).collect();
+    }
+    for key in &mut new.foreign_keys {
+        key.columns = key.columns.iter().map(|&old| at(old)).collect();
+    }
+    for identity in &mut new.identities {
+        identity.column = at(identity.column);
+    }
+    for entry in &mut new.default_dialects {
+        entry.column = at(entry.column);
+    }
+    for entry in &mut new.domains {
+        entry.column = at(entry.column);
+    }
+    constraints::unregister_references(writer, tables, &table)?;
+    let mut map = |row: Vec<Value>| -> SqlResult<Vec<Value>> {
+        Ok(order
+            .iter()
+            .map(|&old| row.get(old).cloned().unwrap_or(Value::Null))
+            .collect())
+    };
+    let rebuilt = rebuild(writer, &table, new, &mut map, None)?;
+    constraints::register_references(writer, tables, &rebuilt)?;
+    Ok(())
 }
 
 fn rename_column(
@@ -1997,6 +2084,14 @@ fn drop_constraint(
             if_exists: false,
         };
         indexes::drop_index(writer, tables, &drop, dialect)?;
+        return Ok(None);
+    }
+    if dialect == Dialect::Oracle
+        && let Some(position) =
+            crate::oracle_dictionary::not_null_constraint_column(&table, &constraint.text)
+    {
+        table.columns[position].not_null = false;
+        save(writer, &table)?;
         return Ok(None);
     }
     if if_exists {

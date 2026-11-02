@@ -1,4 +1,4 @@
-use super::{NAMESPACE, Reader, put_bytes, put_type, put_varint};
+use super::{NAMESPACE, Reader, is_base_type, put_bytes, put_type, put_varint};
 use crate::error::SqlResult;
 use crate::types::{DefinedKind, SqlType};
 use crate::user_types::{
@@ -8,10 +8,12 @@ use crate::user_types::{
 
 const TYPE_SPACE: u8 = 0x0A;
 const RECORD_VERSION: u8 = 1;
+const BASE_TYPES_RECORD_VERSION: u8 = 2;
 const ENUM_KIND: u8 = 1;
 const COMPOSITE_KIND: u8 = 2;
 const RANGE_KIND: u8 = 3;
 const DOMAIN_KIND: u8 = 4;
+const BASE_KIND: u8 = 5;
 const NOT_NULL_FLAG: u8 = 1;
 
 pub(crate) fn user_type_key(name: &str) -> Vec<u8> {
@@ -31,6 +33,7 @@ pub(crate) fn defined_kind_code(kind: DefinedKind) -> u8 {
         DefinedKind::Composite => COMPOSITE_KIND,
         DefinedKind::Range => RANGE_KIND,
         DefinedKind::Domain => DOMAIN_KIND,
+        DefinedKind::Base => BASE_KIND,
     }
 }
 
@@ -40,13 +43,30 @@ pub(crate) fn defined_kind_of(code: u8) -> Option<DefinedKind> {
         DefinedKind::Composite,
         DefinedKind::Range,
         DefinedKind::Domain,
+        DefinedKind::Base,
     ]
     .into_iter()
     .find(|kind| defined_kind_code(*kind) == code)
 }
 
+fn uses_base_types(body: &TypeBody) -> bool {
+    match body {
+        TypeBody::Enum(_) => false,
+        TypeBody::Composite(attributes) => attributes
+            .iter()
+            .any(|attribute| is_base_type(attribute.sql_type)),
+        TypeBody::Range { subtype } => is_base_type(*subtype),
+        TypeBody::Domain(domain) => is_base_type(domain.base),
+    }
+}
+
 pub(crate) fn encode_user_type(user_type: &UserType) -> Vec<u8> {
-    let mut out = vec![RECORD_VERSION];
+    let version = if uses_base_types(&user_type.body) {
+        BASE_TYPES_RECORD_VERSION
+    } else {
+        RECORD_VERSION
+    };
+    let mut out = vec![version];
     out.push(defined_kind_code(user_type.kind()));
     out.extend_from_slice(&user_type.oid.to_le_bytes());
     match &user_type.body {
@@ -86,8 +106,12 @@ pub(crate) fn encode_user_type(user_type: &UserType) -> Vec<u8> {
     out
 }
 
-fn member_type(reader: &mut Reader<'_>, own_oid: u32) -> SqlResult<SqlType> {
-    let sql_type = reader.sql_type(true, true, true)?;
+fn member_type(
+    reader: &mut Reader<'_>,
+    own_oid: u32,
+    base_types_allowed: bool,
+) -> SqlResult<SqlType> {
+    let sql_type = reader.sql_type(true, true, true, base_types_allowed)?;
     if sql_type
         .defined()
         .is_some_and(|defined| defined.oid == own_oid)
@@ -99,7 +123,8 @@ fn member_type(reader: &mut Reader<'_>, own_oid: u32) -> SqlResult<SqlType> {
 
 pub(crate) fn decode_user_type(name: &str, bytes: &[u8]) -> SqlResult<UserType> {
     let mut reader = Reader::new(bytes, "type definition");
-    reader.version()?;
+    let version = reader.version_up_to(BASE_TYPES_RECORD_VERSION)?;
+    let base_types_allowed = version == BASE_TYPES_RECORD_VERSION;
     if name.is_empty() || !crate::schemas::is_well_formed(name) {
         return Err(reader.damaged());
     }
@@ -141,7 +166,7 @@ pub(crate) fn decode_user_type(name: &str, bytes: &[u8]) -> SqlResult<UserType> 
             let mut attributes: Vec<Attribute> = Vec::with_capacity(count);
             for _ in 0..count {
                 let attribute_name = reader.plain_name()?;
-                let sql_type = member_type(&mut reader, oid)?;
+                let sql_type = member_type(&mut reader, oid, base_types_allowed)?;
                 if attributes.iter().any(|known| known.name == attribute_name)
                     || sql_type
                         .defined()
@@ -157,14 +182,14 @@ pub(crate) fn decode_user_type(name: &str, bytes: &[u8]) -> SqlResult<UserType> 
             TypeBody::Composite(attributes)
         }
         DefinedKind::Range => {
-            let subtype = member_type(&mut reader, oid)?;
+            let subtype = member_type(&mut reader, oid, base_types_allowed)?;
             if !crate::ranges::is_subtype(subtype) {
                 return Err(reader.damaged());
             }
             TypeBody::Range { subtype }
         }
         DefinedKind::Domain => {
-            let base = member_type(&mut reader, oid)?;
+            let base = member_type(&mut reader, oid, base_types_allowed)?;
             let not_null = match reader.byte()? {
                 0 => false,
                 NOT_NULL_FLAG => true,
@@ -212,8 +237,12 @@ pub(crate) fn decode_user_type(name: &str, bytes: &[u8]) -> SqlResult<UserType> 
                 checks,
             })
         }
+        DefinedKind::Base => return Err(reader.damaged()),
     };
     reader.finish()?;
+    if base_types_allowed != uses_base_types(&body) {
+        return Err(reader.damaged());
+    }
     Ok(UserType {
         oid,
         name: name.to_owned(),
@@ -326,8 +355,11 @@ mod tests {
         unordered[7..15].copy_from_slice(&5.0f64.to_bits().to_le_bytes());
         assert!(decode_user_type("mood", &unordered).is_err());
         let mut newer = encode_user_type(&samples()[0]);
-        newer[0] = 2;
+        newer[0] = 3;
         assert!(decode_user_type("mood", &newer).is_err());
+        let mut needless_version = encode_user_type(&samples()[0]);
+        needless_version[0] = 2;
+        assert!(decode_user_type("mood", &needless_version).is_err());
         let mut low_oid = encode_user_type(&samples()[0]);
         low_oid[2..6].copy_from_slice(&23u32.to_le_bytes());
         assert!(decode_user_type("mood", &low_oid).is_err());

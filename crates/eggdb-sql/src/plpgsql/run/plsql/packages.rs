@@ -141,7 +141,7 @@ impl Run<'_> {
             .and_then(|plsql| plsql.package.clone());
         if let Some(own) = own
             && let Some(compiled) =
-                crate::plsql::compiled_package(&*self.writer, self.tables, &own)?
+                crate::plsql::compiled_package(self.writer.read(), self.tables, &own)?
         {
             self.attach_package(compiled, true)?;
         }
@@ -155,7 +155,7 @@ impl Run<'_> {
                 continue;
             }
             let Some(compiled) =
-                crate::plsql::resolve_compiled_package(&*self.writer, self.tables, candidate)?
+                crate::plsql::resolve_compiled_package(self.writer.read(), self.tables, candidate)?
             else {
                 continue;
             };

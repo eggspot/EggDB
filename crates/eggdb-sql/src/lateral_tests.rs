@@ -102,6 +102,59 @@ fn cross_and_outer_apply_run_as_lateral_joins_in_transact_sql() {
 }
 
 #[test]
+fn apply_calls_table_valued_functions_with_the_outer_rows_columns() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    run(
+        &mut session,
+        "CREATE TABLE a (id INT PRIMARY KEY, n INT);
+         INSERT INTO a VALUES (1, 2), (2, 0), (3, 1);
+         CREATE TABLE b (id INT PRIMARY KEY, a_id INT, v VARCHAR(10));
+         INSERT INTO b VALUES (1, 1, 'x'), (2, 1, 'y'), (3, 3, 'z')",
+    )
+    .unwrap();
+    run(
+        &mut session,
+        "CREATE FUNCTION dbo.values_of(@a_id INT) RETURNS TABLE AS RETURN (SELECT v FROM b WHERE a_id = @a_id)",
+    )
+    .unwrap();
+    run(
+        &mut session,
+        "CREATE FUNCTION dbo.numbers_to(@n INT) RETURNS @t TABLE (k INT) AS
+         BEGIN
+           DECLARE @i INT = 1;
+           WHILE @i <= @n BEGIN INSERT INTO @t VALUES (@i); SET @i = @i + 1; END;
+           RETURN;
+         END",
+    )
+    .unwrap();
+    let cross = run(
+        &mut session,
+        "SELECT a.id, f.v FROM a CROSS APPLY dbo.values_of(a.id) AS f ORDER BY a.id, f.v",
+    )
+    .unwrap();
+    assert!(cross.contains("1|x\n1|y\n3|z"), "{cross}");
+    let outer = run(
+        &mut session,
+        "SELECT a.id, f.v FROM a OUTER APPLY dbo.values_of(a.id) f ORDER BY a.id, f.v",
+    )
+    .unwrap();
+    assert!(outer.contains("1|x\n1|y\n2|NULL\n3|z"), "{outer}");
+    let numbers = run(
+        &mut session,
+        "SELECT a.id, t.k FROM a CROSS APPLY dbo.numbers_to(a.n) t ORDER BY a.id, t.k",
+    )
+    .unwrap();
+    assert!(numbers.contains("1|1\n1|2\n3|1"), "{numbers}");
+    let computed = run(
+        &mut session,
+        "SELECT a.id, t.k FROM a OUTER APPLY dbo.numbers_to(a.n - 1) t ORDER BY a.id, t.k",
+    )
+    .unwrap();
+    assert!(computed.contains("1|1\n2|NULL\n3|NULL"), "{computed}");
+}
+
+#[test]
 fn full_joins_with_using_merge_the_joined_columns() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

@@ -145,6 +145,17 @@ pub(crate) fn create_text(table: &TableSchema) -> String {
     )
 }
 
+fn kept_create_text(reader: &dyn KeyValueRead, table: &TableSchema) -> SqlResult<String> {
+    let generated = create_text(table);
+    if table.schema != crate::schemas::DEFAULT_SCHEMA {
+        return Ok(generated);
+    }
+    Ok(
+        crate::sqlite_schema_text::original_text(reader, &table.name, &generated)?
+            .unwrap_or(generated),
+    )
+}
+
 fn text_literal(text: String) -> InsertValue {
     InsertValue::Expr(Expr {
         kind: ExprKind::Literal(Literal::String(text)),
@@ -427,14 +438,16 @@ impl<'s> Session<'s> {
             ));
         };
         let temporary = from.first.name.text.starts_with("sqlite_temp");
-        let (tables, triggers) = if temporary {
-            (Vec::new(), Vec::new())
+        let (tables, texts, triggers) = if temporary {
+            (Vec::new(), Vec::new(), Vec::new())
         } else {
             self.read(|reader, _| {
-                Ok((
-                    read_tables(reader)?,
-                    crate::triggers::every_trigger(reader)?,
-                ))
+                let tables = read_tables(reader)?;
+                let texts = tables
+                    .iter()
+                    .map(|table| kept_create_text(reader, table))
+                    .collect::<SqlResult<Vec<_>>>()?;
+                Ok((tables, texts, crate::triggers::every_trigger(reader)?))
             })?
         };
         let name = from.first.name.text.clone();
@@ -474,6 +487,7 @@ impl<'s> Session<'s> {
             primary_key_name: None,
             indexes: Vec::new(),
             constraints: Vec::new(),
+            sqlite_text: None,
         };
         execute::create_table(
             &mut scratch,
@@ -484,14 +498,14 @@ impl<'s> Session<'s> {
         if !tables.is_empty() || !triggers.is_empty() {
             let mut rootpage = 1;
             let mut rows = Vec::new();
-            for table in &tables {
+            for (table, text) in tables.iter().zip(texts) {
                 rootpage += 1;
                 rows.push(vec![
                     text_literal("table".to_owned()),
                     text_literal(table.name.clone()),
                     text_literal(table.name.clone()),
                     integer_literal(rootpage),
-                    text_literal(create_text(table)),
+                    text_literal(text),
                 ]);
                 for index in &table.indexes {
                     rootpage += 1;

@@ -1,7 +1,8 @@
 //! PostgreSQL's logical replication stream as a subscriber reads it: the copy-both messages of
 //! the streaming replication protocol (XLogData, keepalives, standby status updates), the
 //! `pgoutput` plugin's messages (protocol version 1), and the SQL that applies each change to an
-//! EggDB database in the PostgreSQL dialect.
+//! EggDB database in the PostgreSQL dialect, including the `ALTER TABLE` that follows a change
+//! to a table's columns on the source.
 
 use std::collections::HashMap;
 
@@ -155,6 +156,8 @@ pub struct RelationColumn {
     pub name: String,
     /// The type's OID.
     pub type_oid: u32,
+    /// The type modifier, such as a `varchar`'s length plus 4; -1 for none.
+    pub type_modifier: i32,
 }
 
 /// A published table, as a `Relation` message describes it.
@@ -301,11 +304,12 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
                 let flags = cursor.u8("column flags")?;
                 let name = cursor.string("column name")?;
                 let type_oid = cursor.u32("type OID")?;
-                cursor.u32("type modifier")?;
+                let type_modifier = cursor.u32("type modifier")? as i32;
                 columns.push(RelationColumn {
                     key: flags & 1 != 0,
                     name,
                     type_oid,
+                    type_modifier,
                 });
             }
             let namespace = if namespace.is_empty() {
@@ -408,6 +412,197 @@ fn value_sql(value: &TupleValue) -> String {
 #[derive(Debug, Default)]
 pub struct ChangeApplier {
     relations: HashMap<u32, Relation>,
+    target_tables: Option<HashMap<(String, String), Vec<String>>>,
+    schemas: Vec<String>,
+    skipped: std::collections::HashSet<u32>,
+}
+
+/// One change to a table's shape that a `Relation` message shows was made on the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReshapeStep {
+    /// The table was renamed within its schema; it was called `from`.
+    RenameTable {
+        /// The old name.
+        from: String,
+    },
+    /// A column was dropped.
+    DropColumn {
+        /// The column's name.
+        name: String,
+    },
+    /// A column was renamed.
+    RenameColumn {
+        /// The old name.
+        from: String,
+        /// The new name.
+        to: String,
+    },
+    /// A column was added.
+    AddColumn {
+        /// The column's name.
+        name: String,
+        /// Its type's OID.
+        type_oid: u32,
+        /// Its type modifier.
+        type_modifier: i32,
+    },
+    /// A column's type changed.
+    ChangeType {
+        /// The column's name.
+        name: String,
+        /// The new type's OID.
+        type_oid: u32,
+        /// The new type modifier.
+        type_modifier: i32,
+    },
+}
+
+impl ReshapeStep {
+    /// Whether the SQL for this step needs the column's type spelled out.
+    pub fn needs_type(&self) -> bool {
+        matches!(self, Self::AddColumn { .. } | Self::ChangeType { .. })
+    }
+
+    /// The `ALTER TABLE` statement for this step on `namespace.name`, the table's name after
+    /// the change. `column_type` is the type for an added or retyped column, with any
+    /// `DEFAULT` clause after it.
+    pub fn sql(
+        &self,
+        namespace: &str,
+        name: &str,
+        column_type: Option<&str>,
+    ) -> Result<String, ReplicationError> {
+        let table = format!("{}.{}", quote_identifier(namespace), quote_identifier(name));
+        let typed = |column: &str| {
+            column_type.ok_or_else(|| {
+                ReplicationError(format!(
+                    "the type of the column {column} of {table} is not known, so it cannot be added or changed"
+                ))
+            })
+        };
+        Ok(match self {
+            Self::RenameTable { from } => format!(
+                "ALTER TABLE {}.{} RENAME TO {}",
+                quote_identifier(namespace),
+                quote_identifier(from),
+                quote_identifier(name)
+            ),
+            Self::DropColumn { name } => {
+                format!("ALTER TABLE {table} DROP COLUMN {}", quote_identifier(name))
+            }
+            Self::RenameColumn { from, to } => format!(
+                "ALTER TABLE {table} RENAME COLUMN {} TO {}",
+                quote_identifier(from),
+                quote_identifier(to)
+            ),
+            Self::AddColumn { name, .. } => format!(
+                "ALTER TABLE {table} ADD COLUMN {} {}",
+                quote_identifier(name),
+                typed(name.as_str())?
+            ),
+            Self::ChangeType { name, .. } => format!(
+                "ALTER TABLE {table} ALTER COLUMN {} TYPE {}",
+                quote_identifier(name),
+                typed(name.as_str())?
+            ),
+        })
+    }
+}
+
+/// The steps that turn a table with the `previous` columns into one with the `current` ones.
+/// A previous column with type OID 0 has an unknown type, so its type is not compared. When
+/// the column count is the same and every differing name sits where a column of the same type
+/// was, under a name that is new on both sides, the columns were renamed; otherwise columns
+/// that disappeared are dropped and new ones added.
+pub fn reshape_steps(previous: &[RelationColumn], current: &[RelationColumn]) -> Vec<ReshapeStep> {
+    let old_names: Vec<&str> = previous.iter().map(|column| column.name.as_str()).collect();
+    let new_names: Vec<&str> = current.iter().map(|column| column.name.as_str()).collect();
+    let same_type = |old: &RelationColumn, new: &RelationColumn| {
+        old.type_oid == 0
+            || (old.type_oid == new.type_oid && old.type_modifier == new.type_modifier)
+    };
+    let mut steps = Vec::new();
+    let renamed = previous.len() == current.len()
+        && previous
+            .iter()
+            .zip(current)
+            .any(|(old, new)| old.name != new.name)
+        && previous.iter().zip(current).all(|(old, new)| {
+            old.name == new.name
+                || (same_type(old, new)
+                    && !new_names.contains(&old.name.as_str())
+                    && !old_names.contains(&new.name.as_str()))
+        });
+    if renamed {
+        for (old, new) in previous.iter().zip(current) {
+            if old.name != new.name {
+                steps.push(ReshapeStep::RenameColumn {
+                    from: old.name.clone(),
+                    to: new.name.clone(),
+                });
+            }
+        }
+        return steps;
+    }
+    for old in previous {
+        if !new_names.contains(&old.name.as_str()) {
+            steps.push(ReshapeStep::DropColumn {
+                name: old.name.clone(),
+            });
+        }
+    }
+    for new in current {
+        match previous.iter().find(|old| old.name == new.name) {
+            None => steps.push(ReshapeStep::AddColumn {
+                name: new.name.clone(),
+                type_oid: new.type_oid,
+                type_modifier: new.type_modifier,
+            }),
+            Some(old) if !same_type(old, new) => steps.push(ReshapeStep::ChangeType {
+                name: new.name.clone(),
+                type_oid: new.type_oid,
+                type_modifier: new.type_modifier,
+            }),
+            Some(_) => {}
+        }
+    }
+    steps
+}
+
+/// The SQL spelling of a built-in PostgreSQL type, by OID and type modifier; `None` for a type
+/// this list does not know.
+pub fn builtin_type_name(type_oid: u32, type_modifier: i32) -> Option<String> {
+    let length = (type_modifier >= 4).then(|| type_modifier - 4);
+    let sized = |name: &str| match length {
+        Some(length) => format!("{name}({length})"),
+        None => name.to_owned(),
+    };
+    Some(match type_oid {
+        16 => "boolean".to_owned(),
+        17 => "bytea".to_owned(),
+        20 => "bigint".to_owned(),
+        21 => "smallint".to_owned(),
+        23 => "integer".to_owned(),
+        25 => "text".to_owned(),
+        114 => "json".to_owned(),
+        700 => "real".to_owned(),
+        701 => "double precision".to_owned(),
+        1042 => sized("character"),
+        1043 => sized("character varying"),
+        1082 => "date".to_owned(),
+        1083 => "time without time zone".to_owned(),
+        1114 => "timestamp without time zone".to_owned(),
+        1184 => "timestamp with time zone".to_owned(),
+        1186 => "interval".to_owned(),
+        1266 => "time with time zone".to_owned(),
+        1700 => match length {
+            Some(length) => format!("numeric({}, {})", length >> 16, length & 0xFFFF),
+            None => "numeric".to_owned(),
+        },
+        2950 => "uuid".to_owned(),
+        3802 => "jsonb".to_owned(),
+        _ => return None,
+    })
 }
 
 /// What one message asks of the subscriber.
@@ -417,6 +612,17 @@ pub enum Change {
     Begin,
     /// Run this statement inside the transaction.
     Statement(String),
+    /// Change the table's shape before applying its next change.
+    Reshape {
+        /// The relation's OID on the source.
+        relation: u32,
+        /// The table's schema.
+        namespace: String,
+        /// The table's name after the change.
+        name: String,
+        /// The changes, in the order to apply them.
+        steps: Vec<ReshapeStep>,
+    },
     /// Commit, then report `end_lsn` as applied.
     Commit {
         /// The end of the transaction's WAL.
@@ -432,6 +638,59 @@ impl ChangeApplier {
     /// An applier that knows no relations yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records a table the target already has, with its column names in order, so the first
+    /// `Relation` message for it is compared with them. Once any table is recorded, a
+    /// `Relation` for a table the target does not have is an error.
+    pub fn know_target_table(&mut self, namespace: &str, name: &str, columns: Vec<String>) {
+        self.target_tables
+            .get_or_insert_with(HashMap::new)
+            .insert((namespace.to_owned(), name.to_owned()), columns);
+    }
+
+    /// Applies only the changes of tables in these schemas; an empty list applies every table.
+    pub fn only_schemas(&mut self, schemas: Vec<String>) {
+        self.schemas = schemas;
+    }
+
+    fn reshape(&mut self, relation: &Relation) -> Result<Vec<ReshapeStep>, ReplicationError> {
+        let shown = format!("{}.{}", relation.namespace, relation.name);
+        if let Some(previous) = self.relations.get(&relation.id) {
+            let mut steps = Vec::new();
+            if previous.name != relation.name || previous.namespace != relation.namespace {
+                if previous.namespace != relation.namespace {
+                    return Err(ReplicationError(format!(
+                        "the source moved the table {}.{} to the schema {}; follow cannot move tables between schemas",
+                        previous.namespace, previous.name, relation.namespace
+                    )));
+                }
+                steps.push(ReshapeStep::RenameTable {
+                    from: previous.name.clone(),
+                });
+            }
+            steps.extend(reshape_steps(&previous.columns, &relation.columns));
+            return Ok(steps);
+        }
+        let Some(tables) = &mut self.target_tables else {
+            return Ok(Vec::new());
+        };
+        let key = (relation.namespace.clone(), relation.name.clone());
+        let Some(names) = tables.remove(&key) else {
+            return Err(ReplicationError(format!(
+                "the source has a new table {shown}, created after the copy; follow cannot create tables while it follows"
+            )));
+        };
+        let previous: Vec<RelationColumn> = names
+            .into_iter()
+            .map(|name| RelationColumn {
+                key: false,
+                name,
+                type_oid: 0,
+                type_modifier: -1,
+            })
+            .collect();
+        Ok(reshape_steps(&previous, &relation.columns))
     }
 
     fn relation(&self, id: u32) -> Result<&Relation, ReplicationError> {
@@ -495,7 +754,29 @@ impl ChangeApplier {
                 commit_unix_micros,
             },
             LogicalMessage::Relation(relation) => {
+                if !self.schemas.is_empty() && !self.schemas.contains(&relation.namespace) {
+                    self.skipped.insert(relation.id);
+                    return Ok(Change::Nothing);
+                }
+                let steps = self.reshape(&relation)?;
+                let change = if steps.is_empty() {
+                    Change::Nothing
+                } else {
+                    Change::Reshape {
+                        relation: relation.id,
+                        namespace: relation.namespace.clone(),
+                        name: relation.name.clone(),
+                        steps,
+                    }
+                };
                 self.relations.insert(relation.id, relation);
+                change
+            }
+            LogicalMessage::Insert { relation, .. }
+            | LogicalMessage::Update { relation, .. }
+            | LogicalMessage::Delete { relation, .. }
+                if self.skipped.contains(&relation) =>
+            {
                 Change::Nothing
             }
             LogicalMessage::Insert { relation, new } => {
@@ -551,6 +832,13 @@ impl ChangeApplier {
                 ))
             }
             LogicalMessage::Truncate { cascade, relations } => {
+                let relations: Vec<u32> = relations
+                    .into_iter()
+                    .filter(|id| !self.skipped.contains(id))
+                    .collect();
+                if relations.is_empty() {
+                    return Ok(Change::Nothing);
+                }
                 let names = relations
                     .iter()
                     .map(|id| self.relation(*id).map(qualified))
@@ -689,6 +977,198 @@ mod tests {
         assert_eq!(update.len(), 34);
         assert_eq!(&update[1..9], &0x20u64.to_be_bytes());
         assert_eq!(&update[25..33], &5i64.to_be_bytes());
+    }
+
+    fn column(name: &str, type_oid: u32) -> RelationColumn {
+        RelationColumn {
+            key: false,
+            name: name.to_owned(),
+            type_oid,
+            type_modifier: -1,
+        }
+    }
+
+    fn orders_with(columns: Vec<RelationColumn>) -> LogicalMessage {
+        LogicalMessage::Relation(Relation {
+            id: 16_384,
+            namespace: "public".to_owned(),
+            name: "orders".to_owned(),
+            replica_identity: b'd',
+            columns,
+        })
+    }
+
+    #[test]
+    fn added_and_dropped_columns_become_steps() {
+        let previous = [column("id", 23), column("note", 25)];
+        let current = [column("id", 23), column("amount", 1700)];
+        assert_eq!(
+            reshape_steps(&previous, &current),
+            vec![
+                ReshapeStep::DropColumn {
+                    name: "note".to_owned()
+                },
+                ReshapeStep::AddColumn {
+                    name: "amount".to_owned(),
+                    type_oid: 1700,
+                    type_modifier: -1
+                },
+            ]
+        );
+        assert!(reshape_steps(&previous, &previous).is_empty());
+    }
+
+    #[test]
+    fn a_column_in_the_same_place_with_the_same_type_and_a_new_name_was_renamed() {
+        let previous = [column("id", 23), column("note", 25)];
+        let current = [column("id", 23), column("remark", 25)];
+        assert_eq!(
+            reshape_steps(&previous, &current),
+            vec![ReshapeStep::RenameColumn {
+                from: "note".to_owned(),
+                to: "remark".to_owned()
+            }]
+        );
+        let retyped = [column("id", 23), column("remark", 23)];
+        assert_eq!(reshape_steps(&previous, &retyped).len(), 2);
+    }
+
+    #[test]
+    fn a_changed_type_is_a_step_unless_the_old_type_is_unknown() {
+        let previous = [column("id", 23)];
+        let current = [column("id", 20)];
+        assert_eq!(
+            reshape_steps(&previous, &current),
+            vec![ReshapeStep::ChangeType {
+                name: "id".to_owned(),
+                type_oid: 20,
+                type_modifier: -1
+            }]
+        );
+        assert!(reshape_steps(&[column("id", 0)], &current).is_empty());
+    }
+
+    #[test]
+    fn steps_become_alter_table_statements() {
+        let add = ReshapeStep::AddColumn {
+            name: "amount".to_owned(),
+            type_oid: 1700,
+            type_modifier: -1,
+        };
+        assert_eq!(
+            add.sql("public", "orders", Some("numeric DEFAULT 0"))
+                .unwrap(),
+            "ALTER TABLE \"public\".\"orders\" ADD COLUMN \"amount\" numeric DEFAULT 0"
+        );
+        assert!(add.sql("public", "orders", None).is_err());
+        assert_eq!(
+            ReshapeStep::RenameTable {
+                from: "old".to_owned()
+            }
+            .sql("public", "orders", None)
+            .unwrap(),
+            "ALTER TABLE \"public\".\"old\" RENAME TO \"orders\""
+        );
+        assert_eq!(
+            ReshapeStep::DropColumn {
+                name: "note".to_owned()
+            }
+            .sql("public", "orders", None)
+            .unwrap(),
+            "ALTER TABLE \"public\".\"orders\" DROP COLUMN \"note\""
+        );
+    }
+
+    #[test]
+    fn builtin_types_are_spelled_with_their_modifiers() {
+        assert_eq!(builtin_type_name(23, -1).as_deref(), Some("integer"));
+        assert_eq!(
+            builtin_type_name(1043, 24).as_deref(),
+            Some("character varying(20)")
+        );
+        assert_eq!(
+            builtin_type_name(1700, ((10 << 16) | 2) + 4).as_deref(),
+            Some("numeric(10, 2)")
+        );
+        assert_eq!(builtin_type_name(99_999, -1), None);
+    }
+
+    #[test]
+    fn a_second_relation_message_with_other_columns_reshapes_the_table() {
+        let mut applier = ChangeApplier::new();
+        let first = vec![column("id", 23), column("note", 25)];
+        assert_eq!(
+            applier.apply(orders_with(first.clone())).unwrap(),
+            Change::Nothing
+        );
+        assert_eq!(applier.apply(orders_with(first)).unwrap(), Change::Nothing);
+        let change = applier
+            .apply(orders_with(vec![
+                column("id", 23),
+                column("note", 25),
+                column("priority", 23),
+            ]))
+            .unwrap();
+        assert_eq!(
+            change,
+            Change::Reshape {
+                relation: 16_384,
+                namespace: "public".to_owned(),
+                name: "orders".to_owned(),
+                steps: vec![ReshapeStep::AddColumn {
+                    name: "priority".to_owned(),
+                    type_oid: 23,
+                    type_modifier: -1
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn the_first_relation_message_is_compared_with_the_target_table() {
+        let mut applier = ChangeApplier::new();
+        applier.know_target_table("public", "orders", vec!["id".to_owned(), "gone".to_owned()]);
+        let change = applier
+            .apply(orders_with(vec![
+                column("id", 23),
+                column("note", 25),
+                column("x", 25),
+            ]))
+            .unwrap();
+        assert!(matches!(change, Change::Reshape { ref steps, .. } if steps.len() == 3));
+        let mut unknown = vec![b'R'];
+        unknown.extend_from_slice(&7u32.to_be_bytes());
+        unknown.extend_from_slice(b"public\0brand_new\0d");
+        unknown.extend_from_slice(&0u16.to_be_bytes());
+        let refused = applier.apply(parse_logical_message(&unknown).unwrap());
+        assert!(
+            refused
+                .unwrap_err()
+                .0
+                .contains("new table public.brand_new")
+        );
+    }
+
+    #[test]
+    fn changes_outside_the_followed_schemas_are_skipped() {
+        let mut applier = ChangeApplier::new();
+        applier.only_schemas(vec!["sales".to_owned()]);
+        assert_eq!(
+            applier
+                .apply(parse_logical_message(&relation_message()).unwrap())
+                .unwrap(),
+            Change::Nothing
+        );
+        let mut insert = vec![b'I'];
+        insert.extend_from_slice(&16_384u32.to_be_bytes());
+        insert.push(b'N');
+        insert.extend(tuple_bytes(&[Some("1"), None]));
+        assert_eq!(
+            applier
+                .apply(parse_logical_message(&insert).unwrap())
+                .unwrap(),
+            Change::Nothing
+        );
     }
 
     #[test]

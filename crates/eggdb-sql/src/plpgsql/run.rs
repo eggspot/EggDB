@@ -34,7 +34,7 @@ use crate::routines::{
     ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineReturns, Volatility,
 };
 use crate::schemas::{base_name, display};
-use crate::session::QueryResult;
+use crate::session::{OutputColumn, QueryResult};
 use crate::settings::Settings;
 use crate::store::KeyValueWrite;
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
@@ -57,6 +57,10 @@ impl Drop for Depth {
     fn drop(&mut self) {
         DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
+}
+
+pub(crate) fn routine_depth() -> usize {
+    DEPTH.with(Cell::get)
 }
 
 fn enter_routine() -> SqlResult<Depth> {
@@ -102,8 +106,65 @@ pub(crate) enum Returned {
     Set(Vec<Value>),
 }
 
+pub(crate) trait TransactionControl: KeyValueWrite {
+    fn end_transaction(&mut self, tables: &mut TableCache, end: TransactionEnd) -> SqlResult<()>;
+}
+
+enum RoutineWriter<'r> {
+    Atomic(&'r mut dyn KeyValueWrite),
+    Nonatomic(&'r mut dyn TransactionControl),
+}
+
+impl RoutineWriter<'_> {
+    fn reborrow(&mut self) -> RoutineWriter<'_> {
+        match self {
+            Self::Atomic(writer) => RoutineWriter::Atomic(&mut **writer),
+            Self::Nonatomic(control) => RoutineWriter::Nonatomic(&mut **control),
+        }
+    }
+
+    fn get(&mut self) -> &mut dyn KeyValueWrite {
+        match self {
+            Self::Atomic(writer) => &mut **writer,
+            Self::Nonatomic(control) => &mut **control,
+        }
+    }
+
+    fn read(&self) -> &dyn KeyValueWrite {
+        match self {
+            Self::Atomic(writer) => &**writer,
+            Self::Nonatomic(control) => &**control,
+        }
+    }
+}
+
 pub(crate) fn invoke(
     writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    call: Call<'_>,
+) -> SqlResult<Returned> {
+    invoke_in(RoutineWriter::Atomic(writer), tables, settings, call)
+}
+
+pub(crate) fn invoke_nonatomic(
+    control: &mut dyn TransactionControl,
+    tables: &mut TableCache,
+    settings: &Settings,
+    call: Call<'_>,
+) -> SqlResult<Returned> {
+    let writer = if call.definition.kind == RoutineKind::Procedure
+        && call.definition.language == RoutineLanguage::PlPgSql
+    {
+        RoutineWriter::Nonatomic(control)
+    } else {
+        RoutineWriter::Atomic(control)
+    };
+    invoke_in(writer, tables, settings, call)
+}
+
+fn invoke_in(
+    mut writer: RoutineWriter<'_>,
     tables: &mut TableCache,
     settings: &Settings,
     call: Call<'_>,
@@ -128,7 +189,7 @@ pub(crate) fn invoke(
         ),
         RoutineLanguage::Tsql => {
             return crate::tsql::invoke_function(
-                writer,
+                writer.get(),
                 tables,
                 settings,
                 &definition,
@@ -136,7 +197,7 @@ pub(crate) fn invoke(
             );
         }
     };
-    let mut run = Run::new(writer, tables, settings, &definition, label);
+    let mut run = Run::over(writer.reborrow(), tables, settings, &definition, label);
     let program = match definition.language {
         RoutineLanguage::PlPgSql | RoutineLanguage::PlSql | RoutineLanguage::MySql => {
             Some(crate::routines::compiled_program(run.tables, &definition)?)
@@ -151,6 +212,9 @@ pub(crate) fn invoke(
     }
     let outcome = run.invoked(call.arguments, call.trigger, program.as_deref());
     run.share_packages();
+    if outcome.is_ok() {
+        run.hand_over_cursors();
+    }
     outcome
 }
 
@@ -179,13 +243,33 @@ pub(crate) fn run_inline(
     settings: &Settings,
     code: &str,
 ) -> SqlResult<()> {
+    run_inline_in(RoutineWriter::Atomic(writer), tables, settings, code)
+}
+
+pub(crate) fn run_inline_nonatomic(
+    control: &mut dyn TransactionControl,
+    tables: &mut TableCache,
+    settings: &Settings,
+    code: &str,
+) -> SqlResult<()> {
+    run_inline_in(RoutineWriter::Nonatomic(control), tables, settings, code)
+}
+
+fn run_inline_in(
+    mut writer: RoutineWriter<'_>,
+    tables: &mut TableCache,
+    settings: &Settings,
+    code: &str,
+) -> SqlResult<()> {
     let _depth = enter_routine()?;
     let definition = inline_definition(code);
     let program = super::compile_for_run(&definition)?;
     let label = format!("PL/pgSQL function {INLINE_NAME}");
-    let mut run = Run::new(writer, tables, settings, &definition, label);
+    let mut run = Run::over(writer.reborrow(), tables, settings, &definition, label);
     run.bind_parameters(Vec::new());
-    run.program(&program).map(drop)
+    run.program(&program)?;
+    run.hand_over_cursors();
+    Ok(())
 }
 
 pub(crate) fn run_anonymous_block(
@@ -214,7 +298,14 @@ enum Flow {
     Next,
     Exit(Option<String>),
     Continue(Option<String>),
+    Goto(String),
     Return,
+}
+
+fn labelled_step_at(steps: &[Step], label: &str) -> Option<usize> {
+    steps
+        .iter()
+        .position(|step| matches!(&step.kind, StepKind::Label(found) if found == label))
 }
 
 enum Shape {
@@ -226,11 +317,44 @@ enum Shape {
 #[derive(Debug)]
 pub(crate) struct OpenCursor {
     name: String,
+    columns: Vec<OutputColumn>,
     names: Vec<String>,
     rows: Vec<Vec<Value>>,
     position: usize,
     scroll: Option<bool>,
     found: Option<bool>,
+    holdable: bool,
+}
+
+impl OpenCursor {
+    fn into_portal(self) -> crate::portals::Portal {
+        crate::portals::Portal {
+            name: self.name,
+            columns: self.columns,
+            rows: self.rows,
+            position: self.position,
+            scroll: self.scroll,
+            holdable: self.holdable,
+        }
+    }
+
+    fn from_portal(portal: crate::portals::Portal) -> Self {
+        let names = portal
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        Self {
+            name: portal.name,
+            columns: portal.columns,
+            names,
+            rows: portal.rows,
+            position: portal.position,
+            scroll: portal.scroll,
+            found: None,
+            holdable: portal.holdable,
+        }
+    }
 }
 
 fn column_names(result: &QueryResult) -> Vec<String> {
@@ -359,7 +483,7 @@ fn takes_collation(sql_type: SqlType) -> bool {
 }
 
 struct Run<'r> {
-    writer: &'r mut dyn KeyValueWrite,
+    writer: RoutineWriter<'r>,
     tables: &'r mut TableCache,
     settings: &'r Settings,
     definition: &'r RoutineDefinition,
@@ -375,7 +499,6 @@ struct Run<'r> {
     result: Option<Value>,
     rows: Vec<Value>,
     cursors: Vec<OpenCursor>,
-    portals: usize,
     print_strict_params: bool,
     oracle: bool,
     unit: Option<Arc<plsql::UnitLines>>,
@@ -385,6 +508,22 @@ struct Run<'r> {
 impl<'r> Run<'r> {
     fn new(
         writer: &'r mut dyn KeyValueWrite,
+        tables: &'r mut TableCache,
+        settings: &'r Settings,
+        definition: &'r RoutineDefinition,
+        label: String,
+    ) -> Self {
+        Self::over(
+            RoutineWriter::Atomic(writer),
+            tables,
+            settings,
+            definition,
+            label,
+        )
+    }
+
+    fn over(
+        writer: RoutineWriter<'r>,
         tables: &'r mut TableCache,
         settings: &'r Settings,
         definition: &'r RoutineDefinition,
@@ -407,7 +546,6 @@ impl<'r> Run<'r> {
             result: None,
             rows: Vec::new(),
             cursors: Vec::new(),
-            portals: 0,
             print_strict_params: false,
             oracle: definition.dialect == Dialect::Oracle,
             unit: None,
@@ -763,6 +901,7 @@ impl<'r> Run<'r> {
 
     fn element_value(&self, value: Value) -> SqlResult<Value> {
         match self.shape() {
+            Shape::Scalar(Some(SqlType::Dynamic)) if record_of(&value).is_some() => Ok(value),
             Shape::Scalar(Some(sql_type)) => convert(value, sql_type, Conversion::Assignment),
             _ => Ok(value),
         }
@@ -808,12 +947,12 @@ impl<'r> Run<'r> {
     ) -> SqlResult<T> {
         if self.undo.is_recording() {
             let mut writer = UndoWrite {
-                inner: &mut *self.writer,
+                inner: self.writer.get(),
                 log: &mut self.undo,
             };
             body(&mut writer, self.tables, self.settings)
         } else {
-            body(&mut *self.writer, self.tables, self.settings)
+            body(self.writer.get(), self.tables, self.settings)
         }
     }
 
@@ -855,18 +994,7 @@ impl<'r> Run<'r> {
         };
         let written = parsed(text, self.settings, &RoutineFrame::default(), dialect).ok();
         self.share_frame();
-        let outcome = self.with_writer(|writer, tables, settings| {
-            let binding = crate::name_resolution::Binding {
-                settings,
-                walk_expressions: true,
-                target_privilege: None,
-            };
-            let mut call = call;
-            for argument in &mut call.arguments {
-                binding.condition(&*writer, tables, argument)?;
-            }
-            crate::routines::call_procedure_outputs(writer, tables, settings, &call)
-        });
+        let outcome = self.called(call);
         self.adopt_frame();
         let (mut result, sources) = outcome?;
         push_statement_notices(std::mem::take(&mut result.notices));
@@ -882,6 +1010,36 @@ impl<'r> Run<'r> {
             }
         }
         Ok(Flow::Next)
+    }
+
+    fn called(
+        &mut self,
+        mut call: crate::ast::CallRoutine,
+    ) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
+        let binding = crate::name_resolution::Binding {
+            settings: self.settings,
+            walk_expressions: true,
+            target_privilege: None,
+        };
+        if !self.undo.is_recording()
+            && let RoutineWriter::Nonatomic(control) = &mut self.writer
+        {
+            for argument in &mut call.arguments {
+                binding.condition(&**control, self.tables, argument)?;
+            }
+            return crate::routines::call_procedure_nonatomic(
+                &mut **control,
+                self.tables,
+                self.settings,
+                &call,
+            );
+        }
+        self.with_writer(|writer, tables, settings| {
+            for argument in &mut call.arguments {
+                binding.condition(&*writer, tables, argument)?;
+            }
+            crate::routines::call_procedure_outputs(writer, tables, settings, &call)
+        })
     }
 
     fn query_text(&mut self, text: &str) -> SqlResult<QueryResult> {
@@ -941,8 +1099,8 @@ impl<'r> Run<'r> {
     }
 
     fn relation_columns(&mut self, name: &str) -> SqlResult<Vec<(String, SqlType)>> {
-        let internal = crate::schemas::resolve_relation(&*self.writer, name)?;
-        match self.tables.relation(&*self.writer, &internal)? {
+        let internal = crate::schemas::resolve_relation(self.writer.read(), name)?;
+        match self.tables.relation(self.writer.read(), &internal)? {
             Some(Relation::Table(table)) => Ok(table
                 .columns
                 .iter()
@@ -964,7 +1122,7 @@ impl<'r> Run<'r> {
 
     fn dictionary_columns(&self, name: &str) -> SqlResult<Vec<(String, SqlType)>> {
         let dictionary = if self.oracle {
-            crate::oracle_dictionary::reference(&*self.writer, name)?
+            crate::oracle_dictionary::reference(self.writer.read(), name)?
         } else {
             None
         };
@@ -1171,7 +1329,7 @@ impl<'r> Run<'r> {
             self.undo.release();
             return Err(error);
         };
-        self.undo.roll_back(&mut *self.writer, mark)?;
+        self.undo.roll_back(self.writer.get(), mark)?;
         self.cursors.truncate(cursors);
         self.failure = None;
         self.handle(handler, error)
@@ -1205,10 +1363,18 @@ impl<'r> Run<'r> {
     }
 
     fn steps(&mut self, steps: &[Step]) -> SqlResult<Flow> {
-        for step in steps {
-            let flow = self.step(step)?;
-            if flow != Flow::Next {
-                return Ok(flow);
+        let mut at = 0;
+        while let Some(step) = steps.get(at) {
+            match self.step(step)? {
+                Flow::Next => at += 1,
+                Flow::Goto(label) => match labelled_step_at(steps, &label) {
+                    Some(target) => {
+                        crate::cancel::check()?;
+                        at = target;
+                    }
+                    None => return Ok(Flow::Goto(label)),
+                },
+                flow => return Ok(flow),
             }
         }
         Ok(Flow::Next)
@@ -1323,9 +1489,10 @@ impl<'r> Run<'r> {
             StepKind::Rollback { .. } if self.oracle => {
                 self.transaction_end(TransactionEnd::Rollback)
             }
-            StepKind::Commit { chain } => Err(self.transaction_command("COMMIT", *chain)),
-            StepKind::Rollback { chain } => Err(self.transaction_command("ROLLBACK", *chain)),
-            StepKind::Null => Ok(Flow::Next),
+            StepKind::Commit { .. } => self.end_procedure_transaction(TransactionEnd::Commit),
+            StepKind::Rollback { .. } => self.end_procedure_transaction(TransactionEnd::Rollback),
+            StepKind::Goto(label) => Ok(Flow::Goto(label.clone())),
+            StepKind::Label(_) | StepKind::Null => Ok(Flow::Next),
         }
     }
 
@@ -1340,21 +1507,25 @@ impl<'r> Run<'r> {
         }
     }
 
-    fn transaction_command(&self, command: &str, chain: bool) -> SqlError {
-        if self.definition.kind == RoutineKind::Function {
-            return SqlError::new(
+    fn end_procedure_transaction(&mut self, end: TransactionEnd) -> SqlResult<Flow> {
+        if self.undo.is_recording() {
+            let verb = match end {
+                TransactionEnd::Commit => "commit",
+                TransactionEnd::Rollback => "roll back",
+            };
+            return Err(SqlError::new(
+                SqlState::INVALID_TRANSACTION_TERMINATION,
+                format!("cannot {verb} while a subtransaction is active"),
+            ));
+        }
+        let RoutineWriter::Nonatomic(control) = &mut self.writer else {
+            return Err(SqlError::new(
                 SqlState::INVALID_TRANSACTION_TERMINATION,
                 "invalid transaction termination",
-            );
-        }
-        let written = if chain {
-            format!("{command} AND CHAIN")
-        } else {
-            command.to_owned()
+            ));
         };
-        SqlError::not_supported(format!("{written} inside a procedure")).with_hint(
-            "A procedure's changes commit or roll back with the statement that called it.",
-        )
+        control.end_transaction(self.tables, end)?;
+        Ok(Flow::Next)
     }
 
     fn sql(&mut self, statement: &Fragment, into: Option<&IntoTargets>) -> SqlResult<Flow> {
@@ -1875,11 +2046,23 @@ impl<'r> Run<'r> {
     }
 
     fn source_rows(&mut self, source: &QuerySource) -> SqlResult<(Vec<String>, Vec<Vec<Value>>)> {
-        let result = match source {
-            QuerySource::Static(query) => self.query_text(&query.text)?,
-            QuerySource::Dynamic { command, using } => self.dynamic(command, using)?,
-        };
+        let result = self.source_result(source)?;
         Ok((column_names(&result), result.rows))
+    }
+
+    fn source_columns(
+        &mut self,
+        source: &QuerySource,
+    ) -> SqlResult<(Vec<OutputColumn>, Vec<Vec<Value>>)> {
+        let result = self.source_result(source)?;
+        Ok((result.columns.unwrap_or_default(), result.rows))
+    }
+
+    fn source_result(&mut self, source: &QuerySource) -> SqlResult<QueryResult> {
+        match source {
+            QuerySource::Static(query) => self.query_text(&query.text),
+            QuerySource::Dynamic { command, using } => self.dynamic(command, using),
+        }
     }
 
     fn return_value(&mut self, value: Option<&Fragment>) -> SqlResult<Flow> {
@@ -2019,7 +2202,7 @@ impl<'r> Run<'r> {
                 }
                 (DiagnosticsItem::PgContext, _) => Value::Text(self.label.clone()),
                 (DiagnosticsItem::PgRoutineOid, _) => Value::Oid(crate::pg_catalog::routine_oid(
-                    &*self.writer,
+                    self.writer.read(),
                     self.definition,
                 )?),
                 (item, Some(error)) => Value::Text(stacked_item(*item, error)),
@@ -2036,6 +2219,7 @@ impl<'r> Run<'r> {
         };
         match &self.frame.variables[index].slot {
             Slot::Cursor(_) => Ok(index),
+            Slot::Typed(SqlType::Text) if !self.oracle => Ok(index),
             _ => Err(SqlError::new(
                 SqlState::DATATYPE_MISMATCH,
                 format!("variable \"{variable}\" must be of type cursor or refcursor"),
@@ -2057,25 +2241,24 @@ impl<'r> Run<'r> {
         let portal = match &self.frame.variables[index].value {
             Value::Text(name) => name.clone(),
             _ if declaration.is_some() => variable.to_owned(),
-            _ => {
-                self.portals += 1;
-                format!("<unnamed portal {}>", self.portals)
-            }
+            _ => crate::portals::next_unnamed_name(),
         };
-        if self.cursors.iter().any(|cursor| cursor.name == portal) {
+        if self.cursors.iter().any(|cursor| cursor.name == portal)
+            || crate::portals::is_open(&portal)
+        {
             return Err(SqlError::new(
                 SqlState::DUPLICATE_CURSOR,
                 format!("cursor \"{portal}\" already in use"),
             ));
         }
-        if self.cursors.len() >= MAX_OPEN_CURSORS {
+        if self.cursors.len() + crate::portals::open_count() >= MAX_OPEN_CURSORS {
             return Err(SqlError::new(
                 SqlState::PROGRAM_LIMIT_EXCEEDED,
                 format!("a PL/pgSQL function keeps at most {MAX_OPEN_CURSORS} cursors open"),
             ));
         }
-        let (names, rows) = match source {
-            OpenSource::Query(source) => self.source_rows(source)?,
+        let (columns, rows) = match source {
+            OpenSource::Query(source) => self.source_columns(source)?,
             OpenSource::Bound(values) => {
                 let Some(declaration) = &declaration else {
                     return Err(SqlError::new(
@@ -2089,13 +2272,16 @@ impl<'r> Run<'r> {
             }
         };
         let scroll = scroll.or_else(|| declaration.as_ref().and_then(|declared| declared.scroll));
+        let names = columns.iter().map(|column| column.name.clone()).collect();
         self.cursors.push(OpenCursor {
             name: portal.clone(),
+            columns,
             names,
             rows,
             position: 0,
             scroll,
             found: None,
+            holdable: false,
         });
         self.frame.variables[index].value = Value::Text(portal);
         Ok(Flow::Next)
@@ -2106,7 +2292,7 @@ impl<'r> Run<'r> {
         variable: &str,
         declaration: &CursorDeclaration,
         values: &[CursorValue],
-    ) -> SqlResult<(Vec<String>, Vec<Vec<Value>>)> {
+    ) -> SqlResult<(Vec<OutputColumn>, Vec<Vec<Value>>)> {
         if values.len() != declaration.arguments.len() {
             return Err(SqlError::new(
                 SqlState::SYNTAX_ERROR,
@@ -2141,10 +2327,10 @@ impl<'r> Run<'r> {
         let outcome = self.query_text(&declaration.query.text);
         self.frame.variables.truncate(scope);
         let result = outcome?;
-        Ok((column_names(&result), result.rows))
+        Ok((result.columns.unwrap_or_default(), result.rows))
     }
 
-    fn open_cursor(&self, variable: &str) -> SqlResult<usize> {
+    fn open_cursor(&mut self, variable: &str) -> SqlResult<usize> {
         let index = self.cursor_variable(variable)?;
         let Value::Text(portal) = &self.frame.variables[index].value else {
             return Err(SqlError::new(
@@ -2152,15 +2338,36 @@ impl<'r> Run<'r> {
                 format!("cursor variable \"{variable}\" is null"),
             ));
         };
-        self.cursors
+        if let Some(at) = self
+            .cursors
             .iter()
             .position(|cursor| &cursor.name == portal)
-            .ok_or_else(|| {
-                SqlError::new(
-                    SqlState::INVALID_CURSOR_NAME,
-                    format!("cursor \"{portal}\" does not exist"),
-                )
-            })
+        {
+            return Ok(at);
+        }
+        if self.oracle {
+            return Err(SqlError::new(
+                SqlState::INVALID_CURSOR_NAME,
+                format!("cursor \"{portal}\" does not exist"),
+            ));
+        }
+        let Some(adopted) = crate::portals::adopt(portal) else {
+            return Err(SqlError::new(
+                SqlState::INVALID_CURSOR_NAME,
+                format!("cursor \"{portal}\" does not exist"),
+            ));
+        };
+        self.cursors.push(OpenCursor::from_portal(adopted));
+        Ok(self.cursors.len() - 1)
+    }
+
+    fn hand_over_cursors(&mut self) {
+        if self.oracle || self.dialect() != Dialect::PostgreSql {
+            return;
+        }
+        for cursor in self.cursors.drain(..) {
+            crate::portals::hand_over(cursor.into_portal());
+        }
     }
 
     fn cursor_target(&mut self, at: usize, direction: &FetchDirection) -> SqlResult<usize> {

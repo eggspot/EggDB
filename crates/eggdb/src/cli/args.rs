@@ -11,6 +11,7 @@ const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
 const MOST_TIME_LIMIT_SECONDS: u64 = 300;
 const MOST_CALL_GAP_MS: u64 = 10_000;
+const MOST_BUSY_TIMEOUT_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandName {
@@ -186,9 +187,11 @@ impl CommandName {
 
     fn takes(self, option: OptionName) -> bool {
         match option {
-            OptionName::Cache | OptionName::KeyFile | OptionName::Help | OptionName::Version => {
-                true
-            }
+            OptionName::Cache
+            | OptionName::BusyTimeout
+            | OptionName::KeyFile
+            | OptionName::Help
+            | OptionName::Version => true,
             OptionName::Color => true,
             OptionName::Format | OptionName::Json => {
                 !matches!(self, Self::Ui | Self::Shell | Self::Mcp)
@@ -243,6 +246,7 @@ impl CommandName {
             | OptionName::User
             | OptionName::Database
             | OptionName::MaxConnections
+            | OptionName::IdleTimeout
             | OptionName::SocketDir
             | OptionName::MysqlSocket
             | OptionName::TlsCertificate
@@ -251,7 +255,11 @@ impl CommandName {
             | OptionName::TlsSelfSigned
             | OptionName::TlsMinVersion => self == Self::Serve,
             OptionName::PasswordFile => matches!(self, Self::Serve | Self::Follow),
-            OptionName::Publication | OptionName::Poll | OptionName::Until => self == Self::Follow,
+            OptionName::Publication
+            | OptionName::Poll
+            | OptionName::ReconnectFor
+            | OptionName::Until
+            | OptionName::Changes => self == Self::Follow,
             OptionName::Command => matches!(self, Self::Sql | Self::Shell | Self::Explain),
             OptionName::Dialect => matches!(
                 self,
@@ -272,7 +280,10 @@ impl CommandName {
             | OptionName::Delimiter
             | OptionName::Null
             | OptionName::RowTerminator
-            | OptionName::KeepNulls => self == Self::Import,
+            | OptionName::KeepNulls
+            | OptionName::Unicode
+            | OptionName::Native
+            | OptionName::FormatFile => self == Self::Import,
             OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table | Self::Row),
             OptionName::After => matches!(self, Self::Table | Self::Row),
             OptionName::Schema => matches!(self, Self::Table | Self::Follow),
@@ -360,6 +371,7 @@ enum OptionName {
     Json,
     Color,
     Cache,
+    BusyTimeout,
     KeyFile,
     Help,
     Version,
@@ -412,6 +424,7 @@ enum OptionName {
     PasswordFile,
     Database,
     MaxConnections,
+    IdleTimeout,
     SocketDir,
     MysqlSocket,
     TlsCertificate,
@@ -421,7 +434,9 @@ enum OptionName {
     TlsMinVersion,
     Publication,
     Poll,
+    ReconnectFor,
     Until,
+    Changes,
     KeepGoing,
     Mode,
     Csv,
@@ -434,6 +449,9 @@ enum OptionName {
     Null,
     RowTerminator,
     KeepNulls,
+    Unicode,
+    Native,
+    FormatFile,
     Report,
     At,
     TimeLimit,
@@ -456,6 +474,7 @@ impl OptionName {
             b"json" => Self::Json,
             b"color" => Self::Color,
             b"cache" => Self::Cache,
+            b"busy-timeout" => Self::BusyTimeout,
             b"key-file" => Self::KeyFile,
             b"help" => Self::Help,
             b"version" => Self::Version,
@@ -508,6 +527,7 @@ impl OptionName {
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
+            b"idle-timeout" => Self::IdleTimeout,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
             b"tls-certificate" => Self::TlsCertificate,
@@ -517,7 +537,9 @@ impl OptionName {
             b"tls-min-version" => Self::TlsMinVersion,
             b"publication" => Self::Publication,
             b"poll" => Self::Poll,
+            b"reconnect-for" => Self::ReconnectFor,
             b"until" => Self::Until,
+            b"changes" => Self::Changes,
             b"keep-going" => Self::KeepGoing,
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
@@ -530,6 +552,9 @@ impl OptionName {
             b"null" => Self::Null,
             b"row-terminator" => Self::RowTerminator,
             b"keep-nulls" => Self::KeepNulls,
+            b"unicode" => Self::Unicode,
+            b"native" => Self::Native,
+            b"format-file" => Self::FormatFile,
             b"report" => Self::Report,
             b"at" => Self::At,
             b"time-limit" => Self::TimeLimit,
@@ -580,6 +605,8 @@ impl OptionName {
                 | Self::KeepGoing
                 | Self::Header
                 | Self::KeepNulls
+                | Self::Unicode
+                | Self::Native
                 | Self::AllowWrite
                 | Self::LogBatches
                 | Self::TlsSelfSigned
@@ -593,7 +620,6 @@ impl OptionName {
 pub(crate) enum Invocation {
     Help(Option<CommandName>),
     HelpJson(Option<CommandName>, Option<&'static str>),
-    NoArguments,
     Version,
     VersionJson,
     Run(Box<Request>),
@@ -638,6 +664,7 @@ pub(crate) struct Request {
     pub(crate) format: Option<Format>,
     pub(crate) color: ColorChoice,
     pub(crate) cache_bytes: Option<usize>,
+    pub(crate) busy_timeout_ms: Option<u64>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) page_size: Option<usize>,
     pub(crate) create: bool,
@@ -695,7 +722,15 @@ pub(crate) struct FollowOptions {
     pub(crate) schemas: Vec<String>,
     pub(crate) publication: Option<String>,
     pub(crate) poll_seconds: Option<u64>,
+    pub(crate) reconnect_seconds: Option<u64>,
     pub(crate) until_caught_up: bool,
+    pub(crate) sql_server_changes: Option<SqlServerChanges>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqlServerChanges {
+    ChangeDataCapture,
+    ChangeTracking,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -707,6 +742,9 @@ pub(crate) struct CsvOptions {
     pub(crate) null: Option<String>,
     pub(crate) row_terminator: Option<String>,
     pub(crate) keep_nulls: bool,
+    pub(crate) unicode: bool,
+    pub(crate) native: bool,
+    pub(crate) format_file: Option<PathBuf>,
     pub(crate) parquet: Option<PathBuf>,
     pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
@@ -779,6 +817,7 @@ pub(crate) struct ServeOptions {
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
     pub(crate) max_connections: Option<usize>,
+    pub(crate) idle_timeout_seconds: Option<u64>,
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
     pub(crate) tls_certificate: Option<PathBuf>,
@@ -861,7 +900,7 @@ fn asks_for_json(tokens: &Tokens<'_>) -> bool {
 
 pub(crate) fn parse(args: &[OsString]) -> Result<Invocation, Failure> {
     if args.is_empty() {
-        return Ok(Invocation::NoArguments);
+        return Ok(Invocation::Help(None));
     }
     let tokens = tokenize(args);
     let first = tokens
@@ -1051,6 +1090,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         format: None,
         color: ColorChoice::Auto,
         cache_bytes: None,
+        busy_timeout_ms: None,
         encryption_key: None,
         page_size: None,
         create: false,
@@ -1108,6 +1148,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Color => request.color = parse_color(value).map_err(usage)?,
             OptionName::Cache => {
                 request.cache_bytes = Some(parse_size(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::BusyTimeout => {
+                request.busy_timeout_ms = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|milliseconds| *milliseconds <= MOST_BUSY_TIMEOUT_MS)
+                        .ok_or_else(|| {
+                            usage(format!(
+                                "{} must be a whole number of milliseconds from 0 to {MOST_BUSY_TIMEOUT_MS}, not '{}'",
+                                option.spelled,
+                                shown(value)
+                            ))
+                        })?,
+                );
             }
             OptionName::KeyFile => {
                 request.encryption_key = Some(read_key_file(value).map_err(usage)?);
@@ -1325,7 +1378,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::SocketDir | OptionName::MysqlSocket => {
                 if !eggdb_platform::local_socket::LOCAL_SOCKETS_SUPPORTED {
                     return Err(usage(format!(
-                        "{} is not available on Windows yet; connect over --listen instead",
+                        "{} is not available on this OS; connect over --listen instead",
                         option.spelled
                     )));
                 }
@@ -1366,6 +1419,16 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     })?;
                 request.serve.max_connections = Some(count);
             }
+            OptionName::IdleTimeout => {
+                let seconds = parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
+                    usage(format!(
+                        "{} needs a whole number of seconds, 0 for none, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    ))
+                })?;
+                request.serve.idle_timeout_seconds = Some(seconds);
+            }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
             OptionName::Arrow => request.csv.arrow = Some(PathBuf::from(value)),
@@ -1387,6 +1450,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Header => request.csv.header = true,
             OptionName::KeepNulls => request.csv.keep_nulls = true,
+            OptionName::Unicode => request.csv.unicode = true,
+            OptionName::Native => request.csv.native = true,
+            OptionName::FormatFile => request.csv.format_file = Some(PathBuf::from(value)),
             OptionName::Table
             | OptionName::Delimiter
             | OptionName::Null
@@ -1475,6 +1541,16 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     })?;
                 request.follow.poll_seconds = Some(seconds);
             }
+            OptionName::ReconnectFor => {
+                let seconds = parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
+                    usage(format!(
+                        "{} needs a whole number of seconds (0 to stop at the first lost connection), not {}",
+                        option.spelled,
+                        shown(value)
+                    ))
+                })?;
+                request.follow.reconnect_seconds = Some(seconds);
+            }
             OptionName::Until => {
                 if value.as_encoded_bytes() != b"caught-up" {
                     return Err(usage(format!(
@@ -1485,6 +1561,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 }
                 request.follow.until_caught_up = true;
             }
+            OptionName::Changes => {
+                request.follow.sql_server_changes = Some(match value.as_encoded_bytes() {
+                    b"cdc" => SqlServerChanges::ChangeDataCapture,
+                    b"change-tracking" => SqlServerChanges::ChangeTracking,
+                    _ => {
+                        return Err(usage(format!(
+                            "{} takes cdc or change-tracking, not {}",
+                            option.spelled,
+                            shown(value)
+                        )));
+                    }
+                });
+            }
             OptionName::IfAbsent => request.swap.if_absent = true,
             OptionName::Delete => request.swap.delete = true,
             OptionName::Help | OptionName::Version => {}
@@ -1493,12 +1582,6 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if request.scan.prefix.is_some() && (request.scan.from.is_some() || request.scan.to.is_some()) {
         return Err(usage(
             "--prefix cannot be combined with --from or --to".to_owned(),
-        ));
-    }
-    if request.allow_write && !request.tables.is_empty() {
-        return Err(usage(
-            "--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table"
-                .to_owned(),
         ));
     }
     let arguments = &tokens.positionals[1..];
@@ -1950,6 +2033,9 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             (csv.null.is_some(), "--null"),
             (csv.row_terminator.is_some(), "--row-terminator"),
             (csv.keep_nulls, "--keep-nulls"),
+            (csv.unicode, "--unicode"),
+            (csv.native, "--native"),
+            (csv.format_file.is_some(), "--format-file"),
         ];
         if let Some((_, option)) = given.iter().find(|(given, _)| *given) {
             return Err(format!("{option} goes with --csv <file>"));
@@ -1988,6 +2074,27 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     if !bcp && (csv.row_terminator.is_some() || csv.keep_nulls) {
         return Err(
             "--row-terminator and --keep-nulls are for bcp character files, with --dialect sqlserver"
+                .to_owned(),
+        );
+    }
+    let layouts = [csv.unicode, csv.native, csv.format_file.is_some()];
+    if !bcp && layouts.contains(&true) {
+        return Err(
+            "--unicode, --native and --format-file are for bcp data files, with --dialect sqlserver"
+                .to_owned(),
+        );
+    }
+    if layouts.iter().filter(|given| **given).count() > 1 {
+        return Err(
+            "give one of --unicode (bcp -w), --native (bcp -n) or --format-file (bcp -f)"
+                .to_owned(),
+        );
+    }
+    if (csv.native || csv.format_file.is_some())
+        && (csv.delimiter.is_some() || csv.row_terminator.is_some())
+    {
+        return Err(
+            "--delimiter and --row-terminator are for character files; a native file has none, and a format file names its own"
                 .to_owned(),
         );
     }
@@ -2336,6 +2443,9 @@ mod tests {
         assert_eq!(limited.tables, vec!["users", "orders", "archive.orders"]);
         assert_eq!(limited.call_gap_ms, Some(250));
         assert!(!limited.allow_write);
+        let writing = request("mcp app.db --allow-write --tables users,orders");
+        assert!(writing.allow_write);
+        assert_eq!(writing.tables, vec!["users", "orders"]);
         let plain = request("mcp app.db");
         assert!(plain.tables.is_empty());
         assert_eq!(plain.call_gap_ms, None);
@@ -2347,11 +2457,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_refuses_tables_with_writes_and_malformed_names_and_gaps() {
-        assert_eq!(
-            usage_message("mcp app.db --allow-write --tables users"),
-            "--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table"
-        );
+    fn mcp_refuses_malformed_names_and_gaps() {
         assert_eq!(
             usage_message("mcp app.db --tables users,,orders"),
             "--tables has an empty name in 'users,,orders'"
@@ -2393,6 +2499,9 @@ mod tests {
                 null: Some("NA".into()),
                 row_terminator: None,
                 keep_nulls: false,
+                unicode: false,
+                native: false,
+                format_file: None,
                 parquet: None,
                 arrow: None,
                 sql_dump: None,
@@ -2412,6 +2521,37 @@ mod tests {
             usage_message("import app.db --csv d.csv --table t --keep-nulls")
                 .contains("--dialect sqlserver")
         );
+        let native =
+            request("import --dialect sqlserver app.db --csv items.bcp --table t --native");
+        assert!(native.csv.native && !native.csv.unicode);
+        let formatted = request(
+            "import --dialect sqlserver app.db --csv items.bcp --table t --format-file items.fmt",
+        );
+        assert_eq!(formatted.csv.format_file, Some(PathBuf::from("items.fmt")));
+        assert!(
+            request(
+                "import --dialect sqlserver app.db --csv w.dat --table t --unicode --delimiter ,"
+            )
+            .csv
+            .unicode
+        );
+        for (line, mentions) in [
+            (
+                "import app.db --csv d.csv --table t --unicode",
+                "--dialect sqlserver",
+            ),
+            (
+                "import --dialect sqlserver app.db --csv d --table t --native --unicode",
+                "one of",
+            ),
+            (
+                "import --dialect sqlserver app.db --csv d --table t --native --delimiter ,",
+                "--delimiter",
+            ),
+            ("import --dialect sqlserver app.db --native", "--csv"),
+        ] {
+            assert!(usage_message(line).contains(mentions), "{line}");
+        }
         assert_eq!(
             request("import app.db --csv - --table t").csv.source,
             Some(ExportFile::Standard)
@@ -2433,8 +2573,8 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_is_its_own_case() {
-        assert_eq!(parse(&[]), Ok(Invocation::NoArguments));
+    fn no_arguments_asks_for_the_main_help() {
+        assert_eq!(parse(&[]), Ok(Invocation::Help(None)));
     }
 
     #[test]
@@ -2499,6 +2639,16 @@ mod tests {
     fn sizes_take_suffixes() {
         assert_eq!(request("get a k --cache 64m").cache_bytes, Some(64 << 20));
         assert_eq!(request("get a k --cache=4096").cache_bytes, Some(4096));
+        assert_eq!(
+            request("put a k v --busy-timeout 250").busy_timeout_ms,
+            Some(250)
+        );
+        assert_eq!(request("get a k --busy-timeout=0").busy_timeout_ms, Some(0));
+        assert_eq!(request("get a k").busy_timeout_ms, None);
+        assert_eq!(
+            usage_message("put a k v --busy-timeout soon"),
+            "--busy-timeout must be a whole number of milliseconds from 0 to 3600000, not 'soon'"
+        );
         assert_eq!(request("create a --page-size 16k").page_size, Some(16384));
         assert_eq!(
             usage_message("get a k --cache 12q"),

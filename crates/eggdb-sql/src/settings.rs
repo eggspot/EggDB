@@ -338,6 +338,7 @@ pub(crate) struct Settings {
     pub(crate) sqlserver: SqlServerState,
     pub(crate) oracle_user_schema: Option<String>,
     pub(crate) checked_role: Option<String>,
+    pub(crate) login_role: Option<String>,
     pub(crate) database_names: Vec<String>,
 }
 
@@ -350,6 +351,9 @@ pub(crate) struct SqlServerState {
     pub(crate) format_only: bool,
     pub(crate) xact_abort: bool,
     pub(crate) uncommittable: bool,
+    pub(crate) fetch_status: Option<i32>,
+    pub(crate) cursor_rows: i32,
+    pub(crate) cursors: Vec<crate::tsql::CursorState>,
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +396,7 @@ impl Default for Settings {
             sqlserver: SqlServerState::default(),
             oracle_user_schema: None,
             checked_role: None,
+            login_role: None,
             database_names: Vec::new(),
         }
     }

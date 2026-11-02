@@ -1,6 +1,6 @@
-//! Implicit transactions, portals that end with them, `DISCARD ALL`, `CancelRequest` and
-//! Npgsql's type-loading queries, spoken over a real loopback socket by the minimal client in
-//! `common`.
+//! Implicit transactions, portals that end with them, `DISCARD ALL`, Npgsql's reset of a
+//! connection holding prepared statements, `CancelRequest` and Npgsql's type-loading queries,
+//! spoken over a real loopback socket by the minimal client in `common`.
 
 mod common;
 
@@ -187,6 +187,76 @@ fn discard_all_drops_prepared_statements_and_returns_to_the_startup_settings() {
 }
 
 #[test]
+fn npgsqls_reset_for_a_connection_holding_prepared_statements_keeps_them() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    let (mut other, _) = Client::login(server.address);
+    client.send(b'P', &parse("s1", "SELECT 1"));
+    client.send(b'S', b"");
+    assert_eq!(tags(&client.read_until_ready()), "1Z");
+    client.query("SET application_name = 'changed'");
+    client.query("LISTEN jobs");
+    client.query("SELECT pg_advisory_lock(7)");
+    let answer = client.query(
+        "SET SESSION AUTHORIZATION DEFAULT;RESET ALL;CLOSE ALL;UNLISTEN *;\
+         SELECT pg_advisory_unlock_all();DISCARD SEQUENCES;DISCARD TEMP",
+    );
+    let completed: Vec<String> = answer
+        .iter()
+        .filter(|message| message.tag == b'C')
+        .map(|message| message.text())
+        .collect();
+    assert_eq!(
+        completed,
+        [
+            "SET",
+            "RESET",
+            "CLOSE CURSOR ALL",
+            "UNLISTEN",
+            "SELECT 1",
+            "DISCARD SEQUENCES",
+            "DISCARD TEMP"
+        ],
+        "{answer:?}"
+    );
+    assert!(
+        !answer.iter().any(|message| message.tag == b'E'),
+        "{answer:?}"
+    );
+    assert_eq!(ready_status(&answer), b'I');
+    let description = answer
+        .iter()
+        .find(|message| message.tag == b'T')
+        .expect("RowDescription");
+    assert_eq!(
+        description.column_types(),
+        [("pg_advisory_unlock_all".to_owned(), 2278, 0)]
+    );
+    assert!(
+        answer
+            .iter()
+            .any(|message| message.tag == b'S'
+                && message.text().starts_with("application_name\0tests")),
+        "{answer:?}"
+    );
+    let row = answer
+        .iter()
+        .find(|message| message.tag == b'D')
+        .expect("DataRow");
+    assert_eq!(row.raw_row(), [Some(Vec::new())]);
+    let answer = other.query("SELECT pg_try_advisory_lock(7)");
+    let row = answer
+        .iter()
+        .find(|message| message.tag == b'D')
+        .expect("DataRow");
+    assert_eq!(row.row(), [Some("t".to_owned())]);
+    client.send(b'B', &bind("", "s1"));
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    assert_eq!(tags(&client.read_until_ready()), "2DCZ");
+}
+
+#[test]
 fn a_cancel_request_with_the_backend_key_stops_the_running_statement() {
     let server = TestServer::start(8);
     let (mut client, greeting) = Client::login(server.address);
@@ -247,4 +317,69 @@ fn npgsql_type_loading_queries_answer_in_one_round_trip() {
         .expect("_int4");
     assert_eq!(int_array[3].as_deref(), Some("a"));
     assert_eq!(int_array[5].as_deref(), Some("23"));
+}
+
+fn with_committing_procedure(server: &TestServer) -> Client {
+    let mut client = with_table(server);
+    let created = client.query(
+        "CREATE PROCEDURE keep_one() LANGUAGE plpgsql AS $$ BEGIN \
+         INSERT INTO t VALUES (1); COMMIT; INSERT INTO t VALUES (2); INSERT INTO t VALUES (1); \
+         END $$",
+    );
+    assert_eq!(tags(&created), "CZ");
+    client
+}
+
+#[test]
+fn a_call_alone_in_a_query_message_commits_inside_the_procedure() {
+    let server = TestServer::start(8);
+    let mut client = with_committing_procedure(&server);
+    let (mut other, _) = Client::login(server.address);
+    let answer = client.query("CALL keep_one()");
+    assert_eq!(tags(&answer), "EZ");
+    assert_eq!(answer[0].code(), "23505");
+    assert_eq!(ready_status(&answer), b'I');
+    assert_eq!(count(&mut other), "1");
+
+    let answer = client.query("DO $$ BEGIN INSERT INTO t VALUES (7); COMMIT; END $$;");
+    assert_eq!(tags(&answer), "CZ");
+    assert_eq!(count(&mut other), "2");
+}
+
+#[test]
+fn a_call_among_other_statements_of_a_query_message_cannot_commit() {
+    let server = TestServer::start(8);
+    let mut client = with_committing_procedure(&server);
+    let answer = client.query("SELECT 1; CALL keep_one()");
+    assert_eq!(tags(&answer), "TDCEZ");
+    assert_eq!(answer[3].code(), "2D000");
+    assert_eq!(count(&mut client), "0");
+
+    let answer = client.query("DO $$ BEGIN INSERT INTO t VALUES (7); COMMIT; END $$; SELECT 1");
+    assert_eq!(tags(&answer), "EZ");
+    assert_eq!(answer[0].code(), "2D000");
+    assert_eq!(count(&mut client), "0");
+}
+
+#[test]
+fn an_executed_call_commits_inside_the_procedure_unless_the_pipeline_wrote_first() {
+    let server = TestServer::start(8);
+    let mut client = with_committing_procedure(&server);
+    let (mut other, _) = Client::login(server.address);
+    run_in_pipeline(&mut client, "CALL keep_one()");
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12EZ");
+    assert_eq!(answer[2].code(), "23505");
+    assert_eq!(ready_status(&answer), b'I');
+    assert_eq!(count(&mut other), "1");
+
+    assert_eq!(tags(&client.query("DELETE FROM t")), "CZ");
+    run_in_pipeline(&mut client, "INSERT INTO t VALUES (5)");
+    run_in_pipeline(&mut client, "CALL keep_one()");
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12C12EZ");
+    assert_eq!(answer[5].code(), "2D000");
+    assert_eq!(count(&mut other), "0");
 }

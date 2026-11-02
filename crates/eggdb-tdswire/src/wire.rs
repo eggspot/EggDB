@@ -1,4 +1,5 @@
 use crate::tls_transport::TdsTransport;
+use eggdb_platform::connection_limits::{LoginTicket, MemoryBudget, Reservation};
 use eggdb_tls::{SessionInfo, TlsStream};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -16,6 +17,7 @@ pub(crate) const DEFAULT_PACKET_SIZE: usize = 4096;
 const END_OF_MESSAGE: u8 = 0x01;
 const TLS_HANDSHAKE: u8 = 0x16;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const UNBUDGETED_MESSAGE_BYTES: usize = READ_CHUNK_BYTES;
 
 pub(crate) enum TdsStream {
     Plain(TcpStream),
@@ -71,6 +73,7 @@ pub(crate) enum WireError {
     Stopping,
     TimedOut,
     TooLarge,
+    OverBudget,
     Malformed(&'static str),
     Tls,
     Io,
@@ -93,6 +96,9 @@ pub(crate) struct Wire<'a> {
     stream: TdsStream,
     stop: &'a (dyn Fn() -> bool + Sync),
     pub(crate) deadline: Option<Instant>,
+    pub(crate) login: Option<LoginTicket<'a>>,
+    pub(crate) budget: Option<&'a MemoryBudget>,
+    message_reservation: Option<Reservation<'a>>,
     outbox: Vec<u8>,
     pending: Vec<u8>,
     pending_kind: u8,
@@ -116,6 +122,9 @@ impl<'a> Wire<'a> {
             stream: TdsStream::Plain(stream),
             stop,
             deadline,
+            login: None,
+            budget: None,
+            message_reservation: None,
             outbox: Vec::new(),
             pending: Vec::new(),
             pending_kind: 0,
@@ -129,6 +138,9 @@ impl<'a> Wire<'a> {
     fn next_wait(&self) -> Result<Duration, WireError> {
         if (self.stop)() {
             return Err(WireError::Stopping);
+        }
+        if self.login.as_ref().is_some_and(LoginTicket::is_evicted) {
+            return Err(WireError::TimedOut);
         }
         match self.deadline {
             None => Ok(POLL_INTERVAL),
@@ -242,6 +254,10 @@ impl<'a> Wire<'a> {
         if body.len().saturating_add(payload) > limit {
             return Err(WireError::TooLarge);
         }
+        if first {
+            self.message_reservation = None;
+        }
+        self.reserve_message(body.len().saturating_add(payload))?;
         let mut read = 0;
         while read < payload {
             let chunk = (payload - read).min(READ_CHUNK_BYTES);
@@ -353,6 +369,36 @@ impl<'a> Wire<'a> {
             .tcp()
             .and_then(|stream| stream.peer_addr().ok())
             .map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string())
+    }
+
+    /// Gives back the memory budget a large message held, once the message is handled.
+    pub(crate) fn release_message_reservation(&mut self) {
+        self.message_reservation = None;
+    }
+
+    fn reserve_message(&mut self, total: usize) -> Result<(), WireError> {
+        let Some(budget) = self.budget else {
+            return Ok(());
+        };
+        if total <= UNBUDGETED_MESSAGE_BYTES {
+            return Ok(());
+        }
+        let reserved = match &mut self.message_reservation {
+            Some(reservation) => reservation.resize(total),
+            None => {
+                self.message_reservation = budget.reserve(total);
+                self.message_reservation.is_some()
+            }
+        };
+        if reserved {
+            Ok(())
+        } else {
+            Err(WireError::OverBudget)
+        }
+    }
+
+    pub(crate) fn socket(&self) -> Option<std::net::TcpStream> {
+        self.stream.tcp().and_then(|stream| stream.try_clone().ok())
     }
 
     pub(crate) fn peer_is_loopback(&self) -> bool {

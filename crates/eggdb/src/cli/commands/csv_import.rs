@@ -7,7 +7,10 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject};
 use eggdb::Database;
 use eggdb::sql::Store as DatabaseStore;
-use eggdb_sql::{BcpCharacterReader, BcpTerminators, Dialect, QueryResult, SqlResult};
+use eggdb_sql::{
+    BcpCharacterReader, BcpFileReader, BcpFormat, BcpTerminators, BcpUnicodeInput, BulkRows,
+    Dialect, QueryResult, SqlResult,
+};
 use std::cell::Cell;
 use std::fs::File;
 use std::io::Read;
@@ -26,22 +29,58 @@ fn loaded_rows(result: &QueryResult) -> u64 {
         .unwrap_or(0)
 }
 
-fn load_bcp(
-    session: &mut eggdb_sql::Session<'_>,
-    statement: &str,
-    input: &mut dyn Read,
-    terminators: BcpTerminators,
-    options: &CsvOptions,
-) -> SqlResult<u64> {
-    session.execute(statement, &mut |_| {})?;
-    let mut reader =
-        BcpCharacterReader::new(input, terminators).skipping(u64::from(options.header));
+enum BcpLayout {
+    Character(BcpTerminators),
+    Unicode(BcpTerminators),
+    Native,
+    FormatFile(BcpFormat),
+}
+
+fn bulk_load_rows(session: &mut eggdb_sql::Session<'_>, rows: &mut dyn BulkRows) -> SqlResult<u64> {
     let mut loaded: SqlResult<u64> = Ok(0);
-    session.execute_bulk_load(&mut reader, &mut |step| {
+    session.execute_bulk_load(rows, &mut |step| {
         loaded = step.outcome.as_ref().map(loaded_rows).map_err(Clone::clone);
         true
     })?;
     loaded
+}
+
+fn load_bcp(
+    session: &mut eggdb_sql::Session<'_>,
+    statement: &str,
+    input: &mut dyn Read,
+    layout: BcpLayout,
+    options: &CsvOptions,
+) -> SqlResult<u64> {
+    session.execute(statement, &mut |_| {})?;
+    let skipped = u64::from(options.header);
+    match layout {
+        BcpLayout::Character(terminators) => bulk_load_rows(
+            session,
+            &mut BcpCharacterReader::new(input, terminators).skipping(skipped),
+        ),
+        BcpLayout::Unicode(terminators) => {
+            let mut decoded = BcpUnicodeInput::new(input);
+            bulk_load_rows(
+                session,
+                &mut BcpCharacterReader::new(&mut decoded, terminators).skipping(skipped),
+            )
+        }
+        BcpLayout::Native => {
+            bulk_load_rows(session, &mut BcpFileReader::native(input).skipping(skipped))
+        }
+        BcpLayout::FormatFile(format) => bulk_load_rows(
+            session,
+            &mut BcpFileReader::new(input, format).skipping(skipped),
+        ),
+    }
+}
+
+fn read_format_file(path: &Path) -> Result<BcpFormat, String> {
+    let shown = shown_path(path);
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read --format-file {shown}: {error}"))?;
+    BcpFormat::parse(&text).map_err(|error| format!("--format-file {shown}: {}", error.message()))
 }
 
 fn is_one_name(text: &str) -> bool {
@@ -87,16 +126,25 @@ impl Session<'_> {
             ExportFile::Standard => (None, 0, "stdin".to_owned()),
         };
         let bcp = self.request.dialect == Dialect::SqlServer;
-        let terminators = if bcp {
-            Some(
-                BcpTerminators::written(
-                    options.delimiter.as_deref(),
-                    options.row_terminator.as_deref(),
-                )
-                .map_err(|error| usage(error.message().to_owned()))?,
-            )
-        } else {
+        let layout = if !bcp {
             None
+        } else if let Some(path) = &options.format_file {
+            Some(BcpLayout::FormatFile(
+                read_format_file(path).map_err(usage)?,
+            ))
+        } else if options.native {
+            Some(BcpLayout::Native)
+        } else {
+            let terminators = BcpTerminators::written(
+                options.delimiter.as_deref(),
+                options.row_terminator.as_deref(),
+            )
+            .map_err(|error| usage(error.message().to_owned()))?;
+            Some(if options.unicode {
+                BcpLayout::Unicode(terminators)
+            } else {
+                BcpLayout::Character(terminators)
+            })
         };
         let mut copy_options = vec!["FORMAT csv".to_owned()];
         if options.header {
@@ -144,8 +192,8 @@ impl Session<'_> {
                 Some(file) => file,
                 None => &mut *self.stdin,
             };
-            if let Some(terminators) = terminators {
-                load_bcp(&mut session, &sql, input, terminators, &options).map(|count| {
+            if let Some(layout) = layout {
+                load_bcp(&mut session, &sql, input, layout, &options).map(|count| {
                     rows = count;
                 })
             } else {

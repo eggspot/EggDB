@@ -336,7 +336,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA app GRANT SELECT ON TABLES 
         code(&mut session, "CREATE MATERIALIZED VIEW m AS SELECT 1"),
         "3F000"
     );
-    assert_eq!(code(&mut session, "CREATE EXTENSION hstore"), "0A000");
+    assert_eq!(code(&mut session, "CREATE EXTENSION ltree"), "0A000");
 }
 
 #[test]

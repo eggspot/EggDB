@@ -1,5 +1,7 @@
 mod constraints;
 mod copy;
+mod cursors;
+mod databases;
 mod indexes;
 mod merge;
 mod mysql;
@@ -8,6 +10,7 @@ mod oracle;
 mod partitions;
 mod plpgsql;
 mod plsql;
+mod plsql_goto;
 mod plsql_primary;
 mod plsql_routines;
 mod plsql_triggers;
@@ -221,6 +224,8 @@ fn is_postgresql_only(name: &str) -> bool {
         || crate::regexp_functions::FUNCTIONS.contains(&name)
         || crate::json_functions::FUNCTIONS.contains(&name)
         || crate::json_functions::SET_RETURNING.contains(&name)
+        || crate::json_path::FUNCTIONS.contains(&name)
+        || crate::json_path::SET_RETURNING.contains(&name)
         || crate::temporal::CONSTRUCTORS.contains(&name)
 }
 
@@ -296,6 +301,7 @@ pub(crate) struct Parser<'t> {
     declared_tables: Vec<String>,
     variables_read: Vec<String>,
     select_targets: Option<Vec<(crate::ast::AssignmentTarget, Vec<String>)>>,
+    assigned_per_row: Option<String>,
     select_windows: Option<Vec<(String, crate::window::WindowDefinition)>>,
     trigger_frame: Option<&'t crate::triggers::TriggerFrame>,
     routine_frame: Option<&'t crate::plpgsql::RoutineFrame>,
@@ -419,6 +425,7 @@ impl<'t> Parser<'t> {
             declared_tables: Vec::new(),
             variables_read: Vec::new(),
             select_targets: None,
+            assigned_per_row: None,
             select_windows: None,
             trigger_frame: None,
             routine_frame: None,
@@ -611,7 +618,9 @@ impl<'t> Parser<'t> {
             TokenKind::End => Ok(statement),
             TokenKind::Word(word)
                 if self.sqlserver()
-                    && (sqlserver::starts_statement(word) || sqlserver::ends_a_block(word)) =>
+                    && (sqlserver::starts_statement(word)
+                        || sqlserver::ends_a_block(word)
+                        || self.at_label()) =>
             {
                 Ok(statement)
             }
@@ -914,6 +923,9 @@ impl<'t> Parser<'t> {
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
             "deallocate" if self.postgresql() => self.deallocate(),
+            "declare" if self.postgresql() => self.declare_cursor(),
+            "fetch" | "move" if self.postgresql() => self.fetch_cursor(),
+            "close" if self.postgresql() => self.close_cursor(),
             "lock" if self.postgresql() || self.oracle() => self.lock_table(),
             "listen" if self.postgresql() => {
                 self.at += 1;
@@ -1031,7 +1043,7 @@ impl<'t> Parser<'t> {
         if self.is_word("local") {
             return Err(self.not_supported("SET LOCAL"));
         }
-        let _ = self.take_word("session");
+        let session = self.take_word("session");
         if self.is_word("characteristics") || self.is_word("transaction") {
             return self.set_transaction();
         }
@@ -1040,6 +1052,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("constraints") {
             return self.set_constraints();
+        }
+        if session && self.postgresql() && self.is_word("authorization") {
+            return self.set_session_authorization();
         }
         if self.is_word("authorization") || self.is_word("constraints") {
             return Err(self.not_supported(&format!(
@@ -1095,13 +1110,42 @@ impl<'t> Parser<'t> {
             }
             _ => self.name()?.text,
         };
+        self.set_to_the_session_user("SET ROLE", &role, position)
+    }
+
+    fn set_session_authorization(&mut self) -> SqlResult<Statement> {
+        self.at += 1;
+        if self.take_word("default") {
+            return Ok(Statement::Ignored {
+                tag: "SET",
+                notice: None,
+            });
+        }
+        let position = self.position();
+        let user = match self.peek_kind() {
+            TokenKind::String(text) => {
+                let text = text.as_ref().to_owned();
+                self.at += 1;
+                text
+            }
+            _ => self.name()?.text,
+        };
+        self.set_to_the_session_user("SET SESSION AUTHORIZATION", &user, position)
+    }
+
+    fn set_to_the_session_user(
+        &self,
+        statement: &str,
+        role: &str,
+        position: usize,
+    ) -> SqlResult<Statement> {
         let user = self
             .settings
             .and_then(|settings| settings.get("session_authorization").ok());
         if user.is_some_and(|user| user != role) {
-            return Err(SqlError::not_supported(
-                "SET ROLE to a role other than the session's user is not supported yet",
-            )
+            return Err(SqlError::not_supported(format!(
+                "{statement} to a role other than the session's user is not supported yet"
+            ))
             .at(position));
         }
         Ok(Statement::Ignored {
@@ -1294,7 +1338,11 @@ impl<'t> Parser<'t> {
         if self.take_word("all") {
             return Ok(Statement::Reset { name: None });
         }
-        if self.take_word("role") {
+        let session_authorization = self.is_word("session") && self.is_word_at(1, "authorization");
+        if session_authorization {
+            self.at += 2;
+        }
+        if session_authorization || self.take_word("role") {
             return Ok(Statement::Ignored {
                 tag: "RESET",
                 notice: None,
@@ -1567,6 +1615,9 @@ impl<'t> Parser<'t> {
         if !self.sqlite() && self.at_role_definition() {
             return self.create_role();
         }
+        if self.at_database_definition() {
+            return self.create_database();
+        }
         if self.postgresql() && self.is_word("policy") {
             return self.create_policy();
         }
@@ -1674,6 +1725,7 @@ impl<'t> Parser<'t> {
             false
         };
         let name = self.table_name()?;
+        let name_start = self.previous_start();
         if self.postgresql() && self.is_word("partition") && self.is_word_at(1, "of") {
             return self.create_partition_of(name, temporary, if_not_exists);
         }
@@ -1812,6 +1864,12 @@ impl<'t> Parser<'t> {
             comment,
             partition_by,
             partition_of: None,
+            sqlite_text: self.sqlite().then(|| {
+                format!(
+                    "CREATE TABLE {}",
+                    self.slice(name_start, self.previous_end())
+                )
+            }),
         }))
     }
 
@@ -2370,6 +2428,7 @@ impl<'t> Parser<'t> {
             },
             "boolean" | "bool" => SqlType::Boolean,
             "text" => SqlType::Text,
+            "refcursor" | "jsonpath" if self.postgresql() => SqlType::Text,
             "varchar" => SqlType::Varchar(self.varchar_length(token.start)?),
             "character" | "char" if self.is_word("varying") => {
                 self.at += 1;
@@ -2508,6 +2567,9 @@ impl<'t> Parser<'t> {
         if !self.sqlite() && self.at_role_definition() {
             return self.drop_role();
         }
+        if self.at_database_definition() {
+            return self.drop_database();
+        }
         if self.postgresql() && self.is_word("policy") {
             return self.drop_policy();
         }
@@ -2597,8 +2659,14 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }
+        if self.oracle() && self.is_word("table") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+            return self.oracle_collection_table();
+        }
         if self.sqlserver() && self.at_openjson() {
             return self.sqlserver_openjson();
+        }
+        if self.sqlserver() && self.at_openrowset_bulk() {
+            return self.sqlserver_openrowset_bulk();
         }
         if self.sqlserver() && self.at_string_split() {
             return self.sqlserver_string_split();
@@ -3191,10 +3259,20 @@ impl<'t> Parser<'t> {
             Some(String::new())
         } else if (self.mysql() || self.sqlite()) && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(self.source_text(first_token))
+        } else if self.is_lone_parameter(first_token) {
+            Some("?column?".to_owned())
         } else {
             None
         };
         Ok(SelectItem::Expr { expr, alias })
+    }
+
+    fn is_lone_parameter(&self, first_token: usize) -> bool {
+        self.at == first_token + 1
+            && matches!(
+                self.tokens.get(first_token).map(|token| &token.kind),
+                Some(TokenKind::Parameter(_))
+            )
     }
 
     fn source_text(&self, first_token: usize) -> String {
@@ -3360,8 +3438,13 @@ impl<'t> Parser<'t> {
         {
             return Some(level);
         }
-        if self.oracle() && self.is_operator("%") {
-            return None;
+        if self.oracle() {
+            if let Some(level) = self.oracle_infix_level() {
+                return Some(level);
+            }
+            if self.is_operator("%") {
+                return None;
+            }
         }
         match self.peek_kind() {
             TokenKind::Word(word) => match word.as_ref() {
@@ -3399,6 +3482,9 @@ impl<'t> Parser<'t> {
     fn infix(&mut self, left: Expr, level: Level) -> SqlResult<Expr> {
         if self.mysql() && self.mysql_infix_level().is_some() {
             return self.mysql_infix(left, level);
+        }
+        if self.oracle() && self.oracle_infix_level().is_some() {
+            return self.oracle_collection_infix(left);
         }
         match level {
             Level::Or => {
@@ -3581,6 +3667,7 @@ impl<'t> Parser<'t> {
             "?|" => BinaryOperator::JsonHasAnyKey,
             "?&" => BinaryOperator::JsonHasAllKeys,
             "#-" => BinaryOperator::JsonDeletePath,
+            "@?" => BinaryOperator::JsonPathExists,
             "@@" => BinaryOperator::TextSearchMatch,
             "<->" if self.postgresql() => BinaryOperator::VectorL2Distance,
             "<=>" if self.postgresql() => BinaryOperator::VectorCosineDistance,

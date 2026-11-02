@@ -74,3 +74,34 @@ END CATCH",
         vec![vec![Some("8134".to_owned()), Some("10".to_owned())]]
     );
 }
+
+#[test]
+fn an_attention_during_a_running_batch_stops_it_and_is_acknowledged_once() {
+    let server = TestServer::start(8);
+    let mut client = Client::login(server.address);
+    let started = std::time::Instant::now();
+    client.send(
+        0x01,
+        &common::batch_body("WAITFOR DELAY '00:00:30'; SELECT 1 AS never"),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    client.send(0x06, &[]);
+    let (_, body) = client.read_message().expect("the cancelled batch's reply");
+    let tokens = common::parse_tokens(&body);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(errors(&tokens).is_empty(), "{tokens:?}");
+    assert!(rows(&tokens).is_empty(), "{tokens:?}");
+    let last_done = tokens.iter().rev().find_map(|token| match token {
+        Token::Done { status, .. } => Some(*status),
+        _ => None,
+    });
+    assert_eq!(
+        last_done.map(|status| status & 0x20),
+        Some(0x20),
+        "{tokens:?}"
+    );
+    assert_eq!(
+        rows(&client.batch("SELECT 2 AS next")),
+        vec![vec![Some("2".to_owned())]]
+    );
+}

@@ -13,13 +13,17 @@ mod run_tests;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use collections::{CollectionShape, bulk_exceptions_shape, bulk_rowcount_shape};
+pub(crate) use collections::{
+    CollectionShape, MAX_COLLECTION_ELEMENTS, bulk_exceptions_shape, bulk_rowcount_shape,
+    too_many_elements,
+};
 pub(crate) use conditions::{condition_name, condition_states};
 pub(crate) use frame::{FrameVariable, RoutineFrame};
 pub(crate) use raise::take_raised_notices;
 pub(crate) use run::{
-    Call, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionEnd, TriggerCall,
-    invoke, local_program, local_routines, run_anonymous_block, run_inline, run_plsql_trigger,
+    Call, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionControl,
+    TransactionEnd, TriggerCall, invoke, invoke_nonatomic, local_program, local_routines,
+    routine_depth, run_anonymous_block, run_inline, run_inline_nonatomic, run_plsql_trigger,
     take_transaction_end,
 };
 pub(crate) use writes::ReadOnlyWrite;
@@ -257,6 +261,8 @@ pub(crate) enum StepKind {
     Rollback {
         chain: bool,
     },
+    Goto(String),
+    Label(String),
     Null,
 }
 
@@ -289,6 +295,8 @@ impl StepKind {
             Self::Close(_) => "CLOSE",
             Self::Commit { .. } => "COMMIT",
             Self::Rollback { .. } => "ROLLBACK",
+            Self::Goto(_) => "GOTO",
+            Self::Label(_) => "label",
             Self::Null => "NULL",
         }
     }
@@ -894,6 +902,8 @@ fn step_expressions<'p>(kind: &'p StepKind, found: &mut Vec<&'p Fragment>) {
         | StepKind::Close(_)
         | StepKind::Commit { .. }
         | StepKind::Rollback { .. }
+        | StepKind::Goto(_)
+        | StepKind::Label(_)
         | StepKind::Null => {}
     }
 }

@@ -9,7 +9,8 @@ use crate::execute::TableCache;
 use crate::lexer::{swap_uniform_case, tokenize};
 use crate::memory::WorkMemory;
 use crate::parser::Parser;
-use crate::session::QueryResult;
+use crate::session::{OutputColumn, QueryResult};
+use crate::set_returning::GeneratedRows;
 use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::cell::RefCell;
@@ -341,6 +342,95 @@ pub(crate) fn every_sequence(
         Some(error) => Err(error),
         None => Ok(found),
     }
+}
+
+const RELATION_COLUMNS: [(&str, SqlType); 3] = [
+    ("last_value", SqlType::BigInt),
+    ("log_cnt", SqlType::BigInt),
+    ("is_called", SqlType::Boolean),
+];
+
+/// Whether `name` is a sequence that a query can read as PostgreSQL's one-row relation:
+/// a stored sequence or the implicit one behind an identity column.
+pub(crate) fn readable_as_relation(reader: &dyn KeyValueRead, name: &str) -> SqlResult<bool> {
+    Ok(relation_state(reader, name)?.is_some())
+}
+
+/// The one row PostgreSQL shows for `SELECT * FROM <sequence>`: `last_value`, `log_cnt`
+/// and `is_called`, which `pg_dump` reads to restore the sequence with `setval`.
+pub(crate) fn relation_rows(
+    reader: &dyn KeyValueRead,
+    name: &str,
+    columns_only: bool,
+) -> SqlResult<GeneratedRows> {
+    let columns: Vec<OutputColumn> = RELATION_COLUMNS
+        .iter()
+        .map(|(column, sql_type)| OutputColumn {
+            name: (*column).to_owned(),
+            sql_type: Some(*sql_type),
+        })
+        .collect();
+    if columns_only {
+        return Ok(GeneratedRows::empty(columns));
+    }
+    let Some((last_value, is_called)) = relation_state(reader, name)? else {
+        return Err(missing_sequence(name, Dialect::PostgreSql));
+    };
+    let row = vec![
+        Value::BigInt(last_value),
+        Value::BigInt(0),
+        Value::Boolean(is_called),
+    ];
+    let mut charge = WorkMemory::new();
+    charge.charge_row(&row)?;
+    Ok(GeneratedRows {
+        columns,
+        rows: vec![row],
+        charge,
+    })
+}
+
+fn relation_state(reader: &dyn KeyValueRead, name: &str) -> SqlResult<Option<(i64, bool)>> {
+    if let Some(sequence) = read(reader, name)? {
+        return Ok(Some((sequence.last_value, sequence.is_called)));
+    }
+    identity_relation_state(reader, name)
+}
+
+fn identity_relation_state(
+    reader: &dyn KeyValueRead,
+    name: &str,
+) -> SqlResult<Option<(i64, bool)>> {
+    let wanted_schema = crate::schemas::schema_of(name);
+    for table in crate::indexes::every_table(reader)? {
+        let schema = crate::schemas::schema_of(&table.name);
+        if schema != wanted_schema {
+            continue;
+        }
+        let base = crate::schemas::base_name(&table.name);
+        for (index, column) in table.columns.iter().enumerate() {
+            if table.identity_of(index).is_none()
+                || crate::schemas::qualified(schema, &implicit_sequence_name(base, &column.name))
+                    != name
+            {
+                continue;
+            }
+            let seed = table.identity_seed();
+            let next = if table.auto_increment_column() == Some(index) {
+                crate::execute::StoredRows::next_identity_value(reader, &table)?
+            } else {
+                None
+            };
+            let state = match next.filter(|next| *next != seed.seed) {
+                Some(next) => next
+                    .checked_sub(seed.increment)
+                    .map_or((seed.seed, false), |last| (last, true)),
+                None => (seed.seed, false),
+            };
+            return Ok(Some(state));
+        }
+    }
+    Ok(None)
 }
 
 fn shown(name: &str, dialect: Dialect) -> String {
@@ -711,6 +801,32 @@ fn missing_or_not_a_sequence(reader: &dyn KeyValueRead, name: &str) -> SqlResult
             missing_sequence(name, Dialect::PostgreSql)
         },
     )
+}
+
+/// The error for an INSERT, UPDATE or DELETE whose target table was not found (`error`):
+/// PostgreSQL's "cannot change sequence" (42809) when `target` names a sequence.
+pub(crate) fn refuse_changing_sequence(
+    reader: &dyn KeyValueRead,
+    target: &Name,
+    error: SqlError,
+) -> SqlError {
+    if error.state() != SqlState::UNDEFINED_TABLE || target.text.is_empty() {
+        return error;
+    }
+    let Ok(name) = sequence_on_path(reader, target.text.clone()) else {
+        return error;
+    };
+    match read(reader, &name) {
+        Ok(Some(_)) => SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            format!(
+                "cannot change sequence \"{}\"",
+                crate::schemas::base_name(&name)
+            ),
+        )
+        .at(target.position),
+        _ => error,
+    }
 }
 
 pub(crate) fn explain_missing(reader: &dyn KeyValueRead, error: SqlError) -> SqlError {
@@ -1328,4 +1444,47 @@ pub(crate) fn reapply(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::memory_store::MemoryStore;
+    use crate::{Session, SqlError};
+
+    fn refusal(session: &mut Session<'_>, sql: &str) -> SqlError {
+        match session.execute(sql, &mut |_| {}) {
+            Ok(()) => panic!("{sql} succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn changing_a_sequence_with_insert_update_or_delete_is_refused_like_postgresql() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        session
+            .execute(
+                "CREATE SEQUENCE counter; CREATE SCHEMA other; CREATE SEQUENCE other.tick",
+                &mut |_| {},
+            )
+            .unwrap();
+        for sql in [
+            "INSERT INTO counter VALUES (1, 1, false)",
+            "UPDATE counter SET last_value = 5",
+            "DELETE FROM counter",
+            "DELETE FROM other.tick",
+        ] {
+            let error = refusal(&mut session, sql);
+            assert_eq!(error.state().code(), "42809", "{sql}");
+            assert!(
+                error.message().starts_with("cannot change sequence \""),
+                "{sql}: {}",
+                error.message()
+            );
+        }
+        assert_eq!(
+            refusal(&mut session, "DELETE FROM missing").state().code(),
+            "42P01"
+        );
+    }
 }

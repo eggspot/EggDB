@@ -467,6 +467,64 @@ impl Parser<'_> {
         ))
     }
 
+    fn cursor_status_value(&self, arguments: &[Expr], position: usize) -> SqlResult<Expr> {
+        let texts: Vec<String> = arguments
+            .iter()
+            .map(|argument| match &argument.kind {
+                ExprKind::Literal(Literal::String(text)) => Ok(text.clone()),
+                ExprKind::Constant {
+                    value: Value::Text(text),
+                    ..
+                } => Ok(text.clone()),
+                _ => Err(not_supported(
+                    "CURSOR_STATUS with arguments that are not text constants or variables",
+                )
+                .at(argument.position)),
+            })
+            .collect::<SqlResult<_>>()?;
+        let (Some(scope), Some(cursor)) = (texts.first(), texts.get(1)) else {
+            return Err(self.unexpected());
+        };
+        let nest_level = self.batch.map_or(0, |batch| batch.nest_level);
+        let status = self.sqlserver_settings(|settings| {
+            crate::tsql::cursor_status(&settings.sqlserver.cursors, scope, cursor, nest_level)
+        });
+        let Some(status) = status else {
+            return Err(crate::tsql::invalid_cursor_scope(scope).at(position));
+        };
+        Ok(Expr {
+            kind: ExprKind::Constant {
+                value: Value::SmallInt(i16::try_from(status).unwrap_or(-3)),
+                sql_type: Some(SqlType::SmallInt),
+            },
+            position,
+        })
+    }
+
+    pub(super) fn procedure_id(&self, position: usize) -> Expr {
+        let procedure = self.batch.and_then(|batch| batch.procedure.clone());
+        let Some(procedure) = procedure else {
+            return Expr {
+                kind: ExprKind::Constant {
+                    value: Value::Integer(0),
+                    sql_type: Some(SqlType::Integer),
+                },
+                position,
+            };
+        };
+        call(
+            Function::Metadata(crate::sqlserver_catalog::MetadataFunction::ObjectId),
+            vec![Expr {
+                kind: ExprKind::Constant {
+                    value: Value::Text(crate::tsql::procedure_object_name(&procedure)),
+                    sql_type: Some(SqlType::Varchar(Some(776))),
+                },
+                position,
+            }],
+            position,
+        )
+    }
+
     fn caught_error_value(&self, function: &str, position: usize) -> Expr {
         let caught = self.batch.and_then(|batch| batch.caught.as_ref());
         let (value, sql_type) = match function {
@@ -474,7 +532,12 @@ impl Parser<'_> {
                 caught.map_or(Value::Null, |error| Value::Text(error.message.clone())),
                 SqlType::Varchar(Some(4000)),
             ),
-            "error_procedure" => (Value::Null, SqlType::Varchar(Some(128))),
+            "error_procedure" => (
+                caught
+                    .and_then(|error| error.procedure.clone())
+                    .map_or(Value::Null, Value::Text),
+                SqlType::Varchar(Some(128)),
+            ),
             number => (
                 caught.map_or(Value::Null, |error| {
                     Value::Integer(match number {
@@ -521,6 +584,10 @@ impl Parser<'_> {
             | "error_procedure" => {
                 self.sqlserver_arguments(name, 0..=0)?;
                 self.caught_error_value(&name.text, position)
+            }
+            "cursor_status" => {
+                let arguments = self.sqlserver_arguments(name, 2..=2)?;
+                self.cursor_status_value(&arguments, position)?
             }
             "xact_state" => {
                 self.sqlserver_arguments(name, 0..=0)?;

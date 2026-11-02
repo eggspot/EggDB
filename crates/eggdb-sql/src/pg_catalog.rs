@@ -10,6 +10,8 @@ mod types;
 #[cfg(test)]
 mod deparse_tests;
 #[cfg(test)]
+mod describe_tests;
+#[cfg(test)]
 mod routine_tests;
 #[cfg(test)]
 mod tests;
@@ -37,7 +39,11 @@ pub(crate) use snapshot::{
     load_for_stored_expressions, load_if_wanted, mentions_catalog, names_non_sequence_relation,
     routine_oid, session_user, snapshot_for, statement_settings, text_needs_catalog,
 };
-pub use types::{CatalogType, RegKind, RegValue};
+pub use types::{CatalogType, PseudoType, RegKind, RegValue};
+
+pub(crate) fn is_extension_type(oid: u32) -> bool {
+    oids::EXTENSION_TYPES.contains(&oid)
+}
 
 /// The type OID PostgreSQL gives `sql_type`, such as 23 for `integer`, 1007 for `integer[]`
 /// and 2205 for `regclass`.
@@ -53,7 +59,7 @@ pub(crate) fn operator_operand_type_name(sql_type: SqlType) -> String {
 
 pub(crate) use types::{
     cast_type_named, check_expression_tree_argument, convert, convert_from, oid_number,
-    parse_input, read_only, reg_value, system_catalog,
+    parse_input, polymorphic_type_named, read_only, reg_value, system_catalog,
 };
 
 pub(crate) fn catalog_reference(
@@ -195,6 +201,7 @@ pub(crate) enum CatalogRelation {
     AuthMembers,
     Settings,
     TimezoneNames,
+    TimezoneAbbrevs,
     Opclass,
     Enum,
     Proc,
@@ -259,7 +266,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const IN_PG_CATALOG: [Self; 31] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 32] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -286,6 +293,7 @@ impl CatalogRelation {
         Self::AuthMembers,
         Self::Settings,
         Self::TimezoneNames,
+        Self::TimezoneAbbrevs,
         Self::Opclass,
         Self::Enum,
         Self::Proc,
@@ -321,6 +329,7 @@ impl CatalogRelation {
             Self::AuthMembers => "pg_auth_members",
             Self::Settings => "pg_settings",
             Self::TimezoneNames => "pg_timezone_names",
+            Self::TimezoneAbbrevs => "pg_timezone_abbrevs",
             Self::Opclass => "pg_opclass",
             Self::Enum => "pg_enum",
             Self::Proc => "pg_proc",
@@ -383,6 +392,7 @@ impl CatalogRelation {
             Self::AuthMembers => 1261,
             Self::Settings => 12001,
             Self::TimezoneNames => 12002,
+            Self::TimezoneAbbrevs => 12003,
             Self::Opclass => 2616,
             Self::Enum => 3501,
             Self::Proc => 1255,
@@ -404,6 +414,7 @@ impl CatalogRelation {
             Self::Roles
                 | Self::Settings
                 | Self::TimezoneNames
+                | Self::TimezoneAbbrevs
                 | Self::Information(_)
                 | Self::MySql(_)
                 | Self::SqlServer(_)
@@ -456,6 +467,7 @@ impl CatalogRelation {
             Self::Roles => &ROLES_COLUMNS,
             Self::Settings => &SETTINGS_COLUMNS,
             Self::TimezoneNames => &TIMEZONE_NAMES_COLUMNS,
+            Self::TimezoneAbbrevs => &TIMEZONE_ABBREVS_COLUMNS,
             Self::Opclass => &OPCLASS_COLUMNS,
             Self::Enum => &ENUM_COLUMNS,
             Self::Proc => &PROC_COLUMNS,
@@ -832,6 +844,18 @@ const ROLES_COLUMNS: [CatalogColumn; 13] = [
 
 const TIMEZONE_NAMES_COLUMNS: [CatalogColumn; 4] = [
     column("name", SqlType::Text),
+    column("abbrev", SqlType::Text),
+    column(
+        "utc_offset",
+        SqlType::Interval {
+            fields: None,
+            precision: None,
+        },
+    ),
+    column("is_dst", SqlType::Boolean),
+];
+
+const TIMEZONE_ABBREVS_COLUMNS: [CatalogColumn; 3] = [
     column("abbrev", SqlType::Text),
     column(
         "utc_offset",

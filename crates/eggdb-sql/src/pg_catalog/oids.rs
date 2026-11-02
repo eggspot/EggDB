@@ -47,6 +47,7 @@ const BYTEA_TYPE: u32 = 17;
 const OID_TYPE: u32 = 26;
 const INT4_TYPE: u32 = 23;
 const ANY_ARRAY_TYPE: u32 = 2277;
+const VOID_TYPE: u32 = 2278;
 const CSTRING_TYPE: u32 = 2275;
 const INTERNAL_TYPE: u32 = 2281;
 
@@ -107,7 +108,7 @@ pub(crate) struct BuiltinType {
     pub(crate) collation: u32,
 }
 
-pub(crate) const BUILTIN_TYPES: [BuiltinType; 66] = [
+pub(crate) const BUILTIN_TYPES: [BuiltinType; 77] = [
     BuiltinType {
         oid: 16,
         typname: "bool",
@@ -979,6 +980,51 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 66] = [
         collation: 0,
     },
     BuiltinType {
+        oid: VOID_TYPE,
+        typname: "void",
+        shown: "void",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 2283,
+        typname: "anyelement",
+        shown: "anyelement",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 2776,
+        typname: "anynonarray",
+        shown: "anynonarray",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
+        collation: 0,
+    },
+    BuiltinType {
         oid: 2950,
         typname: "uuid",
         shown: "uuid",
@@ -1006,6 +1052,21 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 66] = [
         array: 0,
         align: 'i',
         storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 3500,
+        typname: "anyenum",
+        shown: "anyenum",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
         collation: 0,
     },
     BuiltinType {
@@ -1098,7 +1159,114 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 66] = [
         storage: 'x',
         collation: 0,
     },
+    BuiltinType {
+        oid: 5077,
+        typname: "anycompatible",
+        shown: "anycompatible",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 5078,
+        typname: "anycompatiblearray",
+        shown: "anycompatiblearray",
+        length: -1,
+        by_value: false,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'd',
+        storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 5079,
+        typname: "anycompatiblenonarray",
+        shown: "anycompatiblenonarray",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 9000,
+        typname: "citext",
+        shown: "citext",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'S',
+        preferred: false,
+        element: 0,
+        array: 9001,
+        align: 'i',
+        storage: 'x',
+        collation: 100,
+    },
+    BuiltinType {
+        oid: 9001,
+        typname: "_citext",
+        shown: "citext[]",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'A',
+        preferred: false,
+        element: 9000,
+        array: 0,
+        align: 'i',
+        storage: 'x',
+        collation: 100,
+    },
+    BuiltinType {
+        oid: 9002,
+        typname: "hstore",
+        shown: "hstore",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'U',
+        preferred: false,
+        element: 0,
+        array: 9003,
+        align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 9003,
+        typname: "_hstore",
+        shown: "hstore[]",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'A',
+        preferred: false,
+        element: 9002,
+        array: 0,
+        align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
 ];
+
+pub(crate) const EXTENSION_TYPES: [u32; 4] = [9000, 9001, 9002, 9003];
 
 pub(crate) fn builtin_type(oid: u32) -> Option<&'static BuiltinType> {
     BUILTIN_TYPES
@@ -1158,6 +1326,8 @@ fn catalog_type_oid(kind: CatalogType) -> u32 {
         CatalogType::Xid => 28,
         CatalogType::AclItem => 1033,
         CatalogType::AnyArray => 2277,
+        CatalogType::Pseudo(pseudo) => pseudo.oid(),
+        CatalogType::Void => VOID_TYPE,
         CatalogType::Reg(RegKind::Class) => 2205,
         CatalogType::Reg(RegKind::Type) => 2206,
         CatalogType::Reg(RegKind::Namespace) => 4089,
@@ -1384,4 +1554,26 @@ pub(crate) fn assign(space: Space, requests: &[OidRequest]) -> Vec<u32> {
         assigned[index] = oid;
     }
     assigned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUILTIN_TYPES, builtin_type};
+
+    #[test]
+    fn builtin_types_are_sorted_by_oid_for_binary_search() {
+        assert!(
+            BUILTIN_TYPES
+                .windows(2)
+                .all(|pair| matches!(pair, [first, second] if first.oid < second.oid))
+        );
+    }
+
+    #[test]
+    fn every_builtin_type_is_found_by_its_oid() {
+        for expected in &BUILTIN_TYPES {
+            let found = builtin_type(expected.oid).map(|found| found.typname);
+            assert_eq!(found, Some(expected.typname));
+        }
+    }
 }

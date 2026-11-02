@@ -7,11 +7,13 @@ use crate::packets::{
     TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
     err_packet, is_ssl_request, ok_packet, parse_command, parse_execute, parse_handshake_response,
 };
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared, take_slot};
+use crate::server::{Shared, take_slot};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
+use eggdb_platform::connection_limits::LoginTicket;
 use eggdb_sql::{
-    Dialect, KeyValueStore, MYSQL_COMPATIBLE_VERSION, OutputColumn, Parameter, QueryResult,
-    Session, SqlError, SqlType, TransactionStatus, Value,
+    DatabaseDirectory, DatabaseSwitch, Dialect, KeyValueStore, MYSQL_COMPATIBLE_VERSION,
+    OutputColumn, Parameter, QueryResult, Session, SqlError, SqlState, SqlType, TransactionStatus,
+    Value,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -122,6 +124,12 @@ fn report_wire_error(wire: &mut Wire<'_>, error: &WireError) {
         ),
         WireError::OutOfOrder => refuse(wire, 1156, "08S01", "Got packets out of order"),
         WireError::TimedOut => refuse(wire, 1043, "08S01", "Bad handshake: timed out"),
+        WireError::OverBudget => refuse(
+            wire,
+            1041,
+            "HY000",
+            "Out of memory: the server's connections already hold their memory budget",
+        ),
         WireError::Closed | WireError::Stopping | WireError::Io => {}
     }
 }
@@ -228,11 +236,26 @@ struct Connection<'a, 's, S: KeyValueStore + 's> {
     store: &'s S,
     session: Session<'s>,
     user: String,
+    database: String,
     connection_id: u32,
     capabilities: u32,
     multi_statements: bool,
     statements: HashMap<u32, Prepared>,
     next_statement: u32,
+}
+
+struct Carried<'a> {
+    wire: Wire<'a>,
+    user: String,
+    capabilities: u32,
+    multi_statements: bool,
+    statements: HashMap<u32, Prepared>,
+    next_statement: u32,
+}
+
+enum Exit {
+    Closed,
+    Switch { database: String, reply: bool },
 }
 
 fn new_session<'s, S: KeyValueStore + 's>(
@@ -247,22 +270,14 @@ fn new_session<'s, S: KeyValueStore + 's>(
     session
 }
 
-pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
+pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     mut wire: Wire<'a>,
     shared: &'a Shared<'a>,
-    store: &'s S,
+    directory: &D,
     connection_id: u32,
+    login: LoginTicket<'a>,
 ) {
-    let Some(login_slot) = take_slot(&shared.unauthenticated, MAX_UNAUTHENTICATED_CONNECTIONS)
-    else {
-        (shared.log)(&format!(
-            "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
-            wire.peer()
-        ));
-        wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
-        refuse_too_many(&mut wire);
-        return;
-    };
+    wire.login = Some(login);
     let Some(nonce) = fresh_nonce() else {
         refuse(
             &mut wire,
@@ -330,45 +345,208 @@ pub(crate) fn serve_connection<'a, 's, S: KeyValueStore + 's>(
     if let Outcome::Refused = authenticate(&mut wire, shared, &nonce, &response) {
         return;
     }
-    let config = shared.config;
-    if let Some(database) = &response.database
-        && !database.eq_ignore_ascii_case(&config.database)
-    {
+    let requested = response
+        .database
+        .clone()
+        .filter(|database| !database.is_empty())
+        .unwrap_or_else(|| shared.config.database.clone());
+    let attached = directory
+        .matching_name(&requested)
+        .and_then(|database| Some((directory.attach(&database)?, database)));
+    let Some((attached, database)) = attached else {
         (shared.log)(&format!(
             "{}  unknown database \"{}\"",
             wire.peer(),
-            printable(database)
+            printable(&requested)
         ));
         refuse(
             &mut wire,
             1049,
             "42000",
-            &format!("Unknown database '{database}'"),
+            &format!("Unknown database '{requested}'"),
         );
         return;
-    }
-    drop(login_slot);
+    };
+    let Some(_connection) = take_slot(&shared.connections, shared.config.max_connections) else {
+        (shared.log)(&format!(
+            "{}  connection refused: {} connections are open (--max-connections)",
+            wire.peer(),
+            shared.config.max_connections
+        ));
+        refuse(&mut wire, 1040, "08004", "Too many connections");
+        return;
+    };
+    wire.login = None;
     wire.deadline = None;
+    wire.budget = Some(&*shared.config.memory_budget);
     let capabilities = response.capabilities & SERVER_CAPABILITIES;
-    let session = new_session(store, &response.user, &config.database, connection_id);
-    let mut connection = Connection {
+    let carried = Carried {
         wire,
-        shared,
-        store,
-        session,
         user: response.user,
-        connection_id,
         capabilities,
         multi_statements: capabilities & CLIENT_MULTI_STATEMENTS != 0,
         statements: HashMap::new(),
         next_statement: 1,
     };
-    let status = connection.status();
-    connection.wire.send(&ok_packet(0, 0, status, 0));
-    if connection.wire.flush().is_ok() {
-        connection.run();
+    serve_databases(
+        shared,
+        directory,
+        connection_id,
+        carried,
+        attached,
+        database,
+    );
+}
+
+struct Switched<'a, A> {
+    carried: Carried<'a>,
+    attached: A,
+    switch: DatabaseSwitch,
+    database: String,
+    reply: bool,
+}
+
+fn serve_databases<'a, 'd, D: DatabaseDirectory>(
+    shared: &'a Shared<'a>,
+    directory: &'d D,
+    connection_id: u32,
+    carried: Carried<'a>,
+    attached: D::Attached<'d>,
+    database: String,
+) {
+    let mut next = serve_database(
+        shared,
+        directory,
+        connection_id,
+        carried,
+        &attached,
+        database,
+        None,
+    );
+    while let Some(switched) = next {
+        let Switched {
+            carried,
+            attached,
+            switch,
+            database,
+            reply,
+        } = switched;
+        next = serve_database(
+            shared,
+            directory,
+            connection_id,
+            carried,
+            &attached,
+            database,
+            Some((switch, reply)),
+        );
     }
-    let _ = connection.session.close();
+}
+
+fn serve_database<'a, 'd, D: DatabaseDirectory>(
+    shared: &'a Shared<'a>,
+    directory: &'d D,
+    connection_id: u32,
+    carried: Carried<'a>,
+    attached: &D::Attached<'d>,
+    database: String,
+    switched: Option<(DatabaseSwitch, bool)>,
+) -> Option<Switched<'a, D::Attached<'d>>> {
+    let (session, answer_with_ok) = match switched {
+        Some((switch, reply)) => (switch.into_session(attached), reply),
+        None => (
+            new_session(attached, &carried.user, &database, connection_id),
+            true,
+        ),
+    };
+    let mut connection = Connection {
+        wire: carried.wire,
+        shared,
+        store: attached,
+        session,
+        user: carried.user,
+        database,
+        connection_id,
+        capabilities: carried.capabilities,
+        multi_statements: carried.multi_statements,
+        statements: carried.statements,
+        next_statement: carried.next_statement,
+    };
+    connection.session.set_served_databases(directory);
+    if answer_with_ok && !connection.ok(0, 0, 0) {
+        let _ = connection.session.close();
+        return None;
+    }
+    let (target, reply, (next_attached, switch)) = loop {
+        let (target, reply) = match connection.run() {
+            Exit::Closed => {
+                let _ = connection.session.close();
+                return None;
+            }
+            Exit::Switch { database, reply } => (database, reply),
+        };
+        match switch_to(directory, &connection.session, &target) {
+            Ok(switched) => break (target, reply, switched),
+            Err(error) if reply => {
+                if connection.sql_error(&error) {
+                    continue;
+                }
+                let _ = connection.session.close();
+                return None;
+            }
+            Err(error) => {
+                (shared.log)(&format!(
+                    "{}  switching to database \"{}\" failed: {}",
+                    connection.wire.peer(),
+                    printable(&target),
+                    error.message()
+                ));
+                let _ = connection.session.close();
+                return None;
+            }
+        }
+    };
+    let Connection {
+        wire,
+        session,
+        user,
+        capabilities,
+        multi_statements,
+        statements,
+        next_statement,
+        ..
+    } = connection;
+    let _ = session.close();
+    Some(Switched {
+        carried: Carried {
+            wire,
+            user,
+            capabilities,
+            multi_statements,
+            statements,
+            next_statement,
+        },
+        attached: next_attached,
+        switch,
+        database: target,
+        reply,
+    })
+}
+
+fn switch_to<'d, D: DatabaseDirectory>(
+    directory: &'d D,
+    session: &Session<'_>,
+    database: &str,
+) -> Result<(D::Attached<'d>, DatabaseSwitch), SqlError> {
+    let Some(attached) = directory.attach(database) else {
+        return Err(SqlError::new(
+            SqlState::INVALID_CATALOG_NAME,
+            format!("Unknown database '{database}'"),
+        )
+        .with_vendor_code(1049));
+    };
+    let switch = session.switch_to(&attached, database)?;
+    Ok((attached, switch))
 }
 
 fn affected_rows(tag: &str) -> u64 {
@@ -756,21 +934,43 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         status
     }
 
-    fn run(&mut self) {
+    fn run(&mut self) -> Exit {
         loop {
-            let body = match self.wire.read_payload(0, MAX_PACKET_BYTES) {
+            self.wire.release_payload_reservation();
+            self.wire.deadline = self
+                .shared
+                .config
+                .idle_timeout
+                .and_then(|timeout| Instant::now().checked_add(timeout));
+            let read = self.wire.read_payload(0, MAX_PACKET_BYTES);
+            self.wire.deadline = None;
+            let body = match read {
                 Ok(body) => body,
+                Err(WireError::TimedOut) => {
+                    (self.shared.log)(&format!(
+                        "{}  disconnected after the idle timeout",
+                        self.wire.peer()
+                    ));
+                    self.wire.sequence = 0;
+                    refuse(
+                        &mut self.wire,
+                        4031,
+                        "HY000",
+                        "The client was disconnected by the server because of inactivity.",
+                    );
+                    return Exit::Closed;
+                }
                 Err(WireError::Stopping) => {
                     self.shared
                         .ended_by_stop
                         .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     self.wire.sequence = 1;
                     refuse(&mut self.wire, 1053, "08S01", "Server shutdown in progress");
-                    return;
+                    return Exit::Closed;
                 }
                 Err(error) => {
                     report_wire_error(&mut self.wire, &error);
-                    return;
+                    return Exit::Closed;
                 }
             };
             let command = match parse_command(&body) {
@@ -789,7 +989,10 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             let keep_going = match command {
                 Command::Quit => false,
                 Command::Ping => self.ok(0, 0, 0),
-                Command::InitDb(database) => self.init_db(&database),
+                Command::InitDb(database) => match self.init_db(&database) {
+                    Some(exit) => return exit,
+                    None => true,
+                },
                 Command::Query(text) => self.query(&text),
                 Command::FieldList(table) => self.field_list(&table),
                 Command::Prepare(text) => self.prepare(text),
@@ -825,12 +1028,11 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     _ => self.error(1047, "08S01", "Unknown command"),
                 },
                 Command::ResetConnection => {
-                    let fresh = new_session(
-                        self.store,
-                        &self.user,
-                        &self.shared.config.database,
-                        self.connection_id,
-                    );
+                    let mut fresh =
+                        new_session(self.store, &self.user, &self.database, self.connection_id);
+                    if let Some(served) = self.session.served_databases() {
+                        fresh.set_served_databases(served);
+                    }
                     let old = std::mem::replace(&mut self.session, fresh);
                     let _ = old.close();
                     self.statements.clear();
@@ -840,7 +1042,13 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                 Command::Other(_) => self.error(1047, "08S01", "Unknown command"),
             };
             if !keep_going {
-                return;
+                return Exit::Closed;
+            }
+            if let Some(database) = self.session.take_database_switch() {
+                return Exit::Switch {
+                    database,
+                    reply: false,
+                };
             }
         }
     }
@@ -882,11 +1090,20 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         )
     }
 
-    fn init_db(&mut self, database: &str) -> bool {
-        if database.eq_ignore_ascii_case(&self.shared.config.database) {
-            return self.ok(0, 0, 0);
+    fn init_db(&mut self, database: &str) -> Option<Exit> {
+        let used = self.session.use_database(database);
+        if let Some(target) = self.session.take_database_switch() {
+            return Some(Exit::Switch {
+                database: target,
+                reply: true,
+            });
         }
-        self.error(1049, "42000", &format!("Unknown database '{database}'"))
+        let answered = match used {
+            Ok(Some(_)) => self.ok(0, 0, 0),
+            Ok(None) => self.error(1049, "42000", &format!("Unknown database '{database}'")),
+            Err(error) => self.sql_error(&error),
+        };
+        (!answered).then_some(Exit::Closed)
     }
 
     fn field_list(&mut self, table: &str) -> bool {
@@ -896,14 +1113,14 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         };
         let wanted = table.to_lowercase();
         let Some(schema) = tables.into_iter().find(|schema| schema.name == wanted) else {
-            let database = self.shared.config.database.clone();
+            let database = self.database.clone();
             return self.error(
                 1146,
                 "42S02",
                 &format!("Table '{database}.{table}' doesn't exist"),
             );
         };
-        let database = self.shared.config.database.clone();
+        let database = self.database.clone();
         for column in &schema.columns {
             let definition = column_for(&column.name, Some(column.sql_type), &[], 0);
             let mut packet = column_definition_packet(&definition, &database);
@@ -934,7 +1151,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
         let mut count = Payload::new();
         count.length_encoded(definitions.len() as u64);
         self.wire.send(&count.0);
-        let database = self.shared.config.database.clone();
+        let database = self.database.clone();
         for definition in &definitions {
             self.wire
                 .send(&column_definition_packet(definition, &database));
@@ -1036,7 +1253,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
             .u8(0)
             .u16(0);
         self.wire.send(&ok.0);
-        let database = self.shared.config.database.clone();
+        let database = self.database.clone();
         let status = self.status();
         if count > 0 {
             let parameter = column_for("?", None, &[], 0);

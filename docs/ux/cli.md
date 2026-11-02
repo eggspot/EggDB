@@ -337,7 +337,7 @@ Options for every command:
   -V, --version                      print the version
 
 Exit codes: 0 ok, 1 not found, 2 usage, 3 database error, 4 damaged, 5 busy.
-Guide: docs/cli.md in the repository, https://github.com/eggspot/EggDB
+Guide: https://github.com/eggspot/EggDB/blob/main/docs/cli.md
 ```
 `eggdb help scan` (the pattern for every command: usage, one paragraph, options, examples):
 ```
@@ -1117,8 +1117,9 @@ The command list line of section 9 loses "read-only":
 can read." with: "Without --allow-write every call is read-only and a write is refused with an
 error the agent can read. With it the agent also gets write_sql, one statement per call that may
 change the file, run in its own transaction; the file is opened read-write for that call only.
-A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE names no column
-of the table, dropping a column, constraint or primary key, changing a column's type) runs only
+A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE does not pin
+every column of a primary or unique key to values, REPLACE or an upsert, a MERGE that updates or
+deletes, dropping a column, constraint or primary key, changing a column's type) runs only
 after you confirm it: in a client that can ask you, a dialog; in one that cannot, the agent must
 pass confirm: true, so set that client to ask you before write_sql runs." The option line, before
 `--time-limit`:
@@ -1133,7 +1134,7 @@ before `audit`:
 ```
 eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
   writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
-  confirm      DROP, TRUNCATE, a DELETE or UPDATE of a whole table, dropping or retyping a column: only after you say yes
+  confirm      DROP, TRUNCATE, a DELETE or UPDATE not pinned by a key, an upsert, dropping or retyping a column: only after you say yes
   audit        app.db.mcp-audit.jsonl (eggdb audit app.db shows it)
   time limit   5 s per call
   add it       claude mcp add mydb -- eggdb mcp app.db --allow-write
@@ -2975,8 +2976,9 @@ The registry's `confirm` field is where the MCP server now picks its confirmatio
 - **`help --json`**: a tool object keeps `confirm` as a string or `null` (`"destructive_statement"`
   for `write_sql`) and gains `confirm_when` right after it, one sentence or `null`, present on
   every tool as the other tool fields are. For `destructive_statement`: `the statement is
-  destructive: DROP, TRUNCATE, a column dropped or retyped, or a DELETE or UPDATE whose WHERE
-  names no column of its table`. An object in place of the string would change the type of a
+  destructive: DROP, TRUNCATE, a column dropped or retyped, a DELETE or UPDATE whose WHERE does
+  not pin every column of the primary key or of a unique key to values, REPLACE or an upsert, or
+  a MERGE that updates or deletes` (D255). An object in place of the string would change the type of a
   field that slice 1's JSON already has; a second key costs nothing.
 - **`command-model.md`'s tools table**: the Confirm cell reads the check's name in code and its
   sentence: `` `destructive_statement`: the statement is destructive (DROP, TRUNCATE, …) ``.
@@ -3360,7 +3362,6 @@ Usage errors, exit 2, section 7's shape (`eggdb: <message>`, then the `usage:` a
 help mcp` lines):
 | When | Message |
 |------|---------|
-| `--tables` with `--allow-write` | `--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table` |
 | `--tables ""` | `--tables needs at least one name, such as --tables users,orders` |
 | an empty entry or a trailing comma | `--tables has an empty name in 'users,,orders'` |
 | more than one dot, or a dot with nothing on one side | `--tables takes name or schema.name, not 'a.b.c'` |
@@ -3446,16 +3447,20 @@ offered), are not there, and a query that names one fails as it would for a miss
 are comma-separated, name or schema.name (public. and dbo. mean the default schema), matched
 exactly as stored; repeat --tables to add more. A sequence comes with the table that owns it, or
 is named itself. Every name must be a table, view or sequence of the file when the server starts,
-or it does not start. --tables goes with a read-only server in this release, not with
---allow-write. After each call the server waits --call-gap milliseconds before the next call
-opens the file, so your own programs, which are refused while a call holds the file, get their
+or it does not start; with --allow-write a name not there yet is one the agent may create. With
+--allow-write and --tables the agent changes only the tables named: creating, changing or dropping
+anything else (a table, view, sequence, schema, type, routine or role) is refused, and so is a
+change to a named table that a foreign key or a view ties to a table not named; the server lists
+those ties when it starts. After each call the server waits --call-gap milliseconds before the
+next call opens the file, so your own programs, which are refused while a call holds the file, get their
 turn between an agent's calls; 0 turns the gap off.
 ```
 The option lines, in this order (the text column stays at column 32, as `--time-limit`'s):
 ```
       --allow-write            add write_sql: one statement per call that may change the file
-      --tables <names>         only these tables and views exist for the agent: comma-separated,
-                               name or schema.name; repeat it for more (read-only servers only)
+      --tables <names>         only these tables and views exist for the agent, and with
+                               --allow-write only these change: comma-separated, name or
+                               schema.name; repeat it for more
       --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
       --call-gap <ms>          the pause after each call before the next, so other programs can write;
                                milliseconds, 0 to 10000 (default 100)
@@ -3546,9 +3551,11 @@ eggdb: --tables names 'ordres': no table, view or sequence in app.db has that na
 $ echo $?
 1
 $ eggdb mcp app.db --tables users,orders --allow-write
-eggdb: --tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table
-  usage: eggdb mcp <file> [--allow-write] [--tables <names>]... [--time-limit <seconds>] [--call-gap <ms>]
-  try: eggdb help mcp
+eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
+  writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
+  tables       users, orders only (--tables): the agent reads and changes only these; other tables do not exist for it, a change that would reach one is refused, and kv_get and kv_scan are off
+  tied         table "order_lines" has a foreign key to "orders", so the agent cannot change the rows and definition of orders; add order_lines to --tables to allow it
+  ...
 $ eggdb mcp app.db --tables users --tables orders,archive.orders --call-gap 250
 eggdb mcp app.db: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
   tables       users, orders, archive.orders only (--tables); other tables do not exist for the agent, and kv_get and kv_scan are off
@@ -3896,7 +3903,7 @@ JSON records.
 
 ### Synopsis
 `eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>]
-[--password-file <path>] [--poll <seconds>] [--until caught-up]`.
+[--password-file <path>] [--poll <seconds>] [--changes cdc|change-tracking] [--until caught-up]`.
 
 The source is `postgres://` (libpq's form) or `sqlserver://` (sqlcmd's words for encryption).
 A password inside the URL is a usage error, because every user's `ps` would show it.
@@ -3923,12 +3930,16 @@ that fails it, not only the first. Each message says what is wrong and how to fi
 - some tables have no primary key or replica identity (try `ALTER TABLE … REPLICA IDENTITY
   FULL;`);
 - the file already has the source's tables (category `exists`);
-- SQL Server's change tracking is off for the database (try `ALTER DATABASE … SET
-  CHANGE_TRACKING = ON …`) or for some tables;
-- the change retention was exceeded while following.
+- SQL Server's change tracking and CDC are off for the database (try `ALTER DATABASE … SET
+  CHANGE_TRACKING = ON …`), CDC is off with `--changes cdc` (try `EXEC sys.sp_cdc_enable_db;`),
+  or some tables have neither (try `ALTER TABLE … ENABLE CHANGE_TRACKING;` or
+  `EXEC sys.sp_cdc_enable_table …`), or a table read through CDC has no primary key;
+- the change retention was exceeded, or CDC's cleanup removed changes not yet applied, while
+  following.
 
-Usage errors (exit 2) cover a password in the URL, an unknown scheme, `--poll` or
-`--publication` for the wrong kind of source, `--until` with any value but `caught-up`, and
+Usage errors (exit 2) cover a password in the URL, an unknown scheme, `--poll`, `--changes` or
+`--publication` for the wrong kind of source, `--changes` with any value but `cdc` or
+`change-tracking`, `--until` with any value but `caught-up`, and
 stdin as the file.
 
 ### Decided by this design
@@ -3971,5 +3982,6 @@ the option is not used.
 - **Live server** on the socket (exit 3): the message names the likely server.
 - **Stale socket file:** replaced silently, as PostgreSQL does.
 - **Path that is not a socket** (exit 2): the message asks to remove it or pass another path.
-- **Windows:** exit 2 when the options are parsed, saying the option is "not available on
-  Windows yet".
+- **Windows:** the options work on Windows 10 version 1803 and later, on its `AF_UNIX`
+  sockets, with an owner-only access list for "owner only"; older Windows gets exit 2 saying
+  the option needs Windows 10 version 1803 or later (D267).

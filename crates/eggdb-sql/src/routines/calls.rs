@@ -1,3 +1,4 @@
+use super::polymorphic::{self, is_polymorphic, is_polymorphic_array};
 use super::{
     ParameterMode, ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineParameter,
     RoutineReturns, Volatility, resolve,
@@ -5,7 +6,8 @@ use super::{
 use crate::arrays::ArrayValue;
 use crate::ast::{
     CallRoutine, Delete, Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource, Literal,
-    Name, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update, ValuesList,
+    Name, ORACLE_COLLECTION_TABLE, Query, Select, SelectItem, SetExpr, Statement, TableFunction,
+    TableReference, Update, ValuesList,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -13,7 +15,7 @@ use crate::eval::{Evaluator, Scope, children, children_mut};
 use crate::execute::TableCache;
 use crate::lexer::tokenize_in;
 use crate::parser::Parser;
-use crate::plpgsql::{Call, ReadOnlyWrite, Returned};
+use crate::plpgsql::{Call, ReadOnlyWrite, Returned, TransactionControl};
 use crate::records::{RecordValue, field_names};
 use crate::schemas::{base_name, display};
 use crate::session::{OutputColumn, QueryResult};
@@ -22,7 +24,18 @@ use crate::store::{KeyValueRead, KeyValueWrite};
 use crate::types::{Conversion, DefinedValue, SqlType, Value, convert};
 use std::sync::Arc;
 
-type BestMatch<'a> = Option<(usize, &'a Arc<RoutineDefinition>, Vec<Option<Value>>)>;
+type BestMatch<'a> = Option<(usize, &'a Arc<RoutineDefinition>, MatchedSlots)>;
+
+struct NamedArguments<'a> {
+    names: &'a [Option<String>],
+    values: Vec<Value>,
+    untyped: &'a [bool],
+}
+
+struct MatchedSlots {
+    values: Vec<Option<Value>>,
+    untyped: Vec<bool>,
+}
 
 pub(crate) const ROUTINE_CALL: &str = "*routine_call*";
 pub(crate) const DEFAULT_ARGUMENT: &str = "*default*";
@@ -147,10 +160,20 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResu
     for argument in call.arguments {
         values.push(evaluator.eval(argument, None)?);
     }
+    let untyped = untyped_arguments(call.arguments);
     match evaluator.correlation {
-        Some(correlation) => correlation.call_routine(&call.name, &call.names, values),
+        Some(correlation) => correlation.call_routine(&call.name, &call.names, values, &untyped),
         None => Err(not_callable_here(&call.name)),
     }
+}
+
+/// Whether each argument expression is an untyped literal (a quoted string with no cast), whose
+/// type a call settles from the parameter it fills instead of from the value.
+pub(crate) fn untyped_arguments(arguments: &[Expr]) -> Vec<bool> {
+    arguments
+        .iter()
+        .map(|argument| matches!(argument.kind, ExprKind::Literal(Literal::String(_))))
+        .collect()
 }
 
 pub(crate) fn call_in_row(
@@ -159,13 +182,104 @@ pub(crate) fn call_in_row(
     name: &str,
     names: &[Option<String>],
     values: Vec<Value>,
+    untyped: &[bool],
 ) -> SqlResult<Value> {
     let settings = crate::pg_catalog::statement_settings();
     let mut writer = ReadOnlyWrite { inner: reader };
-    match call_function(&mut writer, tables, &settings, name, names, values)? {
+    let call = NamedArguments {
+        names,
+        values,
+        untyped,
+    };
+    match call_function(&mut writer, tables, &settings, name, call)? {
         (Returned::Value(value), _) => Ok(value),
         (Returned::Set(_), _) => Err(set_not_allowed()),
     }
+}
+
+pub(crate) fn correlated_table_function_columns(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    function: &TableFunction,
+) -> SqlResult<Option<Vec<OutputColumn>>> {
+    let Some(found) = resolve(reader, tables, &function.name)? else {
+        return Ok(None);
+    };
+    let mut candidates = found
+        .routines
+        .iter()
+        .filter(|routine| routine.kind == RoutineKind::Function);
+    let (Some(definition), None) = (candidates.next(), candidates.next()) else {
+        return Ok(None);
+    };
+    let definition = Arc::clone(definition);
+    let mut columns = if is_inline_tsql_table(&definition) {
+        let settings = crate::pg_catalog::statement_settings();
+        let mut writer = ReadOnlyWrite { inner: reader };
+        crate::tsql::inline_table_columns(&mut writer, tables, &settings, &definition)?
+    } else if let RoutineReturns::Table(declared) = &definition.returns {
+        declared
+            .iter()
+            .map(|(name, sql_type)| OutputColumn {
+                name: name.clone(),
+                sql_type: Some(*sql_type),
+            })
+            .collect()
+    } else {
+        return Ok(None);
+    };
+    if function.ordinality {
+        columns.push(OutputColumn {
+            name: ORDINALITY_COLUMN.to_owned(),
+            sql_type: Some(SqlType::BigInt),
+        });
+    }
+    Ok(Some(columns))
+}
+
+pub(crate) fn correlated_table_function_rows(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    function: &TableFunction,
+    evaluator: &Evaluator<'_>,
+) -> SqlResult<Vec<Vec<Value>>> {
+    let mut values = Vec::with_capacity(function.arguments.len());
+    let mut names = Vec::with_capacity(function.arguments.len());
+    for argument in &function.arguments {
+        if is_default_argument(argument) {
+            values.push(Value::Null);
+            names.push(Some(DEFAULT_ARGUMENT.to_owned()));
+        } else {
+            values.push(evaluator.eval(argument, None)?);
+            names.push(None);
+        }
+    }
+    let settings = crate::pg_catalog::statement_settings();
+    let mut writer = ReadOnlyWrite { inner: reader };
+    let untyped = untyped_arguments(&function.arguments);
+    let (returned, _) = call_function(
+        &mut writer,
+        tables,
+        &settings,
+        &function.name,
+        NamedArguments {
+            names: &names,
+            values,
+            untyped: &untyped,
+        },
+    )
+    .map_err(|error| error.at_if_unplaced(function.position))?;
+    let elements = match returned {
+        Returned::Set(elements) => elements,
+        Returned::Value(value) => vec![value],
+    };
+    let mut rows: Vec<Vec<Value>> = elements.into_iter().map(row_of).collect();
+    if function.ordinality {
+        for (number, row) in rows.iter_mut().enumerate() {
+            row.push(Value::BigInt(i64::try_from(number + 1).unwrap_or(i64::MAX)));
+        }
+    }
+    Ok(rows)
 }
 
 pub(crate) fn call_procedure(
@@ -183,6 +297,48 @@ pub(crate) fn call_procedure_outputs(
     settings: &Settings,
     call: &CallRoutine,
 ) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
+    let chosen = chosen_procedure(writer, tables, settings, call)?;
+    let returned = crate::plpgsql::invoke(
+        writer,
+        tables,
+        settings,
+        Call {
+            definition: &chosen.definition,
+            arguments: chosen.arguments,
+            trigger: None,
+        },
+    )?;
+    let sources = output_sources(&chosen.definition, &call.argument_names);
+    Ok((procedure_result(&chosen.definition, returned), sources))
+}
+
+pub(crate) fn call_procedure_nonatomic(
+    control: &mut dyn TransactionControl,
+    tables: &mut TableCache,
+    settings: &Settings,
+    call: &CallRoutine,
+) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
+    let chosen = chosen_procedure(&mut *control, tables, settings, call)?;
+    let returned = crate::plpgsql::invoke_nonatomic(
+        control,
+        tables,
+        settings,
+        Call {
+            definition: &chosen.definition,
+            arguments: chosen.arguments,
+            trigger: None,
+        },
+    )?;
+    let sources = output_sources(&chosen.definition, &call.argument_names);
+    Ok((procedure_result(&chosen.definition, returned), sources))
+}
+
+fn chosen_procedure(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    call: &CallRoutine,
+) -> SqlResult<Chosen> {
     let mut arguments = call.arguments.clone();
     Preparing {
         writer: &mut *writer,
@@ -196,27 +352,19 @@ pub(crate) fn call_procedure_outputs(
     for argument in &arguments {
         values.push(evaluator.eval(argument, None)?);
     }
-    let chosen = choose(
+    let untyped = untyped_arguments(&arguments);
+    choose(
         &*writer,
         tables,
         RoutineKind::Procedure,
         &call.name.text,
-        &call.argument_names,
-        values,
-    )
-    .map_err(|error| error.at_if_unplaced(call.name.position))?;
-    let returned = crate::plpgsql::invoke(
-        writer,
-        tables,
-        settings,
-        Call {
-            definition: &chosen.definition,
-            arguments: chosen.arguments,
-            trigger: None,
+        NamedArguments {
+            names: &call.argument_names,
+            values,
+            untyped: &untyped,
         },
-    )?;
-    let sources = output_sources(&chosen.definition, &call.argument_names);
-    Ok((procedure_result(&chosen.definition, returned), sources))
+    )
+    .map_err(|error| error.at_if_unplaced(call.name.position))
 }
 
 fn output_sources(definition: &RoutineDefinition, names: &[Option<String>]) -> Vec<Option<usize>> {
@@ -243,6 +391,16 @@ pub(crate) fn run_do(
     code: &str,
 ) -> SqlResult<QueryResult> {
     crate::plpgsql::run_inline(writer, tables, settings, code)?;
+    Ok(QueryResult::command("DO"))
+}
+
+pub(crate) fn run_do_nonatomic(
+    control: &mut dyn TransactionControl,
+    tables: &mut TableCache,
+    settings: &Settings,
+    code: &str,
+) -> SqlResult<QueryResult> {
+    crate::plpgsql::run_inline_nonatomic(control, tables, settings, code)?;
     Ok(QueryResult::command("DO"))
 }
 
@@ -280,6 +438,30 @@ pub(crate) fn select_calls_volatile(
         }
     }
     Ok(false)
+}
+
+pub(crate) fn prepare_oracle_table_function(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    select: &mut Select,
+) -> SqlResult<()> {
+    let Some(from) = &mut select.from else {
+        return Ok(());
+    };
+    if !is_user_table_function(&from.first) {
+        return Ok(());
+    }
+    let mut preparing = Preparing {
+        writer,
+        tables,
+        settings,
+        prefetch: Prefetch::NonVolatile,
+    };
+    if preparing.table_function(&mut from.first)? {
+        select.filter = Some(and_false(select.filter.take(), from.first.name.position));
+    }
+    Ok(())
 }
 
 pub(crate) fn prepare_select(
@@ -562,13 +744,17 @@ impl Preparing<'_> {
         for argument in call_arguments(expr) {
             values.push(evaluator.eval(argument, None)?);
         }
+        let untyped = untyped_arguments(call_arguments(expr));
         call_function(
             &mut *self.writer,
             self.tables,
             self.settings,
             &call.name,
-            &call.names,
-            values,
+            NamedArguments {
+                names: &call.names,
+                values,
+                untyped: &untyped,
+            },
         )
         .map_err(|error| error.at_if_unplaced(expr.position))
     }
@@ -576,6 +762,9 @@ impl Preparing<'_> {
     fn table_function(&mut self, table: &mut TableReference) -> SqlResult<bool> {
         if !is_user_table_function(table) {
             return Ok(false);
+        }
+        if is_oracle_collection_table(table) {
+            return self.collection_table(table);
         }
         let Some(generated) = &mut table.generated else {
             return Ok(false);
@@ -616,17 +805,24 @@ impl Preparing<'_> {
             }
         }
         let position = function.position;
+        let untyped = untyped_arguments(&function.arguments);
         let (returned, definition) = call_function(
             &mut *self.writer,
             self.tables,
             self.settings,
             &function.name,
-            &names,
-            values,
+            NamedArguments {
+                names: &names,
+                values,
+                untyped: &untyped,
+            },
         )
         .map_err(|error| error.at_if_unplaced(position))?;
         let elements = match returned {
             Returned::Set(elements) => elements,
+            Returned::Value(value) if definition.dialect == Dialect::Oracle => {
+                oracle_collection_elements(value)
+            }
             Returned::Value(value) => vec![value],
         };
         let label = base_name(&function.name).to_owned();
@@ -644,7 +840,9 @@ impl Preparing<'_> {
         } else {
             output_columns(&definition, &elements, &label)
         };
-        let mut rows: Vec<Vec<Value>> = elements.into_iter().map(row_of).collect();
+        let fields = record_columns(&elements).filter(|fields| *fields == columns);
+        let mut rows = element_rows(elements, fields.as_deref())
+            .map_err(|error| error.at_if_unplaced(position))?;
         if function.ordinality {
             columns.push(ORDINALITY_COLUMN.to_owned());
             types.push(Some(SqlType::BigInt));
@@ -665,6 +863,69 @@ impl Preparing<'_> {
         table.generated = replacement.generated;
         Ok(empty)
     }
+
+    fn collection_table(&mut self, table: &mut TableReference) -> SqlResult<bool> {
+        let Some(GeneratedTable::Function(function)) = table.generated.as_deref_mut() else {
+            return Ok(false);
+        };
+        let prefetch = std::mem::replace(&mut self.prefetch, Prefetch::Everything);
+        let prepared = function
+            .arguments
+            .iter_mut()
+            .try_for_each(|argument| self.expr(argument));
+        self.prefetch = prefetch;
+        prepared?;
+        let position = function.position;
+        let [collection] = function.arguments.as_slice() else {
+            return Err(SqlError::syntax(
+                "TABLE() takes one collection expression",
+                position,
+            ));
+        };
+        if !is_row_independent(collection) {
+            return Err(SqlError::not_supported(
+                "a TABLE() collection expression that reads columns of other FROM items is not supported yet",
+            )
+            .at(position));
+        }
+        let value = constant_evaluator().eval(collection, None)?;
+        let elements = oracle_collection_elements(value);
+        let fields = record_columns(&elements);
+        let columns = fields
+            .clone()
+            .unwrap_or_else(|| vec![ORACLE_COLUMN_VALUE.to_owned()]);
+        let types = vec![None; columns.len()];
+        let rows = element_rows(elements, fields.as_deref()).map_err(|error| error.at(position))?;
+        let empty = rows.is_empty();
+        let replacement = values_table(table.name.text.clone(), columns, rows, &types, position);
+        table.generated = replacement.generated;
+        Ok(empty)
+    }
+}
+
+const ORACLE_COLUMN_VALUE: &str = "column_value";
+
+fn is_oracle_collection_table(table: &TableReference) -> bool {
+    matches!(
+        table.generated.as_deref(),
+        Some(GeneratedTable::Function(function)) if function.name == ORACLE_COLLECTION_TABLE
+    )
+}
+
+fn oracle_collection_elements(value: Value) -> Vec<Value> {
+    match value {
+        Value::Null => Vec::new(),
+        Value::Defined(defined) => match *defined {
+            DefinedValue::Record(record)
+                if record.names.len() == record.fields.len()
+                    && record.names.iter().all(|name| name.parse::<u32>().is_ok()) =>
+            {
+                record.fields
+            }
+            other => vec![Value::Defined(Box::new(other))],
+        },
+        other => vec![other],
+    }
 }
 
 fn call_function(
@@ -672,10 +933,9 @@ fn call_function(
     tables: &mut TableCache,
     settings: &Settings,
     name: &str,
-    names: &[Option<String>],
-    values: Vec<Value>,
+    call: NamedArguments<'_>,
 ) -> SqlResult<(Returned, Arc<RoutineDefinition>)> {
-    let chosen = choose(&*writer, tables, RoutineKind::Function, name, names, values)?;
+    let chosen = choose(&*writer, tables, RoutineKind::Function, name, call)?;
     let returned = crate::plpgsql::invoke(
         writer,
         tables,
@@ -694,9 +954,13 @@ fn choose(
     tables: &mut TableCache,
     kind: RoutineKind,
     name: &str,
-    names: &[Option<String>],
-    values: Vec<Value>,
+    call: NamedArguments<'_>,
 ) -> SqlResult<Chosen> {
+    let NamedArguments {
+        names,
+        values,
+        untyped,
+    } = call;
     let found = resolve(reader, tables, name)?;
     let routines: &[Arc<RoutineDefinition>] = found
         .as_deref()
@@ -716,7 +980,7 @@ fn choose(
     let mut best: BestMatch<'_> = None;
     let mut tied = false;
     for routine in routines.iter().filter(|routine| routine.kind == kind) {
-        let Some((score, slots)) = matched(routine, names, &values) else {
+        let Some((score, slots)) = matched(routine, names, &values, untyped) else {
             continue;
         };
         match &best {
@@ -735,7 +999,7 @@ fn choose(
         if plsql {
             return Err(super::oracle::wrong_arguments(kind, name, routines));
         }
-        return Err(no_routine(kind, name, names, &values, routines));
+        return Err(no_routine(kind, name, names, &values, untyped, routines));
     };
     if tied && plsql {
         return Err(super::oracle::too_many_matches(name));
@@ -756,7 +1020,22 @@ fn choose(
         )));
     }
     let definition = Arc::clone(definition);
-    let arguments = input_arguments(reader, tables, &definition, slots)?;
+    let (input_untyped, input_given): (Vec<bool>, Vec<bool>) = call_parameters(&definition)
+        .into_iter()
+        .zip(slots.untyped.iter().zip(&slots.values))
+        .filter(|(parameter, _)| parameter.mode.is_input())
+        .map(|(_, (untyped, value))| (*untyped, value.is_some()))
+        .unzip();
+    let arguments = input_arguments(reader, tables, &definition, slots.values)?;
+    let (definition, arguments) = polymorphic::specialize(
+        tables,
+        definition,
+        arguments,
+        polymorphic::ArgumentKinds {
+            untyped: &input_untyped,
+            given: &input_given,
+        },
+    )?;
     Ok(Chosen {
         definition,
         arguments,
@@ -775,7 +1054,8 @@ fn matched(
     routine: &RoutineDefinition,
     names: &[Option<String>],
     values: &[Value],
-) -> Option<(usize, Vec<Option<Value>>)> {
+    untyped: &[bool],
+) -> Option<(usize, MatchedSlots)> {
     let parameters = call_parameters(routine);
     let variadic = parameters
         .last()
@@ -783,13 +1063,15 @@ fn matched(
         .map(|parameter| parameter.sql_type);
     let fixed = parameters.len() - usize::from(variadic.is_some());
     let mut slots: Vec<Option<Value>> = vec![None; parameters.len()];
+    let mut slot_untyped = vec![true; parameters.len()];
     let mut spread = Vec::new();
+    let is_untyped = |at: usize| untyped.get(at).copied().unwrap_or(true);
     let mut score = 0usize;
     for (at, value) in values.iter().enumerate() {
         let index = match names.get(at).cloned().flatten() {
             None if at < fixed => at,
             None if variadic.is_some() => {
-                spread.push(value.clone());
+                spread.push((value.clone(), is_untyped(at)));
                 continue;
             }
             None => return None,
@@ -804,29 +1086,57 @@ fn matched(
         }
         score += fit(value, parameter.sql_type)?;
         *slot = Some(literal_argument(value, parameter.sql_type));
+        *slot_untyped.get_mut(index)? = is_untyped(at);
     }
     if let Some(SqlType::Array(element)) = variadic
         && !spread.is_empty()
     {
         let mut items = Vec::with_capacity(spread.len());
-        for item in spread {
+        for (item, _) in spread {
             score += fit(&item, element.sql_type())?;
             items.push(convert(item, element.sql_type(), Conversion::Assignment).ok()?);
         }
         *slots.get_mut(fixed)? = Some(Value::Array(Box::new(ArrayValue::new(element, items))));
+        *slot_untyped.get_mut(fixed)? = false;
+    } else if let Some(declared) = variadic
+        && is_polymorphic_array(declared)
+        && !spread.is_empty()
+    {
+        score += spread.len();
+        *slots.get_mut(fixed)? = Some(polymorphic::variadic_array(declared, spread)?);
+        *slot_untyped.get_mut(fixed)? = false;
     } else if !spread.is_empty() {
         return None;
+    }
+    if parameters
+        .iter()
+        .any(|parameter| is_polymorphic(parameter.sql_type))
+    {
+        polymorphic::resolve(
+            parameters
+                .iter()
+                .zip(slots.iter().zip(&slot_untyped))
+                .filter(|(parameter, _)| parameter.mode.is_input())
+                .map(|(parameter, (slot, untyped))| (parameter.sql_type, slot.as_ref(), *untyped)),
+        )?;
     }
     let complete = slots.iter().zip(&parameters).all(|(slot, parameter)| {
         slot.is_some()
             || parameter.default.is_some()
             || (routine.kind == RoutineKind::Procedure && parameter.mode == ParameterMode::Out)
     });
-    complete.then_some((score, slots))
+    complete.then_some((
+        score,
+        MatchedSlots {
+            values: slots,
+            untyped: slot_untyped,
+        },
+    ))
 }
 
 fn literal_argument(value: &Value, target: SqlType) -> Value {
-    let text = matches!(value, Value::Text(_)) && target != SqlType::Dynamic;
+    let text =
+        matches!(value, Value::Text(_)) && target != SqlType::Dynamic && !is_polymorphic(target);
     if text && convert(value.clone(), target, Conversion::Assignment).is_err() {
         return convert(value.clone(), target, Conversion::Explicit)
             .unwrap_or_else(|_| value.clone());
@@ -835,7 +1145,7 @@ fn literal_argument(value: &Value, target: SqlType) -> Value {
 }
 
 fn fit(value: &Value, target: SqlType) -> Option<usize> {
-    if target == SqlType::Dynamic {
+    if target == SqlType::Dynamic || is_polymorphic(target) {
         return Some(1);
     }
     match value.sql_type() {
@@ -871,7 +1181,8 @@ fn input_arguments(
         .zip(slots)
         .filter(|(parameter, _)| parameter.mode.is_input())
         .collect();
-    while given.last().is_some_and(|(_, value)| value.is_none()) {
+    let resolves_with_defaults = polymorphic::declares_polymorphism(definition);
+    while !resolves_with_defaults && given.last().is_some_and(|(_, value)| value.is_none()) {
         given.pop();
     }
     let mut arguments = Vec::with_capacity(given.len());
@@ -929,12 +1240,13 @@ fn no_routine(
     name: &str,
     names: &[Option<String>],
     values: &[Value],
+    untyped: &[bool],
     routines: &[Arc<RoutineDefinition>],
 ) -> SqlError {
     let shown = format!("{}({})", display(name), type_list(values));
     let other_kind = routines
         .iter()
-        .any(|routine| routine.kind != kind && matched(routine, names, values).is_some());
+        .any(|routine| routine.kind != kind && matched(routine, names, values, untyped).is_some());
     match (other_kind, kind) {
         (true, RoutineKind::Function) => SqlError::new(
             SqlState::WRONG_OBJECT_TYPE,
@@ -1037,16 +1349,20 @@ fn output_columns(
                 .collect(),
         );
     }
-    if let Some(record) = elements.first().and_then(record_of) {
-        return (
-            field_names(record),
-            record.fields.iter().map(|_| None).collect(),
-        );
+    if let Some(fields) = record_columns(elements) {
+        let types = vec![None; fields.len()];
+        return (fields, types);
     }
     let name = outputs
         .first()
         .and_then(|parameter| parameter.name.clone())
-        .unwrap_or_else(|| label.to_owned());
+        .unwrap_or_else(|| {
+            if definition.dialect == Dialect::Oracle {
+                ORACLE_COLUMN_VALUE.to_owned()
+            } else {
+                label.to_owned()
+            }
+        });
     (vec![name], vec![declared_type(definition)])
 }
 
@@ -1067,6 +1383,64 @@ fn row_of(element: Value) -> Vec<Value> {
         },
         other => vec![other],
     }
+}
+
+fn record_columns(elements: &[Value]) -> Option<Vec<String>> {
+    let mut columns: Option<Vec<String>> = None;
+    for record in elements.iter().filter_map(record_of) {
+        let known = columns.get_or_insert_with(Vec::new);
+        for name in field_names(record) {
+            if !known.contains(&name) {
+                known.push(name);
+            }
+        }
+    }
+    columns
+}
+
+fn element_rows(elements: Vec<Value>, fields: Option<&[String]>) -> SqlResult<Vec<Vec<Value>>> {
+    let Some(fields) = fields else {
+        return Ok(elements.into_iter().map(row_of).collect());
+    };
+    elements
+        .into_iter()
+        .map(|element| match element {
+            Value::Null => Ok(vec![Value::Null; fields.len()]),
+            Value::Defined(defined) => match *defined {
+                DefinedValue::Record(record) => Ok(fields_in_order(record, fields)),
+                _ => Err(mixed_collection_elements()),
+            },
+            _ => Err(mixed_collection_elements()),
+        })
+        .collect()
+}
+
+fn fields_in_order(record: RecordValue, columns: &[String]) -> Vec<Value> {
+    let names = field_names(&record);
+    if names == columns {
+        return record.fields;
+    }
+    let mut fields: Vec<Option<Value>> = record.fields.into_iter().map(Some).collect();
+    columns
+        .iter()
+        .map(|column| {
+            names
+                .iter()
+                .position(|name| name == column)
+                .and_then(|at| fields.get_mut(at))
+                .and_then(Option::take)
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+fn mixed_collection_elements() -> SqlError {
+    SqlError::new(
+        SqlState::DATATYPE_MISMATCH,
+        "inconsistent datatypes: a collection in TABLE() mixes records with scalar elements",
+    )
+    .with_oracle_code(932)
+    .with_hint("Make every element of the collection a record of the same type, or NULL.")
 }
 
 fn record_of(value: &Value) -> Option<&RecordValue> {
@@ -1150,6 +1524,7 @@ fn declared_type(definition: &RoutineDefinition) -> Option<SqlType> {
     match &definition.returns {
         RoutineReturns::One(ReturnType::Type(sql_type))
         | RoutineReturns::Set(ReturnType::Type(sql_type)) => Some(*sql_type),
+        RoutineReturns::One(ReturnType::Void) => Some(SqlType::VOID),
         _ => None,
     }
 }

@@ -1096,6 +1096,16 @@ pub(crate) fn to_char(values: &[Value]) -> Option<SqlResult<Value>> {
         return Some(Ok(Value::Null));
     }
     let template = template.character_text()?;
+    let infinite = match value {
+        Value::Date(days) => datetime::is_infinite_date(*days),
+        Value::Timestamp(micros) | Value::TimestampTz(micros) => {
+            datetime::is_infinite_timestamp(*micros)
+        }
+        _ => false,
+    };
+    if infinite {
+        return Some(Ok(Value::Null));
+    }
     let formatted = match value {
         Value::Date(days) => format_moment(
             &Moment::of_local(i64::from(*days) * MICROS_PER_DAY, None),

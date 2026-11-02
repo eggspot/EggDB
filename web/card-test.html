@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>EggDB connect card test</title></head>
+<body>
+<div id="card" style="width: 1280px; height: 800px"></div>
+<pre id="result">running</pre>
+<script type="module">
+import { ConnectCard } from "./card.js";
+const result = document.getElementById("result");
+const EXPECTED = [
+  ["group", "Connect"],
+  ["heading", "Connect"],
+  ["tablist", "Connection kind"],
+  ["tab", "Open a file"],
+  ["tab", "Connect to a server"],
+  ["tabpanel", "Open a file"],
+  ["textbox", "File"],
+  ["button", "Browse"],
+  ["checkbox", "Create the file if it does not exist"],
+  ["checkbox", "Open read-only"],
+  ["button", "Cancel"],
+  ["button", "Open"],
+  ["link", "Where are you coming from?"],
+  ["link", "Load a sample dataset"],
+];
+function role(element) {
+  if (element.getAttribute("role")) return element.getAttribute("role");
+  if (element.tagName === "INPUT") return element.type === "checkbox" ? "checkbox" : "textbox";
+  return { BUTTON: "button", A: "link", H1: "heading" }[element.tagName] ?? element.tagName;
+}
+function check(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function press(key) {
+  document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+}
+try {
+  const container = document.getElementById("card");
+  const card = await ConnectCard.mount(container, { wasm: "eggdb-gui.wasm", autofocus: true });
+  const scale = card.canvas.width / 1280;
+  check(card.canvas.height === Math.round(800 * scale), `canvas ${card.canvas.width}x${card.canvas.height}`);
+  const context = card.canvas.getContext("2d");
+  const pixel = (x, y) => Array.from(context.getImageData(Math.round(x * scale), Math.round(y * scale), 1, 1).data).join(",");
+  check(pixel(640, 140) !== pixel(100, 100), "the card outline is not drawn");
+  const mirrored = Array.from(card.mirror.querySelectorAll("[data-node]")).map((element) => [role(element), element.getAttribute("aria-label") ?? element.textContent]);
+  check(JSON.stringify(mirrored) === JSON.stringify(EXPECTED), `the ARIA mirror is ${JSON.stringify(mirrored)}`);
+  check(card.mirror.getAttribute("role") === "document" && card.mirror.getAttribute("aria-label") === "EggDB", "the window node");
+  const file = card.mirror.querySelector("input[type=text]");
+  check(document.activeElement === file, "the File input does not have the focus");
+  check(file.value === "~/eggdb/quickstart.eggdb", `the File value is ${file.value}`);
+  check(card.mirror.querySelector("button[disabled]")?.textContent === "Cancel", "Cancel is not disabled");
+  press("Tab");
+  check(document.activeElement.textContent === "Browse", "Tab did not reach Browse");
+  const readOnly = card.mirror.querySelectorAll("input[type=checkbox]")[1];
+  const unchecked = pixel(387, 362);
+  readOnly.focus();
+  check(card.nodes.find((node) => node.focused)?.name === "Open read-only", "focusing the mirror did not move the card focus");
+  press(" ");
+  check(readOnly.checked, "Space did not check Open read-only");
+  check(pixel(387, 362) !== unchecked, "the checked box is not drawn");
+  result.textContent = "eggdb-card-test: passed";
+} catch (error) {
+  result.textContent = `eggdb-card-test: failed ${error}`;
+}
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-use super::TriggerTiming;
+use super::{TriggerEvent, TriggerTiming};
 use crate::ast::Name;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlState};
@@ -114,6 +114,25 @@ pub(super) fn table_cannot_be_instead_of(table: &str, dialect: Dialect) -> SqlEr
         )
         .with_detail("Tables cannot have INSTEAD OF triggers."),
     }
+}
+
+pub(super) fn instead_of_on_cascaded_table(table: &str, event: TriggerEvent) -> SqlError {
+    let code = if event == TriggerEvent::Delete {
+        1787
+    } else {
+        1788
+    };
+    SqlError::new(
+        SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        format!(
+            "a cascading foreign key cannot {} rows of table {}, which has an INSTEAD OF {} trigger",
+            event.keyword().to_ascii_lowercase(),
+            display(table),
+            event.keyword()
+        ),
+    )
+    .with_hint("Use an AFTER trigger on a table that cascading foreign keys change.")
+    .with_sqlserver_code(code)
 }
 
 pub(super) fn missing_referenced_trigger(name: &str) -> SqlError {

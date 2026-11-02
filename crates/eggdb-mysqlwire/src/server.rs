@@ -1,8 +1,11 @@
 use crate::auth::MySqlCredentials;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
+use eggdb_platform::connection_limits::{
+    LoginSlots, LoginTicket, MAX_LOGINS_IN_PROGRESS, MemoryBudget,
+};
 use eggdb_platform::local_socket::LocalListener;
-use eggdb_sql::KeyValueStore;
+use eggdb_sql::{DatabaseDirectory, FixedDatabases, KeyValueStore};
 use eggdb_tls::ServerConnection;
 use std::collections::VecDeque;
 use std::fmt;
@@ -15,12 +18,18 @@ use std::time::{Duration, Instant};
 /// The connections a server serves at once unless told otherwise.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 /// How long a client has from connecting to finishing authentication, unless told otherwise.
-pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(30);
-/// The most connections still authenticating at once; more are refused with MySQL's error
-/// 1040, so slow or failing logins cannot take every slot.
-pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
+pub const DEFAULT_AUTHENTICATION_TIMEOUT: Duration =
+    eggdb_platform::connection_limits::DEFAULT_AUTHENTICATION_TIMEOUT;
+/// How long an authenticated connection may wait for its next command before it is closed
+/// with MySQL's error 4031, unless told otherwise.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = eggdb_platform::connection_limits::DEFAULT_IDLE_TIMEOUT;
+/// The most connections still authenticating at once. When they are all taken, a new
+/// connection takes the slot of the oldest that has waited a second or more, which is dropped,
+/// so idle sockets cannot lock logins out; when every one is younger, the new connection is
+/// refused with MySQL's error 1040.
+pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = MAX_LOGINS_IN_PROGRESS;
 const MAX_REFUSING_THREADS: usize = 8;
-pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_millis(250);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const DELAY_PER_RECENT_FAILURE: Duration = Duration::from_millis(250);
@@ -35,10 +44,18 @@ pub struct ServerConfig {
     pub credentials: MySqlCredentials,
     /// The database clients connect to; `USE` and `COM_INIT_DB` accept only this name.
     pub database: String,
-    /// The most connections served at once; more are refused with error 1040.
+    /// The most logged-in connections served at once; more are refused with error 1040.
+    /// Logins still in progress do not count here: [`MAX_UNAUTHENTICATED_CONNECTIONS`] caps them.
     pub max_connections: usize,
     /// How long a client has from connecting to finishing authentication.
     pub authentication_timeout: Duration,
+    /// How long an authenticated connection may wait for its next command before it is closed
+    /// with error 4031, MySQL's `wait_timeout`; `None` waits for ever.
+    pub idle_timeout: Option<Duration>,
+    /// The bytes every connection holds together in large packets; a packet that would go past
+    /// it closes its connection with error 1041. Share one budget between the servers of one
+    /// process.
+    pub memory_budget: std::sync::Arc<MemoryBudget>,
     /// The TLS setup, when the server offers TLS (D161): `CLIENT_SSL` is then advertised, and
     /// connections from other machines must use it.
     pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
@@ -123,7 +140,8 @@ pub(crate) struct Shared<'a> {
     pub(crate) log: &'a (dyn Fn(&str) + Sync),
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) unknown_user: MySqlCredentials,
-    pub(crate) unauthenticated: AtomicUsize,
+    pub(crate) logins: LoginSlots,
+    pub(crate) connections: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
 }
 
@@ -173,6 +191,29 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_directory(
+        &FixedDatabases::new(&[(config.database.as_str(), store)]),
+        listener,
+        local,
+        config,
+        stop,
+        log,
+    )
+}
+
+/// [`serve_with_local`] for the databases of `directory`, including databases created while
+/// the server runs (D270): the handshake's database, `USE` and `COM_INIT_DB` pick
+/// one by name (ignoring ASCII case), each connection holds its database while it uses it,
+/// and its session creates and drops databases through `directory`. Without a database in
+/// the handshake a connection starts on [`ServerConfig::database`].
+pub fn serve_directory<D: DatabaseDirectory + Sync>(
+    directory: &D,
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     if config.credentials.is_for_empty_password() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -191,10 +232,10 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
         log,
         throttle: AuthenticationThrottle::new(),
         unknown_user: MySqlCredentials::matching_nothing(&secret),
-        unauthenticated: AtomicUsize::new(0),
+        logins: LoginSlots::default(),
+        connections: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
     };
-    let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);
     let next_connection_id = AtomicU32::new(1);
     std::thread::scope(|scope| {
@@ -206,25 +247,36 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
             let peer = stream.peer_text();
             let connection_id = next_connection_id.fetch_add(1, Ordering::Relaxed);
             let shared = &shared;
-            match take_slot(&active, config.max_connections) {
-                Some(slot) => {
+            let full = shared.connections.load(Ordering::Acquire) >= config.max_connections;
+            let login = if full {
+                None
+            } else {
+                shared.logins.admit(peer_ip(&stream))
+            };
+            match login {
+                Some(login) => {
                     let started = std::thread::Builder::new()
                         .name(format!("eggdb-mysql-{connection_id}"))
                         .stack_size(eggdb_sql::SESSION_STACK_BYTES)
                         .spawn_scoped(scope, move || {
                             eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
-                            let _slot = slot;
-                            run_connection(stream, shared, store, connection_id);
+                            run_connection(stream, shared, directory, connection_id, login);
                         });
                     if let Err(error) = started {
                         log(&format!("starting a connection thread failed: {error}"));
                     }
                 }
                 None => {
-                    log(&format!(
-                        "{peer}  connection refused: {} connections are open (--max-connections)",
-                        config.max_connections
-                    ));
+                    if full {
+                        log(&format!(
+                            "{peer}  connection refused: {} connections are open (--max-connections)",
+                            config.max_connections
+                        ));
+                    } else {
+                        log(&format!(
+                            "{peer}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in"
+                        ));
+                    }
                     let Some(slot) = take_slot(&refusing, MAX_REFUSING_THREADS) else {
                         continue;
                     };
@@ -270,17 +322,25 @@ fn accept_next(
     }
 }
 
-fn run_connection<S: KeyValueStore>(
+fn peer_ip(stream: &ServerConnection) -> Option<std::net::IpAddr> {
+    match stream {
+        ServerConnection::Plain(stream) => stream.peer_addr().ok().map(|peer| peer.ip()),
+        _ => None,
+    }
+}
+
+fn run_connection<'a, D: DatabaseDirectory>(
     stream: ServerConnection,
-    shared: &Shared<'_>,
-    store: &S,
+    shared: &'a Shared<'a>,
+    directory: &D,
     connection_id: u32,
+    login: LoginTicket<'a>,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;
     };
-    serve_connection(wire, shared, store, connection_id);
+    serve_connection(wire, shared, directory, connection_id, login);
 }
 
 fn refuse_connection(stream: ServerConnection, shared: &Shared<'_>) {

@@ -65,22 +65,30 @@ pub(crate) struct HashIndex {
     heads: Heads,
     next: Vec<usize>,
     values: Vec<Value>,
+    stored: Option<Vec<usize>>,
     width: usize,
+    table_width: usize,
     key: Vec<u8>,
 }
 
 fn single_integer(row: &[Value], offsets: &[usize]) -> Option<Option<i64>> {
     match offsets {
-        [offset] => match &row[*offset] {
-            Value::Null => Some(None),
-            value => crate::pg_catalog::oid_number(value).map(Some),
+        [offset] => match row.get(*offset) {
+            None | Some(Value::Null) => Some(None),
+            Some(value) => crate::pg_catalog::oid_number(value).map(Some),
         },
         _ => None,
     }
 }
 
 impl HashIndex {
-    pub(crate) fn new(integer_keys: bool, width: usize, expected_rows: usize) -> Self {
+    pub(crate) fn new(
+        integer_keys: bool,
+        table_width: usize,
+        stored: Option<Vec<usize>>,
+        expected_rows: usize,
+    ) -> Self {
+        let width = stored.as_ref().map_or(table_width, Vec::len);
         Self {
             heads: if integer_keys {
                 Heads::Integer(HashMap::with_capacity_and_hasher(
@@ -91,8 +99,10 @@ impl HashIndex {
                 Heads::Bytes(HashMap::with_capacity(expected_rows))
             },
             next: Vec::with_capacity(expected_rows),
-            values: Vec::with_capacity(expected_rows * width),
+            values: Vec::with_capacity(expected_rows.saturating_mul(width)),
+            stored,
             width,
+            table_width,
             key: Vec::new(),
         }
     }
@@ -121,12 +131,26 @@ impl HashIndex {
                     return Ok(());
                 }
                 memory.charge(self.key.len() + 32)?;
-                heads.insert(self.key.clone(), at)
+                match heads.get_mut(self.key.as_slice()) {
+                    Some(head) => Some(std::mem::replace(head, at)),
+                    None => heads.insert(self.key.clone(), at),
+                }
             }
         };
         memory.charge_row(row)?;
         self.next.push(previous.unwrap_or(END));
-        self.values.append(row);
+        match &self.stored {
+            None => self.values.append(row),
+            Some(columns) => {
+                for &column in columns {
+                    let value = row
+                        .get_mut(column)
+                        .map_or(Value::Null, |value| std::mem::replace(value, Value::Null));
+                    self.values.push(value);
+                }
+                row.clear();
+            }
+        }
         Ok(())
     }
 
@@ -147,8 +171,28 @@ impl HashIndex {
         found.copied().unwrap_or(END)
     }
 
-    pub(crate) fn row(&self, at: usize) -> &[Value] {
-        &self.values[at * self.width..(at + 1) * self.width]
+    fn stored_row(&self, at: usize) -> &[Value] {
+        let start = at.saturating_mul(self.width);
+        self.values
+            .get(start..start.saturating_add(self.width))
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn push_row(&self, at: usize, row: &mut Vec<Value>) {
+        let Some(columns) = &self.stored else {
+            row.extend_from_slice(self.stored_row(at));
+            return;
+        };
+        let start = row.len();
+        row.resize(start + self.table_width, Value::Null);
+        if columns.is_empty() {
+            return;
+        }
+        for (&column, value) in columns.iter().zip(self.stored_row(at)) {
+            if let Some(slot) = row.get_mut(start + column) {
+                slot.clone_from(value);
+            }
+        }
     }
 
     pub(crate) fn following(&self, at: usize) -> usize {
@@ -163,11 +207,10 @@ impl HashIndex {
 fn bytes_key(row: &[Value], offsets: &[usize], key: &mut Vec<u8>) -> bool {
     key.clear();
     for &offset in offsets {
-        let value = &row[offset];
-        if value.is_null() {
-            return false;
+        match row.get(offset) {
+            Some(value) if !value.is_null() => equality_key(key, value),
+            _ => return false,
         }
-        equality_key(key, value);
     }
     true
 }

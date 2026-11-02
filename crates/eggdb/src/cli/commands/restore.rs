@@ -152,6 +152,11 @@ impl Session<'_> {
         {
             return self.restore_aof(path);
         }
+        if let Some(path) = &path
+            && let Some(manifests) = super::restore_aof::manifests_of(path)
+        {
+            return self.restore_aof_directory(path, &manifests);
+        }
         if let Some(url) = path
             .as_ref()
             .and_then(|path| path.to_str())

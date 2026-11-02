@@ -24,6 +24,7 @@ pub(crate) enum Statement {
     Savepoint(SavepointCommand),
     Analyze(Vec<Name>),
     Role(crate::roles::RoleStatement),
+    Database(crate::served_databases::DatabaseStatement),
     RowSecurity(crate::row_security::RowSecurityStatement),
     Listen(Name),
     Unlisten(Option<Name>),
@@ -90,6 +91,7 @@ pub(crate) enum Statement {
     Merge(Box<MergeStatement>),
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
+    Cursor(CursorCommand),
     With(Box<WithStatement>),
     CreateType(Box<CreateType>),
     CreateDomain(Box<CreateDomain>),
@@ -379,6 +381,22 @@ impl WithTable {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CursorCommand {
+    Declare {
+        name: String,
+        scroll: Option<bool>,
+        hold: bool,
+        query: Box<Statement>,
+    },
+    Fetch {
+        name: String,
+        direction: crate::portals::PortalDirection,
+        only_move: bool,
+    },
+    Close(Option<String>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DiscardTarget {
     All,
@@ -453,6 +471,7 @@ pub(crate) enum SqlServerStatement {
     SelectAssign {
         targets: Vec<AssignmentTarget>,
         query: Box<Statement>,
+        per_row: bool,
     },
     Condition(Expr),
     Print(Expr),
@@ -462,6 +481,44 @@ pub(crate) enum SqlServerStatement {
     SaveTransaction(Name),
     RollbackTo(Name),
     Return(Expr),
+    DeclareCursor(CursorDeclaration),
+    OpenCursor(CursorName),
+    FetchCursor {
+        cursor: CursorName,
+        orientation: FetchOrientation,
+        into: Vec<Name>,
+    },
+    CloseCursor(CursorName),
+    DeallocateCursor(CursorName),
+    WaitFor {
+        until_time: bool,
+        time: Expr,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CursorName {
+    pub(crate) name: Name,
+    pub(crate) global: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CursorDeclaration {
+    pub(crate) name: Name,
+    pub(crate) global: bool,
+    pub(crate) scroll: bool,
+    pub(crate) dynamic: bool,
+    pub(crate) query: Box<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FetchOrientation {
+    Next,
+    Prior,
+    First,
+    Last,
+    Absolute(Expr),
+    Relative(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -764,7 +821,17 @@ pub(crate) enum AlterAction {
         bound: PartitionBoundSpec,
     },
     DetachPartition(Name),
+    MoveColumn {
+        column: Name,
+        placement: ColumnPlacement,
+    },
     Accepted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ColumnPlacement {
+    First,
+    After(Name),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -903,6 +970,7 @@ pub(crate) struct CreateTable {
     pub(crate) comment: Option<String>,
     pub(crate) partition_by: Option<PartitionBy>,
     pub(crate) partition_of: Option<PartitionOf>,
+    pub(crate) sqlite_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1003,6 +1071,7 @@ pub(crate) enum GeneratedTable {
     Expansion(Box<SelectListExpansion>),
     Catalog(crate::pg_catalog::CatalogRelation),
     Variable(String),
+    Sequence(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1011,6 +1080,8 @@ pub(crate) struct ValuesList {
     pub(crate) column_names: Vec<Name>,
     pub(crate) position: usize,
 }
+
+pub(crate) const ORACLE_COLLECTION_TABLE: &str = "table";
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TableFunction {
@@ -1377,6 +1448,7 @@ pub(crate) enum BinaryOperator {
     JsonHasAnyKey,
     JsonHasAllKeys,
     JsonDeletePath,
+    JsonPathExists,
     TextSearchMatch,
     VectorL2Distance,
     VectorCosineDistance,
@@ -1414,6 +1486,7 @@ impl BinaryOperator {
             Self::JsonHasAnyKey => "?|",
             Self::JsonHasAllKeys => "?&",
             Self::JsonDeletePath => "#-",
+            Self::JsonPathExists => "@?",
             Self::TextSearchMatch => "@@",
             Self::VectorL2Distance => "<->",
             Self::VectorCosineDistance => "<=>",

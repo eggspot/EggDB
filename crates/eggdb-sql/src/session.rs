@@ -1,4 +1,8 @@
+mod classifier_catalog;
+mod cursors;
+pub(crate) mod database_switch;
 mod mysql;
+mod nonatomic;
 mod oracle;
 mod restore;
 mod savepoints;
@@ -53,6 +57,13 @@ fn walks_expressions(tokens: &[Token<'_>]) -> bool {
                 matches!(&token.kind, TokenKind::Word(word)
                     if word.eq_ignore_ascii_case("select") || word.eq_ignore_ascii_case("with"))
             })
+}
+
+fn only_separators_after(tokens: &[Token<'_>], at: usize) -> bool {
+    tokens.get(at..).is_none_or(|rest| {
+        rest.iter()
+            .all(|token| matches!(token.kind, TokenKind::Semicolon | TokenKind::End))
+    })
 }
 
 fn mentions_sequence_functions(tokens: &[Token<'_>]) -> bool {
@@ -124,6 +135,12 @@ pub enum OneStatementRefusal {
     /// The statement is destructive and is not the one confirmed
     /// ([`Session::run_one_statement_if_confirmed`]).
     Unconfirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseFor {
+    Refusing,
+    Classifying,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -310,6 +327,40 @@ fn inline_data_start(text: &str, ranges: &[std::ops::Range<usize>], stop: CopySt
 
 const NO_TRANSACTION_WARNING: &str = "WARNING:  there is no transaction in progress";
 pub(crate) const PLSQL_BLOCK_TAG: &str = "PL/SQL BLOCK";
+const POSTGRESQL_CATALOG: &str = "pg_catalog";
+
+fn is_one_statement_naming_the_postgresql_catalog(text: &str) -> bool {
+    let mentions = text
+        .as_bytes()
+        .windows(POSTGRESQL_CATALOG.len())
+        .any(|window| window.eq_ignore_ascii_case(POSTGRESQL_CATALOG.as_bytes()));
+    if !mentions {
+        return false;
+    }
+    let Ok(tokens) = tokenize_in(text, Dialect::PostgreSql) else {
+        return false;
+    };
+    let mut ended = false;
+    let mut qualifies = false;
+    let mut previous: Option<&TokenKind<'_>> = None;
+    for token in &tokens {
+        match &token.kind {
+            TokenKind::End => break,
+            TokenKind::Semicolon => ended = true,
+            _ if ended => return false,
+            TokenKind::Dot => {
+                qualifies |= previous.is_some_and(|before| match before {
+                    TokenKind::Word(word) => word.eq_ignore_ascii_case(POSTGRESQL_CATALOG),
+                    TokenKind::QuotedIdentifier(name) => name == POSTGRESQL_CATALOG,
+                    _ => false,
+                });
+            }
+            _ => {}
+        }
+        previous = Some(&token.kind);
+    }
+    qualifies
+}
 
 fn aborted_block() -> SqlError {
     SqlError::new(
@@ -351,6 +402,8 @@ pub struct Session<'s> {
     search_path_at_begin: Option<String>,
     max_value_bytes: usize,
     max_row_bytes: usize,
+    deadline: Option<std::time::Instant>,
+    max_result_rows: Option<u64>,
     batch_resume: Option<(usize, usize)>,
     sqlserver_status: crate::sqlserver_functions::SessionStatus,
     oracle_nls: Arc<crate::oracle_nls::NlsParameters>,
@@ -363,6 +416,8 @@ pub struct Session<'s> {
     cancel: crate::cancel::CancelSignal,
     implicit_transaction: bool,
     block_is_implicit: bool,
+    statements_in_text: usize,
+    statement_stands_alone: bool,
     connection_settings: Option<Arc<Settings>>,
     pending_bulk_load: Option<String>,
     batch_context: Arc<crate::tsql::BatchContext>,
@@ -371,6 +426,7 @@ pub struct Session<'s> {
     pending_dynamic: Option<crate::tsql::DynamicBatch>,
     pending_procedure: Option<crate::tsql::ProcedureRun>,
     dynamic_depth: u8,
+    tsql_cursors: Vec<crate::tsql::Cursor>,
     returned_value: Option<Value>,
     unprepare_requests: Vec<i32>,
     parameter_values: Vec<NamedParameter>,
@@ -382,10 +438,14 @@ pub struct Session<'s> {
     deallocated: Vec<Option<String>>,
     _open: crate::activity::OpenSession,
     temporary: crate::temporary::TemporaryObjects,
+    portals: crate::portals::Portals,
     deferred: crate::deferred_checks::DeferredState,
     pending_user_types: Option<Arc<crate::user_types::Registry>>,
     plan_cache: crate::plan_cache::PlanCache,
     trigger_transaction: bool,
+    served_databases: Option<&'s dyn crate::served_databases::ServedDatabases>,
+    database_switch: Option<String>,
+    database_listing_version: Option<u64>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -420,6 +480,8 @@ impl<'s> Session<'s> {
             search_path_at_begin: None,
             max_value_bytes: crate::memory::MAX_VALUE_BYTES,
             max_row_bytes: crate::memory::MAX_ROW_BYTES,
+            deadline: None,
+            max_result_rows: None,
             batch_resume: None,
             sqlserver_status: crate::sqlserver_functions::SessionStatus::default(),
             oracle_nls: Arc::new(crate::oracle_nls::NlsParameters::default()),
@@ -431,6 +493,8 @@ impl<'s> Session<'s> {
             extra_results: Vec::new(),
             cancel: crate::cancel::CancelSignal::default(),
             implicit_transaction: false,
+            statements_in_text: 0,
+            statement_stands_alone: false,
             block_is_implicit: false,
             connection_settings: None,
             pending_bulk_load: None,
@@ -440,16 +504,16 @@ impl<'s> Session<'s> {
             pending_dynamic: None,
             pending_procedure: None,
             dynamic_depth: 0,
+            tsql_cursors: Vec::new(),
             returned_value: None,
             unprepare_requests: Vec::new(),
             parameter_values: Vec::new(),
             set_error: None,
             save_points: Vec::new(),
             savepoints: savepoints::Savepoints::default(),
-            advisory_locks: crate::advisory_locks::AdvisoryLocks::new(
-                std::ptr::from_ref(store).addr(),
-            ),
+            advisory_locks: crate::advisory_locks::AdvisoryLocks::new(store.store_id()),
             temporary: crate::temporary::TemporaryObjects::default(),
+            portals: crate::portals::Portals::default(),
             notifications: crate::notifications::Notifications::default(),
             deallocated: Vec::new(),
             _open: crate::activity::OpenSession::new(),
@@ -457,6 +521,9 @@ impl<'s> Session<'s> {
             pending_user_types: None,
             plan_cache: crate::plan_cache::PlanCache::default(),
             trigger_transaction: false,
+            served_databases: None,
+            database_switch: None,
+            database_listing_version: None,
         }
     }
 
@@ -477,6 +544,25 @@ impl<'s> Session<'s> {
         self.max_row_bytes = bytes.min(crate::memory::MAX_ROW_BYTES);
     }
 
+    /// Stops every statement of this session still running at `deadline` with SQLSTATE
+    /// `57014`, as `statement_timeout` does (the earlier of the two applies), checked by the
+    /// engine itself as it works through rows, so a statement that reads nothing from the
+    /// store stops too. `None` (the default) sets no deadline. A server
+    /// that runs untrusted statements under a time limit sets it.
+    pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.deadline = deadline;
+    }
+
+    /// Makes a `SELECT` of this session return at most `rows` rows: the engine stops reading
+    /// once it has them, as a `LIMIT` would (a statement's own lower `LIMIT` stays), so a
+    /// query that would produce millions of rows never builds them. Statements that can write
+    /// (a `SELECT` of a function that may change data, `nextval`, `INSERT ... RETURNING`) are
+    /// never cut. `None` (the default) sets no cap. A server that sends at most `n` rows
+    /// sets `n + 1`, so it can tell the client the result was cut.
+    pub fn set_max_result_rows(&mut self, rows: Option<u64>) {
+        self.max_result_rows = rows;
+    }
+
     /// The dialect this session reads: the one it was opened in, or the one a client chose
     /// with `eggdb.dialect`.
     pub fn dialect(&self) -> Dialect {
@@ -488,6 +574,12 @@ impl<'s> Session<'s> {
     /// in force whichever dialect `eggdb.dialect` chooses.
     pub fn connection_dialect(&self) -> Dialect {
         self.connection_dialect
+    }
+
+    fn reads_the_postgresql_catalog(&self, text: &str) -> bool {
+        self.connection_dialect == Dialect::PostgreSql
+            && self.dialect != Dialect::PostgreSql
+            && is_one_statement_naming_the_postgresql_catalog(text)
     }
 
     /// Runs `body` with the session reading its connection's dialect, then reads the dialect
@@ -688,6 +780,65 @@ impl<'s> Session<'s> {
         Arc::make_mut(&mut self.settings).database_names = names;
     }
 
+    /// Gives the session the server's databases: `CREATE DATABASE` and `DROP DATABASE` run
+    /// through `served`, and the catalogs list its databases as they are at each statement.
+    pub fn set_served_databases(
+        &mut self,
+        served: &'s dyn crate::served_databases::ServedDatabases,
+    ) {
+        self.served_databases = Some(served);
+        self.database_listing_version = None;
+        self.refresh_database_names();
+    }
+
+    /// The server's databases [`Session::set_served_databases`] gave this session, if any.
+    pub fn served_databases(&self) -> Option<&'s dyn crate::served_databases::ServedDatabases> {
+        self.served_databases
+    }
+
+    fn refresh_database_names(&mut self) {
+        let Some(served) = self.served_databases else {
+            return;
+        };
+        let version = served.listing_version();
+        if version.is_some() && version == self.database_listing_version {
+            return;
+        }
+        self.database_listing_version = version;
+        let names = served.names();
+        if names != self.settings.database_names {
+            self.set_database_names(names);
+        }
+    }
+
+    fn run_database_command(
+        &mut self,
+        statement: &crate::served_databases::DatabaseStatement,
+    ) -> SqlResult<QueryResult> {
+        let checked_role = self.settings.checked_role.clone();
+        let may_create_databases = match &checked_role {
+            None => true,
+            Some(role) => self
+                .read(|reader, _| crate::roles::stored_role(reader, role))?
+                .is_some_and(|role| role.create_database),
+        };
+        let settings = Arc::clone(&self.settings);
+        let result = crate::served_databases::run(
+            &crate::served_databases::DatabaseCommandContext {
+                served: self.served_databases,
+                dialect: self.dialect,
+                current_database: &settings.database,
+                superuser: checked_role.is_none(),
+                login_role: settings.login_role.as_deref(),
+                may_create_databases,
+                in_block: self.in_block(),
+            },
+            statement,
+        );
+        self.refresh_database_names();
+        result
+    }
+
     /// Names a stored role this session runs as, like [`Session::identify`], and checks its
     /// privileges from now on unless it is a superuser. Fails with `28000` when the role does not
     /// exist or may not log in.
@@ -700,8 +851,9 @@ impl<'s> Session<'s> {
             ));
         };
         self.identify(user, database);
-        Arc::make_mut(&mut self.settings).checked_role =
-            (!role.superuser).then(|| role.name.clone());
+        let settings = Arc::make_mut(&mut self.settings);
+        settings.checked_role = (!role.superuser).then(|| role.name.clone());
+        settings.login_role = Some(role.name);
         Ok(())
     }
 
@@ -923,6 +1075,7 @@ impl<'s> Session<'s> {
                 }
                 self.reset_all_settings();
                 sequences::discard_session_values();
+                crate::portals::take();
                 self.temporary.discard();
                 self.temporary.commit();
                 Ok(QueryResult::command("DISCARD ALL"))
@@ -972,6 +1125,9 @@ impl<'s> Session<'s> {
         text: &str,
         declared_types: &[Option<SqlType>],
     ) -> SqlResult<PreparedStatement> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self.in_connection_dialect(|session| session.prepare(text, declared_types));
+        }
         self.prepare_in_dialect(text, declared_types)
             .map_err(|error| self.in_dialect(text, error))
     }
@@ -1032,6 +1188,9 @@ impl<'s> Session<'s> {
         text: &str,
         declared_types: &[Option<SqlType>],
     ) -> SqlResult<StatementDescription> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self.in_connection_dialect(|session| session.describe(text, declared_types));
+        }
         self.describe_in_dialect(text, declared_types)
             .map_err(|error| self.in_dialect(text, error))
     }
@@ -1150,6 +1309,11 @@ impl<'s> Session<'s> {
             Statement::Explain(explain) => {
                 Ok(Some(crate::explain::columns(explain.style, self.dialect)))
             }
+            Statement::Cursor(crate::ast::CursorCommand::Fetch {
+                name,
+                only_move: false,
+                ..
+            }) => Ok(self.portals.columns_of(name)),
             _ => Ok(None),
         };
         let columns = columns.map(|columns| {
@@ -1191,6 +1355,11 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         copy: &mut dyn CopyChannel,
     ) -> SqlResult<()> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self.in_connection_dialect(|session| {
+                session.execute_prepared_with_copy(text, parameters, on_result, copy)
+            });
+        }
         let mut client = Client {
             channel: copy,
             script: false,
@@ -1234,6 +1403,12 @@ impl<'s> Session<'s> {
         self.read(|reader, _| crate::indexes::check_indexes(reader))
     }
 
+    /// Whether a `SAVEPOINT` is set in the open block, so that a `ROLLBACK TO SAVEPOINT` could
+    /// undo part of it. Only writes made through this session's statements are undone.
+    pub fn has_savepoints(&self) -> bool {
+        self.savepoints.is_active()
+    }
+
     /// Whether a `BEGIN` block is open, failed or not. An implicit transaction
     /// ([`Session::start_implicit_transaction`]) is not one.
     pub fn in_block(&self) -> bool {
@@ -1274,6 +1449,10 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         copy: &mut dyn CopyChannel,
     ) -> SqlResult<()> {
+        if self.reads_the_postgresql_catalog(text) {
+            return self
+                .in_connection_dialect(|session| session.execute_with_copy(text, on_result, copy));
+        }
         let mut client = Client {
             channel: copy,
             script: false,
@@ -1339,7 +1518,9 @@ impl<'s> Session<'s> {
     }
 
     /// Parses `text` as [`Session::run_one_statement`] does and says whether its one
-    /// statement is destructive, without running it.
+    /// statement is destructive, without running it. For a `DELETE` or `UPDATE` it reads the
+    /// keys, foreign keys and triggers of the table it changes; when it cannot read them, the
+    /// statement counts as one that can change many rows.
     pub fn destructive_statement(
         &mut self,
         text: &str,
@@ -1348,11 +1529,19 @@ impl<'s> Session<'s> {
             Ok(tokens) => tokens,
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         };
-        match self.one_statement_in(text, &tokens) {
-            Ok(Ok(destructive)) => Ok(destructive),
+        match self.one_statement_in(text, &tokens, ParseFor::Classifying) {
+            Ok(Ok(statement)) => Ok(self.destructive_part_of(statement)),
             Ok(Err(refusal)) => Err(OneStatementError::Refused(refusal)),
             Err(error) => Err(OneStatementError::Failed(self.in_dialect(text, error))),
         }
+    }
+
+    fn destructive_part_of(
+        &mut self,
+        statement: Option<Statement>,
+    ) -> Option<DestructiveStatement> {
+        let statement = statement?;
+        crate::destructive::classify(&statement, self)
     }
 
     fn run_checked_statement(
@@ -1365,8 +1554,16 @@ impl<'s> Session<'s> {
             Ok(tokens) => tokens,
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         };
-        match self.one_statement_in(text, &tokens) {
-            Ok(Ok(destructive)) => {
+        let parse_for = match rule {
+            DestructiveRule::OnlyConfirmed(_) => ParseFor::Classifying,
+            DestructiveRule::Allowed => ParseFor::Refusing,
+        };
+        match self.one_statement_in(text, &tokens, parse_for) {
+            Ok(Ok(statement)) => {
+                let destructive = match rule {
+                    DestructiveRule::OnlyConfirmed(_) => self.destructive_part_of(statement),
+                    DestructiveRule::Allowed => None,
+                };
                 if let DestructiveRule::OnlyConfirmed(confirmed) = rule
                     && destructive.is_some()
                     && destructive.as_ref() != confirmed
@@ -1377,11 +1574,18 @@ impl<'s> Session<'s> {
             Ok(Err(refusal)) => return Err(OneStatementError::Refused(refusal)),
             Err(error) => return Err(OneStatementError::Failed(self.in_dialect(text, error))),
         }
+        if self.sqlserver() && crate::tsql::uses_batch_logic(&tokens) {
+            self.statement_start = 0;
+            return self
+                .run_logic_text(text, tokens, Parameters::Absent, on_result)
+                .map_err(|error| OneStatementError::Failed(self.in_dialect(text, error)));
+        }
         let mut client = Client {
             channel: &mut NoCopyChannel,
             script: false,
             bulk_rows: None,
         };
+        self.statements_in_text = 0;
         match self.run_tokens(
             text,
             &tokens,
@@ -1399,7 +1603,8 @@ impl<'s> Session<'s> {
         &self,
         text: &str,
         tokens: &[Token<'_>],
-    ) -> SqlResult<Result<Option<DestructiveStatement>, OneStatementRefusal>> {
+        parse_for: ParseFor,
+    ) -> SqlResult<Result<Option<Statement>, OneStatementRefusal>> {
         let settings = Arc::clone(&self.settings);
         let _clock = crate::datetime::enter_statement(settings.time_zone);
         let _bytes = crate::bytea::enter_dialect(self.dialect);
@@ -1412,7 +1617,7 @@ impl<'s> Session<'s> {
             return Ok(Err(OneStatementRefusal::Empty));
         }
         let _constraints = self.enter_constraints();
-        let destructive = if parser.literal_rows().is_none() {
+        let statement = if parse_for == ParseFor::Classifying || parser.literal_rows().is_none() {
             match parser.statement()? {
                 Statement::Begin { .. }
                 | Statement::Commit
@@ -1424,14 +1629,14 @@ impl<'s> Session<'s> {
                     return Ok(Err(OneStatementRefusal::TransactionControl));
                 }
                 Statement::Copy(_) => return Ok(Err(OneStatementRefusal::Copy)),
-                statement => crate::destructive::classify(&statement),
+                statement => Some(statement),
             }
         } else {
             None
         };
         parser.skip_empty_statements();
         if parser.at_end() {
-            Ok(Ok(destructive))
+            Ok(Ok(statement))
         } else {
             Ok(Err(OneStatementRefusal::MoreThanOne {
                 position: parser.position(),
@@ -1447,6 +1652,7 @@ impl<'s> Session<'s> {
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
         self.statement_start = 0;
+        self.statements_in_text = 0;
         if self.sqlserver() && client.bulk_rows.is_none() {
             let tokens = tokenize_in(text, self.dialect)?;
             if crate::tsql::uses_batch_logic(&tokens) {
@@ -1536,7 +1742,7 @@ impl<'s> Session<'s> {
             let settings = Arc::clone(&self.settings);
             let context = Arc::clone(&self.batch_context);
             let _cancel = crate::cancel::enter(&self.cancel);
-            let _deadline = crate::cancel::enter_deadline(self.statement_timeout());
+            let _deadline = crate::cancel::enter_deadline(self.statement_timeout(), self.deadline);
             let _advisory = crate::advisory_locks::enter(
                 &self.advisory_locks,
                 !matches!(self.block, Block::None) || self.implicit_transaction,
@@ -1562,6 +1768,7 @@ impl<'s> Session<'s> {
                 return Ok(Flow::Finished { inline_end });
             }
             self.statement_start = parser.position();
+            self.statements_in_text = self.statements_in_text.saturating_add(1);
             let _status = self.enter_sqlserver_status();
             let _variables = self
                 .sqlserver()
@@ -1643,6 +1850,7 @@ impl<'s> Session<'s> {
                 match self.read(|reader, _| crate::user_types::load(reader)) {
                     Ok(registry) => {
                         self.pending_user_types = Some(registry);
+                        self.statements_in_text = self.statements_in_text.saturating_sub(1);
                         continue;
                     }
                     Err(error) => {
@@ -1655,6 +1863,8 @@ impl<'s> Session<'s> {
             if self.batch_resume.is_some() {
                 self.batch_resume = Some(resume);
             }
+            self.statement_stands_alone =
+                self.statements_in_text == 1 && only_separators_after(tokens, resume.0);
             let statement_tokens = tokens.get(first_token..resume.0.min(tokens.len()));
             let uses_sequences = statement_tokens.is_some_and(mentions_sequence_functions);
             self.statement_walks_expressions = statement_tokens.is_none_or(walks_expressions);
@@ -1691,7 +1901,12 @@ impl<'s> Session<'s> {
             self.enter_sequences(uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
+            crate::portals::install(std::mem::take(&mut self.portals));
             let result = with_raised_notices(self.run(&mut statement, &mut io));
+            self.portals = crate::portals::take();
+            if matches!(self.block, Block::None) {
+                self.portals.close_at_transaction_end();
+            }
             let result = self.keep_deferred(result);
             crate::activity::statement_finished(result.is_ok());
             let raised = crate::notifications::take_raised();
@@ -2403,6 +2618,7 @@ impl<'s> Session<'s> {
         statement: &mut Statement,
         io: &mut CopyIo<'_, '_>,
     ) -> SqlResult<QueryResult> {
+        self.refuse_after_database_switch()?;
         match statement {
             Statement::Set { name, value } if is_dialect_setting(name) => {
                 return self
@@ -2476,8 +2692,17 @@ impl<'s> Session<'s> {
         {
             self.commit()?;
         }
+        if let Statement::Database(command) = statement {
+            return self.run_database_command(command);
+        }
+        self.refresh_database_names();
         let settings = Arc::clone(&self.settings);
         crate::roles::check_statement(&settings, statement)?;
+        if let Some(most_rows) = self.max_result_rows
+            && !self.statement_uses_sequences
+        {
+            crate::result_row_cap::cap_result_rows(statement, most_rows);
+        }
         let binding = Binding {
             settings: &settings,
             walk_expressions: self.statement_walks_expressions,
@@ -2546,6 +2771,9 @@ impl<'s> Session<'s> {
                     crate::row_security::run(writer, binding.settings, &statement)
                 })
             }
+            Statement::Database(command) => {
+                Err(SqlError::not_supported(format!("{} here", command.tag())))
+            }
             Statement::Role(role) => {
                 let mut role = role.clone();
                 let tag = role.tag();
@@ -2613,6 +2841,13 @@ impl<'s> Session<'s> {
                         &settings,
                         select,
                         crate::routines::Prefetch::NonVolatile,
+                    )?;
+                } else if dialect == Dialect::Oracle {
+                    crate::routines::prepare_oracle_table_function(
+                        &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
+                        tables,
+                        &settings,
+                        select,
                     )?;
                 }
                 execute::select(reader, tables, select, false)
@@ -2723,10 +2958,11 @@ impl<'s> Session<'s> {
                 Ok(QueryResult::command("RESET"))
             }
             Statement::Discard(target) => self.discard(target.clone()),
+            Statement::Cursor(command) => self.cursor_command(command, io),
             Statement::Show { name } => self.show(name.as_deref()),
             Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
                 binding.create_table(writer, tables, create)?;
-                execute::create_table(writer, tables, create, dialect)
+                crate::sqlite_schema_text::create_table(writer, tables, create, dialect)
             }),
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
@@ -2866,6 +3102,20 @@ impl<'s> Session<'s> {
                 }
                 result
             }
+            Statement::Call(call) if self.runs_procedures_nonatomic() => {
+                self.write_nonatomic("CALL", |control, tables| {
+                    for argument in &mut call.arguments {
+                        binding.condition(&*control, tables, argument)?;
+                    }
+                    crate::routines::call_procedure_nonatomic(control, tables, &settings, call)
+                        .map(|(result, _)| result)
+                })
+            }
+            Statement::Do(block) if self.runs_procedures_nonatomic() => {
+                self.write_nonatomic("DO", |control, tables| {
+                    crate::routines::run_do_nonatomic(control, tables, &settings, &block.code)
+                })
+            }
             Statement::Call(call) => self.write_plsql("CALL", |writer, tables| {
                 for argument in &mut call.arguments {
                     binding.condition(&*writer, tables, argument)?;
@@ -2971,6 +3221,7 @@ impl<'s> Session<'s> {
                     | Statement::CreateSchema { .. }
                     | Statement::DropSchema { .. }
                     | Statement::RenameSchema { .. }
+                    | Statement::Database(_)
                     | Statement::CreateView(_)
                     | Statement::DropView { .. }
                     | Statement::AlterView(_)
@@ -3190,84 +3441,101 @@ impl<'s> Session<'s> {
                     },
                     tables,
                 );
-                match outcome {
-                    Ok(result)
-                        if !keep_open
-                            && !implicit
-                            && crate::triggers::statement_triggers_pending() =>
-                    {
-                        self.block = Block::Writing(writer);
-                        self.block_is_implicit = false;
-                        self.trigger_transaction = true;
-                        Ok(result)
-                    }
-                    Ok(result)
-                        if keep_open
-                            && (keeps_ddl_open
-                                || !matches!(
-                                    command,
-                                    "CREATE TABLE"
-                                        | "DROP TABLE"
-                                        | "TRUNCATE TABLE"
-                                        | "CREATE INDEX"
-                                        | "DROP INDEX"
-                                        | "CREATE SEQUENCE"
-                                        | "ALTER SEQUENCE"
-                                        | "DROP SEQUENCE"
-                                        | "ALTER TABLE"
-                                        | "CREATE SCHEMA"
-                                        | "DROP SCHEMA"
-                                        | "ALTER SCHEMA"
-                                        | "CREATE VIEW"
-                                        | "DROP VIEW"
-                                        | "ALTER VIEW"
-                                        | "COMMENT"
-                                        | "CREATE TRIGGER"
-                                        | "DROP TRIGGER"
-                                )) =>
-                    {
-                        self.block = Block::Writing(writer);
-                        self.block_is_implicit = false;
-                        Ok(result)
-                    }
-                    Ok(result) if implicit => {
-                        self.block = Block::Writing(writer);
-                        self.block_is_implicit = true;
-                        Ok(result)
-                    }
-                    Ok(result) => {
-                        let pending = crate::deferred_checks::take_statement_pending();
-                        if !pending.is_empty() {
-                            let checked = crate::constraints::check_pending(
-                                &crate::temporary::TemporaryRead {
-                                    inner: &writer,
-                                    objects: &*objects,
-                                },
-                                tables,
-                                &pending,
-                            );
-                            if let Err(error) = checked {
-                                let _ = writer.rollback();
-                                self.temporary.rollback();
-                                return Err(error);
-                            }
-                        }
-                        if let Err(error) = writer.commit() {
-                            self.temporary.rollback();
-                            return Err(error);
-                        }
-                        self.temporary.commit();
-                        sequences::mark_changes_committed();
-                        crate::activity::committed();
-                        Ok(result)
-                    }
-                    Err(error) => {
+                self.end_autocommit_statement(
+                    writer,
+                    outcome,
+                    command,
+                    keep_open,
+                    keeps_ddl_open,
+                    implicit,
+                )
+            }
+        }
+    }
+
+    fn end_autocommit_statement(
+        &mut self,
+        writer: Box<dyn crate::store::BoxedWrite + 's>,
+        outcome: SqlResult<QueryResult>,
+        command: &str,
+        keep_open: bool,
+        keeps_ddl_open: bool,
+        implicit: bool,
+    ) -> SqlResult<QueryResult> {
+        match outcome {
+            Ok(result)
+                if !keep_open && !implicit && crate::triggers::statement_triggers_pending() =>
+            {
+                self.block = Block::Writing(writer);
+                self.block_is_implicit = false;
+                self.trigger_transaction = true;
+                Ok(result)
+            }
+            Ok(result)
+                if keep_open
+                    && (keeps_ddl_open
+                        || !matches!(
+                            command,
+                            "CREATE TABLE"
+                                | "DROP TABLE"
+                                | "TRUNCATE TABLE"
+                                | "CREATE INDEX"
+                                | "DROP INDEX"
+                                | "CREATE SEQUENCE"
+                                | "ALTER SEQUENCE"
+                                | "DROP SEQUENCE"
+                                | "ALTER TABLE"
+                                | "CREATE SCHEMA"
+                                | "DROP SCHEMA"
+                                | "ALTER SCHEMA"
+                                | "CREATE VIEW"
+                                | "DROP VIEW"
+                                | "ALTER VIEW"
+                                | "COMMENT"
+                                | "CREATE TRIGGER"
+                                | "DROP TRIGGER"
+                        )) =>
+            {
+                self.block = Block::Writing(writer);
+                self.block_is_implicit = false;
+                Ok(result)
+            }
+            Ok(result) if implicit => {
+                self.block = Block::Writing(writer);
+                self.block_is_implicit = true;
+                Ok(result)
+            }
+            Ok(result) => {
+                let pending = crate::deferred_checks::take_statement_pending();
+                if !pending.is_empty() {
+                    let checked = crate::constraints::check_pending(
+                        &crate::temporary::TemporaryRead {
+                            inner: &writer,
+                            objects: &self.temporary,
+                        },
+                        &mut self.tables,
+                        &pending,
+                    );
+                    if let Err(error) = checked {
                         let _ = writer.rollback();
                         self.temporary.rollback();
-                        crate::activity::rolled_back();
-                        Err(error)
+                        return Err(error);
                     }
                 }
+                if let Err(error) = writer.commit() {
+                    self.temporary.rollback();
+                    return Err(error);
+                }
+                self.temporary.commit();
+                sequences::mark_changes_committed();
+                crate::activity::committed();
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = writer.rollback();
+                self.temporary.rollback();
+                crate::activity::rolled_back();
+                Err(error)
             }
         }
     }

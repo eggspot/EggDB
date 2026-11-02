@@ -1,6 +1,6 @@
 use super::{
-    MAX_COLUMNS, NAMESPACE, Reader, VIEW_FORMAT_VERSION, dialect_code, dialect_of, put_bytes,
-    put_type, put_varint,
+    BASE_TYPES_VIEW_FORMAT_VERSION, MAX_COLUMNS, NAMESPACE, Reader, VIEW_FORMAT_VERSION,
+    dialect_code, dialect_of, is_base_type, put_bytes, put_type, put_varint,
 };
 use crate::dialect::Dialect;
 use crate::error::SqlResult;
@@ -40,6 +40,12 @@ pub(crate) fn decode_schema(name: &str, bytes: &[u8]) -> SqlResult<()> {
         return Err(reader.damaged());
     }
     Ok(())
+}
+
+pub(crate) fn every_dependency_prefix() -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(DEPENDENCY_SPACE);
+    key
 }
 
 pub(crate) fn dependencies_prefix(referenced: &str) -> Vec<u8> {
@@ -179,8 +185,19 @@ pub(crate) struct ViewDefinition {
 }
 
 impl ViewDefinition {
+    fn uses_base_types(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|column| column.sql_type.is_some_and(is_base_type))
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = vec![VIEW_FORMAT_VERSION, dialect_code(self.dialect)];
+        let version = if self.uses_base_types() {
+            BASE_TYPES_VIEW_FORMAT_VERSION
+        } else {
+            VIEW_FORMAT_VERSION
+        };
+        let mut out = vec![version, dialect_code(self.dialect)];
         let mut flags = 0;
         if self.expands_wildcard {
             flags |= WILDCARD_FLAG;
@@ -217,7 +234,9 @@ impl ViewDefinition {
 
     pub(crate) fn decode(name: &str, bytes: &[u8]) -> SqlResult<Self> {
         let mut reader = Reader::new(bytes, "view definition");
-        if reader.byte()? != VIEW_FORMAT_VERSION || !crate::schemas::is_well_formed(name) {
+        let version = reader.byte()?;
+        let base_types_allowed = version == BASE_TYPES_VIEW_FORMAT_VERSION;
+        if !is_view_record(bytes) || !crate::schemas::is_well_formed(name) {
             return Err(reader.damaged());
         }
         let dialect = dialect_of(reader.byte()?).ok_or_else(|| reader.damaged())?;
@@ -244,7 +263,7 @@ impl ViewDefinition {
                 reader.byte()?;
                 None
             } else {
-                Some(reader.sql_type(true, true, true)?)
+                Some(reader.sql_type(true, true, true, base_types_allowed)?)
             };
             let source = reader.plain_name()?;
             if columns.iter().any(|known| known.name == column) {
@@ -281,7 +300,7 @@ impl ViewDefinition {
             references.push(reference);
         }
         reader.finish()?;
-        Ok(Self {
+        let view = Self {
             name: name.to_owned(),
             dialect,
             query,
@@ -297,12 +316,19 @@ impl ViewDefinition {
             } else {
                 None
             },
-        })
+        };
+        if view.uses_base_types() != base_types_allowed {
+            return Err(reader.damaged());
+        }
+        Ok(view)
     }
 }
 
 pub(crate) fn is_view_record(bytes: &[u8]) -> bool {
-    bytes.first() == Some(&VIEW_FORMAT_VERSION)
+    matches!(
+        bytes.first().copied(),
+        Some(VIEW_FORMAT_VERSION | BASE_TYPES_VIEW_FORMAT_VERSION)
+    )
 }
 
 #[cfg(test)]
@@ -426,6 +452,36 @@ mod tests {
             assert_eq!(bytes[3..], plain[3..]);
             assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), checked);
         }
+    }
+
+    #[test]
+    fn a_view_with_a_citext_column_is_a_newer_version_to_the_older_reader_and_others_keep_8() {
+        assert_eq!(view().encode()[0], crate::encoding::VIEW_FORMAT_VERSION);
+        let mut citext = view();
+        citext.columns[1].sql_type = Some(SqlType::Defined(crate::types::DefinedType::CITEXT));
+        let bytes = citext.encode();
+        assert_eq!(bytes[0], crate::encoding::BASE_TYPES_VIEW_FORMAT_VERSION);
+        assert!(is_view_record(&bytes));
+        assert_eq!(ViewDefinition::decode("app\0v", &bytes).unwrap(), citext);
+        assert_eq!(
+            TableDefinition::decode("app\0v", &bytes)
+                .unwrap_err()
+                .state()
+                .code(),
+            "42809"
+        );
+        let older_reader = crate::encoding::Reader::new(&bytes, "table definition")
+            .version_up_to(crate::encoding::DEFINED_TYPES_FORMAT_VERSION)
+            .unwrap_err();
+        assert_eq!(older_reader.state().code(), "0A000");
+        let mut claimed_older = bytes.clone();
+        claimed_older[0] = crate::encoding::VIEW_FORMAT_VERSION;
+        let damaged = ViewDefinition::decode("app\0v", &claimed_older).unwrap_err();
+        assert_eq!(damaged.state().code(), "XX001");
+        let mut claimed_newer = view().encode();
+        claimed_newer[0] = crate::encoding::BASE_TYPES_VIEW_FORMAT_VERSION;
+        let damaged = ViewDefinition::decode("app\0v", &claimed_newer).unwrap_err();
+        assert_eq!(damaged.state().code(), "XX001");
     }
 
     #[test]

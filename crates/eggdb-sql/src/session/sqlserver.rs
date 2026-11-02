@@ -306,9 +306,10 @@ impl<'s> Session<'s> {
     }
 
     /// Resets the session as SQL Server resets a connection a pool hands out again: an open
-    /// transaction rolls back unless `keep_transaction`, and the `SET` options (`eggdb.dialect`
+    /// transaction rolls back unless `keep_transaction`, the `SET` options (`eggdb.dialect`
     /// among them), `IDENTITY_INSERT`, `@@ROWCOUNT` and `SCOPE_IDENTITY()` return to their
-    /// state after login. The user, the database and `@@SPID` stay. An error is the rollback's.
+    /// state after login, cursors are deallocated and temporary procedures (`#name`) dropped.
+    /// The user, the database and `@@SPID` stay. An error is the rollback's.
     pub fn reset_connection(&mut self, keep_transaction: bool) -> SqlResult<()> {
         let rolled_back = if keep_transaction || !self.in_block() {
             Ok(())
@@ -320,6 +321,14 @@ impl<'s> Session<'s> {
         settings.sqlserver.no_count = false;
         settings.sqlserver.implicit_transactions = false;
         settings.sqlserver.format_only = false;
+        settings.sqlserver.cursors.clear();
+        self.tsql_cursors.clear();
+        self.temporary.discard_prefix(&crate::encoding::routine_key(
+            &crate::temporary::internal_name("#"),
+        ));
+        if !self.in_block() {
+            self.temporary.commit();
+        }
         self.pending_bulk_load = None;
         self.dialect = self.connection_dialect;
         self.sync_transaction_count();
@@ -481,7 +490,7 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         match statement {
             SqlServerStatement::Use(name) => {
-                if !name.text.eq_ignore_ascii_case(&self.settings.database) {
+                let Some(database) = self.use_database(&name.text)? else {
                     return Err(SqlError::new(
                         SqlState::INVALID_CATALOG_NAME,
                         format!(
@@ -491,11 +500,8 @@ impl<'s> Session<'s> {
                     )
                     .with_sqlserver_code(911)
                     .at(name.position));
-                }
-                Ok(QueryResult::command(format!(
-                    "USE {}",
-                    self.settings.database
-                )))
+                };
+                Ok(QueryResult::command(format!("USE {database}")))
             }
             SqlServerStatement::NoCount(on) => {
                 Arc::make_mut(&mut self.settings).sqlserver.no_count = *on;
@@ -545,9 +551,11 @@ impl<'s> Session<'s> {
             SqlServerStatement::SetVariable { variable, value } => {
                 self.run_set_variable(variable, value)
             }
-            SqlServerStatement::SelectAssign { targets, query } => {
-                self.run_select_assignment(targets, query)
-            }
+            SqlServerStatement::SelectAssign {
+                targets,
+                query,
+                per_row,
+            } => self.run_select_assignment(targets, query, *per_row),
             SqlServerStatement::Condition(condition) => self.run_condition(condition),
             SqlServerStatement::Print(message) => self.run_print(message),
             SqlServerStatement::RaiseError(raise) => self.run_raiserror(raise),
@@ -556,6 +564,16 @@ impl<'s> Session<'s> {
             SqlServerStatement::SaveTransaction(name) => self.save_transaction(name),
             SqlServerStatement::RollbackTo(name) => self.roll_back_to(name),
             SqlServerStatement::Return(value) => self.run_return(value),
+            SqlServerStatement::DeclareCursor(declaration) => self.run_declare_cursor(declaration),
+            SqlServerStatement::OpenCursor(cursor) => self.run_open_cursor(cursor),
+            SqlServerStatement::FetchCursor {
+                cursor,
+                orientation,
+                into,
+            } => self.run_fetch_cursor(cursor, orientation, into),
+            SqlServerStatement::CloseCursor(cursor) => self.run_close_cursor(cursor),
+            SqlServerStatement::DeallocateCursor(cursor) => self.run_deallocate_cursor(cursor),
+            SqlServerStatement::WaitFor { until_time, time } => self.run_waitfor(*until_time, time),
         }
     }
 

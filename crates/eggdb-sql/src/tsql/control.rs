@@ -113,6 +113,11 @@ pub(crate) fn uses_batch_logic(tokens: &[Token<'_>]) -> bool {
         .enumerate()
         .any(|(at, token)| match &token.kind {
             TokenKind::Variable(name) => !name.starts_with("@@"),
+            TokenKind::Word(_)
+                if tokens.get(at + 1).map(|next| &next.kind) == Some(&TokenKind::Colon) =>
+            {
+                true
+            }
             TokenKind::Word(word) => match word.as_ref() {
                 "begin" => {
                     !word_at(tokens, at + 1).is_some_and(|next| TRANSACTION_WORDS.contains(&next))
