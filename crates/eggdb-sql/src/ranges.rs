@@ -56,15 +56,33 @@ pub(crate) const RIGHT_OF: &str = "*range_right_of*";
 pub(crate) const NOT_RIGHT_OF: &str = "*range_not_right_of*";
 pub(crate) const NOT_LEFT_OF: &str = "*range_not_left_of*";
 pub(crate) const ADJACENT: &str = "*range_adjacent*";
+const INTEGER_AND: &str = "*integer_and*";
+const INTEGER_OR: &str = "*integer_or*";
 
-pub(crate) const OPERATORS: [(&str, &str); 6] = [
+pub(crate) const OPERATORS: [(&str, &str); 8] = [
     ("&&", OVERLAPS),
     ("<<", LEFT_OF),
     (">>", RIGHT_OF),
     ("&<", NOT_RIGHT_OF),
     ("&>", NOT_LEFT_OF),
     ("-|-", ADJACENT),
+    ("&", INTEGER_AND),
+    ("|", INTEGER_OR),
 ];
+
+fn bitwise(name: &str, left: &Value, right: &Value) -> Option<SqlResult<Value>> {
+    if !matches!(name, INTEGER_AND | INTEGER_OR) {
+        return None;
+    }
+    let (a, b) = (left.as_integer()?, right.as_integer()?);
+    let combined = if name == INTEGER_AND { a & b } else { a | b };
+    let sql_type = match (left, right) {
+        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => SqlType::BigInt,
+        (Value::Integer(_), _) | (_, Value::Integer(_)) => SqlType::Integer,
+        _ => SqlType::SmallInt,
+    };
+    Some(crate::types::integer_value(combined, sql_type))
+}
 
 const FUNCTIONS: [&str; 7] = [
     "lower",
@@ -629,6 +647,9 @@ pub(crate) fn operator(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if left.is_null() || right.is_null() {
         return Some(Ok(Value::Null));
     }
+    if let Some(result) = bitwise(name, left, right) {
+        return Some(result);
+    }
     if name == OVERLAPS
         && let (Value::Array(a), Value::Array(b)) = (left, right)
     {
@@ -904,6 +925,10 @@ pub(crate) fn function_type(name: &str, argument: Option<SqlType>) -> Option<Opt
     if OPERATORS.iter().any(|(_, internal)| *internal == name) {
         return Some(match (name, argument) {
             (LEFT_OF | RIGHT_OF, Some(sql_type)) if sql_type.is_numeric() => Some(sql_type),
+            (
+                INTEGER_AND | INTEGER_OR,
+                Some(sql_type @ (SqlType::SmallInt | SqlType::Integer | SqlType::BigInt)),
+            ) => Some(sql_type),
             _ => Some(SqlType::Boolean),
         });
     }

@@ -35,6 +35,7 @@ public final class AppCheck {
             step(connection, "columns", AppCheck::columns);
             step(connection, "primary keys", AppCheck::primaryKeys);
             step(connection, "imported keys", AppCheck::importedKeys);
+            step(connection, "index info", AppCheck::indexInfo);
         }
     }
 
@@ -234,6 +235,18 @@ public final class AppCheck {
                 print(rows, "PKTABLE_SCHEM", "PKTABLE_NAME", "PKCOLUMN_NAME", "FKTABLE_SCHEM", "FKTABLE_NAME",
                         "FKCOLUMN_NAME", "KEY_SEQ", "UPDATE_RULE", "DELETE_RULE", "FK_NAME", "PK_NAME",
                         "DEFERRABILITY");
+            }
+        }
+    }
+
+    private static void indexInfo(Connection connection) throws SQLException {
+        String[][] tables = {{"public", "orders"}, {"public", "tickets"}, {"shop", "stock"}};
+        for (String[] table : tables) {
+            for (boolean unique : new boolean[] {false, true}) {
+                try (ResultSet rows = connection.getMetaData().getIndexInfo(null, table[0], table[1], unique, true)) {
+                    print(rows, "TABLE_SCHEM", "TABLE_NAME", "NON_UNIQUE", "INDEX_NAME", "TYPE", "ORDINAL_POSITION",
+                            "COLUMN_NAME", "ASC_OR_DESC", "FILTER_CONDITION");
+                }
             }
         }
     }

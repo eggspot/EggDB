@@ -201,6 +201,120 @@ fn pg_expandarray_gives_pgjdbc_its_key_columns_in_order() {
     );
 }
 
+const PGJDBC_INDEX_INFO: &str = "SELECT     tmp.TABLE_CAT,     tmp.TABLE_SCHEM,     tmp.TABLE_NAME, \
+     tmp.NON_UNIQUE,     tmp.INDEX_QUALIFIER,     tmp.INDEX_NAME,     tmp.TYPE, \
+     tmp.ORDINAL_POSITION, \
+     trim(both '\"' from pg_catalog.pg_get_indexdef(tmp.CI_OID, tmp.ORDINAL_POSITION, false)) AS COLUMN_NAME, \
+   CASE tmp.AM_NAME     WHEN 'btree' THEN CASE tmp.I_INDOPTION[tmp.ORDINAL_POSITION - 1] & 1::smallint \
+       WHEN 1 THEN 'D'       ELSE 'A'     END     ELSE NULL   END AS ASC_OR_DESC, \
+     tmp.CARDINALITY,     tmp.PAGES,     tmp.FILTER_CONDITION FROM (  SELECT     NULL AS TABLE_CAT, \
+     n.nspname AS TABLE_SCHEM,     ct.relname AS TABLE_NAME,     NOT i.indisunique AS NON_UNIQUE, \
+     NULL AS INDEX_QUALIFIER,     ci.relname AS INDEX_NAME,     CASE i.indisclustered \
+       WHEN true THEN 1       ELSE CASE am.amname         WHEN 'hash' THEN 2         ELSE 3 \
+       END     END AS TYPE,     (information_schema._pg_expandarray(i.indkey)).n AS ORDINAL_POSITION, \
+     ci.reltuples AS CARDINALITY,     ci.relpages AS PAGES, \
+     pg_catalog.pg_get_expr(i.indpred, i.indrelid) AS FILTER_CONDITION,     ci.oid AS CI_OID, \
+     i.indoption AS I_INDOPTION,     am.amname AS AM_NAME   FROM pg_catalog.pg_class ct \
+     JOIN pg_catalog.pg_namespace n ON (ct.relnamespace = n.oid) \
+     JOIN pg_catalog.pg_index i ON (ct.oid = i.indrelid) \
+     JOIN pg_catalog.pg_class ci ON (ci.oid = i.indexrelid) \
+     JOIN pg_catalog.pg_am am ON (ci.relam = am.oid)   WHERE true  AND n.nspname = E'public' \
+ AND ct.relname = E'idx_info' UNIQUE_ONLY) AS tmp  ORDER BY NON_UNIQUE, TYPE, INDEX_NAME, ORDINAL_POSITION ";
+
+fn columns_named(output: &str, names: &[&str]) -> String {
+    let mut lines = output.lines();
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('|').collect();
+    let positions: Vec<usize> = names
+        .iter()
+        .map(|name| {
+            header
+                .iter()
+                .position(|column| column == name)
+                .unwrap_or_else(|| panic!("no column {name} in {output}"))
+        })
+        .collect();
+    let mut shown = vec![names.join("|")];
+    for line in lines {
+        let cells: Vec<&str> = line.split('|').collect();
+        if cells.len() != header.len() {
+            shown.push(line.to_owned());
+            continue;
+        }
+        let picked: Vec<&str> = positions.iter().map(|&at| cells[at]).collect();
+        shown.push(picked.join("|"));
+    }
+    shown.join("\n")
+}
+
+#[test]
+fn integer_bitwise_and_and_or_keep_postgresql_types() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT 5::smallint & 1::smallint AS a, 6 | 1 AS b, 12::bigint & 10 AS c, \
+             NULL::integer & 1 AS d, 3::smallint | 4 AS e"
+        ),
+        "a|b|c|d|e\n1|7|8|NULL|7\nSELECT 1"
+    );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT CASE 3::smallint & 1::smallint WHEN 1 THEN 'D' ELSE 'A' END AS bit"
+        ),
+        "bit\nD\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT 'a'::text & 1"), "42883");
+}
+
+#[test]
+fn pgjdbc_get_index_info_lists_every_index_column_in_order() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    ok(
+        &mut session,
+        "CREATE TABLE idx_info (id integer PRIMARY KEY, code text, opened date, priority integer, \
+         closed date, CONSTRAINT idx_info_code_key UNIQUE (code)); \
+         CREATE INDEX idx_info_opened ON idx_info (opened DESC); \
+         CREATE INDEX idx_info_priority ON idx_info (priority NULLS FIRST, closed DESC NULLS LAST); \
+         INSERT INTO idx_info VALUES (1, 'a', '2024-01-01', 2, NULL), (2, 'b', NULL, 1, '2024-02-01')",
+    );
+    let names = [
+        "table_schem",
+        "table_name",
+        "non_unique",
+        "index_name",
+        "type",
+        "ordinal_position",
+        "column_name",
+        "asc_or_desc",
+        "filter_condition",
+    ];
+    let every = ok(&mut session, &PGJDBC_INDEX_INFO.replace("UNIQUE_ONLY", ""));
+    assert_eq!(
+        columns_named(&every, &names),
+        "table_schem|table_name|non_unique|index_name|type|ordinal_position|column_name|asc_or_desc|filter_condition\n\
+         public|idx_info|f|idx_info_code_key|3|1|code|A|NULL\n\
+         public|idx_info|f|idx_info_pkey|3|1|id|A|NULL\n\
+         public|idx_info|t|idx_info_opened|3|1|opened|D|NULL\n\
+         public|idx_info|t|idx_info_priority|3|1|priority|A|NULL\n\
+         public|idx_info|t|idx_info_priority|3|2|closed|D|NULL\n\
+         SELECT 5"
+    );
+    let unique = ok(
+        &mut session,
+        &PGJDBC_INDEX_INFO.replace("UNIQUE_ONLY", " AND i.indisunique "),
+    );
+    assert_eq!(
+        columns_named(&unique, &["index_name", "ordinal_position", "column_name"]),
+        "index_name|ordinal_position|column_name\n\
+         idx_info_code_key|1|code\n\
+         idx_info_pkey|1|id\n\
+         SELECT 2"
+    );
+}
+
 #[test]
 fn ranges_take_canonical_forms_and_answer_their_operators() {
     let store = MemoryStore::default();
