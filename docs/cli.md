@@ -982,13 +982,16 @@ one continues, `app'>` and `app">` inside an unfinished string or quoted name, `
 `BEGIN` block and `app=!>` in a failed one (every statement answers `25P02` until `ROLLBACK`).
 `BEGIN` holds the database's write transaction across prompts until `COMMIT` or `ROLLBACK`; a
 block still open when the shell ends is rolled back with a `WARNING:`. Inside a block, `put`,
-`get`, `del`, `incr` and `decr` run in the block's own transaction, so key-value writes and SQL
-are all-or-nothing together: `COMMIT` keeps both, `ROLLBACK` (or a block left open at the end)
-drops both, and `get` sees what the block wrote. In a failed block they are refused until
-`ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, while a `SAVEPOINT` is set
-`put`, `del`, `incr` and `decr` are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
-`RELEASE SAVEPOINT` lifts it), and `expire`, `persist` and `cas` are refused inside a block for
-now; `scan`, `ttl`, `check`, `stats` and `backup` read the last commit (D266).
+`get`, `del`, `incr`, `decr`, `expire`, `persist`, `cas`, `scan` and `ttl` run in the block's
+own transaction, so key-value writes and SQL are all-or-nothing together: `COMMIT` keeps both,
+`ROLLBACK` (or a block left open at the end) drops both. Reads see what the block wrote: `get`
+and `ttl` its values and times to live, `scan` the keys it put and not the ones it deleted, and
+`cas` compares against the block's value. A time to live set in the block counts from the
+moment the block's transaction began, takes effect at `COMMIT` and is gone after `ROLLBACK`
+(D266, D283). In a failed block they are refused until `ROLLBACK`, in a `BEGIN READ ONLY` block
+the writes are refused while `get`, `scan` and `ttl` read the last commit, and while a
+`SAVEPOINT` is set the writes are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
+`RELEASE SAVEPOINT` lifts it); `check`, `stats` and `backup` read the last commit.
 
 ```
 app=> begin;

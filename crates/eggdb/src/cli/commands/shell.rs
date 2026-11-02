@@ -1097,16 +1097,29 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             status: self.sql.transaction_status(),
             has_savepoints: self.sql.has_savepoints(),
         };
-        let exit = match key_value_in_block(self.store, block, &request, &self.file) {
+        let mut out = Output::new(&mut *console.stdout, false);
+        let ran = key_value_in_block(self.store, block, &request, &mut out, &self.file);
+        let written = match &ran {
+            Ok(InBlock::Ran { printed, .. }) => out.write_through(printed),
+            _ => Ok(()),
+        };
+        if written.and_then(|()| out.finish()).is_err() {
+            return Some(Step::Quit);
+        }
+        let exit = match ran {
             Ok(InBlock::ReadsTheLastCommit) => return None,
+            Err(Failure::OutputClosed) => return Some(Step::Quit),
             Ok(InBlock::Ran {
-                printed,
                 message,
+                note,
                 exit,
+                ..
             }) => {
-                let mut out = Output::new(&mut *console.stdout, false);
-                if out.write_through(&printed).is_err() || out.finish().is_err() {
-                    return Some(Step::Quit);
+                if let Some(note) = note {
+                    let mut messages = Output::new(&mut *console.stderr, self.color_err);
+                    messages.styled(Style::Dim, &note);
+                    messages.text("\n");
+                    let _ = messages.finish();
                 }
                 if let Some(message) = message {
                     return Some(self.fail(console, &message, exit));

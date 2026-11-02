@@ -724,6 +724,31 @@ until `ROLLBACK`. Key-value commands inside a block run inside it (so a `put` is
 the `COMMIT`, or rolled back), which is the one place the two worlds meet. `.quit`, `Ctrl-D`
 and the end of a batch roll an open block back with the `WARNING:` above.
 
+As built (D266, D283): `put`, `get`, `del`, `incr`, `decr`, `expire`, `persist`, `cas`, `scan`
+and `ttl` run in the block's transaction and print what they print outside it (`scan` ends with
+its dim `n entries` line on stderr). Reads see the block: `scan` lists the keys put earlier in
+the block and leaves out the ones it deleted, `ttl` shows a time set by an `expire` in the
+block, and `cas` compares against the value the block holds. A time to live counts from the
+moment the block began and is kept by `COMMIT` and dropped by `ROLLBACK`. While a `SAVEPOINT`
+is set the writes are refused, naming `RELEASE SAVEPOINT`, `COMMIT` and `ROLLBACK`; in a
+`BEGIN READ ONLY` block the writes are refused and `get`, `scan` and `ttl` read the last
+commit; `check`, `stats` and `backup` always read the last commit.
+
+```
+app=> begin;
+BEGIN
+app=*> put session:7 Ada
+app=*> expire session:7 1h
+app=*> ttl session:7
+1h
+app=*> cas session:7 Ada Grace
+app=*> scan --prefix session:
+session:7	Grace
+1 entry
+app=*> commit;
+COMMIT
+```
+
 ### Exit codes
 Interactive: 0, or 130 from a `Ctrl-C` during a statement. Batch, from section 7's table: 0 when
 every statement and command succeeded; 1 when the first failure was a `get`/`del` of a missing
