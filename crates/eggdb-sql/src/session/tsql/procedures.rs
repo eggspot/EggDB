@@ -1,3 +1,4 @@
+use super::application_locks::ApplicationLockProcedure;
 use super::{Code, DynamicEnd, Level};
 use crate::ast::{Expr, ProcedureArgument, ProcedureCall};
 use crate::dialect::Dialect;
@@ -140,6 +141,9 @@ impl<'s> Session<'s> {
         &mut self,
         call: &ProcedureCall,
     ) -> SqlResult<QueryResult> {
+        if let Some(procedure) = ApplicationLockProcedure::named(&call.procedure.text) {
+            return self.run_application_lock_procedure(procedure, call);
+        }
         let system = crate::session::sqlserver::is_system_procedure(&call.procedure.text);
         if !system
             && self.batch_resume.is_some()

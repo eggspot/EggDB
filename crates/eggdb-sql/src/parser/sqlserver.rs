@@ -280,8 +280,19 @@ const NOT_TRANSACT_SQL_STATEMENTS: [&str; 20] = [
     "pragma",
 ];
 
-const ENGINE_FUNCTIONS: [&str; 10] = [
-    "coalesce", "nullif", "upper", "lower", "abs", "count", "sum", "avg", "min", "max",
+const ENGINE_FUNCTIONS: [&str; 12] = [
+    "coalesce",
+    "nullif",
+    "upper",
+    "lower",
+    "abs",
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "applock_mode",
+    "applock_test",
 ];
 
 const ON_ONLY_OPTIONS: [&str; 7] = [

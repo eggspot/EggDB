@@ -1454,6 +1454,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::advisory_locks::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::advisory_locks::application_function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::pg_catalog::function(name, &values) {
             return result;
         }

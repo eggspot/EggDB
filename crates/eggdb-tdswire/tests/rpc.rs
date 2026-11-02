@@ -422,11 +422,24 @@ fn transaction_manager_requests_begin_commit_and_roll_back_with_their_descriptor
     let save_outside = client.transaction(9, &[1, b's', 0]);
     assert_eq!(errors(&save_outside)[0].0, 628);
     client.transaction(5, &[0, 0]);
+    client.batch("INSERT INTO items (id) VALUES (8)");
     let saved = client.transaction(9, &[1, b's', 0]);
     assert!(errors(&saved).is_empty(), "{saved:?}");
+    client.batch("INSERT INTO items (id) VALUES (9)");
     let to_save_point = client.transaction(8, &[1, b's', 0, 0]);
     assert!(errors(&to_save_point).is_empty(), "{to_save_point:?}");
     assert!(environment_changes(&to_save_point).is_empty());
+    assert_eq!(
+        rows(&client.batch("SELECT id FROM items ORDER BY id")),
+        vec![vec![Some("6".to_owned())], vec![Some("8".to_owned())]]
+    );
+    let committed_after_save_point = client.transaction(7, &[0, 0]);
+    assert_eq!(environment_changes(&committed_after_save_point), vec![9]);
+    assert_eq!(
+        rows(&client.batch("SELECT COUNT(*) AS n FROM items")),
+        vec![vec![Some("2".to_owned())]]
+    );
+    client.transaction(5, &[0, 0]);
     let rolled_back_whole = client.transaction(8, &[0, 0]);
     assert_eq!(environment_changes(&rolled_back_whole), vec![10]);
     let distributed = client.transaction(1, &[]);

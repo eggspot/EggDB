@@ -1794,6 +1794,26 @@ value keeps the number as written (`1.0`); `json` has no equality, as in Postgre
 and cannot be indexed or be a key (`42704`). Stored `json` and `jsonb` are parsed again when a
 row is read, so a damaged one is `XX001`.
 
+SQL/JSON path (DNEW-R-36) works as in PostgreSQL: `jsonb_path_exists`, `jsonb_path_match`,
+`jsonb_path_query` (set-returning, in `FROM` or a select list), `jsonb_path_query_array` and
+`jsonb_path_query_first`, each with optional `vars` (an object, else `22023`) and `silent`
+arguments and a `_tz` form, and the operators `jsonb @? path` and `jsonb @@ path`. A path is
+`lax` (the default, arrays unwrapped and structural errors ignored) or `strict`, and has member
+(`.a`, `."a b"`, `.*`), element (`[0]`, `[1 to 3]`, `[last]`, `[*]`) and recursive (`.**`,
+`.**{1 to 2}`) accessors, filters `? (...)` with comparisons, `&&`, `||`, `!`, `is unknown`,
+`exists`, `like_regex` (with `flag`) and `starts with`, arithmetic (`+ - * / %`, unary signs),
+the methods `type()`, `size()`, `double()`, `number()`, `integer()`, `string()`, `abs()`,
+`floor()`, `ceiling()`, `bigint()`, `boolean()` and `keyvalue()`, and `$name` variables
+(`datetime()` and the other date and time methods are not supported yet). Errors carry PostgreSQL's
+SQL/JSON states (`2203A` member not found, `22039` array not found, `22033` subscript, `22036`
+non-numeric item, `22038` singleton required). The `jsonpath` type name is accepted as text, and
+the path is checked when it is used. A path of more than 1,000 nodes fails with
+`54001`, one producing too many items with `54000`, and `like_regex` runs within a step budget.
+`json_to_record`, `jsonb_to_record`, `json_to_recordset` and `jsonb_to_recordset` in `FROM`
+take a column definition list (`AS x(a int, b text)` or `AS (a int)`): each column is the
+member of that name converted to its type (`NULL` when missing or JSON `null`; an object or
+array kept as JSON text), and without the list they fail with `42601`.
+
 **Arrays** (D128) are values of expressions, of `WITH` queries, derived tables and `VALUES` lists,
 and of results, with one dimension and elements of `smallint`, `integer`, `bigint`, `real`,
 `double precision`, `numeric`, `boolean`, `text`, `varchar` or `character`: `ARRAY[1, 2]`
@@ -3271,8 +3291,11 @@ D138):
   IMPLICIT_TRANSACTIONS OFF; SET NOCOUNT ON;`), LINQ queries (`OFFSET ... FETCH` in derived
   tables, joins, `TOP(1)`, `CASE WHEN EXISTS`, `GROUP BY`, `Contains` as `OPENJSON(@p) WITH
   (...)`), and `SaveChanges` inside `BeginTransaction()` (EF's `SAVE TRANSACTION
-  [__EFSavePoint]`) rolled back whole. EF Core 9's migrations lock with `sp_getapplock` through
-  `EXEC @result = sp_getapplock ...`, which is not there yet.
+  [__EFSavePoint]`), where rolling back to the save point (in SQL or as a TDS transaction manager
+  request) undoes only what came after it. EF Core 9's migration lock works too: `DECLARE @result
+  int; EXEC @result = sp_getapplock @Resource = '__EFMigrationsLock', @LockOwner = 'Session',
+  @LockMode = 'Exclusive'; SELECT @result` and the matching `sp_releaseapplock` (see Application
+  locks below).
 
 **Advisory locks.** `pg_advisory_lock`, `pg_try_advisory_lock`, `pg_advisory_unlock` and their
 `_shared` forms take one `bigint` or two `integer`s, as do the transaction-level
@@ -3281,6 +3304,23 @@ releases the session's session-level locks. They are held by the session in one 
 session over the same database: session-level locks count re-entries and last until unlocked or
 until the session ends, transaction-level locks until the transaction ends (the statement, outside
 one). The functions that wait and `pg_advisory_unlock_all()` return `void`.
+
+**Application locks.** SQL Server's `sp_getapplock @Resource, @LockMode, @LockOwner, @LockTimeout,
+@DbPrincipal` and `sp_releaseapplock @Resource, @LockOwner, @DbPrincipal` (named or positional
+arguments) take and release a lock on a resource name in the same table as the advisory locks.
+`@Resource` is compared byte for byte and cut to 255 characters; `@LockMode` is `Shared`,
+`Update`, `IntentShared`, `IntentExclusive` or `Exclusive`, with SQL Server's compatibility
+between them; `@LockOwner` is `Transaction` (the default, which needs an open transaction and
+ends with it) or `Session` (until released or the session ends; each take needs its own
+release); `@LockTimeout` is in milliseconds, `-1` or none waits as long as it takes and `0`
+returns at once. `EXEC @result = sp_getapplock ...` sets `@result` to 0 (granted at once), 1
+(granted after waiting) or -1 (timed out); `sp_releaseapplock` returns 0. A bad argument or
+releasing a lock the session does not hold returns -999 with SQL Server's error 1223 to 1228,
+ending the statement and not the batch. `APPLOCK_MODE('public', resource, owner)` names the mode
+the session holds (`NoLock` when none) and `APPLOCK_TEST('public', resource, mode, owner)` returns
+1 when the lock could be granted now, 0 when not. `@DbPrincipal` is accepted and not checked.
+Not yet: -2 (cancelled) and -3 (deadlock victim), which EggDB reports as the cancel or error
+itself.
 
 CI's `pg-apps` job runs the ORM section of `crates/eggdb/tests/clients/python/app_check.py` and
 `crates/eggdb/tests/clients/java/FlywayCheck.java` (with the migrations in

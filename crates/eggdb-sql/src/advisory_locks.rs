@@ -4,32 +4,154 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const WAIT_SLICE: Duration = Duration::from_millis(10);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
     Single(i64),
     Pair(i32, i32),
+    Application(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LockName {
     database: usize,
     key: Key,
 }
 
+/// A lock mode: PostgreSQL's advisory locks are `Exclusive` or `Shared`, and SQL Server's
+/// application locks (`sp_getapplock`'s `@LockMode`) may also be `Update`, `IntentShared` or
+/// `IntentExclusive`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub(crate) enum Mode {
     Exclusive,
     Shared,
+    Update,
+    IntentShared,
+    IntentExclusive,
 }
 
+impl Mode {
+    /// The mode `sp_getapplock` and `APPLOCK_TEST` name, without regard to case.
+    pub(crate) fn named(text: &str) -> Option<Self> {
+        [
+            ("Exclusive", Self::Exclusive),
+            ("Shared", Self::Shared),
+            ("Update", Self::Update),
+            ("IntentShared", Self::IntentShared),
+            ("IntentExclusive", Self::IntentExclusive),
+        ]
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(text.trim()))
+        .map(|(_, mode)| mode)
+    }
+
+    fn admits(self, other: Self) -> bool {
+        use Mode::{Exclusive, IntentExclusive, IntentShared, Shared, Update};
+        match (self, other) {
+            (Exclusive, _) | (_, Exclusive) => false,
+            (IntentShared, _) | (_, IntentShared) => true,
+            (Shared, Shared) | (Shared, Update) | (Update, Shared) => true,
+            (IntentExclusive, IntentExclusive) => true,
+            _ => false,
+        }
+    }
+}
+
+/// How long a lock is held: until the session releases it or ends, or until its transaction
+/// ends (`sp_getapplock`'s `@LockOwner` of `Session` or `Transaction`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Lasts {
+pub(crate) enum Lasts {
     Session,
     Transaction,
+}
+
+impl Lasts {
+    /// The owner `sp_getapplock`, `APPLOCK_MODE` and `APPLOCK_TEST` name, without regard to
+    /// case: `Session` or `Transaction`.
+    pub(crate) fn named(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.eq_ignore_ascii_case("Transaction") {
+            Some(Self::Transaction)
+        } else if text.eq_ignore_ascii_case("Session") {
+            Some(Self::Session)
+        } else {
+            None
+        }
+    }
+}
+
+const MAX_RESOURCE_CHARACTERS: usize = 255;
+
+/// The name an application lock is known by: the first 255 characters of the resource a
+/// caller gives, compared byte for byte.
+pub(crate) fn application_resource(text: &str) -> String {
+    text.chars().take(MAX_RESOURCE_CHARACTERS).collect()
+}
+
+/// An error of an application lock procedure or function, numbered as SQL Server numbers it
+/// (1223 to 1228): severity 16, ending the statement and not the batch.
+pub(crate) fn application_lock_error(code: u16, message: String) -> SqlError {
+    SqlError::raised_in_sqlserver(u32::from(code), 16, 1, message, false)
+}
+
+fn application_text(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(value) => crate::sqlserver_conversion::text_of(value, None, None).ok(),
+    }
+}
+
+/// The type SQL Server's `APPLOCK_MODE` (`nvarchar(32)`) or `APPLOCK_TEST` (`int`) returns.
+pub(crate) fn application_function_type(name: &str) -> Option<SqlType> {
+    match name {
+        "applock_mode" => Some(SqlType::Varchar(Some(32))),
+        "applock_test" => Some(SqlType::Integer),
+        _ => None,
+    }
+}
+
+/// Runs SQL Server's `APPLOCK_MODE(principal, resource, owner)` or `APPLOCK_TEST(principal,
+/// resource, mode, owner)`, or `None` for another function.
+pub(crate) fn application_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    let (resource, mode, owner) = match (name, values) {
+        ("applock_mode", [_, resource, owner]) => (resource, None, owner),
+        ("applock_test", [_, resource, mode, owner]) => (resource, Some(mode), owner),
+        ("applock_mode" | "applock_test", _) => {
+            return Some(Err(application_lock_error(
+                1228,
+                format!("An invalid parameter \"{name}\" was passed to the application lock function or procedure."),
+            )));
+        }
+        _ => return None,
+    };
+    let shown = name.to_ascii_uppercase();
+    let Some(resource) = application_text(Some(resource)).filter(|text| !text.is_empty()) else {
+        return Some(Err(application_lock_error(
+            1224,
+            format!("An invalid application lock resource was passed to {shown}."),
+        )));
+    };
+    let Some(lasts) = application_text(Some(owner)).and_then(|text| Lasts::named(&text)) else {
+        return Some(Err(application_lock_error(
+            1226,
+            format!("An invalid application lock owner was passed to {shown}."),
+        )));
+    };
+    let resource = application_resource(&resource);
+    Some(match mode {
+        None => application_lock_mode(&resource, lasts).map(|mode| Value::Text(mode.to_owned())),
+        Some(mode) => match application_text(Some(mode)).and_then(|text| Mode::named(&text)) {
+            None => Err(application_lock_error(
+                1225,
+                format!("An invalid application lock mode was passed to {shown}."),
+            )),
+            Some(mode) => application_lock_free(&resource, mode)
+                .map(|free| Value::Integer(i32::from(free))),
+        },
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,9 +395,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 }
 
 fn conflicts(holds: &[Hold], owner: u64, mode: Mode) -> bool {
-    holds.iter().any(|hold| {
-        hold.owner != owner && (mode == Mode::Exclusive || hold.mode == Mode::Exclusive)
-    })
+    holds
+        .iter()
+        .any(|hold| hold.owner != owner && !hold.mode.admits(mode))
 }
 
 fn take(
@@ -285,7 +407,7 @@ fn take(
     mode: Mode,
     lasts: Lasts,
 ) -> bool {
-    let holds = held.entry(name).or_default();
+    let holds = held.entry(name.clone()).or_default();
     if conflicts(holds, owner, mode) {
         if holds.is_empty() {
             held.remove(&name);
@@ -318,7 +440,7 @@ fn take(
 fn wait(name: LockName, owner: u64, mode: Mode, lasts: Lasts) -> SqlResult<()> {
     let mut held = held();
     loop {
-        if take(&mut held, name, owner, mode, lasts) {
+        if take(&mut held, name.clone(), owner, mode, lasts) {
             return Ok(());
         }
         held = registry()
@@ -349,6 +471,156 @@ fn unlock(name: LockName, owner: u64, mode: Mode) -> bool {
     drop(held);
     registry().released.notify_all();
     true
+}
+
+/// What asking for an application lock came to, as `sp_getapplock` returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplicationLockGrant {
+    /// Granted at once (status 0).
+    AtOnce,
+    /// Granted after waiting for other sessions to release it (status 1).
+    AfterWaiting,
+    /// Not granted before the time-out (status -1).
+    TimedOut,
+}
+
+impl ApplicationLockGrant {
+    /// The status `sp_getapplock` returns for it.
+    pub(crate) fn status(self) -> i32 {
+        match self {
+            Self::AtOnce => 0,
+            Self::AfterWaiting => 1,
+            Self::TimedOut => -1,
+        }
+    }
+}
+
+fn application_name(database: usize, resource: &str) -> LockName {
+    LockName {
+        database,
+        key: Key::Application(resource.to_owned()),
+    }
+}
+
+/// Takes the application lock `resource` of the active session in `mode`, as SQL Server's
+/// `sp_getapplock` does: waiting for other sessions to release it for at most `timeout`, or
+/// for as long as it takes when `timeout` is `None`. Resource names compare byte for byte.
+pub(crate) fn take_application_lock(
+    resource: &str,
+    mode: Mode,
+    lasts: Lasts,
+    timeout: Option<Duration>,
+) -> SqlResult<ApplicationLockGrant> {
+    let owner = active()?;
+    let name = application_name(owner.database, resource);
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    let mut held = held();
+    if take(&mut held, name.clone(), owner.owner, mode, lasts) {
+        return Ok(ApplicationLockGrant::AtOnce);
+    }
+    loop {
+        let slice = match deadline {
+            None => WAIT_SLICE,
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(ApplicationLockGrant::TimedOut);
+                }
+                left.min(WAIT_SLICE)
+            }
+        };
+        held = registry()
+            .released
+            .wait_timeout(held, slice)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
+        crate::cancel::check()?;
+        if take(&mut held, name.clone(), owner.owner, mode, lasts) {
+            return Ok(ApplicationLockGrant::AfterWaiting);
+        }
+    }
+}
+
+/// Releases one hold of the application lock `resource` the active session took for
+/// `lasts`, as `sp_releaseapplock` does; `false` when it holds none.
+pub(crate) fn release_application_lock(resource: &str, lasts: Lasts) -> SqlResult<bool> {
+    let owner = active()?;
+    let name = application_name(owner.database, resource);
+    let mut held = held();
+    let Some(holds) = held.get_mut(&name) else {
+        return Ok(false);
+    };
+    let Some(hold) = holds.iter_mut().find(|hold| {
+        hold.owner == owner.owner
+            && match lasts {
+                Lasts::Session => hold.session_count > 0,
+                Lasts::Transaction => hold.transaction_count > 0,
+            }
+    }) else {
+        return Ok(false);
+    };
+    match lasts {
+        Lasts::Session => hold.session_count -= 1,
+        Lasts::Transaction => hold.transaction_count -= 1,
+    }
+    holds.retain(|hold| !hold.is_empty());
+    if holds.is_empty() {
+        held.remove(&name);
+    }
+    drop(held);
+    registry().released.notify_all();
+    Ok(true)
+}
+
+/// The mode in which the active session holds the application lock `resource` for `lasts`,
+/// as SQL Server's `APPLOCK_MODE` names it: `NoLock` when it holds none.
+pub(crate) fn application_lock_mode(resource: &str, lasts: Lasts) -> SqlResult<&'static str> {
+    let owner = active()?;
+    let held = held();
+    let modes: Vec<Mode> = held
+        .get(&application_name(owner.database, resource))
+        .map(|holds| {
+            holds
+                .iter()
+                .filter(|hold| {
+                    hold.owner == owner.owner
+                        && match lasts {
+                            Lasts::Session => hold.session_count > 0,
+                            Lasts::Transaction => hold.transaction_count > 0,
+                        }
+                })
+                .map(|hold| hold.mode)
+                .collect()
+        })
+        .unwrap_or_default();
+    let has = |mode: Mode| modes.contains(&mode);
+    Ok(if has(Mode::Exclusive) {
+        "Exclusive"
+    } else if has(Mode::Update) && has(Mode::IntentExclusive) {
+        "UpdateIntentExclusive"
+    } else if has(Mode::Shared) && has(Mode::IntentExclusive) {
+        "SharedIntentExclusive"
+    } else if has(Mode::Update) {
+        "Update"
+    } else if has(Mode::IntentExclusive) {
+        "IntentExclusive"
+    } else if has(Mode::Shared) {
+        "Shared"
+    } else if has(Mode::IntentShared) {
+        "IntentShared"
+    } else {
+        "NoLock"
+    })
+}
+
+/// Whether the active session could take the application lock `resource` in `mode` now
+/// without waiting, as SQL Server's `APPLOCK_TEST` answers it.
+pub(crate) fn application_lock_free(resource: &str, mode: Mode) -> SqlResult<bool> {
+    let owner = active()?;
+    let held = held();
+    Ok(held
+        .get(&application_name(owner.database, resource))
+        .is_none_or(|holds| !conflicts(holds, owner.owner, mode)))
 }
 
 #[cfg(test)]

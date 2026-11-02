@@ -22,6 +22,9 @@ use crate::types::{SqlType, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod application_locks;
+#[cfg(test)]
+mod application_locks_tests;
 mod cursors;
 #[cfg(test)]
 mod cursors_tests;

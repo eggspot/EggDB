@@ -118,6 +118,9 @@ fn added_function_type(
     if let Some(sql_type) = crate::advisory_locks::result_type(name) {
         return Some(Some(sql_type));
     }
+    if let Some(sql_type) = crate::advisory_locks::application_function_type(name) {
+        return Some(Some(sql_type));
+    }
     if let Some(sql_type) = crate::json_path::result_type(name) {
         return Some(Some(sql_type));
     }
