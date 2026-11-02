@@ -417,7 +417,7 @@ fn capture_changes_query(table: &SourceTable, instance: &str, from: Lsn, to: Lsn
 }
 
 fn capture_bounds_query(instance: &str, after: Lsn, committed_before_copy: Option<&str>) -> String {
-    let in_copy = committed_before_copy.map_or("NULL".to_owned(), |time| {
+    let in_copy = committed_before_copy.map_or("CAST(NULL AS nvarchar(max))".to_owned(), |time| {
         format!(
             "CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', CONVERT(datetime, {}, 121))), 1)",
             quote_unicode(time)
@@ -1738,7 +1738,7 @@ mod tests {
         assert_eq!(
             capture_bounds_query("it's", to, None),
             "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_min_lsn(N'it''s'), 1), \
-             CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(0x0000002B000000100001), 1), NULL"
+             CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(0x0000002B000000100001), 1), CAST(NULL AS nvarchar(max))"
         );
         assert_eq!(
             capture_bounds_query("dbo_orders", to, Some("2026-11-02 11:40:01.123")),
