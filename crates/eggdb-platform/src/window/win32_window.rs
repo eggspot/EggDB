@@ -32,6 +32,7 @@ const QS_ALLINPUT: u32 = 0x04FF;
 const MWMO_INPUTAVAILABLE: u32 = 0x0004;
 const INFINITE: u32 = u32::MAX;
 const SIZE_MINIMIZED: usize = 1;
+const MIN_TRACK_SIZE_POINT_IN_MINMAXINFO: usize = 3;
 const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 
 const WM_SIZE: u32 = 0x0005;
@@ -97,31 +98,6 @@ struct PaintStruct {
     restore: i32,
     incremental_update: i32,
     reserved: [u8; 32],
-}
-
-#[repr(C)]
-struct MinMaxInfo {
-    reserved: Point,
-    max_size: Point,
-    max_position: Point,
-    min_track_size: Point,
-    max_track_size: Point,
-}
-
-#[repr(C)]
-struct CreateStruct {
-    create_params: *mut c_void,
-    instance: Handle,
-    menu: Handle,
-    parent: Handle,
-    height: i32,
-    width: i32,
-    y: i32,
-    x: i32,
-    style: i32,
-    name: *const u16,
-    class_name: *const u16,
-    ex_style: u32,
 }
 
 #[repr(C)]
@@ -482,11 +458,13 @@ fn handle_message(
                 win32::device_pixels(state.min_size.1, scale),
                 state.dpi.get(),
             );
-            let info = lparam as *mut MinMaxInfo;
+            let min_track_size =
+                (lparam as *mut Point).wrapping_add(MIN_TRACK_SIZE_POINT_IN_MINMAXINFO);
             // SAFETY: for `WM_GETMINMAXINFO` the system passes a writable `MINMAXINFO` in
-            // `lparam` for the duration of the message.
-            if let Some(info) = unsafe { info.as_mut() } {
-                info.min_track_size = Point {
+            // `lparam` for the duration of the message, and its `ptMinTrackSize` is the
+            // `POINT` at this index.
+            if let Some(point) = unsafe { min_track_size.as_mut() } {
+                *point = Point {
                     x: width,
                     y: height,
                 };
@@ -529,13 +507,14 @@ unsafe extern "system" fn window_procedure(
     lparam: isize,
 ) -> isize {
     if message == WM_NCCREATE {
-        let create = lparam as *const CreateStruct;
+        let create_params = lparam as *const *mut c_void;
         // SAFETY: for `WM_NCCREATE` the system passes the `CREATESTRUCTW` built from
-        // `CreateWindowExW`'s arguments in `lparam`.
-        if let Some(create) = unsafe { create.as_ref() } {
+        // `CreateWindowExW`'s arguments in `lparam`, whose first field is the creation
+        // parameter.
+        if let Some(&state) = unsafe { create_params.as_ref() } {
             // SAFETY: `window` is the window being created; the slot receives the
             // `WindowState` pointer `open` passed as the creation parameter.
-            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, create.create_params as isize) };
+            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, state as isize) };
         }
     } else if let Some(state) = state_of(window)
         && let Some(result) = handle_message(window, state, message, wparam, lparam)
