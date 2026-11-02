@@ -4,6 +4,7 @@
 
 use std::ffi::OsString;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use eggdb_gui::connect_screen::{
     self, ConnectAction, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
@@ -13,7 +14,7 @@ use eggdb_gui::png::encode_png;
 use eggdb_gui::{BoxFace, SystemFaces, Theme, ThemeKind};
 use eggdb_platform::window::{WindowEvent, WindowOptions, open_window};
 
-const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>]
+const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
 Shows EggDB's connect screen.
   --window          open it in a native window (the default without --png)
@@ -21,7 +22,11 @@ Shows EggDB's connect screen.
   --theme <theme>   light (the default), dark or high-contrast
   --scale <n>       device pixels per logical pixel for --png (default 1)
   --size <w>x<h>    the logical size for --png (default 1280x800)
+  --box-text        draw text as boxes, the same pixels on every OS (for pixel tests)
+  --frames <n>      close the window by itself after presenting <n> frames (for scripted runs)
 ";
+
+const SCRIPTED_FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq)]
 struct Options {
@@ -30,6 +35,8 @@ struct Options {
     theme: ThemeKind,
     scale: f32,
     size: (u32, u32),
+    box_text: bool,
+    frames: Option<u32>,
 }
 
 fn parse_size(text: &str) -> Option<(u32, u32)> {
@@ -45,6 +52,8 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         theme: ThemeKind::Light,
         scale: 1.0,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        box_text: false,
+        frames: None,
     };
     while let Some(arg) = args.next() {
         let name = arg
@@ -55,6 +64,22 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         match name.as_str() {
             "-h" | "--help" => return Ok(None),
             "--window" => options.window = true,
+            "--box-text" => options.box_text = true,
+            "--frames" => {
+                let frames = value("a number")?;
+                options.frames = Some(
+                    frames
+                        .to_str()
+                        .and_then(|text| text.parse::<u32>().ok())
+                        .filter(|frames| *frames >= 1)
+                        .ok_or_else(|| {
+                            format!(
+                                "--frames {} is not a whole number of at least 1",
+                                frames.to_string_lossy()
+                            )
+                        })?,
+                );
+            }
             "--png" => options.png = Some(value("a file")?),
             "--theme" => {
                 let theme = value("a theme")?;
@@ -96,16 +121,21 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
     Ok(Some(options))
 }
 
-fn with_faces<T>(run: impl FnOnce(Faces<'_>) -> T) -> T {
+const BOX_FACES: Faces<'static> = Faces {
+    ui: &BoxFace,
+    ui_bold: &BoxFace,
+    mono: &BoxFace,
+};
+
+fn with_faces<T>(box_text: bool, run: impl FnOnce(Faces<'_>) -> T) -> T {
+    if box_text {
+        return run(BOX_FACES);
+    }
     match SystemFaces::find() {
         Some(system) => run(system.faces()),
         None => {
             eprintln!("eggdb-gui: no usable system font was found; text is drawn as boxes");
-            run(Faces {
-                ui: &BoxFace,
-                ui_bold: &BoxFace,
-                mono: &BoxFace,
-            })
+            run(BOX_FACES)
         }
     }
 }
@@ -142,6 +172,8 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
     let mut scale = window.scale();
     let mut size = window.size();
     let mut dirty = true;
+    let mut presented: u32 = 0;
+    let timeout = options.frames.map(|_| SCRIPTED_FRAME_INTERVAL);
     loop {
         if dirty {
             let logical = logical_size(size, scale);
@@ -153,8 +185,15 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
             window
                 .set_accessibility_tree(&connect_screen::accessibility_tree(&card, faces, logical));
             dirty = false;
+            presented = presented.saturating_add(1);
+            if options.frames.is_some_and(|limit| presented >= limit) {
+                return Ok(());
+            }
         }
-        match window.next_event(None).map_err(|error| error.to_string())? {
+        match window
+            .next_event(timeout)
+            .map_err(|error| error.to_string())?
+        {
             Some(WindowEvent::Key(press)) => {
                 let (next, action) = connect_screen::handle_key(card, press);
                 card = next;
@@ -173,7 +212,8 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
             }
             Some(WindowEvent::Redraw) => dirty = true,
             Some(WindowEvent::CloseRequested) => return Ok(()),
-            Some(WindowEvent::Focused(_)) | None => {}
+            Some(WindowEvent::Focused(_)) => {}
+            None => dirty = timeout.is_some(),
         }
     }
 }
@@ -190,7 +230,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let result = with_faces(|faces| {
+    let result = with_faces(options.box_text, |faces| {
         if let Some(path) = &options.png {
             write_png(&options, path, faces)?;
         }
@@ -220,6 +260,12 @@ mod tests {
     fn options_parse_and_bad_ones_are_errors() {
         let window = parse(&[]).unwrap().unwrap();
         assert!(window.window && window.png.is_none());
+        assert!(!window.box_text && window.frames.is_none());
+        let scripted = parse(&["--window", "--frames", "3", "--box-text"])
+            .unwrap()
+            .unwrap();
+        assert!(scripted.window && scripted.box_text);
+        assert_eq!(scripted.frames, Some(3));
         let png = parse(&[
             "--png",
             "card.png",
@@ -245,6 +291,9 @@ mod tests {
             &["--size", "0x10"],
             &["--size", "big"],
             &["--png"],
+            &["--frames", "0"],
+            &["--frames", "-1"],
+            &["--frames"],
             &["--frobnicate"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");

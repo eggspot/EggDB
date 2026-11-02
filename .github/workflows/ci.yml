@@ -54,6 +54,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Open eggdb-gui's native X11 window under Xvfb and close it after three frames
+        run: |
+          command -v xvfb-run || { sudo apt-get update && sudo apt-get install -y xvfb; }
+          cargo build -p eggdb-gui
+          timeout 60 xvfb-run -a -s "-screen 0 1600x1000x24" target/debug/eggdb-gui --window --box-text --frames 3
       - name: Lint and test the browser connect card (eggdb-wasm's gui feature, off by default)
         run: |
           cargo clippy -p eggdb-wasm --features gui --all-targets -- -D warnings

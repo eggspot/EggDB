@@ -1,0 +1,6 @@
+connect_light_1x 1280x800 unset
+connect_dark_1x 1280x800 unset
+connect_high_contrast_1x 1280x800 unset
+connect_light_2x 2560x1600 unset
+connect_dark_2x 2560x1600 unset
+connect_high_contrast_2x 2560x1600 unset
