@@ -365,17 +365,27 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   read as `TZH:TZM`, a `TZR` offset (`-08:00`), `UTC`/`GMT` or a region of the time zone
   database (`US/Pacific`, with its daylight saving time, D153; an unknown one is `ORA-01882`); a
   value without one takes the session's time zone. The `nlsparam` accepts
-  `NLS_DATE_LANGUAGE = American`.
+  `NLS_DATE_LANGUAGE` with American, German, French, Spanish, Italian, Portuguese or Dutch:
+  `MON`, `MONTH`, `DY` and `DAY` write and read that language's names and Oracle's
+  abbreviations (`MRZ`, `FÉVR.`, `MIÉ`), `MONTH` and `DAY` padded to the language's longest
+  name; `NEXT_DAY` takes the session language's day names.
 - **Number format models** (D126, D149): `TO_CHAR(n, fmt)` and `TO_NUMBER(char, fmt
   [, nlsparam])` with `9`, `0`, `.`, `D`, `,`, `G`, `$`, `L`, `C`, `U`, `B`, `S` (leading or
   trailing), `MI`, `PR`, `V`, `EEEE`, `RN`/`rn`, `X`/`x` (with leading `0`s), `TM`, `TM9`, `TME`
   and `FM`, as the Format Models page's "Results of Number Conversions" table shows them
   (`TO_CHAR(123.456, '9.9EEEE')` is `  1.2E+02`, `FM999.009` keeps the zeros of its `0`s);
   `TO_NUMBER` reads `$`, `L`, `C`, `U`, `PR`, trailing `S`, `EEEE`, `RN` and `X`, and refuses
-  `V` with `ORA-01481`. The currencies are America's: `$` local and dual, `USD` ISO.
+  `V` with `ORA-01481`. `L` writes and reads `NLS_CURRENCY`, `C` the code of
+  `NLS_ISO_CURRENCY`'s territory (`GERMANY` is `EUR`), `D` and `G` the two
+  `NLS_NUMERIC_CHARACTERS`, while `.` and `,` stay themselves; the `nlsparam` of `TO_CHAR` and
+  `TO_NUMBER` sets any of those for the call (`'NLS_NUMERIC_CHARACTERS = '',.'''`), and a bad
+  one is `ORA-12702`. The dual currency stays `$`.
 - **Session settings** (D126): `ALTER SESSION SET` `NLS_DATE_FORMAT`, `NLS_TIMESTAMP_FORMAT`,
-  `NLS_TIMESTAMP_TZ_FORMAT`, `NLS_LANGUAGE`/`NLS_DATE_LANGUAGE` (American),
-  `NLS_TERRITORY` (America, which resets the formats it implies), `NLS_NUMERIC_CHARACTERS='.,'`,
+  `NLS_TIMESTAMP_TZ_FORMAT`, `NLS_LANGUAGE`/`NLS_DATE_LANGUAGE` (the seven languages above;
+  an unknown one is `ORA-12705`), `NLS_CURRENCY` (up to ten bytes), `NLS_ISO_CURRENCY` (a
+  territory name), `NLS_NUMERIC_CHARACTERS` (two different characters, neither a digit nor
+  `+`, `-`, `<`, `>`), `NLS_TERRITORY` (America, which resets the formats, currencies and
+  numeric characters it implies),
   `NLS_SORT=BINARY`, `NLS_COMP=BINARY`, `TIME_ZONE` (an offset such as `'-08:00'`, `'UTC'`, a
   region such as `'Europe/Paris'`, `LOCAL` or `DBTIMEZONE`, both `+00:00`, as the session's
   `TimeZone`; `FROM_TZ` and `TZ_OFFSET` take regions too; `SESSIONTIMEZONE` and
@@ -3797,7 +3807,7 @@ And more, not in the suite yet:
   `DATE + INTERVAL` keeps fractional seconds of a `DAY TO SECOND` interval. `TS` writes
   `HH:MI:SS AM` and `DL` follows the documented `fmDay, Month dd, yyyy` (`December 1`), choices
   recorded in D149; `L` and `U` pad the leading symbol to twelve characters as the conversion
-  table shows. Languages other than American, `NLS_CURRENCY`, `E`/`EE` (other calendars),
+  table shows. Languages other than the seven above, `E`/`EE` (other calendars),
   `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)`, `LISTAGG ... OVER` and `AT TIME ZONE` are not
   supported yet. Other string functions given a date (`SUBSTR(d, ...)`) write it by
   `NLS_DATE_FORMAT` whatever its type; a time stamp assigned to a character column takes the

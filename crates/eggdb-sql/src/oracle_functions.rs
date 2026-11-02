@@ -742,13 +742,6 @@ fn is_datetime(value: &Value) -> bool {
     )
 }
 
-fn numeric_parameter(values: &[Value]) -> SqlResult<()> {
-    match values.get(2) {
-        Some(Value::Text(text)) => crate::oracle_nls::check_numeric_parameter(text),
-        _ => Ok(()),
-    }
-}
-
 fn to_char(values: &[Value], declared: Option<SqlType>) -> SqlResult<Value> {
     if is_datetime(&values[0]) {
         return crate::oracle_datetime::to_char_datetime(values, declared);
@@ -761,7 +754,7 @@ fn to_char(values: &[Value], declared: Option<SqlType>) -> SqlResult<Value> {
     if values.iter().any(Value::is_null) {
         return Ok(Value::Null);
     }
-    numeric_parameter(values)?;
+    let _nls = crate::oracle_nls::enter_number_function_parameters(values.get(2))?;
     let format = values.get(1).and_then(text_of);
     match (&values[0], format) {
         (Value::Text(text), None) => Ok(text_or_null(text.clone())),
@@ -779,7 +772,7 @@ fn to_number(values: &[Value]) -> SqlResult<Value> {
     if values.iter().any(Value::is_null) {
         return Ok(Value::Null);
     }
-    numeric_parameter(values)?;
+    let _nls = crate::oracle_nls::enter_number_function_parameters(values.get(2))?;
     let source = &values[0];
     if !matches!(source, Value::Text(_) | Value::Bpchar(_)) {
         return Ok(number_of(source)?.map_or(Value::Null, Number::value));
@@ -1110,12 +1103,20 @@ mod tests {
         assert_eq!(code(&[text("1,234"), text("9999")]), Some(1722));
         assert_eq!(code(&[text("12"), text("99X")]), Some(1481));
         assert_eq!(
+            number(&[
+                text("1.234,5"),
+                text("9G999D99"),
+                text("NLS_NUMERIC_CHARACTERS = ',.'")
+            ]),
+            number(&[text("1234.5"), text("9999.99")])
+        );
+        assert_eq!(
             code(&[
                 text("12"),
                 text("99"),
-                text("NLS_NUMERIC_CHARACTERS = ',.'")
+                text("NLS_NUMERIC_CHARACTERS = ',,'")
             ]),
-            Some(3001)
+            Some(12702)
         );
         assert_eq!(
             code(&[text("12"), text("99"), text("garbage")]),

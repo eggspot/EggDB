@@ -4,9 +4,9 @@ use crate::oracle_functions::{Number, invalid_number, parse_number, within_limit
 use std::cmp::Ordering;
 
 const DOLLAR: &str = "$";
-const LOCAL_CURRENCY: &str = "$";
-const ISO_CURRENCY: &str = "USD";
 const DUAL_CURRENCY: &str = "$";
+const GROUP_COMMA: char = ',';
+const RADIX_PERIOD: char = '.';
 const CURRENCY_FIELD_WIDTH: usize = 12;
 const ROMAN_WIDTH: usize = 15;
 const MAX_TEXT_MINIMUM_CHARACTERS: usize = 64;
@@ -39,12 +39,12 @@ enum Currency {
 }
 
 impl Currency {
-    fn symbol(self) -> &'static str {
+    fn symbol(self) -> String {
         match self {
-            Self::Dollar => DOLLAR,
-            Self::Local => LOCAL_CURRENCY,
-            Self::Iso => ISO_CURRENCY,
-            Self::Dual => DUAL_CURRENCY,
+            Self::Dollar => DOLLAR.to_owned(),
+            Self::Local => crate::oracle_nls::current().currency().to_owned(),
+            Self::Iso => crate::oracle_nls::current().iso_currency().to_owned(),
+            Self::Dual => DUAL_CURRENCY.to_owned(),
         }
     }
 
@@ -79,6 +79,8 @@ struct NumberModel {
     integer: Vec<char>,
     fraction: Vec<char>,
     point: bool,
+    group_separator: char,
+    radix_character: char,
     multiplier_digits: usize,
     shape: Shape,
     width: usize,
@@ -94,6 +96,8 @@ impl NumberModel {
             integer: Vec::new(),
             fraction: Vec::new(),
             point: false,
+            group_separator: GROUP_COMMA,
+            radix_character: RADIX_PERIOD,
             multiplier_digits: 0,
             shape,
             width,
@@ -203,8 +207,20 @@ fn model_of(format: &str) -> SqlResult<NumberModel> {
             '9' | '0' => model.integer.push(character),
             ',' | 'G' if !model.point && !multiplier && !model.integer.is_empty() => {
                 model.integer.push(',');
+                model.group_separator = if character == 'G' {
+                    crate::oracle_nls::current().group_separator()
+                } else {
+                    GROUP_COMMA
+                };
             }
-            '.' | 'D' if !model.point && !multiplier => model.point = true,
+            '.' | 'D' if !model.point && !multiplier => {
+                model.point = true;
+                model.radix_character = if character == 'D' {
+                    crate::oracle_nls::current().decimal_character()
+                } else {
+                    RADIX_PERIOD
+                };
+            }
             'V' if !model.point && !multiplier => multiplier = true,
             _ => return Err(invalid_format()),
         }
@@ -331,7 +347,7 @@ fn fixed(number: &Number, model: &NumberModel) -> SqlResult<String> {
     let mut printing = false;
     for (index, slot) in model.integer.iter().enumerate() {
         if *slot == ',' {
-            body.push(if printing { ',' } else { ' ' });
+            body.push(if printing { model.group_separator } else { ' ' });
             continue;
         }
         if digit_slot >= blanks {
@@ -353,7 +369,7 @@ fn fixed(number: &Number, model: &NumberModel) -> SqlResult<String> {
         && currency.padded()
         && !model.fill_mode
     {
-        let padding = CURRENCY_FIELD_WIDTH.saturating_sub(currency.symbol().len());
+        let padding = CURRENCY_FIELD_WIDTH.saturating_sub(currency.symbol().chars().count());
         prefix.extend(std::iter::repeat_n(' ', padding));
     }
     match model.sign {
@@ -363,11 +379,11 @@ fn fixed(number: &Number, model: &NumberModel) -> SqlResult<String> {
         Sign::Trailing | Sign::TrailingMinus => {}
     }
     if let Some(currency) = currency {
-        prefix.push_str(currency.symbol());
+        prefix.push_str(&currency.symbol());
     }
     text.insert_str(first_printed, &prefix);
     if model.point {
-        text.push('.');
+        text.push(model.radix_character);
         if model.fill_mode {
             text.push_str(&without_trailing_zeros(fraction, &model.fraction));
         } else {
@@ -377,7 +393,7 @@ fn fixed(number: &Number, model: &NumberModel) -> SqlResult<String> {
     if let Some((currency, true)) = model.currency
         && currency != Currency::Dollar
     {
-        text.push_str(currency.symbol());
+        text.push_str(&currency.symbol());
     }
     match model.sign {
         Sign::Trailing => text.push(if negative { '-' } else { '+' }),
@@ -503,7 +519,11 @@ fn scientific(number: &Number, model: &NumberModel) -> String {
         Sign::Brackets => text.push(if negative { '<' } else { ' ' }),
         Sign::Trailing | Sign::TrailingMinus => {}
     }
-    text.push_str(&body);
+    if model.radix_character == RADIX_PERIOD {
+        text.push_str(&body);
+    } else {
+        text.push_str(&body.replacen(RADIX_PERIOD, &model.radix_character.to_string(), 1));
+    }
     match model.sign {
         Sign::Trailing => text.push(if negative { '-' } else { '+' }),
         Sign::TrailingMinus => text.push(if negative { '-' } else { ' ' }),
@@ -598,9 +618,9 @@ fn without_currency<'t>(text: &'t str, model: &NumberModel) -> &'t str {
     };
     let symbol = currency.symbol();
     let stripped = if trailing && currency != Currency::Dollar {
-        text.strip_suffix(symbol)
+        text.strip_suffix(symbol.as_str())
     } else {
-        text.strip_prefix(symbol)
+        text.strip_prefix(symbol.as_str())
     };
     stripped.unwrap_or(text).trim()
 }
@@ -699,15 +719,15 @@ pub(crate) fn number_by_model(text: &str, format: &str) -> SqlResult<Number> {
         }
         return parse_number(&format!("{sign}{rest}"));
     }
-    let (whole, fraction) = match rest.split_once('.') {
+    let (whole, fraction) = match rest.split_once(model.radix_character) {
         Some(_) if !model.point => return Err(invalid_number()),
         Some((whole, fraction)) => (whole, fraction),
         None => (rest, ""),
     };
     let grouped = model.integer.contains(&',');
-    let whole_ok = whole
-        .chars()
-        .all(|character| character.is_ascii_digit() || (grouped && character == ','));
+    let whole_ok = whole.chars().all(|character| {
+        character.is_ascii_digit() || (grouped && character == model.group_separator)
+    });
     let digits: String = whole.chars().filter(char::is_ascii_digit).collect();
     if !whole_ok
         || !fraction.chars().all(|character| character.is_ascii_digit())

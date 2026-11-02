@@ -1,6 +1,7 @@
 use crate::datetime::{self, MICROS_PER_DAY, MICROS_PER_SECOND};
 use crate::error::SqlResult;
 use crate::numeric::Numeric;
+use crate::oracle_date_language::DateLanguage;
 use crate::oracle_datetime::{
     DAYS, date_of, local_of, not_a_day_of_the_week, not_recognized, year_in_range,
     year_out_of_range, zone_named, zone_text,
@@ -218,7 +219,27 @@ pub(crate) fn months_between(later: &Value, earlier: &Value) -> SqlResult<Value>
     )
 }
 
+fn weekday_in_language(text: &str, language: DateLanguage) -> SqlResult<i64> {
+    let upper = text.trim().to_uppercase();
+    language
+        .days()
+        .iter()
+        .position(|day| *day == upper)
+        .or_else(|| {
+            language
+                .day_abbreviations()
+                .iter()
+                .position(|day| *day == upper)
+        })
+        .map(|index| index as i64)
+        .ok_or_else(not_a_day_of_the_week)
+}
+
 fn weekday_named(text: &str) -> SqlResult<i64> {
+    let language = crate::oracle_nls::current().date_language();
+    if language != DateLanguage::American {
+        return weekday_in_language(text, language);
+    }
     let upper = text.trim().to_ascii_uppercase();
     let abbreviation = upper
         .get(..ABBREVIATION_LENGTH)

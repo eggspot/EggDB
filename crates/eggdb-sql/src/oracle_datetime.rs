@@ -10,7 +10,6 @@ pub(crate) const MAX_MODEL_BYTES: usize = 1000;
 const MAX_INPUT_BYTES: usize = 4000;
 const MAX_ELEMENT_BYTES: usize = 9;
 const CACHED_MODELS: usize = 8;
-const NAME_WIDTH: usize = 9;
 const ROMAN_MONTH_WIDTH: usize = 4;
 pub(crate) const JULIAN_DAY_OF_EPOCH: i64 = 2_451_545;
 const MAX_JULIAN_DAY: i64 = 5_373_484;
@@ -666,16 +665,16 @@ fn cached_models() -> usize {
 fn spelled(name: &str, spelling: Spelling) -> String {
     match spelling {
         Spelling::Upper => name.to_owned(),
-        Spelling::Lower => name.to_ascii_lowercase(),
+        Spelling::Lower => name.to_lowercase(),
         Spelling::Capitalized => {
             let mut out = String::with_capacity(name.len());
             let mut word_start = true;
             for character in name.chars() {
-                out.push(if word_start {
-                    character
+                if word_start {
+                    out.push(character);
                 } else {
-                    character.to_ascii_lowercase()
-                });
+                    out.extend(character.to_lowercase());
+                }
                 word_start = matches!(character, ' ' | '-');
             }
             out
@@ -691,8 +690,8 @@ fn push_number(out: &mut String, value: i64, width: usize, fill: bool) {
     }
 }
 
-fn push_name(out: &mut String, name: &str, spelling: Spelling, pad: bool) {
-    push_padded(out, &spelled(name, spelling), NAME_WIDTH, pad);
+fn push_name(out: &mut String, name: &str, spelling: Spelling, width: usize, pad: bool) {
+    push_padded(out, &spelled(name, spelling), width, pad);
 }
 
 fn push_padded(out: &mut String, shown: &str, width: usize, pad: bool) {
@@ -826,6 +825,22 @@ fn push_suffixed(
     }
 }
 
+fn month_of(names: &'static [&'static str; 12], month: i64) -> &'static str {
+    usize::try_from(month - 1)
+        .ok()
+        .and_then(|index| names.get(index))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn day_of(names: &'static [&'static str; 7], weekday: i64) -> &'static str {
+    usize::try_from(weekday)
+        .ok()
+        .and_then(|index| names.get(index))
+        .copied()
+        .unwrap_or_default()
+}
+
 fn letters(text: &str, spelling: Spelling) -> String {
     if spelling == Spelling::Lower {
         text.to_ascii_lowercase()
@@ -844,6 +859,7 @@ pub(crate) fn format_zoned(
     crate::oracle_functions::within_limit(model.output_bound())?;
     let parts = Parts::of(local, offset)?;
     let micros = parts.of_day % MICROS_PER_SECOND;
+    let language = crate::oracle_nls::current().date_language();
     let mut out = String::new();
     let mut fill = false;
     for element in &model.elements {
@@ -890,15 +906,12 @@ pub(crate) fn format_zoned(
                 }
             }
             E::MonthAbbreviation(spelling) => {
-                push_name(
-                    &mut out,
-                    &MONTHS[parts.month as usize - 1][..3],
-                    *spelling,
-                    false,
-                );
+                let name = month_of(language.month_abbreviations(), parts.month);
+                push_name(&mut out, name, *spelling, 0, false);
             }
             E::MonthName(spelling) => {
-                push_name(&mut out, MONTHS[parts.month as usize - 1], *spelling, !fill);
+                let name = month_of(language.months(), parts.month);
+                push_name(&mut out, name, *spelling, language.month_width(), !fill);
             }
             E::RomanMonth(spelling) => {
                 let numeral = oracle_numerals::roman(parts.month as u32).unwrap_or_default();
@@ -932,15 +945,12 @@ pub(crate) fn format_zoned(
             }
             E::RadixCharacter => out.push('.'),
             E::DayName(spelling) => {
-                push_name(&mut out, DAYS[parts.weekday() as usize], *spelling, !fill)
+                let name = day_of(language.days(), parts.weekday());
+                push_name(&mut out, name, *spelling, language.day_width(), !fill)
             }
             E::DayAbbreviation(spelling) => {
-                push_name(
-                    &mut out,
-                    &DAYS[parts.weekday() as usize][..3],
-                    *spelling,
-                    false,
-                );
+                let name = day_of(language.day_abbreviations(), parts.weekday());
+                push_name(&mut out, name, *spelling, 0, false);
             }
             E::ZoneHour => {
                 let offset = parts.offset.ok_or_else(not_recognized)?;
@@ -1057,7 +1067,7 @@ impl Reader<'_> {
             && word
                 .chars()
                 .zip(&self.input[self.at..])
-                .all(|(wanted, found)| found.to_ascii_uppercase() == wanted);
+                .all(|(wanted, found)| found.to_uppercase().eq(std::iter::once(wanted)));
         if matches {
             self.at += length;
         }
@@ -1078,22 +1088,29 @@ impl Reader<'_> {
         }
     }
 
-    fn name_among(&mut self, names: &[&str], full: Option<bool>) -> Option<i64> {
-        let mut try_names = |full: bool| {
-            names.iter().position(|name| {
-                let name: &str = if full { name } else { &name[..3] };
-                self.word(name)
-            })
-        };
-        let found = match full {
-            Some(full) => try_names(full),
-            None => try_names(true).or_else(|| try_names(false)),
+    fn name_among(&mut self, full: &[&str], short: &[&str], which: Option<bool>) -> Option<i64> {
+        let mut try_names = |names: &[&str]| names.iter().position(|name| self.word(name));
+        let found = match which {
+            Some(true) => try_names(full),
+            Some(false) => try_names(short),
+            None => try_names(full).or_else(|| try_names(short)),
         };
         found.map(|index| index as i64)
     }
 
+    fn month_among(&mut self, which: Option<bool>) -> Option<i64> {
+        let language = crate::oracle_nls::current().date_language();
+        self.name_among(language.months(), language.month_abbreviations(), which)
+            .map(|index| index + 1)
+    }
+
+    fn day_among(&mut self, which: Option<bool>) -> Option<i64> {
+        let language = crate::oracle_nls::current().date_language();
+        self.name_among(language.days(), language.day_abbreviations(), which)
+    }
+
     fn month_name(&mut self) -> Option<i64> {
-        self.name_among(&MONTHS, None).map(|index| index + 1)
+        self.month_among(None)
     }
 
     fn roman_month(&mut self) -> Option<i64> {
@@ -1399,9 +1416,7 @@ fn read_element(
         E::MonthAbbreviation(_) | E::MonthName(_) => {
             let full = matches!(element, E::MonthName(_));
             let month = if exact {
-                reader
-                    .name_among(&MONTHS, Some(full))
-                    .map(|index| index + 1)
+                reader.month_among(Some(full))
             } else {
                 reader.month_name()
             };
@@ -1472,11 +1487,7 @@ fn read_element(
         }
         E::DayName(_) | E::DayAbbreviation(_) => {
             let full = exact.then_some(matches!(element, E::DayName(_)));
-            fields.weekday = Some(
-                reader
-                    .name_among(&DAYS, full)
-                    .ok_or_else(not_a_day_of_the_week)?,
-            );
+            fields.weekday = Some(reader.day_among(full).ok_or_else(not_a_day_of_the_week)?);
         }
         E::DayOfYear => {
             let day = number(reader, 3)?;
@@ -1832,20 +1843,6 @@ pub(crate) fn literal_has_offset(text: &str) -> bool {
     split_offset(text).1.is_some()
 }
 
-fn check_date_language(nlsparam: Option<&Value>) -> SqlResult<()> {
-    let Some(value) = nlsparam else {
-        return Ok(());
-    };
-    let Value::Text(text) = value else {
-        return Ok(());
-    };
-    let (name, setting) = crate::oracle_nls::parameter_assignment(text)?;
-    if name != "nls_date_language" {
-        return Err(crate::oracle_nls::invalid_parameter_string());
-    }
-    crate::oracle_nls::require_american(&setting)
-}
-
 fn source_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
@@ -1870,7 +1867,7 @@ fn read_source(values: &[Value], purpose: ModelUse) -> SqlResult<Option<(i64, Op
     if values.get(1).is_some_and(Value::is_null) || values.get(2).is_some_and(Value::is_null) {
         return Ok(None);
     }
-    check_date_language(values.get(2))?;
+    let _nls = crate::oracle_nls::enter_date_function_parameters(values.get(2))?;
     let format = match values.get(1).and_then(source_text) {
         Some(format) => format,
         None => default_format(purpose),
@@ -1981,7 +1978,7 @@ pub(crate) fn to_char_datetime(values: &[Value], declared: Option<SqlType>) -> S
     if values.iter().any(Value::is_null) {
         return Ok(Value::Null);
     }
-    check_date_language(values.get(2))?;
+    let _nls = crate::oracle_nls::enter_date_function_parameters(values.get(2))?;
     let Some(local) = local_of(&values[0])? else {
         return Ok(Value::Null);
     };

@@ -1,19 +1,54 @@
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::oracle_date_language::DateLanguage;
 use crate::oracle_datetime::{DatetimeModel, ModelUse};
+use crate::Value;
 use std::cell::RefCell;
 use std::sync::Arc;
 
 const AMERICA_DATE_FORMAT: &str = "DD-MON-RR";
 const AMERICA_TIMESTAMP_FORMAT: &str = "DD-MON-RR HH.MI.SSXFF AM";
 const AMERICA_TIMESTAMP_TZ_FORMAT: &str = "DD-MON-RR HH.MI.SSXFF AM TZR";
-const AMERICA_NUMERIC_CHARACTERS: &str = ".,";
+const AMERICA_CURRENCY: &str = "$";
+const AMERICA_DECIMAL_CHARACTER: char = '.';
+const AMERICA_GROUP_SEPARATOR: char = ',';
+const MAX_CURRENCY_BYTES: usize = 10;
+const DATE_FUNCTION_PARAMETERS: [&str; 1] = ["nls_date_language"];
+const NUMBER_FUNCTION_PARAMETERS: [&str; 4] = [
+    "nls_numeric_characters",
+    "nls_currency",
+    "nls_iso_currency",
+    "nls_dual_currency",
+];
 
-const UNSUPPORTED_PARAMETERS: [&str; 29] = [
+const ISO_CURRENCIES: [(&str, &str); 22] = [
+    ("AMERICA", "USD"),
+    ("AUSTRALIA", "AUD"),
+    ("AUSTRIA", "EUR"),
+    ("BELGIUM", "EUR"),
+    ("BRAZIL", "BRL"),
+    ("CANADA", "CAD"),
+    ("CHINA", "CNY"),
+    ("DENMARK", "DKK"),
+    ("FINLAND", "EUR"),
+    ("FRANCE", "EUR"),
+    ("GERMANY", "EUR"),
+    ("INDIA", "INR"),
+    ("IRELAND", "EUR"),
+    ("ITALY", "EUR"),
+    ("JAPAN", "JPY"),
+    ("MEXICO", "MXN"),
+    ("NORWAY", "NOK"),
+    ("PORTUGAL", "EUR"),
+    ("SPAIN", "EUR"),
+    ("SWITZERLAND", "CHF"),
+    ("THE NETHERLANDS", "EUR"),
+    ("UNITED KINGDOM", "GBP"),
+];
+
+const UNSUPPORTED_PARAMETERS: [&str; 27] = [
     "nls_length_semantics",
     "edition",
     "events",
-    "nls_currency",
-    "nls_iso_currency",
     "nls_dual_currency",
     "nls_calendar",
     "nls_nchar_conv_excp",
@@ -45,6 +80,13 @@ pub(crate) struct NlsParameters {
     date_format: String,
     timestamp_format: String,
     timestamp_tz_format: String,
+    language: DateLanguage,
+    date_language: DateLanguage,
+    currency: String,
+    iso_currency_territory: &'static str,
+    iso_currency: &'static str,
+    decimal_character: char,
+    group_separator: char,
 }
 
 impl Default for NlsParameters {
@@ -53,6 +95,13 @@ impl Default for NlsParameters {
             date_format: AMERICA_DATE_FORMAT.to_owned(),
             timestamp_format: AMERICA_TIMESTAMP_FORMAT.to_owned(),
             timestamp_tz_format: AMERICA_TIMESTAMP_TZ_FORMAT.to_owned(),
+            language: DateLanguage::American,
+            date_language: DateLanguage::American,
+            currency: AMERICA_CURRENCY.to_owned(),
+            iso_currency_territory: ISO_CURRENCIES[0].0,
+            iso_currency: ISO_CURRENCIES[0].1,
+            decimal_character: AMERICA_DECIMAL_CHARACTER,
+            group_separator: AMERICA_GROUP_SEPARATOR,
         }
     }
 }
@@ -88,14 +137,6 @@ pub(crate) fn invalid_parameter_string() -> SqlError {
     .with_oracle_code(12702)
 }
 
-pub(crate) fn require_american(value: &str) -> SqlResult<()> {
-    if value.trim().eq_ignore_ascii_case("american") {
-        Ok(())
-    } else {
-        Err(invalid_environment())
-    }
-}
-
 fn unquoted(value: &str) -> &str {
     let trimmed = value.trim();
     trimmed
@@ -104,34 +145,69 @@ fn unquoted(value: &str) -> &str {
         .unwrap_or(trimmed)
 }
 
-pub(crate) fn parameter_assignment(text: &str) -> SqlResult<(String, String)> {
-    let Some((name, value)) = text.split_once('=') else {
-        return Err(invalid_parameter_string());
-    };
-    let name = name.trim();
-    let value = unquoted(value);
-    let simple = !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        && !value.is_empty()
-        && !value.contains(['=', '\'']);
-    if !simple {
-        return Err(invalid_parameter_string());
-    }
-    Ok((name.to_ascii_lowercase(), value.to_owned()))
+fn language_named(value: &str) -> SqlResult<DateLanguage> {
+    DateLanguage::named(value).ok_or_else(invalid_environment)
 }
 
-pub(crate) fn check_numeric_parameter(text: &str) -> SqlResult<()> {
-    let (name, value) = parameter_assignment(text)?;
-    match name.as_str() {
-        "nls_numeric_characters" if value.chars().count() != 2 => Err(invalid_parameter_string()),
-        "nls_numeric_characters" if value == AMERICA_NUMERIC_CHARACTERS => Ok(()),
-        "nls_numeric_characters" | "nls_currency" | "nls_iso_currency" | "nls_dual_currency" => {
-            Err(unsupported(&name, &value))
-        }
-        _ => Err(invalid_parameter_string()),
+fn checked_currency(value: &str) -> SqlResult<String> {
+    if value.is_empty() || value.len() > MAX_CURRENCY_BYTES {
+        return Err(invalid_environment());
     }
+    Ok(value.to_owned())
+}
+
+fn iso_currency_of(territory: &str) -> SqlResult<(&'static str, &'static str)> {
+    let wanted = territory.trim();
+    ISO_CURRENCIES
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+        .ok_or_else(invalid_environment)
+}
+
+fn checked_numeric_characters(value: &str) -> SqlResult<(char, char)> {
+    let mut characters = value.chars();
+    let (Some(decimal), Some(group), None) =
+        (characters.next(), characters.next(), characters.next())
+    else {
+        return Err(invalid_environment());
+    };
+    let refused = |character: char| character.is_numeric() || "+-<>".contains(character);
+    if decimal == group || refused(decimal) || refused(group) {
+        return Err(invalid_environment());
+    }
+    Ok((decimal, group))
+}
+
+pub(crate) fn parameter_assignments(text: &str) -> SqlResult<Vec<(String, String)>> {
+    let mut assignments = Vec::new();
+    let mut rest = text.trim_start();
+    while !rest.is_empty() {
+        let (name, after) = rest.split_once('=').ok_or_else(invalid_parameter_string)?;
+        let name = name.trim();
+        let simple_name = !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if !simple_name {
+            return Err(invalid_parameter_string());
+        }
+        let after = after.trim_start();
+        let (value, remaining) = match after.strip_prefix('\'') {
+            Some(quoted) => quoted
+                .split_once('\'')
+                .ok_or_else(invalid_parameter_string)?,
+            None => after.split_once(char::is_whitespace).unwrap_or((after, "")),
+        };
+        if value.is_empty() || value.contains(['=', '\'']) {
+            return Err(invalid_parameter_string());
+        }
+        assignments.push((name.to_ascii_lowercase(), value.to_owned()));
+        rest = remaining.trim_start();
+    }
+    if assignments.is_empty() {
+        return Err(invalid_parameter_string());
+    }
+    Ok(assignments)
 }
 
 fn checked_format(value: &str, date: bool) -> SqlResult<String> {
@@ -155,6 +231,52 @@ impl NlsParameters {
         &self.timestamp_tz_format
     }
 
+    pub(crate) fn language(&self) -> DateLanguage {
+        self.language
+    }
+
+    pub(crate) fn date_language(&self) -> DateLanguage {
+        self.date_language
+    }
+
+    pub(crate) fn currency(&self) -> &str {
+        &self.currency
+    }
+
+    pub(crate) fn iso_currency_territory(&self) -> &'static str {
+        self.iso_currency_territory
+    }
+
+    pub(crate) fn iso_currency(&self) -> &'static str {
+        self.iso_currency
+    }
+
+    pub(crate) fn decimal_character(&self) -> char {
+        self.decimal_character
+    }
+
+    pub(crate) fn group_separator(&self) -> char {
+        self.group_separator
+    }
+
+    pub(crate) fn numeric_characters(&self) -> String {
+        [self.decimal_character, self.group_separator]
+            .into_iter()
+            .collect()
+    }
+
+    fn reset_territory(&mut self) {
+        let defaults = Self::default();
+        self.date_format = defaults.date_format;
+        self.timestamp_format = defaults.timestamp_format;
+        self.timestamp_tz_format = defaults.timestamp_tz_format;
+        self.currency = defaults.currency;
+        self.iso_currency_territory = defaults.iso_currency_territory;
+        self.iso_currency = defaults.iso_currency;
+        self.decimal_character = defaults.decimal_character;
+        self.group_separator = defaults.group_separator;
+    }
+
     pub(crate) fn with(&self, name: &str, value: &str) -> SqlResult<Self> {
         let mut next = self.clone();
         let plain = unquoted(value);
@@ -162,23 +284,46 @@ impl NlsParameters {
             "nls_date_format" => next.date_format = checked_format(value, true)?,
             "nls_timestamp_format" => next.timestamp_format = checked_format(value, false)?,
             "nls_timestamp_tz_format" => next.timestamp_tz_format = checked_format(value, false)?,
-            "nls_language" | "nls_date_language" => require_american(plain)?,
+            "nls_language" => {
+                next.language = language_named(plain)?;
+                next.date_language = next.language;
+            }
+            "nls_date_language" => next.date_language = language_named(plain)?,
             "nls_territory" => {
                 if !plain.eq_ignore_ascii_case("america") {
                     return Err(invalid_environment());
                 }
-                let defaults = Self::default();
-                next.date_format = defaults.date_format;
-                next.timestamp_format = defaults.timestamp_format;
-                next.timestamp_tz_format = defaults.timestamp_tz_format;
+                next.reset_territory();
             }
-            "nls_numeric_characters" if plain == AMERICA_NUMERIC_CHARACTERS => {}
+            "nls_currency" => next.currency = checked_currency(plain)?,
+            "nls_iso_currency" => {
+                (next.iso_currency_territory, next.iso_currency) = iso_currency_of(plain)?;
+            }
+            "nls_numeric_characters" => {
+                (next.decimal_character, next.group_separator) =
+                    checked_numeric_characters(plain)?;
+            }
             "nls_sort" | "nls_comp" if plain.eq_ignore_ascii_case("binary") => {}
-            "nls_numeric_characters" | "nls_sort" | "nls_comp" => {
-                return Err(unsupported(name, plain));
-            }
+            "nls_sort" | "nls_comp" => return Err(unsupported(name, plain)),
             _ if UNSUPPORTED_PARAMETERS.contains(&name) => return Err(unsupported(name, plain)),
             _ => return Err(invalid_option()),
+        }
+        Ok(next)
+    }
+
+    fn with_function_parameters(&self, text: &str, allowed: &[&str]) -> SqlResult<Self> {
+        let mut next = self.clone();
+        for (name, value) in parameter_assignments(text)? {
+            if !allowed.contains(&name.as_str()) {
+                return Err(invalid_parameter_string());
+            }
+            next = next.with(&name, &format!("'{value}'")).map_err(|error| {
+                if error.vendor_code() == Some(3001) {
+                    error
+                } else {
+                    invalid_parameter_string()
+                }
+            })?;
         }
         Ok(next)
     }
@@ -211,9 +356,36 @@ pub(crate) fn current() -> Arc<NlsParameters> {
     })
 }
 
+fn enter_function_parameters(
+    nlsparam: Option<&Value>,
+    allowed: &[&str],
+) -> SqlResult<Option<NlsGuard>> {
+    let Some(Value::Text(text)) = nlsparam else {
+        return Ok(None);
+    };
+    let next = current().with_function_parameters(text, allowed)?;
+    Ok(Some(enter(Arc::new(next))))
+}
+
+pub(crate) fn enter_date_function_parameters(
+    nlsparam: Option<&Value>,
+) -> SqlResult<Option<NlsGuard>> {
+    enter_function_parameters(nlsparam, &DATE_FUNCTION_PARAMETERS)
+}
+
+pub(crate) fn enter_number_function_parameters(
+    nlsparam: Option<&Value>,
+) -> SqlResult<Option<NlsGuard>> {
+    enter_function_parameters(nlsparam, &NUMBER_FUNCTION_PARAMETERS)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NlsParameters, check_numeric_parameter, current, enter, parameter_assignment};
+    use super::{
+        DATE_FUNCTION_PARAMETERS, NUMBER_FUNCTION_PARAMETERS, NlsParameters, current, enter,
+        parameter_assignments,
+    };
+    use crate::oracle_date_language::DateLanguage;
     use std::sync::Arc;
 
     fn code(result: Result<NlsParameters, crate::SqlError>) -> Option<u16> {
@@ -246,7 +418,7 @@ mod tests {
         assert_eq!(code(nls.with("nls_sort", "XGERMAN")), Some(3001));
         assert!(nls.with("nls_sort", "BINARY").is_ok());
         assert!(nls.with("nls_comp", "binary").is_ok());
-        assert_eq!(code(nls.with("nls_language", "GERMAN")), Some(12705));
+        assert_eq!(code(nls.with("nls_language", "KLINGON")), Some(12705));
         assert_eq!(code(nls.with("nls_territory", "KOREA")), Some(12705));
         assert_eq!(
             code(nls.with("nls_date_format", "'HH24:MI:SS.FF'")),
@@ -259,18 +431,63 @@ mod tests {
     #[test]
     fn function_parameter_strings_are_checked() {
         assert_eq!(
-            parameter_assignment("NLS_DATE_LANGUAGE = American").ok(),
-            Some(("nls_date_language".to_owned(), "American".to_owned()))
+            parameter_assignments("NLS_DATE_LANGUAGE = American").ok(),
+            Some(vec![("nls_date_language".to_owned(), "American".to_owned())])
         );
-        assert!(check_numeric_parameter("NLS_NUMERIC_CHARACTERS = '.,'").is_ok());
-        let code = |text: &str| {
-            check_numeric_parameter(text)
-                .err()
-                .and_then(|e| e.vendor_code())
+        assert_eq!(
+            parameter_assignments("NLS_NUMERIC_CHARACTERS = ', ' NLS_CURRENCY='EUR '").ok(),
+            Some(vec![
+                ("nls_numeric_characters".to_owned(), ", ".to_owned()),
+                ("nls_currency".to_owned(), "EUR ".to_owned()),
+            ])
+        );
+        let numbers = |text: &str| {
+            NlsParameters::default().with_function_parameters(text, &NUMBER_FUNCTION_PARAMETERS)
         };
-        assert_eq!(code("NLS_NUMERIC_CHARACTERS = ',.'"), Some(3001));
-        assert_eq!(code("NLS_NUMERIC_CHARACTERS = '.'"), Some(12702));
-        assert_eq!(code("nonsense"), Some(12702));
+        let swapped = numbers("NLS_NUMERIC_CHARACTERS = ',.'").expect("swapped");
+        assert_eq!((swapped.decimal_character(), swapped.group_separator()), (',', '.'));
+        assert_eq!(code(numbers("NLS_NUMERIC_CHARACTERS = '.'")), Some(12702));
+        assert_eq!(code(numbers("NLS_NUMERIC_CHARACTERS = '..'")), Some(12702));
+        assert_eq!(code(numbers("NLS_NUMERIC_CHARACTERS = '1,'")), Some(12702));
+        assert_eq!(code(numbers("NLS_DUAL_CURRENCY = 'X'")), Some(3001));
+        assert_eq!(code(numbers("NLS_DATE_LANGUAGE = German")), Some(12702));
+        assert_eq!(code(numbers("nonsense")), Some(12702));
+        assert_eq!(code(numbers("")), Some(12702));
+        let dates = |text: &str| {
+            NlsParameters::default().with_function_parameters(text, &DATE_FUNCTION_PARAMETERS)
+        };
+        assert_eq!(
+            dates("NLS_DATE_LANGUAGE = 'French'").map(|nls| nls.date_language()).ok(),
+            Some(DateLanguage::French)
+        );
+        assert_eq!(code(dates("NLS_DATE_LANGUAGE = Klingon")), Some(12702));
+    }
+
+    #[test]
+    fn language_currency_and_numeric_characters_are_session_settings() {
+        let nls = NlsParameters::default();
+        let german = nls.with("nls_language", "german").expect("language");
+        assert_eq!(german.language(), DateLanguage::German);
+        assert_eq!(german.date_language(), DateLanguage::German);
+        let dutch = german.with("nls_date_language", "'DUTCH'").expect("date language");
+        assert_eq!(dutch.language(), DateLanguage::German);
+        assert_eq!(dutch.date_language(), DateLanguage::Dutch);
+        let priced = nls
+            .with("nls_currency", "'€'")
+            .and_then(|nls| nls.with("nls_iso_currency", "'united kingdom'"))
+            .and_then(|nls| nls.with("nls_numeric_characters", "',.'"))
+            .expect("currency");
+        assert_eq!(priced.currency(), "€");
+        assert_eq!(priced.iso_currency(), "GBP");
+        assert_eq!(priced.iso_currency_territory(), "UNITED KINGDOM");
+        assert_eq!(priced.numeric_characters(), ",.");
+        let reset = priced.with("nls_territory", "AMERICA").expect("territory");
+        assert_eq!(reset.currency(), "$");
+        assert_eq!(reset.iso_currency(), "USD");
+        assert_eq!(reset.numeric_characters(), ".,");
+        assert_eq!(code(nls.with("nls_iso_currency", "ATLANTIS")), Some(12705));
+        assert_eq!(code(nls.with("nls_currency", "'ELEVENBYTES'")), Some(12705));
+        assert_eq!(code(nls.with("nls_numeric_characters", "'+,'")), Some(12705));
     }
 
     #[test]

@@ -1553,14 +1553,17 @@ fn nls_parameters(session: bool) -> Vec<(&'static str, String)> {
     let defaults = crate::oracle_nls::NlsParameters::default();
     let chosen: &crate::oracle_nls::NlsParameters = if session { &current } else { &defaults };
     let mut parameters = vec![
-        ("NLS_LANGUAGE", "AMERICAN".to_owned()),
+        ("NLS_LANGUAGE", chosen.language().name().to_owned()),
         ("NLS_TERRITORY", "AMERICA".to_owned()),
-        ("NLS_CURRENCY", "$".to_owned()),
-        ("NLS_ISO_CURRENCY", "AMERICA".to_owned()),
-        ("NLS_NUMERIC_CHARACTERS", ".,".to_owned()),
+        ("NLS_CURRENCY", chosen.currency().to_owned()),
+        (
+            "NLS_ISO_CURRENCY",
+            chosen.iso_currency_territory().to_owned(),
+        ),
+        ("NLS_NUMERIC_CHARACTERS", chosen.numeric_characters()),
         ("NLS_CALENDAR", "GREGORIAN".to_owned()),
         ("NLS_DATE_FORMAT", chosen.date_format().to_owned()),
-        ("NLS_DATE_LANGUAGE", "AMERICAN".to_owned()),
+        ("NLS_DATE_LANGUAGE", chosen.date_language().name().to_owned()),
         ("NLS_SORT", "BINARY".to_owned()),
         ("NLS_TIME_FORMAT", TIME_FORMAT.to_owned()),
         ("NLS_TIMESTAMP_FORMAT", chosen.timestamp_format().to_owned()),
