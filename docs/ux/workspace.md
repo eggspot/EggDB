@@ -48,6 +48,17 @@ protocol (5432, 3306, 1433, 6379). `Use TLS` is on unless the URL says `?sslmode
 (`?tls=false` for the others). The password is never written into the URL field. The primary
 button reads `Connect`; `Enter` from any field connects.
 
+The `URL` row does not fit above gui.md's fields in the 480 px card, so the panel packs them
+(card-relative, labels' text positions, then rects): `URL` (24, 120), input (24, 142, 512, 28);
+`Protocol` (24, 186), dropdown (24, 208, 168, 28); `Host` (200, 186), input (200, 208, 224, 28);
+`Port` (432, 186), input (432, 208, 104, 28); `Database` (24, 252), input (24, 274, 512, 28);
+`User` (24, 318), input (24, 340, 250, 28); `Password` (286, 318), input (286, 340, 250, 28);
+`Use TLS` checkbox (24, 384, 16, 16), label at x 48; the TLS warning at (24, 406) in `body`
+`warning`, at most 332 px wide and elided, shown only while TLS is off and the card is enabled.
+The status line of 1.5 is also at most 332 px wide. The last control ends 36 px above the
+buttons, so two error lines never reach them; the card stays 480 px and the focus order is
+unchanged (D274).
+
 ### 1.5 Progress
 Pressing `Open` or `Connect` at once:
 - disables the whole card (every control `textDisabled`, inputs `bg1`), keeps focus where it was;
