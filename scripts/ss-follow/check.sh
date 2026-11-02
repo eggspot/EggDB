@@ -53,6 +53,18 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 database=master source_sql -Q "SET NOCOUNT ON; SELECT 1" > /dev/null || fail "SQL Server did not start"
+agent_ready_query="SET NOCOUNT ON;
+DECLARE @starting int = 1;
+EXEC master.dbo.xp_sqlagent_is_starting @starting OUTPUT;
+SELECT CASE WHEN @starting = 0 AND EXISTS (SELECT 1 FROM sys.dm_server_services
+  WHERE servicename LIKE N'SQL Server Agent%' AND status_desc = N'Running') THEN 1 ELSE 0 END"
+agent_ready=
+for _ in $(seq 1 180); do
+  agent_ready=$(database=master source_sql -Q "$agent_ready_query" 2> /dev/null | tr -d '[:space:]' || true)
+  [ "$agent_ready" = "1" ] && break
+  sleep 1
+done
+[ "$agent_ready" = "1" ] || fail "SQL Server Agent did not finish starting, and CDC's capture job needs it"
 database=master source_sql -Q "CREATE DATABASE app" || fail "cannot create the database"
 source_sql -Q "ALTER DATABASE app SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON)" \
   || fail "cannot turn change tracking on"
