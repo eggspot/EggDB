@@ -134,6 +134,40 @@ fn a_collection_variable_is_a_table_in_plsql_sql() {
 }
 
 #[test]
+fn a_collection_of_records_with_null_elements_gives_rows_of_one_width() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    run(
+        &mut session,
+        "DECLARE \
+           TYPE pt IS RECORD (x NUMBER, y NUMBER); \
+           TYPE pts IS TABLE OF pt; \
+           v pts := pts(); \
+           p pt; \
+         BEGIN \
+           v.EXTEND(3); \
+           p.x := 1; p.y := 2; \
+           v(2) := p; \
+           INSERT INTO log SELECT x, TO_CHAR(y) FROM TABLE(v); \
+           v(1) := NULL; \
+           v(3) := p; \
+           INSERT INTO log SELECT x + 10, TO_CHAR(y + 10) FROM TABLE(v); \
+         END;",
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT n, msg FROM log ORDER BY n NULLS LAST"),
+        [
+            ["1", "2"],
+            ["11", "12"],
+            ["11", "12"],
+            ["NULL", "NULL"],
+            ["NULL", "NULL"],
+            ["NULL", "NULL"],
+        ]
+    );
+}
+
+#[test]
 fn member_of_cardinality_and_multiset_operators_work_on_collections() {
     let store = MemoryStore::default();
     let mut session = session(&store);

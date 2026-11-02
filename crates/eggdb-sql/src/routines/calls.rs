@@ -840,7 +840,9 @@ impl Preparing<'_> {
         } else {
             output_columns(&definition, &elements, &label)
         };
-        let mut rows: Vec<Vec<Value>> = elements.into_iter().map(row_of).collect();
+        let fields = record_columns(&elements).filter(|fields| *fields == columns);
+        let mut rows = element_rows(elements, fields.as_deref())
+            .map_err(|error| error.at_if_unplaced(position))?;
         if function.ordinality {
             columns.push(ORDINALITY_COLUMN.to_owned());
             types.push(Some(SqlType::BigInt));
@@ -888,14 +890,12 @@ impl Preparing<'_> {
         }
         let value = constant_evaluator().eval(collection, None)?;
         let elements = oracle_collection_elements(value);
-        let (columns, types) = match elements.first().and_then(record_of) {
-            Some(record) => (
-                field_names(record),
-                record.fields.iter().map(|_| None).collect(),
-            ),
-            None => (vec![ORACLE_COLUMN_VALUE.to_owned()], vec![None]),
-        };
-        let rows: Vec<Vec<Value>> = elements.into_iter().map(row_of).collect();
+        let fields = record_columns(&elements);
+        let columns = fields
+            .clone()
+            .unwrap_or_else(|| vec![ORACLE_COLUMN_VALUE.to_owned()]);
+        let types = vec![None; columns.len()];
+        let rows = element_rows(elements, fields.as_deref()).map_err(|error| error.at(position))?;
         let empty = rows.is_empty();
         let replacement = values_table(table.name.text.clone(), columns, rows, &types, position);
         table.generated = replacement.generated;
@@ -1342,11 +1342,9 @@ fn output_columns(
                 .collect(),
         );
     }
-    if let Some(record) = elements.first().and_then(record_of) {
-        return (
-            field_names(record),
-            record.fields.iter().map(|_| None).collect(),
-        );
+    if let Some(fields) = record_columns(elements) {
+        let types = vec![None; fields.len()];
+        return (fields, types);
     }
     let name = outputs
         .first()
@@ -1378,6 +1376,64 @@ fn row_of(element: Value) -> Vec<Value> {
         },
         other => vec![other],
     }
+}
+
+fn record_columns(elements: &[Value]) -> Option<Vec<String>> {
+    let mut columns: Option<Vec<String>> = None;
+    for record in elements.iter().filter_map(record_of) {
+        let known = columns.get_or_insert_with(Vec::new);
+        for name in field_names(record) {
+            if !known.contains(&name) {
+                known.push(name);
+            }
+        }
+    }
+    columns
+}
+
+fn element_rows(elements: Vec<Value>, fields: Option<&[String]>) -> SqlResult<Vec<Vec<Value>>> {
+    let Some(fields) = fields else {
+        return Ok(elements.into_iter().map(row_of).collect());
+    };
+    elements
+        .into_iter()
+        .map(|element| match element {
+            Value::Null => Ok(vec![Value::Null; fields.len()]),
+            Value::Defined(defined) => match *defined {
+                DefinedValue::Record(record) => Ok(fields_in_order(record, fields)),
+                _ => Err(mixed_collection_elements()),
+            },
+            _ => Err(mixed_collection_elements()),
+        })
+        .collect()
+}
+
+fn fields_in_order(record: RecordValue, columns: &[String]) -> Vec<Value> {
+    let names = field_names(&record);
+    if names == columns {
+        return record.fields;
+    }
+    let mut fields: Vec<Option<Value>> = record.fields.into_iter().map(Some).collect();
+    columns
+        .iter()
+        .map(|column| {
+            names
+                .iter()
+                .position(|name| name == column)
+                .and_then(|at| fields.get_mut(at))
+                .and_then(Option::take)
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+fn mixed_collection_elements() -> SqlError {
+    SqlError::new(
+        SqlState::DATATYPE_MISMATCH,
+        "inconsistent datatypes: a collection in TABLE() mixes records with scalar elements",
+    )
+    .with_oracle_code(932)
+    .with_hint("Make every element of the collection a record of the same type, or NULL.")
 }
 
 fn record_of(value: &Value) -> Option<&RecordValue> {
