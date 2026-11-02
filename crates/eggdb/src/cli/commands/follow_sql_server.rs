@@ -24,6 +24,8 @@ const CAPTURE_ENABLED_QUERY: &str =
     "SELECT CAST(is_cdc_enabled AS nvarchar(max)) FROM sys.databases WHERE database_id = DB_ID()";
 const LIVENESS_QUERY: &str = "SELECT CAST(1 AS nvarchar(max))";
 const MAX_LSN_QUERY: &str = "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1)";
+const COPY_START_QUERY: &str = "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1), \
+     CONVERT(nvarchar(max), CAST(DATEADD(second, -1, SYSDATETIME()) AS datetime), 121)";
 const CAPTURE_INSTANCES_QUERY: &str = "SELECT CAST(s.name AS nvarchar(max)), CAST(t.name AS nvarchar(max)), \
      CAST(c.capture_instance AS nvarchar(max)), \
      CAST(CASE WHEN (SELECT COUNT(*) FROM cdc.captured_columns cc WHERE cc.object_id = c.object_id) \
@@ -413,13 +415,28 @@ fn capture_changes_query(table: &SourceTable, instance: &str, from: Lsn, to: Lsn
     )
 }
 
-fn capture_bounds_query(instance: &str, after: Lsn) -> String {
+fn capture_bounds_query(instance: &str, after: Lsn, committed_before_copy: Option<&str>) -> String {
+    let in_copy = committed_before_copy.map_or("NULL".to_owned(), |time| {
+        format!(
+            "CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', CONVERT(datetime, {}, 121))), 1)",
+            quote_unicode(time)
+        )
+    });
     format!(
         "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_min_lsn({}), 1), \
-         CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn({}), 1)",
+         CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn({}), 1), {in_copy}",
         quote_unicode(instance),
         after.literal()
     )
+}
+
+fn first_change_after_copy(next: Lsn, bounds: &TextRows) -> Lsn {
+    bounds
+        .first()
+        .and_then(|row| row.get(2))
+        .and_then(parse_lsn)
+        .filter(|lsn| lsn.is_valid())
+        .map_or(next, |after_copy| next.max(after_copy))
 }
 
 fn position_text(version: Option<i64>, lsn: Option<Lsn>) -> String {
@@ -976,11 +993,14 @@ impl Session<'_> {
         } else {
             None
         };
+        let mut committed_before_copy: Option<String> = None;
         let mut lsn: Option<Lsn> = if uses_capture {
-            Some(
-                first_value(&first_rows(query(&mut source, MAX_LSN_QUERY)?), parse_lsn)
-                    .unwrap_or(Lsn(0)),
-            )
+            let start = first_rows(query(&mut source, COPY_START_QUERY)?);
+            committed_before_copy = start
+                .first()
+                .and_then(|row| row.get(1).cloned().flatten())
+                .filter(|time| !time.is_empty());
+            Some(first_value(&start, parse_lsn).unwrap_or(Lsn(0)))
         } else {
             None
         };
@@ -988,8 +1008,10 @@ impl Session<'_> {
             for table in &mut tables {
                 let shown = table.shown();
                 if let ChangeSource::Capture { instance, next } = &mut table.changes {
-                    let bounds =
-                        first_rows(query(&mut source, &capture_bounds_query(instance, start))?);
+                    let bounds = first_rows(query(
+                        &mut source,
+                        &capture_bounds_query(instance, start, committed_before_copy.as_deref()),
+                    )?);
                     let minimum = first_value(&bounds, parse_lsn).filter(|lsn| lsn.is_valid());
                     let following = bounds
                         .first()
@@ -1000,7 +1022,7 @@ impl Session<'_> {
                             "cannot follow {target}: the CDC changes of {shown} cannot be read: capture instance {instance} is gone or this login may not read it. Grant the login its gating role, then follow again"
                         )));
                     };
-                    *next = minimum.max(following);
+                    *next = first_change_after_copy(minimum.max(following), &bounds);
                 }
             }
         }
@@ -1060,6 +1082,7 @@ impl Session<'_> {
             if uses_tracking {
                 version = resumed_version.or(version);
             }
+            committed_before_copy = None;
             let target_tables = self.target_table_columns()?;
             for table in &tables {
                 let in_target = target_tables.iter().find(|(schema, name, _)| {
@@ -1251,8 +1274,11 @@ impl Session<'_> {
                         let (Some(to), next) = (current_lsn, *next) else {
                             continue;
                         };
-                        let bounds =
-                            first_rows(query(&mut source, &capture_bounds_query(instance, to))?);
+                        let bounds = first_rows(query(
+                            &mut source,
+                            &capture_bounds_query(instance, to, committed_before_copy.as_deref()),
+                        )?);
+                        let next = first_change_after_copy(next, &bounds);
                         let minimum = first_value(&bounds, parse_lsn).unwrap_or(Lsn(0));
                         if !minimum.is_valid() || minimum > next {
                             return Err(source_failed(capture_lost(
@@ -1264,36 +1290,41 @@ impl Session<'_> {
                             )));
                         }
                         if next > to {
-                            continue;
-                        }
-                        let following = bounds
-                            .first()
-                            .and_then(|row| row.get(1))
-                            .and_then(parse_lsn)
-                            .ok_or_else(|| malformed_change(&target, &table.shown()))?;
-                        let changes = first_rows(query(
-                            &mut source,
-                            &capture_changes_query(table, instance, next, to),
-                        )?);
-                        for change in &changes {
-                            let Some(step) = capture_operation(&cell(change, 0)) else {
-                                continue;
-                            };
-                            let row = change.get(1..).unwrap_or_default();
-                            let image = match step {
-                                CaptureRow::BeforeUpdate
-                                | CaptureRow::Change(RowChange::Delete) => None,
-                                CaptureRow::Change(_) => Some(row),
-                            };
-                            statements.extend(
-                                change_statements(table, &capture_key_values(table, row), image)
+                            Some(next)
+                        } else {
+                            let following = bounds
+                                .first()
+                                .and_then(|row| row.get(1))
+                                .and_then(parse_lsn)
+                                .ok_or_else(|| malformed_change(&target, &table.shown()))?;
+                            let changes = first_rows(query(
+                                &mut source,
+                                &capture_changes_query(table, instance, next, to),
+                            )?);
+                            for change in &changes {
+                                let Some(step) = capture_operation(&cell(change, 0)) else {
+                                    continue;
+                                };
+                                let row = change.get(1..).unwrap_or_default();
+                                let image = match step {
+                                    CaptureRow::BeforeUpdate
+                                    | CaptureRow::Change(RowChange::Delete) => None,
+                                    CaptureRow::Change(_) => Some(row),
+                                };
+                                statements.extend(
+                                    change_statements(
+                                        table,
+                                        &capture_key_values(table, row),
+                                        image,
+                                    )
                                     .ok_or_else(|| malformed_change(&target, &table.shown()))?,
-                            );
-                            if let CaptureRow::Change(operation) = step {
-                                count_change(&mut counts, operation);
+                                );
+                                if let CaptureRow::Change(operation) = step {
+                                    count_change(&mut counts, operation);
+                                }
                             }
+                            Some(following)
                         }
-                        Some(following)
                     }
                 };
                 if let (Some(advanced), ChangeSource::Capture { next, .. }) =
@@ -1633,9 +1664,52 @@ mod tests {
              ORDER BY C.[__$start_lsn], C.[__$seqval], C.[__$operation]"
         );
         assert_eq!(
-            capture_bounds_query("it's", to),
+            capture_bounds_query("it's", to, None),
             "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_min_lsn(N'it''s'), 1), \
-             CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(0x0000002B000000100001), 1)"
+             CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(0x0000002B000000100001), 1), NULL"
+        );
+        assert_eq!(
+            capture_bounds_query("dbo_orders", to, Some("2026-11-02 11:40:01.123")),
+            "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_min_lsn(N'dbo_orders'), 1), \
+             CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(0x0000002B000000100001), 1), \
+             CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', CONVERT(datetime, N'2026-11-02 11:40:01.123', 121))), 1)"
+        );
+    }
+
+    #[test]
+    fn changes_committed_before_the_copy_started_are_not_read_again_once_captured() {
+        let next = Lsn::parse("0x0000002A000001F80003").unwrap();
+        let bounds = |after_copy: Option<&str>| {
+            vec![vec![
+                Some("0x00000020000000100001".to_owned()),
+                Some("0x0000002A000001F80003".to_owned()),
+                after_copy.map(str::to_owned),
+            ]]
+        };
+        let captured_late = Lsn::parse("0x0000002E000056D000D1").unwrap();
+        assert_eq!(
+            first_change_after_copy(next, &bounds(Some("0x0000002E000056D000D1"))),
+            captured_late
+        );
+        assert_eq!(
+            first_change_after_copy(captured_late, &bounds(Some("0x0000002A000001F80003"))),
+            captured_late
+        );
+        assert_eq!(first_change_after_copy(next, &bounds(None)), next);
+        assert_eq!(
+            first_change_after_copy(next, &bounds(Some("0x00000000000000000000"))),
+            next
+        );
+        assert_eq!(first_change_after_copy(next, &bounds(Some("junk"))), next);
+        assert_eq!(first_change_after_copy(next, &Vec::new()), next);
+    }
+
+    #[test]
+    fn the_copy_start_reads_the_capture_position_and_a_time_a_second_earlier() {
+        assert_eq!(
+            COPY_START_QUERY,
+            "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1), \
+             CONVERT(nvarchar(max), CAST(DATEADD(second, -1, SYSDATETIME()) AS datetime), 121)"
         );
     }
 

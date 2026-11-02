@@ -87,6 +87,7 @@ INSERT INTO dbo.orders (customer_id, amount, note)
 SELECT 1 + i % 2000, CAST((i % 997) / 7.0 AS decimal(10, 2)), CASE WHEN i % 3 = 0 THEN NULL ELSE CONCAT(N'it''s order ', i) END FROM n;
 WITH n AS (SELECT TOP (300) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects)
 INSERT INTO dbo.notes (id, body) SELECT i, CONCAT(N'note ', i) FROM n;" || fail "cannot fill the database"
+sleep 2
 
 writes_during_copy() {
   source_sql -Q "SET NOCOUNT ON;
