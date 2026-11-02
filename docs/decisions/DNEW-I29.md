@@ -15,8 +15,10 @@ encoder, frames tested offscreen). This decision keeps all of D191 and adds the 
   backend speaks its own system interface with our own declarations and no third-party code
   (D1): on Linux and the BSDs the X11 protocol directly over the display's Unix socket (from the
   public X Window System Protocol specification, with `MIT-MAGIC-COOKIE-1` from the Xauthority
-  file); Win32 on Windows and Cocoa on macOS in the next slices, Wayland after them. The OS
-  clipboard and the accessibility bridges (UI Automation, NSAccessibility, AT-SPI2, ARIA in the
+  file); Win32 on Windows through our own `user32`/`gdi32` declarations; Cocoa on macOS through
+  the Objective-C runtime, with AppKit, Core Graphics and Core Foundation loaded by `dlopen`
+  only when a window opens, so the server's binary gains no framework load commands; Wayland
+  after them. The OS clipboard and the accessibility bridges (UI Automation, NSAccessibility, AT-SPI2, ARIA in the
   browser) join the same module; the toolkit keeps one accessibility tree per window and the
   platform layer exposes it. The engine never depends on any of this.
 - **A CPU rasterizer first, the GPU later.** Every frame is drawn by D191's antialiased software
@@ -55,7 +57,7 @@ encoder, frames tested offscreen). This decision keeps all of D191 and adds the 
   (7:1 in high contrast) and every control boundary and the ring at 3:1. `--theme` overrides;
   following the OS's dark and contrast settings comes with each backend.
 
-Left: the Win32 and Cocoa backends, Wayland, the clipboard, the accessibility bridges, the
+Left: Wayland, the clipboard, the accessibility bridges, the
 wasm canvas, pointer input (hover, pressed, mouse focus without a ring), caret blinking,
 remembered window size and position, reading the OS theme, and golden frames with pinned fonts
 (D191).

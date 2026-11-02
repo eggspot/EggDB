@@ -4,15 +4,18 @@
 //! Every operating system's window API stays behind [`open_window`] and the [`Window`] trait,
 //! so the GUI toolkit draws frames without knowing which system shows them. On Linux and the
 //! BSDs the backend speaks the X11 protocol itself over the display's Unix socket ([`x11`]);
-//! on Windows it calls Win32 through our own declarations ([`win32`]); macOS answers
-//! [`WindowError::Unsupported`] until its backend lands.
+//! on Windows it calls Win32 through our own declarations ([`win32`]); on macOS it drives
+//! AppKit through the Objective-C runtime, loaded only when a window opens ([`cocoa`]).
 
 use std::fmt;
 use std::time::Duration;
 
+pub mod cocoa;
 pub mod win32;
 pub mod x11;
 
+#[cfg(target_os = "macos")]
+mod cocoa_window;
 #[cfg(windows)]
 mod win32_window;
 
@@ -215,11 +218,16 @@ pub fn open_window(options: &WindowOptions) -> Result<Box<dyn Window>, WindowErr
         let window = win32_window::Win32Window::open(options)?;
         Ok(Box::new(window))
     }
-    #[cfg(target_vendor = "apple")]
+    #[cfg(target_os = "macos")]
+    {
+        let window = cocoa_window::CocoaWindow::open(options)?;
+        Ok(Box::new(window))
+    }
+    #[cfg(all(target_vendor = "apple", not(target_os = "macos")))]
     {
         let _ = options;
         Err(WindowError::Unsupported(
-            "native windows on macOS (Cocoa) are not supported yet",
+            "native windows on iOS, tvOS, watchOS and visionOS are not supported yet",
         ))
     }
     #[cfg(not(any(
