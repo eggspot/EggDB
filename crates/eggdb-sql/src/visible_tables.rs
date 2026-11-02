@@ -489,6 +489,7 @@ enum Refusal {
     Linked(OutsideLink),
     Shared,
     Trigger,
+    Code(String),
 }
 
 impl Refusal {
@@ -533,7 +534,94 @@ impl Refusal {
                 "cannot create, change or drop a trigger: a trigger runs its function in every later session that changes the table, where --tables does not confine it, and dropping one switches off what it guards",
             )
             .with_hint("Ask the user to change the trigger."),
+            Self::Code(function) => SqlError::new(
+                SqlState::INSUFFICIENT_PRIVILEGE,
+                format!(
+                    "cannot write a default, check or generated expression that calls the routine \"{function}\": it runs in every later session that writes the table, where --tables does not confine it"
+                ),
+            )
+            .with_hint("Ask the user to make this change."),
         }
+    }
+}
+
+fn user_routine_in_new_expressions(
+    reader: &dyn KeyValueRead,
+    key: &[u8],
+    value: &[u8],
+) -> SqlResult<Option<String>> {
+    let Written::Definition(name) = written(key) else {
+        return Ok(None);
+    };
+    let Ok(text) = std::str::from_utf8(name) else {
+        return Ok(None);
+    };
+    if key != table_key(text).as_slice() || is_view_record(value) {
+        return Ok(None);
+    }
+    let Ok(table) = TableDefinition::decode(text, value) else {
+        return Ok(None);
+    };
+    let before = match reader.get(key)? {
+        Some(stored) if !is_view_record(&stored) => TableDefinition::decode(text, &stored).ok(),
+        _ => None,
+    };
+    let mut expressions = Vec::new();
+    for (at, column) in table.columns.iter().enumerate() {
+        let kept = before.as_ref().is_some_and(|before| {
+            before
+                .columns
+                .iter()
+                .any(|old| old.name == column.name && old.default == column.default)
+        });
+        if !kept
+            && let Ok(Some(expr)) =
+                crate::execute::default_expression(column, table.default_dialect(at))
+        {
+            expressions.push(expr);
+        }
+    }
+    for check in &table.checks {
+        let kept = before.as_ref().is_some_and(|before| {
+            before
+                .checks
+                .iter()
+                .any(|old| old.expression == check.expression)
+        });
+        if !kept && let Ok(expr) = crate::constraints::parse_check(check) {
+            expressions.push(expr);
+        }
+    }
+    let mut called = Vec::new();
+    for expr in &expressions {
+        called_names(expr, &mut called);
+    }
+    let mut tables = crate::execute::TableCache::default();
+    for function in called {
+        let found = crate::routines::resolve(reader, &mut tables, &function);
+        if !matches!(found, Ok(None)) {
+            return Ok(Some(shown_name(&function)));
+        }
+    }
+    Ok(None)
+}
+
+fn called_names(expr: &crate::ast::Expr, called: &mut Vec<String>) {
+    if let crate::ast::ExprKind::Function { name, arguments } = &expr.kind {
+        if name == crate::routines::ROUTINE_CALL {
+            if let Some(crate::ast::Expr {
+                kind: crate::ast::ExprKind::Literal(crate::ast::Literal::String(routine)),
+                ..
+            }) = arguments.first()
+            {
+                called.push(routine.clone());
+            }
+        } else if !name.is_empty() && !name.starts_with('*') {
+            called.push(name.clone());
+        }
+    }
+    for child in crate::eval::children(expr) {
+        called_names(child, called);
     }
 }
 
@@ -730,6 +818,17 @@ impl Confined {
 }
 
 impl<W: KeyValueWrite> VisibleWrite<W> {
+    fn admit(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        let Some(confined) = &mut self.confined else {
+            return Ok(());
+        };
+        if let Some(function) = user_routine_in_new_expressions(&self.inner, key, value)? {
+            confined.refused = true;
+            return Err(Refusal::Code(function).error());
+        }
+        confined.admit(key, value)
+    }
+
     /// `inner` with nothing hidden and nothing refused.
     pub fn everything(inner: W) -> Self {
         Self {
@@ -789,16 +888,12 @@ impl<W: KeyValueWrite> KeyValueRead for VisibleWrite<W> {
 
 impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
-        if let Some(confined) = &mut self.confined {
-            confined.admit(key, value)?;
-        }
+        self.admit(key, value)?;
         self.inner.put(key, value)
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
-        if let Some(confined) = &mut self.confined {
-            confined.admit(key, value)?;
-        }
+        self.admit(key, value)?;
         self.inner.put_if_absent(key, value)
     }
 

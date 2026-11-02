@@ -417,3 +417,41 @@ fn a_trigger_cannot_be_dropped_or_disabled_but_goes_with_its_dropped_table() {
         "count\n0\nSELECT 1"
     );
 }
+
+#[test]
+fn a_default_or_check_calling_a_user_routine_cannot_be_written() {
+    let store = shop();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "CREATE FUNCTION wipe_secrets() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN UPDATE secrets SET code = 'gone'; RETURN 1; END $$",
+    );
+    owner.close().unwrap();
+    let limited = confined(&store);
+    let mut session = Session::new(&limited);
+    for sql in [
+        "ALTER TABLE items ALTER COLUMN name SET DEFAULT wipe_secrets()::text",
+        "CREATE TABLE drafts (id integer PRIMARY KEY, n integer CHECK (n < wipe_secrets()))",
+        "CREATE TABLE drafts (id integer PRIMARY KEY, n integer DEFAULT wipe_secrets())",
+    ] {
+        let message = refused(&mut session, sql);
+        assert!(message.contains("wipe_secrets"), "{sql}: {message}");
+    }
+    runs(
+        &mut session,
+        "ALTER TABLE items ALTER COLUMN name SET DEFAULT upper('x')",
+    );
+    runs(
+        &mut session,
+        "ALTER TABLE items ADD CONSTRAINT short_name CHECK (length(name) < 100)",
+    );
+    runs(
+        &mut session,
+        "ALTER TABLE items RENAME COLUMN name TO title",
+    );
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT code FROM secrets"),
+        "code\nswordfish\nSELECT 1"
+    );
+}
