@@ -766,6 +766,13 @@ fn routine_created(
         Some(created) => push_new(&mut names, created),
         None => replaces = true,
     }
+    if written
+        .rsplit(['.', crate::schemas::QUALIFIER])
+        .next()
+        .is_some_and(crate::eval::is_builtin_function)
+    {
+        replaces = true;
+    }
     routine_changed(shown(&create.name), &names, replaces, catalog)
 }
 

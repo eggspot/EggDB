@@ -1636,6 +1636,40 @@ impl Evaluator<'_> {
     }
 }
 
+/// Whether EggDB itself provides a function called `name` (in any case), which a user routine
+/// of that name would take over for every unqualified call.
+pub(crate) fn is_builtin_function(name: &str) -> bool {
+    let name = name.to_lowercase();
+    if crate::advisory_locks::result_type(&name).is_some()
+        || crate::advisory_locks::application_function_type(&name).is_some()
+        || crate::set_returning::named(&name).is_some()
+    {
+        return true;
+    }
+    let evaluator = Evaluator {
+        scope: Scope::empty(),
+        row: &[],
+        correlation: None,
+    };
+    let undefined = format!("function {name}(");
+    let samples = [Literal::Null, Literal::String(String::new())];
+    (0..=3).any(|count| {
+        samples.iter().any(|sample| {
+            let argument = Expr {
+                kind: ExprKind::Literal(sample.clone()),
+                position: 0,
+            };
+            match evaluator.function(&name, &vec![argument; count]) {
+                Ok(_) => true,
+                Err(error) => {
+                    error.state() != SqlState::UNDEFINED_FUNCTION
+                        || !error.message().starts_with(&undefined)
+                }
+            }
+        })
+    })
+}
+
 fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     const TIMESTAMP: Option<SqlType> = Some(SqlType::Timestamp(None));
     const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);

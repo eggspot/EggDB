@@ -1153,6 +1153,39 @@ fn replacing_renaming_or_dropping_any_existing_routine_changes_code_that_runs_la
 }
 
 #[test]
+fn creating_a_function_named_like_a_built_in_changes_code_that_runs_later() {
+    let store = MemoryStore::default();
+    Session::new(&store)
+        .execute(
+            "CREATE TABLE g (name text); \
+             CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF length(NEW.name) > 3 THEN RAISE EXCEPTION 'blocked'; END IF; RETURN NEW; END $$; \
+             CREATE TRIGGER g_guard BEFORE INSERT ON g FOR EACH ROW EXECUTE FUNCTION tf()",
+            &mut |_| {},
+        )
+        .unwrap();
+    for text in [
+        "CREATE FUNCTION length(x text) RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN -1; END $$",
+        "CREATE FUNCTION public.lower(x text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN x; END $$",
+        "CREATE OR REPLACE FUNCTION LOWER(x text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN x; END $$",
+        "CREATE FUNCTION now() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$",
+    ] {
+        assert_eq!(
+            kind_with_keys(&store, Dialect::PostgreSql, text),
+            Some(DestructiveKind::ChangeRoutine),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        kind_with_keys(
+            &store,
+            Dialect::PostgreSql,
+            "CREATE FUNCTION length_of_name(x text) RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN -1; END $$",
+        ),
+        None
+    );
+}
+
+#[test]
 fn other_dialects_replacing_or_dropping_an_existing_routine_change_code_that_runs_later() {
     let store = MemoryStore::default();
     let mut sqlserver = Session::with_dialect(&store, Dialect::SqlServer);

@@ -905,6 +905,27 @@ fn renaming_moving_or_recreating_a_trigger_function_needs_confirmation_first() {
 }
 
 #[test]
+fn creating_a_function_named_like_a_built_in_needs_confirmation_first() {
+    let audit = TempAudit::new("built-in-override");
+    let opener = MapOpener::new(code_running_store());
+    let before = opener.store.snapshot();
+    let mut server = writing_server(&opener, &audit, "{}");
+    for (id, sql) in (1..).zip([
+        "CREATE FUNCTION length(x text) RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN -1; END $$",
+        "CREATE FUNCTION public.lower(x text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN x; END $$",
+    ]) {
+        let answer = call(
+            &mut server,
+            id,
+            "write_sql",
+            &format!(r#"{{"sql":"{sql}"}}"#),
+        );
+        assert_eq!(error_code(&answer), "needs_confirmation", "{sql}: {answer:?}");
+    }
+    assert_eq!(opener.store.snapshot(), before);
+}
+
+#[test]
 fn confirmed_dynamic_transact_sql_commits_its_change() {
     let audit = TempAudit::new("dynamic-tsql");
     let opener = MapOpener::new(scratch_store());
