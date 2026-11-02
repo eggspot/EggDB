@@ -277,3 +277,48 @@ fn ordered_aggregates_follow_their_order_by() {
         "2"
     );
 }
+
+#[test]
+fn json_to_record_reads_columns_from_a_definition_list() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        rows(
+            &mut session,
+            r#"SELECT * FROM json_to_record('{"a": 1, "b": "x", "c": [1, 2]}') AS x(a int, b text, c jsonb, d text)"#
+        ),
+        ["1|x|[1, 2]|NULL"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            r#"SELECT a, b FROM jsonb_to_recordset('[{"a": 1, "b": true}, {"a": 2}]') AS (a bigint, b boolean) ORDER BY a"#
+        ),
+        ["1|t", "2|NULL"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            r#"SELECT r.a + 1 FROM jsonb_to_record('{"a": 41}'::jsonb) AS r(a int)"#
+        ),
+        ["42"]
+    );
+    assert_eq!(
+        state(
+            &mut session,
+            r#"SELECT * FROM json_to_record('[1]') AS x(a int)"#
+        ),
+        "22023"
+    );
+    assert_eq!(
+        state(
+            &mut session,
+            r#"SELECT * FROM json_to_record('{"a": "x"}') AS x(a int)"#
+        ),
+        "22P02"
+    );
+    assert_eq!(
+        state(&mut session, r#"SELECT * FROM json_to_record('{"a": 1}')"#),
+        "42601"
+    );
+}

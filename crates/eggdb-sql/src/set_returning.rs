@@ -18,7 +18,11 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 25] = [
+const FUNCTIONS: [SetReturningFunction; 29] = [
+    to_records("json_to_record"),
+    to_records("jsonb_to_record"),
+    to_records("json_to_recordset"),
+    to_records("jsonb_to_recordset"),
     SetReturningFunction {
         name: "jsonb_path_query",
         result_type: json_path_query_type,
@@ -229,6 +233,19 @@ fn openjson_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlRes
     crate::json_functions::openjson_rows(values, &mut |record| {
         sink(crate::json_functions::record_text(&record))
     })
+}
+
+const fn to_records(name: &'static str) -> SetReturningFunction {
+    SetReturningFunction {
+        name,
+        result_type: crate::json_to_record::result_type,
+        rows: to_record_rows,
+        fields: true,
+    }
+}
+
+fn to_record_rows(_: &[Value], _: SqlType, _: &mut RowSink<'_>) -> SqlResult<()> {
+    Err(crate::json_to_record::definition_list_required())
 }
 
 const fn json_records(
@@ -1170,8 +1187,11 @@ fn function_columns(
     label: &str,
     alias_given: bool,
     sql_type: SqlType,
+    types: &[Option<SqlType>],
 ) -> Vec<OutputColumn> {
-    let mut columns: Vec<OutputColumn> = if found.fields {
+    let mut columns: Vec<OutputColumn> = if crate::json_to_record::is_to_record(found.name) {
+        crate::json_to_record::columns(&defined_names(function), types)
+    } else if found.fields {
         record_columns(found.name)
     } else {
         vec![OutputColumn {
@@ -1208,12 +1228,23 @@ pub(crate) fn table_function_columns(
         label,
         alias_given,
         sql_type,
+        &types,
     ))
+}
+
+fn defined_names(function: &TableFunction) -> Vec<String> {
+    function
+        .column_names
+        .iter()
+        .map(|name| name.text.clone())
+        .collect()
 }
 
 pub(crate) struct BoundFunction {
     found: &'static SetReturningFunction,
     values: Vec<Value>,
+    types: Vec<Option<SqlType>>,
+    defined_names: Vec<String>,
     sql_type: SqlType,
     ordinality: bool,
     position: usize,
@@ -1254,6 +1285,8 @@ pub(crate) fn bind_function(
     Ok(BoundFunction {
         found,
         values,
+        types,
+        defined_names: defined_names(function),
         sql_type,
         ordinality: function.ordinality,
         position: function.position,
@@ -1267,7 +1300,14 @@ impl BoundFunction {
         label: &str,
         alias_given: bool,
     ) -> Vec<OutputColumn> {
-        function_columns(function, self.found, label, alias_given, self.sql_type)
+        function_columns(
+            function,
+            self.found,
+            label,
+            alias_given,
+            self.sql_type,
+            &self.types,
+        )
     }
 
     pub(crate) fn generate(
@@ -1276,18 +1316,25 @@ impl BoundFunction {
     ) -> SqlResult<()> {
         let mut ordinal: i64 = 0;
         if self.found.fields {
-            return record_rows(
-                self.found.name,
-                &self.values,
-                &mut |mut record| {
-                    ordinal += 1;
-                    if self.ordinality {
-                        record.push(Value::BigInt(ordinal));
-                    }
-                    store(record)
-                },
-            )
-            .map_err(|error| error.at_if_unplaced(self.position));
+            let mut numbered = |mut record: Vec<Value>| {
+                ordinal += 1;
+                if self.ordinality {
+                    record.push(Value::BigInt(ordinal));
+                }
+                store(record)
+            };
+            let produced = if crate::json_to_record::is_to_record(self.found.name) {
+                crate::json_to_record::rows(
+                    self.found.name,
+                    &self.values,
+                    &self.defined_names,
+                    &self.types,
+                    &mut numbered,
+                )
+            } else {
+                record_rows(self.found.name, &self.values, &mut numbered)
+            };
+            return produced.map_err(|error| error.at_if_unplaced(self.position));
         }
         (self.found.rows)(&self.values, self.sql_type, &mut |value| {
             ordinal += 1;

@@ -319,12 +319,21 @@ impl Parser<'_> {
         if ordinality {
             self.at += 2;
         }
+        let to_record = crate::json_to_record::is_to_record(&name.text);
         let alias = if self.take_word("as") || self.at_bare_alias() {
-            Some(self.name()?.text)
+            if to_record && self.peek_kind() == &TokenKind::LeftParen {
+                None
+            } else {
+                Some(self.name()?.text)
+            }
         } else {
             None
         };
-        let column_names = if alias.is_some() && self.peek_kind() == &TokenKind::LeftParen {
+        let column_names = if to_record && self.peek_kind() == &TokenKind::LeftParen {
+            let (names, placeholders) = self.column_definition_list()?;
+            arguments.extend(placeholders);
+            names
+        } else if alias.is_some() && self.peek_kind() == &TokenKind::LeftParen {
             self.name_list()?
         } else {
             Vec::new()
@@ -346,6 +355,33 @@ impl Parser<'_> {
                 position,
             }))),
         })
+    }
+
+    fn column_definition_list(&mut self) -> SqlResult<(Vec<Name>, Vec<Expr>)> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut names = Vec::new();
+        let mut placeholders = Vec::new();
+        loop {
+            let name = self.name()?;
+            let position = name.position;
+            let sql_type = self.cast_type()?;
+            names.push(name);
+            placeholders.push(Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(Expr {
+                        kind: ExprKind::Literal(Literal::Null),
+                        position,
+                    }),
+                    sql_type,
+                },
+                position,
+            });
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok((names, placeholders))
     }
 
     pub(super) fn values_list(&mut self) -> SqlResult<Select> {

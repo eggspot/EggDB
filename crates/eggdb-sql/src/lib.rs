@@ -60,6 +60,7 @@ mod join;
 pub mod json;
 mod json_functions;
 mod json_path;
+mod json_to_record;
 mod ledger;
 mod lexer;
 mod md5;
@@ -124,6 +125,7 @@ mod settings;
 mod sqlite_datetime;
 mod sqlite_errors;
 mod sqlite_functions;
+mod sqlite_schema_text;
 mod sqlserver_catalog;
 mod sqlserver_conversion;
 mod sqlserver_errors;
@@ -212,6 +214,8 @@ mod sql_speed_tests;
 mod sqlserver_tests;
 #[cfg(test)]
 mod subquery_tests;
+#[cfg(test)]
+mod table_ddl_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
