@@ -25,6 +25,26 @@ pub(crate) struct Request {
     pub(crate) body: Vec<u8>,
 }
 
+/// The bytes the request that starts `buffer` takes once it is whole, as its header declares
+/// them, or the bytes buffered while the header is not whole yet.
+pub(crate) fn declared_request_bytes(buffer: &[u8]) -> usize {
+    match buffer.get(..9) {
+        Some(header) => {
+            let length = u32::from_be_bytes([header[5], header[6], header[7], header[8]]) as usize;
+            length.saturating_add(9).max(buffer.len())
+        }
+        None => buffer.len(),
+    }
+}
+
+/// The stream id of the request that starts `buffer`, or 0 before its header is whole.
+pub(crate) fn declared_stream(buffer: &[u8]) -> i16 {
+    match buffer.get(2..4) {
+        Some(stream) => i16::from_be_bytes([stream[0], stream[1]]),
+        None => 0,
+    }
+}
+
 /// The next whole request at the start of `buffer`, removed from it, `None` when more bytes are
 /// needed, or why the input is refused.
 pub(crate) fn take_request(buffer: &mut Vec<u8>) -> Result<Option<Request>, String> {

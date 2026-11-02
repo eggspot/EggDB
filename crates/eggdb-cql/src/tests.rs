@@ -401,14 +401,23 @@ fn config() -> ServerConfig {
         password_sha256: eggdb_crypto::sha256(b"secret"),
         database: "eggdb".to_owned(),
         max_connections: 4,
+        memory_budget: Arc::default(),
     }
 }
 
 fn converse(store: &MemoryStore, input: &[u8]) -> Vec<(i16, u8, Vec<u8>)> {
+    converse_with(store, &config(), input)
+}
+
+fn converse_with(
+    store: &MemoryStore,
+    config: &ServerConfig,
+    input: &[u8],
+) -> Vec<(i16, u8, Vec<u8>)> {
     let mut output = Vec::new();
     serve_stream(
         store,
-        &config(),
+        config,
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         input,
         &mut output,
@@ -557,4 +566,56 @@ fn nested_batches_and_oversized_numbers_are_refused() {
     assert!(
         crate::types::parameter_text(Some(&long_varint), crate::types::CqlType::Varint).is_err()
     );
+}
+
+#[test]
+fn frames_and_results_past_the_memory_budget_get_overloaded_and_other_sessions_go_on() {
+    let store = MemoryStore::default();
+    let budget = Arc::new(eggdb_platform::connection_limits::MemoryBudget::new(256 * 1024));
+    let config = ServerConfig {
+        memory_budget: Arc::clone(&budget),
+        ..config()
+    };
+    let error_code = |body: &[u8]| i32::from_be_bytes(body[..4].try_into().unwrap());
+    let mut input = login("secret");
+    input.extend(query(
+        3,
+        "CREATE KEYSPACE big WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}",
+    ));
+    input.extend(query(4, "USE big"));
+    input.extend(query(5, "CREATE TABLE t (id int PRIMARY KEY, v text)"));
+    let value = "x".repeat(10 * 1024);
+    for id in 0..30i16 {
+        input.extend(query(
+            10 + id,
+            &format!("INSERT INTO t (id, v) VALUES ({id}, '{value}')"),
+        ));
+    }
+    input.extend(query(100, "SELECT v FROM t"));
+    input.extend(query(101, "SELECT id FROM t WHERE id = 1"));
+    let answered = converse_with(&store, &config, &input);
+    let (stream, opcode, body) = &answered[answered.len() - 2];
+    assert_eq!((*stream, *opcode), (100, ERROR));
+    assert_eq!(error_code(body), 0x1001);
+    let (stream, opcode, _) = &answered[answered.len() - 1];
+    assert_eq!((*stream, *opcode), (101, RESULT));
+    assert!(
+        answered[..answered.len() - 2]
+            .iter()
+            .all(|(_, opcode, _)| *opcode != ERROR),
+        "{answered:?}"
+    );
+    assert_eq!(budget.used_bytes(), 0);
+
+    let mut greedy = login("secret");
+    let mut header = vec![4, 0];
+    header.extend_from_slice(&7i16.to_be_bytes());
+    header.push(QUERY);
+    header.extend_from_slice(&(300u32 * 1024).to_be_bytes());
+    greedy.extend(header);
+    let refused = converse_with(&store, &config, &greedy);
+    let (stream, opcode, body) = refused.last().unwrap();
+    assert_eq!((*stream, *opcode), (7, ERROR));
+    assert_eq!(error_code(body), 0x1001);
+    assert_eq!(budget.used_bytes(), 0);
 }

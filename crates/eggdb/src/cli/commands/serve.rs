@@ -385,6 +385,7 @@ impl Session<'_> {
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
             database: String::new(),
             max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let stomp_listener = match options.stomp_listen {
             Some(address) => {
