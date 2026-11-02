@@ -182,9 +182,11 @@ can reach another table is covered, not a list of statement kinds:
 - **A refusal rolls everything back.** A transaction in which any change was refused is rolled
   back at commit, even when a procedure caught the error.
 - **The keys stay off**, and listed tables may be granted and analyzed as usual.
-- **Not covered yet.** A column default, check, generated column or index expression on a listed
-  table may call a function that already exists; it then runs in your own sessions when they
-  change that table. Review such definitions before trusting the data.
+- **Not covered yet.** A new or changed column default, generated column or `CHECK` that calls
+  a user-defined routine is refused (`42501`, D257), but the ones a listed table already had are
+  not checked again, nor are its row security policies: such a definition may call a function
+  that already exists, which then runs in your own sessions when they change that table. Review
+  those definitions before trusting the data. Indexes have no expressions, so none calls one.
 
 A server that acts as a stored role (D190) limits an agent through `GRANT`s instead; `--tables`
 needs no role in the file, follows triggers and routines, and also stops DDL outside the list.
@@ -232,7 +234,13 @@ ask first. `REPLACE`, `INSERT OR REPLACE`, `ON DUPLICATE KEY UPDATE`, `ON CONFLI
 and a `MERGE` that updates or deletes always ask, since they overwrite rows chosen by the data.
 Other `INSERT`s into a table without an `INSERT` trigger (`ON CONFLICT DO NOTHING`,
 `INSERT IGNORE` and an insert-only `MERGE` too), `CREATE`, renames, `ADD COLUMN` and the like
-run without asking. To tell, `eggdb mcp` reads the table's keys,
+run without asking. Code that runs later asks first: `CREATE OR REPLACE` (Transact-SQL's `ALTER
+PROCEDURE` and `CREATE OR ALTER`), `ALTER ... RENAME` or `SET SCHEMA` and `DROP` of an existing
+function, procedure or package, and a `CREATE` of a routine named like one an unqualified call
+already finds or like the function a trigger names (re-creating a renamed trigger function);
+when a trigger calls that name it is shown as disabling the trigger. Only a routine of a new name
+no trigger names is created without asking. A function called anywhere in a write (`VALUES`,
+`SET`, `WHERE`, `RETURNING`, a `MERGE`'s source, `ON` and actions) asks too. To tell, `eggdb mcp` reads the table's keys,
 foreign keys and triggers from the file before it asks you, and closes it again; when it cannot
 read them it asks.
 

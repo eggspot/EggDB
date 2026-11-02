@@ -40,7 +40,7 @@ pub(crate) use exceptions::{
 };
 pub(crate) use packages::{
     StoredPackage, alter_package, create_package, drop_package, every_package, parse_package,
-    stored_package,
+    resolve_package, stored_package,
 };
 pub use session_state::ServerOutputReader;
 pub(crate) use session_state::{

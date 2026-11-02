@@ -1056,11 +1056,175 @@ fn dropping_or_replacing_a_trigger_function_takes_its_triggers_out() {
         "DROP FUNCTION wipe_now() CASCADE",
         "DROP FUNCTION wipe_u()",
         "CREATE OR REPLACE FUNCTION wipe_now() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 2; END $$",
-        "CREATE FUNCTION fresh() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    ] {
+        assert_eq!(
+            kind_with_keys(&store, Dialect::PostgreSql, text),
+            Some(DestructiveKind::ChangeRoutine),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        classified_with_keys(
+            &store,
+            Dialect::PostgreSql,
+            "CREATE FUNCTION fresh() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+        ),
+        None
+    );
+}
+
+fn guarded_store() -> MemoryStore {
+    let store = MemoryStore::default();
+    Session::new(&store)
+        .execute(
+            "CREATE TABLE g (id integer PRIMARY KEY); \
+             CREATE SCHEMA s2; \
+             CREATE FUNCTION helper() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$; \
+             CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF helper() = 1 THEN RAISE EXCEPTION 'blocked'; END IF; RETURN NEW; END $$; \
+             CREATE TRIGGER g_guard BEFORE INSERT ON g FOR EACH ROW EXECUTE FUNCTION tf(); \
+             CREATE FUNCTION unused() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$",
+            &mut |_| {},
+        )
+        .unwrap();
+    store
+}
+
+const NEUTERED_TRIGGER_FUNCTION: &str =
+    "CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$";
+
+#[test]
+fn renaming_moving_or_recreating_a_trigger_function_takes_its_trigger_out() {
+    let store = guarded_store();
+    for text in [
+        "ALTER FUNCTION tf() RENAME TO tf_old",
+        "ALTER FUNCTION tf() SET SCHEMA s2",
+        "ALTER ROUTINE tf RENAME TO tf_old",
+    ] {
+        let found = classified_with_keys(&store, Dialect::PostgreSql, text)
+            .unwrap_or_else(|| panic!("{text} is not destructive"));
+        assert_eq!(
+            found.parts[0].kind,
+            DestructiveKind::DisableTrigger,
+            "{text}"
+        );
+        assert_eq!(found.parts[0].objects, ["g.g_guard"], "{text}");
+    }
+    Session::new(&store)
+        .execute("ALTER FUNCTION tf() RENAME TO tf_old", &mut |_| {})
+        .unwrap();
+    let recreated = classified_with_keys(&store, Dialect::PostgreSql, NEUTERED_TRIGGER_FUNCTION)
+        .expect("re-creating a function a trigger names is destructive");
+    assert_eq!(recreated.parts[0].kind, DestructiveKind::DisableTrigger);
+    assert_eq!(recreated.parts[0].objects, ["g.g_guard"]);
+}
+
+#[test]
+fn replacing_renaming_or_dropping_any_existing_routine_changes_code_that_runs_later() {
+    let store = guarded_store();
+    for text in [
+        "CREATE OR REPLACE FUNCTION helper() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 0; END $$",
+        "ALTER FUNCTION helper() RENAME TO helper_old",
+        "ALTER FUNCTION helper() SET SCHEMA s2",
+        "DROP FUNCTION helper()",
+        "DROP FUNCTION IF EXISTS helper",
+    ] {
+        let found = classified_with_keys(&store, Dialect::PostgreSql, text)
+            .unwrap_or_else(|| panic!("{text} is not destructive"));
+        assert_eq!(
+            found.parts[0].kind,
+            DestructiveKind::ChangeRoutine,
+            "{text}"
+        );
+        assert_eq!(found.parts[0].objects, ["helper"], "{text}");
+    }
+    for text in [
+        "CREATE FUNCTION brand_new() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$",
+        "CREATE OR REPLACE FUNCTION brand_new() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$",
+        "ALTER FUNCTION unused() OWNER TO someone",
+        "ALTER FUNCTION missing() RENAME TO other",
+        "DROP FUNCTION IF EXISTS missing",
     ] {
         assert_eq!(
             classified_with_keys(&store, Dialect::PostgreSql, text),
             None,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn other_dialects_replacing_or_dropping_an_existing_routine_change_code_that_runs_later() {
+    let store = MemoryStore::default();
+    let mut sqlserver = Session::with_dialect(&store, Dialect::SqlServer);
+    sqlserver
+        .execute("CREATE PROCEDURE p AS SELECT 1", &mut |_| {})
+        .unwrap();
+    for text in [
+        "ALTER PROCEDURE p AS SELECT 2",
+        "CREATE OR ALTER PROCEDURE p AS SELECT 2",
+        "DROP PROCEDURE p",
+    ] {
+        assert_eq!(
+            kind_with_keys(&store, Dialect::SqlServer, text),
+            Some(DestructiveKind::ChangeRoutine),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        kind_with_keys(
+            &store,
+            Dialect::SqlServer,
+            "CREATE OR ALTER PROCEDURE q AS SELECT 1"
+        ),
+        None
+    );
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    oracle
+        .execute(
+            "CREATE OR REPLACE PROCEDURE op IS BEGIN NULL; END op;",
+            &mut |_| {},
+        )
+        .unwrap();
+    oracle
+        .execute("CREATE PACKAGE pk AS PROCEDURE bump; END pk;", &mut |_| {})
+        .unwrap();
+    for text in [
+        "CREATE OR REPLACE PROCEDURE op IS BEGIN NULL; END op;",
+        "CREATE OR REPLACE PACKAGE pk AS PROCEDURE bump; END pk;",
+        "DROP PACKAGE pk",
+    ] {
+        assert_eq!(
+            kind_with_keys(&store, Dialect::Oracle, text),
+            Some(DestructiveKind::ChangeRoutine),
+            "{text}"
+        );
+    }
+    for text in [
+        "CREATE OR REPLACE PROCEDURE fresh_op IS BEGIN NULL; END fresh_op;",
+        "CREATE PACKAGE BODY pk AS PROCEDURE bump IS BEGIN NULL; END bump; END pk;",
+    ] {
+        assert_eq!(
+            kind_with_keys(&store, Dialect::Oracle, text),
+            None,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_merge_calling_a_user_function_in_its_source_condition_or_actions_runs_code() {
+    let store = reaching_store();
+    for text in [
+        "MERGE INTO u USING (SELECT wipe_now() AS id FROM dual) s ON (u.id = s.id) WHEN NOT MATCHED THEN INSERT VALUES (s.id)",
+        "MERGE INTO u USING t ON (u.id = wipe_now()) WHEN NOT MATCHED THEN INSERT VALUES (t.id)",
+        "MERGE INTO u USING t ON (u.id = t.id) WHEN NOT MATCHED THEN INSERT VALUES (wipe_now())",
+        "MERGE INTO t USING u ON (t.id = u.id) WHEN MATCHED THEN UPDATE SET t.name = 'x' WHERE wipe_now() = 1",
+    ] {
+        assert!(
+            runs_function(
+                classified_with_keys(&store, Dialect::Oracle, text),
+                "wipe_now"
+            ),
             "{text}"
         );
     }

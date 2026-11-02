@@ -745,11 +745,20 @@ fn dependent_triggers(
     if located.kind != RoutineKind::Function || !located.identity.is_empty() {
         return Ok(Vec::new());
     }
+    triggers_naming(reader, &located.name)
+}
+
+/// The triggers, as `(table, trigger)`, whose action names the routine `internal`, whether or
+/// not it exists.
+pub(crate) fn triggers_naming(
+    reader: &dyn KeyValueRead,
+    internal: &str,
+) -> SqlResult<Vec<(String, String)>> {
     let mut found = Vec::new();
     for table in crate::triggers::every_trigger(reader)? {
         for trigger in &table.triggers {
             if let TriggerAction::Function { name, .. } = &trigger.action
-                && names_routine(name, &located.name)
+                && names_routine(name, internal)
             {
                 found.push((table.table.clone(), trigger.name.clone()));
             }

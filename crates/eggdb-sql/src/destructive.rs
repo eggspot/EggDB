@@ -1,9 +1,10 @@
 use crate::ast::{
-    AlterAction, AlterTriggerAction, AssignedValue, BinaryOperator, CopySource, CreateRoutine,
-    CursorCommand, Delete, DropRoutine, Expr, ExprKind, GeneratedTable, Insert, InsertSource,
-    InsertValue, Literal, MaterializedViewCommand, MySqlStatement, Name, OnDuplicate, Query,
-    ReferentialAction, RoutineTarget, Select, SelectItem, SetExpr, SqlServerStatement, Statement,
-    TableReference, UnaryOperator, Update, VariableSource,
+    AlterAction, AlterRoutine, AlterRoutineAction, AlterTriggerAction, AssignedValue,
+    BinaryOperator, CopySource, CreateRoutine, CursorCommand, Delete, DropRoutine, Expr, ExprKind,
+    GeneratedTable, Insert, InsertSource, InsertValue, Literal, MaterializedViewCommand,
+    MergeStatement, MySqlStatement, Name, OnDuplicate, Query, ReferentialAction, RoutineTarget,
+    Select, SelectItem, SetExpr, SqlServerStatement, Statement, TableReference, UnaryOperator,
+    Update, VariableSource,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -134,6 +135,11 @@ pub enum DestructiveKind {
     /// Transact-SQL's `EXEC`, a `SELECT` of a function, or an `INSERT` whose table fires a
     /// trigger (or that the classifier cannot look up, such as a view).
     RunCode,
+    /// A change of code that runs later, in triggers, defaults or other routines: `CREATE OR
+    /// REPLACE`, Transact-SQL's `ALTER PROCEDURE` or `CREATE OR ALTER`, `ALTER ... RENAME` or
+    /// `SET SCHEMA`, or `DROP` of an existing function, procedure or package, or a new one
+    /// named like a routine that an unqualified call already finds.
+    ChangeRoutine,
     /// `DROP TRIGGER`.
     DropTrigger,
     /// `ALTER TABLE ... DISABLE TRIGGER`, `DISABLE TRIGGER` or `ALTER TRIGGER ... DISABLE`.
@@ -169,6 +175,9 @@ impl DestructiveKind {
             }
             Self::RunCode => {
                 "code that may change or drop data (CALL, DO, EXEC, a function or a trigger)"
+            }
+            Self::ChangeRoutine => {
+                "a replace, rename or drop of an existing function, procedure or package (code that may run later)"
             }
             Self::DropTrigger => "DROP TRIGGER",
             Self::DisableTrigger => "DISABLE TRIGGER",
@@ -245,23 +254,28 @@ pub(crate) fn classify(
         Statement::Cursor(CursorCommand::Declare { query, .. }) => classify(query, keys),
         Statement::Copy(copy) => match &copy.source {
             CopySource::Query(query) => {
-                let mut functions = Vec::new();
+                let mut functions = CalledFunctions::default();
                 query_user_functions(query, keys, &mut functions);
-                running(functions)
+                running(functions.user)
             }
             CopySource::Table { .. } => None,
         },
         Statement::MySql(MySqlStatement::Set(assignments)) => {
-            let mut functions = Vec::new();
+            let mut functions = CalledFunctions::default();
             for assignment in assignments {
                 if let AssignedValue::Expr(expr) = &assignment.value {
                     user_functions(expr, keys, &mut functions);
                 }
             }
-            running(functions)
+            running(functions.user)
         }
-        Statement::DropRoutine(drop) if drop.cascade => routine_drop_cascading(drop, keys),
-        Statement::CreateRoutine(create) if create.replace => routine_replacing(create, keys),
+        Statement::DropRoutine(drop) => routine_dropped(drop, keys),
+        Statement::CreateRoutine(create) => routine_created(create, keys),
+        Statement::AlterRoutine(alter) => routine_altered(alter, keys),
+        Statement::CreatePackage(create) => {
+            package_changed(&create.package.name, create.package.body, keys)
+        }
+        Statement::DropPackage(drop) => package_changed(&drop.name, false, keys),
         Statement::InstallExtension { .. } => None,
         Statement::Database(crate::served_databases::DatabaseStatement::Drop { names, .. }) => {
             dropped(DestructiveKind::DropDatabase, names, false)
@@ -358,11 +372,6 @@ pub(crate) fn classify(
         | Statement::CreateTrigger(_)
         | Statement::EnableTrigger(_)
         | Statement::AlterTrigger(_)
-        | Statement::CreateRoutine(_)
-        | Statement::DropRoutine(_)
-        | Statement::AlterRoutine(_)
-        | Statement::CreatePackage(_)
-        | Statement::DropPackage(_)
         | Statement::AlterPackage(_) => None,
         Statement::Call(call) => Some(DestructiveStatement::new(
             DestructiveKind::RunCode,
@@ -380,22 +389,7 @@ pub(crate) fn classify(
             false,
         )),
         Statement::With(with) => crate::with_statement::classify(with, keys),
-        Statement::Merge(merge) => match &merge.update {
-            Some(update) => {
-                let kind = if update.delete_condition.is_some() {
-                    DestructiveKind::DeleteOfManyRows
-                } else {
-                    DestructiveKind::UpdateOfManyRows
-                };
-                Some(DestructiveStatement::new(
-                    kind,
-                    vec![shown(&merge.target.name)],
-                    false,
-                ))
-            }
-            None if merge.insert.is_some() => insert_runs_code(&merge.target.name, keys),
-            None => None,
-        },
+        Statement::Merge(merge) => merged(merge, keys),
     }
 }
 
@@ -542,12 +536,12 @@ fn deleted(delete: &Delete, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
         RowReach::Pinned(table) if !table.delete_reaches_further => None,
         RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::DeleteOfManyRows),
     };
-    let mut functions = Vec::new();
+    let mut functions = CalledFunctions::default();
     optional_user_functions(delete.filter.as_ref(), keys, &mut functions);
     returning_user_functions(delete.returning.as_deref(), keys, &mut functions);
     DestructiveStatement::combined(
         kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&delete.table.name)], false)),
-        running(functions),
+        running(functions.user),
     )
 }
 
@@ -557,7 +551,7 @@ fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
         RowReach::Pinned(table) if !table.update_reaches_further_with(update) => None,
         RowReach::Pinned(_) | RowReach::Many => Some(DestructiveKind::UpdateOfManyRows),
     };
-    let mut functions = Vec::new();
+    let mut functions = CalledFunctions::default();
     for (_, value) in &update.assignments {
         if let InsertValue::Expr(expr) = value {
             user_functions(expr, keys, &mut functions);
@@ -567,7 +561,7 @@ fn updated(update: &Update, keys: &mut CatalogLookup<'_>) -> Option<DestructiveS
     returning_user_functions(update.returning.as_deref(), keys, &mut functions);
     DestructiveStatement::combined(
         kind.map(|kind| DestructiveStatement::new(kind, vec![shown(&update.table.name)], false)),
-        running(functions),
+        running(functions.user),
     )
 }
 
@@ -580,7 +574,7 @@ fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<Destructive
         )),
         OnDuplicate::Fail | OnDuplicate::Ignore => insert_runs_code(&insert.table.name, keys),
     };
-    let mut functions = Vec::new();
+    let mut functions = CalledFunctions::default();
     match &insert.source {
         InsertSource::Values(rows) => {
             for value in rows.iter().flatten() {
@@ -598,13 +592,13 @@ fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<Destructive
         }
     }
     returning_user_functions(insert.returning.as_deref(), keys, &mut functions);
-    DestructiveStatement::combined(found, running(functions))
+    DestructiveStatement::combined(found, running(functions.user))
 }
 
 fn optional_user_functions(
     expr: Option<&Expr>,
     catalog: &mut CatalogLookup<'_>,
-    functions: &mut Vec<String>,
+    functions: &mut CalledFunctions,
 ) {
     if let Some(expr) = expr {
         user_functions(expr, catalog, functions);
@@ -614,7 +608,7 @@ fn optional_user_functions(
 fn returning_user_functions(
     returning: Option<&[SelectItem]>,
     catalog: &mut CatalogLookup<'_>,
-    functions: &mut Vec<String>,
+    functions: &mut CalledFunctions,
 ) {
     for item in returning.unwrap_or_default() {
         if let SelectItem::Expr { expr, .. } = item {
@@ -627,19 +621,19 @@ fn statement_running_code(
     statement: &Statement,
     catalog: &mut CatalogLookup<'_>,
 ) -> Option<DestructiveStatement> {
-    let mut functions = Vec::new();
+    let mut functions = CalledFunctions::default();
     match statement {
         Statement::Query(query) => query_user_functions(query, catalog, &mut functions),
         Statement::Select(select) => select_user_functions(select, catalog, &mut functions),
         other => return classify(other, catalog),
     }
-    running(functions)
+    running(functions.user)
 }
 
 fn query_user_functions(
     query: &Query,
     catalog: &mut CatalogLookup<'_>,
-    functions: &mut Vec<String>,
+    functions: &mut CalledFunctions,
 ) {
     for common in &query.with {
         query_user_functions(&common.query, catalog, functions);
@@ -650,7 +644,7 @@ fn query_user_functions(
 fn body_user_functions(
     body: &SetExpr,
     catalog: &mut CatalogLookup<'_>,
-    functions: &mut Vec<String>,
+    functions: &mut CalledFunctions,
 ) {
     match body {
         SetExpr::Select(select) => select_user_functions(select, catalog, functions),
@@ -665,7 +659,7 @@ fn body_user_functions(
 fn select_user_functions(
     select: &Select,
     catalog: &mut CatalogLookup<'_>,
-    functions: &mut Vec<String>,
+    functions: &mut CalledFunctions,
 ) {
     for expr in crate::subquery::select_expressions(select) {
         user_functions(expr, catalog, functions);
@@ -679,14 +673,13 @@ fn select_user_functions(
         }
         if let Some(generated) = &table.generated
             && let GeneratedTable::Function(function) = generated.as_ref()
-            && catalog.is_user_routine(&function.name)
         {
-            push_new(functions, shown_text(&function.name));
+            functions.look_up(&function.name, catalog);
         }
     }
 }
 
-fn user_functions(expr: &Expr, catalog: &mut CatalogLookup<'_>, functions: &mut Vec<String>) {
+fn user_functions(expr: &Expr, catalog: &mut CatalogLookup<'_>, functions: &mut CalledFunctions) {
     match &expr.kind {
         ExprKind::Function { name, arguments } if name == crate::routines::ROUTINE_CALL => {
             if let Some(Expr {
@@ -694,19 +687,35 @@ fn user_functions(expr: &Expr, catalog: &mut CatalogLookup<'_>, functions: &mut 
                 ..
             }) = arguments.first()
             {
-                push_new(functions, shown_text(called));
+                push_new(&mut functions.user, shown_text(called));
             }
         }
-        ExprKind::Function { name, .. }
-            if !name.is_empty() && !name.starts_with('*') && catalog.is_user_routine(name) =>
-        {
-            push_new(functions, shown_text(name));
+        ExprKind::Function { name, .. } if !name.is_empty() && !name.starts_with('*') => {
+            functions.look_up(name, catalog);
         }
         ExprKind::Subquery(subquery) => query_user_functions(&subquery.query, catalog, functions),
         _ => {}
     }
     for child in crate::eval::children(expr) {
         user_functions(child, catalog, functions);
+    }
+}
+
+#[derive(Default)]
+struct CalledFunctions {
+    user: Vec<String>,
+    looked_up: Vec<String>,
+}
+
+impl CalledFunctions {
+    fn look_up(&mut self, name: &str, catalog: &mut CatalogLookup<'_>) {
+        if self.looked_up.iter().any(|seen| seen == name) {
+            return;
+        }
+        self.looked_up.push(name.to_owned());
+        if catalog.is_user_routine(name) {
+            push_new(&mut self.user, shown_text(name));
+        }
     }
 }
 
@@ -731,23 +740,157 @@ fn routine_drop_cascading(
         .then(|| DestructiveStatement::new(DestructiveKind::DropTrigger, triggers, true))
 }
 
-fn routine_replacing(
+fn routine_created(
     create: &CreateRoutine,
     catalog: &mut CatalogLookup<'_>,
 ) -> Option<DestructiveStatement> {
-    if create.definition.kind != crate::routines::RoutineKind::Function
-        || !create.definition.identity().is_empty()
-    {
+    let written = create.name.text.as_str();
+    let base = crate::schemas::base_name(crate::schemas::normalized(written));
+    let mut names = Vec::new();
+    let mut replaces = false;
+    let mut looked_up = vec![written];
+    if base != written {
+        looked_up.push(base);
+    }
+    for looked_up in looked_up {
+        match catalog.existing_routine(looked_up) {
+            ExistingObject::Found(internal) => {
+                replaces = true;
+                push_new(&mut names, internal);
+            }
+            ExistingObject::Unknown => replaces = true,
+            ExistingObject::Missing => {}
+        }
+    }
+    match catalog.creation_name(&create.name) {
+        Some(created) => push_new(&mut names, created),
+        None => replaces = true,
+    }
+    routine_changed(shown(&create.name), &names, replaces, catalog)
+}
+
+fn routine_altered(
+    alter: &AlterRoutine,
+    catalog: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    if alter.action == AlterRoutineAction::Accepted {
         return None;
     }
-    let target = RoutineTarget {
-        name: create.name.clone(),
-        arguments: Some(Vec::new()),
+    let old = match catalog.existing_routine(&alter.target.name.text) {
+        ExistingObject::Missing => return None,
+        ExistingObject::Unknown => return changed_routines(vec![shown(&alter.target.name)]),
+        ExistingObject::Found(internal) => internal,
     };
-    let triggers =
-        catalog.triggers_calling(Some(crate::routines::RoutineKind::Function), &target)?;
-    (!triggers.is_empty())
-        .then(|| DestructiveStatement::new(DestructiveKind::DisableTrigger, triggers, false))
+    let new = match &alter.action {
+        AlterRoutineAction::RenameTo(to) => match old.split_once(crate::schemas::QUALIFIER) {
+            Some((schema, _)) => crate::schemas::qualified(schema, &to.text),
+            None => to.text.clone(),
+        },
+        AlterRoutineAction::SetSchema(schema) => {
+            crate::schemas::qualified(&schema.text, crate::schemas::base_name(&old))
+        }
+        AlterRoutineAction::Accepted => return None,
+    };
+    routine_changed(shown(&alter.target.name), &[old, new], true, catalog)
+}
+
+fn routine_changed(
+    shown_name: String,
+    internal_names: &[String],
+    replaces: bool,
+    catalog: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    let mut triggers = Vec::new();
+    for name in internal_names {
+        match catalog.triggers_naming(name) {
+            Some(found) => {
+                for trigger in found {
+                    push_new(&mut triggers, trigger);
+                }
+            }
+            None => return changed_routines(vec![shown_name]),
+        }
+    }
+    if !triggers.is_empty() {
+        return Some(DestructiveStatement::new(
+            DestructiveKind::DisableTrigger,
+            triggers,
+            false,
+        ));
+    }
+    replaces
+        .then(|| DestructiveStatement::new(DestructiveKind::ChangeRoutine, vec![shown_name], false))
+}
+
+fn routine_dropped(
+    drop: &DropRoutine,
+    catalog: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    let cascaded = if drop.cascade {
+        routine_drop_cascading(drop, catalog)
+    } else {
+        None
+    };
+    let existing = drop
+        .targets
+        .iter()
+        .filter(|target| catalog.existing_routine(&target.name.text) != ExistingObject::Missing)
+        .map(|target| shown(&target.name))
+        .collect();
+    DestructiveStatement::combined(cascaded, changed_routines(existing))
+}
+
+fn package_changed(
+    name: &Name,
+    body: bool,
+    catalog: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    match catalog.existing_package(&name.text, body) {
+        ExistingObject::Missing => None,
+        ExistingObject::Found(_) | ExistingObject::Unknown => changed_routines(vec![shown(name)]),
+    }
+}
+
+fn changed_routines(names: Vec<String>) -> Option<DestructiveStatement> {
+    (!names.is_empty())
+        .then(|| DestructiveStatement::new(DestructiveKind::ChangeRoutine, names, false))
+}
+
+fn merged(merge: &MergeStatement, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
+    let found = match &merge.update {
+        Some(update) => {
+            let kind = if update.delete_condition.is_some() {
+                DestructiveKind::DeleteOfManyRows
+            } else {
+                DestructiveKind::UpdateOfManyRows
+            };
+            Some(DestructiveStatement::new(
+                kind,
+                vec![shown(&merge.target.name)],
+                false,
+            ))
+        }
+        None if merge.insert.is_some() => insert_runs_code(&merge.target.name, keys),
+        None => None,
+    };
+    let mut functions = CalledFunctions::default();
+    select_user_functions(&merge.source, keys, &mut functions);
+    user_functions(&merge.on, keys, &mut functions);
+    if let Some(update) = &merge.update {
+        for (_, expr) in &update.assignments {
+            user_functions(expr, keys, &mut functions);
+        }
+        optional_user_functions(update.condition.as_ref(), keys, &mut functions);
+        optional_user_functions(update.delete_condition.as_ref(), keys, &mut functions);
+    }
+    if let Some(insert) = &merge.insert {
+        for expr in &insert.values {
+            user_functions(expr, keys, &mut functions);
+        }
+        optional_user_functions(insert.condition.as_ref(), keys, &mut functions);
+    }
+    returning_user_functions(merge.output.as_deref(), keys, &mut functions);
+    DestructiveStatement::combined(found, running(functions.user))
 }
 
 fn insert_runs_code(table: &Name, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
@@ -881,12 +1024,37 @@ pub(crate) trait ClassifierCatalog {
         target: &RoutineTarget,
     ) -> Option<Vec<String>>;
 
+    /// The internal name of the routine a call written as `name` finds.
+    fn existing_routine(&mut self, name: &str) -> ExistingObject;
+
+    /// The internal name of the package `name` finds; with `body`, only one that has a body.
+    fn existing_package(&mut self, name: &str, body: bool) -> ExistingObject;
+
+    /// The internal name `CREATE` gives a routine written as `name`, or `None` when it cannot
+    /// tell.
+    fn creation_name(&mut self, name: &Name) -> Option<String>;
+
+    /// The triggers, as `table.trigger`, whose action names the routine `internal`, whether
+    /// or not it exists, or `None` when it cannot tell.
+    fn triggers_naming(&mut self, internal: &str) -> Option<Vec<String>>;
+
     /// The query a materialized view stores, or `None` when it cannot tell.
     fn materialized_view_query(&mut self, name: &str) -> Option<String>;
 
     /// The one statement `text` holds, parsed as the session parses it, or `None` when it
     /// does not parse to one.
     fn parsed(&mut self, text: &str) -> Option<Statement>;
+}
+
+/// Whether a routine or package a statement names exists, as the classifier reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExistingObject {
+    /// It does not exist.
+    Missing,
+    /// It exists, under this internal name.
+    Found(String),
+    /// The classifier cannot tell.
+    Unknown,
 }
 
 pub(crate) type CatalogLookup<'a> = dyn ClassifierCatalog + 'a;

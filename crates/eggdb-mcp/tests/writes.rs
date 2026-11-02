@@ -849,6 +849,62 @@ fn code_a_write_would_run_and_a_trigger_dropped_need_confirmation_first() {
 }
 
 #[test]
+fn renaming_moving_or_recreating_a_trigger_function_needs_confirmation_first() {
+    let audit = TempAudit::new("trigger-function-swap");
+    let store = code_running_store();
+    store.sql(Dialect::PostgreSql, "CREATE SCHEMA s2");
+    let opener = MapOpener::new(store);
+    let before = opener.store.snapshot();
+    let mut server = writing_server(&opener, &audit, "{}");
+    let neutered = "CREATE FUNCTION wipe_gone() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$";
+    for (id, sql) in (1..).zip([
+        "ALTER FUNCTION wipe_gone() RENAME TO wipe_gone_old",
+        "ALTER FUNCTION wipe_gone() SET SCHEMA s2",
+        "CREATE OR REPLACE FUNCTION wipe_now() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 0; END $$",
+    ]) {
+        let answer = call(
+            &mut server,
+            id,
+            "write_sql",
+            &format!(r#"{{"sql":"{sql}"}}"#),
+        );
+        assert_eq!(error_code(&answer), "needs_confirmation", "{sql}: {answer:?}");
+    }
+    assert_eq!(opener.store.snapshot(), before);
+    let renamed = call(
+        &mut server,
+        10,
+        "write_sql",
+        r#"{"sql":"ALTER FUNCTION wipe_gone() RENAME TO wipe_gone_old","confirm":true}"#,
+    );
+    assert!(!is_error(&renamed), "{renamed:?}");
+    let renamed_state = opener.store.snapshot();
+    let recreated = call(
+        &mut server,
+        11,
+        "write_sql",
+        &format!(r#"{{"sql":"{neutered}"}}"#),
+    );
+    assert_eq!(
+        error_code(&recreated),
+        "needs_confirmation",
+        "{recreated:?}"
+    );
+    assert!(
+        text_at(structured(&recreated), &["error", "message"]).contains("noisy_wipes"),
+        "{recreated:?}"
+    );
+    assert_eq!(opener.store.snapshot(), renamed_state);
+    let fresh = call(
+        &mut server,
+        12,
+        "write_sql",
+        r#"{"sql":"CREATE FUNCTION brand_new() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$"}"#,
+    );
+    assert!(!is_error(&fresh), "{fresh:?}");
+}
+
+#[test]
 fn confirmed_dynamic_transact_sql_commits_its_change() {
     let audit = TempAudit::new("dynamic-tsql");
     let opener = MapOpener::new(scratch_store());
