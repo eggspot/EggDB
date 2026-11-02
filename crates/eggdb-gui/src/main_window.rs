@@ -1,12 +1,17 @@
-use eggdb_platform::window::{AccessNode, AccessRect, AccessRole, AccessState};
+use std::time::Instant;
+
+use eggdb_platform::window::{AccessNode, AccessRect, AccessRole, AccessState, Key, KeyPress};
 
 use crate::canvas::{Canvas, Rect};
+use crate::catalog::{Catalog, CatalogColumn, CatalogIndex, CatalogTable, CatalogView, KeyCount, KeySpace};
 use crate::color::{Rgba, Theme};
 use crate::dialect::QueryDialect;
 use crate::font::{TextStyle, Typeface};
-use crate::grid::{CellLook, ResultGrid, ValueKind, cell_text, visible_columns, visible_rows};
+use crate::grid::{CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns, visible_rows};
 use crate::highlight::{Carry, TokenKind, tokens};
-use crate::query_tab::{QueryTab, ResultView, TabFocus};
+use crate::inspector::{self, Inspector, InspectorBlock};
+use crate::object_browser::{self, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, SidebarFocus, TreeAction, TreeItem};
+use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
@@ -40,7 +45,34 @@ impl std::fmt::Debug for Faces<'_> {
     }
 }
 
-/// What the main window shows: a connection, its tables and the query tab.
+/// Where the main window's keyboard focus is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowFocus {
+    /// The query tab: its editor, dialect pill or grid.
+    #[default]
+    Tab,
+    /// The object tree.
+    Tree,
+    /// The sidebar's filter field.
+    Filter,
+}
+
+/// What a key in the main window asks the workspace to do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowAction {
+    /// The query tab's answer.
+    Tab(TabAction),
+    /// Fetch the sample of the row the inspector shows.
+    Inspect(TreeItem),
+    /// Read the catalog again.
+    RefreshCatalog,
+}
+
+/// The status bar's notice while a run keeps the tree from opening another tab.
+pub const OPEN_WHILE_RUNNING: &str = "A query is running: press Esc to stop it, then open the table again";
+
+/// What the main window shows: a connection, its object tree and inspector, and the query
+/// tabs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MainWindow {
     /// The database's name.
@@ -49,25 +81,39 @@ pub struct MainWindow {
     pub location: String,
     /// Whether it is open for writing.
     pub writable: bool,
-    /// Its tables, in order.
-    pub tables: Vec<String>,
-    /// The table selected in the tree.
-    pub selected_table: Option<usize>,
-    /// The query tab.
+    /// The object browser's tree.
+    pub tree: ObjectTree,
+    /// The inspector.
+    pub inspector: Inspector,
+    /// Where the focus is.
+    pub focus: WindowFocus,
+    /// The window's logical width; the height is [`HEIGHT`].
+    pub width: usize,
+    /// The query tab that shows.
     pub tab: QueryTab,
+    /// The other query tabs, in the strip's order before the one that shows.
+    pub background_tabs: Vec<QueryTab>,
 }
 
 impl MainWindow {
     /// The main window as it first shows a database (`docs/ux/workspace.md` 1.7): its name
     /// and location in the toolbar, its tables in the tree, an empty `Query 1`.
     pub fn opened(database: &str, location: &str, writable: bool, tables: Vec<String>) -> Self {
+        Self::with_catalog(database, location, writable, Catalog::of_tables(tables))
+    }
+
+    /// The main window on a database whose catalog is `catalog`.
+    pub fn with_catalog(database: &str, location: &str, writable: bool, catalog: Catalog) -> Self {
         Self {
             database: database.to_owned(),
             location: location.to_owned(),
             writable,
-            tables,
-            selected_table: None,
+            tree: ObjectTree::new(database, catalog),
+            inspector: Inspector::for_width(WIDTH),
+            focus: WindowFocus::Tab,
+            width: WIDTH,
             tab: QueryTab::new("Query 1"),
+            background_tabs: Vec::new(),
         }
     }
 
@@ -87,31 +133,258 @@ impl MainWindow {
         ));
         tab.summary = "3 rows · 0.4 ms".to_owned();
         tab.status_tags = "SELECT 3 · 0.4 ms".to_owned();
-        Self {
-            tables: vec!["customers".into(), "orders".into(), "products".into()],
-            selected_table: Some(0),
+        let mut window = Self {
             tab,
-            ..Self::opened("shop", "shop.eggdb", true, Vec::new())
+            ..Self::with_catalog("shop", "shop.eggdb", true, sample_catalog())
+        };
+        window.tree.selected = Some(TreeItem::Table(0));
+        window
+    }
+
+    /// Sets the window's width, opening the inspector by default from 1440 px.
+    pub fn set_width(&mut self, width: usize) {
+        let width = width.max(WIDTH);
+        if (width >= inspector::DOCKED_FROM_WIDTH) != (self.width >= inspector::DOCKED_FROM_WIDTH) {
+            self.inspector = Inspector {
+                collapsed: std::mem::take(&mut self.inspector.collapsed),
+                sample: self.inspector.sample.take(),
+                ..Inspector::for_width(width)
+            };
+        }
+        self.width = width;
+    }
+
+    /// The right edge of the main area: the window's, or the docked inspector's left edge.
+    pub fn centre_right(&self) -> f32 {
+        if self.inspector.docked {
+            self.width as f32 - inspector::INSPECTOR_WIDTH
+        } else {
+            self.width as f32
+        }
+    }
+
+    /// The tree row the inspector describes: the selected one, else the current one.
+    pub fn inspected(&self) -> TreeItem {
+        self.tree.selected.unwrap_or(self.tree.current)
+    }
+
+    /// Answers a key (`docs/ux/workspace.md` 2 to 4): `Ctrl/Cmd+1` focuses the tree,
+    /// `Ctrl/Cmd+I` opens or closes the inspector, `Esc` closes its overlay, and every other
+    /// key goes to the region with the focus.
+    pub fn key(&mut self, press: KeyPress, now: Instant) -> WindowAction {
+        let primary = press.modifiers.control || press.modifiers.command;
+        match press.key {
+            Key::Character('1') if primary => {
+                self.focus_tree();
+                return WindowAction::Tab(TabAction::None);
+            }
+            Key::Character('i' | 'I') if primary && !press.modifiers.shift => {
+                self.inspector.toggle(self.width);
+                return self.inspect_selected();
+            }
+            Key::Escape if self.inspector.overlay && self.focus != WindowFocus::Filter => {
+                self.inspector.overlay = false;
+                return WindowAction::Tab(TabAction::None);
+            }
+            _ => {}
+        }
+        match self.focus {
+            WindowFocus::Tab => WindowAction::Tab(self.tab.key(press)),
+            WindowFocus::Tree => {
+                let action = self.tree.key(press, now);
+                self.tree_action(action, WindowFocus::Tree)
+            }
+            WindowFocus::Filter => {
+                let action = self.tree.filter_key(press);
+                self.tree_action(action, WindowFocus::Filter)
+            }
+        }
+    }
+
+    fn inspect_selected(&self) -> WindowAction {
+        if self.inspector.is_open() {
+            WindowAction::Inspect(self.inspected())
+        } else {
+            WindowAction::Tab(TabAction::None)
+        }
+    }
+
+    /// Moves the focus to the object tree.
+    pub fn focus_tree(&mut self) {
+        self.focus = WindowFocus::Tree;
+        self.tab.dialect_menu = None;
+        self.tab.focus = TabFocus::Editor;
+        if let Some(grid) = &mut self.tab.grid {
+            grid.focused = false;
+        }
+    }
+
+    fn focus_tab(&mut self) {
+        self.focus = WindowFocus::Tab;
+        self.tab.focus = TabFocus::Editor;
+    }
+
+    fn tree_action(&mut self, action: TreeAction, from: WindowFocus) -> WindowAction {
+        let none = WindowAction::Tab(TabAction::None);
+        match action {
+            TreeAction::None => none,
+            TreeAction::Open(item) => self.open_object(item),
+            TreeAction::InsertName(item) => {
+                if let Some(name) = self.tree.name_of(item) {
+                    for letter in quote_name(&name, self.tab.dialect).chars() {
+                        self.tab.editor.apply(crate::editor::Key::Char(letter));
+                    }
+                }
+                none
+            }
+            TreeAction::Inspect(item) => WindowAction::Inspect(item),
+            TreeAction::Refresh => WindowAction::RefreshCatalog,
+            TreeAction::LeaveForward if from == WindowFocus::Filter => {
+                self.focus = WindowFocus::Tree;
+                none
+            }
+            TreeAction::LeaveForward => {
+                self.focus_tab();
+                none
+            }
+            TreeAction::LeaveBack if from == WindowFocus::Tree => {
+                self.focus = WindowFocus::Filter;
+                none
+            }
+            TreeAction::LeaveBack => {
+                self.focus_tab();
+                none
+            }
+        }
+    }
+
+    /// `Enter` on a table or view: a new tab `Query <n>` with `SELECT * FROM <name> LIMIT
+    /// 100;` in the tab's dialect, run at once. While a run is going the tab is not opened
+    /// and the status bar says why.
+    pub fn open_object(&mut self, item: TreeItem) -> WindowAction {
+        let Some(name) = self.tree.name_of(item) else {
+            return WindowAction::Tab(TabAction::None);
+        };
+        if self.tab.running {
+            self.tab.notice = Some(OPEN_WHILE_RUNNING.to_owned());
+            return WindowAction::Tab(TabAction::None);
+        }
+        let dialect = self.tab.dialect;
+        let title = format!("Query {}", self.background_tabs.len() + 2);
+        let mut tab = QueryTab::with_text(&title, &open_statement(&name, dialect));
+        tab.set_dialect(dialect);
+        let previous = std::mem::replace(&mut self.tab, tab);
+        self.background_tabs.push(previous);
+        match self.tab.run_request(true) {
+            Some(request) => WindowAction::Tab(TabAction::Run(request)),
+            None => WindowAction::Tab(TabAction::None),
         }
     }
 }
 
-const BODY: (f32, f32) = (13.0, 18.0);
-const SMALL: (f32, f32) = (11.0, 14.0);
-const CODE: (f32, f32) = (13.0, 20.0);
+/// The statement `Enter` on a table or view runs: its first 100 rows in `dialect`'s form.
+pub fn open_statement(name: &str, dialect: QueryDialect) -> String {
+    let quoted = quote_name(name, dialect);
+    match dialect {
+        QueryDialect::SqlServer => format!("SELECT TOP 100 * FROM {quoted};"),
+        QueryDialect::Oracle => format!("SELECT * FROM {quoted} FETCH FIRST 100 ROWS ONLY;"),
+        QueryDialect::PostgreSql | QueryDialect::MySql | QueryDialect::Sqlite => {
+            format!("SELECT * FROM {quoted} LIMIT 100;")
+        }
+    }
+}
 
-struct Painter<'c, 'f> {
-    canvas: &'c mut Canvas,
-    theme: Theme,
-    faces: Faces<'f>,
+fn sample_column(name: &str, type_name: &str, primary_key: bool) -> CatalogColumn {
+    CatalogColumn {
+        name: name.to_owned(),
+        type_name: type_name.to_owned(),
+        primary_key,
+        not_null: primary_key,
+    }
+}
+
+fn sample_table(name: &str, columns: Vec<CatalogColumn>) -> CatalogTable {
+    let ddl = crate::catalog::table_ddl(name, &columns);
+    CatalogTable {
+        name: name.to_owned(),
+        columns,
+        ddl,
+    }
+}
+
+fn sample_index(name: &str, table: &str, column: &str, unique: bool) -> CatalogIndex {
+    let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
+    CatalogIndex {
+        name: name.to_owned(),
+        table: table.to_owned(),
+        columns: vec![column.to_owned()],
+        unique,
+        ddl: format!("CREATE {kind} {name} ON {table} ({column});"),
+    }
+}
+
+/// The catalog of [`MainWindow::sample`]'s `shop`.
+pub fn sample_catalog() -> Catalog {
+    Catalog {
+        tables: vec![
+            sample_table("customers", vec![sample_column("id", "integer", true), sample_column("name", "text", false)]),
+            sample_table(
+                "orders",
+                vec![
+                    sample_column("id", "integer", true),
+                    sample_column("customer_id", "integer", false),
+                    sample_column("total", "numeric", false),
+                ],
+            ),
+            sample_table(
+                "products",
+                vec![
+                    sample_column("id", "integer", true),
+                    sample_column("name", "text", false),
+                    sample_column("price", "numeric", false),
+                ],
+            ),
+        ],
+        views: vec![CatalogView {
+            name: "order_totals".to_owned(),
+            columns: vec![sample_column("customer_id", "integer", false), sample_column("total", "numeric", false)],
+            ddl: "CREATE VIEW order_totals AS\nSELECT customer_id, sum(total) AS total FROM orders GROUP BY customer_id;".to_owned(),
+        }],
+        indexes: vec![
+            sample_index("customers_name_idx", "customers", "name", false),
+            sample_index("orders_customer_id_idx", "orders", "customer_id", false),
+            sample_index("products_name_key", "products", "name", true),
+        ],
+        sequences: Vec::new(),
+        key_spaces: vec![KeySpace {
+            collection: Some("sessions".to_owned()),
+            keys: KeyCount::Exactly(2),
+        }],
+    }
+}
+
+pub(crate) const BODY: (f32, f32) = (13.0, 18.0);
+pub(crate) const SMALL: (f32, f32) = (11.0, 14.0);
+pub(crate) const CODE: (f32, f32) = (13.0, 20.0);
+
+pub(crate) struct Painter<'c, 'f> {
+    pub(crate) canvas: &'c mut Canvas,
+    pub(crate) theme: Theme,
+    pub(crate) faces: Faces<'f>,
+    pub(crate) width: f32,
+    pub(crate) centre_right: f32,
 }
 
 impl Painter<'_, '_> {
-    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
+    fn centre_width(&self) -> f32 {
+        self.centre_right - 260.0
+    }
+
+    pub(crate) fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
         self.canvas.fill_rect(Rect::new(x, y, w, h), color);
     }
 
-    fn text(
+    pub(crate) fn text(
         &mut self,
         face: &dyn Typeface,
         text: &str,
@@ -128,7 +401,7 @@ impl Painter<'_, '_> {
         face.draw_text(self.canvas, text, x, top, style)
     }
 
-    fn text_right(
+    pub(crate) fn text_right(
         &mut self,
         face: &dyn Typeface,
         text: &str,
@@ -141,7 +414,7 @@ impl Painter<'_, '_> {
         self.text(face, text, right - width, top, metrics, color);
     }
 
-    fn button(&mut self, rect: Rect, kind: Button) {
+    pub(crate) fn button(&mut self, rect: Rect, kind: Button) {
         let theme = self.theme;
         match kind {
             Button::Primary => self.canvas.fill_rounded_rect(rect, 4.0, theme.accent),
@@ -159,7 +432,7 @@ impl Painter<'_, '_> {
         }
     }
 
-    fn polyline(&mut self, points: &[(f32, f32)], width: f32, color: Rgba) {
+    pub(crate) fn polyline(&mut self, points: &[(f32, f32)], width: f32, color: Rgba) {
         for pair in points.windows(2) {
             self.canvas.line(pair[0], pair[1], width, color);
         }
@@ -167,36 +440,53 @@ impl Painter<'_, '_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Button {
+pub(crate) enum Button {
     Primary,
     Secondary,
     Disabled,
     Ghost,
 }
 
-/// Draws `window` into a new 1280 × 800 canvas in `theme`, as `docs/ux/gui.md` lays it out.
+/// Draws `window` into a new canvas of its width and [`HEIGHT`] in `theme`, as
+/// `docs/ux/gui.md` and `docs/ux/workspace.md` lay it out.
 pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
-    let mut canvas = Canvas::new(WIDTH, HEIGHT, theme.bg0);
+    let mut canvas = Canvas::new(window.width.max(WIDTH), HEIGHT, theme.bg0);
     let mut paint = Painter {
         canvas: &mut canvas,
         theme,
         faces,
+        width: window.width.max(WIDTH) as f32,
+        centre_right: window.centre_right(),
     };
     toolbar(&mut paint, window);
-    sidebar(&mut paint, window);
-    tabs(&mut paint, &window.tab);
+    let sidebar_focus = match window.focus {
+        WindowFocus::Tab => SidebarFocus::None,
+        WindowFocus::Tree => SidebarFocus::Tree,
+        WindowFocus::Filter => SidebarFocus::Filter,
+    };
+    object_browser::draw(&mut paint, &window.tree, access_text(window), sidebar_focus);
+    tabs(&mut paint, window);
     editor(&mut paint, &window.tab);
     results(&mut paint, &window.tab);
+    if window.inspector.is_open() {
+        let description = inspector::describe(&window.tree, window.inspected(), window.inspector.sample.as_ref());
+        inspector::draw(&mut paint, &window.inspector, &description);
+    }
     status_bar(&mut paint, window);
     dialect_menu(&mut paint, &window.tab);
     canvas
 }
 
+fn access_text(window: &MainWindow) -> &'static str {
+    if window.writable { "read-write" } else { "read-only" }
+}
+
 fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(0.0, 0.0, 1280.0, 44.0, theme.bg2);
-    paint.rect(0.0, 43.0, 1280.0, 1.0, theme.border);
+    let width = paint.width;
+    paint.rect(0.0, 0.0, width, 44.0, theme.bg2);
+    paint.rect(0.0, 43.0, width, 1.0, theme.border);
     paint
         .canvas
         .stroke_circle(20.0, 22.0, 16.0, 2.0, theme.accent);
@@ -260,33 +550,33 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         .canvas
         .fill_rounded_rect(Rect::new(512.0, 17.0, 10.0, 10.0), 2.0, stop_icon);
     paint.text(faces.ui, "Stop", 528.0, 13.0, BODY, stop_ink);
-    paint.button(Rect::new(1056.0, 8.0, 120.0, 28.0), Button::Secondary);
+    paint.button(Rect::new(width - 224.0, 8.0, 120.0, 28.0), Button::Secondary);
     paint.text(
         faces.ui,
         window.tab.dialect.label(),
-        1068.0,
+        width - 212.0,
         13.0,
         BODY,
         theme.text_primary,
     );
     paint.polyline(
-        &[(1156.0, 20.0), (1160.0, 24.0), (1164.0, 20.0)],
+        &[(width - 124.0, 20.0), (width - 120.0, 24.0), (width - 116.0, 20.0)],
         1.5,
         theme.text_primary,
     );
     if window.tab.focus == TabFocus::DialectPill {
-        focus_ring(paint, Rect::new(1054.0, 6.0, 124.0, 32.0));
+        focus_ring(paint, Rect::new(width - 226.0, 6.0, 124.0, 32.0));
     }
     if running {
-        paint.rect(0.0, 42.0, 1280.0, 2.0, theme.accent);
+        paint.rect(0.0, 42.0, width, 2.0, theme.accent);
     }
-    paint.button(Rect::new(1240.0, 8.0, 28.0, 28.0), Button::Ghost);
-    for x in [1249.0, 1254.0, 1259.0] {
+    paint.button(Rect::new(width - 40.0, 8.0, 28.0, 28.0), Button::Ghost);
+    for x in [width - 31.0, width - 26.0, width - 21.0] {
         paint.canvas.fill_circle(x, 22.0, 3.0, theme.text_primary);
     }
 }
 
-fn icon_database(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
+pub(crate) fn icon_database(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let color = paint.theme.text_secondary;
     for top in [y, y + 7.0] {
         paint
@@ -299,7 +589,7 @@ fn icon_database(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     }
 }
 
-fn icon_folder(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
+pub(crate) fn icon_folder(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let theme = paint.theme;
     paint
         .canvas
@@ -310,14 +600,14 @@ fn icon_folder(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     paint.rect(x, y + 5.0, 12.0, 1.0, theme.text_secondary);
 }
 
-fn icon_table(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
+pub(crate) fn icon_table(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let color = paint.theme.text_secondary;
     paint.canvas.stroke_rect(Rect::new(x, y, 12.0, 10.0), color);
     paint.rect(x, y + 3.0, 12.0, 1.0, color);
     paint.rect(x + 4.0, y + 3.0, 1.0, 7.0, color);
 }
 
-fn chevron(paint: &mut Painter<'_, '_>, x: f32, y: f32, open: bool) {
+pub(crate) fn chevron(paint: &mut Painter<'_, '_>, x: f32, y: f32, open: bool) {
     let color = paint.theme.text_secondary;
     if open {
         paint.polyline(&[(x, y), (x + 4.0, y + 4.0), (x + 8.0, y)], 1.5, color);
@@ -326,91 +616,7 @@ fn chevron(paint: &mut Painter<'_, '_>, x: f32, y: f32, open: bool) {
     }
 }
 
-fn sidebar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
-    let theme = paint.theme;
-    let faces = paint.faces;
-    paint.rect(0.0, 44.0, 260.0, 732.0, theme.bg1);
-    paint.rect(259.0, 44.0, 1.0, 732.0, theme.border);
-    paint.button(Rect::new(8.0, 52.0, 244.0, 28.0), Button::Secondary);
-    paint
-        .canvas
-        .stroke_circle(20.0, 64.0, 8.0, 1.5, theme.text_secondary);
-    paint
-        .canvas
-        .line((23.0, 67.0), (26.0, 70.0), 1.5, theme.text_secondary);
-    paint.text(
-        faces.ui,
-        "Filter objects",
-        32.0,
-        57.0,
-        BODY,
-        theme.text_secondary,
-    );
-    let mut y = 88.0;
-    chevron(paint, 8.0, y + 8.0, true);
-    icon_database(paint, 24.0, y + 6.0);
-    paint.text(
-        faces.ui_bold,
-        &window.database,
-        44.0,
-        y + 3.0,
-        BODY,
-        theme.text_primary,
-    );
-    let access = if window.writable {
-        "read-write"
-    } else {
-        "read-only"
-    };
-    paint.text_right(
-        faces.ui,
-        access,
-        244.0,
-        y + 5.0,
-        SMALL,
-        theme.text_secondary,
-    );
-    y += 24.0;
-    chevron(paint, 24.0, y + 8.0, true);
-    icon_folder(paint, 40.0, y + 6.0);
-    paint.text(faces.ui, "Tables", 60.0, y + 3.0, BODY, theme.text_primary);
-    paint.text_right(
-        faces.ui,
-        &window.tables.len().to_string(),
-        244.0,
-        y + 5.0,
-        SMALL,
-        theme.text_secondary,
-    );
-    y += 24.0;
-    for (index, table) in window.tables.iter().enumerate() {
-        let selected = window.selected_table == Some(index);
-        let background = if selected {
-            theme.selection_inactive
-        } else {
-            theme.bg1
-        };
-        if selected {
-            paint
-                .canvas
-                .fill_rounded_rect(Rect::new(4.0, y, 252.0, 24.0), 4.0, background);
-        }
-        icon_table(paint, 56.0, y + 6.0);
-        paint.text(faces.ui, table, 76.0, y + 3.0, BODY, theme.text_primary);
-        y += 24.0;
-    }
-    for (label, count) in [("Views", Some("0")), ("Indexes", Some("3")), ("Keys", None)] {
-        chevron(paint, 24.0, y + 8.0, false);
-        icon_folder(paint, 40.0, y + 6.0);
-        paint.text(faces.ui, label, 60.0, y + 3.0, BODY, theme.text_primary);
-        if let Some(count) = count {
-            paint.text_right(faces.ui, count, 244.0, y + 5.0, SMALL, theme.text_secondary);
-        }
-        y += 24.0;
-    }
-}
-
-fn focus_ring(paint: &mut Painter<'_, '_>, rect: Rect) {
+pub(crate) fn focus_ring(paint: &mut Painter<'_, '_>, rect: Rect) {
     let color = paint.theme.focus_ring;
     paint.canvas.stroke_rect(rect, color);
     paint.canvas.stroke_rect(
@@ -419,7 +625,7 @@ fn focus_ring(paint: &mut Painter<'_, '_>, rect: Rect) {
     );
 }
 
-fn elided(face: &dyn Typeface, text: &str, max_width: f32, size: f32) -> String {
+pub(crate) fn elided(face: &dyn Typeface, text: &str, max_width: f32, size: f32) -> String {
     if face.width(text, size) <= max_width {
         return text.to_owned();
     }
@@ -434,33 +640,46 @@ fn elided(face: &dyn Typeface, text: &str, max_width: f32, size: f32) -> String 
     String::new()
 }
 
-fn tabs(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
+const TAB_WIDTH: f32 = 140.0;
+
+fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(260.0, 44.0, 1020.0, 36.0, theme.bg2);
-    paint.rect(260.0, 79.0, 1020.0, 1.0, theme.border);
-    paint.rect(260.0, 44.0, 140.0, 36.0, theme.bg0);
-    paint.rect(260.0, 44.0, 140.0, 2.0, theme.accent);
-    paint.text(faces.ui, &tab.title, 272.0, 53.0, BODY, theme.text_primary);
+    let centre_width = paint.centre_width();
+    paint.rect(260.0, 44.0, centre_width, 36.0, theme.bg2);
+    paint.rect(260.0, 79.0, centre_width, 1.0, theme.border);
+    for (index, other) in window.background_tabs.iter().enumerate() {
+        let left = 260.0 + TAB_WIDTH * index as f32;
+        paint.rect(left + TAB_WIDTH - 1.0, 52.0, 1.0, 20.0, theme.border);
+        let title = elided(faces.ui, &other.title, TAB_WIDTH - 40.0, BODY.0);
+        paint.text(faces.ui, &title, left + 12.0, 53.0, BODY, theme.text_secondary);
+    }
+    let tab = &window.tab;
+    let left = 260.0 + TAB_WIDTH * window.background_tabs.len() as f32;
+    paint.rect(left, 44.0, TAB_WIDTH, 36.0, theme.bg0);
+    paint.rect(left, 44.0, TAB_WIDTH, 2.0, theme.accent);
+    paint.text(faces.ui, &tab.title, left + 12.0, 53.0, BODY, theme.text_primary);
+    let close = left + 124.0;
     if tab.running {
         paint
             .canvas
-            .stroke_circle(384.0, 62.0, 12.0, 1.5, theme.accent);
-        paint.canvas.fill_circle(384.0, 57.0, 3.0, theme.accent);
+            .stroke_circle(close, 62.0, 12.0, 1.5, theme.accent);
+        paint.canvas.fill_circle(close, 57.0, 3.0, theme.accent);
     } else {
         paint
             .canvas
-            .line((380.0, 58.0), (388.0, 66.0), 1.5, theme.text_secondary);
+            .line((close - 4.0, 58.0), (close + 4.0, 66.0), 1.5, theme.text_secondary);
         paint
             .canvas
-            .line((388.0, 58.0), (380.0, 66.0), 1.5, theme.text_secondary);
+            .line((close + 4.0, 58.0), (close - 4.0, 66.0), 1.5, theme.text_secondary);
     }
+    let plus = left + TAB_WIDTH + 22.0;
     paint
         .canvas
-        .line((417.0, 62.0), (427.0, 62.0), 1.5, theme.text_primary);
+        .line((plus - 5.0, 62.0), (plus + 5.0, 62.0), 1.5, theme.text_primary);
     paint
         .canvas
-        .line((422.0, 57.0), (422.0, 67.0), 1.5, theme.text_primary);
+        .line((plus, 57.0), (plus, 67.0), 1.5, theme.text_primary);
 }
 
 fn token_color(theme: Theme, kind: TokenKind) -> Rgba {
@@ -497,7 +716,8 @@ pub fn first_visible_line(caret_line: usize, visible_lines: usize) -> usize {
 fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(260.0, 80.0, 1020.0, 300.0, theme.bg0);
+    let centre_width = paint.centre_width();
+    paint.rect(260.0, 80.0, centre_width, 300.0, theme.bg0);
     let bottom = editor_bottom(tab);
     let visible = ((bottom - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor() as usize;
     let lines = tab.editor.lines();
@@ -518,7 +738,7 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     for (number, line) in lines.iter().enumerate().skip(first).take(visible) {
         let top = EDITOR_TEXT_TOP + LINE_HEIGHT * (number - first) as f32;
         if number == caret.line {
-            paint.rect(308.0, top, 972.0, LINE_HEIGHT, theme.bg1);
+            paint.rect(308.0, top, centre_width - 48.0, LINE_HEIGHT, theme.bg1);
         }
         if let Some((start, end)) = selection.filter(|(start, end)| (start.line..=end.line).contains(&number)) {
             let from = if number == start.line { start.column } else { 0 };
@@ -570,8 +790,8 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
         error_strip(paint, &error.strip_text(), error.fix_label().as_deref());
     }
-    paint.rect(260.0, 380.0, 1020.0, 6.0, theme.bg2);
-    paint.rect(260.0, 382.0, 1020.0, 1.0, theme.border);
+    paint.rect(260.0, 380.0, centre_width, 6.0, theme.bg2);
+    paint.rect(260.0, 382.0, centre_width, 1.0, theme.border);
 }
 
 fn zigzag(paint: &mut Painter<'_, '_>, left: f32, right: f32, top: f32) {
@@ -597,14 +817,15 @@ fn error_icon(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
 fn error_strip(paint: &mut Painter<'_, '_>, text: &str, fix: Option<&str>) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(260.0, 352.0, 1020.0, 28.0, theme.bg1);
-    paint.rect(260.0, 352.0, 1020.0, 1.0, theme.border);
+    let (centre_width, right) = (paint.centre_width(), paint.centre_right - 12.0);
+    paint.rect(260.0, 352.0, centre_width, 28.0, theme.bg1);
+    paint.rect(260.0, 352.0, centre_width, 1.0, theme.border);
     error_icon(paint, 272.0, 360.0);
     let fix_width = fix.map_or(0.0, |label| faces.ui.width(label, BODY.0) + 24.0);
-    let shown = elided(faces.mono, text, 1268.0 - 292.0 - fix_width, CODE.0);
+    let shown = elided(faces.mono, text, right - 292.0 - fix_width, CODE.0);
     paint.text(faces.mono, &shown, 292.0, 356.0, CODE, theme.text_primary);
     if let Some(label) = fix {
-        paint.text_right(faces.ui, label, 1268.0, 357.0, BODY, theme.accent);
+        paint.text_right(faces.ui, label, right, 357.0, BODY, theme.accent);
     }
 }
 
@@ -621,8 +842,9 @@ fn warning_icon(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
 fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(260.0, 386.0, 1020.0, 32.0, theme.bg1);
-    paint.rect(260.0, 417.0, 1020.0, 1.0, theme.border);
+    let (centre_width, centre_right) = (paint.centre_width(), paint.centre_right);
+    paint.rect(260.0, 386.0, centre_width, 32.0, theme.bg1);
+    paint.rect(260.0, 417.0, centre_width, 1.0, theme.border);
     let messages = tab.view == ResultView::Messages;
     let (results_face, messages_face) = if messages {
         (faces.ui, faces.ui_bold)
@@ -642,33 +864,34 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     }
     paint.text(messages_face, "Messages", 344.0, 393.0, BODY, messages_ink);
     paint.text(faces.ui, &tab.summary, 428.0, 393.0, BODY, theme.text_secondary);
-    paint.text(faces.ui, "Export…", 1204.0, 393.0, BODY, theme.text_primary);
+    paint.text(faces.ui, "Export…", centre_right - 76.0, 393.0, BODY, theme.text_primary);
     if messages {
         for (index, line) in tab.messages.iter().enumerate().take(17) {
             let top = 426.0 + LINE_HEIGHT * index as f32;
-            let shown = elided(faces.mono, line, 1000.0, CODE.0);
+            let shown = elided(faces.mono, line, centre_width - 20.0, CODE.0);
             paint.text(faces.mono, &shown, 272.0, top, CODE, theme.text_primary);
         }
         return;
     }
     let Some(grid) = &tab.grid else {
-        paint.rect(260.0, 418.0, 1020.0, 28.0, theme.bg1);
-        paint.rect(260.0, 445.0, 1020.0, 1.0, theme.border);
+        paint.rect(260.0, 418.0, centre_width, 28.0, theme.bg1);
+        paint.rect(260.0, 445.0, centre_width, 1.0, theme.border);
         paint.rect(307.0, 418.0, 1.0, 27.0, theme.border_strong);
         paint.rect(307.0, 446.0, 1.0, 330.0, theme.border);
         return;
     };
     let mut top = 418.0;
     if grid.truncated() {
-        paint.rect(260.0, 418.0, 1020.0, 28.0, theme.bg1);
-        paint.rect(260.0, 445.0, 1020.0, 1.0, theme.border);
+        paint.rect(260.0, 418.0, centre_width, 28.0, theme.bg1);
+        paint.rect(260.0, 445.0, centre_width, 1.0, theme.border);
         warning_icon(paint, 272.0, 426.0);
         let banner = status_line::truncated_banner(grid.rows.len(), grid.row_count);
-        let shown = elided(faces.ui, &banner, 1140.0 - 292.0, BODY.0);
+        let shown = elided(faces.ui, &banner, centre_right - 140.0 - 292.0, BODY.0);
         paint.text(faces.ui, &shown, 292.0, 423.0, BODY, theme.text_primary);
-        paint.text_right(faces.ui, "Export…", 1236.0, 423.0, BODY, theme.text_primary);
-        paint.canvas.line((1252.0, 428.0), (1260.0, 436.0), 1.5, theme.text_secondary);
-        paint.canvas.line((1260.0, 428.0), (1252.0, 436.0), 1.5, theme.text_secondary);
+        paint.text_right(faces.ui, "Export…", centre_right - 44.0, 423.0, BODY, theme.text_primary);
+        let close = centre_right - 28.0;
+        paint.canvas.line((close, 428.0), (close + 8.0, 436.0), 1.5, theme.text_secondary);
+        paint.canvas.line((close + 8.0, 428.0), (close, 436.0), 1.5, theme.text_secondary);
         top = 446.0;
     }
     grid_body(paint, grid, top);
@@ -677,10 +900,11 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
 fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(260.0, top, 1020.0, 28.0, theme.bg1);
-    paint.rect(260.0, top + 27.0, 1020.0, 1.0, theme.border);
+    let centre_width = paint.centre_width();
+    paint.rect(260.0, top, centre_width, 28.0, theme.bg1);
+    paint.rect(260.0, top + 27.0, centre_width, 1.0, theme.border);
     let edges = grid.column_edges();
-    let columns = visible_columns(&grid.widths, grid.scroll_x, GRID_BODY_WIDTH);
+    let columns = visible_columns(&grid.widths, grid.scroll_x, centre_width - 48.0);
     let x_of = |column: usize| GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x;
     let marked = grid.focused || grid.selection_size() != (1, 1);
     let (selected_rows, selected_columns) = grid.selection();
@@ -707,7 +931,7 @@ fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
     for row in rows {
         let y = body_top + 24.0 * (row - grid.first_row) as f32;
         let fill = if row % 2 == 1 { theme.zebra } else { theme.bg0 };
-        paint.rect(260.0, y, 1020.0, 24.0, fill);
+        paint.rect(260.0, y, centre_width, 24.0, fill);
         for column in columns.clone() {
             let (left, right) = (x_of(column), x_of(column + 1));
             let cell = crate::grid::Cell { row, column };
@@ -759,14 +983,10 @@ fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
 fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.rect(0.0, 776.0, 1280.0, 24.0, theme.bg2);
-    paint.rect(0.0, 776.0, 1280.0, 1.0, theme.border);
+    paint.rect(0.0, 776.0, paint.width, 24.0, theme.bg2);
+    paint.rect(0.0, 776.0, paint.width, 1.0, theme.border);
     paint.canvas.fill_circle(16.0, 788.0, 8.0, theme.success);
-    let access = if window.writable {
-        "read-write"
-    } else {
-        "read-only"
-    };
+    let access = access_text(window);
     paint.text(
         faces.ui,
         &format!("Connected · {} · {access}", window.location),
@@ -784,7 +1004,7 @@ fn status_bar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         theme.text_secondary,
     );
     let caret = window.tab.editor.caret();
-    let mut right = 1268.0;
+    let mut right = paint.width - 12.0;
     for item in [
         window.tab.dialect.label().to_owned(),
         format!("Ln {}, Col {}", caret.line + 1, caret.column + 1),
@@ -825,7 +1045,7 @@ fn dialect_menu(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     };
     let theme = paint.theme;
     let faces = paint.faces;
-    let menu = Rect::new(1056.0, 40.0, 160.0, 28.0 * QueryDialect::ALL.len() as f32);
+    let menu = Rect::new(paint.width - 224.0, 40.0, 160.0, 28.0 * QueryDialect::ALL.len() as f32);
     paint.rect(menu.x + 2.0, menu.y + 4.0, menu.w, menu.h, theme.border);
     paint.canvas.fill_rounded_rect(menu, 6.0, theme.border);
     paint.canvas.fill_rounded_rect(
@@ -840,12 +1060,12 @@ fn dialect_menu(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
         }
         if *dialect == tab.dialect {
             paint.polyline(
-                &[(1066.0, top + 14.0), (1070.0, top + 18.0), (1078.0, top + 10.0)],
+                &[(menu.x + 10.0, top + 14.0), (menu.x + 14.0, top + 18.0), (menu.x + 22.0, top + 10.0)],
                 1.5,
                 theme.accent,
             );
         }
-        paint.text(faces.ui, dialect.label(), 1088.0, top + 5.0, BODY, theme.text_primary);
+        paint.text(faces.ui, dialect.label(), menu.x + 32.0, top + 5.0, BODY, theme.text_primary);
     }
 }
 
@@ -884,10 +1104,26 @@ pub const NODE_GRID: u32 = 114;
 pub const NODE_STATUS_BAR: u32 = 115;
 /// The `Results` segment; `Messages` is the next id.
 pub const NODE_RESULTS_SEGMENT: u32 = 116;
+/// The sidebar's filter field.
+pub const NODE_FILTER: u32 = 120;
+/// The object tree.
+pub const NODE_OBJECTS: u32 = 121;
+/// The inspector.
+pub const NODE_INSPECTOR: u32 = 122;
+/// The inspector's name heading.
+pub const NODE_INSPECTOR_NAME: u32 = 123;
+/// The inspector's DDL box.
+pub const NODE_DDL: u32 = 124;
+/// The inspector's first block heading; the others follow.
+pub const NODE_FIRST_BLOCK: u32 = 125;
 /// The first column header; the others follow.
 pub const NODE_FIRST_HEADER: u32 = 200;
 /// The first visible cell.
 pub const NODE_FIRST_CELL: u32 = 1000;
+/// The first visible tree row; the others follow in reading order.
+pub const NODE_FIRST_TREE_ROW: u32 = 60_000;
+/// The background query tabs, in the strip's order.
+pub const NODE_FIRST_BACKGROUND_TAB: u32 = 61_000;
 
 fn node(id: u32, parent: u32, role: AccessRole, name: &str, bounds: (f32, f32, f32, f32)) -> AccessNode {
     AccessNode {
@@ -924,9 +1160,12 @@ pub fn spoken_cell(value: Option<&str>, kind: ValueKind) -> String {
 /// (`docs/ux/workspace.md` 7), in reading order.
 pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     let tab = &window.tab;
-    let mut root = node(NODE_MAIN_WINDOW, 0, AccessRole::Window, "EggDB", (0.0, 0.0, 1280.0, 800.0));
+    let width = window.width.max(WIDTH) as f32;
+    let centre_width = window.centre_right() - 260.0;
+    let tab_focused = window.focus == WindowFocus::Tab;
+    let mut root = node(NODE_MAIN_WINDOW, 0, AccessRole::Window, "EggDB", (0.0, 0.0, width, 800.0));
     root.parent = None;
-    let mut nodes = vec![root, node(NODE_TOOLBAR, NODE_MAIN_WINDOW, AccessRole::Group, "Toolbar", (0.0, 0.0, 1280.0, 44.0))];
+    let mut nodes = vec![root, node(NODE_TOOLBAR, NODE_MAIN_WINDOW, AccessRole::Group, "Toolbar", (0.0, 0.0, width, 44.0))];
     for (id, name, x, w) in [
         (NODE_RUN, "Run", 232.0, 72.0),
         (NODE_RUN_ALL, "Run all", 312.0, 88.0),
@@ -937,23 +1176,29 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         button.state.disabled = if id == NODE_STOP { !tab.running } else { tab.running };
         nodes.push(button);
     }
-    let mut pill = node(NODE_DIALECT, NODE_TOOLBAR, AccessRole::Button, "Dialect", (1056.0, 8.0, 120.0, 28.0));
+    let mut pill = node(NODE_DIALECT, NODE_TOOLBAR, AccessRole::Button, "Dialect", (width - 224.0, 8.0, 120.0, 28.0));
     pill.value = Some(tab.dialect.label().to_owned());
-    pill.state.focused = tab.focus == TabFocus::DialectPill;
+    pill.state.focused = tab_focused && tab.focus == TabFocus::DialectPill;
     nodes.push(pill);
-    nodes.push(node(NODE_QUERIES, NODE_MAIN_WINDOW, AccessRole::TabList, "Queries", (260.0, 44.0, 1020.0, 36.0)));
+    sidebar_nodes(&mut nodes, window);
+    nodes.push(node(NODE_QUERIES, NODE_MAIN_WINDOW, AccessRole::TabList, "Queries", (260.0, 44.0, centre_width, 36.0)));
+    for (index, other) in window.background_tabs.iter().enumerate() {
+        let left = 260.0 + TAB_WIDTH * index as f32;
+        nodes.push(node(NODE_FIRST_BACKGROUND_TAB + index as u32 % 1000, NODE_QUERIES, AccessRole::Tab, &other.title, (left, 44.0, TAB_WIDTH, 36.0)));
+    }
     let title = if tab.running { format!("{}, running", tab.title) } else { tab.title.clone() };
-    let mut query = node(NODE_QUERY_TAB, NODE_QUERIES, AccessRole::Tab, &title, (260.0, 44.0, 140.0, 36.0));
+    let left = 260.0 + TAB_WIDTH * window.background_tabs.len() as f32;
+    let mut query = node(NODE_QUERY_TAB, NODE_QUERIES, AccessRole::Tab, &title, (left, 44.0, TAB_WIDTH, 36.0));
     query.state.selected = true;
     nodes.push(query);
-    let mut text = node(NODE_EDITOR, NODE_MAIN_WINDOW, AccessRole::TextField, "Query", (260.0, 80.0, 1020.0, 300.0));
+    let mut text = node(NODE_EDITOR, NODE_MAIN_WINDOW, AccessRole::TextField, "Query", (260.0, 80.0, centre_width, 300.0));
     text.value = Some(tab.editor.text());
-    text.state.focused = tab.focus == TabFocus::Editor;
+    text.state.focused = tab_focused && tab.focus == TabFocus::Editor;
     nodes.push(text);
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
-        nodes.push(node(NODE_ERROR_STRIP, NODE_MAIN_WINDOW, AccessRole::Status, &error.strip_text(), (260.0, 352.0, 1020.0, 28.0)));
+        nodes.push(node(NODE_ERROR_STRIP, NODE_MAIN_WINDOW, AccessRole::Status, &error.strip_text(), (260.0, 352.0, centre_width, 28.0)));
     }
-    nodes.push(node(NODE_RESULT_VIEWS, NODE_MAIN_WINDOW, AccessRole::TabList, "Result views", (260.0, 386.0, 1020.0, 32.0)));
+    nodes.push(node(NODE_RESULT_VIEWS, NODE_MAIN_WINDOW, AccessRole::TabList, "Result views", (260.0, 386.0, centre_width, 32.0)));
     for (offset, (name, view, x)) in [("Results", ResultView::Results, 272.0), ("Messages", ResultView::Messages, 344.0)].into_iter().enumerate() {
         let mut segment = node(NODE_RESULTS_SEGMENT + offset as u32, NODE_RESULT_VIEWS, AccessRole::Tab, name, (x, 386.0, 72.0, 32.0));
         segment.state.selected = tab.view == view;
@@ -961,15 +1206,62 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     }
     nodes.push(node(NODE_STATUS_LINE, NODE_MAIN_WINDOW, AccessRole::Status, &status_line::spoken(&tab.summary), (428.0, 386.0, 760.0, 32.0)));
     if let Some(grid) = tab.grid.as_ref().filter(|_| tab.view == ResultView::Results) {
-        grid_nodes(&mut nodes, grid);
+        grid_nodes(&mut nodes, grid, centre_width);
     }
-    let mut bar = node(NODE_STATUS_BAR, NODE_MAIN_WINDOW, AccessRole::Group, "Status", (0.0, 776.0, 1280.0, 24.0));
+    if window.inspector.is_open() {
+        inspector_nodes(&mut nodes, window);
+    }
+    let mut bar = node(NODE_STATUS_BAR, NODE_MAIN_WINDOW, AccessRole::Group, "Status", (0.0, 776.0, width, 24.0));
     bar.value = Some(status_bar_left(tab));
     nodes.push(bar);
     nodes
 }
 
-fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid) {
+fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
+    let tree = &window.tree;
+    let mut filter = node(NODE_FILTER, NODE_MAIN_WINDOW, AccessRole::TextField, "Filter objects", (8.0, 52.0, 244.0, 28.0));
+    filter.value = Some(tree.filter.clone());
+    filter.placeholder = Some("Filter objects".to_owned());
+    filter.state.focused = window.focus == WindowFocus::Filter;
+    nodes.push(filter);
+    nodes.push(node(NODE_OBJECTS, NODE_MAIN_WINDOW, AccessRole::Group, "Objects", (0.0, ROWS_TOP, 260.0, 776.0 - ROWS_TOP)));
+    let rows = tree.rows();
+    for (offset, row) in rows.iter().enumerate().skip(tree.first_row).take(ROWS_IN_VIEW) {
+        let visible = offset - tree.first_row;
+        let y = ROWS_TOP + ROW_HEIGHT * visible as f32;
+        let detail = if row.item == TreeItem::Connection { Some(access_text(window).to_owned()) } else { row.detail.clone() };
+        let mut item = node(NODE_FIRST_TREE_ROW + visible as u32, NODE_OBJECTS, AccessRole::Button, &row.label, (4.0, y, 252.0, ROW_HEIGHT));
+        item.value = Some(object_browser::row_description(row, detail.as_deref()));
+        item.state.selected = tree.selected == Some(row.item);
+        item.state.focused = window.focus == WindowFocus::Tree && tree.current == row.item;
+        nodes.push(item);
+    }
+}
+
+fn inspector_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
+    let area = inspector::region(window.width.max(WIDTH) as f32);
+    let description = inspector::describe(&window.tree, window.inspected(), window.inspector.sample.as_ref());
+    let mut panel = node(NODE_INSPECTOR, NODE_MAIN_WINDOW, AccessRole::Group, "Inspector", (area.x, area.y, area.w, area.h));
+    panel.value = Some(description.name.clone());
+    nodes.push(panel);
+    let mut heading = node(NODE_INSPECTOR_NAME, NODE_INSPECTOR, AccessRole::Heading, &description.name, (area.x + 12.0, area.y + 12.0, area.w - 24.0, 20.0));
+    heading.value = Some(description.subtitle.clone());
+    nodes.push(heading);
+    for (index, (block, title, top)) in inspector::heading_tops(&description, &window.inspector).into_iter().enumerate() {
+        let open = window.inspector.is_expanded(block);
+        let mut button = node(NODE_FIRST_BLOCK + index as u32, NODE_INSPECTOR, AccessRole::Button, &title, (area.x + 12.0, top, area.w - 24.0, 24.0));
+        button.value = Some(if open { "expanded" } else { "collapsed" }.to_owned());
+        nodes.push(button);
+        if block == InspectorBlock::Ddl && open {
+            let mut ddl = node(NODE_DDL, NODE_INSPECTOR, AccessRole::TextField, "DDL", (area.x + 12.0, top + 28.0, area.w - 24.0, 120.0));
+            ddl.value = description.ddl.clone();
+            ddl.state.disabled = true;
+            nodes.push(ddl);
+        }
+    }
+}
+
+fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32) {
     let mut top = 418.0;
     if grid.truncated() {
         nodes.push(node(
@@ -977,12 +1269,12 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid) {
             NODE_MAIN_WINDOW,
             AccessRole::Status,
             &status_line::truncated_banner(grid.rows.len(), grid.row_count),
-            (260.0, 418.0, 1020.0, 28.0),
+            (260.0, 418.0, centre_width, 28.0),
         ));
         top = 446.0;
     }
     let (rows, columns) = grid.selection_size();
-    let mut table = node(NODE_GRID, NODE_MAIN_WINDOW, AccessRole::Group, "Results", (260.0, top, 1020.0, BODY_BOTTOM - top));
+    let mut table = node(NODE_GRID, NODE_MAIN_WINDOW, AccessRole::Group, "Results", (260.0, top, centre_width, BODY_BOTTOM - top));
     table.value = Some(format!(
         "{} rows, {} columns; {} by {} selected",
         grid.row_count,
@@ -992,7 +1284,7 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid) {
     ));
     nodes.push(table);
     let edges = grid.column_edges();
-    let visible = visible_columns(&grid.widths, grid.scroll_x, GRID_BODY_WIDTH);
+    let visible = visible_columns(&grid.widths, grid.scroll_x, centre_width - 48.0);
     let x_of = |column: usize| GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x;
     for column in visible.clone() {
         let name = grid.columns.get(column).map_or("", String::as_str);
@@ -1100,6 +1392,70 @@ mod tests {
         assert!(run.state.disabled && !stop.state.disabled);
         let query = tree.iter().find(|node| node.id == NODE_QUERY_TAB).unwrap();
         assert_eq!(query.name, "Query 1, running");
+    }
+
+    #[test]
+    fn a_table_opens_in_each_dialects_form() {
+        assert_eq!(open_statement("orders", QueryDialect::PostgreSql), "SELECT * FROM orders LIMIT 100;");
+        assert_eq!(open_statement("Order Lines", QueryDialect::MySql), "SELECT * FROM `Order Lines` LIMIT 100;");
+        assert_eq!(open_statement("orders", QueryDialect::SqlServer), "SELECT TOP 100 * FROM orders;");
+        assert_eq!(open_statement("orders", QueryDialect::Oracle), "SELECT * FROM orders FETCH FIRST 100 ROWS ONLY;");
+    }
+
+    #[test]
+    fn enter_in_the_tree_opens_query_2_and_runs_it() {
+        let mut window = MainWindow::sample();
+        let now = Instant::now();
+        let _ = window.key(KeyPress { key: Key::Character('1'), modifiers: eggdb_platform::window::Modifiers { control: true, ..Default::default() } }, now);
+        assert_eq!(window.focus, WindowFocus::Tree);
+        for _ in 0..3 {
+            let _ = window.key(KeyPress::plain(Key::Down), now);
+        }
+        let action = window.key(KeyPress::plain(Key::Enter), now);
+        let WindowAction::Tab(TabAction::Run(request)) = action else {
+            panic!("Enter runs the new tab: {action:?}");
+        };
+        assert_eq!(request.statements.len(), 1);
+        assert_eq!(window.tab.title, "Query 2");
+        assert_eq!(window.background_tabs[0].title, "Query 1");
+        window.tab.started();
+        let blocked = window.open_object(TreeItem::Table(0));
+        assert_eq!(blocked, WindowAction::Tab(TabAction::None));
+        assert_eq!(window.tab.notice.as_deref(), Some(OPEN_WHILE_RUNNING));
+        let canvas = draw(&window, Theme::of(crate::color::ThemeKind::Light), box_faces());
+        assert_eq!(canvas.pixel(450, 45), Some(Theme::of(crate::color::ThemeKind::Light).accent), "the second tab is the active one");
+    }
+
+    #[test]
+    fn a_1440_window_docks_the_inspector_and_narrows_the_main_area() {
+        let theme = Theme::of(ThemeKind::Light);
+        let mut window = MainWindow::sample();
+        window.set_width(1440);
+        assert_eq!(window.centre_right(), 1160.0);
+        let canvas = draw(&window, theme, box_faces());
+        assert_eq!(canvas.width(), 1440);
+        assert_eq!(canvas.pixel(1160, 300), Some(theme.border));
+        assert_eq!(canvas.pixel(1300, 600), Some(theme.bg1));
+        assert_eq!(canvas.pixel(1400, 790), Some(theme.bg2), "the status bar spans the window");
+        let tree = accessibility_tree(&window);
+        assert!(tree.iter().any(|node| node.id == NODE_INSPECTOR));
+        let editor = tree.iter().find(|node| node.id == NODE_EDITOR).unwrap();
+        assert_eq!(editor.bounds.width, 900.0);
+        window.set_width(1280);
+        assert!(!window.inspector.is_open());
+        assert!(!accessibility_tree(&window).iter().any(|node| node.id == NODE_INSPECTOR));
+    }
+
+    #[test]
+    fn the_sidebar_rows_are_tree_items_with_their_state() {
+        let window = MainWindow::sample();
+        let tree = accessibility_tree(&window);
+        let rows: Vec<&AccessNode> = tree.iter().filter(|node| node.parent == Some(NODE_OBJECTS)).collect();
+        let names: Vec<&str> = rows.iter().map(|node| node.name.as_str()).collect();
+        assert_eq!(names, ["shop", "Tables", "customers", "orders", "products", "Views", "Indexes", "Keys"]);
+        assert!(rows[2].state.selected && !rows[2].state.focused);
+        assert_eq!(rows[1].value.as_deref(), Some("3, level 2, 1 of 4, expanded"));
+        assert!(tree.iter().filter(|node| node.state.focused).all(|node| node.id == NODE_EDITOR));
     }
 
     #[test]

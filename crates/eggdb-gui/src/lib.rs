@@ -12,6 +12,9 @@
 /// accessibility tree as JSON for the ARIA mirror over the canvas (D256).
 pub mod browser;
 mod canvas;
+/// The database's catalog as the object browser lists it: tables, views, indexes, sequences
+/// and key spaces (`docs/ux/workspace.md` 4.1).
+pub mod catalog;
 /// Where copied text goes: the [`clipboard::Clipboard`] the platform layer gives, or one in
 /// memory.
 pub mod clipboard;
@@ -38,8 +41,14 @@ pub mod highlight;
 pub mod layout;
 /// The main window: what it draws and how it answers input.
 pub mod main_window;
+/// The object browser: the sidebar's tree of the catalog, its filter and keys
+/// (`docs/ux/workspace.md` 4.1, 4.2).
+pub mod object_browser;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
+/// The inspector: the selected object's columns, indexes, DDL and sample rows
+/// (`docs/ux/workspace.md` 4.3).
+pub mod inspector;
 /// The query tab: its editor, dialect, runs, results and inline errors
 /// (`docs/ux/workspace.md` 2).
 pub mod query_tab;

@@ -356,6 +356,25 @@ fn connecting_to_a_running_server_opens_the_main_window_on_its_database() {
     assert_eq!(connection.toast(), "Connected to 127.0.0.1");
     let tables = connection.run("SELECT 1 AS one").expect("the session answers");
     assert_eq!(tables.len(), 1);
+    connection
+        .run("CREATE TABLE parts (id integer PRIMARY KEY, name text NOT NULL)")
+        .expect("the table is made");
+    connection
+        .run("CREATE UNIQUE INDEX parts_name_key ON parts (name)")
+        .expect("the index is made");
+    let catalog = connection.catalog().expect("the server lists its catalog");
+    let parts = catalog.tables.iter().find(|table| table.name == "parts").expect("parts is listed");
+    let columns: Vec<(&str, bool, bool)> = parts
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column.primary_key, column.not_null))
+        .collect();
+    assert_eq!(columns, [("id", true, true), ("name", false, true)]);
+    assert!(parts.ddl.starts_with("CREATE TABLE parts ("), "{}", parts.ddl);
+    let index = catalog.indexes.iter().find(|index| index.name == "parts_name_key").expect("the index is listed");
+    assert_eq!((index.table.as_str(), index.unique), ("parts", true));
+    assert_eq!(index.columns, ["name"]);
+    assert!(catalog.key_spaces.is_empty(), "a server lists no key spaces");
 }
 
 #[test]

@@ -11,7 +11,10 @@ use crate::connection::{
     CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
     StatementFailure,
 };
-use crate::main_window::MainWindow;
+use crate::catalog::Catalog;
+use crate::inspector;
+use crate::main_window::{MainWindow, WindowAction};
+use crate::object_browser::TreeItem;
 use crate::query_tab::{RunRequest, TabAction};
 
 /// How long an open runs before the card shows its progress state, so a quick open never
@@ -159,8 +162,8 @@ impl Workspace {
     /// Answers a key press.
     pub fn key(&mut self, press: KeyPress, now: Instant) -> WorkspaceCommand {
         if let Screen::Main(window) = &mut self.screen {
-            let action = window.tab.key(press);
-            self.tab_action(action, now);
+            let action = window.key(press, now);
+            self.window_action(action, now);
             return WorkspaceCommand::None;
         }
         let Screen::Connect(card) = &mut self.screen else {
@@ -169,6 +172,39 @@ impl Workspace {
         let (next, action) = handle_key(card.clone(), press);
         *card = next;
         self.act(action, now)
+    }
+
+    fn window_action(&mut self, action: WindowAction, now: Instant) {
+        match action {
+            WindowAction::Tab(action) => self.tab_action(action, now),
+            WindowAction::Inspect(item) => self.inspect(item),
+            WindowAction::RefreshCatalog => self.refresh_catalog(),
+        }
+    }
+
+    fn inspect(&mut self, item: TreeItem) {
+        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut()) else {
+            return;
+        };
+        let Some(name) = inspector::sampled_name(&window.tree, item) else {
+            return;
+        };
+        if window.inspector.sample.as_ref().is_some_and(|sample| sample.of == name) {
+            return;
+        }
+        window.inspector.sample = Some(inspector::fetch_sample(connection, &name));
+    }
+
+    /// Reads the catalog again and shows it in the tree, keeping its expanded, current and
+    /// selected rows; nothing happens while a run holds the connection.
+    pub fn refresh_catalog(&mut self) {
+        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut()) else {
+            return;
+        };
+        if let Ok(catalog) = connection.catalog() {
+            window.tree.set_catalog(catalog);
+            window.inspector.sample = None;
+        }
     }
 
     fn tab_action(&mut self, action: TabAction, now: Instant) {
@@ -225,8 +261,15 @@ impl Workspace {
         let (connection, outcomes) = answer;
         self.connection = Some(connection);
         let elapsed = now.saturating_duration_since(running.started);
+        let changed_schema = outcomes
+            .iter()
+            .zip(&running.request.statements)
+            .any(|(outcome, statement)| outcome.is_ok() && changes_schema(statement));
         if let Some(window) = self.main_window_mut() {
             window.tab.finish(&running.request, outcomes, elapsed);
+        }
+        if changed_schema {
+            self.refresh_catalog();
         }
     }
 
@@ -461,11 +504,28 @@ impl Workspace {
 }
 
 /// The main window as it first shows `connection` (`docs/ux/workspace.md` 1.7): its name and
-/// location in the toolbar, its tables in the tree, one empty `Query 1` editor.
+/// location in the toolbar, its catalog in the object tree, one empty `Query 1` editor.
 pub fn main_window_for(connection: &mut Connection) -> MainWindow {
     let writable = !connection.read_only();
-    let tables = connection.table_names().unwrap_or_default();
-    MainWindow::opened(connection.name(), connection.location(), writable, tables)
+    let catalog = connection
+        .catalog()
+        .unwrap_or_else(|_| Catalog::of_tables(connection.table_names().unwrap_or_default()));
+    MainWindow::with_catalog(connection.name(), connection.location(), writable, catalog)
+}
+
+/// Whether `statement` may change what the object tree lists: a `CREATE`, `ALTER`, `DROP`
+/// or `RENAME`, or SQL Server's `sp_rename`.
+pub fn changes_schema(statement: &str) -> bool {
+    let first: String = statement
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    match first.to_ascii_uppercase().as_str() {
+        "CREATE" | "ALTER" | "DROP" | "RENAME" => true,
+        "EXEC" | "EXECUTE" | "SP_RENAME" => statement.to_ascii_lowercase().contains("sp_rename"),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

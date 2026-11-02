@@ -128,7 +128,7 @@ pub struct StatementFailure {
 }
 
 impl StatementFailure {
-    fn from_sql(error: &SqlError, text: &str) -> Self {
+    pub(crate) fn from_sql(error: &SqlError, text: &str) -> Self {
         Self {
             code: error.state().code().to_owned(),
             message: error.message().to_owned(),
@@ -138,7 +138,7 @@ impl StatementFailure {
         }
     }
 
-    fn from_client(error: &ClientError) -> Self {
+    pub(crate) fn from_client(error: &ClientError) -> Self {
         let (code, message) = match error {
             ClientError::Server { code, message } => (code.clone(), message.clone()),
             other => (String::new(), other.to_string()),
@@ -354,6 +354,16 @@ impl Connection {
         }
     }
 
+    /// The database's catalog as the object browser lists it: tables with their columns and
+    /// DDL, views, indexes, sequences and, for a file, its key spaces. A file is read through
+    /// the engine's schema, a server through its `pg_catalog` and `information_schema`.
+    pub fn catalog(&mut self) -> Result<crate::catalog::Catalog, StatementFailure> {
+        match &mut self.link {
+            Link::File(database) => crate::catalog::read_file(database),
+            Link::Server(client) => crate::catalog::read_server(client),
+        }
+    }
+
     /// Runs `sql` (one or more statements in PostgreSQL's dialect) and returns each
     /// statement's result as text.
     pub fn run(&mut self, sql: &str) -> Result<Vec<ResultTable>, StatementFailure> {
@@ -419,7 +429,7 @@ impl Connection {
     }
 }
 
-fn file_result(result: QueryResult) -> ResultTable {
+pub(crate) fn file_result(result: QueryResult) -> ResultTable {
     let columns: Vec<String> = result
         .columns
         .unwrap_or_default()

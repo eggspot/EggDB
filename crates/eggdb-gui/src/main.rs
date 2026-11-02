@@ -196,6 +196,9 @@ fn write_png(options: &Options, path: &OsString, faces: Faces<'_>) -> Result<(),
         workspace.open_typed(&open.to_string_lossy(), Instant::now());
         workspace.wait_for_open(SCRIPTED_OPEN_LIMIT);
     }
+    if let Some(window) = workspace.main_window_mut() {
+        window.set_width(options.size.0 as usize);
+    }
     if let Some(sql) = &options.run {
         workspace.run_text(&sql.to_string_lossy(), false, Instant::now());
         workspace.wait_for_run(SCRIPTED_OPEN_LIMIT);
