@@ -1419,6 +1419,7 @@ impl Evaluator<'_> {
         let declared = declared_argument_types(name)
             .or_else(|| crate::hstore_functions::argument_types(name))
             .or_else(|| crate::pg_catalog::argument_types(name))
+            .or_else(|| crate::json_path::argument_types(name))
             .or_else(|| crate::advisory_locks::argument_types(name, arguments.len()));
         let mut held = crate::memory::RowBytes::default();
         for (position, argument) in arguments.iter().enumerate() {

@@ -1906,6 +1906,18 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     })
 }
 
+/// The declared argument types of the SQL/JSON path functions: `jsonb`, `jsonpath` (held as
+/// text), the `vars` object and the `silent` flag, so an untyped path literal stays a path.
+pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
+    const TYPES: [Option<SqlType>; 4] = [
+        Some(SqlType::Jsonb),
+        Some(SqlType::Text),
+        Some(SqlType::Jsonb),
+        Some(SqlType::Boolean),
+    ];
+    (FUNCTIONS.contains(&name) || SET_RETURNING.contains(&name)).then_some(&TYPES)
+}
+
 /// The result type of a scalar SQL/JSON path function.
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     if !FUNCTIONS.contains(&name) {

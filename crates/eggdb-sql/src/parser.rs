@@ -3259,10 +3259,20 @@ impl<'t> Parser<'t> {
             Some(String::new())
         } else if (self.mysql() || self.sqlite()) && !matches!(expr.kind, ExprKind::Column { .. }) {
             Some(self.source_text(first_token))
+        } else if self.is_lone_parameter(first_token) {
+            Some("?column?".to_owned())
         } else {
             None
         };
         Ok(SelectItem::Expr { expr, alias })
+    }
+
+    fn is_lone_parameter(&self, first_token: usize) -> bool {
+        self.at == first_token + 1
+            && matches!(
+                self.tokens.get(first_token).map(|token| &token.kind),
+                Some(TokenKind::Parameter(_))
+            )
     }
 
     fn source_text(&self, first_token: usize) -> String {

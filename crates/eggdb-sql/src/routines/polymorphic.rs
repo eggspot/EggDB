@@ -129,7 +129,7 @@ fn returned_types(returns: &RoutineReturns) -> Vec<SqlType> {
     }
 }
 
-fn declares_polymorphism(definition: &RoutineDefinition) -> bool {
+pub(crate) fn declares_polymorphism(definition: &RoutineDefinition) -> bool {
     definition
         .parameters
         .iter()

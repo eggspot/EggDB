@@ -1109,7 +1109,8 @@ fn input_arguments(
         .zip(slots)
         .filter(|(parameter, _)| parameter.mode.is_input())
         .collect();
-    while given.last().is_some_and(|(_, value)| value.is_none()) {
+    let resolves_with_defaults = polymorphic::declares_polymorphism(definition);
+    while !resolves_with_defaults && given.last().is_some_and(|(_, value)| value.is_none()) {
         given.pop();
     }
     let mut arguments = Vec::with_capacity(given.len());

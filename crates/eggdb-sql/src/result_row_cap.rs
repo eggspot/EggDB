@@ -5,10 +5,19 @@ pub(crate) fn cap_result_rows(statement: &mut Statement, most_rows: u64) {
         Statement::Select(select) if !crate::routines::select_may_write(select) => {
             &mut select.limit
         }
-        Statement::Query(query) if query_only_reads(query) => &mut query.limit,
+        Statement::Query(query) if query_only_reads(query) => query_limit(query),
         _ => return,
     };
     lower_limit(limit, most_rows);
+}
+
+fn query_limit(query: &mut Query) -> &mut Option<Expr> {
+    let tail_is_empty =
+        query.order_by.is_empty() && query.limit.is_none() && query.offset.is_none();
+    match &mut query.body {
+        SetExpr::Select(select) if tail_is_empty => &mut select.limit,
+        _ => &mut query.limit,
+    }
 }
 
 fn query_only_reads(query: &Query) -> bool {
