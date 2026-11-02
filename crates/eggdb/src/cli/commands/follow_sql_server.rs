@@ -25,7 +25,8 @@ const CAPTURE_ENABLED_QUERY: &str =
 const LIVENESS_QUERY: &str = "SELECT CAST(1 AS nvarchar(max))";
 const MAX_LSN_QUERY: &str = "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1)";
 const COPY_START_QUERY: &str = "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1), \
-     CONVERT(nvarchar(max), CAST(DATEADD(second, -1, SYSDATETIME()) AS datetime), 121)";
+     CONVERT(nvarchar(max), CAST(DATEADD(second, -1, SYSDATETIME()) AS datetime), 121), \
+     CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))";
 const CAPTURE_INSTANCES_QUERY: &str = "SELECT CAST(s.name AS nvarchar(max)), CAST(t.name AS nvarchar(max)), \
      CAST(c.capture_instance AS nvarchar(max)), \
      CAST(CASE WHEN (SELECT COUNT(*) FROM cdc.captured_columns cc WHERE cc.object_id = c.object_id) \
@@ -428,6 +429,65 @@ fn capture_bounds_query(instance: &str, after: Lsn, committed_before_copy: Optio
         quote_unicode(instance),
         after.literal()
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CopyStart {
+    time: String,
+    utc_offset_minutes: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyStartSkip {
+    Wait,
+    Apply,
+    Drop,
+}
+
+fn copy_start(rows: &TextRows) -> Option<CopyStart> {
+    let row = rows.first()?;
+    let time = row
+        .get(1)
+        .cloned()
+        .flatten()
+        .filter(|time| !time.is_empty())?;
+    let utc_offset_minutes = row.get(2).and_then(whole_number)?;
+    Some(CopyStart {
+        time,
+        utc_offset_minutes,
+    })
+}
+
+fn copy_start_check_query(start: &CopyStart) -> String {
+    format!(
+        "SELECT CASE WHEN sys.fn_cdc_map_lsn_to_time(sys.fn_cdc_get_max_lsn()) > CONVERT(datetime, {}, 121) \
+         THEN N'1' ELSE N'0' END, CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))",
+        quote_unicode(&start.time)
+    )
+}
+
+fn copy_start_skip(start: &CopyStart, check: &TextRows) -> CopyStartSkip {
+    let Some(row) = check.first() else {
+        return CopyStartSkip::Drop;
+    };
+    if row.get(1).and_then(whole_number) != Some(start.utc_offset_minutes) {
+        return CopyStartSkip::Drop;
+    }
+    if cell(row, 0) == "1" {
+        CopyStartSkip::Apply
+    } else {
+        CopyStartSkip::Wait
+    }
+}
+
+fn copy_start_after_poll(
+    start: Option<CopyStart>,
+    skip: Option<CopyStartSkip>,
+) -> Option<CopyStart> {
+    match skip {
+        Some(CopyStartSkip::Apply | CopyStartSkip::Drop) => None,
+        Some(CopyStartSkip::Wait) | None => start,
+    }
 }
 
 fn first_change_after_copy(next: Lsn, bounds: &TextRows) -> Lsn {
@@ -993,13 +1053,10 @@ impl Session<'_> {
         } else {
             None
         };
-        let mut committed_before_copy: Option<String> = None;
+        let mut copy_started: Option<CopyStart> = None;
         let mut lsn: Option<Lsn> = if uses_capture {
             let start = first_rows(query(&mut source, COPY_START_QUERY)?);
-            committed_before_copy = start
-                .first()
-                .and_then(|row| row.get(1).cloned().flatten())
-                .filter(|time| !time.is_empty());
+            copy_started = copy_start(&start);
             Some(first_value(&start, parse_lsn).unwrap_or(Lsn(0)))
         } else {
             None
@@ -1010,7 +1067,7 @@ impl Session<'_> {
                 if let ChangeSource::Capture { instance, next } = &mut table.changes {
                     let bounds = first_rows(query(
                         &mut source,
-                        &capture_bounds_query(instance, start, committed_before_copy.as_deref()),
+                        &capture_bounds_query(instance, start, None),
                     )?);
                     let minimum = first_value(&bounds, parse_lsn).filter(|lsn| lsn.is_valid());
                     let following = bounds
@@ -1022,7 +1079,7 @@ impl Session<'_> {
                             "cannot follow {target}: the CDC changes of {shown} cannot be read: capture instance {instance} is gone or this login may not read it. Grant the login its gating role, then follow again"
                         )));
                     };
-                    *next = first_change_after_copy(minimum.max(following), &bounds);
+                    *next = minimum.max(following);
                 }
             }
         }
@@ -1082,7 +1139,7 @@ impl Session<'_> {
             if uses_tracking {
                 version = resumed_version.or(version);
             }
-            committed_before_copy = None;
+            copy_started = None;
             let target_tables = self.target_table_columns()?;
             for table in &tables {
                 let in_target = target_tables.iter().find(|(schema, name, _)| {
@@ -1226,6 +1283,17 @@ impl Session<'_> {
                 ),
                 None => None,
             };
+            let skip = match (&copy_started, current_lsn) {
+                (Some(start), Some(_)) => Some(copy_start_skip(
+                    start,
+                    &first_rows(query(&mut source, &copy_start_check_query(start))?),
+                )),
+                _ => None,
+            };
+            let skip_after = copy_started
+                .as_ref()
+                .filter(|_| skip == Some(CopyStartSkip::Apply))
+                .map(|start| start.time.clone());
             let mut statements = Vec::new();
             for table in &mut tables {
                 let advanced = match &table.changes {
@@ -1274,9 +1342,12 @@ impl Session<'_> {
                         let (Some(to), next) = (current_lsn, *next) else {
                             continue;
                         };
+                        if skip == Some(CopyStartSkip::Wait) {
+                            continue;
+                        }
                         let bounds = first_rows(query(
                             &mut source,
-                            &capture_bounds_query(instance, to, committed_before_copy.as_deref()),
+                            &capture_bounds_query(instance, to, skip_after.as_deref()),
                         )?);
                         let next = first_change_after_copy(next, &bounds);
                         let minimum = first_value(&bounds, parse_lsn).unwrap_or(Lsn(0));
@@ -1333,6 +1404,7 @@ impl Session<'_> {
                     *next = advanced;
                 }
             }
+            copy_started = copy_start_after_poll(copy_started, skip);
             polls += 1;
             let changed = !statements.is_empty();
             version = version.max(current_version);
@@ -1709,8 +1781,113 @@ mod tests {
         assert_eq!(
             COPY_START_QUERY,
             "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1), \
-             CONVERT(nvarchar(max), CAST(DATEADD(second, -1, SYSDATETIME()) AS datetime), 121)"
+             CONVERT(nvarchar(max), CAST(DATEADD(second, -1, SYSDATETIME()) AS datetime), 121), \
+             CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))"
         );
+    }
+
+    fn started_at_utc_plus_one() -> CopyStart {
+        CopyStart {
+            time: "2026-10-25 02:40:01.123".to_owned(),
+            utc_offset_minutes: 60,
+        }
+    }
+
+    fn check(passed: &str, offset: &str) -> TextRows {
+        vec![vec![Some(passed.to_owned()), Some(offset.to_owned())]]
+    }
+
+    #[test]
+    fn the_copy_start_keeps_its_time_and_utc_offset_and_is_dropped_when_either_is_unreadable() {
+        let row = |time: Option<&str>, offset: Option<&str>| {
+            vec![vec![
+                Some("0x0000002A000001F80003".to_owned()),
+                time.map(str::to_owned),
+                offset.map(str::to_owned),
+            ]]
+        };
+        assert_eq!(
+            copy_start(&row(Some("2026-10-25 02:40:01.123"), Some("60"))),
+            Some(started_at_utc_plus_one())
+        );
+        assert_eq!(copy_start(&row(Some(""), Some("60"))), None);
+        assert_eq!(copy_start(&row(None, Some("60"))), None);
+        assert_eq!(
+            copy_start(&row(Some("2026-10-25 02:40:01.123"), None)),
+            None
+        );
+        assert_eq!(copy_start(&Vec::new()), None);
+        assert_eq!(
+            copy_start_check_query(&started_at_utc_plus_one()),
+            "SELECT CASE WHEN sys.fn_cdc_map_lsn_to_time(sys.fn_cdc_get_max_lsn()) > CONVERT(datetime, N'2026-10-25 02:40:01.123', 121) \
+             THEN N'1' ELSE N'0' END, CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))"
+        );
+    }
+
+    #[test]
+    fn the_copy_start_skip_waits_for_the_capture_job_then_applies_only_in_the_same_utc_offset() {
+        let start = started_at_utc_plus_one();
+        assert_eq!(
+            copy_start_skip(&start, &check("0", "60")),
+            CopyStartSkip::Wait
+        );
+        assert_eq!(
+            copy_start_skip(&start, &check("1", "60")),
+            CopyStartSkip::Apply
+        );
+        assert_eq!(
+            copy_start_skip(&start, &check("0", "0")),
+            CopyStartSkip::Drop
+        );
+        assert_eq!(
+            copy_start_skip(&start, &check("1", "0")),
+            CopyStartSkip::Drop
+        );
+        assert_eq!(
+            copy_start_skip(&start, &check("1", "junk")),
+            CopyStartSkip::Drop
+        );
+        assert_eq!(copy_start_skip(&start, &Vec::new()), CopyStartSkip::Drop);
+    }
+
+    #[test]
+    fn the_copy_start_skip_is_used_once_and_never_again_after_it_applies_or_is_dropped() {
+        let start = Some(started_at_utc_plus_one());
+        assert_eq!(
+            copy_start_after_poll(start.clone(), Some(CopyStartSkip::Wait)),
+            start
+        );
+        assert_eq!(
+            copy_start_after_poll(start.clone(), Some(CopyStartSkip::Apply)),
+            None
+        );
+        assert_eq!(
+            copy_start_after_poll(start.clone(), Some(CopyStartSkip::Drop)),
+            None
+        );
+        assert_eq!(copy_start_after_poll(None, Some(CopyStartSkip::Wait)), None);
+        let mut state = start;
+        for poll in [
+            CopyStartSkip::Wait,
+            CopyStartSkip::Apply,
+            CopyStartSkip::Wait,
+        ] {
+            let skip = state.as_ref().map(|started| {
+                copy_start_skip(
+                    started,
+                    &check(
+                        if poll == CopyStartSkip::Wait {
+                            "0"
+                        } else {
+                            "1"
+                        },
+                        "60",
+                    ),
+                )
+            });
+            state = copy_start_after_poll(state, skip);
+        }
+        assert_eq!(state, None);
     }
 
     #[test]
