@@ -834,12 +834,13 @@ impl<'a> Correlation<'a> {
         name: &str,
         names: &[Option<String>],
         values: Vec<Value>,
+        untyped: &[bool],
     ) -> SqlResult<Value> {
         let mut tables = self
             .tables
             .try_borrow_mut()
             .map_err(|_| internal("a routine call found the statement's tables in use"))?;
-        crate::routines::call_in_row(self.reader, &mut tables, name, names, values)
+        crate::routines::call_in_row(self.reader, &mut tables, name, names, values, untyped)
     }
 
     fn value_at(&self, row: &[Value], depth: usize, index: usize) -> Value {

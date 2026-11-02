@@ -151,7 +151,11 @@ fn infinite_difference(left: &Value, right: &Value) -> Option<SqlResult<Value>> 
     if matches!((left, right), (Value::Date(_), Value::Date(_))) {
         return Some(Err(infinite_dates_subtracted()));
     }
-    let positive = match signs {
+    infinite_span(signs.0, signs.1)
+}
+
+fn infinite_span(later: Option<bool>, earlier: Option<bool>) -> Option<SqlResult<Value>> {
+    let positive = match (later, earlier) {
         (Some(later), Some(earlier)) if later == earlier => {
             return Some(Err(SqlError::new(
                 SqlState::DATETIME_FIELD_OVERFLOW,
@@ -504,19 +508,30 @@ fn date_bin(stride: &Interval, source: &Value, origin: &Value) -> Option<SqlResu
         Ok(found) => found,
         Err(error) => return Some(Err(error)),
     };
+    if datetime::is_infinite_timestamp(source.0) {
+        return Some(Ok(binned_value(source.0, source.1)));
+    }
     let origin = match binned_instant(origin, Some(source.1))? {
         Ok(found) => found,
         Err(error) => return Some(Err(error)),
     };
+    if datetime::is_infinite_timestamp(origin.0) {
+        return Some(Err(SqlError::new(
+            SqlState::DATETIME_FIELD_OVERFLOW,
+            "origin out of range",
+        )));
+    }
     let distance = i128::from(source.0) - i128::from(origin.0);
     let binned = i128::from(origin.0) + distance.div_euclid(step) * step;
-    Some(datetime::checked_timestamp(binned).map(|micros| {
-        if source.1 {
-            Value::TimestampTz(micros)
-        } else {
-            Value::Timestamp(micros)
-        }
-    }))
+    Some(datetime::checked_timestamp(binned).map(|micros| binned_value(micros, source.1)))
+}
+
+fn binned_value(micros: i64, zoned: bool) -> Value {
+    if zoned {
+        Value::TimestampTz(micros)
+    } else {
+        Value::Timestamp(micros)
+    }
 }
 
 const TIME_BUCKET_ORIGIN_DAYS: i64 = 2;
@@ -538,6 +553,9 @@ fn time_bucket(
         Ok(found) => found,
         Err(error) => return Some(Err(error)),
     };
+    if datetime::is_infinite_timestamp(micros) {
+        return Some(Ok(source.clone()));
+    }
     let (origin_micros, offset_micros) = match origin {
         None => (None, 0i128),
         Some(Value::Interval(offset)) if offset.months == 0 => (
@@ -718,6 +736,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             justified(interval).map(Value::Interval)
         }
         ("age", [Value::Null] | [Value::Null, _] | [_, Value::Null]) => Ok(Value::Null),
+        ("age", [value]) if infinity_sign(value).is_some() => {
+            infinite_span(None, infinity_sign(value))?
+        }
+        ("age", [first, second])
+            if (infinity_sign(first).is_some() || infinity_sign(second).is_some())
+                && age_instant(first).is_some()
+                && age_instant(second).is_some() =>
+        {
+            infinite_span(infinity_sign(first), infinity_sign(second))?
+        }
         ("age", [value]) => {
             let then = age_instant(value)?;
             local_now()
@@ -770,4 +798,121 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::memory_store::MemoryStore;
+    use crate::{Session, SqlError};
+
+    fn value(session: &mut Session<'_>, sql: &str) -> Result<String, SqlError> {
+        let mut outputs = Vec::new();
+        session.execute(sql, &mut |result| {
+            outputs.push(crate::tests::render(&result))
+        })?;
+        let output = outputs.pop().unwrap_or_default();
+        Ok(output.lines().nth(1).unwrap_or_default().to_owned())
+    }
+
+    #[test]
+    fn infinite_dates_and_timestamps_give_infinity_or_null_never_made_up_numbers() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for (sql, shown) in [
+            (
+                "SELECT date_part('epoch', 'infinity'::timestamp)",
+                "Infinity",
+            ),
+            (
+                "SELECT date_part('year', '-infinity'::timestamptz)",
+                "-Infinity",
+            ),
+            (
+                "SELECT date_part('millennium', 'infinity'::date)",
+                "Infinity",
+            ),
+            ("SELECT date_part('julian', '-infinity'::date)", "-Infinity"),
+            (
+                "SELECT date_part('isoyear', 'infinity'::timestamp)",
+                "Infinity",
+            ),
+            (
+                "SELECT date_part('decade', 'infinity'::timestamp)",
+                "Infinity",
+            ),
+            (
+                "SELECT date_part('century', 'infinity'::timestamp)",
+                "Infinity",
+            ),
+            ("SELECT date_part('month', 'infinity'::timestamp)", "NULL"),
+            (
+                "SELECT date_part('timezone', 'infinity'::timestamptz)",
+                "NULL",
+            ),
+            ("SELECT extract(day FROM 'infinity'::date)", "NULL"),
+            ("SELECT extract(hour FROM '-infinity'::timestamp)", "NULL"),
+            ("SELECT extract(dow FROM 'infinity'::timestamptz)", "NULL"),
+            (
+                "SELECT age('infinity'::timestamp, '2024-01-01')::text",
+                "infinity",
+            ),
+            (
+                "SELECT age('2024-01-01'::timestamp, 'infinity')::text",
+                "-infinity",
+            ),
+            (
+                "SELECT age('-infinity'::date, 'infinity'::date)::text",
+                "-infinity",
+            ),
+            ("SELECT age('infinity'::timestamptz)::text", "-infinity"),
+            ("SELECT age('-infinity'::timestamp)::text", "infinity"),
+            (
+                "SELECT date_trunc('day', 'infinity'::timestamp)::text",
+                "infinity",
+            ),
+            (
+                "SELECT date_trunc('year', '-infinity'::timestamptz)::text",
+                "-infinity",
+            ),
+            (
+                "SELECT date_trunc('month', 'infinity'::date)::text",
+                "infinity",
+            ),
+            ("SELECT to_char('infinity'::timestamp, 'YYYY')", "NULL"),
+            (
+                "SELECT date_bin('1 hour', 'infinity'::timestamp, '2000-01-01')::text",
+                "infinity",
+            ),
+            (
+                "SELECT time_bucket('1 day', '-infinity'::date)::text",
+                "-infinity",
+            ),
+        ] {
+            assert_eq!(value(&mut session, sql).unwrap(), shown, "{sql}");
+        }
+        for (sql, code) in [
+            ("SELECT extract(epoch FROM 'infinity'::timestamp)", "0A000"),
+            ("SELECT extract(hour FROM 'infinity'::date)", "0A000"),
+            (
+                "SELECT date_part('timezone', 'infinity'::timestamp)",
+                "0A000",
+            ),
+            (
+                "SELECT date_part('fortnight', 'infinity'::timestamp)",
+                "22023",
+            ),
+            (
+                "SELECT age('infinity'::timestamp, 'infinity'::timestamp)",
+                "22008",
+            ),
+            ("SELECT age('-infinity'::date, '-infinity'::date)", "22008"),
+            (
+                "SELECT date_bin('1 hour', '2024-01-01'::timestamp, 'infinity'::timestamp)",
+                "22008",
+            ),
+        ] {
+            let error = value(&mut session, sql).unwrap_err();
+            assert_eq!(error.state().code(), code, "{sql}");
+        }
+    }
 }

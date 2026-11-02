@@ -29,7 +29,7 @@ pub(crate) use calls::{
     is_default_argument, marked_call, mentions_routine_call, prepare_delete, prepare_insert,
     prepare_oracle_table_function, prepare_query, prepare_select, prepare_update,
     query_calls_marked_routine, run_do, run_do_nonatomic, select_calls_marked_routine,
-    select_calls_volatile, select_may_write,
+    select_calls_volatile, select_may_write, untyped_arguments,
 };
 
 pub(crate) const MAX_ROUTINE_TEXT: usize = 1 << 20;

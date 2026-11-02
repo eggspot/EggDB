@@ -212,6 +212,9 @@ impl TableCache {
             Some(Relation::View(_)) => {
                 Err(crate::views::not_updatable(&name.text, verb).at(name.position))
             }
+            None if matches!(verb, "insert into" | "update" | "delete from") => Err(
+                crate::sequences::refuse_changing_sequence(reader, name, undefined_table(name)),
+            ),
             None => Err(undefined_table(name)),
         }
     }

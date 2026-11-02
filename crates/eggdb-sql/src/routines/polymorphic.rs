@@ -139,13 +139,16 @@ pub(crate) fn declares_polymorphism(definition: &RoutineDefinition) -> bool {
             .any(is_polymorphic)
 }
 
+/// Settles the types the polymorphic parameters stand for from the arguments given to them:
+/// each input is a parameter's declared type, its argument (if given) and whether that argument
+/// is an untyped literal, which takes its type from the others instead of setting it.
 pub(crate) fn resolve<'v>(
-    inputs: impl IntoIterator<Item = (SqlType, Option<&'v Value>)>,
+    inputs: impl IntoIterator<Item = (SqlType, Option<&'v Value>, bool)>,
 ) -> Option<Resolution> {
     let mut resolution = Resolution::default();
     let mut roles = Vec::new();
     let mut untyped = Vec::new();
-    for (declared, value) in inputs {
+    for (declared, value, is_untyped) in inputs {
         let Some(role) = Role::of(declared) else {
             continue;
         };
@@ -156,7 +159,7 @@ pub(crate) fn resolve<'v>(
         let Some(actual) = value.sql_type() else {
             continue;
         };
-        if matches!(value, Value::Text(_)) {
+        if is_untyped && matches!(value, Value::Text(_)) {
             untyped.push((role, value));
             continue;
         }
@@ -177,7 +180,7 @@ pub(crate) fn resolve<'v>(
             None if role == Role::Enum => return None,
             None => SqlType::Text,
         };
-        coerced(value, role.argument_type(family)?)?;
+        coerced(value, role.argument_type(family)?, true)?;
         resolution.settle(role, family);
     }
     for role in roles {
@@ -190,7 +193,7 @@ pub(crate) fn resolve<'v>(
     Some(resolution)
 }
 
-fn coerced(value: &Value, target: SqlType) -> Option<Value> {
+fn coerced(value: &Value, target: SqlType, untyped: bool) -> Option<Value> {
     if value.is_null() {
         return Some(Value::Null);
     }
@@ -203,20 +206,22 @@ fn coerced(value: &Value, target: SqlType) -> Option<Value> {
     convert(value.clone(), target, Conversion::Assignment)
         .ok()
         .or_else(|| {
-            matches!(value, Value::Text(_))
+            (untyped && matches!(value, Value::Text(_)))
                 .then(|| convert(value.clone(), target, Conversion::Explicit).ok())
                 .flatten()
         })
 }
 
-pub(crate) fn variadic_array(declared: SqlType, items: Vec<Value>) -> Option<Value> {
+/// The array a polymorphic `VARIADIC` parameter receives from the spread arguments `items`,
+/// each paired with whether it is an untyped literal.
+pub(crate) fn variadic_array(declared: SqlType, items: Vec<(Value, bool)>) -> Option<Value> {
     let role = Role::of(declared)?;
     let mut family: Option<SqlType> = None;
-    for item in &items {
+    for (item, untyped) in &items {
         let Some(actual) = item.sql_type() else {
             continue;
         };
-        if matches!(item, Value::Text(_)) {
+        if *untyped && matches!(item, Value::Text(_)) {
             continue;
         }
         let actual = actual.without_modifier();
@@ -235,8 +240,8 @@ pub(crate) fn variadic_array(declared: SqlType, items: Vec<Value>) -> Option<Val
     }
     let element = ArrayElement::of(family)?;
     let mut converted = Vec::with_capacity(items.len());
-    for item in &items {
-        converted.push(coerced(item, family)?);
+    for (item, untyped) in &items {
+        converted.push(coerced(item, family, *untyped)?);
     }
     Some(Value::Array(Box::new(ArrayValue::new(element, converted))))
 }
@@ -266,23 +271,38 @@ fn not_alike(definition: &RoutineDefinition) -> SqlError {
     )
 }
 
+/// The definition specialized to the types its polymorphic parameters take in this call, and
+/// the arguments converted to them; `untyped` says which arguments are untyped literals (an
+/// argument past its end counts as one).
 pub(crate) fn specialize(
     tables: &mut TableCache,
     definition: Arc<RoutineDefinition>,
     arguments: Vec<Value>,
+    untyped: &[bool],
 ) -> SqlResult<(Arc<RoutineDefinition>, Vec<Value>)> {
     if !declares_polymorphism(&definition) {
         return Ok((definition, arguments));
     }
     let inputs = definition.input_types();
-    let resolution = resolve(inputs.iter().copied().zip(arguments.iter().map(Some)))
-        .ok_or_else(|| not_alike(&definition))?;
+    let is_untyped = |at: usize| untyped.get(at).copied().unwrap_or(true);
+    let resolution = resolve(
+        inputs
+            .iter()
+            .copied()
+            .zip(arguments.iter().map(Some))
+            .enumerate()
+            .map(|(at, (declared, value))| (declared, value, is_untyped(at))),
+    )
+    .ok_or_else(|| not_alike(&definition))?;
     let mut converted = Vec::with_capacity(arguments.len());
     for (at, value) in arguments.into_iter().enumerate() {
         match inputs.get(at) {
             Some(declared) if is_polymorphic(*declared) => {
                 let target = specialized_type(*declared, resolution)?;
-                converted.push(coerced(&value, target).ok_or_else(|| not_alike(&definition))?);
+                converted.push(
+                    coerced(&value, target, is_untyped(at))
+                        .ok_or_else(|| not_alike(&definition))?,
+                );
             }
             _ => converted.push(value),
         }

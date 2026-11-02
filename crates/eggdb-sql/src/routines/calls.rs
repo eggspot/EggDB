@@ -24,7 +24,18 @@ use crate::store::{KeyValueRead, KeyValueWrite};
 use crate::types::{Conversion, DefinedValue, SqlType, Value, convert};
 use std::sync::Arc;
 
-type BestMatch<'a> = Option<(usize, &'a Arc<RoutineDefinition>, Vec<Option<Value>>)>;
+type BestMatch<'a> = Option<(usize, &'a Arc<RoutineDefinition>, MatchedSlots)>;
+
+struct NamedArguments<'a> {
+    names: &'a [Option<String>],
+    values: Vec<Value>,
+    untyped: &'a [bool],
+}
+
+struct MatchedSlots {
+    values: Vec<Option<Value>>,
+    untyped: Vec<bool>,
+}
 
 pub(crate) const ROUTINE_CALL: &str = "*routine_call*";
 pub(crate) const DEFAULT_ARGUMENT: &str = "*default*";
@@ -149,10 +160,20 @@ pub(crate) fn evaluate(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResu
     for argument in call.arguments {
         values.push(evaluator.eval(argument, None)?);
     }
+    let untyped = untyped_arguments(call.arguments);
     match evaluator.correlation {
-        Some(correlation) => correlation.call_routine(&call.name, &call.names, values),
+        Some(correlation) => correlation.call_routine(&call.name, &call.names, values, &untyped),
         None => Err(not_callable_here(&call.name)),
     }
+}
+
+/// Whether each argument expression is an untyped literal (a quoted string with no cast), whose
+/// type a call settles from the parameter it fills instead of from the value.
+pub(crate) fn untyped_arguments(arguments: &[Expr]) -> Vec<bool> {
+    arguments
+        .iter()
+        .map(|argument| matches!(argument.kind, ExprKind::Literal(Literal::String(_))))
+        .collect()
 }
 
 pub(crate) fn call_in_row(
@@ -161,10 +182,16 @@ pub(crate) fn call_in_row(
     name: &str,
     names: &[Option<String>],
     values: Vec<Value>,
+    untyped: &[bool],
 ) -> SqlResult<Value> {
     let settings = crate::pg_catalog::statement_settings();
     let mut writer = ReadOnlyWrite { inner: reader };
-    match call_function(&mut writer, tables, &settings, name, names, values)? {
+    let call = NamedArguments {
+        names,
+        values,
+        untyped,
+    };
+    match call_function(&mut writer, tables, &settings, name, call)? {
         (Returned::Value(value), _) => Ok(value),
         (Returned::Set(_), _) => Err(set_not_allowed()),
     }
@@ -229,13 +256,17 @@ pub(crate) fn correlated_table_function_rows(
     }
     let settings = crate::pg_catalog::statement_settings();
     let mut writer = ReadOnlyWrite { inner: reader };
+    let untyped = untyped_arguments(&function.arguments);
     let (returned, _) = call_function(
         &mut writer,
         tables,
         &settings,
         &function.name,
-        &names,
-        values,
+        NamedArguments {
+            names: &names,
+            values,
+            untyped: &untyped,
+        },
     )
     .map_err(|error| error.at_if_unplaced(function.position))?;
     let elements = match returned {
@@ -321,13 +352,17 @@ fn chosen_procedure(
     for argument in &arguments {
         values.push(evaluator.eval(argument, None)?);
     }
+    let untyped = untyped_arguments(&arguments);
     choose(
         &*writer,
         tables,
         RoutineKind::Procedure,
         &call.name.text,
-        &call.argument_names,
-        values,
+        NamedArguments {
+            names: &call.argument_names,
+            values,
+            untyped: &untyped,
+        },
     )
     .map_err(|error| error.at_if_unplaced(call.name.position))
 }
@@ -709,13 +744,17 @@ impl Preparing<'_> {
         for argument in call_arguments(expr) {
             values.push(evaluator.eval(argument, None)?);
         }
+        let untyped = untyped_arguments(call_arguments(expr));
         call_function(
             &mut *self.writer,
             self.tables,
             self.settings,
             &call.name,
-            &call.names,
-            values,
+            NamedArguments {
+                names: &call.names,
+                values,
+                untyped: &untyped,
+            },
         )
         .map_err(|error| error.at_if_unplaced(expr.position))
     }
@@ -766,13 +805,17 @@ impl Preparing<'_> {
             }
         }
         let position = function.position;
+        let untyped = untyped_arguments(&function.arguments);
         let (returned, definition) = call_function(
             &mut *self.writer,
             self.tables,
             self.settings,
             &function.name,
-            &names,
-            values,
+            NamedArguments {
+                names: &names,
+                values,
+                untyped: &untyped,
+            },
         )
         .map_err(|error| error.at_if_unplaced(position))?;
         let elements = match returned {
@@ -890,10 +933,9 @@ fn call_function(
     tables: &mut TableCache,
     settings: &Settings,
     name: &str,
-    names: &[Option<String>],
-    values: Vec<Value>,
+    call: NamedArguments<'_>,
 ) -> SqlResult<(Returned, Arc<RoutineDefinition>)> {
-    let chosen = choose(&*writer, tables, RoutineKind::Function, name, names, values)?;
+    let chosen = choose(&*writer, tables, RoutineKind::Function, name, call)?;
     let returned = crate::plpgsql::invoke(
         writer,
         tables,
@@ -912,9 +954,13 @@ fn choose(
     tables: &mut TableCache,
     kind: RoutineKind,
     name: &str,
-    names: &[Option<String>],
-    values: Vec<Value>,
+    call: NamedArguments<'_>,
 ) -> SqlResult<Chosen> {
+    let NamedArguments {
+        names,
+        values,
+        untyped,
+    } = call;
     let found = resolve(reader, tables, name)?;
     let routines: &[Arc<RoutineDefinition>] = found
         .as_deref()
@@ -934,7 +980,7 @@ fn choose(
     let mut best: BestMatch<'_> = None;
     let mut tied = false;
     for routine in routines.iter().filter(|routine| routine.kind == kind) {
-        let Some((score, slots)) = matched(routine, names, &values) else {
+        let Some((score, slots)) = matched(routine, names, &values, untyped) else {
             continue;
         };
         match &best {
@@ -953,7 +999,7 @@ fn choose(
         if plsql {
             return Err(super::oracle::wrong_arguments(kind, name, routines));
         }
-        return Err(no_routine(kind, name, names, &values, routines));
+        return Err(no_routine(kind, name, names, &values, untyped, routines));
     };
     if tied && plsql {
         return Err(super::oracle::too_many_matches(name));
@@ -974,8 +1020,15 @@ fn choose(
         )));
     }
     let definition = Arc::clone(definition);
-    let arguments = input_arguments(reader, tables, &definition, slots)?;
-    let (definition, arguments) = polymorphic::specialize(tables, definition, arguments)?;
+    let input_untyped: Vec<bool> = call_parameters(&definition)
+        .into_iter()
+        .zip(&slots.untyped)
+        .filter(|(parameter, _)| parameter.mode.is_input())
+        .map(|(_, untyped)| *untyped)
+        .collect();
+    let arguments = input_arguments(reader, tables, &definition, slots.values)?;
+    let (definition, arguments) =
+        polymorphic::specialize(tables, definition, arguments, &input_untyped)?;
     Ok(Chosen {
         definition,
         arguments,
@@ -994,7 +1047,8 @@ fn matched(
     routine: &RoutineDefinition,
     names: &[Option<String>],
     values: &[Value],
-) -> Option<(usize, Vec<Option<Value>>)> {
+    untyped: &[bool],
+) -> Option<(usize, MatchedSlots)> {
     let parameters = call_parameters(routine);
     let variadic = parameters
         .last()
@@ -1002,13 +1056,15 @@ fn matched(
         .map(|parameter| parameter.sql_type);
     let fixed = parameters.len() - usize::from(variadic.is_some());
     let mut slots: Vec<Option<Value>> = vec![None; parameters.len()];
+    let mut slot_untyped = vec![true; parameters.len()];
     let mut spread = Vec::new();
+    let is_untyped = |at: usize| untyped.get(at).copied().unwrap_or(true);
     let mut score = 0usize;
     for (at, value) in values.iter().enumerate() {
         let index = match names.get(at).cloned().flatten() {
             None if at < fixed => at,
             None if variadic.is_some() => {
-                spread.push(value.clone());
+                spread.push((value.clone(), is_untyped(at)));
                 continue;
             }
             None => return None,
@@ -1023,22 +1079,25 @@ fn matched(
         }
         score += fit(value, parameter.sql_type)?;
         *slot = Some(literal_argument(value, parameter.sql_type));
+        *slot_untyped.get_mut(index)? = is_untyped(at);
     }
     if let Some(SqlType::Array(element)) = variadic
         && !spread.is_empty()
     {
         let mut items = Vec::with_capacity(spread.len());
-        for item in spread {
+        for (item, _) in spread {
             score += fit(&item, element.sql_type())?;
             items.push(convert(item, element.sql_type(), Conversion::Assignment).ok()?);
         }
         *slots.get_mut(fixed)? = Some(Value::Array(Box::new(ArrayValue::new(element, items))));
+        *slot_untyped.get_mut(fixed)? = false;
     } else if let Some(declared) = variadic
         && is_polymorphic_array(declared)
         && !spread.is_empty()
     {
         score += spread.len();
         *slots.get_mut(fixed)? = Some(polymorphic::variadic_array(declared, spread)?);
+        *slot_untyped.get_mut(fixed)? = false;
     } else if !spread.is_empty() {
         return None;
     }
@@ -1049,9 +1108,9 @@ fn matched(
         polymorphic::resolve(
             parameters
                 .iter()
-                .zip(&slots)
+                .zip(slots.iter().zip(&slot_untyped))
                 .filter(|(parameter, _)| parameter.mode.is_input())
-                .map(|(parameter, slot)| (parameter.sql_type, slot.as_ref())),
+                .map(|(parameter, (slot, untyped))| (parameter.sql_type, slot.as_ref(), *untyped)),
         )?;
     }
     let complete = slots.iter().zip(&parameters).all(|(slot, parameter)| {
@@ -1059,7 +1118,13 @@ fn matched(
             || parameter.default.is_some()
             || (routine.kind == RoutineKind::Procedure && parameter.mode == ParameterMode::Out)
     });
-    complete.then_some((score, slots))
+    complete.then_some((
+        score,
+        MatchedSlots {
+            values: slots,
+            untyped: slot_untyped,
+        },
+    ))
 }
 
 fn literal_argument(value: &Value, target: SqlType) -> Value {
@@ -1168,12 +1233,13 @@ fn no_routine(
     name: &str,
     names: &[Option<String>],
     values: &[Value],
+    untyped: &[bool],
     routines: &[Arc<RoutineDefinition>],
 ) -> SqlError {
     let shown = format!("{}({})", display(name), type_list(values));
     let other_kind = routines
         .iter()
-        .any(|routine| routine.kind != kind && matched(routine, names, values).is_some());
+        .any(|routine| routine.kind != kind && matched(routine, names, values, untyped).is_some());
     match (other_kind, kind) {
         (true, RoutineKind::Function) => SqlError::new(
             SqlState::WRONG_OBJECT_TYPE,

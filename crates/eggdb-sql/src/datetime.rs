@@ -1090,6 +1090,29 @@ fn millennium_start(year: i64) -> i64 {
     }
 }
 
+/// What `extract` and `date_part` give for an infinite date or timestamp, as PostgreSQL 16 does:
+/// `Ok(true)` for the fields that grow with time (epoch, julian, year, isoyear, decade, century,
+/// millennium), whose result is the infinity of the input's sign, `Ok(false)` for every other
+/// field, whose result is NULL, and an error for a unit the type doesn't have.
+pub(crate) fn extract_of_infinity_is_infinite(name: &str, kind: DateTimeKind) -> SqlResult<bool> {
+    let field = Field::named(name).ok_or_else(|| unknown_unit(name, kind))?;
+    if (kind == DateTimeKind::Date && field.is_time_of_day())
+        || (kind != DateTimeKind::TimestampTz && field.is_zone())
+    {
+        return Err(unit_error(name, kind));
+    }
+    Ok(matches!(
+        field,
+        Field::Epoch
+            | Field::Julian
+            | Field::Year
+            | Field::IsoYear
+            | Field::Decade
+            | Field::Century
+            | Field::Millennium
+    ))
+}
+
 pub(crate) fn extract(
     name: &str,
     kind: DateTimeKind,

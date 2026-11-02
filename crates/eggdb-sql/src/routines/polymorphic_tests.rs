@@ -234,3 +234,37 @@ fn results_and_arguments_that_cannot_be_resolved_are_errors() {
         "pick\nx\nSELECT 1"
     );
 }
+
+#[test]
+fn only_untyped_literals_take_their_type_from_the_other_polymorphic_arguments() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION same(a anyelement, b anyelement) RETURNS anyelement \
+             LANGUAGE sql AS 'SELECT a'",
+            "CREATE TABLE words (w text)",
+            "INSERT INTO words VALUES ('5')",
+        ],
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT same('5', 5) + 1 AS n"),
+        "n\n6\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT same(5, '6') AS n"),
+        "n\n5\nSELECT 1"
+    );
+    for sql in [
+        "SELECT same('5'::text, 5)",
+        "SELECT same(5, '5'::text)",
+        "SELECT same(w, 5) FROM words",
+        "SELECT * FROM same('5'::text, 5)",
+    ] {
+        assert_eq!(
+            refusal(&mut session, sql).state(),
+            SqlState::UNDEFINED_FUNCTION,
+            "{sql}"
+        );
+    }
+}

@@ -1121,6 +1121,11 @@ impl Evaluator<'_> {
                         SqlError::syntax(format!("syntax error at or near \"{unit}\""), 0)
                     })
             }
+            ("extract" | "date_part", [Value::Text(field), value])
+                if infinite_instant(value).is_some() =>
+            {
+                extract_of_infinity(name, field, value)?
+            }
             ("extract" | "date_part", [Value::Text(field), value]) => {
                 let (kind, local, offset) = match local_instant(value) {
                     Ok(Some(found)) => found,
@@ -1136,6 +1141,16 @@ impl Evaluator<'_> {
             }
             ("date_trunc", [Value::Text(field), Value::Interval(interval)]) => {
                 interval.truncate(field).map(Value::Interval)
+            }
+            ("date_trunc", [Value::Text(_), value]) if infinite_instant(value).is_some() => {
+                match value {
+                    Value::Date(days) => Ok(Value::TimestampTz(if *days > 0 {
+                        datetime::INFINITE_TIMESTAMP
+                    } else {
+                        datetime::NEGATIVE_INFINITE_TIMESTAMP
+                    })),
+                    other => Ok(other.clone()),
+                }
             }
             ("date_trunc", [Value::Text(field), value]) => {
                 let (kind, local, _) = match local_instant(value) {
@@ -1608,7 +1623,12 @@ impl Evaluator<'_> {
             _ => match (crate::ranges::constructor(name), self.correlation) {
                 (Some(oid), _) => crate::ranges::construct_from_values(oid, &values),
                 (None, Some(correlation)) if crate::set_returning::named(name).is_none() => {
-                    correlation.call_routine(name, &vec![None; values.len()], values.clone())
+                    correlation.call_routine(
+                        name,
+                        &vec![None; values.len()],
+                        values.clone(),
+                        &crate::routines::untyped_arguments(arguments),
+                    )
                 }
                 (None, _) => Err(unknown()),
             },
@@ -1925,6 +1945,40 @@ fn local_instant(value: &Value) -> SqlResult<Option<(DateTimeKind, LocalTime, i3
         ),
         _ => return Ok(None),
     }))
+}
+
+fn infinite_instant(value: &Value) -> Option<(DateTimeKind, bool)> {
+    match value {
+        Value::Date(days) if datetime::is_infinite_date(*days) => {
+            Some((DateTimeKind::Date, *days > 0))
+        }
+        Value::Timestamp(micros) if datetime::is_infinite_timestamp(*micros) => {
+            Some((DateTimeKind::Timestamp, *micros > 0))
+        }
+        Value::TimestampTz(micros) if datetime::is_infinite_timestamp(*micros) => {
+            Some((DateTimeKind::TimestampTz, *micros > 0))
+        }
+        _ => None,
+    }
+}
+
+fn extract_of_infinity(name: &str, field: &str, value: &Value) -> Option<SqlResult<Value>> {
+    let (kind, positive) = infinite_instant(value)?;
+    Some(
+        match datetime::extract_of_infinity_is_infinite(field, kind) {
+            Err(error) => Err(error),
+            Ok(false) => Ok(Value::Null),
+            Ok(true) if name == "date_part" => Ok(Value::Double(if positive {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            })),
+            Ok(true) => Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "numeric does not hold infinity yet; date_part gives it as double precision",
+            )),
+        },
+    )
 }
 
 fn invalid_extract_field() -> SqlError {

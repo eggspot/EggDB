@@ -803,6 +803,32 @@ fn missing_or_not_a_sequence(reader: &dyn KeyValueRead, name: &str) -> SqlResult
     )
 }
 
+/// The error for an INSERT, UPDATE or DELETE whose target table was not found (`error`):
+/// PostgreSQL's "cannot change sequence" (42809) when `target` names a sequence.
+pub(crate) fn refuse_changing_sequence(
+    reader: &dyn KeyValueRead,
+    target: &Name,
+    error: SqlError,
+) -> SqlError {
+    if error.state() != SqlState::UNDEFINED_TABLE || target.text.is_empty() {
+        return error;
+    }
+    let Ok(name) = sequence_on_path(reader, target.text.clone()) else {
+        return error;
+    };
+    match read(reader, &name) {
+        Ok(Some(_)) => SqlError::new(
+            SqlState::WRONG_OBJECT_TYPE,
+            format!(
+                "cannot change sequence \"{}\"",
+                crate::schemas::base_name(&name)
+            ),
+        )
+        .at(target.position),
+        _ => error,
+    }
+}
+
 pub(crate) fn explain_missing(reader: &dyn KeyValueRead, error: SqlError) -> SqlError {
     let missing = STATEMENT.with(|state| {
         state
@@ -1418,4 +1444,47 @@ pub(crate) fn reapply(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::memory_store::MemoryStore;
+    use crate::{Session, SqlError};
+
+    fn refusal(session: &mut Session<'_>, sql: &str) -> SqlError {
+        match session.execute(sql, &mut |_| {}) {
+            Ok(()) => panic!("{sql} succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn changing_a_sequence_with_insert_update_or_delete_is_refused_like_postgresql() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        session
+            .execute(
+                "CREATE SEQUENCE counter; CREATE SCHEMA other; CREATE SEQUENCE other.tick",
+                &mut |_| {},
+            )
+            .unwrap();
+        for sql in [
+            "INSERT INTO counter VALUES (1, 1, false)",
+            "UPDATE counter SET last_value = 5",
+            "DELETE FROM counter",
+            "DELETE FROM other.tick",
+        ] {
+            let error = refusal(&mut session, sql);
+            assert_eq!(error.state().code(), "42809", "{sql}");
+            assert!(
+                error.message().starts_with("cannot change sequence \""),
+                "{sql}: {}",
+                error.message()
+            );
+        }
+        assert_eq!(
+            refusal(&mut session, "DELETE FROM missing").state().code(),
+            "42P01"
+        );
+    }
 }
