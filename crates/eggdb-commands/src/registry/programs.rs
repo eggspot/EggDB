@@ -140,7 +140,7 @@ pub(super) const SERVE: CommandDefinition = CommandDefinition {
     synopsis: "<file>",
     summary: "serve the file to PostgreSQL, MySQL and SQL Server clients; see --listen",
     description: "Serves the file to PostgreSQL clients, and with options to MySQL and SQL Server (TDS) clients, until stopped: on this machine's loopback address without TLS, and on any address with TLS, which other machines must then use; clients log in with a password and may run any statement. The first line says where it listens.",
-    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
+    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
     help: "\
 Serves the file to PostgreSQL clients: psql and PostgreSQL drivers connect to it unchanged and
 run the SQL of eggdb sql. Clients log in as one user with a password (SCRAM-SHA-256), which
@@ -174,6 +174,14 @@ the running statements, rolls back open transactions and stops with exit 0.
                                   (default 4g; at least 1m)
       --idle-timeout <seconds>    close a logged-in connection that sends nothing for that
                                   long (default 3600; 0 never closes it)
+      --log-slow-statements <milliseconds>
+                                  log every statement that runs at least that long, on any
+                                  protocol, as one line with its time, database, user,
+                                  protocol, rows and text with each literal as $1, $2, ...
+                                  (0 logs every statement; off by default)
+      --statement-statistics <count>
+                                  how many statement shapes pg_stat_statements keeps calls,
+                                  times and rows for (default 5000; 0 keeps none)
       --socket-dir <directory>    also accept PostgreSQL connections on a Unix socket there,
                                   .s.PGSQL.<port> (psql -h <directory>); Windows 10 1803+
       --mysql-socket <file>       also accept MySQL connections on that Unix socket
@@ -258,6 +266,19 @@ Examples:
                 "idle-timeout",
                 "seconds",
                 "close a logged-in connection that sends nothing for that long; 0 never closes it",
+            )
+        },
+        valued(
+            "log-slow-statements",
+            "milliseconds",
+            "log every statement that runs at least that long, with its literals as $1, $2, ...; 0 logs every statement",
+        ),
+        OptionDefinition {
+            default: Some("5000"),
+            ..valued(
+                "statement-statistics",
+                "count",
+                "how many statement shapes pg_stat_statements keeps statistics for; 0 keeps none",
             )
         },
         valued(

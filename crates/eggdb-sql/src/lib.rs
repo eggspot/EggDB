@@ -136,6 +136,7 @@ mod sqlserver_strings;
 mod sqlserver_types;
 mod stack_depth;
 mod standards;
+pub mod statement_statistics;
 mod statistics;
 mod store;
 mod string_functions;
@@ -296,7 +297,8 @@ pub use sqlite_errors::sqlite_result_code_name;
 pub use sqlserver_catalog::is_catalog_procedure;
 pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use store::{
-    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, StoreFailure,
+    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
+    StoreFailure,
 };
 pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};

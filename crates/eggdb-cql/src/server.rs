@@ -981,6 +981,7 @@ pub(crate) fn serve_stream<S: KeyValueStore>(
 ) -> io::Result<()> {
     let mut session = Session::with_dialect(store, Dialect::PostgreSql);
     session.identify(&config.user, &config.database);
+    session.set_protocol("cql");
     let mut connection = Connection {
         config,
         session,

@@ -140,6 +140,32 @@ pub trait KeyValueStore {
     fn store_id(&self) -> usize {
         std::ptr::from_ref(self).addr()
     }
+
+    /// The page lookups the calling thread has made so far, if the store counts them: the
+    /// difference between two readings is what `EXPLAIN (ANALYZE, BUFFERS)` reports. By
+    /// default the store does not count them.
+    fn page_lookups(&self) -> Option<PageLookups> {
+        None
+    }
+}
+
+/// Page lookups a store's page cache answered from memory and from its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PageLookups {
+    /// Lookups answered from memory: PostgreSQL's `shared hit`.
+    pub hits: u64,
+    /// Lookups that read the page from the file: PostgreSQL's `read`.
+    pub reads: u64,
+}
+
+impl PageLookups {
+    /// What was looked up since `earlier`, a reading taken before this one on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            hits: self.hits.saturating_sub(earlier.hits),
+            reads: self.reads.saturating_sub(earlier.reads),
+        }
+    }
 }
 
 impl<S: KeyValueStore> KeyValueStore for &S {
@@ -163,6 +189,10 @@ impl<S: KeyValueStore> KeyValueStore for &S {
     fn store_id(&self) -> usize {
         (**self).store_id()
     }
+
+    fn page_lookups(&self) -> Option<PageLookups> {
+        (**self).page_lookups()
+    }
 }
 
 impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
@@ -185,6 +215,10 @@ impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
 
     fn store_id(&self) -> usize {
         (**self).store_id()
+    }
+
+    fn page_lookups(&self) -> Option<PageLookups> {
+        (**self).page_lookups()
     }
 }
 
@@ -286,6 +320,8 @@ pub(crate) trait ErasedStore {
     fn begin_boxed_read(&self) -> SqlResult<Box<dyn KeyValueRead + '_>>;
 
     fn begin_boxed_write(&self) -> SqlResult<Box<dyn BoxedWrite + '_>>;
+
+    fn erased_page_lookups(&self) -> Option<PageLookups>;
 }
 
 impl<S: KeyValueStore> ErasedStore for S {
@@ -295,6 +331,10 @@ impl<S: KeyValueStore> ErasedStore for S {
 
     fn begin_boxed_write(&self) -> SqlResult<Box<dyn BoxedWrite + '_>> {
         Ok(Box::new(self.begin_write()?))
+    }
+
+    fn erased_page_lookups(&self) -> Option<PageLookups> {
+        self.page_lookups()
     }
 }
 

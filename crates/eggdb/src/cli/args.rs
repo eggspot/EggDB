@@ -248,6 +248,8 @@ impl CommandName {
             | OptionName::Database
             | OptionName::MaxConnections
             | OptionName::MaxConnectionMemory
+            | OptionName::LogSlowStatements
+            | OptionName::StatementStatistics
             | OptionName::IdleTimeout
             | OptionName::SocketDir
             | OptionName::MysqlSocket
@@ -427,6 +429,8 @@ enum OptionName {
     Database,
     MaxConnections,
     MaxConnectionMemory,
+    LogSlowStatements,
+    StatementStatistics,
     IdleTimeout,
     SocketDir,
     MysqlSocket,
@@ -531,6 +535,8 @@ impl OptionName {
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
             b"max-connection-memory" => Self::MaxConnectionMemory,
+            b"log-slow-statements" => Self::LogSlowStatements,
+            b"statement-statistics" => Self::StatementStatistics,
             b"idle-timeout" => Self::IdleTimeout,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
@@ -823,6 +829,8 @@ pub(crate) struct ServeOptions {
     pub(crate) max_connections: Option<usize>,
     pub(crate) max_connection_memory: Option<usize>,
     pub(crate) idle_timeout_seconds: Option<u64>,
+    pub(crate) log_slow_statements_ms: Option<u64>,
+    pub(crate) statement_statistics: Option<usize>,
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
     pub(crate) tls_certificate: Option<PathBuf>,
@@ -1444,6 +1452,29 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     ))
                 })?;
                 request.serve.idle_timeout_seconds = Some(seconds);
+            }
+            OptionName::LogSlowStatements => {
+                let milliseconds =
+                    parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of milliseconds, 0 to log every statement, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        ))
+                    })?;
+                request.serve.log_slow_statements_ms = Some(milliseconds);
+            }
+            OptionName::StatementStatistics => {
+                let count = parse_whole_number(value.as_encoded_bytes())
+                    .and_then(|count| usize::try_from(count).ok())
+                    .ok_or_else(|| {
+                        usage(format!(
+                            "{} needs a whole number of statements, 0 to keep none, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        ))
+                    })?;
+                request.serve.statement_statistics = Some(count);
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),

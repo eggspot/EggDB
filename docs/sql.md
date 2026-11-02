@@ -2024,14 +2024,34 @@ full-text index yet, so `@@` reads every row.
 
 `EXPLAIN ANALYZE` (or `EXPLAIN (ANALYZE[, COSTS OFF, ...])`) runs the statement and prints its
 plan with the rows it returned or changed, and the planning and execution times, as
-PostgreSQL does; an `UPDATE` or `DELETE` under it changes the data. Setting
+PostgreSQL does; an `UPDATE` or `DELETE` under it changes the data. `EXPLAIN (ANALYZE,
+BUFFERS)` adds the page cache's lookups in PostgreSQL's form: `Buffers: shared hit=N read=M`
+under the top node for the whole statement (pages found in memory, pages read from the file;
+a count of zero is left out) and the same under `Planning:` for planning, counted on the
+session's own thread so other sessions' reads never mix in (D286). Setting
 `log_min_duration_statement` (milliseconds, or with `ms`, `s` or `min`; `-1` turns it off) makes
 `eggdb serve` log every simple query that takes at least that long, with the client's address,
 the duration and the statement, in PostgreSQL's `duration: ... ms  statement: ...` form.
 `statement_timeout` (same units; `0`, the default, turns it off) stops any statement
 that runs longer with `57014 canceling statement due to statement timeout`, checked between
-rows and while `pg_sleep` waits. Statement statistics per normalized query
-(`pg_stat_statements`), `lock_timeout` and limits per role are not there yet.
+rows and while `pg_sleep` waits.
+
+`eggdb serve` keeps statement statistics (D286) for every protocol: each statement that
+completes is counted under its normalized text, the statement with each literal replaced by
+`$1`, `$2`, ... (numbered after the statement's own parameters), its spaces and comments folded
+and a trailing `;` left out, so values and passwords are never kept. `pg_stat_statements` lists
+them for the current database with PostgreSQL's column names: `userid`, `dbid`, `toplevel`,
+`queryid` (a stable hash of the normalized text), `query`, `calls`, `total_exec_time`,
+`min_exec_time`, `max_exec_time`, `mean_exec_time`, `stddev_exec_time` (milliseconds) and
+`rows`. `pg_stat_statements_info` has `dealloc` and `stats_reset`, and
+`pg_stat_statements_reset()` empties them (with a non-zero third argument, only that query
+ID). Sessions in the MySQL, SQL Server and Oracle dialects read them as
+`pg_catalog.pg_stat_statements`. `--statement-statistics` sets how many statement shapes are
+kept (5000 by default); a full table drops its least-called twentieth. `--log-slow-statements
+<milliseconds>` logs each statement that takes at least that long to stderr, on every
+protocol, as one line: `slow statement duration_ms=... database=... user=... protocol=...
+rows=... query="..."` after the UTC time, with the same normalized text. `lock_timeout` and
+limits per role are not there yet.
 
 ## LISTEN and NOTIFY
 

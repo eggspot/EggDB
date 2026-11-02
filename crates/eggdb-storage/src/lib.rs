@@ -88,7 +88,9 @@ pub use format::{
 pub use hybrid_clock::CommitStamp;
 pub use log::{Durability, LogStats};
 pub use lsm::{LsmCursor, LsmReport, LsmTree};
-pub use page_cache::{CacheSize, CacheStats, PageCache, PageMut, PageRef};
+pub use page_cache::{
+    CacheSize, CacheStats, PageCache, PageLookups, PageMut, PageRef, thread_page_lookups,
+};
 pub use page_cipher::{PAGE_KEY_BYTES, PageCipher};
 pub use page_file::{CreateOptions, PageFile};
 pub use snapshot_copy::{CopyDestination, CopyFailure, CopyReport};

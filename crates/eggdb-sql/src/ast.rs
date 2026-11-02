@@ -871,6 +871,7 @@ pub(crate) enum ExplainStyle {
 pub(crate) struct Explain {
     pub(crate) style: ExplainStyle,
     pub(crate) analyze: bool,
+    pub(crate) buffers: bool,
     pub(crate) statement: Box<Statement>,
 }
 

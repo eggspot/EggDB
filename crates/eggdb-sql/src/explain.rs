@@ -5,6 +5,7 @@ use crate::execute::{ExplainedQuery, ExplainedSource};
 use crate::join::JoinMethod;
 use crate::plan::{KeyChoice, Use};
 use crate::session::{OutputColumn, QueryResult};
+use crate::store::PageLookups;
 use crate::types::{SqlType, Value};
 
 const MYSQL_COLUMNS: [&str; 12] = [
@@ -68,25 +69,53 @@ pub(crate) fn render(query: &ExplainedQuery, style: ExplainStyle, dialect: Diale
     QueryResult::rows(tag, columns(style, dialect), rows)
 }
 
+pub(crate) struct Buffers {
+    pub(crate) planning: PageLookups,
+    pub(crate) execution: PageLookups,
+}
+
+pub(crate) struct Analyzed {
+    pub(crate) rows: u64,
+    pub(crate) planning: std::time::Duration,
+    pub(crate) execution: std::time::Duration,
+    pub(crate) buffers: Option<Buffers>,
+}
+
+fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
+    let mut parts = Vec::new();
+    if lookups.hits > 0 {
+        parts.push(format!("hit={}", lookups.hits));
+    }
+    if lookups.reads > 0 {
+        parts.push(format!("read={}", lookups.reads));
+    }
+    (!parts.is_empty()).then(|| format!("{indent}Buffers: shared {}", parts.join(" ")))
+}
+
 /// `EXPLAIN ANALYZE` in PostgreSQL's text form: the plan, the rows the statement returned or
-/// changed on its top line, and the planning and execution times.
-pub(crate) fn render_analyzed(
-    query: &ExplainedQuery,
-    rows: u64,
-    planning: std::time::Duration,
-    execution: std::time::Duration,
-) -> QueryResult {
+/// changed on its top line, under `BUFFERS` the page lookups of the whole statement under the
+/// top node and those of planning under `Planning:`, and the planning and execution times.
+pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
     let mut lines = postgresql_lines(query);
     if let Some(top) = lines.first_mut() {
-        top.push_str(&format!(" (actual rows={rows} loops=1)"));
+        top.push_str(&format!(" (actual rows={} loops=1)", analyzed.rows));
+    }
+    if let Some(buffers) = &analyzed.buffers {
+        if let Some(line) = buffers_line("  ", buffers.execution) {
+            lines.insert(1.min(lines.len()), line);
+        }
+        if let Some(line) = buffers_line("  ", buffers.planning) {
+            lines.push("Planning:".to_owned());
+            lines.push(line);
+        }
     }
     lines.push(format!(
         "Planning Time: {:.3} ms",
-        planning.as_secs_f64() * 1000.0
+        analyzed.planning.as_secs_f64() * 1000.0
     ));
     lines.push(format!(
         "Execution Time: {:.3} ms",
-        execution.as_secs_f64() * 1000.0
+        analyzed.execution.as_secs_f64() * 1000.0
     ));
     QueryResult::rows(
         "EXPLAIN".to_owned(),
@@ -368,4 +397,27 @@ fn sqlite_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
             ]
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffers_print_only_the_counts_that_are_not_zero() {
+        let lookups = |hits, reads| PageLookups { hits, reads };
+        assert_eq!(
+            buffers_line("  ", lookups(3, 2)).as_deref(),
+            Some("  Buffers: shared hit=3 read=2")
+        );
+        assert_eq!(
+            buffers_line("  ", lookups(0, 4)).as_deref(),
+            Some("  Buffers: shared read=4")
+        );
+        assert_eq!(
+            buffers_line("  ", lookups(5, 0)).as_deref(),
+            Some("  Buffers: shared hit=5")
+        );
+        assert_eq!(buffers_line("  ", lookups(0, 0)), None);
+    }
 }

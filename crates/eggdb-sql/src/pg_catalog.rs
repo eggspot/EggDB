@@ -66,6 +66,9 @@ pub(crate) fn catalog_reference(
     reader: &dyn crate::store::KeyValueRead,
     name: &str,
 ) -> crate::error::SqlResult<Option<CatalogRelation>> {
+    if let Some(relation) = statement_statistics_reference(name) {
+        return Ok(Some(relation));
+    }
     match crate::constraints::current_dialect() {
         crate::Dialect::PostgreSql => postgresql_catalog_reference(reader, name),
         crate::Dialect::SqlServer => {
@@ -79,6 +82,20 @@ pub(crate) fn catalog_reference(
         }
         crate::Dialect::Sqlite => Ok(None),
     }
+}
+
+fn statement_statistics_reference(name: &str) -> Option<CatalogRelation> {
+    let (schema, base) = name.split_once(crate::schemas::QUALIFIER)?;
+    if !schema.eq_ignore_ascii_case(crate::schemas::CATALOG_SCHEMA) {
+        return None;
+    }
+    [
+        monitoring::MonitoringRelation::StatStatements,
+        monitoring::MonitoringRelation::StatStatementsInfo,
+    ]
+    .into_iter()
+    .find(|relation| relation.name().eq_ignore_ascii_case(base))
+    .map(CatalogRelation::Monitoring)
 }
 
 fn postgresql_catalog_reference(

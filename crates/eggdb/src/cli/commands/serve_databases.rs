@@ -243,6 +243,13 @@ impl KeyValueStore for AttachedDatabase<'_> {
         }
     }
 
+    fn page_lookups(&self) -> Option<eggdb_sql::PageLookups> {
+        match self {
+            Self::Default(store) => store.page_lookups(),
+            Self::Other(store) => store.page_lookups(),
+        }
+    }
+
     fn store_id(&self) -> usize {
         match self {
             Self::Default(store) => store.store_id(),

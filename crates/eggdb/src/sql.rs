@@ -205,6 +205,10 @@ impl KeyValueStore for Store<'_> {
     fn begin_write(&self) -> SqlResult<SqlWriter<'_>> {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
     }
+
+    fn page_lookups(&self) -> Option<eggdb_sql::PageLookups> {
+        Some(this_threads_page_lookups())
+    }
 }
 
 /// A [`Database`] owned as the store SQL sessions run on, for a program that opens the
@@ -236,6 +240,18 @@ impl KeyValueStore for OwnedStore {
 
     fn begin_write(&self) -> SqlResult<SqlWriter<'_>> {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
+    }
+
+    fn page_lookups(&self) -> Option<eggdb_sql::PageLookups> {
+        Some(this_threads_page_lookups())
+    }
+}
+
+fn this_threads_page_lookups() -> eggdb_sql::PageLookups {
+    let lookups = eggdb_storage::thread_page_lookups();
+    eggdb_sql::PageLookups {
+        hits: lookups.hits,
+        reads: lookups.reads,
     }
 }
 

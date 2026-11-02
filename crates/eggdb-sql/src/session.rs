@@ -447,6 +447,7 @@ pub struct Session<'s> {
     served_databases: Option<&'s dyn crate::served_databases::ServedDatabases>,
     database_switch: Option<String>,
     database_listing_version: Option<u64>,
+    protocol: Option<&'static str>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -525,6 +526,7 @@ impl<'s> Session<'s> {
             served_databases: None,
             database_switch: None,
             database_listing_version: None,
+            protocol: None,
         }
     }
 
@@ -653,6 +655,42 @@ impl<'s> Session<'s> {
         let settings = Arc::make_mut(&mut self.settings);
         settings.mysql.connection_id = id;
         settings.sqlserver.connection_id = id;
+    }
+
+    /// Names the protocol this session's statements arrive on, which the slow-statement log
+    /// reports (D286); by default it is the connection's dialect, such as `postgresql`,
+    /// `mysql` or `sqlserver`.
+    pub fn set_protocol(&mut self, protocol: &'static str) {
+        self.protocol = Some(protocol);
+    }
+
+    fn protocol(&self) -> &'static str {
+        self.protocol
+            .unwrap_or_else(|| self.connection_dialect.name())
+    }
+
+    fn record_statement(
+        &self,
+        tokens: Option<&[crate::lexer::Token<'_>]>,
+        text: &str,
+        started: Option<std::time::Instant>,
+        result: &SqlResult<QueryResult>,
+    ) {
+        let (Some(tokens), Some(started), Ok(result)) = (tokens, started, result) else {
+            return;
+        };
+        let user = self.settings.get("session_authorization").unwrap_or_default();
+        crate::statement_statistics::record(
+            tokens,
+            text,
+            &crate::statement_statistics::RecordedStatement {
+                database: &self.settings.database,
+                user: &user,
+                protocol: self.protocol(),
+                duration: started.elapsed(),
+                rows: crate::statement_statistics::rows_of(result),
+            },
+        );
     }
 
     /// The warnings and notes of the last statement, as MySQL's `SHOW WARNINGS` lists them.
@@ -1903,7 +1941,9 @@ impl<'s> Session<'s> {
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
             crate::portals::install(std::mem::take(&mut self.portals));
+            let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
             let result = with_raised_notices(self.run(&mut statement, &mut io));
+            self.record_statement(statement_tokens, text, started, &result);
             self.portals = crate::portals::take();
             if matches!(self.block, Block::None) {
                 self.portals.close_at_transaction_end();
@@ -2574,29 +2614,45 @@ impl<'s> Session<'s> {
             walk_expressions: true,
             target_privilege: Some(crate::roles::target_privilege(&explain.statement)),
         };
+        let store = self.store;
+        let lookups = || {
+            explain
+                .buffers
+                .then(|| store.erased_page_lookups())
+                .flatten()
+        };
         let planning = std::time::Instant::now();
+        let before_planning = lookups();
         let mut planned = (*explain.statement).clone();
         let plan = self.read(|reader, tables| {
             binding.statement(reader, tables, &mut planned)?;
             execute::explain(reader, tables, &planned)
         })?;
         let planning = planning.elapsed();
+        let before_execution = lookups();
         let started = std::time::Instant::now();
         let mut statement = (*explain.statement).clone();
         let result = self.run(&mut statement, io)?;
         let execution = started.elapsed();
-        let rows = if result.columns.is_some() {
-            result.rows.len() as u64
-        } else {
-            result
-                .tag
-                .rsplit(' ')
-                .next()
-                .and_then(|count| count.parse().ok())
-                .unwrap_or(0)
+        let after_execution = lookups();
+        let rows = crate::statement_statistics::rows_of(&result);
+        let buffers = match (before_planning, before_execution, after_execution) {
+            (Some(planning_start), Some(execution_start), Some(execution_end)) => {
+                Some(crate::explain::Buffers {
+                    planning: execution_start.since(planning_start),
+                    execution: execution_end.since(execution_start),
+                })
+            }
+            _ => None,
         };
         Ok(crate::explain::render_analyzed(
-            &plan, rows, planning, execution,
+            &plan,
+            crate::explain::Analyzed {
+                rows,
+                planning,
+                execution,
+                buffers,
+            },
         ))
     }
 

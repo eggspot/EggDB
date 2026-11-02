@@ -215,6 +215,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     fn session(&self) -> Session<'s> {
         let mut session = Session::with_dialect(self.store, Dialect::PostgreSql);
         session.identify(&self.user, &self.database);
+        session.set_protocol("observability");
         session
     }
 

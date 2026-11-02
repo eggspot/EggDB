@@ -511,6 +511,14 @@ Fable. The choices:
 6. **stderr is a log** while serving: failures only (authentication, unknown database, too many
    connections), each with a UTC time, the client address and PostgreSQL's own wording,
    without the `eggdb:` prefix, which stays for the server's own errors.
+   `--log-slow-statements <milliseconds>` adds one line per statement that took at least that
+   long (D286): `slow statement` and then `key=value` pairs (`duration_ms`, `database`, `user`,
+   `protocol`, `rows`, `query`) in a fixed order, values with spaces or quotes in double
+   quotes, so `grep` finds the lines and a log shipper splits them without a custom parser.
+   The query is the normalized text, literals as `$1`, `$2`, ..., so the log never holds the
+   values a client sent. `--statement-statistics <count>` sizes what `pg_stat_statements`
+   keeps; the flags are named for what they do, as `--log-batches` is, not after PostgreSQL's
+   setting names, which stay settings.
 7. **Stopping is success**: Ctrl-C or SIGTERM finishes statements, rolls back open
    transactions, prints `stopped` and exits 0, so a supervising script's `wait` sees a clean
    stop; a second Ctrl-C ends the process at once (exit 130).
