@@ -614,6 +614,20 @@ impl Session<'_> {
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
+        eggdb_sql::statement_statistics::collect(
+            options
+                .statement_statistics
+                .unwrap_or(eggdb_sql::statement_statistics::DEFAULT_CAPACITY),
+        );
+        if let Some(milliseconds) = options.log_slow_statements_ms {
+            let slow_events = events.clone();
+            eggdb_sql::statement_statistics::log_slow_statements(
+                std::time::Duration::from_millis(milliseconds),
+                Box::new(move |statement| {
+                    let _ = slow_events.send(stamped(&statement.to_string()));
+                }),
+            );
+        }
         let observability_endpoint = eggdb_observability::Endpoint::new(
             &store,
             &config.user,
@@ -724,14 +738,16 @@ impl Session<'_> {
                 let log = move |line: &str| {
                     let _ = events.send(stamped(line));
                 };
-                eggdb_pgwire::serve_directory(
+                let served = eggdb_pgwire::serve_directory(
                     &served_databases,
                     &listener,
                     local_listener.as_ref(),
                     &config,
                     &stop_signals::requested,
                     &log,
-                )
+                );
+                eggdb_sql::statement_statistics::stop_logging_slow_statements();
+                served
             });
             let mysql_server = scope.spawn(|| match (&mysql_listener, &mysql_config) {
                 (Some(listener), Some(config)) => {
@@ -816,6 +832,7 @@ impl Session<'_> {
                     listener,
                     eggdb_memcached::ServerConfig {
                         max_connections: config.max_connections,
+                        memory_budget: Arc::clone(&memory_budget),
                     },
                     &stop_signals::requested,
                 ),

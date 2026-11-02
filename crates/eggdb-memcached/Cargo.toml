@@ -11,3 +11,4 @@ workspace = true
 
 [dependencies]
 eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-platform = { path = "../eggdb-platform" }

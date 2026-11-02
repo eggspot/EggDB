@@ -14,11 +14,16 @@ pub use server::{ServerConfig, serve, serve_stream};
 mod tests {
     use super::*;
     use eggdb_keyspace::MemoryKeyspace;
+    use eggdb_platform::connection_limits::MemoryBudget;
     use std::sync::atomic::AtomicU64;
 
     fn converse(shared: &Shared<'_>, input: &[u8]) -> String {
+        converse_within(shared, &MemoryBudget::default(), input)
+    }
+
+    fn converse_within(shared: &Shared<'_>, budget: &MemoryBudget, input: &[u8]) -> String {
         let mut out = Vec::new();
-        serve_stream(shared, input, &mut out).unwrap();
+        serve_stream(shared, budget, input, &mut out).unwrap();
         String::from_utf8(out).unwrap().replace("\r\n", "|")
     }
 
@@ -54,5 +59,31 @@ mod tests {
             answer,
             "STORED|EXISTS|STORED|VALUE k 0 1|c|END|TOUCHED|NOT_FOUND|HD|VA 2 f3|hi|EN|HD|MN|"
         );
+    }
+
+    #[test]
+    fn values_and_replies_past_the_memory_budget_get_out_of_memory_and_the_client_goes_on() {
+        let keyspace = MemoryKeyspace::default();
+        let shared = Shared {
+            keyspace: &keyspace,
+            next_cas: AtomicU64::new(1),
+        };
+        let budget = MemoryBudget::new(256 * 1024);
+        let value = "v".repeat(200 * 1024);
+        let mut input = Vec::new();
+        for key in ["a", "b"] {
+            input.extend(format!("set {key} 0 0 {}\r\n{value}\r\n", value.len()).into_bytes());
+        }
+        input.extend(b"get a\r\nget a b\r\n".to_vec());
+        input.extend(format!("set c 0 0 300000\r\n{}\r\n", "c".repeat(300_000)).into_bytes());
+        input.extend(b"version\r\n".to_vec());
+        let answer = converse_within(&shared, &budget, &input);
+        let expected = format!(
+            "STORED|STORED|VALUE a 0 {}|{value}|END|SERVER_ERROR out of memory|SERVER_ERROR out of memory storing object|VERSION 1.6.0 EggDB|",
+            value.len()
+        );
+        assert!(answer == expected, "{}", &answer[answer.len().saturating_sub(200)..]);
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(converse(&shared, b"get c\r\n"), "END|");
     }
 }

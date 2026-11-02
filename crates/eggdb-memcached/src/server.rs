@@ -2,6 +2,7 @@ use crate::commands::{
     MAX_ITEM_BYTES, Mode, Shared, Stored, arithmetic, check_key, delete, flush_all, get, storage,
     touch,
 };
+use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -86,14 +87,27 @@ fn server_error(message: String) -> Vec<u8> {
     }
 }
 
-/// Runs one connection's commands from `reader` and writes the answers to `writer`; returns
-/// when the client quits or the input ends.
+const OUT_OF_MEMORY_STORING: &[u8] = b"SERVER_ERROR out of memory storing object\r\n";
+const OUT_OF_MEMORY: &[u8] = b"SERVER_ERROR out of memory\r\n";
+
+fn discard(reader: &mut impl Read, bytes: usize) -> io::Result<()> {
+    let skipped = io::copy(&mut reader.take(bytes as u64), &mut io::sink())?;
+    if skipped < bytes as u64 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(())
+}
+
+/// Runs one connection's commands from `reader` and writes the answers to `writer`, holding
+/// large values and replies against `budget`; returns when the client quits or the input ends.
 pub fn serve_stream(
     shared: &Shared<'_>,
+    budget: &MemoryBudget,
     reader: impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(reader);
+    let mut held = budget.empty_reservation();
     loop {
         let Some(request) = (match line(&mut reader) {
             Ok(request) => request,
@@ -130,6 +144,13 @@ pub fn serve_stream(
                     writer.write_all(b"CLIENT_ERROR bad data chunk\r\n")?;
                     if length > MAX_ITEM_BYTES {
                         return Ok(());
+                    }
+                    continue;
+                }
+                if !held.hold_if_large(length + 2) {
+                    discard(&mut reader, length + 2)?;
+                    if !noreply {
+                        writer.write_all(OUT_OF_MEMORY_STORING)?;
                     }
                     continue;
                 }
@@ -283,6 +304,11 @@ pub fn serve_stream(
                     writer.write_all(b"CLIENT_ERROR bad data chunk\r\n")?;
                     return Ok(());
                 };
+                if !held.hold_if_large(length + 2) {
+                    discard(&mut reader, length + 2)?;
+                    writer.write_all(OUT_OF_MEMORY_STORING)?;
+                    continue;
+                }
                 let mut data = vec![0u8; length + 2];
                 reader.read_exact(&mut data)?;
                 data.truncate(length);
@@ -306,17 +332,26 @@ pub fn serve_stream(
             },
             _ => b"ERROR\r\n".to_vec(),
         };
+        let answer = if held.hold_if_large(answer.len()) {
+            answer
+        } else {
+            OUT_OF_MEMORY.to_vec()
+        };
         if !noreply {
             writer.write_all(&answer)?;
         }
+        held.hold_if_large(0);
     }
 }
 
 /// How the memcached server runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's values and replies hold together, shared with the
+    /// server's other listeners.
+    pub memory_budget: std::sync::Arc<MemoryBudget>,
 }
 
 /// Serves memcached clients on `listener` from `shared`, a thread per connection, until
@@ -329,6 +364,7 @@ pub fn serve(
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
+    let budget: &MemoryBudget = &config.memory_budget;
     std::thread::scope(|scope| {
         while !stop() {
             let stream = match listener.accept() {
@@ -354,7 +390,12 @@ pub fn serve(
                 .name("eggdb-memcached".to_owned())
                 .spawn_scoped(scope, move || {
                     if let Ok(mut writer) = stream.try_clone() {
-                        let _ = serve_stream(shared, StopAware { stream, stop }, &mut writer);
+                        let _ = serve_stream(
+                            shared,
+                            budget,
+                            StopAware { stream, stop },
+                            &mut writer,
+                        );
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
