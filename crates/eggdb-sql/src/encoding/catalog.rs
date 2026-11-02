@@ -42,6 +42,12 @@ pub(crate) fn decode_schema(name: &str, bytes: &[u8]) -> SqlResult<()> {
     Ok(())
 }
 
+pub(crate) fn every_dependency_prefix() -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(DEPENDENCY_SPACE);
+    key
+}
+
 pub(crate) fn dependencies_prefix(referenced: &str) -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
     key.push(DEPENDENCY_SPACE);

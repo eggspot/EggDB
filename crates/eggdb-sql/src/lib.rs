@@ -216,6 +216,8 @@ mod view_change_tests;
 #[cfg(test)]
 mod visible_tables_tests;
 #[cfg(test)]
+mod visible_writes_tests;
+#[cfg(test)]
 mod window_tests;
 #[cfg(test)]
 mod with_statement_tests;
@@ -276,7 +278,9 @@ pub use store::{
 };
 pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
-pub use visible_tables::{UnknownTableName, VisibleRead, VisibleTables};
+pub use visible_tables::{
+    OutsideLink, OutsideLinkKind, UnknownTableName, VisibleRead, VisibleTables, VisibleWrite,
+};
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's
 /// rows. Other keys of the same database never start with them unless written there on

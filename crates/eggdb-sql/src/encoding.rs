@@ -72,6 +72,12 @@ pub(crate) fn sequences_prefix() -> Vec<u8> {
     sequence_key("")
 }
 
+pub(crate) fn every_reference_prefix() -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(REFERENCE_SPACE);
+    key
+}
+
 pub(crate) fn references_prefix(parent: &str) -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
     key.push(REFERENCE_SPACE);

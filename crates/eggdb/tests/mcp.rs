@@ -950,7 +950,7 @@ fn an_agent_limited_to_tables_sees_only_them_in_every_dialect_and_catalog() {
 }
 
 #[test]
-fn startup_refuses_unknown_tables_tables_with_writes_and_a_bad_call_gap() {
+fn startup_refuses_unknown_tables_and_a_bad_call_gap() {
     let (file, _audit) = sample("mcp-tables-refused", 0);
     let path = file.path().to_str().unwrap().to_owned();
     let unknown = eggdb(&["mcp", &path, "--tables", "users,ordres,USERS"]);
@@ -977,10 +977,10 @@ fn startup_refuses_unknown_tables_tables_with_writes_and_a_bad_call_gap() {
         "{}",
         stderr(&one)
     );
-    let writing = eggdb(&["mcp", &path, "--allow-write", "--tables", "users"]);
-    assert_eq!(writing.status.code(), Some(2));
+    let writing = eggdb(&["mcp", &path, "--allow-write", "--tables", "USERS"]);
+    assert_eq!(writing.status.code(), Some(1));
     assert!(
-        stderr(&writing).contains("--tables goes with a read-only server in this release"),
+        stderr(&writing).contains("--tables names 'USERS' (stored as 'users')"),
         "{}",
         stderr(&writing)
     );
@@ -994,6 +994,111 @@ fn startup_refuses_unknown_tables_tables_with_writes_and_a_bad_call_gap() {
         stderr(&gap)
     );
     assert!(!audit_path(file.path()).exists());
+}
+
+fn sql_failure(answer: &Node) -> (String, String) {
+    assert_eq!(error_code(answer), "sql_error", "{}", canonical(answer));
+    (
+        text_at(result(answer), &["error", "sqlstate"]),
+        text_at(result(answer), &["error", "message"]),
+    )
+}
+
+#[test]
+fn an_agent_writing_with_tables_changes_only_those_tables() {
+    let (file, _audit) = sample("mcp-tables-write", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let setup = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "CREATE TABLE secrets (id integer PRIMARY KEY, code text); \
+         INSERT INTO secrets VALUES (1, 'swordfish'); \
+         CREATE TABLE notes (id serial PRIMARY KEY, body text); \
+         CREATE TABLE parents (id integer PRIMARY KEY); \
+         CREATE TABLE children (id integer PRIMARY KEY, parent integer REFERENCES parents (id) ON DELETE CASCADE); \
+         INSERT INTO parents VALUES (1); \
+         INSERT INTO children VALUES (1, 1)",
+    ]);
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let mut mcp = Mcp::start(
+        file.path(),
+        &[
+            "--allow-write",
+            "--tables",
+            "users,notes,parents,drafts",
+            "--call-gap",
+            "0",
+        ],
+    );
+    mcp.initialize();
+    let inserted = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO notes (body) VALUES ('hello')"}"#,
+    );
+    assert_eq!(text_at(ok(&inserted), &["committed"]), "true");
+    let updated = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE users SET email = 'grace@example.com' WHERE id = 2"}"#,
+    );
+    assert_eq!(text_at(ok(&updated), &["committed"]), "true");
+    let created = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE TABLE drafts (id integer PRIMARY KEY, body text)"}"#,
+    );
+    assert_eq!(text_at(ok(&created), &["committed"]), "true");
+    let into_created = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO drafts VALUES (1, 'first')"}"#,
+    );
+    assert_eq!(text_at(ok(&into_created), &["committed"]), "true");
+    let hidden = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO secrets VALUES (2, 'x')"}"#,
+    );
+    assert_eq!(sql_failure(&hidden).0, "42P01");
+    let other_name = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE TABLE elsewhere (id integer)"}"#,
+    );
+    let (state, message) = sql_failure(&other_name);
+    assert_eq!(state, "42501");
+    assert!(message.contains("\"elsewhere\""), "{message}");
+    let routine = mcp.call(
+        "write_sql",
+        r#"{"sql":"CREATE FUNCTION leak() RETURNS integer AS 'SELECT 1' LANGUAGE sql"}"#,
+    );
+    assert_eq!(sql_failure(&routine).0, "42501");
+    let cascading = mcp.call(
+        "write_sql",
+        r#"{"sql":"INSERT INTO parents VALUES (2)"}"#,
+    );
+    let (state, message) = sql_failure(&cascading);
+    assert_eq!(state, "42501");
+    assert!(
+        message.contains("table \"children\" has a foreign key to \"parents\""),
+        "{message}"
+    );
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(
+        messages.contains("read-write, tables users, notes, parents, drafts"),
+        "{messages}"
+    );
+    let check = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "SELECT 'secrets=' || CAST(count(*) AS text) FROM secrets; \
+         SELECT 'parents=' || CAST(count(*) AS text) FROM parents; \
+         SELECT 'note=' || body FROM notes; \
+         SELECT 'draft=' || body FROM drafts",
+    ]);
+    assert!(check.status.success(), "{}", stderr(&check));
+    let rows = stdout(&check);
+    for expected in ["secrets=1", "parents=1", "note=hello", "draft=first"] {
+        assert!(rows.contains(expected), "{expected}: {rows}");
+    }
 }
 
 #[test]

@@ -46,8 +46,9 @@ file, and `--dialect oracle` Oracle's (no Oracle wire protocol). `eggdb mcp` let
 such as Claude Code read the file over MCP, read-only, every call in an audit log
 ([docs/mcp.md](docs/mcp.md)). With `--allow-write` an agent may also change it; a statement that
 can drop data or change many rows waits for your yes, but a client that cannot ask you lets the
-agent answer for you (`confirm: true`), so `--allow-write` then lets the agent change anything,
-and there is no per-table grant for writes: give unattended agents read-only access. What is in it:
+agent answer for you (`confirm: true`), so `--allow-write` then lets the agent change anything
+it can see: add `--tables a,b` to limit it to those tables, and give unattended agents read-only
+access. What is in it:
 [docs/releases/v0.2.0.md](docs/releases/v0.2.0.md); everything it doesn't do yet, in one list:
 its [Limits](docs/releases/v0.2.0.md#limits);
 what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:

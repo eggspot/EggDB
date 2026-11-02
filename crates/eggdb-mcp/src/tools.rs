@@ -541,7 +541,7 @@ impl<O: DatabaseOpener> Call<'_, O> {
         };
         let limits = CallLimits::new(self.deadline);
         let result = run(
-            &WritingCallStore::new(&store, &limits, self.watchdog),
+            &WritingCallStore::new(&store, &limits, self.watchdog, self.tables),
             &limits,
         );
         let committed = limits.committed();
@@ -1923,6 +1923,15 @@ mod tests {
         for category in Category::ALL {
             assert!(limited.contains(category.name()), "{}", category.name());
         }
+        let writing = instructions(true, true);
+        assert!(writing.is_ascii() && !writing.contains('\n'), "{writing}");
+        assert!(
+            writing.contains("needs the user's confirmation. The user limited this session to some tables (--tables): you may read and change only those")
+                && writing.contains("is refused with SQLSTATE 42501 and rolled back")
+                && writing.contains("To reach more, ask the user to widen --tables. Start with list_tables"),
+            "{writing}"
+        );
+        assert!(!instructions(true, false).contains("--tables"));
         let listed = tools_list(Grants {
             allow_write: false,
             key_value_store: false,

@@ -3362,7 +3362,6 @@ Usage errors, exit 2, section 7's shape (`eggdb: <message>`, then the `usage:` a
 help mcp` lines):
 | When | Message |
 |------|---------|
-| `--tables` with `--allow-write` | `--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table` |
 | `--tables ""` | `--tables needs at least one name, such as --tables users,orders` |
 | an empty entry or a trailing comma | `--tables has an empty name in 'users,,orders'` |
 | more than one dot, or a dot with nothing on one side | `--tables takes name or schema.name, not 'a.b.c'` |
@@ -3448,16 +3447,20 @@ offered), are not there, and a query that names one fails as it would for a miss
 are comma-separated, name or schema.name (public. and dbo. mean the default schema), matched
 exactly as stored; repeat --tables to add more. A sequence comes with the table that owns it, or
 is named itself. Every name must be a table, view or sequence of the file when the server starts,
-or it does not start. --tables goes with a read-only server in this release, not with
---allow-write. After each call the server waits --call-gap milliseconds before the next call
-opens the file, so your own programs, which are refused while a call holds the file, get their
+or it does not start; with --allow-write a name not there yet is one the agent may create. With
+--allow-write and --tables the agent changes only the tables named: creating, changing or dropping
+anything else (a table, view, sequence, schema, type, routine or role) is refused, and so is a
+change to a named table that a foreign key or a view ties to a table not named; the server lists
+those ties when it starts. After each call the server waits --call-gap milliseconds before the
+next call opens the file, so your own programs, which are refused while a call holds the file, get their
 turn between an agent's calls; 0 turns the gap off.
 ```
 The option lines, in this order (the text column stays at column 32, as `--time-limit`'s):
 ```
       --allow-write            add write_sql: one statement per call that may change the file
-      --tables <names>         only these tables and views exist for the agent: comma-separated,
-                               name or schema.name; repeat it for more (read-only servers only)
+      --tables <names>         only these tables and views exist for the agent, and with
+                               --allow-write only these change: comma-separated, name or
+                               schema.name; repeat it for more
       --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
       --call-gap <ms>          the pause after each call before the next, so other programs can write;
                                milliseconds, 0 to 10000 (default 100)
@@ -3548,9 +3551,11 @@ eggdb: --tables names 'ordres': no table, view or sequence in app.db has that na
 $ echo $?
 1
 $ eggdb mcp app.db --tables users,orders --allow-write
-eggdb: --tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table
-  usage: eggdb mcp <file> [--allow-write] [--tables <names>]... [--time-limit <seconds>] [--call-gap <ms>]
-  try: eggdb help mcp
+eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
+  writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
+  tables       users, orders only (--tables): the agent reads and changes only these; other tables do not exist for it, a change that would reach one is refused, and kv_get and kv_scan are off
+  tied         table "order_lines" has a foreign key to "orders", so the agent cannot change the rows and definition of orders; add order_lines to --tables to allow it
+  ...
 $ eggdb mcp app.db --tables users --tables orders,archive.orders --call-gap 250
 eggdb mcp app.db: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
   tables       users, orders, archive.orders only (--tables); other tables do not exist for the agent, and kv_get and kv_scan are off

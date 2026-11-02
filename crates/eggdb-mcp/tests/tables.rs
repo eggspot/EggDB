@@ -5,10 +5,10 @@
 mod common;
 
 use common::{
-    MapOpener, MapStore, TempAudit, call, config, error_code, get, parsed, structured,
+    MapOpener, MapStore, TempAudit, call, config, count, error_code, get, parsed, structured,
     tables_config, text_at,
 };
-use eggdb_mcp::{Server, ServerConfig, StartFailure};
+use eggdb_mcp::{Server, ServerConfig};
 use eggdb_sql::Dialect;
 use eggdb_sql::json::{Json, Node};
 use std::time::{Duration, Instant};
@@ -225,19 +225,126 @@ fn the_instructions_tell_the_agent_about_the_limit() {
     assert!(!instructions.contains("users"), "{instructions}");
 }
 
+fn write(server: &mut Server<'_, MapOpener>, id: u32, sql: &str) -> Node {
+    let arguments = format!(r#"{{"sql":{sql:?},"confirm":true}}"#);
+    call(server, id, "write_sql", &arguments)
+}
+
+fn write_refused(server: &mut Server<'_, MapOpener>, id: u32, sql: &str) -> (String, String) {
+    let answer = write(server, id, sql);
+    assert_eq!(error_code(&answer), "sql_error", "{sql}");
+    (
+        text_at(structured(&answer), &["error", "sqlstate"]),
+        text_at(structured(&answer), &["error", "message"]),
+    )
+}
+
 #[test]
-fn tables_cannot_be_combined_with_writes() {
+fn a_writing_agent_limited_to_tables_changes_only_those() {
     let audit = TempAudit::new("tables-writes");
-    let opener = MapOpener::new(shop());
-    let refused = Server::new(
+    let store = shop();
+    store.sql(
+        Dialect::PostgreSql,
+        "CREATE TABLE tags (id serial PRIMARY KEY, label text); \
+         CREATE TABLE tag_log (id serial PRIMARY KEY, label text); \
+         CREATE FUNCTION log_tag() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO tag_log (label) VALUES (NEW.label); RETURN NEW; END $$; \
+         CREATE TABLE logged_tags (id integer PRIMARY KEY, label text); \
+         CREATE TRIGGER logged AFTER INSERT ON logged_tags FOR EACH ROW EXECUTE FUNCTION log_tag(); \
+         CREATE PROCEDURE raise_pay() LANGUAGE plpgsql AS $$ BEGIN UPDATE salaries SET amount = amount * 2; END $$",
+    );
+    let opener = MapOpener::new(store);
+    let mut server = Server::new(
         &opener,
         ServerConfig {
             allow_write: true,
-            ..tables_config(&audit, &["users"])
+            ..tables_config(&audit, &["users", "tags", "logged_tags", "notes"])
         },
+    )
+    .unwrap();
+    let answer = parsed(&server.handle(INITIALIZE).unwrap());
+    let instructions = text_at(&answer, &["result", "instructions"]);
+    assert!(
+        instructions.contains("you may read and change only those"),
+        "{instructions}"
     );
-    assert!(matches!(refused, Err(StartFailure::TablesWithWrites)));
-    assert!(audit.lines().is_empty());
+    assert!(!instructions.contains("salaries"), "{instructions}");
+    let inserted = write(&mut server, 1, "INSERT INTO tags (label) VALUES ('red')");
+    assert_eq!(text_at(structured(&inserted), &["committed"]), "true");
+    let created = write(
+        &mut server,
+        2,
+        "CREATE TABLE notes (id serial PRIMARY KEY, body text)",
+    );
+    assert_eq!(text_at(structured(&created), &["committed"]), "true");
+    let noted = write(&mut server, 3, "INSERT INTO notes (body) VALUES ('hi')");
+    assert_eq!(text_at(structured(&noted), &["committed"]), "true");
+    assert_eq!(
+        write_refused(&mut server, 4, "INSERT INTO salaries VALUES (3, 300)").0,
+        "42P01"
+    );
+    let (state, message) = write_refused(&mut server, 5, "INSERT INTO users VALUES (3, 'Hedy')");
+    assert_eq!(state, "42501");
+    assert!(
+        message.contains("table \"salaries\" has a foreign key to \"users\""),
+        "{message}"
+    );
+    let (state, message) = write_refused(&mut server, 6, "CREATE TABLE elsewhere (id integer)");
+    assert_eq!(state, "42501");
+    assert!(message.contains("\"elsewhere\""), "{message}");
+    assert_eq!(
+        write_refused(
+            &mut server,
+            7,
+            "CREATE FUNCTION leak() RETURNS integer LANGUAGE sql AS 'SELECT 1'"
+        )
+        .0,
+        "42501"
+    );
+    assert_eq!(
+        write_refused(&mut server, 8, "INSERT INTO logged_tags VALUES (1, 'blue')").0,
+        "42P01"
+    );
+    assert_eq!(
+        write_refused(&mut server, 9, "CALL raise_pay()").0,
+        "42P01"
+    );
+    assert_eq!(
+        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM tags"),
+        1
+    );
+    assert_eq!(
+        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM notes"),
+        1
+    );
+    assert_eq!(
+        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM tag_log"),
+        0
+    );
+    assert_eq!(
+        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM logged_tags"),
+        0
+    );
+    assert_eq!(
+        count(&opener.store, Dialect::PostgreSql, "SELECT count(*) FROM users"),
+        2
+    );
+    assert_eq!(
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM salaries WHERE amount IN (100, 200)"
+        ),
+        2
+    );
+    assert_eq!(
+        count(
+            &opener.store,
+            Dialect::PostgreSql,
+            "SELECT count(*) FROM pg_class WHERE relname IN ('elsewhere', 'leak')"
+        ),
+        0
+    );
+    assert!(audit.lines()[0].contains(r#""allow_write":true"#));
 }
 
 #[test]

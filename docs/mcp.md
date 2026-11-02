@@ -140,9 +140,46 @@ or is named itself.
 - **Checked at start.** Every name must be a table, view or sequence of the file when the server
   starts (skipped while another program has the file open for writing); otherwise it exits 1
   with `table_not_found`, naming the stored name when only the letter case differs.
-- **Read-only servers only, for now.** `--tables` with `--allow-write` is a usage error.
+- **With `--allow-write`, only the listed tables change.** See below.
 
 The audit's `server_started` record lists the names (`"tables"`), and `eggdb audit` shows them.
+
+### Letting the agent write only some tables
+
+```sh
+claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write --tables orders,order_lines
+```
+
+With both options the agent reads and changes only the tables you name (DNEW-F-mcp-tables-write).
+The same filter that hides the other tables sits under the writer too, so every way a statement
+can reach another table is covered, not a list of statement kinds:
+
+- **Other tables are missing.** `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `COPY` or a
+  `SELECT` that names an unlisted table fails as missing (`42P01`), as it does on a read-only
+  server. So does a trigger on a listed table whose function writes an unlisted one, a
+  procedure or function whose body reads or writes one, and `nextval` on a sequence that is
+  neither listed nor owned by a listed table. The statement fails and nothing is changed.
+- **New objects only under listed names.** `CREATE TABLE` or `CREATE VIEW` works for a name in
+  `--tables` (the name need not exist when the server starts), and a sequence a listed table
+  owns (`serial`, identity) comes with it. Any other name, renaming a listed table to an
+  unlisted name, and creating or replacing a schema, type, function, procedure, package or role
+  is refused with SQLSTATE `42501`, naming the object. So is creating or changing a trigger, even
+  on a listed table, since its function would run in your own later sessions, unfiltered.
+- **Ties to unlisted tables freeze what they tie.** When an unlisted table has a foreign key to a
+  listed one, or a listed one has a foreign key to an unlisted one, the listed table's rows and
+  definition cannot change, since a delete could cascade or a check would read the other table;
+  when an unlisted view reads a listed table, its definition (`ALTER`, `DROP`) cannot change.
+  The refusal (`42501`) names both tables, and the banner lists these ties when the server
+  starts: list the other table too to allow the change.
+- **A refusal rolls everything back.** A transaction in which any change was refused is rolled
+  back at commit, even when a procedure caught the error.
+- **The keys stay off**, and listed tables may be granted and analyzed as usual.
+- **Not covered yet.** A column default, check, generated column or index expression on a listed
+  table may call a function that already exists; it then runs in your own sessions when they
+  change that table. Review such definitions before trusting the data.
+
+A server that acts as a stored role (D190) limits an agent through `GRANT`s instead; `--tables`
+needs no role in the file, follows triggers and routines, and also stops DDL outside the list.
 
 ## Letting the agent write
 
@@ -203,9 +240,9 @@ destructive runs until you say yes. With a client that cannot ask, `confirm: tru
 agent itself: it stops an agent that did not mean to destroy data, not one that decides to (or is
 talked into it by text it read, a prompt injection). Without a client that asks you,
 `--allow-write` lets the agent change or drop anything in the file. A client may also be set to
-accept for you. And with `--allow-write` there is no per-table grant: the agent can change every
-table (`--tables` limits only a read-only server). Give unattended agents a read-only server,
-give `--allow-write` only to agents you would let change all the data, and keep a backup.
+accept for you. And with `--allow-write` alone the agent can change every table; add `--tables` to limit it to
+some (above). Give unattended agents a read-only server, give `--allow-write` only to agents you
+would let change all the data they can see, and keep a backup.
 
 ## Over HTTP, from eggdb serve
 

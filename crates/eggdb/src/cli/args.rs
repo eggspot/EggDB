@@ -1508,12 +1508,6 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             "--prefix cannot be combined with --from or --to".to_owned(),
         ));
     }
-    if request.allow_write && !request.tables.is_empty() {
-        return Err(usage(
-            "--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table"
-                .to_owned(),
-        ));
-    }
     let arguments = &tokens.positionals[1..];
     if command == CommandName::Collection {
         return collection_request(request, arguments);
@@ -2349,6 +2343,9 @@ mod tests {
         assert_eq!(limited.tables, vec!["users", "orders", "archive.orders"]);
         assert_eq!(limited.call_gap_ms, Some(250));
         assert!(!limited.allow_write);
+        let writing = request("mcp app.db --allow-write --tables users,orders");
+        assert!(writing.allow_write);
+        assert_eq!(writing.tables, vec!["users", "orders"]);
         let plain = request("mcp app.db");
         assert!(plain.tables.is_empty());
         assert_eq!(plain.call_gap_ms, None);
@@ -2360,11 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_refuses_tables_with_writes_and_malformed_names_and_gaps() {
-        assert_eq!(
-            usage_message("mcp app.db --allow-write --tables users"),
-            "--tables goes with a read-only server in this release: drop --allow-write, or drop --tables to let the agent write every table"
-        );
+    fn mcp_refuses_malformed_names_and_gaps() {
         assert_eq!(
             usage_message("mcp app.db --tables users,,orders"),
             "--tables has an empty name in 'users,,orders'"

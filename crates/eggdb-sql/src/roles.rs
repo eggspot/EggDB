@@ -9,7 +9,7 @@ use eggdb_crypto::{base64_encode, hmac_sha256, pbkdf2_hmac_sha256, sha256};
 use std::collections::BTreeSet;
 
 const ROLE_SPACE: u8 = 0x11;
-const GRANT_SPACE: u8 = 0x12;
+pub(crate) const GRANT_SPACE: u8 = 0x12;
 const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
 const SUPERUSER: u8 = 2;
