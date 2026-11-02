@@ -38,6 +38,7 @@ mod serve_mongo;
 mod serve_resp;
 mod serve_tls;
 mod shell;
+mod shell_block;
 mod shell_copy;
 pub(super) mod sql;
 mod table;

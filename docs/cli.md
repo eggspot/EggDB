@@ -981,8 +981,23 @@ lines.
 one continues, `app'>` and `app">` inside an unfinished string or quoted name, `app=*>` inside a
 `BEGIN` block and `app=!>` in a failed one (every statement answers `25P02` until `ROLLBACK`).
 `BEGIN` holds the database's write transaction across prompts until `COMMIT` or `ROLLBACK`; a
-block still open when the shell ends is rolled back with a `WARNING:`. Key-value writes inside a
-block fail with the busy error (exit 5): the block holds the one write transaction.
+block still open when the shell ends is rolled back with a `WARNING:`. Inside a block, `put`,
+`get`, `del`, `incr` and `decr` run in the block's own transaction, so key-value writes and SQL
+are all-or-nothing together: `COMMIT` keeps both, `ROLLBACK` (or a block left open at the end)
+drops both, and `get` sees what the block wrote. In a failed block they are refused until
+`ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, and `expire`, `persist` and
+`cas` are refused inside a block for now; `scan`, `ttl`, `check`, `stats` and `backup` read the
+last commit (DNEW-R-M3-shell).
+
+```
+app=> begin;
+BEGIN
+app=*> put stock:egg 11
+app=*> insert into sales (item_id, quantity) values (1, 1);
+INSERT 0 1
+app=*> commit;
+COMMIT
+```
 
 | Shell command | Does |
 |---------------|------|

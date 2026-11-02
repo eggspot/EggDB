@@ -315,3 +315,89 @@ fn the_oracle_shell_refuses_a_bad_set_serveroutput_and_prints_lines_before_an_er
         text(&failed.stderr)
     );
 }
+
+#[test]
+fn key_value_writes_and_sql_in_one_block_commit_together() {
+    let directory = TempDirectory::new("shell-mixed-commit");
+    let file = created(&directory);
+    let script = "create table items (id integer primary key, name text);\n\
+        begin;\n\
+        put stock:egg 12\n\
+        insert into items values (1, 'egg');\n\
+        incr orders\n\
+        get stock:egg\n\
+        commit;\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "CREATE TABLE\nBEGIN\nINSERT 0 1\n1\n12\nCOMMIT\n"
+    );
+    let after = shell(
+        &file,
+        &[],
+        "get stock:egg\nget orders\n.mode csv\nselect name from items;\n",
+    );
+    assert_eq!(after.exit, 0, "{}", text(&after.stderr));
+    assert_eq!(text(&after.stdout), "12\n1\nmode: csv\nname\negg\n");
+}
+
+#[test]
+fn rollback_drops_the_key_value_writes_of_the_block_with_its_sql() {
+    let directory = TempDirectory::new("shell-mixed-rollback");
+    let file = created(&directory);
+    let script = "create table items (id integer primary key, name text);\n\
+        put stock:egg 1\n\
+        put stock:ham 5\n\
+        begin;\n\
+        put stock:egg 99\n\
+        del stock:ham\n\
+        insert into items values (2, 'ham');\n\
+        get stock:egg\n\
+        rollback;\n\
+        get stock:egg\n\
+        get stock:ham\n\
+        .mode csv\n\
+        select count(*) as n from items;\n";
+    let ran = shell(&file, &[], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    assert_eq!(
+        text(&ran.stdout),
+        "CREATE TABLE\nBEGIN\nINSERT 0 1\n99\nROLLBACK\n1\n5\nmode: csv\nn\n0\n"
+    );
+}
+
+#[test]
+fn a_failed_block_refuses_key_value_writes_until_rollback() {
+    let directory = TempDirectory::new("shell-mixed-failed");
+    let file = created(&directory);
+    let script = "create table t (id integer primary key);\n\
+        begin;\n\
+        put k before\n\
+        insert into t values (1);\n\
+        insert into t values (1);\n\
+        put k after\n\
+        expire k 30s\n\
+        rollback;\n\
+        begin;\n\
+        expire k 30s\n\
+        rollback;\n\
+        get k\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    assert!(stderr.contains("SQLSTATE:  23505"), "{stderr}");
+    assert!(
+        stderr.contains("cannot run put in "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the transaction block failed; ROLLBACK ends it"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("expire cannot run inside a transaction block yet; COMMIT or ROLLBACK first"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("key not found: k"), "{stderr}");
+    assert!(!text(&ran.stdout).contains("before"), "{}", text(&ran.stdout));
+}

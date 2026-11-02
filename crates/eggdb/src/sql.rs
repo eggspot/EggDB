@@ -382,6 +382,190 @@ impl<'t, 'db> KeyValueStore for TransactionStore<'t, 'db> {
     }
 }
 
+/// A [`Database`] as the store SQL sessions run on, whose open write transaction key-value code
+/// also reaches between statements. While a session's block (`BEGIN` to `COMMIT` or `ROLLBACK`)
+/// holds the database's one write transaction, [`SharedWriteStore::with_open_transaction`]
+/// writes into that same transaction, so the block's commit keeps the key-value writes and the
+/// SQL changes together and its rollback drops both.
+///
+/// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let path = std::env::temp_dir().join(format!("eggdb-doc-shared-{}.db", std::process::id()));
+/// use eggdb::sql::{Dialect, SharedWriteStore};
+/// let db = eggdb::Database::open(&path)?;
+/// let store = SharedWriteStore::new(&db);
+/// let mut sql = store.session(Dialect::PostgreSql);
+/// sql.execute("CREATE TABLE orders (id integer PRIMARY KEY)", &mut |_| {})?;
+/// sql.execute("BEGIN; INSERT INTO orders VALUES (7)", &mut |_| {})?;
+/// store.with_open_transaction(|tx| tx.put("last_order", "7")).transpose()?;
+/// sql.execute("ROLLBACK", &mut |_| {})?;
+/// assert_eq!(db.get("last_order")?, None);
+/// sql.close()?;
+/// # drop(store);
+/// # drop(db);
+/// # std::fs::remove_file(&path)?;
+/// # Ok(()) }
+/// ```
+#[derive(Debug)]
+pub struct SharedWriteStore<'db> {
+    db: &'db Database,
+    open: std::cell::RefCell<Option<WriteTransaction<'db>>>,
+}
+
+impl<'db> SharedWriteStore<'db> {
+    /// A store over `db` with no write transaction open.
+    pub fn new(db: &'db Database) -> Self {
+        eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
+        Self {
+            db,
+            open: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// A SQL session on this store that reads `dialect`, outside any transaction block.
+    pub fn session(&self, dialect: Dialect) -> Session<'_> {
+        Session::with_dialect(self, dialect)
+    }
+
+    /// Runs `work` on the write transaction a SQL session holds open on this store, as a block
+    /// does from `BEGIN` to its end, and returns what it returned; `None`, without running it,
+    /// when no write transaction is open.
+    pub fn with_open_transaction<T>(
+        &self,
+        work: impl FnOnce(&mut WriteTransaction<'db>) -> T,
+    ) -> Option<T> {
+        let mut open = self.open.try_borrow_mut().ok()?;
+        open.as_mut().map(work)
+    }
+}
+
+/// The write transaction SQL writes through, as [`SharedWriteStore`] gives it: the transaction
+/// stays in the store, where [`SharedWriteStore::with_open_transaction`] reaches it between
+/// statements. Dropping it without a commit rolls the transaction back.
+#[derive(Debug)]
+pub struct SharedWriter<'s, 'db> {
+    open: &'s std::cell::RefCell<Option<WriteTransaction<'db>>>,
+}
+
+fn shared_transaction_ended() -> SqlError {
+    SqlError::store(
+        StoreFailure::Other,
+        "the shared write transaction has already ended",
+    )
+}
+
+impl<'db> SharedWriter<'_, 'db> {
+    fn reading<T>(
+        &self,
+        work: impl FnOnce(&WriteTransaction<'db>) -> SqlResult<T>,
+    ) -> SqlResult<T> {
+        let open = self.open.try_borrow().map_err(|_| in_use())?;
+        work(open.as_ref().ok_or_else(shared_transaction_ended)?)
+    }
+
+    fn writing<T>(
+        &self,
+        work: impl FnOnce(&mut WriteTransaction<'db>) -> SqlResult<T>,
+    ) -> SqlResult<T> {
+        let mut open = self.open.try_borrow_mut().map_err(|_| in_use())?;
+        work(open.as_mut().ok_or_else(shared_transaction_ended)?)
+    }
+
+    fn taken(&self) -> SqlResult<WriteTransaction<'db>> {
+        self.open
+            .try_borrow_mut()
+            .map_err(|_| in_use())?
+            .take()
+            .ok_or_else(shared_transaction_ended)
+    }
+}
+
+impl Drop for SharedWriter<'_, '_> {
+    fn drop(&mut self) {
+        if let Ok(mut open) = self.open.try_borrow_mut()
+            && let Some(transaction) = open.take()
+        {
+            let _ = transaction.rollback();
+        }
+    }
+}
+
+impl KeyValueRead for SharedWriter<'_, '_> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.reading(|transaction| transaction.get(key).map_err(store_error))
+    }
+
+    fn get_with(
+        &self,
+        key: &[u8],
+        read: &mut dyn FnMut(&[u8]) -> SqlResult<()>,
+    ) -> SqlResult<bool> {
+        self.reading(
+            |transaction| match transaction.get_with(key, read).map_err(store_error)? {
+                Some(outcome) => outcome.map(|()| true),
+                None => Ok(false),
+            },
+        )
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        self.reading(|transaction| scan_through(transaction.scan(range), direction, visit))
+    }
+}
+
+impl KeyValueWrite for SharedWriter<'_, '_> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        self.writing(|transaction| transaction.put(key, value).map_err(store_error))
+    }
+
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        self.writing(|transaction| transaction.put_if_absent(key, value).map_err(store_error))
+    }
+
+    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.writing(|transaction| transaction.delete(key).map_err(store_error))
+    }
+
+    fn commit(self) -> SqlResult<()> {
+        self.taken()?.commit().map(|_| ()).map_err(store_error)
+    }
+
+    fn rollback(self) -> SqlResult<()> {
+        self.taken()?.rollback().map_err(store_error)
+    }
+}
+
+impl<'db> KeyValueStore for SharedWriteStore<'db> {
+    type Read<'s>
+        = SqlSnapshot<'s>
+    where
+        Self: 's;
+    type Write<'s>
+        = SharedWriter<'s, 'db>
+    where
+        Self: 's;
+
+    fn begin_read(&self) -> SqlResult<SqlSnapshot<'_>> {
+        self.db.begin_read().map(SqlSnapshot).map_err(store_error)
+    }
+
+    fn begin_write(&self) -> SqlResult<SharedWriter<'_, 'db>> {
+        let mut open = self.open.try_borrow_mut().map_err(|_| in_use())?;
+        if open.is_some() {
+            return Err(SqlError::store(StoreFailure::Busy, WRITER_BUSY));
+        }
+        *open = Some(self.db.begin_write().map_err(store_error)?);
+        Ok(SharedWriter { open: &self.open })
+    }
+}
+
 impl<'db> WriteTransaction<'db> {
     /// Runs the SQL statements in `text`, in `dialect`, inside this transaction, and returns
     /// each statement's result. Their changes become part of this transaction, so one commit
