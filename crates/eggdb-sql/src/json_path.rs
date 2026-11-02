@@ -649,8 +649,10 @@ impl Parser {
                 return Err(self.unexpected());
             };
             self.at += 1;
-            let mut options = Options::default();
-            options.newline_excluded = true;
+            let mut options = Options {
+                newline_excluded: true,
+                ..Options::default()
+            };
             if self.take_word("flag") {
                 let Some(Token::String(flags)) = self.peek().cloned() else {
                     return Err(self.unexpected());
@@ -1232,6 +1234,7 @@ impl<'a> Evaluator<'a> {
         result.map(|number| number_json(&number)).map_err(Failure::Suppressible)
     }
 
+    #[allow(clippy::ptr_arg)]
     fn step(
         &self,
         step: &Step,
@@ -1358,6 +1361,7 @@ impl<'a> Evaluator<'a> {
             })
     }
 
+    #[allow(clippy::ptr_arg)]
     fn elements(
         &self,
         subscripts: &[Subscript],

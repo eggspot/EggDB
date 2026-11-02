@@ -417,15 +417,11 @@ fn misused_statements_are_answered_with_a_status() {
 
     let stmt = prepared(sql, "INSERT INTO t VALUES ($1)");
     // SAFETY: a live statement; index 0 and 2 are out of range and refused.
-    assert_eq!(
-        unsafe { eggdb_stmt_bind_int64(stmt, 0, 1) },
-        EGGDB_ERR_INVALID_ARGUMENT
-    );
+    let status = unsafe { eggdb_stmt_bind_int64(stmt, 0, 1) };
+    assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { eggdb_stmt_bind_int64(stmt, 2, 1) },
-        EGGDB_ERR_INVALID_ARGUMENT
-    );
+    let status = unsafe { eggdb_stmt_bind_int64(stmt, 2, 1) };
+    assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     assert!(last_error().contains("1 to 1"), "{}", last_error());
     assert_eq!(bind_text(stmt, 1, "not a number"), EGGDB_OK);
     let (status, results) = run(stmt);
@@ -447,7 +443,8 @@ fn misused_statements_are_answered_with_a_status() {
     assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
 
     // SAFETY: a live session with a live statement; the refusal leaves it open.
-    assert_eq!(unsafe { eggdb_sql_close(sql) }, EGGDB_ERR_IN_USE);
+    let status = unsafe { eggdb_sql_close(sql) };
+    assert_eq!(status, EGGDB_ERR_IN_USE);
     assert!(last_error().contains("eggdb_stmt_finalize"));
     ok(execute(sql, "SELECT 1").0);
     finalize(stmt);
@@ -455,32 +452,23 @@ fn misused_statements_are_answered_with_a_status() {
     let mut results: *const EggdbResult = ptr::null();
     let mut count = 0;
     // SAFETY: NULL handles are refused.
-    assert_eq!(
-        unsafe { eggdb_stmt_execute(ptr::null_mut(), &mut results, &mut count) },
-        EGGDB_ERR_INVALID_ARGUMENT
-    );
+    let status = unsafe { eggdb_stmt_execute(ptr::null_mut(), &mut results, &mut count) };
+    assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { eggdb_stmt_bind_null(ptr::null_mut(), 1) },
-        EGGDB_ERR_INVALID_ARGUMENT
-    );
+    let status = unsafe { eggdb_stmt_bind_null(ptr::null_mut(), 1) };
+    assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { eggdb_stmt_reset(ptr::null_mut()) },
-        EGGDB_ERR_INVALID_ARGUMENT
-    );
+    let status = unsafe { eggdb_stmt_reset(ptr::null_mut()) };
+    assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { eggdb_stmt_parameter_count(ptr::null_mut(), &mut count) },
-        EGGDB_ERR_INVALID_ARGUMENT
-    );
+    let status = unsafe { eggdb_stmt_parameter_count(ptr::null_mut(), &mut count) };
+    assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { eggdb_sql_cancel(ptr::null_mut()) },
-        EGGDB_ERR_INVALID_ARGUMENT
-    );
+    let status = unsafe { eggdb_sql_cancel(ptr::null_mut()) };
+    assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     // SAFETY: NULL is accepted and does nothing.
-    ok(unsafe { eggdb_stmt_finalize(ptr::null_mut()) });
+    let status = unsafe { eggdb_stmt_finalize(ptr::null_mut()) };
+    ok(status);
     close_sql(sql);
     close_db(db);
 }

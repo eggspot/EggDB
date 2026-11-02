@@ -351,8 +351,10 @@ impl<'r> BcpUnicodeInput<'r> {
             .pending
             .get(..whole)
             .unwrap_or_default()
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         let mut kept: Vec<u8> = self.pending.get(whole..).unwrap_or_default().to_vec();
         if let Some(&last) = units.last()

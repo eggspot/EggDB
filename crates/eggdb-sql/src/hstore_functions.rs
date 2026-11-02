@@ -273,7 +273,7 @@ pub(crate) fn subtract(document: &Value, removed: &Value) -> SqlResult<Value> {
 }
 
 fn sliced(hstore: &HstoreValue, keys: &Value) -> SqlResult<Value> {
-    let keys = keys_of(keys).ok_or_else(|| no_function("slice", &[keys.clone()]))??;
+    let keys = keys_of(keys).ok_or_else(|| no_function("slice", std::slice::from_ref(keys)))??;
     hstore_result(
         owned_pairs(hstore)
             .filter(|(key, _)| keys.contains(key))
@@ -302,7 +302,7 @@ fn from_arrays(keys: &Value, values: &Value) -> SqlResult<Value> {
     let values = match values {
         Value::Null => vec![None; keys.len()],
         other => text_items(other)
-            .ok_or_else(|| no_function("hstore", &[other.clone()]))??,
+            .ok_or_else(|| no_function("hstore", std::slice::from_ref(other)))??,
     };
     if values.len() != keys.len() {
         return Err(SqlError::new(
@@ -318,7 +318,7 @@ fn from_arrays(keys: &Value, values: &Value) -> SqlResult<Value> {
 }
 
 fn from_alternating(items: Vec<Option<String>>) -> SqlResult<Value> {
-    if items.len() % 2 != 0 {
+    if !items.len().is_multiple_of(2) {
         return Err(SqlError::new(
             SqlState::ARRAY_SUBSCRIPT_ERROR,
             "array must have even number of elements",
@@ -523,10 +523,10 @@ mod tests {
     fn functions_list_test_cut_and_build() {
         let h = hstore("a=>1, b=>NULL");
         let call = |name: &str, values: &[Value]| shown(function(name, values).unwrap());
-        assert_eq!(call("akeys", &[h.clone()]), "{a,b}");
-        assert_eq!(call("avals", &[h.clone()]), "{1,NULL}");
-        assert_eq!(call("hstore_to_array", &[h.clone()]), "{a,1,b,NULL}");
-        assert_eq!(call("hstore_to_json", &[h.clone()]), "{\"a\": \"1\", \"b\": null}");
+        assert_eq!(call("akeys", std::slice::from_ref(&h)), "{a,b}");
+        assert_eq!(call("avals", std::slice::from_ref(&h)), "{1,NULL}");
+        assert_eq!(call("hstore_to_array", std::slice::from_ref(&h)), "{a,1,b,NULL}");
+        assert_eq!(call("hstore_to_json", std::slice::from_ref(&h)), "{\"a\": \"1\", \"b\": null}");
         assert_eq!(call("exist", &[h.clone(), text("b")]), "t");
         assert_eq!(call("defined", &[h.clone(), text("b")]), "f");
         assert_eq!(call("delete", &[h.clone(), text("a")]), "\"b\"=>NULL");

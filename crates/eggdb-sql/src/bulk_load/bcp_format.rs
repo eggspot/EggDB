@@ -1055,8 +1055,10 @@ fn utf16_text(bytes: &[u8]) -> SqlResult<String> {
         return Err(conversion_error("a UTF-16 field has an odd number of bytes"));
     }
     let units = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair.first().copied().unwrap_or(0), pair.get(1).copied().unwrap_or(0)]));
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair));
     char::decode_utf16(units)
         .collect::<Result<String, _>>()
         .map_err(|_| conversion_error("a UTF-16 field holds an unpaired surrogate"))

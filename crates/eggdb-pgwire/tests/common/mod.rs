@@ -138,18 +138,10 @@ impl KeyValueStore for SharedMemoryStore {
     }
 }
 
+#[derive(Default)]
 pub struct Limits {
     pub idle_timeout: Option<Duration>,
     pub memory_budget: Arc<eggdb_platform::connection_limits::MemoryBudget>,
-}
-
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            idle_timeout: None,
-            memory_budget: Arc::default(),
-        }
-    }
 }
 
 pub struct TestServer {

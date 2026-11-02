@@ -182,10 +182,8 @@ pub fn device_pixels(logical: u32, scale: f32) -> i32 {
 pub fn bgra_from_rgba(rgba: &[u8], bgra: &mut Vec<u8>) {
     bgra.clear();
     bgra.reserve(rgba.len());
-    for pixel in rgba.chunks_exact(4) {
-        if let [red, green, blue, alpha] = *pixel {
-            bgra.extend_from_slice(&[blue, green, red, alpha]);
-        }
+    for &[red, green, blue, alpha] in rgba.as_chunks::<4>().0 {
+        bgra.extend_from_slice(&[blue, green, red, alpha]);
     }
 }
 

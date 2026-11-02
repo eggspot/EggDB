@@ -765,7 +765,7 @@ impl Session<'_> {
                 ClientError::Server { code, .. } if code == "53400" => source_failed(format!(
                     "cannot follow {target}: every replication slot is in use (max_replication_slots). Drop one you no longer need, or raise it and restart"
                 )),
-                _ => client_failure(&target, &error),
+                _ => client_failure(target, &error),
             })?;
         let slot_row = rows_of(slot).into_iter().next().unwrap_or_default();
         let consistent_point = slot_row

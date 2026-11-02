@@ -461,11 +461,8 @@ impl PixelLayout {
     /// `rgba` (four bytes a pixel) as this layout's pixels, four bytes each.
     pub fn encode(&self, rgba: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(rgba.len());
-        for pixel in rgba.chunks_exact(4) {
-            let (r, g, b) = match *pixel {
-                [r, g, b, _] => (u32::from(r), u32::from(g), u32::from(b)),
-                _ => (0, 0, 0),
-            };
+        for &[red, green, blue, _] in rgba.as_chunks::<4>().0 {
+            let (r, g, b) = (u32::from(red), u32::from(green), u32::from(blue));
             let value = (r << self.red_shift) | (g << self.green_shift) | (b << self.blue_shift);
             let bytes = if self.msb_first {
                 value.to_be_bytes()

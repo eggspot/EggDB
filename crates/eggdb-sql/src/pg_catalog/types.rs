@@ -34,6 +34,7 @@ pub enum CatalogType {
 /// A polymorphic pseudo-type a PostgreSQL routine declares for a parameter or its result,
 /// resolved on each call from the types of the arguments it is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum PseudoType {
     /// `anyelement`: any type, the same for every `anyelement` argument.
     AnyElement,

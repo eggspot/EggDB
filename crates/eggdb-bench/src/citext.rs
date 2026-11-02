@@ -15,7 +15,7 @@ pub(crate) const COMPARE: &str = "sql_citext.compare";
 pub(crate) const INDEX_LOOKUP: &str = "sql_citext.index_lookup";
 
 fn word(row: usize) -> String {
-    if row % 2 == 0 {
+    if row.is_multiple_of(2) {
         format!("Customer.{row}@Example.COM")
     } else {
         format!("customer.{row}@example.com")

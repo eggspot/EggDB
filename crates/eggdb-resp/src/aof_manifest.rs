@@ -82,10 +82,7 @@ fn parse_line(line: &[u8]) -> Result<AofManifestFile, String> {
     let mut name = None;
     let mut seq = None;
     let mut kind = None;
-    for pair in tokens.chunks_exact(2) {
-        let [key, value] = pair else {
-            continue;
-        };
+    for [key, value] in tokens.as_chunks::<2>().0 {
         match key.as_slice() {
             b"file" => name = Some(file_name(value)?),
             b"seq" => seq = Some(sequence(value)?),

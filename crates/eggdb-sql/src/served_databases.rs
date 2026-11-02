@@ -214,7 +214,7 @@ pub(crate) fn run(
                 if !context.superuser {
                     return Err(denied("drop database").at(name.position));
                 }
-                if name.text.eq_ignore_ascii_case(&context.current_database) {
+                if name.text.eq_ignore_ascii_case(context.current_database) {
                     return Err(numbered_in_use(
                         SqlError::new(
                             SqlState::OBJECT_IN_USE,
