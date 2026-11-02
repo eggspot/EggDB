@@ -96,6 +96,42 @@ fn a_user_with_a_schema_of_its_own_sees_it_as_its_own_objects() {
 }
 
 #[test]
+fn dropping_a_listed_generated_not_null_constraint_drops_the_not_null() {
+    let store = MemoryStore::default();
+    hr_schema(&store);
+    let mut session = hr_session(&store);
+    let listed = last(
+        &mut session,
+        "SELECT constraint_name FROM user_constraints
+         WHERE table_name = 'COUNTRIES' AND constraint_type = 'C' AND generated = 'GENERATED NAME'",
+    );
+    let name = listed.lines().nth(1).unwrap_or_default().to_owned();
+    assert!(name.starts_with("SYS_C"), "{listed}");
+    let error = fails(&mut session, "INSERT INTO countries VALUES ('FR', NULL, 1)");
+    assert_eq!(error.state().code(), "23502", "{error}");
+    last(
+        &mut session,
+        &format!("ALTER TABLE countries DROP CONSTRAINT {name}"),
+    );
+    last(&mut session, "INSERT INTO countries VALUES ('FR', NULL, 1)");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT COUNT(*) FROM user_constraints WHERE table_name = 'COUNTRIES' AND generated = 'GENERATED NAME'"
+        ),
+        "COUNT(*)\n0\nSELECT 1"
+    );
+    let error = fails(
+        &mut session,
+        &format!("ALTER TABLE countries DROP CONSTRAINT {name}"),
+    );
+    assert!(
+        error.message().contains("nonexistent constraint"),
+        "{error}"
+    );
+}
+
+#[test]
 fn constraints_indexes_sequences_views_and_objects_are_listed_and_joined() {
     let store = MemoryStore::default();
     hr_schema(&store);

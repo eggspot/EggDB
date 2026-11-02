@@ -2086,6 +2086,14 @@ fn drop_constraint(
         indexes::drop_index(writer, tables, &drop, dialect)?;
         return Ok(None);
     }
+    if dialect == Dialect::Oracle
+        && let Some(position) =
+            crate::oracle_dictionary::not_null_constraint_column(&table, &constraint.text)
+    {
+        table.columns[position].not_null = false;
+        save(writer, &table)?;
+        return Ok(None);
+    }
     if if_exists {
         return Ok(Some(format!(
             "NOTICE:  constraint \"{}\" of relation \"{}\" does not exist, skipping",

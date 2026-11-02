@@ -1062,6 +1062,16 @@ fn not_null_constraint_name(table_id: u32, position: usize) -> String {
     format!("SYS_C{number:07}")
 }
 
+/// The position of the `NOT NULL` column whose generated constraint name (`SYS_C...`, as
+/// `USER_CONSTRAINTS` lists it) is `name`, in any case.
+pub(crate) fn not_null_constraint_column(table: &TableDefinition, name: &str) -> Option<usize> {
+    (0..table.columns.len()).find(|&position| {
+        table.columns[position].not_null
+            && !table.primary_key.contains(&position)
+            && not_null_constraint_name(table.id, position).eq_ignore_ascii_case(name)
+    })
+}
+
 fn not_null_constraints(table: &TableDefinition) -> Vec<(String, &Column)> {
     table
         .columns
