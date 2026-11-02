@@ -177,9 +177,11 @@ pub(crate) fn is_temporary_key(key: &[u8]) -> bool {
         return false;
     };
     match space {
-        TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE | partitions::PARTITION_SPACE => {
-            names_temporary_object(rest)
-        }
+        TABLE_SPACE
+        | SEQUENCE_SPACE
+        | triggers::TRIGGER_SPACE
+        | partitions::PARTITION_SPACE
+        | routines::ROUTINE_SPACE => names_temporary_object(rest),
         ROW_SPACE | INDEX_SPACE => has_temporary_id(rest),
         TEMPORARY_ACTION_SPACE => true,
         REFERENCE_SPACE | catalog::DEPENDENCY_SPACE => {
@@ -644,7 +646,13 @@ fn dialect_of(code: u8) -> Option<crate::Dialect> {
 
 impl TableDefinition {
     pub(crate) fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|column| column.name == name)
+        self.columns
+            .iter()
+            .position(|column| column.name == name)
+            .or_else(|| {
+                let hidden = crate::temp_tables::system_column(name)?;
+                self.columns.iter().position(|column| column.name == hidden)
+            })
     }
 
     pub(crate) fn auto_increment_column(&self) -> Option<usize> {

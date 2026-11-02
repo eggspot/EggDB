@@ -158,12 +158,15 @@ impl Parser<'_> {
         if !at_batch_start {
             return Err(not_first_in_batch(kind, position));
         }
-        if matches!(self.peek_kind(), TokenKind::Word(word) if word.starts_with('#')) {
-            return Err(
-                not_supported("Temporary procedures and functions (#name)").at(self.position())
-            );
+        let temporary =
+            matches!(self.peek_kind(), TokenKind::Word(word) if word.starts_with('#'));
+        if temporary && kind == RoutineKind::Function {
+            return Err(not_supported("Temporary functions (#name)").at(self.position()));
         }
-        let name = self.table_name()?;
+        let mut name = self.table_name()?;
+        if temporary {
+            name.text = crate::temporary::internal_name(&name.text);
+        }
         if self.peek_kind() == &TokenKind::Semicolon
             && matches!(self.peek_kind_at(1), TokenKind::Integer(_))
         {

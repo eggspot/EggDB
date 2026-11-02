@@ -1099,14 +1099,19 @@ SELECT id, name FROM dbo.in_stock(5)
 
 Inside a procedure `@@PROCID` is its object id (so `OBJECT_NAME(@@PROCID)` is its name; 0
 outside a procedure), and `ERROR_PROCEDURE()` in a `CATCH` block names the innermost procedure
-the caught error came from.
+the caught error came from; over TDS the `ERROR` token carries that procedure's name too.
 
-Not yet: a table-valued function whose arguments read the columns of an earlier `FROM` item
-(`CROSS APPLY dbo.f(t.id)`; constant arguments work), a
-procedure called by its name alone as the first statement of a batch (write `EXEC`), `EXEC
-@result = dbo.scalar_function`, numbered and
-temporary (`#name`) procedures, CLR routines (`AS EXTERNAL NAME`), `SELECT INTO` in a body, and
-`COMMIT` or `ROLLBACK` of the caller's transaction inside a function.
+`CROSS APPLY dbo.f(t.id)` and `OUTER APPLY` call a table-valued function (inline or
+multi-statement) whose arguments read the columns of an earlier `FROM` item: the function runs
+once for each distinct set of argument values. `CREATE PROCEDURE #name` makes a temporary
+procedure that only its session sees and that goes away with the session (`DROP PROCEDURE #name`
+drops it sooner); temporary functions are refused, as SQL Server refuses them.
+
+Not yet: a global temporary procedure (`##name`) is created like a `#name` one, visible only to
+its own session; a procedure called by its name alone as the first statement of a batch (write
+`EXEC`), `EXEC @result = dbo.scalar_function`, numbered procedures (`name;2`), CLR routines (`AS
+EXTERNAL NAME`), `SELECT INTO` in a body, and `COMMIT` or `ROLLBACK` of the caller's transaction
+inside a function.
 
 ## SQL Server metadata for tools
 

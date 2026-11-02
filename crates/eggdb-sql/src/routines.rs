@@ -392,6 +392,9 @@ pub(crate) fn resolve(
     if let Some(members) = crate::plsql::current_package_routines(reader, tables, name)? {
         return Ok(Some(members));
     }
+    if crate::temporary::is_sqlserver_temporary(name) {
+        return of_name(reader, tables, &crate::temporary::internal_name(name));
+    }
     let plain = normalized(name);
     if is_qualified(plain) || plain.len() != name.len() {
         if let Some(found) = of_name(reader, tables, plain)? {
