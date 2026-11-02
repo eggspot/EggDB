@@ -280,7 +280,10 @@ impl CommandName {
             | OptionName::Delimiter
             | OptionName::Null
             | OptionName::RowTerminator
-            | OptionName::KeepNulls => self == Self::Import,
+            | OptionName::KeepNulls
+            | OptionName::Unicode
+            | OptionName::Native
+            | OptionName::FormatFile => self == Self::Import,
             OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table | Self::Row),
             OptionName::After => matches!(self, Self::Table | Self::Row),
             OptionName::Schema => matches!(self, Self::Table | Self::Follow),
@@ -446,6 +449,9 @@ enum OptionName {
     Null,
     RowTerminator,
     KeepNulls,
+    Unicode,
+    Native,
+    FormatFile,
     Report,
     At,
     TimeLimit,
@@ -546,6 +552,9 @@ impl OptionName {
             b"null" => Self::Null,
             b"row-terminator" => Self::RowTerminator,
             b"keep-nulls" => Self::KeepNulls,
+            b"unicode" => Self::Unicode,
+            b"native" => Self::Native,
+            b"format-file" => Self::FormatFile,
             b"report" => Self::Report,
             b"at" => Self::At,
             b"time-limit" => Self::TimeLimit,
@@ -596,6 +605,8 @@ impl OptionName {
                 | Self::KeepGoing
                 | Self::Header
                 | Self::KeepNulls
+                | Self::Unicode
+                | Self::Native
                 | Self::AllowWrite
                 | Self::LogBatches
                 | Self::TlsSelfSigned
@@ -731,6 +742,9 @@ pub(crate) struct CsvOptions {
     pub(crate) null: Option<String>,
     pub(crate) row_terminator: Option<String>,
     pub(crate) keep_nulls: bool,
+    pub(crate) unicode: bool,
+    pub(crate) native: bool,
+    pub(crate) format_file: Option<PathBuf>,
     pub(crate) parquet: Option<PathBuf>,
     pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
@@ -1436,6 +1450,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Header => request.csv.header = true,
             OptionName::KeepNulls => request.csv.keep_nulls = true,
+            OptionName::Unicode => request.csv.unicode = true,
+            OptionName::Native => request.csv.native = true,
+            OptionName::FormatFile => request.csv.format_file = Some(PathBuf::from(value)),
             OptionName::Table
             | OptionName::Delimiter
             | OptionName::Null
@@ -2016,6 +2033,9 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
             (csv.null.is_some(), "--null"),
             (csv.row_terminator.is_some(), "--row-terminator"),
             (csv.keep_nulls, "--keep-nulls"),
+            (csv.unicode, "--unicode"),
+            (csv.native, "--native"),
+            (csv.format_file.is_some(), "--format-file"),
         ];
         if let Some((_, option)) = given.iter().find(|(given, _)| *given) {
             return Err(format!("{option} goes with --csv <file>"));
@@ -2054,6 +2074,26 @@ fn check_csv_options(request: &Request) -> Result<(), String> {
     if !bcp && (csv.row_terminator.is_some() || csv.keep_nulls) {
         return Err(
             "--row-terminator and --keep-nulls are for bcp character files, with --dialect sqlserver"
+                .to_owned(),
+        );
+    }
+    let layouts = [csv.unicode, csv.native, csv.format_file.is_some()];
+    if !bcp && layouts.contains(&true) {
+        return Err(
+            "--unicode, --native and --format-file are for bcp data files, with --dialect sqlserver"
+                .to_owned(),
+        );
+    }
+    if layouts.iter().filter(|given| **given).count() > 1 {
+        return Err(
+            "give one of --unicode (bcp -w), --native (bcp -n) or --format-file (bcp -f)".to_owned(),
+        );
+    }
+    if (csv.native || csv.format_file.is_some())
+        && (csv.delimiter.is_some() || csv.row_terminator.is_some())
+    {
+        return Err(
+            "--delimiter and --row-terminator are for character files; a native file has none, and a format file names its own"
                 .to_owned(),
         );
     }
@@ -2458,6 +2498,9 @@ mod tests {
                 null: Some("NA".into()),
                 row_terminator: None,
                 keep_nulls: false,
+                unicode: false,
+                native: false,
+                format_file: None,
                 parquet: None,
                 arrow: None,
                 sql_dump: None,
@@ -2477,6 +2520,31 @@ mod tests {
             usage_message("import app.db --csv d.csv --table t --keep-nulls")
                 .contains("--dialect sqlserver")
         );
+        let native = request("import --dialect sqlserver app.db --csv items.bcp --table t --native");
+        assert!(native.csv.native && !native.csv.unicode);
+        let formatted = request(
+            "import --dialect sqlserver app.db --csv items.bcp --table t --format-file items.fmt",
+        );
+        assert_eq!(formatted.csv.format_file, Some(PathBuf::from("items.fmt")));
+        assert!(
+            request("import --dialect sqlserver app.db --csv w.dat --table t --unicode --delimiter ,")
+                .csv
+                .unicode
+        );
+        for (line, mentions) in [
+            ("import app.db --csv d.csv --table t --unicode", "--dialect sqlserver"),
+            (
+                "import --dialect sqlserver app.db --csv d --table t --native --unicode",
+                "one of",
+            ),
+            (
+                "import --dialect sqlserver app.db --csv d --table t --native --delimiter ,",
+                "--delimiter",
+            ),
+            ("import --dialect sqlserver app.db --native", "--csv"),
+        ] {
+            assert!(usage_message(line).contains(mentions), "{line}");
+        }
         assert_eq!(
             request("import app.db --csv - --table t").csv.source,
             Some(ExportFile::Standard)

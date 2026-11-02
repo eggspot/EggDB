@@ -297,3 +297,98 @@ fn import_with_the_sql_server_dialect_loads_bcp_character_files() {
     assert!(errors.contains("2627"), "{errors}");
     assert!(errors.contains("Nothing was imported"), "{errors}");
 }
+
+#[test]
+fn import_with_the_sql_server_dialect_loads_bcp_native_unicode_and_format_file_data() {
+    let directory = TempDirectory::new("bcp-layouts");
+    let file = directory.file("shop.db");
+    ok(
+        &[
+            "sql",
+            "--create",
+            "--dialect",
+            "sqlserver",
+            &file,
+            "-c",
+            "CREATE TABLE dbo.items (id INT NOT NULL PRIMARY KEY, name NVARCHAR(40) NULL)",
+        ],
+        "",
+    );
+    let import = |data: &str, layout: &[&str]| {
+        let mut arguments = vec![
+            "import",
+            "--dialect",
+            "sqlserver",
+            file.as_str(),
+            "--csv",
+            data,
+            "--table",
+            "dbo.items",
+            "-F",
+            "text",
+        ];
+        arguments.extend_from_slice(layout);
+        ok(&arguments, "")
+    };
+    let native = directory.file("items.bcp");
+    std::fs::write(
+        &native,
+        [1, 0, 0, 0, 4, 0, b'a', 0, b'b', 0, 2, 0, 0, 0, 0xFF, 0xFF],
+    )
+    .unwrap();
+    assert_eq!(
+        import(&native, &["--native"]),
+        format!("imported 2 rows from {native} into dbo.items in {file}\n")
+    );
+    let unicode = directory.file("items.w.dat");
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend("3\tc\u{e9}\r\n".encode_utf16().flat_map(u16::to_le_bytes));
+    std::fs::write(&unicode, bytes).unwrap();
+    assert_eq!(
+        import(&unicode, &["--unicode", "--row-terminator", "\\r\\n"]),
+        format!("imported 1 row from {unicode} into dbo.items in {file}\n")
+    );
+    let format_file = directory.file("items.fmt");
+    std::fs::write(
+        &format_file,
+        "14.0\n2\n1 SQLCHAR 0 12 \"|\" 1 id \"\"\n2 SQLCHAR 0 80 \"\\r\\n\" 2 name SQL_Latin1_General_CP1_CI_AS\n",
+    )
+    .unwrap();
+    let formatted = directory.file("items.f.dat");
+    std::fs::write(&formatted, "4|tart\r\n").unwrap();
+    assert_eq!(
+        import(&formatted, &["--format-file", &format_file]),
+        format!("imported 1 row from {formatted} into dbo.items in {file}\n")
+    );
+    let listed = ok(
+        &[
+            "sql",
+            "--dialect",
+            "sqlserver",
+            &file,
+            "-c",
+            "SELECT COUNT(*) AS n FROM dbo.items WHERE (id = 1 AND name = N'ab') OR (id = 2 AND name IS NULL) OR (id = 3 AND name = N'c\u{e9}') OR (id = 4 AND name = N'tart')",
+        ],
+        "",
+    );
+    assert!(listed.lines().any(|line| line.trim() == "4"), "{listed}");
+    let broken = directory.file("broken.fmt");
+    std::fs::write(&broken, "14.0\nthree\n").unwrap();
+    let refused = run(
+        &[
+            "import",
+            "--dialect",
+            "sqlserver",
+            &file,
+            "--csv",
+            &formatted,
+            "--table",
+            "dbo.items",
+            "--format-file",
+            &broken,
+        ],
+        "",
+    );
+    assert_eq!(refused.exit, 2, "{}", text(&refused.stderr));
+    assert!(text(&refused.stderr).contains("--format-file"));
+}
