@@ -445,7 +445,8 @@ impl Session<'_> {
         };
         let mongo_config = match &mongo_listener {
             Some(_) => Some(
-                super::serve_mongo::config(&user, &password, max_connections).map_err(|error| {
+                super::serve_mongo::config(&user, &password, max_connections, &memory_budget)
+                    .map_err(|error| {
                     Failure::database(
                         format!("cannot prepare the MongoDB-compatible listener: {error}"),
                         Exit::DatabaseError,

@@ -6,6 +6,7 @@ pub(super) fn config(
     user: &str,
     password: &str,
     max_connections: usize,
+    memory_budget: &std::sync::Arc<eggdb_platform::connection_limits::MemoryBudget>,
 ) -> std::io::Result<eggdb_mongowire::ServerConfig> {
     let mut salt = [0u8; 16];
     eggdb_platform::secure_random::fill(&mut salt)?;
@@ -17,6 +18,7 @@ pub(super) fn config(
         unknown_user_secret,
         max_connections,
         random: eggdb_platform::secure_random::fill,
+        memory_budget: std::sync::Arc::clone(memory_budget),
     })
 }
 
