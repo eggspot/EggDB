@@ -122,9 +122,9 @@ fn timeout_milliseconds(timeout: Option<std::time::Duration>) -> io::Result<u32>
 
 #[cfg(unix)]
 mod imp {
-    use super::{LocalBindError, Path, require_directory};
+    use super::{LocalBindError, Path, PathBuf, require_directory};
     use std::io;
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 
     /// A listening Unix domain socket.
     pub type LocalListener = std::os::unix::net::UnixListener;
@@ -144,10 +144,49 @@ mod imp {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(LocalBindError::Io(error)),
         }
-        let listener = LocalListener::bind(path).map_err(LocalBindError::Io)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(LocalBindError::Io)?;
-        Ok(listener)
+        let staging = staging_directory(path).map_err(LocalBindError::Io)?;
+        let bound = bind_staged(&staging, path);
+        let _ = std::fs::remove_dir(&staging);
+        bound
+    }
+
+    const STAGING_ATTEMPTS: u32 = 1000;
+    const STAGED_SOCKET: &str = "s";
+
+    pub(super) fn staging_directory(path: &Path) -> io::Result<PathBuf> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        for attempt in 0..STAGING_ATTEMPTS {
+            let candidate = parent.join(format!(".e{attempt}"));
+            match builder.create(&candidate) {
+                Ok(()) => return Ok(candidate),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free staging directory next to the socket",
+        ))
+    }
+
+    fn bind_staged(staging: &Path, path: &Path) -> Result<LocalListener, LocalBindError> {
+        let staged = staging.join(STAGED_SOCKET);
+        let listener = LocalListener::bind(&staged).map_err(LocalBindError::Io)?;
+        let published = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| std::fs::hard_link(&staged, path));
+        let _ = std::fs::remove_file(&staged);
+        match published {
+            Ok(()) => Ok(listener),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err(LocalBindError::InUse)
+            }
+            Err(error) => Err(LocalBindError::Io(error)),
+        }
     }
 }
 
@@ -338,6 +377,34 @@ mod tests {
         drop(listener);
         drop(accepted);
         assert!(bind_local(&path).is_ok(), "a stale socket file is replaced");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_appears_only_owner_only_and_leaves_no_staging_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = scratch("owner");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir(directory.join(".e0")).unwrap();
+        let path = directory.join("eggdb.sock");
+        let listener = bind_local(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let mut names: Vec<String> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, [".e0", "eggdb.sock"]);
+        let _client = LocalStream::connect(&path).unwrap();
+        listener.accept().unwrap();
+        let staging = imp::staging_directory(&path).unwrap();
+        let staging_mode = std::fs::metadata(&staging).unwrap().permissions().mode();
+        assert_eq!(staging_mode & 0o777, 0o700);
+        std::fs::remove_dir(&staging).unwrap();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

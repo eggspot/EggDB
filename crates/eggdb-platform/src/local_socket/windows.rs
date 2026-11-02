@@ -150,11 +150,10 @@ pub struct LocalStream(OwnedSocket);
 impl LocalListener {
     /// Binds a socket at `path` and listens on it, failing when anything is already there.
     pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let address = socket_address(path.as_ref())?;
-        let socket = new_socket()?;
-        // SAFETY: `address` is a sockaddr_un that outlives the call and `ADDRESS_LEN` is its size.
-        let bound = unsafe { sys::bind(raw(&socket), (&raw const address).cast(), ADDRESS_LEN) };
-        check(bound)?;
+        Self::listen(bound_socket(path.as_ref())?)
+    }
+
+    fn listen(socket: OwnedSocket) -> io::Result<Self> {
         // SAFETY: `socket` is an open, bound stream socket.
         let listening = unsafe { sys::listen(raw(&socket), LISTEN_BACKLOG) };
         check(listening)?;
@@ -305,19 +304,27 @@ pub(super) fn bind(path: &Path) -> Result<LocalListener, LocalBindError> {
         },
         Err(error) => return Err(LocalBindError::Io(error)),
     }
-    let listener = LocalListener::bind(path).map_err(|error| {
+    let socket = bound_socket(path).map_err(|error| {
         if error.raw_os_error() == Some(WSAEAFNOSUPPORT) {
             LocalBindError::Unsupported
         } else {
             LocalBindError::Io(error)
         }
     })?;
-    if let Err(error) = restrict_to_owner(path) {
-        drop(listener);
+    let listening = restrict_to_owner(path).and_then(|()| LocalListener::listen(socket));
+    listening.map_err(|error| {
         let _ = std::fs::remove_file(path);
-        return Err(LocalBindError::Io(error));
-    }
-    Ok(listener)
+        LocalBindError::Io(error)
+    })
+}
+
+fn bound_socket(path: &Path) -> io::Result<OwnedSocket> {
+    let address = socket_address(path)?;
+    let socket = new_socket()?;
+    // SAFETY: `address` is a sockaddr_un that outlives the call and `ADDRESS_LEN` is its size.
+    let bound = unsafe { sys::bind(raw(&socket), (&raw const address).cast(), ADDRESS_LEN) };
+    check(bound)?;
+    Ok(socket)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
