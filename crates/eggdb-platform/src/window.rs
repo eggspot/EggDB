@@ -6,6 +6,10 @@
 //! BSDs the backend speaks the X11 protocol itself over the display's Unix socket ([`x11`]);
 //! on Windows it calls Win32 through our own declarations ([`win32`]); on macOS it drives
 //! AppKit through the Objective-C runtime, loaded only when a window opens ([`cocoa`]).
+//!
+//! Each window also takes the screen's accessibility tree ([`AccessNode`],
+//! [`Window::set_accessibility_tree`]) and hands it to the system's screen readers: through
+//! NSAccessibility on macOS; the other systems' bridges (UI Automation, AT-SPI2) come next.
 
 use std::fmt;
 use std::time::Duration;
@@ -166,6 +170,104 @@ impl fmt::Display for WindowError {
 
 impl std::error::Error for WindowError {}
 
+/// What an element of the screen is, in the generic roles of `docs/ux/first-screen.md`'s
+/// screen-reader table; each platform bridge maps them to its own (NSAccessibility, UI
+/// Automation, AT-SPI2, ARIA).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessRole {
+    /// The window itself; the operating system already exposes it, so bridges skip it and
+    /// attach its children to the window's content.
+    Window,
+    /// A group of related elements.
+    Group,
+    /// A level-one heading.
+    Heading,
+    /// A list of tabs (a segmented control).
+    TabList,
+    /// One tab of a tab list.
+    Tab,
+    /// The panel a tab controls.
+    TabPanel,
+    /// Text announced politely when it appears, without moving the focus.
+    Status,
+    /// A single-line editable text field.
+    TextField,
+    /// A push button.
+    Button,
+    /// A checkbox.
+    CheckBox,
+    /// A link.
+    Link,
+}
+
+/// Rectangle of an accessibility node in logical pixels, from the window's top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AccessRect {
+    /// The left edge.
+    pub x: f32,
+    /// The top edge.
+    pub y: f32,
+    /// The width.
+    pub width: f32,
+    /// The height.
+    pub height: f32,
+}
+
+/// The states a screen reader reports for a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessState {
+    /// The node has the keyboard focus.
+    pub focused: bool,
+    /// For a checkbox, whether it is checked; `None` for nodes that cannot be checked.
+    pub checked: Option<bool>,
+    /// The node is shown but cannot be used or focused.
+    pub disabled: bool,
+    /// For a tab, whether it is the active one.
+    pub selected: bool,
+    /// The button `Enter` activates.
+    pub default_button: bool,
+}
+
+/// One node of a window's accessibility tree: the list is in reading order, and a node's
+/// parent comes before it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessNode {
+    /// An identifier that stays the same for the same element from frame to frame.
+    pub id: u32,
+    /// The parent node's id, `None` for the root.
+    pub parent: Option<u32>,
+    /// What the node is.
+    pub role: AccessRole,
+    /// The visible text that names it.
+    pub name: String,
+    /// The value of a text field, when the node has one.
+    pub value: Option<String>,
+    /// The hint shown in an empty text field.
+    pub placeholder: Option<String>,
+    /// Focus, checked, disabled and selected states.
+    pub state: AccessState,
+    /// Where it is, in logical pixels.
+    pub bounds: AccessRect,
+}
+
+/// The id of the node with the keyboard focus, if any.
+pub fn focused_node(nodes: &[AccessNode]) -> Option<u32> {
+    nodes
+        .iter()
+        .find(|node| node.state.focused)
+        .map(|node| node.id)
+}
+
+/// Whether two trees have the same nodes (ids, roles and parents) in the same order, so a
+/// bridge can update its platform objects in place instead of building them again.
+pub fn same_access_structure(old: &[AccessNode], new: &[AccessNode]) -> bool {
+    old.len() == new.len()
+        && old
+            .iter()
+            .zip(new)
+            .all(|(old, new)| old.id == new.id && old.role == new.role && old.parent == new.parent)
+}
+
 /// An open native window.
 pub trait Window: fmt::Debug {
     /// The drawable area in device pixels.
@@ -182,6 +284,13 @@ pub trait Window: fmt::Debug {
     /// `Ok(None)` when the time ran out.
     fn next_event(&mut self, timeout: Option<Duration>)
     -> Result<Option<WindowEvent>, WindowError>;
+
+    /// Gives the operating system's screen readers the window's current accessibility tree,
+    /// raising the platform's focus and value-change events for what changed since the last
+    /// call. Backends without an accessibility bridge yet ignore it.
+    fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
+        let _ = nodes;
+    }
 }
 
 /// Checks that `rgba` holds exactly `width` × `height` pixels of four bytes.
@@ -259,6 +368,43 @@ mod tests {
             Err(WindowError::InvalidInput(_))
         ));
         assert!(check_frame(u32::MAX, u32::MAX, &[]).is_err());
+    }
+
+    fn node(id: u32, parent: Option<u32>, role: AccessRole, focused: bool) -> AccessNode {
+        AccessNode {
+            id,
+            parent,
+            role,
+            name: format!("node {id}"),
+            value: None,
+            placeholder: None,
+            state: AccessState {
+                focused,
+                ..AccessState::default()
+            },
+            bounds: AccessRect::default(),
+        }
+    }
+
+    #[test]
+    fn the_focused_node_and_an_unchanged_structure_are_found() {
+        let tree = vec![
+            node(1, None, AccessRole::Window, false),
+            node(2, Some(1), AccessRole::Button, true),
+        ];
+        assert_eq!(focused_node(&tree), Some(2));
+        assert_eq!(focused_node(&tree[..1]), None);
+        let mut renamed = tree.clone();
+        renamed[1].name = "other".to_owned();
+        renamed[1].state.focused = false;
+        assert!(same_access_structure(&tree, &renamed));
+        let mut moved = tree.clone();
+        moved[1].parent = None;
+        assert!(!same_access_structure(&tree, &moved));
+        assert!(!same_access_structure(&tree, &tree[..1]));
+        let mut retyped = tree.clone();
+        retyped[1].role = AccessRole::Link;
+        assert!(!same_access_structure(&tree, &retyped));
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]

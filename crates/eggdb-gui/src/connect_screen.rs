@@ -5,6 +5,15 @@ use crate::color::{Rgba, Theme};
 use crate::font::{TextStyle, Typeface};
 use crate::main_window::Faces;
 
+mod accessibility;
+
+pub use accessibility::{
+    NODE_BROWSE, NODE_CANCEL, NODE_CARD, NODE_CONNECT_TO_A_SERVER, NODE_CREATE_IF_MISSING,
+    NODE_ERROR, NODE_FILE, NODE_OPEN, NODE_OPEN_A_FILE, NODE_PANEL, NODE_READ_ONLY, NODE_SAMPLE,
+    NODE_SEGMENTS, NODE_TITLE, NODE_WHERE_FROM, NODE_WINDOW, accessibility_tree,
+    error_announcement,
+};
+
 /// The window's default width in logical pixels.
 pub const DEFAULT_WIDTH: u32 = 1280;
 /// The window's default height in logical pixels.

@@ -144,11 +144,14 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
     let mut dirty = true;
     loop {
         if dirty {
-            let frame = connect_screen::draw(&card, theme, faces, logical_size(size, scale), scale);
+            let logical = logical_size(size, scale);
+            let frame = connect_screen::draw(&card, theme, faces, logical, scale);
             let (width, height) = (frame.width() as u32, frame.height() as u32);
             window
                 .present(width, height, &frame.rgba_bytes())
                 .map_err(|error| error.to_string())?;
+            window
+                .set_accessibility_tree(&connect_screen::accessibility_tree(&card, faces, logical));
             dirty = false;
         }
         match window.next_event(None).map_err(|error| error.to_string())? {
