@@ -749,19 +749,23 @@ impl<'a> Session<'a> {
         Database::open_with(&self.request.file, options)
     }
 
+    fn busy_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.request
+                .busy_timeout_ms
+                .unwrap_or(DEFAULT_BUSY_TIMEOUT_MS),
+        )
+    }
+
     fn database_options(&self, access: Access, cache_for_command: Option<usize>) -> Options {
         let cache = self
             .request
             .cache_bytes
             .or(cache_for_command)
             .unwrap_or(DEFAULT_CACHE_BYTES);
-        let busy_timeout = self
-            .request
-            .busy_timeout_ms
-            .unwrap_or(DEFAULT_BUSY_TIMEOUT_MS);
         let mut options = Options::new()
             .cache_bytes(cache)
-            .busy_timeout(std::time::Duration::from_millis(busy_timeout));
+            .busy_timeout(self.busy_timeout());
         options = match access {
             Access::ReadOnly => options.read_only(true).create_if_missing(false),
             Access::Write { create } => options.create_if_missing(create),

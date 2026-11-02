@@ -249,7 +249,7 @@ is the moment of the call, and would only mislead.
 | 2 | usage | unknown command or option, missing argument, bad hex, a reserved command |
 | 3 | database error | file missing (no `--create`), not an EggDB file, newer format, permission denied, I/O failure, key or value too large, disk full |
 | 4 | damaged | `check` found corruption, or any command hit `Corrupt` while reading |
-| 5 | busy | the file is open elsewhere and the lock could not be had |
+| 5 | busy | the file is open elsewhere and stayed so for the busy timeout (`--busy-timeout`, five seconds by default) |
 | 130 | interrupted | Ctrl-C; a write in progress is rolled back by the engine, nothing is half-written |
 
 Errors go to stderr as `eggdb: <what happened>: <why>. <what to do>`, one or two sentences,
@@ -268,7 +268,10 @@ eggdb: cannot open app.db: another program has it open for writing. Close it, or
 eggdb: cannot open app.db: another program has it open. Close it before writing, or read with `eggdb get`, `scan`, `check` or `stats`, which work alongside readers.
 ```
 The busy message names which side is blocked: a read-only command blocked by a writer gets
-the first busy line; a `put`/`del` blocked by any open gets the second.
+the first busy line; a `put`/`del` blocked by any open gets the second. Every command,
+`backup`, `compact`, `restore`, `import` and `export` included, first tries again for up to
+`--busy-timeout <ms>` (five seconds by default, `0` for not at all) and prints the busy line
+only when the file is still taken after it (D258, D287).
 
 Interrupt handling: the CLI keeps the operating system's default for Ctrl-C, so the process
 ends at once with the shell's interrupted status (130 on POSIX shells; 0xC000013A on Windows).
@@ -333,6 +336,8 @@ Options for every command:
   -F, --format <text|json|hex|raw>   default: text on a terminal, json in a pipe (raw for get)
       --color <auto|always|never>    default: auto (a terminal, unless NO_COLOR is set)
       --cache <bytes>                page cache size, e.g. 64m (default fits the value)
+      --busy-timeout <ms>            wait this long for a file another program has open
+                                     (default 5000; 0 fails at once)
   -h, --help                         help for eggdb or for one command
   -V, --version                      print the version
 

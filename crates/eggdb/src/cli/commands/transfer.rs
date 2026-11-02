@@ -242,6 +242,7 @@ impl Session<'_> {
             policy: self.request.on_conflict,
             target_collection: self.request.collection.clone(),
             cache_bytes: self.request.cache_bytes,
+            busy_timeout: self.busy_timeout(),
             requested_page_size: self.request.page_size,
             staging_opened: false,
             messages: &mut self.messages,
@@ -534,6 +535,7 @@ struct Import<'s, 'a> {
     policy: ConflictPolicy,
     target_collection: Option<String>,
     cache_bytes: Option<usize>,
+    busy_timeout: Duration,
     requested_page_size: Option<usize>,
     staging_opened: bool,
     messages: &'s mut Output<'a>,
@@ -550,6 +552,7 @@ impl Import<'_, '_> {
         let options = Options::new()
             .read_only(true)
             .create_if_missing(false)
+            .busy_timeout(self.busy_timeout)
             .cache_bytes(self.cache_bytes.unwrap_or(IMPORT_CACHE_BYTES));
         let db = Database::open_with(self.target, options).map_err(|error| {
             open_failure(self.file, self.file_display, &error, Access::ReadOnly)
@@ -1101,6 +1104,7 @@ impl Import<'_, '_> {
     ) -> Result<Database, Failure> {
         let mut options = Options::new()
             .cache_bytes(cache)
+            .busy_timeout(self.busy_timeout)
             .durability(Durability::Normal)
             .create_if_missing(new_page_size.is_some());
         if let Some(page_size) = new_page_size {
