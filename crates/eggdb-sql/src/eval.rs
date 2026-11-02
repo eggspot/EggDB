@@ -11,6 +11,8 @@ use crate::types::{
 };
 use std::cmp::Ordering;
 
+const UNKNOWN_TYPE_OID: u32 = 705;
+
 #[derive(Clone, Copy)]
 pub(crate) struct Source<'a> {
     pub(crate) table: &'a TableDefinition,
@@ -752,6 +754,34 @@ impl Evaluator<'_> {
         value.sql_type().or_else(|| self.declared_type(expr))
     }
 
+    fn pg_typeof(&self, arguments: &[Expr]) -> SqlResult<Value> {
+        let [argument] = arguments else {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!(
+                    "function pg_typeof({}) does not exist",
+                    vec!["unknown"; arguments.len()].join(", ")
+                ),
+            ));
+        };
+        let value = self.eval(argument, None)?;
+        let oid = match &argument.kind {
+            ExprKind::Literal(Literal::String(_)) => UNKNOWN_TYPE_OID,
+            _ => crate::typing::static_type(argument, self.scope)
+                .or_else(|| self.type_of(&value, argument))
+                .map_or(UNKNOWN_TYPE_OID, crate::pg_catalog::type_oid),
+        };
+        let name = match oid {
+            UNKNOWN_TYPE_OID => "unknown".to_owned(),
+            oid => crate::pg_catalog::format_type(oid, None),
+        };
+        Ok(Value::Reg(Box::new(crate::pg_catalog::RegValue {
+            kind: crate::pg_catalog::RegKind::Type,
+            oid,
+            name,
+        })))
+    }
+
     pub(crate) fn declared_type(&self, expr: &Expr) -> Option<SqlType> {
         match &expr.kind {
             ExprKind::Column { qualifier, name } => {
@@ -1394,6 +1424,7 @@ impl Evaluator<'_> {
             "array_any" => return crate::arrays::quantified(self, arguments, false),
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
+            "pg_typeof" => return self.pg_typeof(arguments),
             "to_tsvector"
             | "to_tsquery"
             | "plainto_tsquery"

@@ -1,12 +1,13 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::{OutputColumn, QueryResult};
 use crate::types::Value;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 pub(crate) const MAX_OPEN_PORTALS: usize = 1_000;
 
 thread_local! {
     static OPEN: RefCell<Portals> = RefCell::new(Portals::default());
+    static PROCEDURE_TRANSACTIONS_ENDED: Cell<u64> = const { Cell::new(0) };
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +63,15 @@ pub(crate) fn install(portals: Portals) {
 
 pub(crate) fn take() -> Portals {
     OPEN.with(|open| std::mem::take(&mut *open.borrow_mut()))
+}
+
+pub(crate) fn transactions_ended() -> u64 {
+    PROCEDURE_TRANSACTIONS_ENDED.with(Cell::get)
+}
+
+pub(crate) fn end_procedure_transaction() {
+    OPEN.with(|open| open.borrow_mut().close_at_transaction_end());
+    PROCEDURE_TRANSACTIONS_ENDED.with(|ended| ended.set(ended.get().wrapping_add(1)));
 }
 
 pub(crate) fn next_unnamed_name() -> String {

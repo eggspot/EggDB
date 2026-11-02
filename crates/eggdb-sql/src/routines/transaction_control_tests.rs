@@ -330,3 +330,182 @@ fn declared_cursors_fetch_move_and_close_as_postgresql_does() {
     let error = refusal(&mut session, "CLOSE missing");
     assert_eq!(error.state(), SqlState::INVALID_CURSOR_NAME);
 }
+
+#[test]
+fn a_commit_or_rollback_inside_a_procedure_closes_the_cursors_it_opened() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE TABLE items (id integer)",
+            "INSERT INTO items VALUES (1), (2)",
+            "CREATE PROCEDURE fetch_after_commit() LANGUAGE plpgsql AS $$ \
+             DECLARE c refcursor := 'kept'; v integer; BEGIN \
+             OPEN c FOR SELECT id FROM items ORDER BY id; COMMIT; FETCH c INTO v; END $$",
+            "CREATE PROCEDURE fetch_after_rollback() LANGUAGE plpgsql AS $$ \
+             DECLARE c CURSOR FOR SELECT id FROM items; v integer; BEGIN \
+             OPEN c; ROLLBACK; FETCH c INTO v; END $$",
+            "CREATE PROCEDURE opens(INOUT c refcursor) LANGUAGE plpgsql AS $$ BEGIN \
+             OPEN c FOR SELECT id FROM items; END $$",
+            "CREATE PROCEDURE fetch_after_nested_commit() LANGUAGE plpgsql AS $$ \
+             DECLARE c refcursor := 'handed_over'; v integer; BEGIN \
+             CALL opens(c); COMMIT; FETCH c INTO v; END $$",
+            "CREATE PROCEDURE reopen_after_commit() LANGUAGE plpgsql AS $$ \
+             DECLARE c CURSOR FOR SELECT id FROM items ORDER BY id; v integer; BEGIN \
+             OPEN c; COMMIT; OPEN c; FETCH c INTO v; INSERT INTO items VALUES (v * 10); \
+             CLOSE c; END $$",
+        ],
+    );
+    let error = refusal(&mut session, "CALL fetch_after_commit()");
+    assert_eq!(error.state(), SqlState::INVALID_CURSOR_NAME);
+    assert!(
+        error.to_string().contains("cursor \"kept\" does not exist"),
+        "{error}"
+    );
+    let error = refusal(&mut session, "CALL fetch_after_rollback()");
+    assert_eq!(error.state(), SqlState::INVALID_CURSOR_NAME);
+    assert!(
+        error.to_string().contains("cursor \"c\" does not exist"),
+        "{error}"
+    );
+    let error = refusal(&mut session, "CALL fetch_after_nested_commit()");
+    assert_eq!(error.state(), SqlState::INVALID_CURSOR_NAME);
+    assert!(
+        error
+            .to_string()
+            .contains("cursor \"handed_over\" does not exist"),
+        "{error}"
+    );
+    assert_eq!(answer(&mut session, "CALL reopen_after_commit()"), "CALL");
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM items ORDER BY id"),
+        "id\n1\n2\n10\nSELECT 3"
+    );
+}
+
+#[test]
+fn cursor_loops_and_with_hold_cursors_survive_a_commit_inside_a_procedure() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE TABLE items (id integer)",
+            "INSERT INTO items VALUES (1), (2), (3)",
+            "CREATE TABLE copies (id integer)",
+            "CREATE PROCEDURE copy_each() LANGUAGE plpgsql AS $$ \
+             DECLARE c CURSOR FOR SELECT id FROM items ORDER BY id; BEGIN \
+             FOR r IN c LOOP INSERT INTO copies VALUES (r.id); COMMIT; END LOOP; END $$",
+            "BEGIN",
+            "DECLARE held CURSOR WITH HOLD FOR SELECT id FROM items ORDER BY id",
+            "COMMIT",
+            "CREATE PROCEDURE read_held() LANGUAGE plpgsql AS $$ \
+             DECLARE c refcursor := 'held'; v integer; BEGIN \
+             COMMIT; FETCH c INTO v; INSERT INTO copies VALUES (v * 100); END $$",
+        ],
+    );
+    assert_eq!(answer(&mut session, "CALL copy_each()"), "CALL");
+    assert_eq!(
+        answer(&mut session, "SELECT id FROM copies ORDER BY id"),
+        "id\n1\n2\n3\nSELECT 3"
+    );
+    assert_eq!(answer(&mut session, "CALL read_held()"), "CALL");
+    assert_eq!(answer(&mut session, "FETCH 1 FROM held"), "id\n2\nFETCH 1");
+    assert_eq!(
+        answer(&mut session, "SELECT max(id) FROM copies"),
+        "max\n100\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_procedure_with_a_set_clause_cannot_end_its_transaction() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE TABLE t (n integer)",
+            "CREATE PROCEDURE with_setting() LANGUAGE plpgsql SET search_path = public AS $$ \
+             BEGIN INSERT INTO t VALUES (1); COMMIT; END $$",
+        ],
+    );
+    let error = refusal(&mut session, "CALL with_setting()");
+    assert_eq!(error.state(), SqlState::INVALID_TRANSACTION_TERMINATION);
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM t"),
+        "count\n0\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_procedure_takes_transaction_level_advisory_locks_on_both_sides_of_its_commit() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE TABLE t (n integer)",
+            "CREATE PROCEDURE lock_commit_lock() LANGUAGE plpgsql AS $$ BEGIN \
+             PERFORM pg_advisory_xact_lock(42); INSERT INTO t VALUES (1); COMMIT; \
+             PERFORM pg_advisory_xact_lock(42); INSERT INTO t VALUES (2); END $$",
+        ],
+    );
+    assert_eq!(answer(&mut session, "CALL lock_commit_lock()"), "CALL");
+    let mut other = Session::new(&store);
+    assert_eq!(
+        answer(&mut other, "SELECT pg_try_advisory_lock(42)"),
+        "pg_try_advisory_lock\nt\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM t"),
+        "count\n2\nSELECT 1"
+    );
+}
+
+#[test]
+fn refcursor_is_a_type_of_its_own() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION named(c refcursor) RETURNS refcursor LANGUAGE plpgsql AS $$ \
+             BEGIN RETURN c; END $$",
+            "CREATE FUNCTION variable_types() RETURNS text LANGUAGE plpgsql AS $$ \
+             DECLARE c refcursor; b CURSOR FOR SELECT 1; BEGIN \
+             RETURN pg_typeof(c)::text || ' ' || pg_typeof(b)::text; END $$",
+            "CREATE TABLE kept (c refcursor)",
+        ],
+    );
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT pg_typeof(1) AS a, pg_typeof('x') AS b, pg_typeof('x'::refcursor) AS c, \
+             pg_typeof(named('n')) AS d"
+        ),
+        "a|b|c|d\ninteger|unknown|refcursor|refcursor\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT variable_types()"),
+        "variable_types\nrefcursor refcursor\nSELECT 1"
+    );
+    let mut columns = Vec::new();
+    session
+        .execute("SELECT named('n')", &mut |result| {
+            columns.extend(result.columns.unwrap_or_default());
+        })
+        .unwrap();
+    assert_eq!(
+        columns.first().and_then(|column| column.sql_type),
+        Some(crate::types::SqlType::Catalog(
+            crate::pg_catalog::CatalogType::RefCursor
+        ))
+    );
+    assert_eq!(
+        crate::pg_catalog::type_oid(crate::types::SqlType::Catalog(
+            crate::pg_catalog::CatalogType::RefCursor
+        )),
+        1790
+    );
+    answer(&mut session, "INSERT INTO kept VALUES ('stored')");
+    assert_eq!(
+        answer(&mut session, "SELECT c, pg_typeof(c) AS t FROM kept"),
+        "c|t\nstored|text\nSELECT 1"
+    );
+}

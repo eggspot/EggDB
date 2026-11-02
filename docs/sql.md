@@ -2930,8 +2930,12 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   block (and in procedures it `CALL`s directly) end the transaction and start a new one: work
   committed before a later error stays committed, and `FOR` loops over queries keep their rows
   across the commit. As in PostgreSQL they are refused with `2D000` in a function, in a `CALL`
-  inside `BEGIN ... COMMIT`, and in a block with an `EXCEPTION` handler ("cannot commit while a
-  subtransaction is active").
+  inside `BEGIN ... COMMIT`, in a procedure with a `SET` clause, and in a block with an
+  `EXCEPTION` handler ("cannot commit while a subtransaction is active"). Such a `COMMIT` or
+  `ROLLBACK` closes the cursors other than `WITH HOLD` that are open, also those the procedure
+  opened, so a later `FETCH` from one fails with `34000` (`cursor "c" does not exist`); cursors of
+  `FOR` loops survive it (D280). It also releases the transaction-level advisory locks
+  (`pg_advisory_xact_lock` and the rest) taken before it.
 - Cursors as portals: a cursor a routine opens (`OPEN c FOR ...`, the cursor's name is the
   `refcursor` variable's value, or `<unnamed portal N>` when it is `NULL`) stays open after the
   routine returns until the transaction ends, so the caller reads a returned `refcursor` (also
@@ -2941,8 +2945,10 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   `FETCH` and `MOVE [NEXT | PRIOR | FIRST | LAST | ABSOLUTE n | RELATIVE n | n | ALL | FORWARD
   [n | ALL] | BACKWARD [n | ALL]] [FROM | IN] name`, and `CLOSE {name | ALL}`; cursors other
   than `WITH HOLD` close when their transaction ends, and `DISCARD ALL` closes them all. A
-  cursor's rows are read when it is opened. `refcursor` is accepted as a type and holds the
-  cursor's name as text.
+  cursor's rows are read when it is opened. `refcursor` is a type of its own holding the
+  cursor's name (D280): `pg_typeof` names it, results send it with type OID 1790, it converts
+  to and from `text`, and a parameter declared with OID 1790 reads as text. A table column
+  declared `refcursor` is stored and shown as `text`.
 - Polymorphic types (D264): parameters and results of `sql` and PL/pgSQL functions and
   procedures may be `anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible`,
   `anycompatiblearray` and `anycompatiblenonarray`, also in `OUT` parameters, `RETURNS SETOF`,
@@ -3268,7 +3274,8 @@ only the catalog's `pg_node_tree` columns, as PostgreSQL does. The functions:
 `pg_relation_is_publishable`, `pg_partition_ancestors` (no rows: there are no partitions),
 `pg_encoding_to_char`, `obj_description`, `col_description`, `pg_get_serial_sequence` (the
 sequence a `serial` column owns, schema-qualified, or NULL), `to_regclass` and `to_regtype`
-(NULL for a name that does not exist), `generate_subscripts`, `pg_get_triggerdef` (the
+(NULL for a name that does not exist), `pg_typeof` (the `regtype` of its argument's type,
+`unknown` for a quoted constant without a cast; D280), `generate_subscripts`, `pg_get_triggerdef` (the
 trigger's `CREATE TRIGGER` as written), and `pg_get_ruledef`, `pg_get_statisticsobjdef_columns`
 and `shobj_description`, which return NULL.
 `regproc` takes and shows the name of the built-in functions EggDB names: `array_in`,

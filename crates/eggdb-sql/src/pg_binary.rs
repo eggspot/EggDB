@@ -559,7 +559,7 @@ pub(crate) fn reads_binary(sql_type: SqlType) -> bool {
         SqlType::Array(element) => {
             !matches!(element.sql_type(), SqlType::Array(_)) && reads_binary(element.sql_type())
         }
-        SqlType::Catalog(CatalogType::Name) | SqlType::Dynamic => true,
+        SqlType::Catalog(CatalogType::Name | CatalogType::RefCursor) | SqlType::Dynamic => true,
         SqlType::Catalog(_) => false,
         _ => true,
     }

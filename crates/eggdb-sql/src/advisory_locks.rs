@@ -295,6 +295,14 @@ pub(crate) fn enter(locks: &AdvisoryLocks, in_transaction: bool) -> EnteredLocks
     EnteredLocks { entered, previous }
 }
 
+pub(crate) fn release_active_transaction_locks() {
+    if let Some(active) = ACTIVE.with(|active| *active.borrow()) {
+        release(active.database, active.owner, |hold| {
+            hold.transaction_count = 0;
+        });
+    }
+}
+
 fn active() -> SqlResult<ActiveOwner> {
     ACTIVE.with(|active| *active.borrow()).ok_or_else(|| {
         SqlError::new(
@@ -629,7 +637,7 @@ pub(crate) fn application_lock_free(resource: &str, mode: Mode) -> SqlResult<boo
 
 #[cfg(test)]
 mod tests {
-    use super::{AdvisoryLocks, enter, function};
+    use super::{AdvisoryLocks, enter, function, release_active_transaction_locks};
     use crate::types::Value;
     use std::time::Duration;
 
@@ -671,6 +679,40 @@ mod tests {
         }
         let _entered = enter(&second, false);
         assert_eq!(call("pg_try_advisory_lock", &key), Value::Boolean(true));
+    }
+
+    #[test]
+    fn a_procedures_commit_releases_the_transaction_locks_and_keeps_the_session_locks() {
+        let first = AdvisoryLocks::new(3);
+        let second = AdvisoryLocks::new(3);
+        let transaction_key = [Value::Integer(31)];
+        let session_key = [Value::Integer(32)];
+        {
+            let _entered = enter(&first, true);
+            assert_eq!(
+                call("pg_try_advisory_xact_lock", &transaction_key),
+                Value::Boolean(true)
+            );
+            assert_eq!(
+                call("pg_try_advisory_lock", &session_key),
+                Value::Boolean(true)
+            );
+            release_active_transaction_locks();
+        }
+        {
+            let _entered = enter(&second, true);
+            assert_eq!(
+                call("pg_try_advisory_xact_lock", &transaction_key),
+                Value::Boolean(true)
+            );
+            assert_eq!(
+                call("pg_try_advisory_lock", &session_key),
+                Value::Boolean(false)
+            );
+        }
+        second.release_transaction_locks();
+        let _entered = enter(&first, false);
+        assert_eq!(call("pg_advisory_unlock", &session_key), Value::Boolean(true));
     }
 
     #[test]

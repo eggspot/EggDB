@@ -383,3 +383,37 @@ fn an_executed_call_commits_inside_the_procedure_unless_the_pipeline_wrote_first
     assert_eq!(answer[5].code(), "2D000");
     assert_eq!(count(&mut other), "0");
 }
+
+#[test]
+fn a_commit_inside_a_procedure_closes_its_cursor_and_refcursors_go_out_as_their_own_type() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    let created = client.query(
+        "CREATE PROCEDURE fetch_after_commit() LANGUAGE plpgsql AS $$ \
+         DECLARE c refcursor := 'kept'; v integer; BEGIN \
+         OPEN c FOR SELECT 1; COMMIT; FETCH c INTO v; END $$",
+    );
+    assert_eq!(tags(&created), "CZ");
+    let answer = client.query("CALL fetch_after_commit()");
+    assert_eq!(tags(&answer), "EZ");
+    assert_eq!(answer[0].code(), "34000");
+    assert!(
+        answer[0].text().contains("cursor \"kept\" does not exist"),
+        "{answer:?}"
+    );
+
+    let created = client.query(
+        "CREATE FUNCTION named(c refcursor) RETURNS refcursor LANGUAGE plpgsql AS $$ \
+         BEGIN RETURN c; END $$",
+    );
+    assert_eq!(tags(&created), "CZ");
+    let answer = client.query("SELECT named('n') AS c, pg_typeof('x'::refcursor) AS t");
+    assert_eq!(tags(&answer), "TDCZ");
+    let types = answer[0].column_types();
+    assert_eq!(types[0].1, 1790, "{types:?}");
+    assert_eq!(types[1].1, 2206, "{types:?}");
+    assert_eq!(
+        answer[1].row(),
+        vec![Some("n".to_owned()), Some("refcursor".to_owned())]
+    );
+}

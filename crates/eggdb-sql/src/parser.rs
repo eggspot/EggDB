@@ -2428,7 +2428,10 @@ impl<'t> Parser<'t> {
             },
             "boolean" | "bool" => SqlType::Boolean,
             "text" => SqlType::Text,
-            "refcursor" | "jsonpath" if self.postgresql() => SqlType::Text,
+            "refcursor" if self.postgresql() => {
+                SqlType::Catalog(crate::pg_catalog::CatalogType::RefCursor)
+            }
+            "jsonpath" if self.postgresql() => SqlType::Text,
             "varchar" => SqlType::Varchar(self.varchar_length(token.start)?),
             "character" | "char" if self.is_word("varying") => {
                 self.at += 1;

@@ -11,6 +11,8 @@ pub const BOOL_OID: u32 = 16;
 pub const BYTEA_OID: u32 = 17;
 /// `name`.
 pub const NAME_OID: u32 = 19;
+/// `refcursor`.
+pub const REFCURSOR_OID: u32 = 1790;
 /// `int8`.
 pub const INT8_OID: u32 = 20;
 /// `int2`.
@@ -140,7 +142,7 @@ pub fn sql_type_of(oid: u32) -> Option<SqlType> {
         INT8_OID => SqlType::BigInt,
         FLOAT4_OID => SqlType::Real,
         FLOAT8_OID => SqlType::Double,
-        TEXT_OID | NAME_OID => SqlType::Text,
+        TEXT_OID | NAME_OID | REFCURSOR_OID => SqlType::Text,
         BPCHAR_OID => SqlType::Bpchar(None),
         TIME_OID => SqlType::Time(None),
         TIMETZ_OID => SqlType::TimeTz(None),

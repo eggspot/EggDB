@@ -29,6 +29,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{Relation, TableCache};
 use crate::lexer::tokenize_in;
 use crate::parser::{Parameters, Parser};
+use crate::pg_catalog::CatalogType;
 use crate::records::{self, RECORD_OID};
 use crate::routines::{
     ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineReturns, Volatility,
@@ -155,6 +156,7 @@ pub(crate) fn invoke_nonatomic(
 ) -> SqlResult<Returned> {
     let writer = if call.definition.kind == RoutineKind::Procedure
         && call.definition.language == RoutineLanguage::PlPgSql
+        && call.definition.settings.is_empty()
     {
         RoutineWriter::Nonatomic(control)
     } else {
@@ -324,6 +326,7 @@ pub(crate) struct OpenCursor {
     scroll: Option<bool>,
     found: Option<bool>,
     holdable: bool,
+    opened_in: u64,
 }
 
 impl OpenCursor {
@@ -353,6 +356,7 @@ impl OpenCursor {
             scroll: portal.scroll,
             found: None,
             holdable: portal.holdable,
+            opened_in: crate::portals::transactions_ended(),
         }
     }
 }
@@ -1312,6 +1316,7 @@ impl<'r> Run<'r> {
         if self.oracle {
             return self.guarded_oracle(block);
         }
+        self.close_ended_cursors();
         let mark = self.undo.begin();
         let cursors = self.cursors.len();
         let error = match self.steps(&block.steps) {
@@ -1524,8 +1529,11 @@ impl<'r> Run<'r> {
                 "invalid transaction termination",
             ));
         };
-        control.end_transaction(self.tables, end)?;
-        Ok(Flow::Next)
+        let ended = control.end_transaction(self.tables, end);
+        crate::portals::end_procedure_transaction();
+        crate::advisory_locks::release_active_transaction_locks();
+        self.close_ended_cursors();
+        ended.map(|()| Flow::Next)
     }
 
     fn sql(&mut self, statement: &Fragment, into: Option<&IntoTargets>) -> SqlResult<Flow> {
@@ -2219,7 +2227,11 @@ impl<'r> Run<'r> {
         };
         match &self.frame.variables[index].slot {
             Slot::Cursor(_) => Ok(index),
-            Slot::Typed(SqlType::Text) if !self.oracle => Ok(index),
+            Slot::Typed(SqlType::Text | SqlType::Catalog(CatalogType::RefCursor))
+                if !self.oracle =>
+            {
+                Ok(index)
+            }
             _ => Err(SqlError::new(
                 SqlState::DATATYPE_MISMATCH,
                 format!("variable \"{variable}\" must be of type cursor or refcursor"),
@@ -2233,6 +2245,7 @@ impl<'r> Run<'r> {
         scroll: Option<bool>,
         source: &OpenSource,
     ) -> SqlResult<Flow> {
+        self.close_ended_cursors();
         let index = self.cursor_variable(variable)?;
         let declaration = match &self.frame.variables[index].slot {
             Slot::Cursor(declaration) => declaration.clone(),
@@ -2282,6 +2295,7 @@ impl<'r> Run<'r> {
             scroll,
             found: None,
             holdable: false,
+            opened_in: crate::portals::transactions_ended(),
         });
         self.frame.variables[index].value = Value::Text(portal);
         Ok(Flow::Next)
@@ -2331,6 +2345,7 @@ impl<'r> Run<'r> {
     }
 
     fn open_cursor(&mut self, variable: &str) -> SqlResult<usize> {
+        self.close_ended_cursors();
         let index = self.cursor_variable(variable)?;
         let Value::Text(portal) = &self.frame.variables[index].value else {
             return Err(SqlError::new(
@@ -2361,10 +2376,16 @@ impl<'r> Run<'r> {
         Ok(self.cursors.len() - 1)
     }
 
+    fn close_ended_cursors(&mut self) {
+        let current = crate::portals::transactions_ended();
+        self.cursors.retain(|cursor| cursor.holdable || cursor.opened_in == current);
+    }
+
     fn hand_over_cursors(&mut self) {
         if self.oracle || self.dialect() != Dialect::PostgreSql {
             return;
         }
+        self.close_ended_cursors();
         for cursor in self.cursors.drain(..) {
             crate::portals::hand_over(cursor.into_portal());
         }
