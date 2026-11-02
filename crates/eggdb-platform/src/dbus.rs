@@ -2,7 +2,7 @@
 //! operating system: typed values and their signatures, marshalling in either byte order,
 //! messages with their header fields, the length of a message from its first 16 bytes, the
 //! `EXTERNAL` authentication lines, and bus addresses. It is the base of the AT-SPI2
-//! accessibility bridge on Linux and the BSDs (DNEW-I29); the socket that carries it is the
+//! accessibility bridge on Linux and the BSDs (D256); the socket that carries it is the
 //! caller's. Every reader returns errors as values: whatever a peer sends is untrusted.
 
 use std::fmt;

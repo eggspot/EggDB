@@ -610,7 +610,7 @@ const db = await EggDB.open({ wasm: "eggdb.wasm", path: "/app.eggdb", dialect: "
 const out = await db.execute("SELECT 1 AS one");
 ```
 
-The desktop client's connect card runs in the browser too (DNEW-I29): build with
+The desktop client's connect card runs in the browser too (D256): build with
 `--features gui`, copy the module to `web/eggdb-gui.wasm` and open `web/card.html`
 (`?theme=dark`, `?theme=high-contrast`, `?font=<url of a .ttf>`). `web/card.js` draws the
 card on a canvas and keeps a hidden ARIA copy of its accessibility tree over it, so screen

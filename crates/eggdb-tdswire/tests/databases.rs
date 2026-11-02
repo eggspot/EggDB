@@ -1,4 +1,4 @@
-//! Databases created while the server runs (DNEW-R-M6a-db) over TDS: `CREATE DATABASE` and
+//! Databases created while the server runs (D270) over TDS: `CREATE DATABASE` and
 //! `DROP DATABASE`, `sys.databases`, a login naming a new database, and `USE` moving a
 //! connection between databases with the database ENVCHANGE.
 

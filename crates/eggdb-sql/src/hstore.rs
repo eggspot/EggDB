@@ -1,6 +1,6 @@
 //! The `hstore` type compatible with PostgreSQL's extension of that name: a set of text keys,
 //! each with a text value or `NULL`, kept sorted the way PostgreSQL keeps them (by key length,
-//! then by bytes) with the first of duplicate keys winning (DNEW-F-citext).
+//! then by bytes) with the first of duplicate keys winning (D259).
 
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{DefinedValue, SqlType, Value};

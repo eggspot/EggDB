@@ -1,4 +1,4 @@
-//! Databases created while the server runs (DNEW-R-M6a-db) over the MySQL protocol:
+//! Databases created while the server runs (D270) over the MySQL protocol:
 //! `CREATE DATABASE` and `DROP DATABASE`, `SHOW DATABASES`, a handshake naming a new database,
 //! and `USE` and `COM_INIT_DB` moving a connection between databases.
 

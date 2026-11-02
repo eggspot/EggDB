@@ -1748,7 +1748,7 @@ other across the three types): `isfinite` is false for them, adding or subtracti
 interval or a number of days keeps them, a finite time stamp plus an infinite interval is
 infinite, `infinity - infinity` and `infinity + '-infinity'` fail with `22008`, the difference
 with a finite time stamp is an infinite interval, subtracting infinite dates fails with `22008`,
-and `to_char` returns NULL for them (DNEW-R-31b).
+and `to_char` returns NULL for them (D271).
 
 `time` reads `04:05:06.789`, `04:05 PM` and the time of a date-time string, and `timetz` the
 same with an offset (`04:05:06+02`; without one, the session's); both print in the ISO style,
@@ -1818,7 +1818,7 @@ value keeps the number as written (`1.0`); `json` has no equality, as in Postgre
 and cannot be indexed or be a key (`42704`). Stored `json` and `jsonb` are parsed again when a
 row is read, so a damaged one is `XX001`.
 
-SQL/JSON path (DNEW-R-36) works as in PostgreSQL: `jsonb_path_exists`, `jsonb_path_match`,
+SQL/JSON path (D272) works as in PostgreSQL: `jsonb_path_exists`, `jsonb_path_match`,
 `jsonb_path_query` (set-returning, in `FROM` or a select list), `jsonb_path_query_array` and
 `jsonb_path_query_first`, each with optional `vars` (an object, else `22023`) and `silent`
 arguments and a `_tz` form, and the operators `jsonb @? path` and `jsonb @@ path`. A path is
@@ -1864,7 +1864,7 @@ of every element type above; arrays of `name`, `oid`, `"char"`, `aclitem`, `int2
 its text. Multidimensional arrays, slices (`a[1:2]`), bounds in literals
 (`[1:2]={...}`) and arrays of other element types answer `0A000`. Parameters declared with an
 array type OID (`int4[]`, `text[]` and every array a column can hold) bind in the text and binary
-formats (DNEW-R-45). An array may
+formats (D265). An array may
 hold at most 2^27 elements (`54000`) and counts against the session's value limit.
 
 **Expressions**
@@ -2377,7 +2377,7 @@ it, and a statement that fails in a trigger leaves nothing behind.
   triggers are `0A000`, and a trigger does not fire itself again.
 
 Triggers that fire triggers nest at most 32 deep; deeper is an error, never a crash, also when
-a cascade fires a trigger that sets off another cascade (DNEW-F-trig-cascade). Rows a cascading
+a cascade fires a trigger that sets off another cascade (D260). Rows a cascading
 foreign key changes or removes (`ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT`, `ON UPDATE
 CASCADE`) fire the child table's `UPDATE` or `DELETE` triggers, as in PostgreSQL, SQL Server,
 SQLite and Oracle: row triggers once per row, statement triggers (and a Transact-SQL trigger's
@@ -2431,7 +2431,7 @@ coordinates, geography measures on the spheroid, transformations between other S
 
 ## citext and hstore
 
-`citext` and `hstore` are built in (DNEW-F-citext): `CREATE EXTENSION citext` and
+`citext` and `hstore` are built in (D259): `CREATE EXTENSION citext` and
 `CREATE EXTENSION hstore` succeed and list in `pg_extension`, and the types keep PostgreSQL's
 names in `pg_type` (OIDs 9000 to 9003, with their array types) and its text and binary forms
 on the wire.
@@ -2532,7 +2532,7 @@ rolled-back change never streams and a committed one always does. `eggdb serve
 `source`, `op` of `c`, `u` or `d`, `ts_ms`), oldest first, at least once. `eggdb serve
 --cdc-queue <name>` delivers the same events into EggDB's durable queue `<name>`, where AMQP
 0-9-1, AMQP 1.0, STOMP and SQS clients consume them (D217). Rows a cascading foreign key or a
-`REPLACE` changes or removes are captured like any other change (DNEW-F-trig-cascade). Not yet:
+`REPLACE` changes or removes are captured like any other change (D260). Not yet:
 Kafka and MQTT sinks, Debezium's schema section, and capture without triggers.
 
 ### Transactional outbox and inbox
@@ -2888,7 +2888,7 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   does (`PL/pgSQL function f(integer) line 3 at RAISE`).
 - Bodies are checked at `CREATE` (unless `check_function_bodies` is off, as `pg_dump` sets it),
   with PostgreSQL's messages; the SQL statements inside run when they are reached.
-- Transaction control (DNEW-F-proc-commit): `COMMIT [AND CHAIN]` and `ROLLBACK [AND CHAIN]`
+- Transaction control (D262): `COMMIT [AND CHAIN]` and `ROLLBACK [AND CHAIN]`
   inside a procedure, or a `DO` block, run by a top-level `CALL`/`DO` outside a transaction
   block (and in procedures it `CALL`s directly) end the transaction and start a new one: work
   committed before a later error stays committed, and `FOR` loops over queries keep their rows
@@ -2906,7 +2906,7 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   than `WITH HOLD` close when their transaction ends, and `DISCARD ALL` closes them all. A
   cursor's rows are read when it is opened. `refcursor` is accepted as a type and holds the
   cursor's name as text.
-- Polymorphic types (DNEW-R-33c): parameters and results of `sql` and PL/pgSQL functions and
+- Polymorphic types (D264): parameters and results of `sql` and PL/pgSQL functions and
   procedures may be `anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible`,
   `anycompatiblearray` and `anycompatiblenonarray`, also in `OUT` parameters, `RETURNS SETOF`,
   `RETURNS TABLE` and `VARIADIC`. Each call resolves them from its arguments: every `any*`
@@ -3287,7 +3287,7 @@ TEMP`, which runs and keeps the prepared statements. `SET SESSION AUTHORIZATION`
 `DEFAULT` or the session's own user (`0A000` for another). Array parameters bind in the text and
 binary formats with PostgreSQL's array type OIDs, and `pg_sleep`, `pg_notify`, the waiting
 advisory lock functions, `pg_advisory_unlock_all()` and functions declared `RETURNS void` report
-the `void` type (OID 2278) (DNEW-R-45). Known difference: a function returning `void` yields
+the `void` type (OID 2278) (D265). Known difference: a function returning `void` yields
 NULL where PostgreSQL yields an empty value.
 
 ## ORMs and migration tools

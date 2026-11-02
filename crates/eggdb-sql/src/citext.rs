@@ -1,5 +1,5 @@
 //! The `citext` type compatible with PostgreSQL's extension of that name: text that compares,
-//! orders, groups and indexes by one full case fold (DNEW-F-citext), with no tie-break, so
+//! orders, groups and indexes by one full case fold (D259), with no tie-break, so
 //! `'A'` and `'a'` are the same value to every operation that compares.
 
 use crate::types::{DefinedType, DefinedValue, Value};

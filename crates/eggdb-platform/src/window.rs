@@ -1,4 +1,4 @@
-//! Native windows for EggDB's GUI (D8, D191, DNEW-I29): open a window of a logical size,
+//! Native windows for EggDB's GUI (D8, D191, D256): open a window of a logical size,
 //! present RGBA frames into it, and read its keyboard, resize, scale and close events.
 //!
 //! Every operating system's window API stays behind [`open_window`] and the [`Window`] trait,

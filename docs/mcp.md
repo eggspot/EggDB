@@ -156,7 +156,7 @@ The audit's `server_started` record lists the names (`"tables"`), and `eggdb aud
 claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write --tables orders,order_lines
 ```
 
-With both options the agent reads and changes only the tables you name (DNEW-F-mcp-tables-write).
+With both options the agent reads and changes only the tables you name (D257).
 The same filter that hides the other tables sits under the writer too, so every way a statement
 can reach another table is covered, not a list of statement kinds:
 
@@ -199,7 +199,7 @@ stay drawn, as in the database itself. Only `write_sql` opens the file read-writ
 statement runs (the time limit bounds it), commits and closes the file, other programs cannot
 open the file at all.
 
-**Destructive statements need your confirmation** (DNEW-I80): `DROP` of anything, `TRUNCATE`,
+**Destructive statements need your confirmation** (D255): `DROP` of anything, `TRUNCATE`,
 `ALTER TABLE ... DROP COLUMN`, `DROP CONSTRAINT` or `DROP PRIMARY KEY`, a column's type change,
 any statement that can change or delete many rows, and a statement that can run other
 statements (an Oracle anonymous block, `CALL`, `EXECUTE IMMEDIATE`, `DO`). A `DELETE` or
@@ -313,7 +313,7 @@ calls `eggdb mcp` holds nothing. So:
   commands wait up to five seconds (`--busy-timeout <ms>` changes it), and programs on the Rust
   API wait as long as `Options::busy_timeout` says (by default they fail at once with
   `ErrorKind::Locked`). A writer still refused after its wait exits 5 and is told it may be an
-  `eggdb mcp` call (DNEW-F-mcp-limits). A call holds the file for at most its time limit plus one second (up to 301 s
+  `eggdb mcp` call (D258). A call holds the file for at most its time limit plus one second (up to 301 s
   with `--time-limit 300`), after which the watchdog ends the server;
 - after each call the next one waits `--call-gap` milliseconds (100 by default, at most 10,000)
   before it opens the file, so an agent calling again and again leaves your writers, which do

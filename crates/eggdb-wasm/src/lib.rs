@@ -11,7 +11,7 @@
 //! [`eggdb_wasm_close`] ends a handle; [`eggdb_wasm_version`] answers the version.
 //!
 //! With the `gui` feature the module also carries the desktop client's connect card for the
-//! browser loader in `web/card.js` (DNEW-I29): `eggdb_wasm_card_render` draws its RGBA frame,
+//! browser loader in `web/card.js` (D256): `eggdb_wasm_card_render` draws its RGBA frame,
 //! `eggdb_wasm_card_key` and `eggdb_wasm_card_focus` answer input, `eggdb_wasm_card_accessibility`
 //! answers the screen-reader tree the loader mirrors into ARIA elements, and
 //! `eggdb_wasm_card_font` takes the TrueType fonts to draw text with. The feature is off by

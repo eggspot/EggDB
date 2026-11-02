@@ -156,7 +156,7 @@ example and malformed variants) and the cryptography's published vectors have un
 their own, and `crates/eggdb-pgwire/tests/protocol.rs` drives every protocol flow with a client
 written in the test.
 
-The limits that keep another program from locking users out or exhausting memory (DNEW-I79)
+The limits that keep another program from locking users out or exhausting memory (D254)
 have tests of their own on each SQL protocol, in `tests/limits.rs` of `eggdb-pgwire`,
 `eggdb-mysqlwire` and `eggdb-tdswire`: 20 idle sockets do not keep a real login out, 10,000
 `Parse` messages end in `54000` after 4,096 prepared statements, portals stop at 4,096, a message

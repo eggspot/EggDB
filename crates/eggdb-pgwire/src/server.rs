@@ -233,7 +233,7 @@ pub fn serve_databases<S: KeyValueStore + Sync>(
 
 /// [`serve_with_local`] for the databases of `directory`, each reached by its name in the
 /// startup packet, including databases created while the server runs (`CREATE DATABASE`,
-/// DNEW-R-M6a-db): each connection holds its database for as long as it is connected, and
+/// D270): each connection holds its database for as long as it is connected, and
 /// its session creates and drops databases through `directory`. [`ServerConfig::database`]
 /// names the database whose stored roles a login to a missing database is checked against.
 pub fn serve_directory<D: DatabaseDirectory + Sync>(

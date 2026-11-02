@@ -209,7 +209,7 @@ pub fn serve<S: KeyValueStore + Sync>(
 }
 
 /// [`serve`] for the databases of `directory`, including databases created while the server
-/// runs (DNEW-R-M6a-db): the login's database and `USE` pick one by name (ignoring ASCII
+/// runs (D270): the login's database and `USE` pick one by name (ignoring ASCII
 /// case), each connection holds its database while it uses it, and its session creates and
 /// drops databases through `directory`. A login without a database starts on
 /// [`ServerConfig::database`].

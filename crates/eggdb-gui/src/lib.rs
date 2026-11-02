@@ -1,5 +1,5 @@
 //! EggDB's own GUI toolkit and the desktop client's screens, designed in `docs/ux/gui.md`
-//! (D15, D191, DNEW-I29): an RGBA [`Canvas`] with antialiased shapes, text from TrueType fonts
+//! (D15, D191, D256): an RGBA [`Canvas`] with antialiased shapes, text from TrueType fonts
 //! read by our own [`TrueTypeFont`], a [`png`] encoder for offscreen frames, the first screen's
 //! connect card drawn by [`connect_screen::draw`] with its keyboard model
 //! [`connect_screen::handle_key`] and its screen-reader tree
@@ -9,7 +9,7 @@
 //! native window from the platform layer (`eggdb_platform::window`).
 
 /// The browser build's glue: DOM key names, modifier bits, theme and action numbers, and the
-/// accessibility tree as JSON for the ARIA mirror over the canvas (DNEW-I29).
+/// accessibility tree as JSON for the ARIA mirror over the canvas (D256).
 pub mod browser;
 mod canvas;
 mod color;

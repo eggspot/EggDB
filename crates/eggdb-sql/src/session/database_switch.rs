@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 /// What a session carries to the session that replaces it when its client switches to another
 /// served database (MySQL's `USE` and `COM_INIT_DB`, SQL Server's `USE`): the user, the dialect,
-/// the run-time settings, the limits and the cancel signal (DNEW-R-M6a-db). Made by
+/// the run-time settings, the limits and the cancel signal (D270). Made by
 /// [`Session::switch_to`]; [`DatabaseSwitch::into_session`] builds the new session.
 pub struct DatabaseSwitch {
     settings: Settings,

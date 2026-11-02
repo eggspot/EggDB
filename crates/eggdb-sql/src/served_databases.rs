@@ -1,4 +1,4 @@
-//! The databases one server serves (D184, DNEW-R-M6a-db): `CREATE DATABASE` and
+//! The databases one server serves (D184, D270): `CREATE DATABASE` and
 //! `DROP DATABASE` run through [`ServedDatabases`], which the server implements over its data
 //! directory, one file per database.
 

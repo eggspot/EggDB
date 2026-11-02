@@ -1,5 +1,5 @@
 //! What a network server limits so that no client, and no other program on the same machine,
-//! can lock other users out or exhaust the server's memory (D9, D22, DNEW-I79):
+//! can lock other users out or exhaust the server's memory (D9, D22, D254):
 //! - [`LoginSlots`]: the connections still logging in. When every slot is taken, a new
 //!   connection takes the slot of the oldest one that has waited at least
 //!   [`LoginSlots::eviction_age`], and that one is dropped; a peer on another machine holds at

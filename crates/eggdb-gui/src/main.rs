@@ -1,4 +1,4 @@
-//! `eggdb-gui`: EggDB's desktop client (D15, DNEW-I29), a binary of its own so the server's
+//! `eggdb-gui`: EggDB's desktop client (D15, D256), a binary of its own so the server's
 //! size never carries the GUI. It shows the first screen's connect card in a native window, or
 //! renders it offscreen to a PNG file for scripts and tests.
 

@@ -5,7 +5,7 @@
 //! `Properties` calls a screen reader such as Orca makes, and the `Object:StateChanged`,
 //! `Focus`, `ChildrenChanged` and `Window` events raised when the tree or the window's focus
 //! changes. The values come from the public AT-SPI2 D-Bus interface descriptions; the socket
-//! that carries the messages is the caller's (DNEW-I29).
+//! that carries the messages is the caller's (D256).
 //!
 //! The application is the root object; the window's own node becomes its frame, because no
 //! other part of the system exposes an X11 window to AT-SPI2.

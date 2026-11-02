@@ -60,7 +60,7 @@ eggdb <command> <file> [arguments] [options]
 | `explain <file> -c <sql>` | read-only | shows the plan for one statement, in its dialect's EXPLAIN form, without running it (below) |
 | `table list\|show\|sample <file> [<table>]` | read-only | lists the tables and views, shows one in full, or prints its first rows (below) |
 | `row list <file> <table>` | read-only | the rows of one table in the order they are stored, a page at a time with `--limit` and `--after` (below) |
-| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the `mysql` client and MySQL drivers, and with `--tds-listen` to `sqlcmd` and SQL Server drivers over TDS; on a loopback address without TLS, on any address with TLS (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184), and `CREATE DATABASE` and `DROP DATABASE` add and remove such files while it runs (DNEW-R-M6a-db) |
+| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the `mysql` client and MySQL drivers, and with `--tds-listen` to `sqlcmd` and SQL Server drivers over TDS; on a loopback address without TLS, on any address with TLS (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184), and `CREATE DATABASE` and `DROP DATABASE` add and remove such files while it runs (D270) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, or with `--dialect mysql` a `mysqldump` file, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
@@ -94,7 +94,7 @@ without an option. `--cache <bytes>` sets the cache for any command (`--cache 64
 another program has it open (an `eggdb mcp` call, another `eggdb` command), trying again every
 few milliseconds, and exits 5 (busy) only when the file is still taken after that.
 `--busy-timeout <ms>` sets the wait for any command (0 to 3,600,000; `--busy-timeout 0` fails at
-once). Programs using the Rust API set it with `Options::busy_timeout` (DNEW-F-mcp-limits).
+once). Programs using the Rust API set it with `Options::busy_timeout` (D258).
 
 ## Keys and values
 
@@ -987,7 +987,7 @@ are all-or-nothing together: `COMMIT` keeps both, `ROLLBACK` (or a block left op
 drops both, and `get` sees what the block wrote. In a failed block they are refused until
 `ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, and `expire`, `persist` and
 `cas` are refused inside a block for now; `scan`, `ttl`, `check`, `stats` and `backup` read the
-last commit (DNEW-R-M3-shell).
+last commit (D266).
 
 ```
 app=> begin;
@@ -1090,7 +1090,7 @@ Server's error 3702) while any connection uses the database, including the one d
 the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `-` or `$`
 (`42602` otherwise). Serving a single file, or `--read-only`, creates and drops nothing
 (`0A000`). Statements after a `USE` that changes the database in the same batch fail with
-`0A000`: send them in the next batch (DNEW-R-M6a-db).
+`0A000`: send them in the next batch (D270).
 
 | Option | Meaning |
 |--------|---------|
@@ -1124,10 +1124,10 @@ the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `
 | `--stomp-listen <address>` | serves STOMP 1.2, 1.1 and 1.0 (default port 61613): `CONNECT` or `STOMP` with `login` as `--user` and `passcode` as the server's password, `SEND`, `SUBSCRIBE` with `ack:auto`, `client` (cumulative) or `client-individual` and an optional `prefetch-count`, `ACK`, `NACK`, transactions (`BEGIN`, `COMMIT`, `ABORT`; a commit's queue messages are stored all or none), receipts and `DISCONNECT`; `/queue/<name>` destinations are the durable queues `--amqp-listen` and `--sqs-listen` serve, `/topic/<name>` destinations go to every current subscriber; no heart-beats yet; loopback only for now (D217) |
 | `--cql-listen <address>` | serves Cassandra's CQL native protocol v4 (default port 9042) for Cassandra drivers: the password authenticator with `--user` and the server's password, `QUERY`, `PREPARE`, `EXECUTE` and `BATCH`, and the `system.local`, `system.peers` and `system_schema` tables drivers read; a keyspace is a SQL schema and a CQL table is a SQL table of the same name, so SQL reads and writes the same rows; `CREATE`/`DROP KEYSPACE`, `CREATE`/`DROP TABLE` (with partition and clustering keys and `CLUSTERING ORDER`), `TRUNCATE`, `INSERT` and `UPDATE` as upserts (counters with `c = c + n`), `INSERT ... IF NOT EXISTS`, `DELETE` of rows or columns, `SELECT` with `WHERE`, `IN`, `ORDER BY`, `LIMIT` and `count(*)`, and batches as one transaction; scalar types only (no collections, user-defined types, TTL, `USING TIMESTAMP` or other lightweight transactions yet), every result in one page; loopback only for now (D218) |
 | `--database <name>` | the name clients connect to; default the file name without its extension (`app.db` is `app`). Any other name gets `3D000` |
-| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, and each has 5 seconds to finish its login. When all 16 are taken, a new connection takes the slot of the oldest that has waited a second or more, and that one is dropped, so idle sockets from another program cannot lock real logins out; only when every one is younger is the new connection refused with `53300` (MySQL 1040, SQL Server 17809). A peer on another machine (over TLS) holds at most 8 of the 16, an IPv6 peer counted by its `/64`. The same limits hold on `--mysql-listen` and `--tds-listen`. A PostgreSQL connection keeps at most 4,096 prepared statements, 4,096 portals and 1 GiB of their text and bound parameters; one more is refused with `54000` and the connection goes on. Messages over 64 KiB, prepared statements and portals of every connection on every SQL listener share one memory budget of 4 GiB (all of memory on 32-bit machines): a request past it gets `53200 out of memory` (MySQL 1041, SQL Server 701), and a message too large for what is left ends its connection (DNEW-I79) |
-| `--idle-timeout <seconds>` | close a logged-in connection that sends nothing for that long; default 3600 (one hour), `0` never closes it. PostgreSQL clients get `FATAL 57P05 terminating connection due to idle-session timeout`, MySQL clients error 4031, and a TDS connection is closed; the log gets a line. The same value holds on every SQL listener (DNEW-I79) |
-| `--socket-dir <directory>` | also accept PostgreSQL connections on a Unix socket in that directory, named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory> -p <port>` connects; the socket is readable and writable by its owner only, a stale socket file is replaced, and it is removed at stop. On Windows (10 version 1803 or later) it is an `AF_UNIX` socket file whose access list lets only the user running the server in, the stand-in for mode 0600; libpq 14 and later reach it with `psql -h C:\path\to\directory -p <port>`; older Windows gets exit 2 (DNEW-F-win-afunix) |
-| `--mysql-socket <file>` | also accept MySQL connections on that Unix socket (`mysql --socket=<file>`); needs `--mysql-listen`. On Windows (10 version 1803 or later) it is an owner-only `AF_UNIX` socket file; the mysql client there reads `--socket` as a named pipe, so only drivers that open `AF_UNIX` paths reach it (DNEW-F-win-afunix) |
+| `--max-connections <count>` | connections served at once, one thread each; default 64. The next one gets `53300 sorry, too many clients already`. At most 16 of them may still be logging in at once, and each has 5 seconds to finish its login. When all 16 are taken, a new connection takes the slot of the oldest that has waited a second or more, and that one is dropped, so idle sockets from another program cannot lock real logins out; only when every one is younger is the new connection refused with `53300` (MySQL 1040, SQL Server 17809). A peer on another machine (over TLS) holds at most 8 of the 16, an IPv6 peer counted by its `/64`. The same limits hold on `--mysql-listen` and `--tds-listen`. A PostgreSQL connection keeps at most 4,096 prepared statements, 4,096 portals and 1 GiB of their text and bound parameters; one more is refused with `54000` and the connection goes on. Messages over 64 KiB, prepared statements and portals of every connection on every SQL listener share one memory budget of 4 GiB (all of memory on 32-bit machines): a request past it gets `53200 out of memory` (MySQL 1041, SQL Server 701), and a message too large for what is left ends its connection (D254) |
+| `--idle-timeout <seconds>` | close a logged-in connection that sends nothing for that long; default 3600 (one hour), `0` never closes it. PostgreSQL clients get `FATAL 57P05 terminating connection due to idle-session timeout`, MySQL clients error 4031, and a TDS connection is closed; the log gets a line. The same value holds on every SQL listener (D254) |
+| `--socket-dir <directory>` | also accept PostgreSQL connections on a Unix socket in that directory, named `.s.PGSQL.<port>` after `--listen`'s port, so `psql -h <directory> -p <port>` connects; the socket is readable and writable by its owner only, a stale socket file is replaced, and it is removed at stop. On Windows (10 version 1803 or later) it is an `AF_UNIX` socket file whose access list lets only the user running the server in, the stand-in for mode 0600; libpq 14 and later reach it with `psql -h C:\path\to\directory -p <port>`; older Windows gets exit 2 (D267) |
+| `--mysql-socket <file>` | also accept MySQL connections on that Unix socket (`mysql --socket=<file>`); needs `--mysql-listen`. On Windows (10 version 1803 or later) it is an owner-only `AF_UNIX` socket file; the mysql client there reads `--socket` as a named pipe, so only drivers that open `AF_UNIX` paths reach it (D267) |
 | `--tls-certificate <file>` | PEM certificate chain, the server's first, for TLS on every listener; needs `--tls-key` |
 | `--tls-key <file>` | PEM private key for `--tls-certificate`: PKCS#8, SEC 1 or PKCS#1, P-256 or RSA; read once at start, never on the command line |
 | `--tls-self-signed` | make a P-256 certificate at start, in memory, for the listen hosts and `localhost`; a new one each start. Its SHA-256 fingerprint is printed so clients can pin it |
@@ -1317,7 +1317,7 @@ the position and prints a summary ending `ok: … holds every source transaction
 command resumes; `--until caught-up` drops both when it finishes. If the connection to the
 source stays lost for longer than `--reconnect-for`, the file is consistent at the last applied
 position and the command exits 3; running it again resumes. The design is
-[ux/cli.md](ux/cli.md), section 30, and decision DNEW-F-follow-resume.
+[ux/cli.md](ux/cli.md), section 30, and decision D263.
 
 ## `eggdb mcp`
 
@@ -1354,7 +1354,7 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   routine or role) is refused with `42501`, a trigger or routine that reaches an unlisted table
   fails as missing, and a listed table that a foreign key or an unlisted view ties to an unlisted
   table cannot change where the change could reach it; the banner lists those ties
-  (DNEW-F-mcp-tables-write).
+  (D257).
 - **`--call-gap <ms>`** (default 100, 0 to 10000, 0 for none): after each call the next one that
   opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,

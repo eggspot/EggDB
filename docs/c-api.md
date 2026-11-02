@@ -274,7 +274,7 @@ eggdb_stmt_finalize(insert);
 - A statement belongs to its session: a call on it counts as a call on the session, and
   `eggdb_sql_close` fails with `EGGDB_ERR_IN_USE` while statements prepared on it are not
   finalized. Today the statement is parsed again at each run (the engine does not keep a
-  parsed plan between runs yet, DNEW-R-29); preparing still saves checking, quoting and
+  parsed plan between runs yet, D268); preparing still saves checking, quoting and
   converting values, and one crossing per value.
 
 ### Cancelling a statement

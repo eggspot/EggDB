@@ -88,7 +88,7 @@ impl VisibleTables {
     }
 
     /// `inner`, a write transaction, confined to these tables and views
-    /// (DNEW-F-mcp-tables-write): its reads hide everything else as [`VisibleTables::read`]
+    /// (D257): its reads hide everything else as [`VisibleTables::read`]
     /// does, and a change to anything else is refused with `42501`. That covers another table's
     /// definition, rows and indexes, a sequence that is neither named nor owned by a listed
     /// table, a schema, type, routine, package or role, and keys outside SQL; a new table, view

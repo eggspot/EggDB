@@ -198,7 +198,7 @@ pub fn serve_with_local<S: KeyValueStore + Sync>(
 }
 
 /// [`serve_with_local`] for the databases of `directory`, including databases created while
-/// the server runs (DNEW-R-M6a-db): the handshake's database, `USE` and `COM_INIT_DB` pick
+/// the server runs (D270): the handshake's database, `USE` and `COM_INIT_DB` pick
 /// one by name (ignoring ASCII case), each connection holds its database while it uses it,
 /// and its session creates and drops databases through `directory`. Without a database in
 /// the handshake a connection starts on [`ServerConfig::database`].

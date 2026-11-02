@@ -1,5 +1,5 @@
 //! `eggdb serve <directory>` creating and dropping databases while it runs
-//! (DNEW-R-M6a-db): `CREATE DATABASE` makes a `.eggdb` file a client then connects to by name,
+//! (D270): `CREATE DATABASE` makes a `.eggdb` file a client then connects to by name,
 //! `pg_database` lists it at once, `DROP DATABASE` is refused while a client is connected to it
 //! and removes the file once none is.
 

@@ -2978,7 +2978,7 @@ The registry's `confirm` field is where the MCP server now picks its confirmatio
   every tool as the other tool fields are. For `destructive_statement`: `the statement is
   destructive: DROP, TRUNCATE, a column dropped or retyped, a DELETE or UPDATE whose WHERE does
   not pin every column of the primary key or of a unique key to values, REPLACE or an upsert, or
-  a MERGE that updates or deletes` (DNEW-I80). An object in place of the string would change the type of a
+  a MERGE that updates or deletes` (D255). An object in place of the string would change the type of a
   field that slice 1's JSON already has; a second key costs nothing.
 - **`command-model.md`'s tools table**: the Confirm cell reads the check's name in code and its
   sentence: `` `destructive_statement`: the statement is destructive (DROP, TRUNCATE, …) ``.
@@ -3984,4 +3984,4 @@ the option is not used.
 - **Path that is not a socket** (exit 2): the message asks to remove it or pass another path.
 - **Windows:** the options work on Windows 10 version 1803 and later, on its `AF_UNIX`
   sockets, with an owner-only access list for "owner only"; older Windows gets exit 2 saying
-  the option needs Windows 10 version 1803 or later (DNEW-F-win-afunix).
+  the option needs Windows 10 version 1803 or later (D267).

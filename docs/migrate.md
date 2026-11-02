@@ -198,7 +198,7 @@ table `eggdb_follow.state`), saved in the same transaction as each applied sourc
   moved to another schema during a follow stop it with a clear message.
 
 Details are in [cli.md](cli.md) under `eggdb follow`, and the design is decisions D162 and
-DNEW-F-follow-resume.
+D263.
 
 ## SQL Server
 

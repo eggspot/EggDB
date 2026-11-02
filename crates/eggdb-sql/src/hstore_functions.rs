@@ -1,5 +1,5 @@
 //! The operators and functions of PostgreSQL's `hstore` extension over EggDB's built-in
-//! `hstore` type (DNEW-F-citext): `->`, `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-`, and
+//! `hstore` type (D259): `->`, `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-`, and
 //! `akeys`, `avals`, `skeys`, `svals`, `each`, `exist`, `defined`, `delete`, `slice`, `hstore`,
 //! `hstore_to_json`, `hstore_to_jsonb` and `hstore_to_array`.
 
