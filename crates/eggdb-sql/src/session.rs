@@ -1,5 +1,7 @@
+mod cursors;
 mod mysql;
 mod oracle;
+mod nonatomic;
 mod restore;
 mod savepoints;
 mod sqlite;
@@ -384,6 +386,7 @@ pub struct Session<'s> {
     deallocated: Vec<Option<String>>,
     _open: crate::activity::OpenSession,
     temporary: crate::temporary::TemporaryObjects,
+    portals: crate::portals::Portals,
     deferred: crate::deferred_checks::DeferredState,
     pending_user_types: Option<Arc<crate::user_types::Registry>>,
     plan_cache: crate::plan_cache::PlanCache,
@@ -454,6 +457,7 @@ impl<'s> Session<'s> {
                 std::ptr::from_ref(store).addr(),
             ),
             temporary: crate::temporary::TemporaryObjects::default(),
+            portals: crate::portals::Portals::default(),
             notifications: crate::notifications::Notifications::default(),
             deallocated: Vec::new(),
             _open: crate::activity::OpenSession::new(),
@@ -946,6 +950,7 @@ impl<'s> Session<'s> {
                 }
                 self.reset_all_settings();
                 sequences::discard_session_values();
+                crate::portals::take();
                 self.temporary.discard();
                 self.temporary.commit();
                 Ok(QueryResult::command("DISCARD ALL"))
@@ -1173,6 +1178,11 @@ impl<'s> Session<'s> {
             Statement::Explain(explain) => {
                 Ok(Some(crate::explain::columns(explain.style, self.dialect)))
             }
+            Statement::Cursor(crate::ast::CursorCommand::Fetch {
+                name,
+                only_move: false,
+                ..
+            }) => Ok(self.portals.columns_of(name)),
             _ => Ok(None),
         };
         let columns = columns.map(|columns| {
@@ -1735,7 +1745,12 @@ impl<'s> Session<'s> {
             self.enter_sequences(uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
+            crate::portals::install(std::mem::take(&mut self.portals));
             let result = with_raised_notices(self.run(&mut statement, &mut io));
+            self.portals = crate::portals::take();
+            if matches!(self.block, Block::None) {
+                self.portals.close_at_transaction_end();
+            }
             let result = self.keep_deferred(result);
             crate::activity::statement_finished(result.is_ok());
             let raised = crate::notifications::take_raised();
@@ -2772,6 +2787,7 @@ impl<'s> Session<'s> {
                 Ok(QueryResult::command("RESET"))
             }
             Statement::Discard(target) => self.discard(target.clone()),
+            Statement::Cursor(command) => self.cursor_command(command, io),
             Statement::Show { name } => self.show(name.as_deref()),
             Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
                 binding.create_table(writer, tables, create)?;
@@ -2914,6 +2930,20 @@ impl<'s> Session<'s> {
                     }
                 }
                 result
+            }
+            Statement::Call(call) if self.runs_procedures_nonatomic() => {
+                self.write_nonatomic("CALL", |control, tables| {
+                    for argument in &mut call.arguments {
+                        binding.condition(&*control, tables, argument)?;
+                    }
+                    crate::routines::call_procedure_nonatomic(control, tables, &settings, call)
+                        .map(|(result, _)| result)
+                })
+            }
+            Statement::Do(block) if self.runs_procedures_nonatomic() => {
+                self.write_nonatomic("DO", |control, tables| {
+                    crate::routines::run_do_nonatomic(control, tables, &settings, &block.code)
+                })
             }
             Statement::Call(call) => self.write_plsql("CALL", |writer, tables| {
                 for argument in &mut call.arguments {
@@ -3239,84 +3269,103 @@ impl<'s> Session<'s> {
                     },
                     tables,
                 );
-                match outcome {
-                    Ok(result)
-                        if !keep_open
-                            && !implicit
-                            && crate::triggers::statement_triggers_pending() =>
-                    {
-                        self.block = Block::Writing(writer);
-                        self.block_is_implicit = false;
-                        self.trigger_transaction = true;
-                        Ok(result)
-                    }
-                    Ok(result)
-                        if keep_open
-                            && (keeps_ddl_open
-                                || !matches!(
-                                    command,
-                                    "CREATE TABLE"
-                                        | "DROP TABLE"
-                                        | "TRUNCATE TABLE"
-                                        | "CREATE INDEX"
-                                        | "DROP INDEX"
-                                        | "CREATE SEQUENCE"
-                                        | "ALTER SEQUENCE"
-                                        | "DROP SEQUENCE"
-                                        | "ALTER TABLE"
-                                        | "CREATE SCHEMA"
-                                        | "DROP SCHEMA"
-                                        | "ALTER SCHEMA"
-                                        | "CREATE VIEW"
-                                        | "DROP VIEW"
-                                        | "ALTER VIEW"
-                                        | "COMMENT"
-                                        | "CREATE TRIGGER"
-                                        | "DROP TRIGGER"
-                                )) =>
-                    {
-                        self.block = Block::Writing(writer);
-                        self.block_is_implicit = false;
-                        Ok(result)
-                    }
-                    Ok(result) if implicit => {
-                        self.block = Block::Writing(writer);
-                        self.block_is_implicit = true;
-                        Ok(result)
-                    }
-                    Ok(result) => {
-                        let pending = crate::deferred_checks::take_statement_pending();
-                        if !pending.is_empty() {
-                            let checked = crate::constraints::check_pending(
-                                &crate::temporary::TemporaryRead {
-                                    inner: &writer,
-                                    objects: &*objects,
-                                },
-                                tables,
-                                &pending,
-                            );
-                            if let Err(error) = checked {
-                                let _ = writer.rollback();
-                                self.temporary.rollback();
-                                return Err(error);
-                            }
-                        }
-                        if let Err(error) = writer.commit() {
-                            self.temporary.rollback();
-                            return Err(error);
-                        }
-                        self.temporary.commit();
-                        sequences::mark_changes_committed();
-                        crate::activity::committed();
-                        Ok(result)
-                    }
-                    Err(error) => {
+                self.end_autocommit_statement(
+                    writer,
+                    outcome,
+                    command,
+                    keep_open,
+                    keeps_ddl_open,
+                    implicit,
+                )
+            }
+        }
+    }
+
+    fn end_autocommit_statement(
+        &mut self,
+        writer: Box<dyn crate::store::BoxedWrite + 's>,
+        outcome: SqlResult<QueryResult>,
+        command: &str,
+        keep_open: bool,
+        keeps_ddl_open: bool,
+        implicit: bool,
+    ) -> SqlResult<QueryResult> {
+        match outcome {
+            Ok(result)
+                if !keep_open
+                    && !implicit
+                    && crate::triggers::statement_triggers_pending() =>
+            {
+                self.block = Block::Writing(writer);
+                self.block_is_implicit = false;
+                self.trigger_transaction = true;
+                Ok(result)
+            }
+            Ok(result)
+                if keep_open
+                    && (keeps_ddl_open
+                        || !matches!(
+                            command,
+                            "CREATE TABLE"
+                                | "DROP TABLE"
+                                | "TRUNCATE TABLE"
+                                | "CREATE INDEX"
+                                | "DROP INDEX"
+                                | "CREATE SEQUENCE"
+                                | "ALTER SEQUENCE"
+                                | "DROP SEQUENCE"
+                                | "ALTER TABLE"
+                                | "CREATE SCHEMA"
+                                | "DROP SCHEMA"
+                                | "ALTER SCHEMA"
+                                | "CREATE VIEW"
+                                | "DROP VIEW"
+                                | "ALTER VIEW"
+                                | "COMMENT"
+                                | "CREATE TRIGGER"
+                                | "DROP TRIGGER"
+                        )) =>
+            {
+                self.block = Block::Writing(writer);
+                self.block_is_implicit = false;
+                Ok(result)
+            }
+            Ok(result) if implicit => {
+                self.block = Block::Writing(writer);
+                self.block_is_implicit = true;
+                Ok(result)
+            }
+            Ok(result) => {
+                let pending = crate::deferred_checks::take_statement_pending();
+                if !pending.is_empty() {
+                    let checked = crate::constraints::check_pending(
+                        &crate::temporary::TemporaryRead {
+                            inner: &writer,
+                            objects: &self.temporary,
+                        },
+                        &mut self.tables,
+                        &pending,
+                    );
+                    if let Err(error) = checked {
                         let _ = writer.rollback();
                         self.temporary.rollback();
-                        crate::activity::rolled_back();
-                        Err(error)
+                        return Err(error);
                     }
                 }
+                if let Err(error) = writer.commit() {
+                    self.temporary.rollback();
+                    return Err(error);
+                }
+                self.temporary.commit();
+                sequences::mark_changes_committed();
+                crate::activity::committed();
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = writer.rollback();
+                self.temporary.rollback();
+                crate::activity::rolled_back();
+                Err(error)
             }
         }
     }

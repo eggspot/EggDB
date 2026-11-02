@@ -207,6 +207,7 @@ pub(crate) fn classify(
         | Statement::Ignored { .. }
         | Statement::AlterSession(_)
         | Statement::Discard(_)
+        | Statement::Cursor(_)
         | Statement::CreateType(_)
         | Statement::CreateDomain(_)
         | Statement::DropType { cascade: false, .. }

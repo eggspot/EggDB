@@ -90,6 +90,7 @@ pub(crate) enum Statement {
     Merge(Box<MergeStatement>),
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
+    Cursor(CursorCommand),
     With(Box<WithStatement>),
     CreateType(Box<CreateType>),
     CreateDomain(Box<CreateDomain>),
@@ -377,6 +378,22 @@ impl WithTable {
             Self::Modifying { name, .. } => name,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CursorCommand {
+    Declare {
+        name: String,
+        scroll: Option<bool>,
+        hold: bool,
+        query: Box<Statement>,
+    },
+    Fetch {
+        name: String,
+        direction: crate::portals::PortalDirection,
+        only_move: bool,
+    },
+    Close(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

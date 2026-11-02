@@ -94,6 +94,7 @@ mod plan;
 mod plan_cache;
 mod plpgsql;
 mod plsql;
+mod portals;
 mod privacy;
 mod pushdown;
 mod random;

@@ -22,6 +22,8 @@ impl SqlState {
     pub const INVALID_CATALOG_NAME: Self = Self(*b"3D000");
     /// `42P03` duplicate_cursor: a portal by that name exists.
     pub const DUPLICATE_CURSOR: Self = Self(*b"42P03");
+    /// `42P11` invalid_cursor_definition: a cursor's query is not one a cursor can hold.
+    pub const INVALID_CURSOR_DEFINITION: Self = Self(*b"42P11");
     /// `42P05` duplicate_prepared_statement.
     pub const DUPLICATE_PREPARED_STATEMENT: Self = Self(*b"42P05");
     /// `53300` too_many_connections.

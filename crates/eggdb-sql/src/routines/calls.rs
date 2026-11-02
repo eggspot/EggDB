@@ -13,7 +13,7 @@ use crate::eval::{Evaluator, Scope, children, children_mut};
 use crate::execute::TableCache;
 use crate::lexer::tokenize_in;
 use crate::parser::Parser;
-use crate::plpgsql::{Call, ReadOnlyWrite, Returned};
+use crate::plpgsql::{Call, ReadOnlyWrite, Returned, TransactionControl};
 use crate::records::{RecordValue, field_names};
 use crate::schemas::{base_name, display};
 use crate::session::{OutputColumn, QueryResult};
@@ -183,6 +183,48 @@ pub(crate) fn call_procedure_outputs(
     settings: &Settings,
     call: &CallRoutine,
 ) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
+    let chosen = chosen_procedure(writer, tables, settings, call)?;
+    let returned = crate::plpgsql::invoke(
+        writer,
+        tables,
+        settings,
+        Call {
+            definition: &chosen.definition,
+            arguments: chosen.arguments,
+            trigger: None,
+        },
+    )?;
+    let sources = output_sources(&chosen.definition, &call.argument_names);
+    Ok((procedure_result(&chosen.definition, returned), sources))
+}
+
+pub(crate) fn call_procedure_nonatomic(
+    control: &mut dyn TransactionControl,
+    tables: &mut TableCache,
+    settings: &Settings,
+    call: &CallRoutine,
+) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
+    let chosen = chosen_procedure(&mut *control, tables, settings, call)?;
+    let returned = crate::plpgsql::invoke_nonatomic(
+        control,
+        tables,
+        settings,
+        Call {
+            definition: &chosen.definition,
+            arguments: chosen.arguments,
+            trigger: None,
+        },
+    )?;
+    let sources = output_sources(&chosen.definition, &call.argument_names);
+    Ok((procedure_result(&chosen.definition, returned), sources))
+}
+
+fn chosen_procedure(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    call: &CallRoutine,
+) -> SqlResult<Chosen> {
     let mut arguments = call.arguments.clone();
     Preparing {
         writer: &mut *writer,
@@ -196,7 +238,7 @@ pub(crate) fn call_procedure_outputs(
     for argument in &arguments {
         values.push(evaluator.eval(argument, None)?);
     }
-    let chosen = choose(
+    choose(
         &*writer,
         tables,
         RoutineKind::Procedure,
@@ -204,19 +246,7 @@ pub(crate) fn call_procedure_outputs(
         &call.argument_names,
         values,
     )
-    .map_err(|error| error.at_if_unplaced(call.name.position))?;
-    let returned = crate::plpgsql::invoke(
-        writer,
-        tables,
-        settings,
-        Call {
-            definition: &chosen.definition,
-            arguments: chosen.arguments,
-            trigger: None,
-        },
-    )?;
-    let sources = output_sources(&chosen.definition, &call.argument_names);
-    Ok((procedure_result(&chosen.definition, returned), sources))
+    .map_err(|error| error.at_if_unplaced(call.name.position))
 }
 
 fn output_sources(definition: &RoutineDefinition, names: &[Option<String>]) -> Vec<Option<usize>> {
@@ -243,6 +273,16 @@ pub(crate) fn run_do(
     code: &str,
 ) -> SqlResult<QueryResult> {
     crate::plpgsql::run_inline(writer, tables, settings, code)?;
+    Ok(QueryResult::command("DO"))
+}
+
+pub(crate) fn run_do_nonatomic(
+    control: &mut dyn TransactionControl,
+    tables: &mut TableCache,
+    settings: &Settings,
+    code: &str,
+) -> SqlResult<QueryResult> {
+    crate::plpgsql::run_inline_nonatomic(control, tables, settings, code)?;
     Ok(QueryResult::command("DO"))
 }
 

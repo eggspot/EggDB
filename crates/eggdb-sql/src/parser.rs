@@ -1,5 +1,6 @@
 mod constraints;
 mod copy;
+mod cursors;
 mod indexes;
 mod merge;
 mod mysql;
@@ -914,6 +915,9 @@ impl<'t> Parser<'t> {
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),
             "deallocate" if self.postgresql() => self.deallocate(),
+            "declare" if self.postgresql() => self.declare_cursor(),
+            "fetch" | "move" if self.postgresql() => self.fetch_cursor(),
+            "close" if self.postgresql() => self.close_cursor(),
             "lock" if self.postgresql() || self.oracle() => self.lock_table(),
             "listen" if self.postgresql() => {
                 self.at += 1;
@@ -2370,6 +2374,7 @@ impl<'t> Parser<'t> {
             },
             "boolean" | "bool" => SqlType::Boolean,
             "text" => SqlType::Text,
+            "refcursor" if self.postgresql() => SqlType::Text,
             "varchar" => SqlType::Varchar(self.varchar_length(token.start)?),
             "character" | "char" if self.is_word("varying") => {
                 self.at += 1;

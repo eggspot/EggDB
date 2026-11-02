@@ -2743,14 +2743,31 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   does (`PL/pgSQL function f(integer) line 3 at RAISE`).
 - Bodies are checked at `CREATE` (unless `check_function_bodies` is off, as `pg_dump` sets it),
   with PostgreSQL's messages; the SQL statements inside run when they are reached.
+- Transaction control (DNEW-F-proc-commit): `COMMIT [AND CHAIN]` and `ROLLBACK [AND CHAIN]`
+  inside a procedure, or a `DO` block, run by a top-level `CALL`/`DO` outside a transaction
+  block (and in procedures it `CALL`s directly) end the transaction and start a new one: work
+  committed before a later error stays committed, and `FOR` loops over queries keep their rows
+  across the commit. As in PostgreSQL they are refused with `2D000` in a function, in a `CALL`
+  inside `BEGIN ... COMMIT`, and in a block with an `EXCEPTION` handler ("cannot commit while a
+  subtransaction is active").
+- Cursors as portals: a cursor a routine opens (`OPEN c FOR ...`, the cursor's name is the
+  `refcursor` variable's value, or `<unnamed portal N>` when it is `NULL`) stays open after the
+  routine returns until the transaction ends, so the caller reads a returned `refcursor` (also
+  through an `INOUT` parameter) with `FETCH`, as Npgsql and psycopg do, and another routine can
+  `FETCH` from it. SQL statements: `DECLARE name [BINARY] [INSENSITIVE] [[NO] SCROLL] CURSOR
+  [{WITH | WITHOUT} HOLD] FOR query` (`25P01` outside a transaction block unless `WITH HOLD`),
+  `FETCH` and `MOVE [NEXT | PRIOR | FIRST | LAST | ABSOLUTE n | RELATIVE n | n | ALL | FORWARD
+  [n | ALL] | BACKWARD [n | ALL]] [FROM | IN] name`, and `CLOSE {name | ALL}`; cursors other
+  than `WITH HOLD` close when their transaction ends, and `DISCARD ALL` closes them all. A
+  cursor's rows are read when it is opened. `refcursor` is accepted as a type and holds the
+  cursor's name as text.
 
 Limits (D45): calls nest at most 32 deep (`54001`), and fewer when the session's thread runs
 out of stack first (`54001`, "stack depth limit exceeded": the servers and the `eggdb` command
 give each session 16 MiB, an embedding program that runs deep routines gives its thread `eggdb_sql::SESSION_STACK_BYTES`
 and calls `eggdb_sql::set_thread_stack_size`), every loop and statement can be cancelled,
 a body nests at most 64 levels and holds at most 100,000 statements, a routine's text is at most
-1 MiB, and a routine holds at most 1000 open cursors. Not yet: `COMMIT` and `ROLLBACK` in
-procedures (`0A000`), refcursors returned to the caller, polymorphic types (`anyelement`),
+1 MiB, and a routine or session holds at most 1000 open cursors. Not yet: polymorphic types (`anyelement`),
 `regprocedure`, functions that write when called once per row (`0A000`; call them on their
 own), set-returning functions other than as a `FROM` item or in a `SELECT` without `FROM`, and
 languages other than `sql` and `plpgsql`.

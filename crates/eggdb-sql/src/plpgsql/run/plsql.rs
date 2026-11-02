@@ -694,7 +694,7 @@ impl Run<'_> {
                 self.undo.release();
                 Ok(())
             }
-            Some(mark) => self.undo.roll_back(&mut *self.writer, mark),
+            Some(mark) => self.undo.roll_back(self.writer.get(), mark),
         }
     }
 

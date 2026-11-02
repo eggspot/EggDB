@@ -21,11 +21,11 @@ mod oracle;
 mod sqlserver;
 
 pub(crate) use calls::{
-    DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_outputs,
-    called_name, default_argument, default_value, evaluate, exprs_call_marked_routine,
+    DEFAULT_ARGUMENT, Prefetch, ROUTINE_CALL, call_in_row, call_procedure, call_procedure_nonatomic,
+    call_procedure_outputs, called_name, default_argument, default_value, evaluate, exprs_call_marked_routine,
     insert_calls_marked_routine, is_default_argument, marked_call, mentions_routine_call,
     prepare_delete, prepare_insert, prepare_query, prepare_select, prepare_update,
-    query_calls_marked_routine, run_do, select_calls_marked_routine, select_calls_volatile,
+    query_calls_marked_routine, run_do, run_do_nonatomic, select_calls_marked_routine, select_calls_volatile,
     select_may_write,
 };
 
@@ -887,3 +887,5 @@ mod mysql_tests;
 mod sqlserver_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transaction_control_tests;
