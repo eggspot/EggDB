@@ -426,11 +426,14 @@ impl ServerForm {
 
     /// Where `Connect` goes: the fields as connect options, with libpq's defaults for what is
     /// left empty (host `localhost`, user `eggdb`, the user's name as the database). Fails
-    /// with the URL's lines when the URL does not parse or the port is not a number, and
+    /// with the URL's lines when a typed URL (one the fields did not write) does not parse or
+    /// the port is not a number, and
     /// with the protocol's when the client cannot speak it yet.
     pub fn connect_options(&self) -> Result<ConnectOptions, ConnectFailure> {
-        if !self.url.value().trim().is_empty()
-            && !parse_server_url(self.url.value()).is_some_and(|url| url.well_formed)
+        let typed = self.url.value().trim();
+        if !typed.is_empty()
+            && typed != self.written_url()
+            && !parse_server_url(typed).is_some_and(|url| url.well_formed)
         {
             return Err(url_failure());
         }
@@ -778,5 +781,10 @@ mod tests {
         let mut port = ServerForm::new();
         port.port.set("99999");
         assert_eq!(port.connect_options().unwrap_err().field, FailureField::Url);
+        let mut written = ServerForm::new();
+        written.toggle_tls();
+        assert_eq!(written.url.value(), "postgresql://:5432?sslmode=disable");
+        let options = written.connect_options().expect("a URL the fields wrote is theirs");
+        assert_eq!(options.host, "localhost");
     }
 }
