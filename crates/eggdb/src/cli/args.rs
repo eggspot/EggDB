@@ -12,6 +12,7 @@ const LARGEST_PAGE_SIZE: usize = 65536;
 const MOST_TIME_LIMIT_SECONDS: u64 = 300;
 const MOST_CALL_GAP_MS: u64 = 10_000;
 const MOST_BUSY_TIMEOUT_MS: u64 = 3_600_000;
+const SMALLEST_CONNECTION_MEMORY: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandName {
@@ -246,6 +247,7 @@ impl CommandName {
             | OptionName::User
             | OptionName::Database
             | OptionName::MaxConnections
+            | OptionName::MaxConnectionMemory
             | OptionName::IdleTimeout
             | OptionName::SocketDir
             | OptionName::MysqlSocket
@@ -424,6 +426,7 @@ enum OptionName {
     PasswordFile,
     Database,
     MaxConnections,
+    MaxConnectionMemory,
     IdleTimeout,
     SocketDir,
     MysqlSocket,
@@ -527,6 +530,7 @@ impl OptionName {
             b"password-file" => Self::PasswordFile,
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
+            b"max-connection-memory" => Self::MaxConnectionMemory,
             b"idle-timeout" => Self::IdleTimeout,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
@@ -817,6 +821,7 @@ pub(crate) struct ServeOptions {
     pub(crate) password_file: Option<ExportFile>,
     pub(crate) database: Option<String>,
     pub(crate) max_connections: Option<usize>,
+    pub(crate) max_connection_memory: Option<usize>,
     pub(crate) idle_timeout_seconds: Option<u64>,
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
@@ -1418,6 +1423,17 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                         ))
                     })?;
                 request.serve.max_connections = Some(count);
+            }
+            OptionName::MaxConnectionMemory => {
+                let bytes = parse_size(&option.spelled, value).map_err(usage)?;
+                if bytes < SMALLEST_CONNECTION_MEMORY {
+                    return Err(usage(format!(
+                        "{} needs at least 1m, so a client can still send its usual requests, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    )));
+                }
+                request.serve.max_connection_memory = Some(bytes);
             }
             OptionName::IdleTimeout => {
                 let seconds = parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {

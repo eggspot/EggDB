@@ -256,7 +256,7 @@ pub use foreign::{ForeignSource, set_foreign_source};
 pub use hstore::HstoreValue;
 pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};
-pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES};
+pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES, held_row_bytes};
 pub use mysql_errors::Warning;
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
 pub use notifications::Notification;

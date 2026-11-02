@@ -58,6 +58,12 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
     }
 }
 
+/// The bytes a result row holds in memory: each value's own size plus the text, bytes and
+/// nested values it owns, and a small overhead for the row itself.
+pub fn held_row_bytes(row: &[Value]) -> usize {
+    WorkMemory::row_bytes(row)
+}
+
 pub(crate) struct EnteredRowLimit {
     previous: usize,
 }
@@ -324,6 +330,14 @@ mod tests {
         drop(fresh);
         drop(second);
         assert!(super::SHARED.with(|shared| shared.get().is_none()));
+    }
+
+    #[test]
+    fn a_rows_held_bytes_count_its_text() {
+        let short = super::held_row_bytes(&[Value::Text("x".to_owned())]);
+        let long = super::held_row_bytes(&[Value::Text("x".repeat(1000))]);
+        assert_eq!(long - short, 999);
+        assert!(super::held_row_bytes(&[]) > 0);
     }
 
     #[test]

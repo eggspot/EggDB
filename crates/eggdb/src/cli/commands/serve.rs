@@ -69,6 +69,11 @@ impl Session<'_> {
             .unwrap_or_else(|| DEFAULT_USER.to_owned());
         let password = self.serve_password(&user)?;
         let max_connections = options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
+        let memory_budget = Arc::new(
+            options
+                .max_connection_memory
+                .map_or_else(MemoryBudget::default, MemoryBudget::new),
+        );
         if !password.is_ascii() {
             return Err(usage(
                 "the password must be ASCII in this release: SASLprep, which normalizes other characters for SCRAM, is not implemented yet".to_owned(),
@@ -546,7 +551,6 @@ impl Session<'_> {
             Some(0) => None,
             Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
         };
-        let memory_budget = Arc::new(MemoryBudget::default());
         let config = ServerConfig {
             user,
             verifier,
@@ -711,6 +715,7 @@ impl Session<'_> {
         let resp_config = eggdb_resp::ServerConfig {
             password_sha256: resp_password,
             max_connections: config.max_connections,
+            memory_budget: Arc::clone(&memory_budget),
         };
         let served = std::thread::scope(|scope| {
             let server = scope.spawn(|| {

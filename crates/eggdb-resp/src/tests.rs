@@ -144,6 +144,7 @@ fn a_server_answers_a_pipelined_client_over_tcp() {
     let config = ServerConfig {
         password_sha256: None,
         max_connections: 8,
+        memory_budget: std::sync::Arc::default(),
     };
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -224,4 +225,82 @@ fn streams_add_range_read_and_trim() {
     assert_eq!(redis.text("XREAD STREAMS s $"), "*-1|");
     assert_eq!(redis.text("XTRIM s MAXLEN 1"), ":2|");
     assert_eq!(redis.text("TYPE s"), "+stream|");
+}
+
+fn bulk_command(words: &[&[u8]]) -> Vec<u8> {
+    let mut request = format!("*{}\r\n", words.len()).into_bytes();
+    for word in words {
+        request.extend_from_slice(format!("${}\r\n", word.len()).as_bytes());
+        request.extend_from_slice(word);
+        request.extend_from_slice(b"\r\n");
+    }
+    request
+}
+
+fn read_reply_line(client: &mut std::io::BufReader<std::net::TcpStream>) -> String {
+    use std::io::BufRead;
+    let mut line = String::new();
+    client.read_line(&mut line).unwrap();
+    line
+}
+
+#[test]
+fn requests_and_replies_past_the_memory_budget_get_oom_and_other_clients_go_on() {
+    use std::io::{Read, Write};
+    let keyspace = MemoryKeyspace::default();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let budget = std::sync::Arc::new(eggdb_platform::connection_limits::MemoryBudget::new(
+        256 * 1024,
+    ));
+    let config = ServerConfig {
+        password_sha256: None,
+        max_connections: 8,
+        memory_budget: std::sync::Arc::clone(&budget),
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            serve(
+                &keyspace,
+                &listener,
+                &config,
+                &|| stopped.load(std::sync::atomic::Ordering::Acquire),
+                &|_| {},
+            )
+            .unwrap();
+        });
+        let mut greedy = std::net::TcpStream::connect(address).unwrap();
+        greedy
+            .write_all(b"*3\r\n$3\r\nSET\r\n$4\r\nhuge\r\n$204800\r\n")
+            .unwrap();
+        let mut refused = String::new();
+        greedy.read_to_string(&mut refused).unwrap();
+        assert!(refused.starts_with("-OOM "), "{refused}");
+
+        let stream = std::net::TcpStream::connect(address).unwrap();
+        let mut client = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let value = vec![b'v'; 60 * 1024];
+        for key in [b"a", b"b", b"c", b"d", b"e"] {
+            writer
+                .write_all(&bulk_command(&[b"SET", key, &value]))
+                .unwrap();
+            assert_eq!(read_reply_line(&mut client), "+OK\r\n");
+        }
+        writer
+            .write_all(&bulk_command(&[b"MGET", b"a", b"b", b"c", b"d", b"e"]))
+            .unwrap();
+        let answer = read_reply_line(&mut client);
+        assert!(answer.starts_with("-OOM "), "{answer}");
+        writer.write_all(&bulk_command(&[b"GET", b"a"])).unwrap();
+        assert_eq!(read_reply_line(&mut client), format!("${}\r\n", 60 * 1024));
+        let mut rest = vec![0u8; 60 * 1024 + 2];
+        client.read_exact(&mut rest).unwrap();
+        writer.write_all(b"PING\r\n").unwrap();
+        assert_eq!(read_reply_line(&mut client), "+PONG\r\n");
+        assert_eq!(budget.used_bytes(), 0);
+        writer.write_all(b"QUIT\r\n").unwrap();
+        stopped.store(true, std::sync::atomic::Ordering::Release);
+    });
 }

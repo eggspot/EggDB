@@ -807,10 +807,23 @@ enum PortalRun {
     Finished(String),
 }
 
+impl Portal {
+    fn total_held_bytes(&self) -> usize {
+        self.held_bytes
+            .saturating_add(self.pending.as_ref().map_or(0, |pending| pending.held_bytes))
+    }
+}
+
 struct PendingRows {
     columns: Vec<ColumnDescription>,
     rows: std::vec::IntoIter<Vec<eggdb_sql::Value>>,
     tag: String,
+    held_bytes: usize,
+}
+
+enum RowBatch {
+    Sent(usize),
+    ConnectionLost,
 }
 
 fn tag_with_count(tag: &str, count: usize) -> String {
@@ -1296,7 +1309,7 @@ impl<'a, 's> Connection<'a, 's> {
 
     fn remove_portal(&mut self, name: &str) {
         if let Some(portal) = self.portals.remove(name) {
-            self.release_held(portal.held_bytes);
+            self.release_held(portal.total_held_bytes());
         }
     }
 
@@ -1304,7 +1317,7 @@ impl<'a, 's> Connection<'a, 's> {
         let released = self
             .portals
             .drain()
-            .map(|(_, portal)| portal.held_bytes)
+            .map(|(_, portal)| portal.total_held_bytes())
             .fold(0, usize::saturating_add);
         self.release_held(released);
     }
@@ -1537,7 +1550,7 @@ impl<'a, 's> Connection<'a, 's> {
         let replaced = self
             .portals
             .get(&portal_name)
-            .map(|portal| portal.held_bytes);
+            .map(Portal::total_held_bytes);
         if replaced.is_none() && self.portals.len() >= MAX_PORTALS {
             return Err((too_many_held("portals", MAX_PORTALS), None));
         }
@@ -1794,6 +1807,7 @@ impl<'a, 's> Connection<'a, 's> {
                     columns: description,
                     rows: result.rows.into_iter(),
                     tag: result.tag,
+                    held_bytes: 0,
                 };
                 self.send_rows(name, pending, limit)
             }
@@ -1810,12 +1824,78 @@ impl<'a, 's> Connection<'a, 's> {
         mut pending: PendingRows,
         limit: usize,
     ) -> Result<(), (SqlError, Option<String>)> {
+        let batch = self.send_row_batch(&mut pending, limit);
+        let sent = match batch {
+            Ok(RowBatch::Sent(sent)) => sent,
+            Ok(RowBatch::ConnectionLost) => {
+                self.release_held(pending.held_bytes);
+                return Ok(());
+            }
+            Err(error) => {
+                self.release_held(pending.held_bytes);
+                return Err(error);
+            }
+        };
+        if pending.rows.as_slice().is_empty() {
+            self.release_held(pending.held_bytes);
+            self.wire
+                .outbox
+                .command_complete(&tag_with_count(&pending.tag, sent));
+            return Ok(());
+        }
+        if pending.held_bytes == 0 {
+            let bytes = pending
+                .rows
+                .as_slice()
+                .iter()
+                .map(|row| eggdb_sql::held_row_bytes(row))
+                .fold(0, usize::saturating_add);
+            if let Err(error) = self.hold_suspended_rows(bytes) {
+                if let Some(portal) = self.portals.get_mut(name) {
+                    portal.run = PortalRun::Failed;
+                }
+                return Err((error, None));
+            }
+            pending.held_bytes = bytes;
+        }
+        match self.portals.get_mut(name) {
+            Some(portal) => portal.pending = Some(pending),
+            None => self.release_held(pending.held_bytes),
+        }
+        self.wire.outbox.portal_suspended();
+        Ok(())
+    }
+
+    fn send_row_batch(
+        &mut self,
+        pending: &mut PendingRows,
+        limit: usize,
+    ) -> Result<RowBatch, (SqlError, Option<String>)> {
         let mut sent = 0usize;
+        let mut released = 0usize;
+        let outcome = self.send_rows_counting(pending, limit, &mut sent, &mut released);
+        let released = released.min(pending.held_bytes);
+        pending.held_bytes -= released;
+        self.release_held(released);
+        outcome.map(|lost| if lost { RowBatch::ConnectionLost } else { RowBatch::Sent(sent) })
+    }
+
+    fn send_rows_counting(
+        &mut self,
+        pending: &mut PendingRows,
+        limit: usize,
+        sent: &mut usize,
+        released: &mut usize,
+    ) -> Result<bool, (SqlError, Option<String>)> {
         let zone = self.session.time_zone();
-        while sent < limit {
+        let counting = pending.held_bytes > 0;
+        while *sent < limit {
             let Some(row) = pending.rows.next() else {
                 break;
             };
+            if counting {
+                *released = released.saturating_add(eggdb_sql::held_row_bytes(&row));
+            }
             let mut values = Vec::with_capacity(row.len());
             for (value, column) in row.iter().zip(&pending.columns) {
                 values.push(
@@ -1827,20 +1907,32 @@ impl<'a, 's> Connection<'a, 's> {
                 .outbox
                 .data_row(&values)
                 .map_err(|error| (too_large(error), None))?;
-            sent += 1;
+            *sent += 1;
             if self.wire.flush_if_large().is_err() {
-                return Ok(());
+                return Ok(true);
             }
         }
-        if pending.rows.len() > 0 {
-            if let Some(portal) = self.portals.get_mut(name) {
-                portal.pending = Some(pending);
-            }
-            self.wire.outbox.portal_suspended();
-        } else {
-            self.wire
-                .outbox
-                .command_complete(&tag_with_count(&pending.tag, sent));
+        Ok(false)
+    }
+
+    fn hold_suspended_rows(&mut self, bytes: usize) -> Result<(), SqlError> {
+        let total = self.held.bytes().saturating_add(bytes);
+        if total > MAX_HELD_BYTES {
+            return Err(too_many_held(
+                "bytes of prepared statements, bound parameters and rows of suspended portals",
+                MAX_HELD_BYTES,
+            ));
+        }
+        if !self.held.resize(total) {
+            return Err(SqlError::new(
+                SqlState::OUT_OF_MEMORY,
+                format!(
+                    "out of memory: the server's connections already hold their memory budget, so the {bytes} bytes of rows this portal has left cannot be kept until its next Execute"
+                ),
+            )
+            .with_hint(
+                "Execute the portal with no row limit so its rows are sent at once, or retry once other sessions have closed their portals.",
+            ));
         }
         Ok(())
     }

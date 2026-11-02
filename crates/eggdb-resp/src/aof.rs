@@ -88,6 +88,12 @@ impl<'k> AofReplay<'k> {
                         self.report.commands
                     ));
                 }
+                Err(ProtocolError::OverBudget(bytes)) => {
+                    return Err(format!(
+                        "command {} of the append-only file declares {bytes} bytes, more than it may hold",
+                        self.report.commands + 1
+                    ));
+                }
             };
             self.report.commands += 1;
             if let Reply::Error(error) =

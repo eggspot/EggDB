@@ -33,6 +33,10 @@ pub const LOGIN_EVICTION_AGE: Duration = Duration::from_secs(1);
 /// all of memory on a 32-bit machine.
 pub const DEFAULT_MEMORY_BUDGET_BYTES: usize = 4usize.saturating_mul(1 << 30);
 
+/// The bytes a request or reply may take without holding them against the budget: a small
+/// one costs less to serve than to count, and a connection's own buffers are of this size.
+pub const UNCOUNTED_BUFFER_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Peer {
     ThisMachine,
@@ -284,6 +288,17 @@ impl Reservation<'_> {
         self.bytes = bytes;
         true
     }
+
+    /// Makes the reservation `bytes` large when that is more than [`UNCOUNTED_BUFFER_BYTES`],
+    /// and gives every byte back when it is not; false, leaving the reservation as it was,
+    /// when the budget has too little left.
+    pub fn hold_if_large(&mut self, bytes: usize) -> bool {
+        if bytes <= UNCOUNTED_BUFFER_BYTES {
+            self.resize(0)
+        } else {
+            self.resize(bytes)
+        }
+    }
 }
 
 impl Drop for Reservation<'_> {
@@ -294,7 +309,7 @@ impl Drop for Reservation<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginSlots, MemoryBudget};
+    use super::{LoginSlots, MemoryBudget, UNCOUNTED_BUFFER_BYTES};
     use std::net::IpAddr;
     use std::time::{Duration, Instant};
 
@@ -409,6 +424,25 @@ mod tests {
         drop(first);
         assert_eq!(budget.used_bytes(), 0);
         assert!(budget.reserve(usize::MAX).is_none());
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn only_buffers_over_the_uncounted_size_are_held() {
+        let budget = MemoryBudget::new(4 * UNCOUNTED_BUFFER_BYTES);
+        let mut held = budget.empty_reservation();
+        assert!(held.hold_if_large(UNCOUNTED_BUFFER_BYTES));
+        assert_eq!(budget.used_bytes(), 0);
+        assert!(held.hold_if_large(3 * UNCOUNTED_BUFFER_BYTES));
+        assert_eq!(budget.used_bytes(), 3 * UNCOUNTED_BUFFER_BYTES);
+        assert!(!held.hold_if_large(5 * UNCOUNTED_BUFFER_BYTES));
+        assert_eq!(held.bytes(), 3 * UNCOUNTED_BUFFER_BYTES);
+        let mut other = budget.empty_reservation();
+        assert!(!other.hold_if_large(2 * UNCOUNTED_BUFFER_BYTES));
+        assert!(held.hold_if_large(10));
+        assert_eq!(budget.used_bytes(), 0);
+        assert!(other.hold_if_large(2 * UNCOUNTED_BUFFER_BYTES));
+        drop(other);
         assert_eq!(budget.used_bytes(), 0);
     }
 }
