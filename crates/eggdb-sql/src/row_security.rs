@@ -192,6 +192,18 @@ fn decode(name: &str, bytes: &[u8]) -> SqlResult<Policy> {
     })
 }
 
+pub(crate) fn stored_conditions(key: &[u8], value: &[u8]) -> Option<SqlResult<Vec<String>>> {
+    let (&space, rest) = key.strip_prefix(NAMESPACE)?.split_first()?;
+    if space != POLICY_SPACE {
+        return None;
+    }
+    let name = match rest.iter().position(|&byte| byte == 0) {
+        Some(end) => String::from_utf8_lossy(rest.get(end + 1..).unwrap_or_default()),
+        None => return Some(Err(corrupt())),
+    };
+    Some(decode(&name, value).map(|policy| policy.using.into_iter().chain(policy.check).collect()))
+}
+
 pub(crate) fn policies(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<Policy>> {
     let prefix = policy_prefix(table);
     let mut found = Vec::new();

@@ -1949,7 +1949,7 @@ mod tests {
         let limited = instructions(false, true);
         assert!(limited.is_ascii() && !limited.contains('\n'), "{limited}");
         assert!(
-            limited.contains(" The user limited this session to some tables (--tables): list_tables shows exactly those, any other table does not exist here and a query naming one fails as missing; kv_get and kv_scan are not offered. To reach more, ask the user to widen --tables. Start with list_tables"),
+            limited.contains(" The user limited this session to some tables (--tables): list_tables shows exactly those, any other table does not exist here and a query naming one fails as missing; kv_get and kv_scan are not offered. A table listed with some of its columns shows only those, and naming another of its columns fails as missing. To reach more, ask the user to widen --tables. Start with list_tables"),
             "{limited}"
         );
         assert!(shipped.contains("oracle); kv_get and kv_scan read keys. A write"));
@@ -1963,6 +1963,7 @@ mod tests {
         assert!(
             writing.contains("needs the user's confirmation. The user limited this session to some tables (--tables): you may read and change only those")
                 && writing.contains("is refused with SQLSTATE 42501 and rolled back")
+                && writing.contains("A table listed with some of its columns shows only those, naming another of its columns fails as missing, and its rows cannot be changed.")
                 && writing.contains("To reach more, ask the user to widen --tables. Start with list_tables"),
             "{writing}"
         );

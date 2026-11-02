@@ -301,7 +301,8 @@ pub use store::{
 pub use time_zones::TimeZone;
 pub use types::{DefinedKind, DefinedType, DefinedValue, NumericModifier, SqlType, Value};
 pub use visible_tables::{
-    OutsideLink, OutsideLinkKind, UnknownTableName, VisibleRead, VisibleTables, VisibleWrite,
+    OutsideLink, OutsideLinkKind, UnknownTableName, UnservableColumnList, VisibleRead,
+    VisibleTables, VisibleWrite,
 };
 
 /// The first bytes of every key that SQL keeps in a database: the catalog and every table's

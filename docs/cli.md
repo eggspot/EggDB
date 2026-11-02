@@ -1361,8 +1361,12 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   tables: creating, renaming to or changing anything else (a table, view, sequence, schema, type,
   routine or role) is refused with `42501`, a trigger or routine that reaches an unlisted table
   fails as missing, and a listed table that a foreign key or an unlisted view ties to an unlisted
-  table cannot change where the change could reach it; the banner lists those ties
-  (D257).
+  table cannot change where the change could reach it (a table an unlisted one references
+  still takes inserts and changes to other columns); the banner lists those ties (D257, D281).
+  A name may carry the only columns to show, `--tables 'orders(id,total)'`: the list must hold
+  the primary key, the other columns are unknown to the agent everywhere (`42703`), and that
+  table cannot be changed; a list the server cannot serve stops it (exit 1,
+  `column_not_found`) (D281).
 - **`--call-gap <ms>`** (default 100, 0 to 10000, 0 for none): after each call the next one that
   opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,

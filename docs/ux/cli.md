@@ -3382,6 +3382,15 @@ eggdb mcp <file> [--allow-write] [--tables <names>]... [--time-limit <seconds>] 
   table fails as that table would: `relation ... does not exist`.
 - Nothing else in the file exists for the agent: other tables, views and sequences, and the keys
   outside SQL (`kv_get` and `kv_scan`, below).
+- **A column list limits a table to some columns** (D281): `--tables "orders(id,total),customers"`
+  shows `orders` with only `id` and `total`. Commas inside the parentheses separate columns, not
+  names, blanks around them are stripped and a column given twice counts once; the list must
+  hold the table's primary key, the table must exist at start, and a view takes no list (list the
+  columns of the tables it reads). Every other column does not exist for the agent: `SELECT *`,
+  `describe_table`, `sample_rows` and every catalog leave it out, and naming it fails as an
+  unknown column (`42703`), directly, through a view, a function, a CTE or a subquery. A table
+  listed with columns cannot be changed, even with `--allow-write`. Giving the same table twice
+  with different columns is a usage error; quote the option in a shell, since `(` is special.
 
 Usage errors, exit 2, section 7's shape (`eggdb: <message>`, then the `usage:` and `try: eggdb
 help mcp` lines):
@@ -3390,6 +3399,10 @@ help mcp` lines):
 | `--tables ""` | `--tables needs at least one name, such as --tables users,orders` |
 | an empty entry or a trailing comma | `--tables has an empty name in 'users,,orders'` |
 | more than one dot, or a dot with nothing on one side | `--tables takes name or schema.name, not 'a.b.c'` |
+| a `(` with no `)` | `--tables has a column list with no ')' in 'orders(id'` |
+| an empty column, as in `orders(id,)` | `--tables has an empty column name in 'orders(id,)'` |
+| nested parentheses, text after `)`, or a `)` alone | `--tables takes columns as name(a,b), not 'orders(id)x'` |
+| one table twice with different columns | `--tables names 'orders' twice with different columns: give it once, with every column it needs, such as orders(a,b)` |
 | a bad `--call-gap` | `--call-gap must be a whole number of milliseconds from 0 to 10000, not '20s'` |
 
 ### The startup check: refuse, don't warn
@@ -3412,6 +3425,20 @@ eggdb: --tables names 'ordres' and 'Users' (stored as 'users'): no table, view o
   try: eggdb table list app.db
 ```
 Three or more: `'a', 'b' and 'c'`. A schema-qualified name is shown as given, `'archive.ordres'`.
+
+A column list the server cannot serve also stops it, exit 1, code `column_not_found`, every
+reason in one message (D281): a column the table does not have, a primary-key column left out,
+an empty list, a list on a view, or a table that does not exist yet:
+```
+eggdb: --tables lists columns eggdb mcp cannot serve from app.db: 'orders' has no column "totl"; 'users' leaves out its primary key column "id": list it too. Fix the column list.
+  try: eggdb table show app.db orders
+```
+With a column list the banner gains a line after `tables`, and the `add it` line quotes the
+option:
+```
+  columns      orders(id,total): the agent sees only the columns listed, and may not change these tables
+  add it       claude mcp add mydb -- eggdb mcp app.db --tables 'orders(id,total),customers'
+```
 
 ### What the agent sees
 - `list_tables`, `describe_table`, `sample_rows`, `row_list`, `explain_query`, `run_sql` in every
@@ -3475,8 +3502,11 @@ is named itself. Every name must be a table, view or sequence of the file when t
 or it does not start; with --allow-write a name not there yet is one the agent may create. With
 --allow-write and --tables the agent changes only the tables named: creating, changing or dropping
 anything else (a table, view, sequence, schema, type, routine or role) is refused, and so is a
-change to a named table that a foreign key or a view ties to a table not named; the server lists
-those ties when it starts. After each call the server waits --call-gap milliseconds before the
+change that could reach a table not named through a foreign key or a view (a named table that
+one not named references still takes inserts and changes to other columns); the server lists
+those ties when it starts. A name may list the only columns the agent sees, as orders(id,total)
+with its primary key: the other columns do not exist for the agent, and it cannot change that
+table. After each call the server waits --call-gap milliseconds before the
 next call opens the file, so your own programs, which are refused while a call holds the file, get their
 turn between an agent's calls; 0 turns the gap off.
 ```
@@ -3485,7 +3515,8 @@ The option lines, in this order (the text column stays at column 32, as `--time-
       --allow-write            add write_sql: one statement per call that may change the file
       --tables <names>         only these tables and views exist for the agent, and with
                                --allow-write only these change: comma-separated, name or
-                               schema.name; repeat it for more
+                               schema.name, or name(a,b) for only some columns; repeat it for
+                               more
       --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
       --call-gap <ms>          the pause after each call before the next, so other programs can write;
                                milliseconds, 0 to 10000 (default 100)
@@ -3579,7 +3610,7 @@ $ eggdb mcp app.db --tables users,orders --allow-write
 eggdb mcp app.db: a read-write MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.
   writes       allowed (--allow-write): write_sql runs one statement per call, in its own transaction
   tables       users, orders only (--tables): the agent reads and changes only these; other tables do not exist for it, a change that would reach one is refused, and kv_get and kv_scan are off
-  tied         table "order_lines" has a foreign key to "orders", so the agent cannot change the rows and definition of orders; add order_lines to --tables to allow it
+  tied         table "order_lines" has a foreign key to "orders", so the agent may not delete its rows, change the columns that foreign key points at, or change its definition on orders; add order_lines to --tables to allow it
   ...
 $ eggdb mcp app.db --tables users --tables orders,archive.orders --call-gap 250
 eggdb mcp app.db: a read-only MCP server on stdin and stdout, for an AI agent's client to start; nothing to type here.

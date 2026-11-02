@@ -1086,13 +1086,23 @@ fn an_agent_writing_with_tables_changes_only_those_tables() {
         r#"{"sql":"CREATE FUNCTION leak() RETURNS integer AS 'SELECT 1' LANGUAGE sql"}"#,
     );
     assert_eq!(sql_failure(&routine).0, "42501");
-    let cascading = mcp.call("write_sql", r#"{"sql":"INSERT INTO parents VALUES (2)"}"#);
+    let referenced = mcp.call("write_sql", r#"{"sql":"INSERT INTO parents VALUES (2)"}"#);
+    assert_eq!(text_at(ok(&referenced), &["committed"]), "true");
+    let cascading = mcp.call(
+        "write_sql",
+        r#"{"sql":"DELETE FROM parents WHERE id = 1","confirm":true}"#,
+    );
     let (state, message) = sql_failure(&cascading);
     assert_eq!(state, "42501");
-    assert!(
-        message.contains("table \"children\" has a foreign key to \"parents\""),
-        "{message}"
+    assert_eq!(
+        message,
+        "cannot delete a row of \"parents\" or change a column a foreign key points at: table \"children\" has a foreign key to \"parents\", and this session may neither change nor check \"children\" (--tables)"
     );
+    let key_change = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE parents SET id = 5 WHERE id = 1","confirm":true}"#,
+    );
+    assert_eq!(sql_failure(&key_change).0, "42501");
     let (status, messages) = mcp.finish();
     assert!(status.success(), "{messages}");
     assert!(
@@ -1110,7 +1120,7 @@ fn an_agent_writing_with_tables_changes_only_those_tables() {
     ]);
     assert!(check.status.success(), "{}", stderr(&check));
     let rows = stdout(&check);
-    for expected in ["secrets=1", "parents=1", "note=hello", "draft=first"] {
+    for expected in ["secrets=1", "parents=2", "note=hello", "draft=first"] {
         assert!(rows.contains(expected), "{expected}: {rows}");
     }
 }
@@ -1135,4 +1145,119 @@ fn calls_wait_for_the_gap_and_the_user_s_writer_works_between_them() {
     let (status, messages) = mcp.finish();
     assert!(status.success(), "{messages}");
     assert!(messages.contains("; call gap 300 ms"), "{messages}");
+}
+
+#[test]
+fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
+    let (file, _audit) = sample("mcp-tables-columns", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let setup = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "CREATE VIEW contact AS SELECT name, email FROM users; \
+         CREATE FUNCTION email_of(person integer) RETURNS text LANGUAGE sql AS $$ SELECT email FROM users WHERE id = person $$",
+    ]);
+    assert!(setup.status.success(), "{}", stderr(&setup));
+    let mut mcp = Mcp::start(
+        file.path(),
+        &[
+            "--allow-write",
+            "--tables",
+            "users(id,name),contact",
+            "--call-gap",
+            "0",
+        ],
+    );
+    mcp.initialize();
+    assert_eq!(
+        first_value(&mut mcp, "postgresql", "SELECT name FROM users WHERE id = 1"),
+        "Ada"
+    );
+    let everything = run_sql(&mut mcp, "postgresql", "SELECT * FROM users ORDER BY id");
+    let shown = canonical(&everything);
+    assert!(shown.contains("Margaret"), "{shown}");
+    assert!(!shown.contains("ada@example.com"), "{shown}");
+    assert!(!shown.contains("email"), "{shown}");
+    for (dialect, sql) in [
+        ("postgresql", "SELECT email FROM users"),
+        ("mysql", "SELECT email FROM users"),
+        ("sqlite", "SELECT email FROM users"),
+        ("postgresql", "SELECT * FROM contact"),
+        ("postgresql", "SELECT email_of(1)"),
+        ("postgresql", "WITH u AS (SELECT * FROM users) SELECT email FROM u"),
+        ("postgresql", "SELECT name FROM users WHERE id IN (SELECT id FROM users WHERE email LIKE 'a%')"),
+    ] {
+        let answer = run_sql(&mut mcp, dialect, sql);
+        let (_, message) = sql_failure(&answer);
+        assert!(message.contains("email"), "{dialect} {sql}: {message}");
+        assert!(!message.contains("example.com"), "{dialect} {sql}: {message}");
+    }
+    let changed = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE users SET name = 'Hedy' WHERE id = 2"}"#,
+    );
+    let (state, message) = sql_failure(&changed);
+    assert_eq!(state, "42501");
+    assert_eq!(
+        message,
+        "cannot change \"users\": this session may read only some of its columns (--tables), so it may not change its rows or its definition"
+    );
+    let (status, messages) = mcp.finish();
+    assert!(status.success(), "{messages}");
+    assert!(
+        messages.contains("read-write, tables users(id,name), contact"),
+        "{messages}"
+    );
+    let check = eggdb(&[
+        "sql",
+        &path,
+        "-c",
+        "SELECT 'row=' || name || '/' || coalesce(email, '-') FROM users WHERE id = 2",
+    ]);
+    assert!(check.status.success(), "{}", stderr(&check));
+    assert!(stdout(&check).contains("row=Grace/-"), "{}", stdout(&check));
+}
+
+#[test]
+fn startup_refuses_column_lists_it_cannot_serve() {
+    let (file, _audit) = sample("mcp-tables-columns-refused", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    let unknown = eggdb(&["mcp", &path, "--tables", "users(id,emial)"]);
+    assert_eq!(unknown.status.code(), Some(1), "{}", stderr(&unknown));
+    let message = stderr(&unknown);
+    assert!(
+        message.contains("--tables lists columns eggdb mcp cannot serve from ")
+            && message.contains(": 'users' has no column \"emial\". Fix the column list."),
+        "{message}"
+    );
+    let keyless = eggdb(&["mcp", &path, "--tables", "users(name)"]);
+    assert_eq!(keyless.status.code(), Some(1));
+    assert!(
+        stderr(&keyless).contains("'users' leaves out its primary key column \"id\": list it too"),
+        "{}",
+        stderr(&keyless)
+    );
+    let not_yet = eggdb(&["mcp", &path, "--allow-write", "--tables", "drafts(id)"]);
+    assert_eq!(not_yet.status.code(), Some(1));
+    assert!(
+        stderr(&not_yet).contains("'drafts' does not exist yet"),
+        "{}",
+        stderr(&not_yet)
+    );
+    let twice = eggdb(&["mcp", &path, "--tables", "users(id)", "--tables", "users"]);
+    assert_eq!(twice.status.code(), Some(2));
+    assert!(
+        stderr(&twice).contains("--tables names 'users' twice with different columns"),
+        "{}",
+        stderr(&twice)
+    );
+    let unclosed = eggdb(&["mcp", &path, "--tables", "users(id"]);
+    assert_eq!(unclosed.status.code(), Some(2));
+    assert!(
+        stderr(&unclosed).contains("--tables has a column list with no ')' in 'users(id'"),
+        "{}",
+        stderr(&unclosed)
+    );
+    assert!(!audit_path(file.path()).exists());
 }

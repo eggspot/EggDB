@@ -1483,9 +1483,22 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Tables => {
                 for name in parse_table_names(&option.spelled, value).map_err(usage)? {
-                    if !request.tables.contains(&name) {
-                        request.tables.push(name);
+                    if request.tables.contains(&name) {
+                        continue;
                     }
+                    if request
+                        .tables
+                        .iter()
+                        .any(|given| table_part(given) == table_part(&name))
+                    {
+                        return Err(usage(format!(
+                            "{} names '{}' twice with different columns: give it once, with every column it needs, such as {}(a,b)",
+                            option.spelled,
+                            table_part(&name),
+                            table_part(&name)
+                        )));
+                    }
+                    request.tables.push(name);
                 }
             }
             OptionName::CallGap => {
@@ -2379,17 +2392,78 @@ fn parse_table_names(spelled: &str, value: &OsStr) -> Result<Vec<String>, String
         ));
     }
     let mut names = Vec::new();
-    for name in text.split(',').map(str::trim) {
-        if name.is_empty() {
+    for entry in split_table_entries(spelled, text)? {
+        let entry = entry.trim();
+        if entry.is_empty() {
             return Err(format!("{spelled} has an empty name in '{text}'"));
         }
+        let (name, columns) = match entry.split_once('(') {
+            Some((name, rest)) => {
+                let inside = rest.strip_suffix(')').ok_or_else(|| {
+                    format!("{spelled} takes columns as name(a,b), not '{entry}'")
+                })?;
+                (name.trim(), Some(parse_column_list(spelled, entry, inside)?))
+            }
+            None if entry.contains(')') => {
+                return Err(format!("{spelled} takes columns as name(a,b), not '{entry}'"));
+            }
+            None => (entry, None),
+        };
         let parts: Vec<&str> = name.split('.').collect();
         if parts.len() > 2 || parts.iter().any(|part| part.is_empty()) {
             return Err(format!("{spelled} takes name or schema.name, not '{name}'"));
         }
-        names.push(name.to_owned());
+        names.push(match columns {
+            Some(columns) => format!("{name}({})", columns.join(",")),
+            None => name.to_owned(),
+        });
     }
     Ok(names)
+}
+
+fn split_table_entries<'t>(spelled: &str, text: &'t str) -> Result<Vec<&'t str>, String> {
+    let mut entries = Vec::new();
+    let mut start = 0;
+    let mut open = false;
+    for (at, character) in text.char_indices() {
+        match character {
+            '(' if open => {
+                return Err(format!("{spelled} takes columns as name(a,b), not '{text}'"));
+            }
+            '(' => open = true,
+            ')' if !open => {
+                return Err(format!("{spelled} takes columns as name(a,b), not '{text}'"));
+            }
+            ')' => open = false,
+            ',' if !open => {
+                entries.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    if open {
+        return Err(format!("{spelled} has a column list with no ')' in '{text}'"));
+    }
+    entries.push(&text[start..]);
+    Ok(entries)
+}
+
+fn parse_column_list(spelled: &str, entry: &str, inside: &str) -> Result<Vec<String>, String> {
+    let mut columns: Vec<String> = Vec::new();
+    for column in inside.split(',').map(str::trim) {
+        if column.is_empty() {
+            return Err(format!("{spelled} has an empty column name in '{entry}'"));
+        }
+        if !columns.iter().any(|kept| kept == column) {
+            columns.push(column.to_owned());
+        }
+    }
+    Ok(columns)
+}
+
+fn table_part(entry: &str) -> &str {
+    entry.split_once('(').map_or(entry, |(name, _)| name)
 }
 
 fn parse_whole_number(digits: &[u8]) -> Option<u64> {
@@ -2483,6 +2557,38 @@ mod tests {
             "--call-gap must be a whole number of milliseconds from 0 to 10000, not '10001'"
         );
         assert!(usage_message("get app.db k --tables users").contains("--tables"));
+    }
+
+    #[test]
+    fn mcp_tables_take_column_lists() {
+        let limited = request("mcp app.db --tables orders(id,total),customers --tables orders(id,total)");
+        assert_eq!(limited.tables, vec!["orders(id,total)", "customers"]);
+        let spaced = request("mcp app.db --tables archive.orders(id,id,total)");
+        assert_eq!(spaced.tables, vec!["archive.orders(id,total)"]);
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id --tables x"),
+            "--tables has a column list with no ')' in 'orders(id'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id,)"),
+            "--tables has an empty column name in 'orders(id,)'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id)x"),
+            "--tables takes columns as name(a,b), not 'orders(id)x'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders((id))"),
+            "--tables takes columns as name(a,b), not 'orders((id))'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables id)"),
+            "--tables takes columns as name(a,b), not 'id)'"
+        );
+        assert_eq!(
+            usage_message("mcp app.db --tables orders(id) --tables orders"),
+            "--tables names 'orders' twice with different columns: give it once, with every column it needs, such as orders(a,b)"
+        );
     }
 
     #[test]

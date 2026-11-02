@@ -411,8 +411,11 @@ is named itself. Every name must be a table, view or sequence of the file when t
 or it does not start; with --allow-write a name not there yet is one the agent may create. With
 --allow-write and --tables the agent changes only the tables named: creating, changing or dropping
 anything else (a table, view, sequence, schema, type, routine or role) is refused, and so is a
-change to a named table that a foreign key or a view ties to a table not named; the server lists
-those ties when it starts. After each call the server waits --call-gap milliseconds before the
+change that could reach a table not named through a foreign key or a view (a named table that
+one not named references still takes inserts and changes to other columns); the server lists
+those ties when it starts. A name may list the only columns the agent sees, as orders(id,total)
+with its primary key: the other columns do not exist for the agent, and it cannot change that
+table. After each call the server waits --call-gap milliseconds before the
 next call opens the file, so your own programs, which wait for a call that holds the file
 (--busy-timeout), get their turn between an agent's calls; 0 turns the gap off.
 Every call is appended to <file>.mcp-audit.jsonl next to the file (readable by its owner only),
@@ -425,7 +428,8 @@ stdout carries the protocol only; every message goes to stderr.
       --allow-write            add write_sql: one statement per call that may change the file
       --tables <names>         only these tables and views exist for the agent, and with
                                --allow-write only these change: comma-separated, name or
-                               schema.name; repeat it for more
+                               schema.name, or name(a,b) for only some columns; repeat it for
+                               more
       --time-limit <seconds>   the longest one call may run, 1 to 300 (default 5)
       --call-gap <ms>          the pause after each call before the next, so other programs can write;
                                milliseconds, 0 to 10000 (default 100)
