@@ -90,6 +90,12 @@ collection instead of the default key space (see "Collections" below).
 **Large values.** `put` sizes its page cache to the value, so any value up to 1 GiB works
 without an option. `--cache <bytes>` sets the cache for any command (`--cache 64m`).
 
+**A file another program has open.** Every command waits up to five seconds for the file when
+another program has it open (an `eggdb mcp` call, another `eggdb` command), trying again every
+few milliseconds, and exits 5 (busy) only when the file is still taken after that.
+`--busy-timeout <ms>` sets the wait for any command (0 to 3,600,000; `--busy-timeout 0` fails at
+once). Programs using the Rust API set it with `Options::busy_timeout` (DNEW-F-mcp-limits).
+
 ## Keys and values
 
 Every key, value and range argument is read by its first characters:

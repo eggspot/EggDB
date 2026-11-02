@@ -4,8 +4,9 @@
 mod common;
 
 use common::TempPath;
-use eggdb::{Database, ErrorKind};
+use eggdb::{Database, ErrorKind, Options};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const LOCK_PROBE: &str = "EGGDB_TEST_LOCK_PROBE";
 
@@ -34,6 +35,34 @@ fn lock_probe_from_another_process() {
     };
     let error = Database::open(&path).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Locked, "{error}");
+}
+
+#[test]
+fn an_open_with_a_busy_timeout_waits_for_the_file_and_gives_up_after_it() {
+    let file = TempPath::new("locked-busy-timeout");
+    let holder = Database::open(file.path()).unwrap();
+    let started = Instant::now();
+    let refused = Database::open_with(
+        file.path(),
+        Options::new().busy_timeout(Duration::from_millis(150)),
+    )
+    .unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::Locked, "{refused}");
+    assert!(started.elapsed() >= Duration::from_millis(150));
+    let at_once = Database::open(file.path()).unwrap_err();
+    assert_eq!(at_once.kind(), ErrorKind::Locked, "{at_once}");
+    let releasing = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        holder.close().unwrap();
+    });
+    let waited = Database::open_with(
+        file.path(),
+        Options::new().busy_timeout(Duration::from_secs(30)),
+    )
+    .unwrap();
+    releasing.join().unwrap();
+    waited.put("k", "v").unwrap();
+    assert_eq!(waited.get("k").unwrap(), Some(b"v".to_vec()));
 }
 
 #[cfg(unix)]

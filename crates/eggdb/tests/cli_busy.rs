@@ -24,7 +24,7 @@ fn a_busy_file_exits_5_and_says_which_side_waits() {
     db.put("k", "v").unwrap();
     let writer = db;
 
-    let read = eggdb(&directory, &["get", "app.db", "k"]);
+    let read = eggdb(&directory, &["get", "app.db", "k", "--busy-timeout", "0"]);
     assert_eq!(read.status.code(), Some(5), "{}", stderr(&read));
     assert_eq!(
         stderr(&read),
@@ -33,7 +33,7 @@ fn a_busy_file_exits_5_and_says_which_side_waits() {
     writer.close().unwrap();
 
     let reader = Database::open_with(&path, Options::new().read_only(true)).unwrap();
-    let write = eggdb(&directory, &["put", "app.db", "k", "w"]);
+    let write = eggdb(&directory, &["put", "app.db", "k", "w", "--busy-timeout", "0"]);
     assert_eq!(write.status.code(), Some(5), "{}", stderr(&write));
     assert_eq!(
         stderr(&write),
@@ -42,6 +42,33 @@ fn a_busy_file_exits_5_and_says_which_side_waits() {
     let alongside = eggdb(&directory, &["get", "app.db", "k"]);
     assert_eq!(alongside.status.code(), Some(0), "{}", stderr(&alongside));
     assert_eq!(alongside.stdout, b"v");
+    drop(reader);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_writer_waits_for_a_file_another_program_holds_for_a_moment() {
+    let directory =
+        std::env::temp_dir().join(format!("eggdb-cli-busy-wait-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("app.db");
+    let holder = Database::open(&path).unwrap();
+    holder.put("k", "v").unwrap();
+    let releasing = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        holder.close().unwrap();
+    });
+    let write = eggdb(&directory, &["put", "app.db", "k", "w"]);
+    releasing.join().unwrap();
+    assert_eq!(write.status.code(), Some(0), "{}", stderr(&write));
+    let read = eggdb(&directory, &["get", "app.db", "k"]);
+    assert_eq!(read.stdout, b"w");
+
+    let reader = Database::open_with(&path, Options::new().read_only(true)).unwrap();
+    let started = std::time::Instant::now();
+    let refused = eggdb(&directory, &["put", "app.db", "k", "x", "--busy-timeout", "200"]);
+    assert_eq!(refused.status.code(), Some(5), "{}", stderr(&refused));
+    assert!(started.elapsed() >= std::time::Duration::from_millis(200));
     drop(reader);
     let _ = std::fs::remove_dir_all(&directory);
 }

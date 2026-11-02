@@ -11,6 +11,7 @@ const SMALLEST_PAGE_SIZE: usize = 4096;
 const LARGEST_PAGE_SIZE: usize = 65536;
 const MOST_TIME_LIMIT_SECONDS: u64 = 300;
 const MOST_CALL_GAP_MS: u64 = 10_000;
+const MOST_BUSY_TIMEOUT_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandName {
@@ -186,9 +187,11 @@ impl CommandName {
 
     fn takes(self, option: OptionName) -> bool {
         match option {
-            OptionName::Cache | OptionName::KeyFile | OptionName::Help | OptionName::Version => {
-                true
-            }
+            OptionName::Cache
+            | OptionName::BusyTimeout
+            | OptionName::KeyFile
+            | OptionName::Help
+            | OptionName::Version => true,
             OptionName::Color => true,
             OptionName::Format | OptionName::Json => {
                 !matches!(self, Self::Ui | Self::Shell | Self::Mcp)
@@ -361,6 +364,7 @@ enum OptionName {
     Json,
     Color,
     Cache,
+    BusyTimeout,
     KeyFile,
     Help,
     Version,
@@ -458,6 +462,7 @@ impl OptionName {
             b"json" => Self::Json,
             b"color" => Self::Color,
             b"cache" => Self::Cache,
+            b"busy-timeout" => Self::BusyTimeout,
             b"key-file" => Self::KeyFile,
             b"help" => Self::Help,
             b"version" => Self::Version,
@@ -640,6 +645,7 @@ pub(crate) struct Request {
     pub(crate) format: Option<Format>,
     pub(crate) color: ColorChoice,
     pub(crate) cache_bytes: Option<usize>,
+    pub(crate) busy_timeout_ms: Option<u64>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) page_size: Option<usize>,
     pub(crate) create: bool,
@@ -1054,6 +1060,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         format: None,
         color: ColorChoice::Auto,
         cache_bytes: None,
+        busy_timeout_ms: None,
         encryption_key: None,
         page_size: None,
         create: false,
@@ -1111,6 +1118,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Color => request.color = parse_color(value).map_err(usage)?,
             OptionName::Cache => {
                 request.cache_bytes = Some(parse_size(&option.spelled, value).map_err(usage)?);
+            }
+            OptionName::BusyTimeout => {
+                request.busy_timeout_ms = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|milliseconds| *milliseconds <= MOST_BUSY_TIMEOUT_MS)
+                        .ok_or_else(|| {
+                            usage(format!(
+                                "{} must be a whole number of milliseconds from 0 to {MOST_BUSY_TIMEOUT_MS}, not '{}'",
+                                option.spelled,
+                                shown(value)
+                            ))
+                        })?,
+                );
             }
             OptionName::KeyFile => {
                 request.encryption_key = Some(read_key_file(value).map_err(usage)?);
@@ -2505,6 +2525,13 @@ mod tests {
     fn sizes_take_suffixes() {
         assert_eq!(request("get a k --cache 64m").cache_bytes, Some(64 << 20));
         assert_eq!(request("get a k --cache=4096").cache_bytes, Some(4096));
+        assert_eq!(request("put a k v --busy-timeout 250").busy_timeout_ms, Some(250));
+        assert_eq!(request("get a k --busy-timeout=0").busy_timeout_ms, Some(0));
+        assert_eq!(request("get a k").busy_timeout_ms, None);
+        assert_eq!(
+            usage_message("put a k v --busy-timeout soon"),
+            "--busy-timeout must be a whole number of milliseconds from 0 to 3600000, not 'soon'"
+        );
         assert_eq!(request("create a --page-size 16k").page_size, Some(16384));
         assert_eq!(
             usage_message("get a k --cache 12q"),

@@ -160,7 +160,7 @@ fn serve_prints_its_port_answers_clients_holds_the_file_and_stops_on_sigterm() {
     let mut answer = [0u8; 1];
     client.read_exact(&mut answer).unwrap();
     assert_eq!(answer, *b"N");
-    let busy = eggdb(&["put", &path, "k", "v"], None);
+    let busy = eggdb(&["put", &path, "k", "v", "--busy-timeout", "0"], None);
     assert_eq!(busy.status.code(), Some(5), "{}", stderr(&busy));
     drop(client);
     stop(&mut server);

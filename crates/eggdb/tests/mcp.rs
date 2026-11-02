@@ -378,7 +378,14 @@ fn a_call_past_its_time_limit_is_stopped_and_a_stuck_one_ends_the_server() {
     mcp.initialize();
     mcp.send(r#"{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"SELECT count(*) FROM numbers a WHERE (SELECT count(*) FROM numbers b WHERE b.n <= a.n) > 0"}}}"#);
     std::thread::sleep(Duration::from_millis(300));
-    let refused_writer = eggdb(&["put", file.path().to_str().unwrap(), "during", "call"]);
+    let refused_writer = eggdb(&[
+        "put",
+        file.path().to_str().unwrap(),
+        "during",
+        "call",
+        "--busy-timeout",
+        "0",
+    ]);
     assert_eq!(
         refused_writer.status.code(),
         Some(5),

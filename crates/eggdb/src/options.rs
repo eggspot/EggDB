@@ -71,6 +71,7 @@ pub struct Options {
     pub(crate) auto_checkpoint_log_bytes: Option<u64>,
     pub(crate) page_size_bytes: usize,
     pub(crate) write_timeout: Duration,
+    pub(crate) busy_timeout: Duration,
     pub(crate) clock: ClockChoice,
     pub(crate) lock_cache: bool,
     pub(crate) compress_values: bool,
@@ -119,8 +120,9 @@ impl std::fmt::Debug for ClockChoice {
 impl Options {
     /// The defaults: create the file if it is missing, open it for writing, [`Durability::Full`],
     /// a 16 MiB page cache, snapshot memory as large as the cache, a checkpoint after every
-    /// megabyte of log, 4 KiB pages for a new file, and writers that wait up to five seconds
-    /// for the one before them.
+    /// megabyte of log, 4 KiB pages for a new file, writers that wait up to five seconds
+    /// for the one before them, and an open that fails at once when another program has the
+    /// file.
     pub fn new() -> Self {
         Self {
             create_if_missing: true,
@@ -131,6 +133,7 @@ impl Options {
             auto_checkpoint_log_bytes: Some(DEFAULT_AUTO_CHECKPOINT_LOG_BYTES),
             page_size_bytes: PageSize::DEFAULT.bytes(),
             write_timeout: DEFAULT_WRITE_TIMEOUT,
+            busy_timeout: Duration::ZERO,
             clock: ClockChoice::default(),
             lock_cache: false,
             compress_values: false,
@@ -236,6 +239,18 @@ impl Options {
     /// at once, as [`Database::try_begin_write`](crate::Database::try_begin_write) does.
     pub fn write_timeout(mut self, timeout: Duration) -> Self {
         self.write_timeout = timeout;
+        self
+    }
+
+    /// How long opening the file waits for another program that has it open, as SQLite's
+    /// busy timeout does: the open tries again, at growing intervals of up to 50 ms, until
+    /// the file is free or `timeout` has passed, and then fails with
+    /// [`ErrorKind::Locked`](crate::ErrorKind::Locked). [`Duration::ZERO`] (the default)
+    /// fails at once. A program that writes beside an AI agent's `eggdb mcp` calls, which
+    /// hold the file for a moment each, sets it so its writes wait for the call instead of
+    /// failing.
+    pub fn busy_timeout(mut self, timeout: Duration) -> Self {
+        self.busy_timeout = timeout;
         self
     }
 

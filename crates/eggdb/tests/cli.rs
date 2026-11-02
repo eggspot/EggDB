@@ -155,6 +155,8 @@ Options for every command:
   -F, --format <text|json|hex|raw>   default: text on a terminal, json in a pipe (raw for get)
       --color <auto|always|never>    default: auto (a terminal, unless NO_COLOR is set)
       --cache <bytes>                page cache size, e.g. 64m (default fits the value)
+      --busy-timeout <ms>            wait this long for a file another program has open
+                                     (default 5000; 0 fails at once)
   -h, --help                         help for eggdb or for one command
   -V, --version                      print the version
 

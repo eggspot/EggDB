@@ -490,7 +490,7 @@ fn eggdb_backup_and_compact_are_busy_under_a_writer_and_backup_works_in_the_shel
     sample_database(&directory);
     let writer = Database::open(directory.join("app.db")).unwrap();
 
-    let backup = directory.eggdb(&["backup", "app.db", "busy.bak"]);
+    let backup = directory.eggdb(&["backup", "app.db", "busy.bak", "--busy-timeout", "0"]);
     assert_eq!(backup.status.code(), Some(5), "{}", text(&backup.stderr));
     assert!(
         text(&backup.stderr).ends_with("\n  to copy a file while a program writes to it, use backup <copy> inside eggdb shell, or Database::backup_to in the program.\n"),
@@ -498,7 +498,7 @@ fn eggdb_backup_and_compact_are_busy_under_a_writer_and_backup_works_in_the_shel
         text(&backup.stderr)
     );
     assert!(!directory.join("busy.bak").exists());
-    let compact = directory.eggdb(&["compact", "app.db"]);
+    let compact = directory.eggdb(&["compact", "app.db", "--busy-timeout", "0"]);
     assert_eq!(compact.status.code(), Some(5), "{}", text(&compact.stderr));
     assert!(!directory.join("app.db.compacting").exists());
     drop(writer);

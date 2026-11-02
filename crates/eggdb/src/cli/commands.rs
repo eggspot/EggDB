@@ -43,6 +43,7 @@ mod table;
 mod transfer;
 
 const DEFAULT_CACHE_BYTES: usize = 16 << 20;
+const DEFAULT_BUSY_TIMEOUT_MS: u64 = 5_000;
 const CACHE_HEADROOM_BYTES: usize = 1 << 20;
 const SCAN_VALUE_SHOWN_BYTES: usize = 128;
 const EXPIRY_KEY_OVERHEAD_BYTES: usize = 14;
@@ -782,7 +783,13 @@ impl<'a> Session<'a> {
             .cache_bytes
             .or(cache_for_command)
             .unwrap_or(DEFAULT_CACHE_BYTES);
-        let mut options = Options::new().cache_bytes(cache);
+        let busy_timeout = self
+            .request
+            .busy_timeout_ms
+            .unwrap_or(DEFAULT_BUSY_TIMEOUT_MS);
+        let mut options = Options::new()
+            .cache_bytes(cache)
+            .busy_timeout(std::time::Duration::from_millis(busy_timeout));
         options = match access {
             Access::ReadOnly => options.read_only(true).create_if_missing(false),
             Access::Write { create } => options.create_if_missing(create),
