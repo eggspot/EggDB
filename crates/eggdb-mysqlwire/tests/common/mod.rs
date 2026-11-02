@@ -4,8 +4,8 @@ use eggdb_mysqlwire::{
     MySqlCredentials, NONCE_BYTES, ServerConfig, caching_sha2_response, native_response,
 };
 use eggdb_sql::{
-    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, SqlError, SqlResult,
-    StoreFailure,
+    DatabaseDirectory, EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection,
+    ServedDatabaseError, ServedDatabases, SqlError, SqlResult, StoreFailure,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -139,6 +139,69 @@ impl KeyValueStore for SharedMemoryStore {
     }
 }
 
+#[derive(Default)]
+pub struct MemoryDirectory {
+    databases: Mutex<BTreeMap<String, Arc<SharedMemoryStore>>>,
+}
+
+impl MemoryDirectory {
+    pub fn with(names: &[&str]) -> Arc<Self> {
+        let directory = Self::default();
+        for name in names {
+            directory.create(name).unwrap();
+        }
+        Arc::new(directory)
+    }
+}
+
+impl ServedDatabases for MemoryDirectory {
+    fn names(&self) -> Vec<String> {
+        self.databases.lock().unwrap().keys().cloned().collect()
+    }
+
+    fn create(&self, name: &str) -> Result<(), ServedDatabaseError> {
+        let mut databases = self.databases.lock().unwrap();
+        if databases
+            .keys()
+            .any(|served| served.eq_ignore_ascii_case(name))
+        {
+            return Err(ServedDatabaseError::Exists);
+        }
+        databases.insert(name.to_owned(), Arc::default());
+        Ok(())
+    }
+
+    fn drop_database(&self, name: &str) -> Result<(), ServedDatabaseError> {
+        let mut databases = self.databases.lock().unwrap();
+        let Some(served) = databases
+            .keys()
+            .find(|served| served.eq_ignore_ascii_case(name))
+            .cloned()
+        else {
+            return Err(ServedDatabaseError::Missing);
+        };
+        if databases
+            .get(&served)
+            .is_some_and(|store| Arc::strong_count(store) > 1)
+        {
+            return Err(ServedDatabaseError::InUse);
+        }
+        databases.remove(&served);
+        Ok(())
+    }
+}
+
+impl DatabaseDirectory for MemoryDirectory {
+    type Attached<'d>
+        = Arc<SharedMemoryStore>
+    where
+        Self: 'd;
+
+    fn attach(&self, name: &str) -> Option<Arc<SharedMemoryStore>> {
+        self.databases.lock().unwrap().get(name).cloned()
+    }
+}
+
 pub struct Limits {
     pub idle_timeout: Option<Duration>,
     pub memory_budget: Arc<eggdb_platform::connection_limits::MemoryBudget>,
@@ -210,6 +273,38 @@ impl TestServer {
             let stop = move || thread_stop.load(Ordering::Acquire);
             let log = move |line: &str| thread_logged.lock().unwrap().push(line.to_owned());
             eggdb_mysqlwire::serve(&store, &listener, &config, &stop, &log).unwrap()
+        });
+        Self {
+            address,
+            stop,
+            logged,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn start_directory(directory: Arc<MemoryDirectory>) -> Self {
+        let listener: TcpListener =
+            eggdb_mysqlwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let logged = Arc::new(Mutex::new(Vec::new()));
+        let config = ServerConfig {
+            user: USER.to_owned(),
+            credentials: MySqlCredentials::derive(PASSWORD.as_bytes()),
+            database: DATABASE.to_owned(),
+            max_connections: 8,
+            authentication_timeout: Duration::from_secs(5),
+            idle_timeout: None,
+            memory_budget: Arc::default(),
+            tls: None,
+        };
+        let thread_stop = Arc::clone(&stop);
+        let thread_logged = Arc::clone(&logged);
+        let thread = std::thread::spawn(move || {
+            let stop = move || thread_stop.load(Ordering::Acquire);
+            let log = move |line: &str| thread_logged.lock().unwrap().push(line.to_owned());
+            eggdb_mysqlwire::serve_directory(&*directory, &listener, None, &config, &stop, &log)
+                .unwrap()
         });
         Self {
             address,
@@ -382,6 +477,19 @@ impl Client {
     }
 
     pub fn login_with(address: SocketAddr, password: &str, plugin: &str) -> (Self, Reply) {
+        Self::login_to_database(address, password, plugin, DATABASE)
+    }
+
+    pub fn login_to(address: SocketAddr, database: &str) -> (Self, Reply) {
+        Self::login_to_database(address, PASSWORD, "caching_sha2_password", database)
+    }
+
+    fn login_to_database(
+        address: SocketAddr,
+        password: &str,
+        plugin: &str,
+        database: &str,
+    ) -> (Self, Reply) {
         let mut client = Self::connect(address);
         let handshake = client.handshake();
         let response = match plugin {
@@ -389,7 +497,7 @@ impl Client {
             "caching_sha2_password" => caching_sha2_response(password.as_bytes(), &handshake.nonce),
             _ => Vec::new(),
         };
-        client.send(&handshake_response(USER, &response, DATABASE, plugin));
+        client.send(&handshake_response(USER, &response, database, plugin));
         let mut reply = client.read().unwrap_or_default();
         if reply.first() == Some(&0xFE) && reply.len() > 1 {
             let name_end = reply[1..].iter().position(|&byte| byte == 0).unwrap() + 1;

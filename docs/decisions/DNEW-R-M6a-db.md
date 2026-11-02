@@ -21,3 +21,16 @@ SQL Server's dialects and runs them through `ServedDatabases`, a trait the serve
 - **Listing.** A session with the server's databases refreshes `pg_database` (and every catalog
   reading the database names) at each statement, so a database another session created shows
   in `\l` at once.
+- **Switching.** A connection holds the database it is connected to for as long as it uses
+  it; that hold is what makes `DROP DATABASE` wait (`55006`). MySQL's `USE` and `COM_INIT_DB`
+  and T-SQL's `USE` move the connection to another served database: the server builds a new
+  session there with the same user, dialect, settings and limits, and checks a stored role's
+  `LOGIN` again in that database, whose roles are its own. A session runs on one store, so
+  statements after such a `USE` in the same batch fail with `0A000` and run in the next
+  batch; `USE` inside a transaction is `25001`. MySQL and SQL Server match database names
+  ignoring ASCII case, PostgreSQL's startup packet exactly, and two databases never differ
+  only by case.
+- **The server's side.** `eggdb serve <directory>` keeps the default database (the first
+  file, which every other protocol serves) and the others, opened with the server's options;
+  the default is never dropped, and serving one file or `--read-only` creates and drops
+  nothing (`0A000`).

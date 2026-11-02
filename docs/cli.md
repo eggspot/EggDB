@@ -60,7 +60,7 @@ eggdb <command> <file> [arguments] [options]
 | `explain <file> -c <sql>` | read-only | shows the plan for one statement, in its dialect's EXPLAIN form, without running it (below) |
 | `table list\|show\|sample <file> [<table>]` | read-only | lists the tables and views, shows one in full, or prints its first rows (below) |
 | `row list <file> <table>` | read-only | the rows of one table in the order they are stored, a page at a time with `--limit` and `--after` (below) |
-| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the `mysql` client and MySQL drivers, and with `--tds-listen` to `sqlcmd` and SQL Server drivers over TDS; on a loopback address without TLS, on any address with TLS (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184) |
+| `serve <file>` | for writing (`--read-only`: no); `--create` makes it | serves the file to psql and PostgreSQL drivers, with `--mysql-listen` to the `mysql` client and MySQL drivers, and with `--tds-listen` to `sqlcmd` and SQL Server drivers over TDS; on a loopback address without TLS, on any address with TLS (below); given a directory, serves each `*.eggdb` file in it as a database named by its stem (`psql -d <name>`, D184), and `CREATE DATABASE` and `DROP DATABASE` add and remove such files while it runs (DNEW-R-M6a-db) |
 | `shell <file>` | for writing (`--read-only`: no); `--create` makes it | an interactive prompt for the key-value commands and SQL, or a batch from `-c` or stdin (below) |
 | `restore <file> [<dump.sql> \| -]` | for writing; `--create` makes it | restores a PostgreSQL dump in plain SQL form (`pg_dump`'s), or with `--dialect sqlserver` an SSMS or sqlpackage script, or with `--dialect oracle` a SQL*Plus-style script, or with `--dialect mysql` a `mysqldump` file, into the file, with a report (below, and [migrate.md](migrate.md)) |
 | `mcp <file>` | read-only, for each call; `--allow-write`: read-write for each `write_sql` call | serves the file to an AI agent over MCP on stdin and stdout, read-only unless `--allow-write` (below, and [mcp.md](mcp.md)) |
@@ -1077,6 +1077,20 @@ eggdb serve --create app.db
 #   connect      psql postgresql://eggdb@127.0.0.1:5432/app
 #   stop         Ctrl-C
 ```
+
+Given a directory, the server serves each `<name>.eggdb` file in it as the database `<name>`,
+and the first in name order is the default database the other protocols use. While it runs,
+a superuser (or a stored role with `CREATEDB`) runs `CREATE DATABASE shop`, which makes
+`shop.eggdb` in the directory; clients then connect to `shop` by name over every protocol
+(`psql -d shop`, the MySQL handshake's database, the TDS login's database), MySQL's `USE shop`
+and `COM_INIT_DB` and T-SQL's `USE shop` move a connection there (SQL Server clients get the
+database ENVCHANGE), and `\l`, `pg_database`, `SHOW DATABASES` and `sys.databases` list it at
+once. `DROP DATABASE shop` closes and removes the file, and is refused with `55006` (SQL
+Server's error 3702) while any connection uses the database, including the one dropping it;
+the default database is never dropped. A name is 1 to 63 letters, digits, `_`, `-` or `$`
+(`42602` otherwise). Serving a single file, or `--read-only`, creates and drops nothing
+(`0A000`). Statements after a `USE` that changes the database in the same batch fail with
+`0A000`: send them in the next batch (DNEW-R-M6a-db).
 
 | Option | Meaning |
 |--------|---------|

@@ -17,9 +17,9 @@ use crate::tokens::{
 use crate::types::{declared_wire_columns, push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, Message, POLL_INTERVAL, Packet, Wire, WireError};
 use eggdb_sql::{
-    BatchStep, BulkRows, DatabaseDirectory, DatabaseSwitch, Dialect, InfoMessage,
-    NamedParameter, QueryResult, SQLSERVER_COMPATIBLE_VERSION, ServedDatabases, Session,
-    SqlError, SqlResult, SqlState, Value,
+    BatchStep, BulkRows, DatabaseDirectory, DatabaseSwitch, Dialect, InfoMessage, NamedParameter,
+    QueryResult, SQLSERVER_COMPATIBLE_VERSION, ServedDatabases, Session, SqlError, SqlResult,
+    SqlState, Value,
 };
 use std::time::{Duration, Instant};
 
@@ -608,8 +608,9 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
         return;
     };
     let Some(attached) = directory.attach(&database) else {
-        let cannot_open =
-            format!("Cannot open database \"{database}\" requested by the login. The login failed.");
+        let cannot_open = format!(
+            "Cannot open database \"{database}\" requested by the login. The login failed."
+        );
         refuse(
             &mut wire,
             &[

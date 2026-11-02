@@ -201,14 +201,11 @@ pub(crate) fn run(
             }
             match served.create(&name.text) {
                 Ok(()) => Ok(QueryResult::command(tag)),
-                Err(ServedDatabaseError::Exists) if *if_not_exists => {
-                    Ok(QueryResult::command(tag).with_notice(exists_notice(
-                        &name.text,
-                        context.dialect,
-                    )))
+                Err(ServedDatabaseError::Exists) if *if_not_exists => Ok(QueryResult::command(tag)
+                    .with_notice(exists_notice(&name.text, context.dialect))),
+                Err(error) => {
+                    Err(create_error(&name.text, &error, context.dialect).at(name.position))
                 }
-                Err(error) => Err(create_error(&name.text, &error, context.dialect)
-                    .at(name.position)),
             }
         }
         DatabaseStatement::Drop { names, if_exists } => {
@@ -217,12 +214,14 @@ pub(crate) fn run(
                 if !context.superuser {
                     return Err(denied("drop database").at(name.position));
                 }
-                if name.text == context.current_database {
-                    return Err(SqlError::new(
-                        SqlState::OBJECT_IN_USE,
-                        "cannot drop the currently open database",
+                if name.text.eq_ignore_ascii_case(&context.current_database) {
+                    return Err(numbered_in_use(
+                        SqlError::new(
+                            SqlState::OBJECT_IN_USE,
+                            "cannot drop the currently open database",
+                        ),
+                        context.dialect,
                     )
-                    .with_vendor_code(3702)
                     .with_hint("Connect to another database first.")
                     .at(name.position));
                 }
@@ -232,13 +231,21 @@ pub(crate) fn run(
                         result = result.with_notice(missing_notice(&name.text, context.dialect));
                     }
                     Err(error) => {
-                        return Err(drop_error(&name.text, &error, context.dialect)
-                            .at(name.position));
+                        return Err(
+                            drop_error(&name.text, &error, context.dialect).at(name.position)
+                        );
                     }
                 }
             }
             Ok(result)
         }
+    }
+}
+
+fn numbered_in_use(error: SqlError, dialect: Dialect) -> SqlError {
+    match dialect {
+        Dialect::SqlServer => error.with_sqlserver_code(3702),
+        _ => error,
     }
 }
 
@@ -283,7 +290,7 @@ fn create_error(name: &str, error: &ServedDatabaseError, dialect: Dialect) -> Sq
             SqlState::DUPLICATE_DATABASE,
             format!("Database '{name}' already exists. Choose a different database name."),
         )
-        .with_vendor_code(1801),
+        .with_sqlserver_code(1801),
         (ServedDatabaseError::Exists, _) => SqlError::new(
             SqlState::DUPLICATE_DATABASE,
             format!("database \"{name}\" already exists"),
@@ -305,7 +312,7 @@ fn drop_error(name: &str, error: &ServedDatabaseError, dialect: Dialect) -> SqlE
                 "Cannot drop the database '{name}', because it does not exist or you do not have permission."
             ),
         )
-        .with_vendor_code(3701),
+        .with_sqlserver_code(3701),
         (ServedDatabaseError::Missing, _) => SqlError::new(
             SqlState::INVALID_CATALOG_NAME,
             format!("database \"{name}\" does not exist"),
@@ -314,13 +321,12 @@ fn drop_error(name: &str, error: &ServedDatabaseError, dialect: Dialect) -> SqlE
             SqlState::OBJECT_IN_USE,
             format!("Cannot drop database \"{name}\" because it is currently in use."),
         )
-        .with_vendor_code(3702),
+        .with_sqlserver_code(3702),
         (ServedDatabaseError::InUse, _) => SqlError::new(
             SqlState::OBJECT_IN_USE,
             format!("database \"{name}\" is being accessed by other users"),
         )
-        .with_detail("Other sessions are connected to the database.")
-        .with_vendor_code(3702),
+        .with_detail("Other sessions are connected to the database."),
         _ => common_error(name, error),
     }
 }
@@ -340,10 +346,9 @@ fn common_error(name: &str, error: &ServedDatabaseError) -> SqlError {
             format!("database \"{name}\" is being accessed by other users"),
         ),
         ServedDatabaseError::Unsupported(reason) => SqlError::not_supported(reason.clone()),
-        ServedDatabaseError::Failed(reason) => SqlError::new(
-            SqlState::IO_ERROR,
-            format!("database \"{name}\": {reason}"),
-        ),
+        ServedDatabaseError::Failed(reason) => {
+            SqlError::new(SqlState::IO_ERROR, format!("database \"{name}\": {reason}"))
+        }
     }
 }
 
@@ -524,8 +529,8 @@ mod tests {
         }
         let long = "a".repeat(MAX_DATABASE_NAME_BYTES + 1);
         for name in [
-            "", "../x", "a/b", "a\\b", "a.b", ".", "..", "-x", "con", "NUL", "Com1", "a b",
-            "a\0b", &long,
+            "", "../x", "a/b", "a\\b", "a.b", ".", "..", "-x", "con", "NUL", "Com1", "a b", "a\0b",
+            &long,
         ] {
             assert!(!is_valid_database_name(name), "{name:?}");
         }

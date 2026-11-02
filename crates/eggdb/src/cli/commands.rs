@@ -31,6 +31,7 @@ mod restore_aof;
 mod restore_mongodump;
 mod row;
 mod serve;
+mod serve_databases;
 mod serve_jobs;
 mod serve_mcp;
 mod serve_metrics;

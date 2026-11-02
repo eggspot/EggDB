@@ -11,8 +11,8 @@ use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_sql::{
     DatabaseDirectory, DatabaseSwitch, Dialect, KeyValueStore, MYSQL_COMPATIBLE_VERSION,
-    OutputColumn, Parameter, QueryResult, Session, SqlError, SqlState, SqlType,
-    TransactionStatus, Value,
+    OutputColumn, Parameter, QueryResult, Session, SqlError, SqlState, SqlType, TransactionStatus,
+    Value,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -355,6 +355,7 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     let requested = response
         .database
         .clone()
+        .filter(|database| !database.is_empty())
         .unwrap_or_else(|| shared.config.database.clone());
     let attached = directory
         .matching_name(&requested)
@@ -385,96 +386,149 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
         statements: HashMap::new(),
         next_statement: 1,
     };
-    serve_databases(shared, directory, connection_id, carried, attached, database);
+    serve_databases(
+        shared,
+        directory,
+        connection_id,
+        carried,
+        attached,
+        database,
+    );
+}
+
+struct Switched<'a, A> {
+    carried: Carried<'a>,
+    attached: A,
+    switch: DatabaseSwitch,
+    database: String,
+    reply: bool,
 }
 
 fn serve_databases<'a, 'd, D: DatabaseDirectory>(
     shared: &'a Shared<'a>,
     directory: &'d D,
     connection_id: u32,
-    mut carried: Carried<'a>,
-    mut attached: D::Attached<'d>,
-    mut database: String,
+    carried: Carried<'a>,
+    attached: D::Attached<'d>,
+    database: String,
 ) {
-    let mut switch: Option<DatabaseSwitch> = None;
-    let mut answer_with_ok = true;
-    loop {
-        let mut session = match switch.take() {
-            Some(switch) => switch.into_session(&attached),
-            None => new_session(&attached, &carried.user, &database, connection_id),
-        };
-        session.set_served_databases(directory);
-        let mut connection = Connection {
-            wire: carried.wire,
-            shared,
-            store: &attached,
-            session,
-            user: carried.user,
+    let mut next = serve_database(
+        shared,
+        directory,
+        connection_id,
+        carried,
+        &attached,
+        database,
+        None,
+    );
+    while let Some(switched) = next {
+        let Switched {
+            carried,
+            attached,
+            switch,
             database,
+            reply,
+        } = switched;
+        next = serve_database(
+            shared,
+            directory,
             connection_id,
-            capabilities: carried.capabilities,
-            multi_statements: carried.multi_statements,
-            statements: carried.statements,
-            next_statement: carried.next_statement,
-        };
-        if answer_with_ok && !connection.ok(0, 0, 0) {
-            let _ = connection.session.close();
-            return;
-        }
-        let (next, prepared) = loop {
-            let (target, reply) = match connection.run() {
-                Exit::Closed => {
-                    let _ = connection.session.close();
-                    return;
-                }
-                Exit::Switch { database, reply } => (database, reply),
-            };
-            match switch_to(directory, &connection.session, &target) {
-                Ok(switched) => {
-                    answer_with_ok = reply;
-                    break (target, switched);
-                }
-                Err(error) => {
-                    if reply {
-                        if connection.sql_error(&error) {
-                            continue;
-                        }
-                    } else {
-                        (shared.log)(&format!(
-                            "{}  switching to database \"{}\" failed: {}",
-                            connection.wire.peer(),
-                            printable(&target),
-                            error.message()
-                        ));
-                    }
-                    let _ = connection.session.close();
-                    return;
-                }
-            }
-        };
-        let Connection {
-            wire,
-            session,
-            user,
-            multi_statements,
-            statements,
-            next_statement,
-            ..
-        } = connection;
-        let _ = session.close();
-        let (next_attached, next_switch) = prepared;
-        attached = next_attached;
-        switch = Some(next_switch);
-        database = next;
-        carried = Carried {
-            wire,
-            user,
-            capabilities: carried.capabilities,
-            multi_statements,
-            statements,
-            next_statement,
-        };
+            carried,
+            &attached,
+            database,
+            Some((switch, reply)),
+        );
     }
+}
+
+fn serve_database<'a, 'd, D: DatabaseDirectory>(
+    shared: &'a Shared<'a>,
+    directory: &'d D,
+    connection_id: u32,
+    carried: Carried<'a>,
+    attached: &D::Attached<'d>,
+    database: String,
+    switched: Option<(DatabaseSwitch, bool)>,
+) -> Option<Switched<'a, D::Attached<'d>>> {
+    let (session, answer_with_ok) = match switched {
+        Some((switch, reply)) => (switch.into_session(attached), reply),
+        None => (
+            new_session(attached, &carried.user, &database, connection_id),
+            true,
+        ),
+    };
+    let mut connection = Connection {
+        wire: carried.wire,
+        shared,
+        store: attached,
+        session,
+        user: carried.user,
+        database,
+        connection_id,
+        capabilities: carried.capabilities,
+        multi_statements: carried.multi_statements,
+        statements: carried.statements,
+        next_statement: carried.next_statement,
+    };
+    connection.session.set_served_databases(directory);
+    if answer_with_ok && !connection.ok(0, 0, 0) {
+        let _ = connection.session.close();
+        return None;
+    }
+    let (target, reply, (next_attached, switch)) = loop {
+        let (target, reply) = match connection.run() {
+            Exit::Closed => {
+                let _ = connection.session.close();
+                return None;
+            }
+            Exit::Switch { database, reply } => (database, reply),
+        };
+        match switch_to(directory, &connection.session, &target) {
+            Ok(switched) => break (target, reply, switched),
+            Err(error) if reply => {
+                if connection.sql_error(&error) {
+                    continue;
+                }
+                let _ = connection.session.close();
+                return None;
+            }
+            Err(error) => {
+                (shared.log)(&format!(
+                    "{}  switching to database \"{}\" failed: {}",
+                    connection.wire.peer(),
+                    printable(&target),
+                    error.message()
+                ));
+                let _ = connection.session.close();
+                return None;
+            }
+        }
+    };
+    let Connection {
+        wire,
+        session,
+        user,
+        capabilities,
+        multi_statements,
+        statements,
+        next_statement,
+        ..
+    } = connection;
+    let _ = session.close();
+    Some(Switched {
+        carried: Carried {
+            wire,
+            user,
+            capabilities,
+            multi_statements,
+            statements,
+            next_statement,
+        },
+        attached: next_attached,
+        switch,
+        database: target,
+        reply,
+    })
 }
 
 fn switch_to<'d, D: DatabaseDirectory>(
@@ -971,12 +1025,8 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
                     _ => self.error(1047, "08S01", "Unknown command"),
                 },
                 Command::ResetConnection => {
-                    let mut fresh = new_session(
-                        self.store,
-                        &self.user,
-                        &self.database,
-                        self.connection_id,
-                    );
+                    let mut fresh =
+                        new_session(self.store, &self.user, &self.database, self.connection_id);
                     if let Some(served) = self.session.served_databases() {
                         fresh.set_served_databases(served);
                     }
