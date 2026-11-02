@@ -347,10 +347,11 @@ impl Database {
 
     /// Begins the write transaction (see [`WriteTransaction`]). While another one is open, it
     /// waits for that one to end, up to [`Options::write_timeout`] (five seconds by default),
-    /// and then fails with [`ErrorKind::WriterActive`](crate::ErrorKind::WriterActive). It
-    /// fails at once when this thread began the open write transaction, since waiting could
-    /// never end; that holds even after the transaction was sent to another thread, so the
-    /// beginning thread stays refused until it ends. On a read-only database it fails with
+    /// and then fails with [`ErrorKind::WriterActive`](crate::ErrorKind::WriterActive).
+    /// Waiting writers are served in arrival order. It fails at once when this thread began
+    /// the open write transaction, since waiting could never end; that holds even after the
+    /// transaction was sent to another thread, so the beginning thread stays refused until it
+    /// ends. On a read-only database it fails with
     /// [`ErrorKind::ReadOnly`](crate::ErrorKind::ReadOnly).
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>> {
         self.begin_write_within(self.write_timeout)

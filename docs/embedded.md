@@ -478,8 +478,11 @@ fn main() {
 `Database` is `Send` and `Sync`: share it by reference, in scoped threads, or through an `Arc`.
 Readers never wait for the writer, nor the writer for readers. A second writer waits for the
 first, up to `Options::write_timeout`, then fails with `WriterActive`; `try_begin_write` fails at
-once. A thread that already holds the write transaction is refused a second one at once, since
-it would wait for itself. `db.checkpoint()` waits for the writer the same way.
+once. Waiting writers are served in arrival order: a writer that asks while others wait queues
+behind them, so it waits only for the writers that asked before it, and one that gives up leaves
+the queue without holding up the rest. A thread that already holds the write transaction is
+refused a second one at once, since it would wait for itself. `db.checkpoint()` waits for the
+writer the same way.
 
 A read transaction that stays open while the writer changes many pages keeps their old versions
 in the snapshot memory. When that memory runs out, the oldest snapshots expire with
