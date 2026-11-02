@@ -271,7 +271,10 @@ fn defined_function_type(
     if crate::enums::FUNCTIONS.contains(&name) {
         return Some(crate::enums::result_type(name, first()));
     }
-    crate::ranges::function_type(name, first())
+    let second = arguments
+        .get(1)
+        .and_then(|argument| static_type(argument, scope));
+    crate::ranges::function_type(name, first(), second)
 }
 
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
