@@ -3830,8 +3830,10 @@ And more, not in the suite yet:
   removed outside quotes, close to SQL*Plus's headings; `SELECT *` from `USER_TABLES` shows the
   twenty columns apps read (`TABLE_NAME`, `TABLESPACE_NAME`, `STATUS`, `NUM_ROWS`, ...), not
   Oracle's fifty, and the other dictionary views likewise show their commonly read columns.
-- The data dictionary (D134): `NOT NULL` constraints are not listed in `USER_CONSTRAINTS`;
-  `CREATED` and `LAST_DDL_TIME` are 2000-01-01 and the statistics (`NUM_ROWS`, `BLOCKS`, ...)
+- The data dictionary (D134): each `NOT NULL` column outside the primary key is listed in
+  `USER_CONSTRAINTS` and `USER_CONS_COLUMNS` as a type `C` constraint with Oracle's
+  `"COLUMN" IS NOT NULL` condition under a generated `SYS_C` name (made from the table's and
+  column's numbers), even when the DDL named it, since EggDB does not keep that name; `CREATED` and `LAST_DDL_TIME` are 2000-01-01 and the statistics (`NUM_ROWS`, `BLOCKS`, ...)
   NULL, since EggDB keeps neither; every index is `NORMAL`, every table in `USERS`; the
   session user's own schema is fixed when the connection chooses Oracle's dialect (a schema
   made for the user later is used from the next connection). For PL/SQL, `USER_SOURCE` holds

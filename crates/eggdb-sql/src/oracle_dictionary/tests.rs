@@ -121,6 +121,22 @@ fn constraints_indexes_sequences_views_and_objects_are_listed_and_joined() {
     assert_eq!(
         last(
             &mut session,
+            "SELECT c.constraint_type, c.search_condition, c.generated, cc.column_name, cc.position
+             FROM user_constraints c JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name
+             WHERE c.table_name = 'COUNTRIES' AND c.constraint_type = 'C' AND c.constraint_name <> 'COUNTRY_NAME_CK'"
+        ),
+        "CONSTRAINT_TYPE|SEARCH_CONDITION|GENERATED|COLUMN_NAME|POSITION\nC|\"COUNTRY_NAME\" IS NOT NULL|GENERATED NAME|COUNTRY_NAME|NULL\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT COUNT(*) FROM all_constraints WHERE table_name = 'REGIONS' AND constraint_type = 'C'"
+        ),
+        "COUNT(*)\n0\nSELECT 1"
+    );
+    assert_eq!(
+        last(
+            &mut session,
             "SELECT i.index_name, i.uniqueness, ic.column_name FROM user_indexes i JOIN user_ind_columns ic ON ic.index_name = i.index_name ORDER BY i.index_name"
         ),
         "INDEX_NAME|UNIQUENESS|COLUMN_NAME\nCOUNTRIES_REGION_IX|NONUNIQUE|REGION_ID\nCOUNTRY_NAME_UK|UNIQUE|COUNTRY_NAME\nSELECT 2"

@@ -4,7 +4,9 @@ mod plsql_tests;
 #[cfg(test)]
 mod tests;
 
-use crate::encoding::{CommentKind, SequenceDefinition, TableDefinition, ViewDefinition};
+use crate::encoding::{
+    Column, CommentKind, SequenceDefinition, TableDefinition, ViewDefinition,
+};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::swap_uniform_case;
 use crate::pg_catalog::{
@@ -30,6 +32,7 @@ const NATIONAL_CHARACTER_SET: &str = "AL16UTF16";
 const COMPATIBLE_RELEASE: &str = "23.0.0.0.0";
 const TIME_FORMAT: &str = "HH.MI.SSXFF AM";
 const TIME_TZ_FORMAT: &str = "HH.MI.SSXFF AM TZR";
+const NOT_NULL_NAME_STRIDE: u64 = 10_000;
 
 const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
     CatalogColumn { name, sql_type }
@@ -1054,9 +1057,72 @@ fn referenced_constraint(
     })
 }
 
+fn not_null_constraint_name(table_id: u32, position: usize) -> String {
+    let number = u64::from(table_id)
+        .saturating_mul(NOT_NULL_NAME_STRIDE)
+        .saturating_add(position as u64 + 1);
+    format!("SYS_C{number:07}")
+}
+
+fn not_null_constraints(table: &TableDefinition) -> Vec<(String, &Column)> {
+    table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(position, column)| column.not_null && !table.primary_key.contains(position))
+        .map(|(position, column)| (not_null_constraint_name(table.id, position), column))
+        .collect()
+}
+
+fn not_null_constraint_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (_, entry, table) in dictionary.tables() {
+        for (name, column) in not_null_constraints(table) {
+            let condition = format!("\"{}\" IS NOT NULL", swap_uniform_case(&column.name));
+            rows.push(
+                dictionary
+                    .row()
+                    .set("owner", dictionary.owner(&entry.schema))
+                    .set("constraint_name", text(&name))
+                    .set("constraint_type", text("C"))
+                    .set("table_name", shown(&entry.name))
+                    .set("search_condition", text(&condition))
+                    .set("search_condition_vc", text(&condition))
+                    .set("status", text("ENABLED"))
+                    .set("deferrable", text("NOT DEFERRABLE"))
+                    .set("deferred", text("IMMEDIATE"))
+                    .set("validated", text("VALIDATED"))
+                    .set("generated", text("GENERATED NAME"))
+                    .set("last_change", UNKNOWN_DATE)
+                    .done(),
+            );
+        }
+    }
+    rows
+}
+
+fn not_null_constraint_column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (_, entry, table) in dictionary.tables() {
+        for (name, column) in not_null_constraints(table) {
+            rows.push(
+                dictionary
+                    .row()
+                    .set("owner", dictionary.owner(&entry.schema))
+                    .set("constraint_name", text(&name))
+                    .set("table_name", shown(&entry.name))
+                    .set("column_name", shown(&column.name))
+                    .set("position", Value::Null)
+                    .done(),
+            );
+        }
+    }
+    rows
+}
+
 fn constraint_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
     let snapshot = dictionary.snapshot;
-    let mut rows = Vec::new();
+    let mut rows = not_null_constraint_rows(dictionary);
     for constraint in &snapshot.constraints {
         let Some(entry) = snapshot.relations.get(constraint.table) else {
             continue;
@@ -1126,7 +1192,7 @@ fn constraint_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
 
 fn constraint_column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
     let snapshot = dictionary.snapshot;
-    let mut rows = Vec::new();
+    let mut rows = not_null_constraint_column_rows(dictionary);
     for constraint in &snapshot.constraints {
         let Some(entry) = snapshot.relations.get(constraint.table) else {
             continue;
