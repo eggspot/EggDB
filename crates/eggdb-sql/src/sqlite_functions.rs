@@ -254,6 +254,11 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
             .to_owned(),
         ),
         "sqlite_random" => Value::BigInt(random_integer()),
+        "sqlite_coalesce" => values
+            .iter()
+            .find(|value| !value.is_null())
+            .cloned()
+            .unwrap_or(Value::Null),
         _ if any_null && name == "sqlite_hex" => Value::Text(String::new()),
         "sqlite_quote" => {
             let length = text_of(first).map_or(4, |text| text.len());

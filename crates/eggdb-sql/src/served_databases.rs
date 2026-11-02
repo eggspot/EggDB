@@ -489,7 +489,7 @@ mod tests {
         let flag = |admin: &mut Session<'_>, role: &str| {
             run(
                 admin,
-                &format!("SELECT rolcreatedb FROM pg_authid WHERE rolname = '{role}'"),
+                &format!("SELECT rolcreatedb FROM pg_roles WHERE rolname = '{role}'"),
             )
             .unwrap()
             .concat()

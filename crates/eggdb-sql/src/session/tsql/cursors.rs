@@ -119,10 +119,10 @@ impl Session<'_> {
 
     fn fetch_offset(&mut self, offset: &Expr) -> SqlResult<i64> {
         let value = self.evaluate(offset)?;
-        match crate::sqlserver_conversion::implicit(value, SqlType::BigInt) {
-            Ok(Value::BigInt(offset)) => Ok(offset),
-            _ => Err(invalid_fetch_offset(offset.position)),
-        }
+        crate::sqlserver_conversion::implicit(value, SqlType::BigInt)
+            .ok()
+            .and_then(|converted| converted.as_integer())
+            .ok_or_else(|| invalid_fetch_offset(offset.position))
     }
 
     fn cursor_move(&mut self, orientation: &FetchOrientation) -> SqlResult<CursorMove> {

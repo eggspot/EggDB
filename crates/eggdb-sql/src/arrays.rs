@@ -334,7 +334,8 @@ fn element_value(value: Value, element: ArrayElement, conversion: Conversion) ->
             ArrayElement::Text
             | ArrayElement::Varchar
             | ArrayElement::Name
-            | ArrayElement::InternalChar,
+            | ArrayElement::InternalChar
+            | ArrayElement::AclItem,
         ) => Ok(Value::Text(text)),
         (value, element) => convert(value, element.sql_type(), conversion),
     }
@@ -424,7 +425,8 @@ fn element_from_text(text: &str, element: ArrayElement) -> SqlResult<Value> {
         ArrayElement::Text
         | ArrayElement::Varchar
         | ArrayElement::Name
-        | ArrayElement::InternalChar => Ok(Value::Text(text.to_owned())),
+        | ArrayElement::InternalChar
+        | ArrayElement::AclItem => Ok(Value::Text(text.to_owned())),
         ArrayElement::Bpchar => Ok(Value::Bpchar(text.to_owned())),
         other => crate::types::parse_input(text, other.sql_type()),
     }

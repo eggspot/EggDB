@@ -1385,15 +1385,20 @@ pub(crate) fn insert(
                                 None => Some(delete_row(writer, &table, &found.row_key)?),
                             };
                             if let Some(removed) = removed {
+                                if dialect == Dialect::MySql {
+                                    affected += 1;
+                                }
                                 if stored.track {
-                                    stored.changes.push(RowChange {
+                                    let change = RowChange {
                                         table: Arc::clone(&table),
                                         old: removed,
                                         new: None,
-                                    });
-                                }
-                                if dialect == Dialect::MySql {
-                                    affected += 1;
+                                    };
+                                    if dialect == Dialect::MySql {
+                                        constraints::propagate(writer, tables, vec![change])?;
+                                    } else {
+                                        stored.changes.push(change);
+                                    }
                                 }
                             }
                             conflict = stored.try_insert(writer, &mut row)?;
