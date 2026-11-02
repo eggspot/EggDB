@@ -1,7 +1,9 @@
 use crate::auth::MySqlCredentials;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
-use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
+use eggdb_platform::connection_limits::{
+    LoginSlots, LoginTicket, MAX_LOGINS_IN_PROGRESS, MemoryBudget,
+};
 use eggdb_platform::local_socket::LocalListener;
 use eggdb_sql::{DatabaseDirectory, FixedDatabases, KeyValueStore};
 use eggdb_tls::ServerConnection;
@@ -27,7 +29,7 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = eggdb_platform::connection_limits::DE
 /// refused with MySQL's error 1040.
 pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = MAX_LOGINS_IN_PROGRESS;
 const MAX_REFUSING_THREADS: usize = 8;
-pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_millis(250);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const DELAY_PER_RECENT_FAILURE: Duration = Duration::from_millis(250);
@@ -42,7 +44,8 @@ pub struct ServerConfig {
     pub credentials: MySqlCredentials,
     /// The database clients connect to; `USE` and `COM_INIT_DB` accept only this name.
     pub database: String,
-    /// The most connections served at once; more are refused with error 1040.
+    /// The most logged-in connections served at once; more are refused with error 1040.
+    /// Logins still in progress do not count here: [`MAX_UNAUTHENTICATED_CONNECTIONS`] caps them.
     pub max_connections: usize,
     /// How long a client has from connecting to finishing authentication.
     pub authentication_timeout: Duration,
@@ -138,6 +141,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) unknown_user: MySqlCredentials,
     pub(crate) logins: LoginSlots,
+    pub(crate) connections: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
 }
 
@@ -229,9 +233,9 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
         throttle: AuthenticationThrottle::new(),
         unknown_user: MySqlCredentials::matching_nothing(&secret),
         logins: LoginSlots::default(),
+        connections: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
     };
-    let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);
     let next_connection_id = AtomicU32::new(1);
     std::thread::scope(|scope| {
@@ -243,25 +247,36 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
             let peer = stream.peer_text();
             let connection_id = next_connection_id.fetch_add(1, Ordering::Relaxed);
             let shared = &shared;
-            match take_slot(&active, config.max_connections) {
-                Some(slot) => {
+            let full = shared.connections.load(Ordering::Acquire) >= config.max_connections;
+            let login = if full {
+                None
+            } else {
+                shared.logins.admit(peer_ip(&stream))
+            };
+            match login {
+                Some(login) => {
                     let started = std::thread::Builder::new()
                         .name(format!("eggdb-mysql-{connection_id}"))
                         .stack_size(eggdb_sql::SESSION_STACK_BYTES)
                         .spawn_scoped(scope, move || {
                             eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
-                            let _slot = slot;
-                            run_connection(stream, shared, directory, connection_id);
+                            run_connection(stream, shared, directory, connection_id, login);
                         });
                     if let Err(error) = started {
                         log(&format!("starting a connection thread failed: {error}"));
                     }
                 }
                 None => {
-                    log(&format!(
-                        "{peer}  connection refused: {} connections are open (--max-connections)",
-                        config.max_connections
-                    ));
+                    if full {
+                        log(&format!(
+                            "{peer}  connection refused: {} connections are open (--max-connections)",
+                            config.max_connections
+                        ));
+                    } else {
+                        log(&format!(
+                            "{peer}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in"
+                        ));
+                    }
                     let Some(slot) = take_slot(&refusing, MAX_REFUSING_THREADS) else {
                         continue;
                     };
@@ -307,17 +322,25 @@ fn accept_next(
     }
 }
 
-fn run_connection<D: DatabaseDirectory>(
+fn peer_ip(stream: &ServerConnection) -> Option<std::net::IpAddr> {
+    match stream {
+        ServerConnection::Plain(stream) => stream.peer_addr().ok().map(|peer| peer.ip()),
+        _ => None,
+    }
+}
+
+fn run_connection<'a, D: DatabaseDirectory>(
     stream: ServerConnection,
-    shared: &Shared<'_>,
+    shared: &'a Shared<'a>,
     directory: &D,
     connection_id: u32,
+    login: LoginTicket<'a>,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;
     };
-    serve_connection(wire, shared, directory, connection_id);
+    serve_connection(wire, shared, directory, connection_id, login);
 }
 
 fn refuse_connection(stream: ServerConnection, shared: &Shared<'_>) {

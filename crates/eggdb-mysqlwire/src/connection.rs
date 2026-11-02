@@ -7,8 +7,9 @@ use crate::packets::{
     TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
     err_packet, is_ssl_request, ok_packet, parse_command, parse_execute, parse_handshake_response,
 };
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared};
+use crate::server::{Shared, take_slot};
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
+use eggdb_platform::connection_limits::LoginTicket;
 use eggdb_sql::{
     DatabaseDirectory, DatabaseSwitch, Dialect, KeyValueStore, MYSQL_COMPATIBLE_VERSION,
     OutputColumn, Parameter, QueryResult, Session, SqlError, SqlState, SqlType, TransactionStatus,
@@ -274,16 +275,8 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     shared: &'a Shared<'a>,
     directory: &D,
     connection_id: u32,
+    login: LoginTicket<'a>,
 ) {
-    let Some(login) = shared.logins.admit(wire.peer_ip()) else {
-        (shared.log)(&format!(
-            "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
-            wire.peer()
-        ));
-        wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
-        refuse_too_many(&mut wire);
-        return;
-    };
     wire.login = Some(login);
     let Some(nonce) = fresh_nonce() else {
         refuse(
@@ -372,6 +365,15 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
             "42000",
             &format!("Unknown database '{requested}'"),
         );
+        return;
+    };
+    let Some(_connection) = take_slot(&shared.connections, shared.config.max_connections) else {
+        (shared.log)(&format!(
+            "{}  connection refused: {} connections are open (--max-connections)",
+            wire.peer(),
+            shared.config.max_connections
+        ));
+        refuse(&mut wire, 1040, "08004", "Too many connections");
         return;
     };
     wire.login = None;
@@ -934,6 +936,7 @@ impl<'a, 's, S: KeyValueStore + 's> Connection<'a, 's, S> {
 
     fn run(&mut self) -> Exit {
         loop {
+            self.wire.release_payload_reservation();
             self.wire.deadline = self
                 .shared
                 .config

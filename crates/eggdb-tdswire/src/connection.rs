@@ -8,7 +8,7 @@ use crate::messages::{
     parse_transaction_manager_request, prelogin_response,
 };
 use crate::procedures::PreparedBatches;
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared};
+use crate::server::{Shared, take_slot};
 use crate::tokens::{
     self, DONE, DONE_ATTENTION, DONE_COUNT, DONE_ERROR, DONE_IN_TRANSACTION, DONE_MORE,
     ENV_COMMIT_TRANSACTION, ENV_DATABASE, ENV_LANGUAGE, ENV_PACKET_SIZE, ENV_ROLLBACK_TRANSACTION,
@@ -16,6 +16,7 @@ use crate::tokens::{
 };
 use crate::types::{declared_wire_columns, push_value, wire_columns};
 use crate::wire::{DEFAULT_PACKET_SIZE, Message, POLL_INTERVAL, Packet, Wire, WireError};
+use eggdb_platform::connection_limits::LoginTicket;
 use eggdb_sql::{
     BatchStep, BulkRows, DatabaseDirectory, DatabaseSwitch, Dialect, InfoMessage, NamedParameter,
     QueryResult, SQLSERVER_COMPATIBLE_VERSION, ServedDatabases, Session, SqlError, SqlResult,
@@ -375,11 +376,14 @@ pub(crate) fn refuse_too_many(shared: &Shared<'_>, wire: &mut Wire<'_>) {
     }
     message.body.fill(0);
     std::hint::black_box(&message.body);
-    let text = format!(
+    refuse(wire, &[(TOO_MANY_CONNECTIONS, 20, &too_many_text(shared))]);
+}
+
+fn too_many_text(shared: &Shared<'_>) -> String {
+    format!(
         "Could not connect because the maximum number of '{}' user connections has already been reached. The connection has been closed.",
         shared.config.max_connections
-    );
-    refuse(wire, &[(TOO_MANY_CONNECTIONS, 20, &text)]);
+    )
 }
 
 enum Login {
@@ -585,16 +589,8 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     shared: &'a Shared<'a>,
     directory: &D,
     connection_id: u32,
+    login: LoginTicket<'a>,
 ) {
-    let Some(login) = shared.logins.admit(wire.peer_ip()) else {
-        (shared.log)(&format!(
-            "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
-            wire.peer()
-        ));
-        wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
-        refuse_too_many(shared, &mut wire);
-        return;
-    };
     wire.login = Some(login);
     let Some(encryption) = read_prelogin(shared, &mut wire) else {
         return;
@@ -617,6 +613,18 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
                 (CANNOT_OPEN_DATABASE, 11, &cannot_open),
                 (LOGIN_FAILED, 14, &login_failed(&user)),
             ],
+        );
+        return;
+    };
+    let Some(_connection) = take_slot(&shared.connections, shared.config.max_connections) else {
+        (shared.log)(&format!(
+            "{}  connection refused: {} connections are open (--max-connections)",
+            wire.peer(),
+            shared.config.max_connections
+        ));
+        refuse(
+            &mut wire,
+            &[(TOO_MANY_CONNECTIONS, 20, &too_many_text(shared))],
         );
         return;
     };
@@ -741,6 +749,7 @@ pub(crate) struct Ran {
 impl Connection<'_> {
     fn run(&mut self, session: &mut Session<'_>) -> Exit {
         loop {
+            self.wire.release_message_reservation();
             self.wire.deadline = self
                 .shared
                 .config

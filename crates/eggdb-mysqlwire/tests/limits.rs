@@ -66,3 +66,30 @@ fn a_packet_past_the_memory_budget_closes_its_connection_with_error_1041() {
     let mut next = Client::login(server.address);
     assert_eq!(texts(&next.query("SELECT 1")), [vec!["1".to_owned()]]);
 }
+
+#[test]
+fn logins_in_progress_hold_no_connection_slot_and_a_large_packet_gives_its_budget_back() {
+    let budget = Arc::new(MemoryBudget::new(4 * 1024 * 1024));
+    let server = TestServer::start_limited(
+        2,
+        Limits {
+            idle_timeout: None,
+            memory_budget: Arc::clone(&budget),
+        },
+    );
+    let idle: Vec<Client> = (0..eggdb_mysqlwire::MAX_UNAUTHENTICATED_CONNECTIONS)
+        .map(|_| Client::connect(server.address))
+        .collect();
+    std::thread::sleep(Duration::from_millis(1300));
+    let mut first = Client::login(server.address);
+    let mut second = Client::login(server.address);
+    assert_eq!(texts(&second.query("SELECT 2")), [vec!["2".to_owned()]]);
+    let text = format!("SELECT length('{}')", "c".repeat(200 * 1024));
+    assert_eq!(texts(&first.query(&text)), [vec![(200 * 1024).to_string()]]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while budget.used_bytes() >= 64 * 1024 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(budget.used_bytes() < 64 * 1024, "{}", budget.used_bytes());
+    drop(idle);
+}

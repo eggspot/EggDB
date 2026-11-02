@@ -141,6 +141,11 @@ impl<'a> Wire<'a> {
         }
     }
 
+    /// Gives back the memory budget a large packet held, once the packet is handled.
+    pub(crate) fn release_payload_reservation(&mut self) {
+        self.payload_reservation = None;
+    }
+
     fn reserve_payload(&mut self, total: usize) -> Result<(), WireError> {
         let Some(budget) = self.budget else {
             return Ok(());
@@ -160,13 +165,6 @@ impl<'a> Wire<'a> {
         } else {
             Err(WireError::OverBudget)
         }
-    }
-
-    pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
-        self.stream
-            .tcp()
-            .and_then(|stream| stream.peer_addr().ok())
-            .map(|peer| peer.ip())
     }
 
     pub(crate) fn send(&mut self, payload: &[u8]) {

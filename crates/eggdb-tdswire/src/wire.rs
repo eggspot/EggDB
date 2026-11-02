@@ -371,6 +371,11 @@ impl<'a> Wire<'a> {
             .map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string())
     }
 
+    /// Gives back the memory budget a large message held, once the message is handled.
+    pub(crate) fn release_message_reservation(&mut self) {
+        self.message_reservation = None;
+    }
+
     fn reserve_message(&mut self, total: usize) -> Result<(), WireError> {
         let Some(budget) = self.budget else {
             return Ok(());
@@ -390,13 +395,6 @@ impl<'a> Wire<'a> {
         } else {
             Err(WireError::OverBudget)
         }
-    }
-
-    pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
-        self.stream
-            .tcp()
-            .and_then(|stream| stream.peer_addr().ok())
-            .map(|peer| peer.ip())
     }
 
     pub(crate) fn socket(&self) -> Option<std::net::TcpStream> {

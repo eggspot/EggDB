@@ -155,6 +155,11 @@ impl<'a> Wire<'a> {
         Ok((header[0], body))
     }
 
+    /// Gives back the memory budget a large message held, once the message is handled.
+    pub(crate) fn release_message_reservation(&mut self) {
+        self.message_reservation = None;
+    }
+
     fn reserve_message(&mut self, length: usize) -> Result<(), WireError> {
         let Some(budget) = self.budget else {
             return Ok(());
@@ -225,13 +230,6 @@ impl<'a> Wire<'a> {
 
     pub(crate) fn peer(&self) -> String {
         self.stream.peer_text()
-    }
-
-    pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
-        self.stream
-            .tcp()
-            .and_then(|stream| stream.peer_addr().ok())
-            .map(|peer| peer.ip())
     }
 
     pub(crate) fn is_local(&self) -> bool {

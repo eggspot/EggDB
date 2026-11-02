@@ -80,3 +80,20 @@ fn a_message_past_the_memory_budget_closes_its_connection_with_error_701() {
     let mut next = Client::login(server.address);
     assert_eq!(rows(&next.batch("SELECT 1")), [vec![Some("1".to_owned())]]);
 }
+
+#[test]
+fn logins_in_progress_hold_no_connection_slot() {
+    let server = TestServer::start(2);
+    let idle: Vec<Client> = (0..eggdb_tdswire::MAX_UNAUTHENTICATED_CONNECTIONS)
+        .map(|_| Client::connect(server.address))
+        .collect();
+    std::thread::sleep(Duration::from_millis(1300));
+    let mut first = Client::login(server.address);
+    let mut second = Client::login(server.address);
+    assert_eq!(rows(&first.batch("SELECT 1")), [vec![Some("1".to_owned())]]);
+    assert_eq!(
+        rows(&second.batch("SELECT 2")),
+        [vec![Some("2".to_owned())]]
+    );
+    drop(idle);
+}

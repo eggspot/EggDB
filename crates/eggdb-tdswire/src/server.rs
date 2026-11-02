@@ -1,7 +1,9 @@
 use crate::auth::TdsCredentials;
 use crate::connection::{refuse_too_many, serve_connection};
 use crate::wire::Wire;
-use eggdb_platform::connection_limits::{LoginSlots, MAX_LOGINS_IN_PROGRESS, MemoryBudget};
+use eggdb_platform::connection_limits::{
+    LoginSlots, LoginTicket, MAX_LOGINS_IN_PROGRESS, MemoryBudget,
+};
 use eggdb_sql::{CancelSignal, DatabaseDirectory, FixedDatabases, KeyValueStore};
 use std::collections::VecDeque;
 use std::fmt;
@@ -25,7 +27,7 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = eggdb_platform::connection_limits::DE
 /// with SQL Server's error 17809.
 pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = MAX_LOGINS_IN_PROGRESS;
 const MAX_REFUSING_THREADS: usize = 8;
-pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_millis(250);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const DELAY_PER_RECENT_FAILURE: Duration = Duration::from_millis(250);
@@ -40,7 +42,8 @@ pub struct ServerConfig {
     pub credentials: TdsCredentials,
     /// The database clients connect to; LOGIN7 and `USE` accept only this name, in any case.
     pub database: String,
-    /// The most connections served at once; more are refused with error 17809.
+    /// The most logged-in connections served at once; more are refused with error 17809.
+    /// Logins still in progress do not count here: [`MAX_UNAUTHENTICATED_CONNECTIONS`] caps them.
     pub max_connections: usize,
     /// How long a client has from connecting to finishing its login.
     pub authentication_timeout: Duration,
@@ -139,6 +142,7 @@ pub(crate) struct Shared<'a> {
     pub(crate) throttle: AuthenticationThrottle,
     pub(crate) unknown_user: TdsCredentials,
     pub(crate) logins: LoginSlots,
+    pub(crate) connections: AtomicUsize,
     pub(crate) ended_by_stop: AtomicUsize,
     pub(crate) running: Mutex<Vec<(u32, CancelSignal)>>,
 }
@@ -236,10 +240,10 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
         throttle: AuthenticationThrottle::new(),
         unknown_user: TdsCredentials::matching_nothing(&secret, config.credentials.iterations()),
         logins: LoginSlots::default(),
+        connections: AtomicUsize::new(0),
         ended_by_stop: AtomicUsize::new(0),
         running: Mutex::new(Vec::new()),
     };
-    let active = AtomicUsize::new(0);
     let refusing = AtomicUsize::new(0);
     let next_connection_id = AtomicU32::new(51);
     std::thread::scope(|scope| {
@@ -259,25 +263,38 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
             };
             let connection_id = next_connection_id.fetch_add(1, Ordering::Relaxed);
             let shared = &shared;
-            match take_slot(&active, config.max_connections) {
-                Some(slot) => {
+            let full = shared.connections.load(Ordering::Acquire) >= config.max_connections;
+            let login = if full {
+                None
+            } else {
+                shared
+                    .logins
+                    .admit(stream.peer_addr().ok().map(|address| address.ip()))
+            };
+            match login {
+                Some(login) => {
                     let started = std::thread::Builder::new()
                         .name(format!("eggdb-tds-{connection_id}"))
                         .stack_size(eggdb_sql::SESSION_STACK_BYTES)
                         .spawn_scoped(scope, move || {
                             eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
-                            let _slot = slot;
-                            run_connection(stream, shared, directory, connection_id);
+                            run_connection(stream, shared, directory, connection_id, login);
                         });
                     if let Err(error) = started {
                         log(&format!("starting a connection thread failed: {error}"));
                     }
                 }
                 None => {
-                    log(&format!(
-                        "{peer}  connection refused: {} connections are open (--max-connections)",
-                        config.max_connections
-                    ));
+                    if full {
+                        log(&format!(
+                            "{peer}  connection refused: {} connections are open (--max-connections)",
+                            config.max_connections
+                        ));
+                    } else {
+                        log(&format!(
+                            "{peer}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in"
+                        ));
+                    }
                     let Some(slot) = take_slot(&refusing, MAX_REFUSING_THREADS) else {
                         continue;
                     };
@@ -298,17 +315,18 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
     Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }
 
-fn run_connection<D: DatabaseDirectory>(
+fn run_connection<'a, D: DatabaseDirectory>(
     stream: TcpStream,
-    shared: &Shared<'_>,
+    shared: &'a Shared<'a>,
     directory: &D,
     connection_id: u32,
+    login: LoginTicket<'a>,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;
     };
-    serve_connection(wire, shared, directory, connection_id);
+    serve_connection(wire, shared, directory, connection_id, login);
 }
 
 fn refuse_connection(stream: TcpStream, shared: &Shared<'_>) {

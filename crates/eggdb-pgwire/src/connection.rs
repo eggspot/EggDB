@@ -3,13 +3,14 @@ use crate::messages::{
     ColumnDescription, Format, FrontendMessage, ReportField, StartupRequest, Target, TooLarge,
     parse_message, parse_sasl_initial_response, parse_startup,
 };
-use crate::server::{MAX_UNAUTHENTICATED_CONNECTIONS, REFUSAL_TIMEOUT, Shared};
+use crate::server::{Shared, take_slot};
 use crate::types::{
     TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,
     sql_type_of,
 };
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
+use eggdb_platform::connection_limits::LoginTicket;
 use eggdb_platform::connection_limits::Reservation;
 use eggdb_sql::{
     CancelSignal, CopyChannel, CopyFormat, CopyStart, DatabaseDirectory, KeyValueStore,
@@ -842,16 +843,8 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     shared: &'a Shared<'a>,
     directory: &D,
     process_id: i32,
+    login: LoginTicket<'a>,
 ) {
-    let Some(login) = shared.logins.admit(wire.peer_ip()) else {
-        (shared.log)(&format!(
-            "{}  connection refused: {MAX_UNAUTHENTICATED_CONNECTIONS} connections are still logging in",
-            wire.peer()
-        ));
-        wire.deadline = Some(Instant::now() + REFUSAL_TIMEOUT);
-        refuse_too_many(&mut wire, shared);
-        return;
-    };
     wire.login = Some(login);
     let Some(startup) = read_startup(&mut wire, shared) else {
         return;
@@ -890,6 +883,19 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
         AuthenticationOutcome::Authenticated => {}
         AuthenticationOutcome::Refused => return,
     }
+    let Some(_connection) = take_slot(&shared.connections, shared.config.max_connections) else {
+        (shared.log)(&format!(
+            "{}  connection refused: {} connections are open (--max-connections)",
+            wire.peer(),
+            shared.config.max_connections
+        ));
+        fatal(
+            &mut wire,
+            SqlState::TOO_MANY_CONNECTIONS,
+            "sorry, too many clients already",
+        );
+        return;
+    };
     wire.login = None;
     wire.deadline = None;
     wire.budget = Some(&*shared.config.memory_budget);
@@ -1057,6 +1063,7 @@ impl<'a, 's> Connection<'a, 's> {
 
     fn run(&mut self) {
         loop {
+            self.wire.release_message_reservation();
             if self.wire.deadline.is_none() {
                 self.wire.deadline = self
                     .shared

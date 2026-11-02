@@ -189,3 +189,48 @@ fn an_idle_session_is_ended_with_57p05_and_a_busy_one_is_not() {
             .any(|line| line.contains("idle-session timeout"))
     );
 }
+
+#[test]
+fn logins_in_progress_and_refused_ones_hold_no_connection_slot() {
+    let server = TestServer::start(2);
+    let idle: Vec<Client> = (0..eggdb_pgwire::MAX_UNAUTHENTICATED_CONNECTIONS)
+        .map(|_| Client::connect(server.address))
+        .collect();
+    std::thread::sleep(Duration::from_millis(100));
+    let mut refused = Client::connect(server.address);
+    let started = Instant::now();
+    assert!(refused.read().is_none());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(1100));
+    let (mut first, _) = Client::login(server.address);
+    let (mut second, _) = Client::login(server.address);
+    assert_eq!(tags(&first.query("SELECT 1")), "TDCZ");
+    assert_eq!(tags(&second.query("SELECT 2")), "TDCZ");
+    let mut third = Client::connect(server.address);
+    third.send_startup(
+        196_608,
+        &[("user", common::USER), ("database", common::DATABASE)],
+    );
+    assert_eq!(third.read().unwrap().code(), "53300");
+    drop(idle);
+}
+
+#[test]
+fn a_large_message_gives_its_budget_back_once_it_is_handled() {
+    let budget = Arc::new(MemoryBudget::new(4 * 1024 * 1024));
+    let server = TestServer::start_limited(
+        8,
+        Limits {
+            idle_timeout: None,
+            memory_budget: Arc::clone(&budget),
+        },
+    );
+    let (mut client, _) = Client::login(server.address);
+    let text = format!("SELECT length('{}')", "c".repeat(200 * 1024));
+    assert_eq!(tags(&client.query(&text)), "TDCZ");
+    assert!(
+        wait_until(|| budget.used_bytes() < 64 * 1024),
+        "{} bytes still held",
+        budget.used_bytes()
+    );
+}
