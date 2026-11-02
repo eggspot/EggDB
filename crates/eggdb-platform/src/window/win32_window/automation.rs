@@ -761,17 +761,14 @@ mod tests {
         let mut variant = Variant::empty();
         let child_simple = Provider::interface(provider_at(child, FRAGMENT_OFFSET), SIMPLE_OFFSET);
         // SAFETY: `child_simple` is the child's simple interface and `variant` is writable.
-        assert_eq!(
-            unsafe { property_value(child_simple, uia::NAME_PROPERTY, &mut variant) },
-            S_OK
-        );
+        let result = unsafe { property_value(child_simple, uia::NAME_PROPERTY, &mut variant) };
+        assert_eq!(result, S_OK);
         assert_eq!(take_string(variant), "Open a database");
         let mut variant = Variant::empty();
         // SAFETY: as above.
-        assert_eq!(
-            unsafe { property_value(child_simple, uia::CONTROL_TYPE_PROPERTY, &mut variant) },
-            S_OK
-        );
+        let result =
+            unsafe { property_value(child_simple, uia::CONTROL_TYPE_PROPERTY, &mut variant) };
+        assert_eq!(result, S_OK);
         assert_eq!(
             (variant.kind, variant.value[0]),
             (VT_I4, uia::TEXT_CONTROL as usize)
@@ -790,16 +787,14 @@ mod tests {
         let focused_simple =
             Provider::interface(provider_at(focused, FRAGMENT_OFFSET), SIMPLE_OFFSET);
         // SAFETY: as above.
-        assert_eq!(
-            unsafe {
-                property_value(
-                    focused_simple,
-                    uia::HAS_KEYBOARD_FOCUS_PROPERTY,
-                    &mut variant,
-                )
-            },
-            S_OK
-        );
+        let result = unsafe {
+            property_value(
+                focused_simple,
+                uia::HAS_KEYBOARD_FOCUS_PROPERTY,
+                &mut variant,
+            )
+        };
+        assert_eq!(result, S_OK);
         assert_eq!((variant.kind, variant.value[0]), (VT_BOOL, VARIANT_TRUE));
 
         for interface in [focused, child, fragment_root, fragment] {

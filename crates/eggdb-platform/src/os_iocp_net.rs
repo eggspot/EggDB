@@ -136,7 +136,7 @@ mod port {
 
     #[link(name = "ws2_32")]
     unsafe extern "system" {
-        fn WSAStartup(version: u16, data: *mut WsaData) -> i32;
+        fn WSAStartup(version: u16, data: *mut c_void) -> i32;
         fn WSACleanup() -> i32;
         fn WSAGetLastError() -> i32;
         fn WSASocketW(
@@ -202,7 +202,7 @@ mod port {
         fn start() -> Result<Self> {
             let mut data = WsaData([0; 512]);
             // SAFETY: `data` is larger than a WSADATA and lives for the whole call.
-            let started = unsafe { WSAStartup(WINSOCK_2_2, &raw mut data) };
+            let started = unsafe { WSAStartup(WINSOCK_2_2, (&raw mut data).cast()) };
             if started == 0 {
                 Ok(Self)
             } else {
