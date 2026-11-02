@@ -201,6 +201,7 @@ pub(crate) enum CatalogRelation {
     AuthMembers,
     Settings,
     TimezoneNames,
+    TimezoneAbbrevs,
     Opclass,
     Enum,
     Proc,
@@ -265,7 +266,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const IN_PG_CATALOG: [Self; 31] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 32] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -292,6 +293,7 @@ impl CatalogRelation {
         Self::AuthMembers,
         Self::Settings,
         Self::TimezoneNames,
+        Self::TimezoneAbbrevs,
         Self::Opclass,
         Self::Enum,
         Self::Proc,
@@ -327,6 +329,7 @@ impl CatalogRelation {
             Self::AuthMembers => "pg_auth_members",
             Self::Settings => "pg_settings",
             Self::TimezoneNames => "pg_timezone_names",
+            Self::TimezoneAbbrevs => "pg_timezone_abbrevs",
             Self::Opclass => "pg_opclass",
             Self::Enum => "pg_enum",
             Self::Proc => "pg_proc",
@@ -389,6 +392,7 @@ impl CatalogRelation {
             Self::AuthMembers => 1261,
             Self::Settings => 12001,
             Self::TimezoneNames => 12002,
+            Self::TimezoneAbbrevs => 12003,
             Self::Opclass => 2616,
             Self::Enum => 3501,
             Self::Proc => 1255,
@@ -410,6 +414,7 @@ impl CatalogRelation {
             Self::Roles
                 | Self::Settings
                 | Self::TimezoneNames
+                | Self::TimezoneAbbrevs
                 | Self::Information(_)
                 | Self::MySql(_)
                 | Self::SqlServer(_)
@@ -462,6 +467,7 @@ impl CatalogRelation {
             Self::Roles => &ROLES_COLUMNS,
             Self::Settings => &SETTINGS_COLUMNS,
             Self::TimezoneNames => &TIMEZONE_NAMES_COLUMNS,
+            Self::TimezoneAbbrevs => &TIMEZONE_ABBREVS_COLUMNS,
             Self::Opclass => &OPCLASS_COLUMNS,
             Self::Enum => &ENUM_COLUMNS,
             Self::Proc => &PROC_COLUMNS,
@@ -838,6 +844,18 @@ const ROLES_COLUMNS: [CatalogColumn; 13] = [
 
 const TIMEZONE_NAMES_COLUMNS: [CatalogColumn; 4] = [
     column("name", SqlType::Text),
+    column("abbrev", SqlType::Text),
+    column(
+        "utc_offset",
+        SqlType::Interval {
+            fields: None,
+            precision: None,
+        },
+    ),
+    column("is_dst", SqlType::Boolean),
+];
+
+const TIMEZONE_ABBREVS_COLUMNS: [CatalogColumn; 3] = [
     column("abbrev", SqlType::Text),
     column(
         "utc_offset",

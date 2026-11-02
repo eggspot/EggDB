@@ -4518,3 +4518,156 @@ fn normalize_and_is_normalized_follow_unicode() {
         "22023"
     );
 }
+
+fn one_value(session: &mut Session<'_>, sql: &str) -> String {
+    let rendered = last(session, sql);
+    rendered.lines().nth(1).unwrap_or_default().to_owned()
+}
+
+#[test]
+fn time_zone_abbreviations_read_in_input_at_time_zone_and_pg_timezone_abbrevs() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "SET TimeZone = 'UTC'");
+    for (written, shown) in [
+        ("2024-01-01 10:00 PST", "2024-01-01 18:00:00+00"),
+        ("2024-07-01 10:00 PDT", "2024-07-01 17:00:00+00"),
+        ("2024-01-01 10:00 est", "2024-01-01 15:00:00+00"),
+        ("2024-07-01 10:00 CEST", "2024-07-01 08:00:00+00"),
+        ("2024-01-01 10:00 CET", "2024-01-01 09:00:00+00"),
+        ("2024-01-01 09:00 JST", "2024-01-01 00:00:00+00"),
+        ("2024-01-01 10:00 GMT", "2024-01-01 10:00:00+00"),
+        ("2024-01-01 12:00 MSK", "2024-01-01 09:00:00+00"),
+        ("2024-01-01T10:00:00Z", "2024-01-01 10:00:00+00"),
+    ] {
+        assert_eq!(
+            one_value(
+                &mut session,
+                &format!("SELECT '{written}'::timestamptz::text AS t")
+            ),
+            shown,
+            "{written}"
+        );
+    }
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT ('2024-01-01 12:00:00+00'::timestamptz AT TIME ZONE 'PST')::text AS t"
+        ),
+        "2024-01-01 04:00:00"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT abbrev, utc_offset::text AS o FROM pg_timezone_abbrevs \
+             WHERE abbrev IN ('CET', 'PDT', 'NPT') ORDER BY abbrev"
+        ),
+        "abbrev|o\nCET|01:00:00\nNPT|05:45:00\nPDT|-07:00:00\nSELECT 3"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT abbrev FROM pg_catalog.pg_timezone_abbrevs \
+             WHERE is_dst AND abbrev IN ('CET', 'CEST') ORDER BY abbrev"
+        ),
+        "abbrev\nCEST\nSELECT 1"
+    );
+    assert!(one_value(&mut session, "SELECT count(*) AS n FROM pg_timezone_abbrevs")
+        .parse::<u32>()
+        .is_ok_and(|count| count > 150));
+    assert_eq!(state(&mut session, "SET TimeZone = 'PST'"), "22023");
+}
+
+#[test]
+fn posix_rule_strings_set_the_session_time_zone() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(&mut session, "SET TimeZone = 'EST5EDT,M3.2.0,M11.1.0'");
+    assert_eq!(
+        one_value(&mut session, "SELECT '2024-07-01 12:00:00+00'::timestamptz::text AS t"),
+        "2024-07-01 08:00:00-04"
+    );
+    assert_eq!(
+        one_value(&mut session, "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"),
+        "2024-01-01 07:00:00-05"
+    );
+    assert_eq!(
+        one_value(&mut session, "SELECT '2024-03-10 02:30:00'::timestamptz::text AS t"),
+        "2024-03-10 03:30:00-04"
+    );
+    last(&mut session, "SET TimeZone = '<+03>-3'");
+    assert_eq!(
+        one_value(&mut session, "SELECT '2024-01-01 12:00:00+00'::timestamptz::text AS t"),
+        "2024-01-01 15:00:00+03"
+    );
+    assert_eq!(
+        one_value(
+            &mut session,
+            "SELECT ('2024-07-01 12:00:00+00'::timestamptz AT TIME ZONE 'AEST-10AEDT,M10.1.0,M4.1.0/3')::text AS t"
+        ),
+        "2024-07-01 22:00:00"
+    );
+    for invalid in [
+        "SET TimeZone = 'EST5EDT,M13.1.0,M11.1.0'",
+        "SET TimeZone = 'EST5EDT,M3.2.0'",
+        "SET TimeZone = '<+03-3'",
+    ] {
+        assert_eq!(state(&mut session, invalid), "22023", "{invalid}");
+    }
+}
+
+#[test]
+fn infinite_time_stamps_and_dates_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE moments (id integer PRIMARY KEY, at timestamp, zoned timestamptz, day date);
+         INSERT INTO moments VALUES
+           (1, 'infinity', '-infinity', 'infinity'),
+           (2, '2024-01-01 10:00', '2024-01-01 10:00+00', '2024-01-01'),
+           (3, '-INFINITY', '+infinity', '-infinity')",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT id, at::text AS a, zoned::text AS z, day::text AS d FROM moments ORDER BY at"
+        ),
+        "id|a|z|d\n3|-infinity|infinity|-infinity\n2|2024-01-01 10:00:00|2024-01-01 10:00:00+00|2024-01-01\n1|infinity|-infinity|infinity\nSELECT 3"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT id, isfinite(at) AS a, isfinite(day) AS d FROM moments ORDER BY id"
+        ),
+        "id|a|d\n1|f|f\n2|t|t\n3|f|f\nSELECT 3"
+    );
+    for (sql, shown) in [
+        ("SELECT ('infinity'::timestamp + interval '1 day')::text AS v", "infinity"),
+        ("SELECT ('-infinity'::timestamptz - interval '1 year')::text AS v", "-infinity"),
+        ("SELECT ('2024-01-01'::timestamp + 'infinity'::interval)::text AS v", "infinity"),
+        ("SELECT ('infinity'::date + 7)::text AS v", "infinity"),
+        ("SELECT ('infinity'::date)::timestamp::text AS v", "infinity"),
+        ("SELECT ('-infinity'::timestamp)::date::text AS v", "-infinity"),
+        ("SELECT ('infinity'::timestamp)::timestamptz::text AS v", "infinity"),
+        ("SELECT ('infinity'::timestamp(3))::text AS v", "infinity"),
+        ("SELECT ('infinity'::timestamp - '2024-01-01'::timestamp)::text AS v", "infinity"),
+        ("SELECT ('2024-01-01'::timestamp - 'infinity'::timestamp)::text AS v", "-infinity"),
+        ("SELECT ('infinity'::timestamptz AT TIME ZONE 'Europe/Paris')::text AS v", "infinity"),
+        ("SELECT 'infinity'::date = 'infinity'::timestamp AS v", "t"),
+        ("SELECT '-infinity'::timestamp < '0001-01-01 BC'::timestamp AS v", "t"),
+    ] {
+        assert_eq!(one_value(&mut session, sql), shown, "{sql}");
+    }
+    for sql in [
+        "SELECT 'infinity'::timestamp + '-infinity'::interval",
+        "SELECT 'infinity'::timestamp - 'infinity'::timestamp",
+        "SELECT 'infinity'::date - '2024-01-01'::date",
+    ] {
+        assert_eq!(state(&mut session, sql), "22008", "{sql}");
+    }
+    assert_eq!(
+        one_value(&mut session, "SELECT count(*) AS n FROM moments WHERE at > '2100-01-01'"),
+        "1"
+    );
+}

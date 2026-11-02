@@ -1710,6 +1710,22 @@ hours'` does not). Input may name a region (`2026-07-01 12:00:00 Europe/Paris`),
 now. The database is IANA's 2026e release, compiled from its public-domain source when a region
 is first named.
 
+Time stamp input and `AT TIME ZONE` also read the time zone abbreviations of PostgreSQL's
+`Default` set in any letter case (`2024-01-01 10:00 PST`, `CEST`, `JST`, `UTC`; `MSK` and the
+other abbreviations whose meaning changed over time follow their region), and
+`pg_timezone_abbrevs` lists them with their offset and daylight saving flag; the `TimeZone`
+setting refuses abbreviations with `22023`, as PostgreSQL does. `TimeZone` and `AT TIME ZONE`
+also take POSIX rule strings: `EST5EDT,M3.2.0,M11.1.0` (offsets west of UTC, `Mm.w.d`, `Jn` and
+`n` day rules with an optional `/time`), `<+03>-3` for a quoted abbreviation, and a daylight
+time without rules (`PST8PDT`) follows the United States' rules. `date`, `timestamp` and
+`timestamptz` take `infinity` and `-infinity` (stored as PostgreSQL stores them, the type's
+largest and smallest values, so they sort after and before every finite value and equal each
+other across the three types): `isfinite` is false for them, adding or subtracting a finite
+interval or a number of days keeps them, a finite time stamp plus an infinite interval is
+infinite, `infinity - infinity` and `infinity + '-infinity'` fail with `22008`, the difference
+with a finite time stamp is an infinite interval, subtracting infinite dates fails with `22008`,
+and `to_char` returns NULL for them (DNEW-R-31b).
+
 `time` reads `04:05:06.789`, `04:05 PM` and the time of a date-time string, and `timetz` the
 same with an offset (`04:05:06+02`; without one, the session's); both print in the ISO style,
 `time(p)` rounds to `p` fractional digits, `24:00:00` is the last valid time and anything later

@@ -1,7 +1,11 @@
+mod abbreviations;
 mod compile;
+mod posix;
 
 use crate::datetime::{self, MICROS_PER_SECOND};
+pub(crate) use abbreviations::{AbbreviationRow, abbreviation_rows};
 use compile::{Compiled, LocalTime, SECONDS_PER_DAY, Source};
+use posix::PosixZone;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -94,11 +98,12 @@ pub(crate) fn region_names() -> Vec<&'static str> {
 enum Zone {
     Fixed(i32),
     Region(&'static Region),
+    Posix(PosixZone),
 }
 
 /// A time zone as a session's `TimeZone` setting or `AT TIME ZONE` names it: a fixed offset
-/// from UTC, or a region of the IANA time zone database (`Europe/Paris`) whose offset follows
-/// its daylight saving and historical rules.
+/// from UTC, a region of the IANA time zone database (`Europe/Paris`) whose offset follows
+/// its daylight saving and historical rules, or a POSIX rule string (`EST5EDT,M3.2.0,M11.1.0`).
 #[derive(Debug, Clone, Copy)]
 pub struct TimeZone(Zone);
 
@@ -107,6 +112,7 @@ impl PartialEq for TimeZone {
         match (self.0, other.0) {
             (Zone::Fixed(left), Zone::Fixed(right)) => left == right,
             (Zone::Region(left), Zone::Region(right)) => std::ptr::eq(left, right),
+            (Zone::Posix(left), Zone::Posix(right)) => left == right,
             _ => false,
         }
     }
@@ -131,13 +137,28 @@ impl TimeZone {
 
     /// The zone `name` names, as PostgreSQL's `TimeZone` setting reads it: `UTC` and its
     /// spellings, a POSIX-style offset (`+03` is three hours west, `UTC-05:30` five and a half
-    /// hours east), or a region or alias of the time zone database in any letter case
-    /// (`Europe/Paris`, `us/eastern`); `None` when it names none of these.
+    /// hours east), a region or alias of the time zone database in any letter case
+    /// (`Europe/Paris`, `us/eastern`), or a POSIX rule string (`EST5EDT,M3.2.0,M11.1.0`,
+    /// `<+03>-3`); `None` when it names none of these.
     pub fn named(name: &str) -> Option<Self> {
         if let Some(offset) = datetime::time_zone_offset(name) {
             return Some(Self(Zone::Fixed(offset)));
         }
-        region(name).map(|found| Self(Zone::Region(found)))
+        if let Some(found) = region(name) {
+            return Some(Self(Zone::Region(found)));
+        }
+        PosixZone::read(name).map(|posix| Self(Zone::Posix(posix)))
+    }
+
+    /// The zone `name` names where PostgreSQL also reads time zone abbreviations, as in
+    /// `AT TIME ZONE`: an abbreviation of the `Default` set first (`PST`), then as
+    /// [`TimeZone::named`] reads it.
+    pub fn abbreviation_or_named(name: &str) -> Option<Self> {
+        abbreviations::abbreviation_zone(name).or_else(|| Self::named(name))
+    }
+
+    pub(crate) fn abbreviation(name: &str) -> Option<Self> {
+        abbreviations::abbreviation_zone(name)
     }
 
     pub(crate) fn region(name: &str) -> Option<Self> {
@@ -146,7 +167,7 @@ impl TimeZone {
 
     pub(crate) fn region_name(self) -> Option<&'static str> {
         match self.0 {
-            Zone::Fixed(_) => None,
+            Zone::Fixed(_) | Zone::Posix(_) => None,
             Zone::Region(found) => Some(found.name),
         }
     }
@@ -154,7 +175,7 @@ impl TimeZone {
     pub(crate) fn fixed_offset(self) -> Option<i32> {
         match self.0 {
             Zone::Fixed(offset) => Some(offset),
-            Zone::Region(_) => None,
+            Zone::Region(_) | Zone::Posix(_) => None,
         }
     }
 
@@ -162,6 +183,11 @@ impl TimeZone {
         match self.0 {
             Zone::Fixed(offset) => offset,
             Zone::Region(found) => found.offset_at(utc_micros.div_euclid(MICROS_PER_SECOND)),
+            Zone::Posix(posix) => {
+                posix
+                    .local_time_at(utc_micros.div_euclid(MICROS_PER_SECOND))
+                    .offset
+            }
         }
     }
 
@@ -171,6 +197,7 @@ impl TimeZone {
             Zone::Region(found) => {
                 found.offset_of_local(local_micros.div_euclid(MICROS_PER_SECOND))
             }
+            Zone::Posix(posix) => posix.offset_of_local(local_micros.div_euclid(MICROS_PER_SECOND)),
         }
     }
 
@@ -180,6 +207,13 @@ impl TimeZone {
             Zone::Region(found) => found
                 .local_time_at(utc_micros.div_euclid(MICROS_PER_SECOND))
                 .map(|local| local.abbreviation.to_string()),
+            Zone::Posix(posix) => Some(
+                posix
+                    .local_time_at(utc_micros.div_euclid(MICROS_PER_SECOND))
+                    .abbreviation
+                    .as_str()
+                    .to_owned(),
+            ),
         }
     }
 
@@ -189,6 +223,11 @@ impl TimeZone {
             Zone::Region(found) => found
                 .local_time_at(utc_micros.div_euclid(MICROS_PER_SECOND))
                 .is_some_and(|local| local.is_dst),
+            Zone::Posix(posix) => {
+                posix
+                    .local_time_at(utc_micros.div_euclid(MICROS_PER_SECOND))
+                    .is_dst
+            }
         }
     }
 

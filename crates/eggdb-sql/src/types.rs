@@ -1140,6 +1140,14 @@ fn time_tz_order(micros: i64, offset: i32) -> (i64, std::cmp::Reverse<i32>) {
 
 fn instant(value: &Value, zoned: bool) -> i128 {
     let local = match value {
+        Value::Date(days) if datetime::is_infinite_date(*days) => {
+            return i128::from(datetime::date_to_timestamp(*days).unwrap_or_default());
+        }
+        Value::Timestamp(micros) | Value::TimestampTz(micros)
+            if datetime::is_infinite_timestamp(*micros) =>
+        {
+            return i128::from(*micros);
+        }
         Value::Date(days) => i128::from(*days) * i128::from(datetime::MICROS_PER_DAY),
         Value::Timestamp(micros) => i128::from(*micros),
         Value::TimestampTz(micros) => return i128::from(*micros),

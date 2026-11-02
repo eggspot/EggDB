@@ -2228,14 +2228,14 @@ pub(crate) fn decode_row_into(
             }
             10 => {
                 let days = i32::from_le_bytes(reader.array()?);
-                if !datetime::valid_date(days) {
+                if !datetime::valid_stored_date(days) {
                     return Err(reader.damaged());
                 }
                 Value::Date(days)
             }
             11 | 12 => {
                 let micros = i64::from_le_bytes(reader.array()?);
-                if !datetime::valid_timestamp(micros) {
+                if !datetime::valid_stored_timestamp(micros) {
                     return Err(reader.damaged());
                 }
                 if tag == 11 {
@@ -2645,14 +2645,14 @@ impl<'b> Reader<'b> {
             SqlType::Numeric(_) => Value::Numeric(self.numeric_key()?),
             SqlType::Date => {
                 let days = (u32::from_be_bytes(self.array()?) ^ 0x8000_0000) as i32;
-                if !datetime::valid_date(days) {
+                if !datetime::valid_stored_date(days) {
                     return Err(self.damaged());
                 }
                 Value::Date(days)
             }
             SqlType::Timestamp(_) | SqlType::TimestampTz(_) => {
                 let micros = (u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64;
-                if !datetime::valid_timestamp(micros) {
+                if !datetime::valid_stored_timestamp(micros) {
                     return Err(self.damaged());
                 }
                 if matches!(sql_type, SqlType::Timestamp(_)) {
@@ -2825,14 +2825,14 @@ impl<'b> Reader<'b> {
             9 => Value::Numeric(self.numeric()?),
             10 => {
                 let days = i32::from_le_bytes(self.array()?);
-                if !datetime::valid_date(days) {
+                if !datetime::valid_stored_date(days) {
                     return Err(self.damaged());
                 }
                 Value::Date(days)
             }
             11 | 12 => {
                 let micros = i64::from_le_bytes(self.array()?);
-                if !datetime::valid_timestamp(micros) {
+                if !datetime::valid_stored_timestamp(micros) {
                     return Err(self.damaged());
                 }
                 if tag == 11 {

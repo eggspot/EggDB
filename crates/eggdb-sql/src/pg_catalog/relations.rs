@@ -210,6 +210,7 @@ pub(crate) fn build(
         CatalogRelation::Language => language_rows(),
         CatalogRelation::Settings => setting_rows(snapshot),
         CatalogRelation::TimezoneNames => time_zone_name_rows(),
+        CatalogRelation::TimezoneAbbrevs => time_zone_abbreviation_rows(),
         CatalogRelation::Information(relation) => {
             crate::information_schema::rows(snapshot, relation)
         }
@@ -1688,17 +1689,31 @@ fn time_zone_name_rows() -> Vec<Vec<Value>> {
                         "abbrev",
                         text(&zone.abbreviation_at(now).unwrap_or_default()),
                     )
-                    .set(
-                        "utc_offset",
-                        Value::Interval(crate::interval::Interval {
-                            months: 0,
-                            days: 0,
-                            micros: i64::from(offset) * crate::datetime::MICROS_PER_SECOND,
-                        }),
-                    )
+                    .set("utc_offset", offset_interval(offset))
                     .set("is_dst", flag(zone.is_dst_at(now)))
                     .done(),
             )
+        })
+        .collect()
+}
+
+fn offset_interval(offset: i32) -> Value {
+    Value::Interval(crate::interval::Interval {
+        months: 0,
+        days: 0,
+        micros: i64::from(offset) * crate::datetime::MICROS_PER_SECOND,
+    })
+}
+
+fn time_zone_abbreviation_rows() -> Vec<Vec<Value>> {
+    crate::time_zones::abbreviation_rows(crate::datetime::statement_now())
+        .into_iter()
+        .map(|row| {
+            Row::new(CatalogRelation::TimezoneAbbrevs)
+                .set("abbrev", text(row.abbreviation))
+                .set("utc_offset", offset_interval(row.offset))
+                .set("is_dst", flag(row.is_dst))
+                .done()
         })
         .collect()
 }

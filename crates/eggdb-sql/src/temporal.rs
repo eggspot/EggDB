@@ -83,6 +83,138 @@ fn difference(left: &Value, right: &Value) -> Option<SqlResult<Value>> {
     }))
 }
 
+fn infinity_sign(value: &Value) -> Option<bool> {
+    match value {
+        Value::Date(days) if datetime::is_infinite_date(*days) => Some(*days > 0),
+        Value::Timestamp(micros) | Value::TimestampTz(micros)
+            if datetime::is_infinite_timestamp(*micros) =>
+        {
+            Some(*micros > 0)
+        }
+        _ => None,
+    }
+}
+
+fn infinite_timestamp(positive: bool) -> i64 {
+    if positive {
+        datetime::INFINITE_TIMESTAMP
+    } else {
+        datetime::NEGATIVE_INFINITE_TIMESTAMP
+    }
+}
+
+fn interval_sign(by: Interval) -> Option<bool> {
+    if by == Interval::INFINITY {
+        Some(true)
+    } else if by == Interval::NEG_INFINITY {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn infinite_shift(value: &Value, by: Interval) -> Option<SqlResult<Value>> {
+    let zoned = match value {
+        Value::Date(_) | Value::Timestamp(_) => false,
+        Value::TimestampTz(_) => true,
+        _ => return None,
+    };
+    let positive = match (infinity_sign(value), interval_sign(by)) {
+        (None, None) => return None,
+        (Some(base), Some(shift)) if base != shift => {
+            return Some(Err(datetime::timestamp_out_of_range()));
+        }
+        (Some(positive), _) | (None, Some(positive)) => positive,
+    };
+    let micros = infinite_timestamp(positive);
+    Some(Ok(if zoned {
+        Value::TimestampTz(micros)
+    } else {
+        Value::Timestamp(micros)
+    }))
+}
+
+fn infinite_difference(left: &Value, right: &Value) -> Option<SqlResult<Value>> {
+    if !matches!(left, Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_))
+        || !matches!(right, Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_))
+    {
+        return None;
+    }
+    let signs = (infinity_sign(left), infinity_sign(right));
+    if signs == (None, None) {
+        return None;
+    }
+    if matches!((left, right), (Value::Date(_), Value::Date(_))) {
+        return Some(Err(infinite_dates_subtracted()));
+    }
+    let positive = match signs {
+        (Some(later), Some(earlier)) if later == earlier => {
+            return Some(Err(SqlError::new(
+                SqlState::DATETIME_FIELD_OVERFLOW,
+                "interval out of range",
+            )));
+        }
+        (Some(positive), _) => positive,
+        (None, Some(positive)) => !positive,
+        (None, None) => return None,
+    };
+    Some(Ok(Value::Interval(if positive {
+        Interval::INFINITY
+    } else {
+        Interval::NEG_INFINITY
+    })))
+}
+
+fn infinite_dates_subtracted() -> SqlError {
+    SqlError::new(
+        SqlState::DATETIME_FIELD_OVERFLOW,
+        "cannot subtract infinite dates",
+    )
+}
+
+fn day_count(value: &Value) -> Option<i64> {
+    match value {
+        Value::Boolean(_) => None,
+        other => other.as_integer(),
+    }
+}
+
+fn infinite_arithmetic(
+    operator: BinaryOperator,
+    left: &Value,
+    right: &Value,
+) -> Option<SqlResult<Value>> {
+    match (operator, left, right) {
+        (BinaryOperator::Add | BinaryOperator::Subtract, Value::Date(days), other)
+            if datetime::is_infinite_date(*days) && day_count(other).is_some() =>
+        {
+            Some(Ok(Value::Date(*days)))
+        }
+        (BinaryOperator::Add, other, Value::Date(days))
+            if datetime::is_infinite_date(*days) && day_count(other).is_some() =>
+        {
+            Some(Ok(Value::Date(*days)))
+        }
+        (BinaryOperator::Add, Value::Date(days), Value::Time(_))
+        | (BinaryOperator::Add, Value::Time(_), Value::Date(days))
+            if datetime::is_infinite_date(*days) =>
+        {
+            Some(datetime::date_to_timestamp(*days).map(Value::Timestamp))
+        }
+        (BinaryOperator::Add, Value::Interval(by), other)
+        | (BinaryOperator::Add, other, Value::Interval(by)) => infinite_shift(other, *by),
+        (BinaryOperator::Subtract, other, Value::Interval(by)) => {
+            let back = match by.negated() {
+                Ok(back) => back,
+                Err(error) => return Some(Err(error)),
+            };
+            infinite_shift(other, back)
+        }
+        (BinaryOperator::Subtract, _, _) => infinite_difference(left, right),
+        _ => None,
+    }
+}
+
 fn factor(value: &Value) -> Option<f64> {
     match value {
         Value::Boolean(_) => None,
@@ -95,6 +227,9 @@ pub(crate) fn arithmetic(
     left: &Value,
     right: &Value,
 ) -> Option<SqlResult<Value>> {
+    if let Some(result) = infinite_arithmetic(operator, left, right) {
+        return Some(result);
+    }
     Some(match (operator, left, right) {
         (BinaryOperator::Add, Value::Interval(a), Value::Interval(b)) => {
             a.checked_add(*b).map(Value::Interval)
@@ -272,7 +407,7 @@ fn zone_named(zone: &Value) -> SqlResult<TimeZone> {
         }
         other => {
             let name = other.character_text().unwrap_or_default();
-            TimeZone::named(name).ok_or_else(|| {
+            TimeZone::abbreviation_or_named(name).ok_or_else(|| {
                 SqlError::new(
                     SqlState::INVALID_PARAMETER_VALUE,
                     format!("time zone \"{name}\" not recognized"),
@@ -287,7 +422,12 @@ fn at_time_zone(zone: &Value, value: &Value) -> Option<SqlResult<Value>> {
         Ok(zone) => zone,
         Err(error) => return Some(Err(error)),
     };
-    let in_zone = |utc: i64| datetime::checked_timestamp(zone.local_of_utc(utc));
+    let in_zone = |utc: i64| {
+        if datetime::is_infinite_timestamp(utc) {
+            return Ok(utc);
+        }
+        datetime::checked_timestamp(zone.local_of_utc(utc))
+    };
     let offset_now = zone.offset_at(datetime::statement_now());
     let wrapped = |micros: i64, from_offset: i32| {
         datetime::wrap_time(
@@ -296,6 +436,9 @@ fn at_time_zone(zone: &Value, value: &Value) -> Option<SqlResult<Value>> {
         )
     };
     Some(match value {
+        Value::Timestamp(local) if datetime::is_infinite_timestamp(*local) => {
+            Ok(Value::TimestampTz(*local))
+        }
         Value::Timestamp(local) => {
             datetime::checked_timestamp(zone.utc_of_local(*local)).map(Value::TimestampTz)
         }
@@ -547,8 +690,8 @@ fn constructed(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         }
         ("time_bucket", [width, value]) => integer_bucket(width, value, &Value::Integer(0))?,
         ("time_bucket", [width, value, offset]) => integer_bucket(width, value, offset)?,
-        ("isfinite", [Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)]) => {
-            Ok(Value::Boolean(true))
+        ("isfinite", [value @ (Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_))]) => {
+            Ok(Value::Boolean(infinity_sign(value).is_none()))
         }
         ("isfinite", [Value::Interval(interval)]) => Ok(Value::Boolean(interval.is_finite())),
         ("timezone", [zone, value]) => at_time_zone(zone, value)?,
