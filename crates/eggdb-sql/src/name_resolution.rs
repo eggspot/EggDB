@@ -1066,6 +1066,16 @@ fn merge_privileges(merge: &MergeStatement) -> Vec<crate::roles::Privilege> {
     if merge.insert.is_some() {
         privileges.push(crate::roles::Privilege::Insert);
     }
+    for clause in &merge.by_source {
+        let privilege = if clause.delete_condition.is_some() {
+            crate::roles::Privilege::Delete
+        } else {
+            crate::roles::Privilege::Update
+        };
+        if !privileges.contains(&privilege) {
+            privileges.push(privilege);
+        }
+    }
     privileges
 }
 
@@ -1239,6 +1249,10 @@ impl Binding<'_> {
         if let Some(insert) = &mut merge.insert {
             exprs.extend(insert.values.iter_mut());
             exprs.extend(insert.condition.iter_mut());
+        }
+        for clause in &mut merge.by_source {
+            exprs.extend(clause.assignments.iter_mut().map(|(_, expr)| expr));
+            exprs.extend(clause.condition.iter_mut());
         }
         exprs.extend(returning_exprs(&mut merge.output));
         resolver.expressions(exprs)

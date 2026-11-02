@@ -49,10 +49,11 @@ pub(crate) enum SystemView {
     Parameters,
     Triggers,
     ExtendedProperties,
+    CompatibilityDatabases,
 }
 
 impl SystemView {
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::Objects,
         Self::Tables,
         Self::Views,
@@ -74,6 +75,7 @@ impl SystemView {
         Self::Parameters,
         Self::Triggers,
         Self::ExtendedProperties,
+        Self::CompatibilityDatabases,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -99,6 +101,7 @@ impl SystemView {
             Self::Parameters => "parameters",
             Self::Triggers => "triggers",
             Self::ExtendedProperties => "extended_properties",
+            Self::CompatibilityDatabases => "sysdatabases",
         }
     }
 
@@ -129,6 +132,7 @@ impl SystemView {
             Self::Parameters => PARAMETER_COLUMNS,
             Self::Triggers => TRIGGER_COLUMNS,
             Self::ExtendedProperties => EXTENDED_PROPERTY_COLUMNS,
+            Self::CompatibilityDatabases => COMPATIBILITY_DATABASE_COLUMNS,
         }
     }
 }
@@ -498,6 +502,21 @@ const SEQUENCE_COLUMNS: &[CatalogColumn] = &[
     column("last_used_value", BIGINT),
 ];
 
+const COMPATIBILITY_DATABASE_COLUMNS: &[CatalogColumn] = &[
+    column("name", SYSNAME),
+    column("dbid", SMALLINT),
+    column("sid", VARBINARY),
+    column("mode", SMALLINT),
+    column("status", INT),
+    column("status2", INT),
+    column("crdate", DATETIME),
+    column("reserved", DATETIME),
+    column("category", INT),
+    column("cmptlevel", TINYINT),
+    column("filename", SqlType::Varchar(Some(260))),
+    column("version", SMALLINT),
+];
+
 const DATABASE_COLUMNS: &[CatalogColumn] = &[
     column("name", SYSNAME),
     column("database_id", INT),
@@ -642,6 +661,7 @@ pub(super) fn rows(snapshot: &CatalogSnapshot, view: SystemView) -> Vec<Vec<Valu
         SystemView::CheckConstraints => check_constraint_rows(snapshot, objects),
         SystemView::Sequences => sequence_rows(snapshot, objects),
         SystemView::Databases => database_rows(snapshot),
+        SystemView::CompatibilityDatabases => compatibility_database_rows(snapshot),
         SystemView::SqlModules => sql_module_rows(snapshot, objects),
         SystemView::ExtendedProperties => extended_property_rows(snapshot, objects),
         SystemView::Triggers => trigger_rows(snapshot, objects),
@@ -1275,6 +1295,32 @@ fn database_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
         }
     }
     rows
+}
+
+fn compatibility_database_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = vec![compatibility_database_row(&snapshot.database, DATABASE_ID)];
+    for name in &snapshot.settings.database_names {
+        if name != &snapshot.database {
+            rows.push(compatibility_database_row(name, other_database_id(name)));
+        }
+    }
+    rows
+}
+
+fn compatibility_database_row(name: &str, database_id: i32) -> Vec<Value> {
+    CatalogRow::new(COMPATIBILITY_DATABASE_COLUMNS)
+        .set("name", text(name))
+        .set("dbid", small(i64::from(database_id)))
+        .set("sid", Value::Bytea(vec![1]))
+        .set("mode", small(0))
+        .set("status", int(0))
+        .set("status2", int(0))
+        .set("crdate", UNKNOWN_DATE)
+        .set("reserved", UNKNOWN_DATE)
+        .set("category", int(0))
+        .set("cmptlevel", small(160))
+        .set("version", small(957))
+        .done()
 }
 
 fn other_database_id(name: &str) -> i32 {

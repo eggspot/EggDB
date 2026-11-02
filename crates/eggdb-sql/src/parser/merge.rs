@@ -171,6 +171,7 @@ impl Parser<'_> {
             on,
             update,
             insert,
+            by_source: Vec::new(),
             output: None,
         })))
     }
@@ -197,16 +198,17 @@ impl Parser<'_> {
         let on = self.expression()?;
         let mut update = None;
         let mut insert = None;
+        let mut by_source: Vec<MergeUpdate> = Vec::new();
         while self.take_word("when") {
+            let clause_position = self.position();
             let matched = !self.take_word("not");
             self.expect_word("matched")?;
+            let mut source_side = false;
             if !matched && self.take_word("by") {
-                if self.is_word("source") {
-                    return Err(
-                        sqlserver::not_supported("WHEN NOT MATCHED BY SOURCE").at(self.position())
-                    );
+                source_side = self.take_word("source");
+                if !source_side {
+                    self.expect_word("target")?;
                 }
-                self.expect_word("target")?;
             }
             let condition = if self.take_word("and") {
                 Some(self.expression()?)
@@ -214,7 +216,11 @@ impl Parser<'_> {
                 None
             };
             self.expect_word("then")?;
-            if matched && update.is_none() {
+            if source_side {
+                let clause = self.sqlserver_merge_matched(condition)?;
+                check_by_source_clause(&by_source, &clause, clause_position)?;
+                by_source.push(clause);
+            } else if matched && update.is_none() {
                 update = Some(self.sqlserver_merge_matched(condition)?);
             } else if !matched && insert.is_none() {
                 let (columns, values) = self.merge_insert_values()?;
@@ -230,7 +236,7 @@ impl Parser<'_> {
                 );
             }
         }
-        if update.is_none() && insert.is_none() {
+        if update.is_none() && insert.is_none() && by_source.is_empty() {
             return Err(SqlError::syntax(
                 "A MERGE statement must have at least one WHEN clause.",
                 self.position(),
@@ -253,6 +259,7 @@ impl Parser<'_> {
             on,
             update,
             insert,
+            by_source,
             output,
         })))
     }
@@ -274,6 +281,42 @@ impl Parser<'_> {
         update.condition = condition;
         Ok(update)
     }
+}
+
+fn deletes(clause: &MergeUpdate) -> bool {
+    clause.delete_condition.is_some()
+}
+
+fn check_by_source_clause(
+    earlier: &[MergeUpdate],
+    clause: &MergeUpdate,
+    position: usize,
+) -> SqlResult<()> {
+    let Some(first) = earlier.first() else {
+        return Ok(());
+    };
+    if earlier.len() > 1 {
+        return Err(SqlError::syntax(
+            "A MERGE statement cannot have more than two WHEN NOT MATCHED BY SOURCE clauses.",
+            position,
+        )
+        .with_sqlserver_code(10714));
+    }
+    if first.condition.is_none() {
+        return Err(SqlError::syntax(
+            "The first of two WHEN NOT MATCHED BY SOURCE clauses in a MERGE statement must have an AND search condition.",
+            position,
+        )
+        .with_sqlserver_code(10714));
+    }
+    if deletes(first) == deletes(clause) {
+        return Err(SqlError::syntax(
+            "Two WHEN NOT MATCHED BY SOURCE clauses in a MERGE statement must be one UPDATE and one DELETE.",
+            position,
+        )
+        .with_sqlserver_code(10714));
+    }
+    Ok(())
 }
 
 fn every_column_of(source: TableReference, position: usize) -> Select {

@@ -193,7 +193,76 @@ impl Hold {
 #[derive(Default)]
 struct Registry {
     held: Mutex<HashMap<LockName, Vec<Hold>>>,
+    application_waits: Mutex<HashMap<u64, (LockName, Mode)>>,
     released: Condvar,
+}
+
+fn application_waits() -> MutexGuard<'static, HashMap<u64, (LockName, Mode)>> {
+    registry()
+        .application_waits
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn blockers(
+    held: &HashMap<LockName, Vec<Hold>>,
+    name: &LockName,
+    owner: u64,
+    mode: Mode,
+) -> Vec<u64> {
+    held.get(name).map_or_else(Vec::new, |holds| {
+        holds
+            .iter()
+            .filter(|hold| hold.owner != owner && !hold.mode.admits(mode))
+            .map(|hold| hold.owner)
+            .collect()
+    })
+}
+
+fn closes_a_cycle(
+    held: &HashMap<LockName, Vec<Hold>>,
+    waits: &HashMap<u64, (LockName, Mode)>,
+    owner: u64,
+) -> bool {
+    let Some((name, mode)) = waits.get(&owner) else {
+        return false;
+    };
+    let mut seen = vec![owner];
+    let mut next = blockers(held, name, owner, *mode);
+    while let Some(blocker) = next.pop() {
+        if blocker == owner {
+            return true;
+        }
+        if seen.contains(&blocker) {
+            continue;
+        }
+        seen.push(blocker);
+        if let Some((name, mode)) = waits.get(&blocker) {
+            next.extend(blockers(held, name, blocker, *mode));
+        }
+    }
+    false
+}
+
+struct ApplicationWait {
+    owner: u64,
+}
+
+impl ApplicationWait {
+    fn start(owner: u64, name: LockName, mode: Mode) -> Self {
+        application_waits().insert(owner, (name, mode));
+        Self { owner }
+    }
+
+    fn is_deadlocked(&self, held: &HashMap<LockName, Vec<Hold>>) -> bool {
+        closes_a_cycle(held, &application_waits(), self.owner)
+    }
+}
+
+impl Drop for ApplicationWait {
+    fn drop(&mut self) {
+        application_waits().remove(&self.owner);
+    }
 }
 
 fn registry() -> &'static Registry {
@@ -520,6 +589,9 @@ pub(crate) enum ApplicationLockGrant {
     AfterWaiting,
     /// Not granted before the time-out (status -1).
     TimedOut,
+    /// Not granted because waiting for it would never end: a session this one waits for
+    /// waits, directly or through others, for an application lock this one holds (status -3).
+    DeadlockVictim,
 }
 
 impl ApplicationLockGrant {
@@ -529,6 +601,7 @@ impl ApplicationLockGrant {
             Self::AtOnce => 0,
             Self::AfterWaiting => 1,
             Self::TimedOut => -1,
+            Self::DeadlockVictim => -3,
         }
     }
 }
@@ -557,7 +630,11 @@ pub(crate) fn take_application_lock(
     if take(&mut held, name.clone(), owner.owner, mode, lasts) {
         return Ok(ApplicationLockGrant::AtOnce);
     }
+    let waiting = ApplicationWait::start(owner.owner, name.clone(), mode);
     loop {
+        if waiting.is_deadlocked(&held) {
+            return Ok(ApplicationLockGrant::DeadlockVictim);
+        }
         let slice = match deadline {
             None => WAIT_SLICE,
             Some(deadline) => {
@@ -866,5 +943,53 @@ mod tests {
         assert!(!waiter.is_finished());
         drop(holder);
         assert_eq!(waiter.join().unwrap(), Value::Text(String::new()));
+    }
+
+    #[test]
+    fn an_application_lock_wait_that_closes_a_cycle_is_the_deadlock_victim() {
+        use super::{
+            ApplicationLockGrant, Lasts, Mode, application_waits, release_application_lock,
+            take_application_lock,
+        };
+        let second = AdvisoryLocks::new(9_291);
+        let entered = enter(&second, false);
+        assert_eq!(
+            take_application_lock("b", Mode::Exclusive, Lasts::Session, None).unwrap(),
+            ApplicationLockGrant::AtOnce
+        );
+        let (holding, held) = std::sync::mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let locks = AdvisoryLocks::new(9_291);
+            let _entered = enter(&locks, false);
+            let taken = take_application_lock("a", Mode::Exclusive, Lasts::Session, None).unwrap();
+            holding.send(locks.owner).unwrap();
+            let waited = take_application_lock(
+                "b",
+                Mode::Exclusive,
+                Lasts::Session,
+                Some(Duration::from_secs(30)),
+            )
+            .unwrap();
+            (taken, waited)
+        });
+        let first_owner = held.recv().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !application_waits().contains_key(&first_owner) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            take_application_lock("a", Mode::Shared, Lasts::Session, Some(Duration::from_secs(30)))
+                .unwrap(),
+            ApplicationLockGrant::DeadlockVictim
+        );
+        assert_eq!(ApplicationLockGrant::DeadlockVictim.status(), -3);
+        assert!(release_application_lock("b", Lasts::Session).unwrap());
+        assert_eq!(
+            first.join().unwrap(),
+            (ApplicationLockGrant::AtOnce, ApplicationLockGrant::AfterWaiting)
+        );
+        assert!(!application_waits().contains_key(&first_owner));
+        drop(entered);
     }
 }

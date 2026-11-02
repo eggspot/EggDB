@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 29] = [
+const FUNCTIONS: [SetReturningFunction; 30] = [
     to_records("json_to_record"),
     to_records("jsonb_to_record"),
     to_records("json_to_recordset"),
@@ -108,6 +108,12 @@ const FUNCTIONS: [SetReturningFunction; 29] = [
         result_type: openjson_type,
         rows: openjson_rows,
         fields: false,
+    },
+    SetReturningFunction {
+        name: crate::json_functions::OPENJSON_PAIRS,
+        result_type: openjson_pairs_type,
+        rows: openjson_pair_rows,
+        fields: true,
     },
     SetReturningFunction {
         name: STRING_SPLIT_FUNCTION,
@@ -200,6 +206,8 @@ fn record_rows(
 ) -> SqlResult<()> {
     if name == crate::hstore_functions::EACH {
         crate::hstore_functions::each_records(values, sink)
+    } else if name == crate::json_functions::OPENJSON_PAIRS {
+        crate::json_functions::openjson_pair_rows(values, sink)
     } else {
         crate::json_functions::record_rows(name, values, sink)
     }
@@ -227,6 +235,16 @@ fn openjson_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
         }
         _ => Err(does_not_exist("OPENJSON", types)),
     }
+}
+
+fn openjson_pairs_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    openjson_type(types).map(|_| SqlType::Text)
+}
+
+fn openjson_pair_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::json_functions::openjson_pair_rows(values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
 }
 
 fn openjson_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {

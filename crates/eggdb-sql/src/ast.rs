@@ -414,6 +414,7 @@ pub(crate) struct MergeStatement {
     pub(crate) on: Expr,
     pub(crate) update: Option<MergeUpdate>,
     pub(crate) insert: Option<MergeInsert>,
+    pub(crate) by_source: Vec<MergeUpdate>,
     pub(crate) output: Option<Vec<SelectItem>>,
 }
 

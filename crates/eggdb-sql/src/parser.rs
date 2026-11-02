@@ -802,6 +802,9 @@ impl<'t> Parser<'t> {
             self.at += 1;
             return self.qualified_part(&name);
         }
+        if self.sqlserver() {
+            return Ok(sqlserver::compatibility_view(name));
+        }
         Ok(name)
     }
 
