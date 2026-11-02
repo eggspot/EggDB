@@ -1766,7 +1766,14 @@ other across the three types): `isfinite` is false for them, adding or subtracti
 interval or a number of days keeps them, a finite time stamp plus an infinite interval is
 infinite, `infinity - infinity` and `infinity + '-infinity'` fail with `22008`, the difference
 with a finite time stamp is an infinite interval, subtracting infinite dates fails with `22008`,
-and `to_char` returns NULL for them (D271).
+and `to_char` returns NULL for them (D271). `date_part` of an epoch, `julian`, `year`,
+`isoyear`, `decade`, `century` or `millennium` field is `Infinity` or `-Infinity` and of any other
+field NULL, as in PostgreSQL 16; `extract` gives the same NULLs, but the infinite fields fail with
+`0A000`, since `numeric` holds no infinity yet. `age` with one infinite argument is an infinite
+interval (`age('infinity'::timestamp, t)` is `infinity`, `age(t, 'infinity')` `-infinity`) and
+with two equal infinities fails with `22008`, as in PostgreSQL 17. `date_trunc`, `date_bin` and
+`time_bucket` return an infinite input unchanged, and `date_bin` with an infinite origin fails
+with `22008`.
 
 `time` reads `04:05:06.789`, `04:05 PM` and the time of a date-time string, and `timetz` the
 same with an offset (`04:05:06+02`; without one, the session's); both print in the ISO style,
@@ -1854,7 +1861,11 @@ the path is checked when it is used. A path of more than 1,000 nodes fails with
 `json_to_record`, `jsonb_to_record`, `json_to_recordset` and `jsonb_to_recordset` in `FROM`
 take a column definition list (`AS x(a int, b text)` or `AS (a int)`): each column is the
 member of that name converted to its type (`NULL` when missing or JSON `null`; an object or
-array kept as JSON text), and without the list they fail with `42601`.
+array kept as JSON text in a text column), and without the list they fail with `42601`. A JSON
+array fills an array column (`c int[]` from `[1,2,3]`) element by element, and a JSON object a
+composite column (`r myrowtype`) member by member, as in PostgreSQL's documented example; a
+nested array fails with `0A000` (arrays have one dimension), an array mixing nested arrays and
+scalars with `22P02`.
 
 **Arrays** (D128) are values of expressions, of `WITH` queries, derived tables and `VALUES` lists,
 and of results, with one dimension and elements of `smallint`, `integer`, `bigint`, `real`,
@@ -2258,7 +2269,9 @@ spellings work. Past its limit a sequence fails with `2200H` (`nextval: reached 
 sequence "s" (9223372036854775807)`) or, with `CYCLE`, starts again; arithmetic never wraps.
 `nextval` is not undone by a rollback, as in PostgreSQL, and is durable with the commit of any
 transaction that used the value. Not yet: reading a sequence as a one-row relation (`SELECT
-last_value, is_called FROM s`, which `pg_dump` sends) and the `pg_sequences` view (`42P01`). Oracle's sequences are the same objects: `CREATE SEQUENCE s
+last_value, is_called FROM s`, which `pg_dump` sends) and the `pg_sequences` view (`42P01`).
+`INSERT`, `UPDATE` and `DELETE` on a sequence fail with `42809` (`cannot change sequence "s"`), as
+in PostgreSQL. Oracle's sequences are the same objects: `CREATE SEQUENCE s
 START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE` (with `NOMAXVALUE`, `NOMINVALUE`, `ORDER` and the
 rest accepted), `s.NEXTVAL` and `s.CURRVAL`, with ORA-02289, ORA-08002 and ORA-08004. SQL
 Server's are too: `CREATE SEQUENCE` with SQL Server's defaults and `NEXT VALUE FOR s` (see the
@@ -2402,7 +2415,8 @@ SQLite and Oracle: row triggers once per row, statement triggers (and a Transact
 `deleted` and `inserted` tables) once per statement and child table with every cascaded row.
 Triggers written in the MySQL dialect don't fire for cascades, as MySQL's own don't. A `BEFORE`
 trigger may change a cascaded row's new values; one that skips a cascaded row fails the statement
-with `23503` (the row would point at nothing), and one that changes or removes the row it fires
+with `23503` (the row would point at nothing), where PostgreSQL completes the statement and leaves
+the row behind as an orphan, and one that changes or removes the row it fires
 for fails it with `27000`, as PostgreSQL does. An `INSTEAD OF` trigger on a table a cascade
 changes is refused (`55000`, SQL Server's 1787/1788). MySQL's `REPLACE` fires `BEFORE INSERT`,
 then `BEFORE DELETE` and `AFTER DELETE` for each row it removes, then `AFTER INSERT`, MySQL's
@@ -2451,12 +2465,14 @@ coordinates, geography measures on the spheroid, transformations between other S
 
 `citext` and `hstore` are built in (D259): `CREATE EXTENSION citext` and
 `CREATE EXTENSION hstore` succeed and list in `pg_extension`, and the types keep PostgreSQL's
-names in `pg_type` (OIDs 9000 to 9003, with their array types) and its text and binary forms
-on the wire.
+names in `pg_type` (OIDs 9000 to 9003: the array types are listed there, but arrays of
+`citext` and `hstore` are not supported yet, so `ARRAY['a'::citext]` fails with `0A000`) and its
+text and binary forms on the wire.
 
 - `citext` keeps the text as written and compares, orders, groups, hashes and indexes by one
   full case fold, so a unique `citext` index refuses `'Ann'` next to `'ANN'`, and `LIKE` and
-  `ILIKE` on a `citext` value ignore case.
+  `ILIKE` on a `citext` value ignore case. Full case folding differs from PostgreSQL's
+  `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259).
 - `hstore` keeps its pairs sorted as PostgreSQL does and prints `"a"=>"1", "b"=>NULL`. Its
   operators `->` (a key or an array of keys), `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-` (a key,
   an array of keys or an `hstore`) and its functions `akeys`, `avals`, `skeys`, `svals`, `each`,
@@ -2931,8 +2947,9 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   argument of the `anyelement` family has the same type (an array's element for `anyarray`), the
   `anycompatible` family takes the arguments' common type (`integer` and `numeric` give
   `numeric`), and the routine runs with its parameters, variables declared `%TYPE` of them and
-  its result typed accordingly. Untyped literals take the type the other arguments give, or
-  `text`. Arguments that don't agree make the routine not a candidate, so the call fails with
+  its result typed accordingly. Untyped literals (a quoted string without a cast) take the type
+  the other arguments give, or `text`; a typed `text` argument (`'5'::text`, a `text` column)
+  sets the type like any other, so `same('5'::text, 5)` fails with `42883` as in PostgreSQL. Arguments that don't agree make the routine not a candidate, so the call fails with
   `42883` as in PostgreSQL (a concrete overload wins over a polymorphic one); a default that
   doesn't agree with the arguments is `42804`, and a polymorphic result without a polymorphic
   argument of its family is refused at `CREATE` (`42P13`). `pg_proc` and `\df` show the
