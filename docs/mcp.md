@@ -316,9 +316,9 @@ calls `eggdb mcp` holds nothing. So:
   `eggdb mcp` call (D258). A call holds the file for at most its time limit plus one second (up to 301 s
   with `--time-limit 300`), after which the watchdog ends the server;
 - after each call the next one waits `--call-gap` milliseconds (100 by default, at most 10,000)
-  before it opens the file, so an agent calling again and again leaves your writers, which do
-  not wait for a lock, that gap to get in; `--call-gap 0` turns it off. The wait is not part of
-  the call's time limit;
+  before it opens the file, so an agent calling again and again leaves your writers that are
+  waiting for the file, or that do not wait (`--busy-timeout 0`, the Rust API's default), that
+  gap to get in; `--call-gap 0` turns it off. The wait is not part of the call's time limit;
 - a call made while a program has the file open for writing answers `database_busy` after a
   second of retrying, and the agent is told to try again;
 - other read-only programs (`eggdb get`, `scan`, `ui --read-only`, `serve --read-only`) run beside

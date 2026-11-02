@@ -102,12 +102,12 @@ relations psql's `\d` family reads.
   name, or all of them (psycopg sends it after a rollback). Not yet: `26000` for a name that was
   never prepared, which is ignored instead.
 
-psql's `\d` family (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du`) reads EggDB's
-catalog: see [The PostgreSQL catalog](#the-postgresql-catalog).
+psql's describe commands (`\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\l`, `\du` and their `+`
+forms, `\df`, `\dT`, `\dD`, `\dp`, `\dx`, `\dd`, `\db`, `\dC`, `\dy`, `\dRp` and `\dRs`) read
+EggDB's catalog: see [The PostgreSQL catalog](#the-postgresql-catalog).
 
-Not yet (each fails readably or is ignored harmlessly): `\d+`, `\df` and the other psql
-commands beyond the `\d` family, the catalog queries of GUI tools beyond it, and non-ASCII
-passwords. TLS, `LISTEN`/`NOTIFY` and stored roles have their own sections.
+Not yet (each fails readably or is ignored harmlessly): the catalog queries of GUI tools beyond
+psql's, and non-ASCII passwords. TLS, `LISTEN`/`NOTIFY` and stored roles have their own sections.
 
 ## The MySQL dialect
 
@@ -3236,11 +3236,14 @@ and `shobj_description`, which return NULL.
 `array_out`, `array_recv` and `array_send`, the `typinput`, `typoutput`, `typreceive` and
 `typsend` of every array type in `pg_type`; another name is `42883`.
 
-**Not yet:** `\d+` and `\dt+ \dv+ \ds+ \di+ \dn+` (sizes, storage, a table's access
-method, `public`'s access privileges and description; `pg_table_size` and the rest are
-missing), `\df`, `\dT`, `\dp`, `\dx`, `\dd`, `\db` and `\dC` (they read `pg_proc`'s other
-functions, `pg_extension`, `pg_tablespace_location` and `pg_cast`, which are not there yet, and
-fail readably or list nothing), the composite row type of each table, and a view column of a
+psql's `+` forms (`\d+`, `\dt+`, `\dv+`, `\ds+`, `\di+`, `\dn+`, `\df+`: owner, access
+method, storage, size and descriptions), `\df`, `\dT`, `\dD`, `\dp` (grants as PostgreSQL's
+`aclitem` text, the owner's entry first), `\dx`, `\dd`, `\db`, `\dC`, `\dy`, `\dRp` and `\dRs`
+answer psql 16's own queries; the catalog tables answer `tableoid` as a hidden system column.
+
+**Not yet:** system columns (`tableoid`, `ctid`, `xmin` and the rest) on user tables, rows in
+`pg_cast` (so `\dC` lists nothing), column privileges (`attacl` is NULL and `\dp` shows no
+column grants), the composite row type of each table, and a view column of a
 catalog type (`CREATE VIEW v AS SELECT relname FROM pg_class` is `0A000`; `relname::text`
 works). A `serial` column made by `CREATE TABLE` in EggDB (not restored from a dump) is an
 auto-increment column and shows as an identity column, where PostgreSQL shows a sequence and a
@@ -3444,7 +3447,10 @@ bytes; an older release refuses a version 6 table by name. A table in a schema o
 their names, versions and bytes, and an older release refuses a version 7 table by name. A view
 is stored under its name in the same key space as version 8: its dialect (the same codes as a
 check's), a flag for `*` in its select list, its query text, its columns with their types, the schemas of the search path when
-it was created and the relations it names; an older release refuses it by name. A table with a
+it was created and the relations it names; an older release refuses it by name. A view with a
+`citext` or `hstore` column is written as version 12 instead (D259,
+`BASE_TYPES_VIEW_FORMAT_VERSION`), the same layout with those types allowed in its columns; every
+other view keeps 8, and a version that does not match its columns is damage. A table with a
 `GENERATED ALWAYS` identity column, an identity column restored from a dump's `ALTER TABLE ...
 ADD GENERATED` (whose number comes from a `nextval(...)` default), an index with a method other
 than `btree` or a column other than `ASC NULLS LAST`, or a unique index that is not a
@@ -3479,6 +3485,18 @@ the present bounds as nested values); a nested value is a row value whose enum, 
 and array forms also carry their type OID or element code. In keys an enum orders by its sort
 order. An older release refuses a version 10 table by name.
 
+Version 11 (D259, `BASE_TYPES_FORMAT_VERSION`) is written only for a table with a `citext` or
+`hstore` column: the version 10 layout, whose column types may now be `23` with kind `5`, a
+built-in base type, and its OID (`9000` `citext`, `9002` `hstore`). Every other table keeps its
+version and bytes, and a version 11 table without such a column, or such a column in an older
+version, is damaged. In rows, a `citext` is tag `27` and its text, length-prefixed as `text`'s
+(the text tag is not reused, because values inside composites and arrays are read by their tag
+alone), and an `hstore` tag `28`: its pair count, then each pair's key (length-prefixed), a byte
+`0` for a NULL value or `1` followed by the value (length-prefixed); pairs are stored sorted as
+PostgreSQL sorts them (by key length, then bytes), and unsorted or duplicate keys are damage. In
+keys a `citext` is its case-folded text, keyed as text is. An older release refuses a version 11
+table by name. Table versions skip 8 and 12, which are view versions.
+
 A user-defined type is a record under the catalog prefix, `0x0A` and the type's schema-qualified
 name: record version `1`, its kind (as above), its 32-bit OID (16384 to 2^31-1, picked from a hash
 of its name and never reused while it exists), then an enum's labels (count; each its 64-bit sort
@@ -3486,7 +3504,11 @@ order, strictly ascending, and its label of 1 to 63 bytes), a composite type's a
 each its name and type, never the type itself), a range's subtype, or a domain's base type, a `NOT
 NULL` flag byte, an optional default text (`0`, or `1` and the text), and its checks (count; each
 its name, its expression text over `VALUE`, and a byte `1` when validated). Every statement that
-names a type loads them once, and a damaged record is an error naming it, never a panic.
+names a type loads them once, and a damaged record is an error naming it, never a panic. A type
+whose attribute, subtype or base type is `citext` or `hstore` is written with record version `2`
+(D259), the same layout with kind `5` allowed in those member types; every other type keeps
+version `1`, and a version that does not match its members is damage. Kind `5` names a column's
+or member's type only, never a record of its own.
 
 A table's or view's triggers are one record under the catalog prefix, `0x0B` and the table's
 internal name: record version `1`, the count of triggers (1 to 1024), then each trigger in firing
@@ -3512,6 +3534,14 @@ and the table's internal name (D169): record version `1`, a flag byte (`1` parti
 partition), the strategy and key column names when partitioned, and the parent's name and the
 bound when a partition. Bound values are kept as text and read back in the key column's type. A
 damaged record is an error naming it, never a panic.
+
+A table made by SQLite's `CREATE TABLE` keeps that statement's text as written in one record
+under the catalog prefix, `0x15` and the table's internal name (D273): record version `1`, the
+generated `CREATE TABLE` text's length as a 32-bit little-endian number, that text, then the
+original text to the end of the value, both UTF-8. `sqlite_schema` shows the original text while
+the table's generated text still equals the saved one, and the generated text otherwise;
+`ALTER TABLE` and `DROP TABLE` delete the record. A damaged record is an error naming it, never
+a panic.
 
 Primary keys are encoded so that byte order is value order (D98): each column is a marker byte
 followed by the value; integers are big-endian at their width with the sign bit flipped, floating

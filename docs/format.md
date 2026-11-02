@@ -681,7 +681,16 @@ of the pinned toolchain, 1.99.1), so the platform layer adds nothing.
   internal name and bound (`1` range: two value lists; `2` list: one; `3` hash: modulus and
   remainder as varints; `4` default). Each bound value is a byte (`0` the value as text, `1`
   NULL, `2` MINVALUE, `3` MAXVALUE) and, for `0`, the text. Rows stay in each partition's own
-  table; a partitioned table holds none.
+  table; a partitioned table holds none. Table-definition version 11 (D259) is written only for
+  a table with a `citext` or `hstore` column (defined-type kind `5`, a built-in base type, with
+  OID 9000 or 9002), whose values in rows are tags `27` (`citext`, its text) and `28` (`hstore`,
+  its sorted pairs); a view with such a column starts with version byte 12, and a user-defined
+  type with such a member is written with record version 2. Every other table, view and type
+  keeps its version and bytes, so older releases refuse only what holds these types. A SQLite
+  table's `CREATE TABLE` text as written is one record per table (catalog prefix, `0x15`, the
+  table's internal name) with record version 1: the generated text's length (32-bit
+  little-endian), the generated text and the original text (D273). All of these are in
+  [sql.md](sql.md) "How SQL is stored".
 - Overflow pages (type 4, layout 1) and the overflow reference arrive within version 1 before
   v0.2.0 ships, with no feature flag (D88). From the v0.2.0 sample file on, a change to their
   layout needs a new layout number behind a feature flag.
