@@ -320,6 +320,14 @@ pub const COMMON_OPTIONS: &[OptionDefinition] = &[
         help: "page cache size, e.g. 64m (default fits the value)",
     },
     OptionDefinition {
+        short: None,
+        long: "busy-timeout",
+        value: Some("ms"),
+        repeatable: false,
+        default: Some("5000"),
+        help: "wait this long for a file another program has open (0 fails at once)",
+    },
+    OptionDefinition {
         short: Some('h'),
         long: "help",
         value: None,

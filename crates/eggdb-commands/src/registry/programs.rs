@@ -391,13 +391,15 @@ is nothing to type here. The agent gets tools to list and describe tables, run a
 sample rows and read keys. Without --allow-write every call is read-only and a write is refused
 with an error the agent can read. With it the agent also gets write_sql, one statement per call
 that may change the file, run in its own transaction; the file is opened read-write for that call
-only. A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE names no
-column of the table, dropping a column, constraint or primary key, changing a column's type) runs
-only after you confirm it: in a client that can ask you, a dialog; in one that cannot, the agent
+only. A statement that destroys data (DROP, TRUNCATE, a DELETE or UPDATE whose WHERE does not
+pin every column of a primary or unique key to values, REPLACE and upserts, a MERGE that updates
+or deletes, dropping a column, constraint or primary key, changing a column's type) runs only
+after you confirm it: in a client that can ask you, a dialog; in one that cannot, the agent
 must pass confirm: true, so set that client to ask you before write_sql runs. Each read call
 opens the file read-only for at most the time limit and closes it again, so other readers run
-beside it; while a call runs, a program that wants to write the file is refused, and while
-another program has the file open for writing a call fails and the agent is told to try again.
+beside it; while a call runs, a program that wants to write the file waits for it (eggdb
+commands up to --busy-timeout, 5 s by default), and while another program has the file open for
+writing a call fails and the agent is told to try again.
 A write_sql call holds the file alone while its statement runs (the time limit bounds it),
 commits and closes the file, and never while you are asked.
 With --tables only the tables and views named exist for the agent, in every dialect and catalog:
@@ -411,8 +413,8 @@ or it does not start; with --allow-write a name not there yet is one the agent m
 anything else (a table, view, sequence, schema, type, routine or role) is refused, and so is a
 change to a named table that a foreign key or a view ties to a table not named; the server lists
 those ties when it starts. After each call the server waits --call-gap milliseconds before the
-next call opens the file, so your own programs, which are refused while a call holds the file, get their
-turn between an agent's calls; 0 turns the gap off.
+next call opens the file, so your own programs, which wait for a call that holds the file
+(--busy-timeout), get their turn between an agent's calls; 0 turns the gap off.
 Every call is appended to <file>.mcp-audit.jsonl next to the file (readable by its owner only),
 which eggdb audit shows; if that file cannot be written the server does not start. A statement
 still running a second past its time limit cannot be stopped, so the server records it and exits
@@ -636,15 +638,22 @@ pub(super) const FOLLOW: CommandDefinition = CommandDefinition {
     synopsis: "<file> <source-url>",
     summary: "copy a running PostgreSQL or SQL Server database into the file and keep it in step",
     description: "Copies a running PostgreSQL database (logical replication) or SQL Server database (change tracking or CDC) into the file, then applies every change the source commits, one source transaction as one transaction here, until stopped or caught up, so applications can switch over with no downtime.",
-    usage: "eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--until caught-up]",
+    usage: "eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--changes cdc|change-tracking] [--reconnect-for <seconds>] [--until caught-up]",
     help: "\
 Copies a running database into the file and keeps the file in step with it. From PostgreSQL
-(wal_level=logical) it creates a temporary replication slot, copies the schema and every
-table's rows from the slot's snapshot, then applies the logical stream: inserts, updates,
-deletes and truncates, each source transaction as one transaction here. From SQL Server it
-copies the tables, then polls change tracking or CDC. Ctrl-C or SIGTERM finishes the
-transaction being applied, copies sequence values, prints a summary and exits 0. The password
-comes from PGPASSWORD or SQLCMDPASSWORD, or --password-file, never from the URL.
+(wal_level=logical) it creates a replication slot, copies the schema and every table's rows
+from the slot's snapshot, then applies the logical stream: inserts, updates, deletes,
+truncates and column changes, each source transaction as one transaction here. From SQL Server
+it copies the tables, then polls CDC or change tracking. The file keeps the follow's position,
+saved with every change applied, so running the same command again resumes without copying; a
+lost connection is retried for --reconnect-for seconds. Ctrl-C or SIGTERM finishes the
+transaction being applied, copies sequence values, prints a summary and exits 0.
+The slot is permanent: once the copy is done, Ctrl-C, SIGTERM and a lost connection keep it
+(and the publication) so the follow can resume, and it holds the source's WAL until then; it is
+dropped when the copy fails or is stopped, or when a follow with --until caught-up finishes. To
+give a follow up, drop it on the source with SELECT pg_drop_replication_slot('<slot>'), the name
+the follow printed. The password comes from PGPASSWORD or SQLCMDPASSWORD, or --password-file,
+never from the URL.
 
       --create                  create the file if it is missing (it must not already hold
                                 the source's tables)
@@ -652,10 +661,17 @@ comes from PGPASSWORD or SQLCMDPASSWORD, or --password-file, never from the URL.
                                 schema)
       --publication <name>      PostgreSQL: use this publication; default: create
                                 eggdb_follow FOR ALL TABLES (needs the owner or a superuser),
-                                dropped again at stop
+                                dropped with the slot
       --password-file <path>    read the source password from this file (default: PGPASSWORD
                                 or SQLCMDPASSWORD)
       --poll <seconds>          SQL Server: how often to ask for changes (default 5)
+      --changes cdc|change-tracking
+                                SQL Server: read every table through CDC or through change
+                                tracking (default: CDC for each table with a capture
+                                instance of all its columns, change tracking for the rest)
+      --reconnect-for <seconds> keep retrying a lost connection this long, waiting 1, 2, 4 ...
+                                up to 60 seconds between tries (default 300; 0 stops at the
+                                first loss)
       --until caught-up         stop by itself, exit 0, once every source change so far is
                                 in the file
 
@@ -680,6 +696,19 @@ Examples:
         OptionDefinition {
             default: Some("5"),
             ..valued("poll", "seconds", "SQL Server: how often to ask for changes")
+        },
+        valued(
+            "changes",
+            "cdc|change-tracking",
+            "SQL Server: read every table through CDC or through change tracking",
+        ),
+        OptionDefinition {
+            default: Some("300"),
+            ..valued(
+                "reconnect-for",
+                "seconds",
+                "how long to keep retrying a lost connection to the source (0 for none)",
+            )
         },
         valued(
             "until",
