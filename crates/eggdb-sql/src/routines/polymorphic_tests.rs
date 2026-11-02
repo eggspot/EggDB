@@ -267,4 +267,16 @@ fn only_untyped_literals_take_their_type_from_the_other_polymorphic_arguments() 
             "{sql}"
         );
     }
+    for sql in [
+        "SELECT same('a', 1)",
+        "SELECT same(1, 'a')",
+        "SELECT * FROM same('a', 1)",
+    ] {
+        let error = refusal(&mut session, sql);
+        assert_eq!(error.state().code(), "22P02", "{sql}: {error}");
+        assert!(
+            error.message().contains("integer") && error.message().contains("\"a\""),
+            "{sql}: {error}"
+        );
+    }
 }

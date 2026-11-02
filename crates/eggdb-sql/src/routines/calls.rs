@@ -1020,15 +1020,22 @@ fn choose(
         )));
     }
     let definition = Arc::clone(definition);
-    let input_untyped: Vec<bool> = call_parameters(&definition)
+    let (input_untyped, input_given): (Vec<bool>, Vec<bool>) = call_parameters(&definition)
         .into_iter()
-        .zip(&slots.untyped)
+        .zip(slots.untyped.iter().zip(&slots.values))
         .filter(|(parameter, _)| parameter.mode.is_input())
-        .map(|(_, untyped)| *untyped)
-        .collect();
+        .map(|(_, (untyped, value))| (*untyped, value.is_some()))
+        .unzip();
     let arguments = input_arguments(reader, tables, &definition, slots.values)?;
-    let (definition, arguments) =
-        polymorphic::specialize(tables, definition, arguments, &input_untyped)?;
+    let (definition, arguments) = polymorphic::specialize(
+        tables,
+        definition,
+        arguments,
+        polymorphic::ArgumentKinds {
+            untyped: &input_untyped,
+            given: &input_given,
+        },
+    )?;
     Ok(Chosen {
         definition,
         arguments,

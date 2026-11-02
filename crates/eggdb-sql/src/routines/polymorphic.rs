@@ -160,7 +160,7 @@ pub(crate) fn resolve<'v>(
             continue;
         };
         if is_untyped && matches!(value, Value::Text(_)) {
-            untyped.push((role, value));
+            untyped.push(role);
             continue;
         }
         let found = role.element_of(actual)?.without_modifier();
@@ -174,13 +174,13 @@ pub(crate) fn resolve<'v>(
         };
         resolution.settle(role, merged);
     }
-    for (role, value) in untyped {
+    for role in untyped {
         let family = match resolution.family(role) {
             Some(family) => family,
             None if role == Role::Enum => return None,
             None => SqlType::Text,
         };
-        coerced(value, role.argument_type(family)?, true)?;
+        role.argument_type(family)?;
         resolution.settle(role, family);
     }
     for role in roles {
@@ -271,20 +271,29 @@ fn not_alike(definition: &RoutineDefinition) -> SqlError {
     )
 }
 
+/// What a call says about each of its input arguments, by position.
+pub(crate) struct ArgumentKinds<'a> {
+    /// Whether the argument is an untyped literal (one past the end counts as one).
+    pub(crate) untyped: &'a [bool],
+    /// Whether the call gave the argument, rather than its parameter's default.
+    pub(crate) given: &'a [bool],
+}
+
 /// The definition specialized to the types its polymorphic parameters take in this call, and
-/// the arguments converted to them; `untyped` says which arguments are untyped literals (an
-/// argument past its end counts as one).
+/// the arguments converted to them. A given untyped literal that does not convert to its
+/// resolved type fails with the conversion's own error, as PostgreSQL's input functions do.
 pub(crate) fn specialize(
     tables: &mut TableCache,
     definition: Arc<RoutineDefinition>,
     arguments: Vec<Value>,
-    untyped: &[bool],
+    kinds: ArgumentKinds<'_>,
 ) -> SqlResult<(Arc<RoutineDefinition>, Vec<Value>)> {
     if !declares_polymorphism(&definition) {
         return Ok((definition, arguments));
     }
     let inputs = definition.input_types();
-    let is_untyped = |at: usize| untyped.get(at).copied().unwrap_or(true);
+    let is_untyped = |at: usize| kinds.untyped.get(at).copied().unwrap_or(true);
+    let is_given = |at: usize| kinds.given.get(at).copied().unwrap_or(false);
     let resolution = resolve(
         inputs
             .iter()
@@ -299,10 +308,16 @@ pub(crate) fn specialize(
         match inputs.get(at) {
             Some(declared) if is_polymorphic(*declared) => {
                 let target = specialized_type(*declared, resolution)?;
-                converted.push(
-                    coerced(&value, target, is_untyped(at))
-                        .ok_or_else(|| not_alike(&definition))?,
-                );
+                let untyped_literal = is_untyped(at) && matches!(value, Value::Text(_));
+                match coerced(&value, target, untyped_literal) {
+                    Some(value) => converted.push(value),
+                    None if untyped_literal && is_given(at) => {
+                        return Err(convert(value, target, Conversion::Explicit)
+                            .err()
+                            .unwrap_or_else(|| not_alike(&definition)));
+                    }
+                    None => return Err(not_alike(&definition)),
+                }
             }
             _ => converted.push(value),
         }
