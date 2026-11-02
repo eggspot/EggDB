@@ -180,6 +180,23 @@ impl ServedDatabases for ServedDirectory<'_> {
     fn listing_version(&self) -> Option<u64> {
         Some(self.listing_version.load(Ordering::Acquire))
     }
+
+    fn is_superuser_in(&self, name: &str, role: &str) -> bool {
+        let database = if name.eq_ignore_ascii_case(&self.default_name) {
+            AttachedDatabase::Default(self.default)
+        } else {
+            let others = self.others();
+            let Some(store) = served_key(&others, name).and_then(|key| others.get(key)) else {
+                return false;
+            };
+            AttachedDatabase::Other(Arc::clone(store))
+        };
+        database
+            .begin_read()
+            .ok()
+            .and_then(|reader| eggdb_sql::stored_role(&reader, role).ok().flatten())
+            .is_some_and(|stored| stored.login && stored.superuser)
+    }
 }
 
 impl DatabaseDirectory for ServedDirectory<'_> {
@@ -326,6 +343,34 @@ mod tests {
         let main = served.attach("main").expect("main");
         assert_eq!(main.store_id(), store.store_id());
         assert_ne!(main.store_id(), first.store_id());
+    }
+
+    #[test]
+    fn a_role_is_a_superuser_only_where_that_database_says_so() {
+        let scratch = Scratch::new("superuser");
+        let db = Database::open(scratch.0.join("main.eggdb")).expect("main");
+        let store = DatabaseStore(&db);
+        let served = serving(&scratch, &store, true);
+        served.create("shop").expect("create");
+        let mut main = eggdb_sql::Session::new(&store);
+        main.execute("CREATE ROLE boss LOGIN SUPERUSER", &mut |_| {})
+            .expect("role in main");
+        let _ = main.close();
+        assert!(served.is_superuser_in("main", "boss"));
+        assert!(served.is_superuser_in("MAIN", "boss"));
+        assert!(!served.is_superuser_in("shop", "boss"));
+        assert!(!served.is_superuser_in("nowhere", "boss"));
+        let shop = served.attach("shop").expect("shop");
+        let mut session = eggdb_sql::Session::new(&shop);
+        session
+            .execute("CREATE ROLE boss LOGIN SUPERUSER", &mut |_| {})
+            .expect("role in shop");
+        let _ = session.close();
+        drop(shop);
+        assert!(served.is_superuser_in("Shop", "boss"));
+        served
+            .drop_database("shop")
+            .expect("no handle is left behind");
     }
 
     #[test]

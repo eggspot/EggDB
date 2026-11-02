@@ -811,6 +811,7 @@ impl<'s> Session<'s> {
                 dialect: self.dialect,
                 current_database: &settings.database,
                 superuser: checked_role.is_none(),
+                login_role: settings.login_role.as_deref(),
                 may_create_databases,
                 in_block: self.in_block(),
             },
@@ -832,8 +833,9 @@ impl<'s> Session<'s> {
             ));
         };
         self.identify(user, database);
-        Arc::make_mut(&mut self.settings).checked_role =
-            (!role.superuser).then(|| role.name.clone());
+        let settings = Arc::make_mut(&mut self.settings);
+        settings.checked_role = (!role.superuser).then(|| role.name.clone());
+        settings.login_role = Some(role.name);
         Ok(())
     }
 

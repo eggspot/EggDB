@@ -9,9 +9,10 @@ use crate::session::QueryResult;
 use crate::store::KeyValueStore;
 
 const MAX_DATABASE_NAME_BYTES: usize = 63;
-const RESERVED_FILE_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+const RESERVED_FILE_NAMES: [&str; 6] = ["con", "prn", "aux", "nul", "conin$", "conout$"];
+const RESERVED_NUMBERED_PREFIXES: [&str; 2] = ["com", "lpt"];
+const RESERVED_NUMBERED_SUFFIXES: [&str; 13] = [
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "\u{b9}", "\u{b2}", "\u{b3}",
 ];
 
 /// Why a served database could not be created or dropped.
@@ -48,6 +49,15 @@ pub trait ServedDatabases: Sync {
     /// statement.
     fn listing_version(&self) -> Option<u64> {
         None
+    }
+
+    /// Whether `role` is a stored role that may log in to, and is a superuser of, the served
+    /// database named `name` (ignoring ASCII case), whose own roles decide: `DROP DATABASE` by
+    /// a session that logged in as a stored role needs it, since each database keeps its own
+    /// roles. `false`, the default, for a server that cannot read another database's roles.
+    fn is_superuser_in(&self, name: &str, role: &str) -> bool {
+        let _ = (name, role);
+        false
     }
 
     /// The served name equal to `name` ignoring ASCII case, as MySQL and SQL Server compare
@@ -133,9 +143,9 @@ fn fixed_list() -> ServedDatabaseError {
     )
 }
 
-/// Whether `name` may name a served database: 1 to 63 bytes of letters, digits, `_`, `-` and
-/// `$`, not starting with `-`, and not a name Windows reserves for devices, so that it is a
-/// safe file name on every platform.
+/// Whether `name` may name a served database: 1 to 63 bytes of letters, digits, `_` and `-`,
+/// not starting with `-`, and not a name Windows reserves for devices (`CON`, `NUL`, `COM0` to
+/// `COM9`, `COM¹`, `LPT²` and the rest), so that it is a safe file name on every platform.
 #[must_use]
 pub fn is_valid_database_name(name: &str) -> bool {
     !name.is_empty()
@@ -143,10 +153,21 @@ pub fn is_valid_database_name(name: &str) -> bool {
         && !name.starts_with('-')
         && name
             .chars()
-            .all(|character| character.is_alphanumeric() || matches!(character, '_' | '-' | '$'))
-        && !RESERVED_FILE_NAMES
-            .iter()
-            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+            .all(|character| character.is_alphanumeric() || matches!(character, '_' | '-'))
+        && !is_reserved_device_name(name)
+}
+
+fn is_reserved_device_name(name: &str) -> bool {
+    RESERVED_FILE_NAMES
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        || RESERVED_NUMBERED_PREFIXES.iter().any(|prefix| {
+            name.split_at_checked(prefix.len())
+                .is_some_and(|(start, number)| {
+                    start.eq_ignore_ascii_case(prefix)
+                        && RESERVED_NUMBERED_SUFFIXES.contains(&number)
+                })
+        })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,6 +190,7 @@ pub(crate) struct DatabaseCommandContext<'a> {
     pub(crate) dialect: Dialect,
     pub(crate) current_database: &'a str,
     pub(crate) superuser: bool,
+    pub(crate) login_role: Option<&'a str>,
     pub(crate) may_create_databases: bool,
     pub(crate) in_block: bool,
 }
@@ -211,7 +233,7 @@ pub(crate) fn run(
         DatabaseStatement::Drop { names, if_exists } => {
             let mut result = QueryResult::command(tag);
             for name in names {
-                if !context.superuser {
+                if !may_drop(context, served, &name.text) {
                     return Err(denied("drop database").at(name.position));
                 }
                 if name.text.eq_ignore_ascii_case(context.current_database) {
@@ -242,6 +264,19 @@ pub(crate) fn run(
     }
 }
 
+fn may_drop(
+    context: &DatabaseCommandContext<'_>,
+    served: &dyn ServedDatabases,
+    name: &str,
+) -> bool {
+    match context.login_role {
+        None => context.superuser,
+        Some(role) => served
+            .matching_name(name)
+            .is_none_or(|target| served.is_superuser_in(&target, role)),
+    }
+}
+
 fn numbered_in_use(error: SqlError, dialect: Dialect) -> SqlError {
     match dialect {
         Dialect::SqlServer => error.with_sqlserver_code(3702),
@@ -254,7 +289,7 @@ fn denied(what: &str) -> SqlError {
         SqlState::INSUFFICIENT_PRIVILEGE,
         format!("permission denied to {what}"),
     )
-    .with_hint("Only a superuser, or a role with CREATEDB for CREATE DATABASE, may do this.")
+    .with_hint("Only the server's own user or a superuser may do this: CREATE DATABASE also lets a role with CREATEDB in the current database, and DROP DATABASE needs a role that is a superuser in the database it drops, since each database keeps its own roles.")
 }
 
 fn invalid_name(name: &str) -> SqlError {
@@ -363,6 +398,7 @@ mod tests {
     #[derive(Default)]
     struct Served {
         databases: Mutex<Vec<(String, usize)>>,
+        superusers: Vec<(&'static str, &'static str)>,
     }
 
     impl Served {
@@ -374,11 +410,18 @@ mod tests {
                         .map(|(name, sessions)| ((*name).to_owned(), *sessions))
                         .collect(),
                 ),
+                superusers: Vec::new(),
             }
         }
     }
 
     impl ServedDatabases for Served {
+        fn is_superuser_in(&self, name: &str, role: &str) -> bool {
+            self.superusers
+                .iter()
+                .any(|(database, superuser)| *database == name && *superuser == role)
+        }
+
         fn names(&self) -> Vec<String> {
             let mut names: Vec<String> = self
                 .databases
@@ -498,6 +541,29 @@ mod tests {
     }
 
     #[test]
+    fn a_superuser_of_one_database_drops_only_databases_where_it_is_a_superuser_too() {
+        let store = MemoryStore::default();
+        let mut served = Served::with(&[("main", 1), ("theirs", 0), ("ours", 0)]);
+        served.superusers = vec![("ours", "boss"), ("main", "boss")];
+        let mut admin = Session::new(&store);
+        run(&mut admin, "CREATE ROLE boss LOGIN SUPERUSER PASSWORD 'x'").unwrap();
+        let mut boss = Session::new(&store);
+        boss.identify_role("boss", "main").unwrap();
+        boss.set_served_databases(&served);
+        assert_eq!(code(&mut boss, "DROP DATABASE theirs"), "42501");
+        assert_eq!(code(&mut boss, "DROP DATABASE THEIRS"), "42501");
+        assert!(served.names().contains(&"theirs".to_owned()));
+        run(&mut boss, "DROP DATABASE ours").unwrap();
+        assert_eq!(code(&mut boss, "DROP DATABASE nowhere"), "3D000");
+        run(&mut boss, "DROP DATABASE IF EXISTS nowhere").unwrap();
+        let mut owner = Session::new(&store);
+        owner.identify("eggdb", "main");
+        owner.set_served_databases(&served);
+        run(&mut owner, "DROP DATABASE theirs").unwrap();
+        assert_eq!(served.names(), ["main"]);
+    }
+
+    #[test]
     fn mysql_and_sql_server_name_databases_their_way() {
         let store = MemoryStore::default();
         let served = Served::with(&[("main", 1)]);
@@ -524,12 +590,35 @@ mod tests {
 
     #[test]
     fn database_names_are_safe_file_names() {
-        for name in ["shop", "Shop_2", "a-b", "x$", "données"] {
+        for name in [
+            "shop", "Shop_2", "a-b", "données", "com10", "lpt", "comx", "console",
+        ] {
             assert!(is_valid_database_name(name), "{name}");
         }
         let long = "a".repeat(MAX_DATABASE_NAME_BYTES + 1);
         for name in [
-            "", "../x", "a/b", "a\\b", "a.b", ".", "..", "-x", "con", "NUL", "Com1", "a b", "a\0b",
+            "",
+            "../x",
+            "a/b",
+            "a\\b",
+            "a.b",
+            ".",
+            "..",
+            "-x",
+            "con",
+            "NUL",
+            "Com1",
+            "a b",
+            "a\0b",
+            "x$",
+            "COM0",
+            "lpt0",
+            "LPT9",
+            "com\u{b9}",
+            "COM\u{b2}",
+            "Lpt\u{b3}",
+            "CONIN$",
+            "conout$",
             &long,
         ] {
             assert!(!is_valid_database_name(name), "{name:?}");
