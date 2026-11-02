@@ -1,4 +1,4 @@
-use super::follow::{FollowCounts, source_failed};
+use super::follow::{FollowCounts, copy_stopped, source_failed};
 use super::follow_state::{SQL_SERVER, SavedFollow, table_item, update_statement};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, Format, SqlServerChanges};
@@ -551,6 +551,159 @@ impl Session<'_> {
         self.follow_tds(options)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn copy_sql_server(
+        &mut self,
+        source: &mut TdsClient,
+        target: &str,
+        tables: &[SourceTable],
+        identity: &str,
+        version: Option<i64>,
+        started: Instant,
+        counts: &mut FollowCounts,
+    ) -> Result<(), Failure> {
+        let query = |source: &mut TdsClient, sql: &str| {
+            source
+                .batch(sql)
+                .map_err(|error| tds_failure(target, &error))
+        };
+        let db = self.open(
+            Access::Write {
+                create: self.request.create,
+            },
+            None,
+        )?;
+        let store = DatabaseStore(&db);
+        let mut session = store.session(Dialect::SqlServer);
+        let mut run = |sql: &str| -> Result<(), Failure> {
+            session.execute(sql, &mut |_| {}).map_err(|error| {
+                source_failed(format!(
+                    "cannot write into the file: {} ({})",
+                    error.message(),
+                    sql.chars().take(200).collect::<String>()
+                ))
+            })
+        };
+        let mut schemas: Vec<&str> = tables.iter().map(|table| table.schema.as_str()).collect();
+        schemas.dedup();
+        for schema in schemas.iter().filter(|schema| **schema != "dbo") {
+            run(&format!("CREATE SCHEMA {}", quote_name(schema)))?;
+        }
+        for table in tables {
+            let mut definitions: Vec<String> = table
+                .columns
+                .iter()
+                .map(|column| format!("{} {}", quote_name(&column.name), column.declared))
+                .collect();
+            if !table.key.is_empty() {
+                let key: Vec<String> = table.key.iter().map(|name| quote_name(name)).collect();
+                definitions.push(format!("PRIMARY KEY ({})", key.join(", ")));
+            }
+            run(&format!("CREATE TABLE {} ({})", table.qualified(), definitions.join(", "))).map_err(|failure| match failure {
+                Failure::Database { message, .. } if message.contains("already") => Failure::Database {
+                    message: format!(
+                        "cannot follow into {}: it already has the source's table {}. Follow into a new file with --create, or drop it first",
+                        self.file_display,
+                        table.shown()
+                    ),
+                    try_command: None,
+                    exit: Exit::DatabaseError,
+                    code: "already_exists",
+                },
+                other => other,
+            })?;
+        }
+        for table in tables {
+            if stop_signals::requested() {
+                return Err(copy_stopped(&self.file_display));
+            }
+            let copied_at = Instant::now();
+            let selected: Vec<String> = table
+                .columns
+                .iter()
+                .map(|column| text_expression(&quote_name(&column.name), &column.data_type))
+                .collect();
+            let rows = first_rows(query(
+                source,
+                &format!("SELECT {} FROM {}", selected.join(", "), table.qualified()),
+            )?);
+            let names = table.column_names();
+            run("BEGIN TRANSACTION")?;
+            for chunk in rows.chunks(ROWS_PER_INSERT) {
+                if stop_signals::requested() {
+                    return Err(copy_stopped(&self.file_display));
+                }
+                let values: Vec<String> = chunk
+                    .iter()
+                    .map(|row| {
+                        let literals: Vec<String> = row
+                            .iter()
+                            .zip(&table.columns)
+                            .map(|(value, column)| literal(value, &column.data_type))
+                            .collect();
+                        format!("({})", literals.join(", "))
+                    })
+                    .collect();
+                run(&format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    table.qualified(),
+                    names.join(", "),
+                    values.join(", ")
+                ))?;
+            }
+            run("COMMIT TRANSACTION")?;
+            counts.tables += 1;
+            counts.rows_copied += rows.len() as u64;
+            self.follow_event(
+                JsonObject::new()
+                    .string("event", "table_copied")
+                    .string("table", &table.shown())
+                    .number("rows", rows.len() as u64)
+                    .number("elapsed_ms", copied_at.elapsed().as_millis() as u64)
+                    .string("changes", table.changes.name()),
+                &format!(
+                    "  copied          {:<28} {:>10} rows   {:.1} s   {}\n",
+                    table.shown(),
+                    rows.len(),
+                    copied_at.elapsed().as_secs_f64(),
+                    table.changes.label()
+                ),
+            );
+        }
+        self.follow_event(
+            JsonObject::new()
+                .string("event", "copied")
+                .number("tables", counts.tables)
+                .number("rows", counts.rows_copied)
+                .number("elapsed_ms", started.elapsed().as_millis() as u64),
+            &format!(
+                "  copied          {} tables, {} rows; now following\n",
+                counts.tables, counts.rows_copied
+            ),
+        );
+        let mut state = SavedFollow::new(SQL_SERVER, identity);
+        for table in tables {
+            state.set(&table_item(&table.shown()), &table_position(table, version));
+        }
+        let mut script = String::from("BEGIN;\n");
+        for statement in state.create_statements() {
+            script.push_str(&statement);
+            script.push_str(";\n");
+        }
+        script.push_str("COMMIT;");
+        let mut state_session = store.session(Dialect::PostgreSql);
+        let created = state_session.execute(&script, &mut |_| {});
+        let _ = state_session.close();
+        created.map_err(|error| {
+            source_failed(format!(
+                "cannot save the follow position in {}: {}",
+                self.file_display,
+                error.message()
+            ))
+        })?;
+        Ok(())
+    }
+
     fn follow_tds(&mut self, options: TdsConnectOptions) -> Result<Exit, Failure> {
         let target = format!("{}:{}/{}", options.host, options.port, options.database);
         let existed = self.request.file.exists();
@@ -937,12 +1090,26 @@ impl Session<'_> {
             );
         }
 
-        let db = self.open(
-            Access::Write {
-                create: self.request.create,
-            },
-            None,
-        )?;
+        let _ = stop_signals::watch();
+        let mut counts = FollowCounts::default();
+        if saved.is_none() {
+            let copied = self.copy_sql_server(
+                &mut source,
+                &target,
+                &tables,
+                &identity,
+                version,
+                started,
+                &mut counts,
+            );
+            if let Err(failure) = copied {
+                if !existed {
+                    let _ = std::fs::remove_file(&self.request.file);
+                }
+                return Err(failure);
+            }
+        }
+        let db = self.open(Access::Write { create: false }, None)?;
         let store = DatabaseStore(&db);
         let mut session = store.session(Dialect::SqlServer);
         let mut run = |sql: &str| -> Result<(), Failure> {
@@ -954,122 +1121,6 @@ impl Session<'_> {
                 ))
             })
         };
-        let mut counts = FollowCounts::default();
-        if saved.is_none() {
-            let mut schemas: Vec<&str> = tables.iter().map(|table| table.schema.as_str()).collect();
-            schemas.dedup();
-            for schema in schemas.iter().filter(|schema| **schema != "dbo") {
-                run(&format!("CREATE SCHEMA {}", quote_name(schema)))?;
-            }
-            for table in &tables {
-                let mut definitions: Vec<String> = table
-                    .columns
-                    .iter()
-                    .map(|column| format!("{} {}", quote_name(&column.name), column.declared))
-                    .collect();
-                if !table.key.is_empty() {
-                    let key: Vec<String> = table.key.iter().map(|name| quote_name(name)).collect();
-                    definitions.push(format!("PRIMARY KEY ({})", key.join(", ")));
-                }
-                run(&format!("CREATE TABLE {} ({})", table.qualified(), definitions.join(", "))).map_err(|failure| match failure {
-                    Failure::Database { message, .. } if message.contains("already") => Failure::Database {
-                        message: format!(
-                            "cannot follow into {}: it already has the source's table {}. Follow into a new file with --create, or drop it first",
-                            self.file_display,
-                            table.shown()
-                        ),
-                        try_command: None,
-                        exit: Exit::DatabaseError,
-                        code: "already_exists",
-                    },
-                    other => other,
-                })?;
-            }
-            for table in &tables {
-                let copied_at = Instant::now();
-                let selected: Vec<String> = table
-                    .columns
-                    .iter()
-                    .map(|column| text_expression(&quote_name(&column.name), &column.data_type))
-                    .collect();
-                let rows = first_rows(query(
-                    &mut source,
-                    &format!("SELECT {} FROM {}", selected.join(", "), table.qualified()),
-                )?);
-                let names = table.column_names();
-                run("BEGIN TRANSACTION")?;
-                for chunk in rows.chunks(ROWS_PER_INSERT) {
-                    let values: Vec<String> = chunk
-                        .iter()
-                        .map(|row| {
-                            let literals: Vec<String> = row
-                                .iter()
-                                .zip(&table.columns)
-                                .map(|(value, column)| literal(value, &column.data_type))
-                                .collect();
-                            format!("({})", literals.join(", "))
-                        })
-                        .collect();
-                    run(&format!(
-                        "INSERT INTO {} ({}) VALUES {}",
-                        table.qualified(),
-                        names.join(", "),
-                        values.join(", ")
-                    ))?;
-                }
-                run("COMMIT TRANSACTION")?;
-                counts.tables += 1;
-                counts.rows_copied += rows.len() as u64;
-                self.follow_event(
-                    JsonObject::new()
-                        .string("event", "table_copied")
-                        .string("table", &table.shown())
-                        .number("rows", rows.len() as u64)
-                        .number("elapsed_ms", copied_at.elapsed().as_millis() as u64)
-                        .string("changes", table.changes.name()),
-                    &format!(
-                        "  copied          {:<28} {:>10} rows   {:.1} s   {}\n",
-                        table.shown(),
-                        rows.len(),
-                        copied_at.elapsed().as_secs_f64(),
-                        table.changes.label()
-                    ),
-                );
-            }
-            self.follow_event(
-                JsonObject::new()
-                    .string("event", "copied")
-                    .number("tables", counts.tables)
-                    .number("rows", counts.rows_copied)
-                    .number("elapsed_ms", started.elapsed().as_millis() as u64),
-                &format!(
-                    "  copied          {} tables, {} rows; now following\n",
-                    counts.tables, counts.rows_copied
-                ),
-            );
-            let mut state = SavedFollow::new(SQL_SERVER, &identity);
-            for table in &tables {
-                state.set(&table_item(&table.shown()), &table_position(table, version));
-            }
-            let mut script = String::from("BEGIN;\n");
-            for statement in state.create_statements() {
-                script.push_str(&statement);
-                script.push_str(";\n");
-            }
-            script.push_str("COMMIT;");
-            let mut state_session = store.session(Dialect::PostgreSql);
-            let created = state_session.execute(&script, &mut |_| {});
-            let _ = state_session.close();
-            created.map_err(|error| {
-                source_failed(format!(
-                    "cannot save the follow position in {}: {}",
-                    self.file_display,
-                    error.message()
-                ))
-            })?;
-        }
-
-        let _ = stop_signals::watch();
         let poll = Duration::from_secs(
             self.request
                 .follow

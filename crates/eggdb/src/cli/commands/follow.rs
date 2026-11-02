@@ -1,6 +1,6 @@
 use super::follow_state::{
-    DEFAULT_RECONNECT_SECONDS, LSN, POSTGRES, PUBLICATION, PUBLICATION_CREATED, READ_STATEMENT,
-    SLOT, SavedFollow, reconnect_delay, update_statement,
+    DEFAULT_RECONNECT_SECONDS, IDENTITY, LSN, POSTGRES, PUBLICATION, PUBLICATION_CREATED,
+    READ_STATEMENT, SLOT, SavedFollow, reconnect_delay, update_statement,
 };
 use super::{Access, Session};
 use crate::cli::args::{CommandName, Format};
@@ -24,6 +24,7 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 const PASSWORD_VARIABLE: &str = "PGPASSWORD";
 const STOP_CHECK: Duration = Duration::from_millis(200);
 const SLOT_DROP_ATTEMPTS: u32 = 25;
+const UNDEFINED_OBJECT: &str = "42704";
 
 fn connection_lost(error: &ClientError) -> bool {
     match error {
@@ -55,6 +56,7 @@ fn drop_slot(catalog: &mut PgClient, slot_name: &str) -> bool {
             quote_literal(slot_name)
         )) {
             Ok(_) => return true,
+            Err(ClientError::Server { code, .. }) if code == UNDEFINED_OBJECT => return true,
             Err(ClientError::Server { code, .. }) if code == "55006" => {
                 std::thread::sleep(STOP_CHECK);
             }
@@ -80,6 +82,31 @@ fn with_slot_note(failure: Failure, slot_name: &str) -> Failure {
         } => Failure::Database {
             message: format!("{message}. {}", slot_kept_note(slot_name)),
             try_command,
+            exit,
+            code,
+        },
+        other => other,
+    }
+}
+
+fn orphan_note(slot_name: &str, pending_path: &std::path::Path) -> String {
+    format!(
+        "The replication slot {slot_name} could not be dropped and holds the source's WAL; running the same command again drops it (it is named in {}), or drop it on the source: {}",
+        pending_path.display(),
+        drop_slot_command(slot_name)
+    )
+}
+
+fn with_orphan_note(failure: Failure, slot_name: &str, pending_path: &std::path::Path) -> Failure {
+    match failure {
+        Failure::Database {
+            message,
+            try_command,
+            exit,
+            code,
+        } => Failure::Database {
+            message: format!("{message}. {}", orphan_note(slot_name, pending_path)),
+            try_command: try_command.or_else(|| Some(drop_slot_command(slot_name))),
             exit,
             code,
         },
@@ -179,6 +206,120 @@ fn rows_of(results: Vec<QueryRows>) -> Vec<Vec<Option<String>>> {
     results.into_iter().flat_map(|result| result.rows).collect()
 }
 
+fn catalog_rows<const COLUMNS: usize>(
+    results: Vec<QueryRows>,
+    source: &str,
+) -> Result<Vec<[Option<String>; COLUMNS]>, Failure> {
+    rows_of(results)
+        .into_iter()
+        .map(|mut row| {
+            row.truncate(COLUMNS);
+            <[Option<String>; COLUMNS]>::try_from(row).map_err(|short| {
+                source_failed(format!(
+                    "cannot follow {source}: it answered a catalog query with {} columns where {COLUMNS} were asked for",
+                    short.len()
+                ))
+            })
+        })
+        .collect()
+}
+
+pub(super) fn copy_stopped(file_display: &str) -> Failure {
+    source_failed(format!(
+        "stopped during the first copy, before {file_display} held a consistent copy of the source; run the same command again to start the copy over"
+    ))
+}
+
+fn drop_slot_command(slot_name: &str) -> String {
+    format!(
+        "SELECT pg_catalog.pg_drop_replication_slot({});",
+        quote_literal(slot_name)
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSlot {
+    identity: String,
+    slot_name: String,
+    publication: String,
+    created_publication: bool,
+}
+
+const PENDING_SLOT_SUFFIX: &str = ".follow-slot";
+
+fn pending_slot_path(file: &std::path::Path) -> std::path::PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(PENDING_SLOT_SUFFIX);
+    std::path::PathBuf::from(name)
+}
+
+fn escaped_line(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+fn unescaped_line(line: &str) -> Option<String> {
+    let mut value = String::with_capacity(line.len());
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            value.push(character);
+            continue;
+        }
+        value.push(match characters.next()? {
+            '\\' => '\\',
+            'n' => '\n',
+            'r' => '\r',
+            _ => return None,
+        });
+    }
+    Some(value)
+}
+
+impl PendingSlot {
+    fn to_text(&self) -> String {
+        format!(
+            "{SOURCE_KIND_LINE}\n{IDENTITY} {}\n{SLOT} {}\n{PUBLICATION} {}\n{PUBLICATION_CREATED} {}\n",
+            escaped_line(&self.identity),
+            escaped_line(&self.slot_name),
+            escaped_line(&self.publication),
+            self.created_publication
+        )
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let mut lines = text.lines();
+        if lines.next()? != SOURCE_KIND_LINE {
+            return None;
+        }
+        let mut value = |item: &str| {
+            lines
+                .next()?
+                .strip_prefix(item)?
+                .strip_prefix(' ')
+                .and_then(unescaped_line)
+        };
+        let identity = value(IDENTITY)?;
+        let slot_name = value(SLOT)?;
+        let publication = value(PUBLICATION)?;
+        let created_publication = match value(PUBLICATION_CREATED)?.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return None,
+        };
+        (!slot_name.is_empty()).then_some(Self {
+            identity,
+            slot_name,
+            publication,
+            created_publication,
+        })
+    }
+}
+
+const SOURCE_KIND_LINE: &str = "eggdb follow slot postgres";
+
 fn text(value: &Option<String>) -> String {
     value.clone().unwrap_or_default()
 }
@@ -226,6 +367,12 @@ impl CopyChannel for CopyBridge<'_> {
     }
 
     fn read_copy_data(&mut self, data: &mut Vec<u8>) -> SqlResult<bool> {
+        if stop_signals::requested() {
+            return Err(SqlError::new(
+                SqlState::QUERY_CANCELED,
+                "the copy was stopped",
+            ));
+        }
         match self
             .client
             .read_copy_out()
@@ -567,6 +714,8 @@ impl Session<'_> {
             system_row.get(3).map(text).unwrap_or_default()
         );
         let saved = if existed { self.saved_follow()? } else { None };
+        self.clear_pending_slot(&mut catalog, &identity, saved.as_ref());
+        let _ = stop_signals::watch();
         let mut counts = FollowCounts::default();
         let resumed = match &saved {
             Some(saved) => {
@@ -604,7 +753,6 @@ impl Session<'_> {
             start,
         } = resumed;
 
-        let _ = stop_signals::watch();
         let followed = self.stream_changes(
             &mut stream,
             &mut catalog,
@@ -699,6 +847,64 @@ impl Session<'_> {
         Ok(if ok { Exit::Done } else { Exit::DatabaseError })
     }
 
+    fn clear_pending_slot(
+        &mut self,
+        catalog: &mut PgClient,
+        identity: &str,
+        saved: Option<&SavedFollow>,
+    ) {
+        let path = pending_slot_path(&self.request.file);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Some(pending) = PendingSlot::parse(&text) else {
+            self.follow_event(
+                JsonObject::new()
+                    .string("event", "orphaned_slot")
+                    .string("file", &path.display().to_string())
+                    .boolean("dropped", false),
+                &format!(
+                    "  orphaned slot   {} is not readable; a replication slot it named may still hold the source's WAL (see pg_replication_slots)\n",
+                    path.display()
+                ),
+            );
+            return;
+        };
+        if saved.and_then(|saved| saved.get(SLOT)) == Some(pending.slot_name.as_str()) {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        let dropped = pending.identity == identity && drop_slot(catalog, &pending.slot_name);
+        if dropped && pending.created_publication {
+            let _ = catalog.simple_query(&format!(
+                "DROP PUBLICATION IF EXISTS {}",
+                quote_identifier(&pending.publication)
+            ));
+        }
+        if dropped {
+            let _ = std::fs::remove_file(&path);
+        }
+        self.follow_event(
+            JsonObject::new()
+                .string("event", "orphaned_slot")
+                .string("slot", &pending.slot_name)
+                .boolean("dropped", dropped),
+            &if dropped {
+                format!(
+                    "  orphaned slot   {} of a follow stopped during its copy, dropped\n",
+                    pending.slot_name
+                )
+            } else {
+                format!(
+                    "  orphaned slot   {} of a follow stopped during its copy is still on {}; drop it there: {}\n",
+                    pending.slot_name,
+                    pending.identity,
+                    drop_slot_command(&pending.slot_name)
+                )
+            },
+        );
+    }
+
     fn resume_postgres(
         &mut self,
         catalog: &mut PgClient,
@@ -761,6 +967,23 @@ impl Session<'_> {
             now_unix_micros() / 1_000_000,
             std::process::id()
         );
+        let pending = PendingSlot {
+            identity: identity.to_owned(),
+            slot_name: slot_name.clone(),
+            publication: publication.clone(),
+            created_publication,
+        };
+        let pending_path = pending_slot_path(&self.request.file);
+        std::fs::write(&pending_path, pending.to_text()).map_err(|error| {
+            source_failed(format!(
+                "cannot write {} before creating the replication slot: {error}",
+                pending_path.display()
+            ))
+        })?;
+        if stop_signals::requested() {
+            let _ = std::fs::remove_file(&pending_path);
+            return Err(copy_stopped(&self.file_display));
+        }
         let slot = stream
             .simple_query(&format!(
                 "CREATE_REPLICATION_SLOT {} LOGICAL pgoutput EXPORT_SNAPSHOT",
@@ -780,7 +1003,14 @@ impl Session<'_> {
                     "cannot follow {target}: every replication slot is in use (max_replication_slots). Drop one you no longer need, or raise it and restart"
                 )),
                 _ => client_failure(target, &error),
-            })?;
+            });
+        let slot = match slot {
+            Ok(slot) => slot,
+            Err(failure) => {
+                let _ = std::fs::remove_file(&pending_path);
+                return Err(failure);
+            }
+        };
         let slot_row = rows_of(slot).into_iter().next().unwrap_or_default();
         let consistent_point = slot_row
             .get(1)
@@ -815,21 +1045,29 @@ impl Session<'_> {
         let copy_outcome =
             self.copy_snapshot(catalog, target, &snapshot, &publication, &saved, counts);
         if let Err(failure) = copy_outcome {
-            let _ = stream.simple_query(&format!(
-                "DROP_REPLICATION_SLOT {}",
-                quote_identifier(&slot_name)
-            ));
-            if created_publication {
-                let _ = catalog.simple_query(&format!(
-                    "DROP PUBLICATION IF EXISTS {}",
-                    quote_identifier(&publication)
-                ));
-            }
+            let slot_dropped = stream
+                .simple_query(&format!(
+                    "DROP_REPLICATION_SLOT {}",
+                    quote_identifier(&slot_name)
+                ))
+                .is_ok();
+            let publication_dropped = !created_publication
+                || catalog
+                    .simple_query(&format!(
+                        "DROP PUBLICATION IF EXISTS {}",
+                        quote_identifier(&publication)
+                    ))
+                    .is_ok();
             if !existed {
                 let _ = std::fs::remove_file(&self.request.file);
             }
-            return Err(failure);
+            if slot_dropped && publication_dropped {
+                let _ = std::fs::remove_file(&pending_path);
+                return Err(failure);
+            }
+            return Err(with_orphan_note(failure, &slot_name, &pending_path));
         }
+        let _ = std::fs::remove_file(&pending_path);
         self.follow_event(
             JsonObject::new()
                 .string("event", "copied")
@@ -928,7 +1166,7 @@ impl Session<'_> {
             ))
             .map_err(failed)?;
         let filter = self.schema_filter();
-        let tables: Vec<SourceTable> = rows_of(
+        let tables: Vec<SourceTable> = catalog_rows::<5>(
             catalog
                 .simple_query(&format!(
                     "SELECT c.oid::text, n.nspname, c.relname, c.relreplident::text, \
@@ -937,7 +1175,8 @@ impl Session<'_> {
                      WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND {filter} ORDER BY n.nspname, c.relname"
                 ))
                 .map_err(failed)?,
-        )
+            target,
+        )?
         .into_iter()
         .map(|row| SourceTable {
             oid: text(&row[0]),
@@ -970,14 +1209,15 @@ impl Session<'_> {
                 code: "source_failed",
             });
         }
-        let published: Vec<String> = rows_of(
+        let published: Vec<String> = catalog_rows::<1>(
             catalog
                 .simple_query(&format!(
                     "SELECT schemaname || '.' || tablename FROM pg_catalog.pg_publication_tables WHERE pubname = {}",
                     quote_literal(publication)
                 ))
                 .map_err(failed)?,
-        )
+            target,
+        )?
         .iter()
         .map(|row| text(&row[0]))
         .collect();
@@ -1024,7 +1264,7 @@ impl Session<'_> {
                 ))?;
             }
         }
-        let sequences = rows_of(
+        let sequences = catalog_rows::<8>(
             catalog
                 .simple_query(&format!(
                     "SELECT s.schemaname, s.sequencename, s.data_type::text, s.start_value::text, s.min_value::text, \
@@ -1032,7 +1272,8 @@ impl Session<'_> {
                      JOIN pg_catalog.pg_namespace n ON n.nspname = s.schemaname WHERE {filter}"
                 ))
                 .map_err(failed)?,
-        );
+            target,
+        )?;
         for sequence in &sequences {
             run(&format!(
                 "CREATE SEQUENCE {} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {}{}",
@@ -1051,7 +1292,7 @@ impl Session<'_> {
         }
         let mut deferred = Vec::new();
         for table in &tables {
-            let columns = rows_of(
+            let columns = catalog_rows::<5>(
                 catalog
                     .simple_query(&format!(
                         "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull::text, \
@@ -1061,8 +1302,9 @@ impl Session<'_> {
                         table.oid
                     ))
                     .map_err(failed)?,
-            );
-            let constraints = rows_of(
+                target,
+            )?;
+            let constraints = catalog_rows::<3>(
                 catalog
                     .simple_query(&format!(
                         "SELECT conname, contype::text, pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint \
@@ -1070,7 +1312,8 @@ impl Session<'_> {
                         table.oid
                     ))
                     .map_err(failed)?,
-            );
+                target,
+            )?;
             let mut definitions: Vec<String> = columns
                 .iter()
                 .map(|column| {
@@ -1146,6 +1389,9 @@ impl Session<'_> {
             ),
         );
         for table in &tables {
+            if stop_signals::requested() {
+                return Err(copy_stopped(&self.file_display));
+            }
             let copied_at = Instant::now();
             let mut bridge = CopyBridge {
                 client: &mut *catalog,
@@ -1159,11 +1405,15 @@ impl Session<'_> {
                     &mut bridge,
                 )
                 .map_err(|error| {
-                    source_failed(format!(
-                        "cannot copy {}: {}",
-                        table.shown(),
-                        error.message()
-                    ))
+                    if stop_signals::requested() {
+                        copy_stopped(&self.file_display)
+                    } else {
+                        source_failed(format!(
+                            "cannot copy {}: {}",
+                            table.shown(),
+                            error.message()
+                        ))
+                    }
                 })?;
             let rows = bridge.rows;
             counts.tables += 1;
@@ -1181,7 +1431,7 @@ impl Session<'_> {
                 ),
             );
         }
-        let indexes = rows_of(
+        let indexes = catalog_rows::<1>(
             catalog
                 .simple_query(&format!(
                     "SELECT i.indexdef FROM pg_catalog.pg_indexes i JOIN pg_catalog.pg_namespace n ON n.nspname = i.schemaname \
@@ -1189,7 +1439,8 @@ impl Session<'_> {
                      WHERE x.relname = i.indexname AND k.connamespace = n.oid)"
                 ))
                 .map_err(failed)?,
-        );
+            target,
+        )?;
         for statement in indexes
             .iter()
             .map(|row| text(&row[0]))
@@ -1476,14 +1727,15 @@ impl Session<'_> {
 
     fn copy_sequence_values(&mut self, catalog: &mut PgClient) -> Result<u64, Failure> {
         let filter = self.schema_filter();
-        let values = rows_of(
+        let values = catalog_rows::<3>(
             catalog
                 .simple_query(&format!(
                     "SELECT s.schemaname, s.sequencename, s.last_value::text FROM pg_catalog.pg_sequences s \
                      JOIN pg_catalog.pg_namespace n ON n.nspname = s.schemaname WHERE {filter} AND s.last_value IS NOT NULL"
                 ))
                 .map_err(|error| source_failed(format!("cannot read the sequences at stop: {error}")))?,
-        );
+            "the source",
+        )?;
         let db = self.open(Access::Write { create: false }, None)?;
         let store = DatabaseStore(&db);
         let mut session = store.session(Dialect::PostgreSql);
@@ -1507,5 +1759,93 @@ impl Session<'_> {
         }
         let _ = session.close();
         Ok(values.len() as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answer(rows: Vec<Vec<Option<String>>>) -> Vec<QueryRows> {
+        vec![QueryRows {
+            rows,
+            ..QueryRows::default()
+        }]
+    }
+
+    #[test]
+    fn a_catalog_answer_with_too_few_columns_is_an_error_not_a_panic() {
+        let short = answer(vec![vec![Some("a".to_owned())]]);
+        assert!(catalog_rows::<3>(short, "db:5432/app").is_err());
+        let wide = answer(vec![vec![
+            Some("a".to_owned()),
+            None,
+            Some("c".to_owned()),
+            Some("extra".to_owned()),
+        ]]);
+        let rows = catalog_rows::<3>(wide, "db:5432/app").unwrap();
+        assert_eq!(
+            rows,
+            vec![[Some("a".to_owned()), None, Some("c".to_owned())]]
+        );
+        assert!(catalog_rows::<1>(answer(vec![Vec::new()]), "db").is_err());
+    }
+
+    #[test]
+    fn the_pending_slot_is_written_before_the_copy_and_read_back_by_the_next_run() {
+        let pending = PendingSlot {
+            identity: "system 7 database a\nb\\c".to_owned(),
+            slot_name: "eggdb_follow_1_2".to_owned(),
+            publication: "eggdb_follow".to_owned(),
+            created_publication: true,
+        };
+        let text = pending.to_text();
+        assert_eq!(text.lines().count(), 5);
+        assert_eq!(PendingSlot::parse(&text), Some(pending));
+        assert_eq!(PendingSlot::parse(""), None);
+        assert_eq!(PendingSlot::parse("eggdb follow slot postgres\n"), None);
+        assert_eq!(
+            PendingSlot::parse(
+                "eggdb follow slot postgres\nidentity x\nslot \npublication p\npublication_created false\n"
+            ),
+            None
+        );
+        assert_eq!(
+            PendingSlot::parse(
+                "eggdb follow slot postgres\nidentity x\\q\nslot s\npublication p\npublication_created false\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_pending_slot_sits_next_to_the_file() {
+        assert_eq!(
+            pending_slot_path(std::path::Path::new("dir/app.eggdb")),
+            std::path::PathBuf::from("dir/app.eggdb.follow-slot")
+        );
+    }
+
+    #[test]
+    fn an_orphaned_slot_names_its_exact_drop_command() {
+        let failure = with_orphan_note(
+            copy_stopped("app.eggdb"),
+            "eggdb_follow_1_2",
+            std::path::Path::new("app.eggdb.follow-slot"),
+        );
+        let Failure::Database {
+            message,
+            try_command,
+            ..
+        } = failure
+        else {
+            panic!("a database failure");
+        };
+        assert!(message.contains("stopped during the first copy"));
+        assert!(message.contains("app.eggdb.follow-slot"));
+        assert_eq!(
+            try_command.as_deref(),
+            Some("SELECT pg_catalog.pg_drop_replication_slot('eggdb_follow_1_2');")
+        );
     }
 }
