@@ -12,6 +12,8 @@ mod compile_tests;
 #[cfg(test)]
 mod ddl_tests;
 #[cfg(test)]
+mod goto_tests;
+#[cfg(test)]
 mod hostile_tests;
 #[cfg(test)]
 mod output_tests;
@@ -21,6 +23,8 @@ mod package_tests;
 mod reference_tests;
 #[cfg(test)]
 mod run_tests;
+#[cfg(test)]
+mod sql_collection_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

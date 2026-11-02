@@ -6,7 +6,8 @@ use super::{
 use crate::arrays::ArrayValue;
 use crate::ast::{
     CallRoutine, Delete, Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource, Literal,
-    Name, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update, ValuesList,
+    Name, ORACLE_COLLECTION_TABLE, Query, Select, SelectItem, SetExpr, Statement, TableReference,
+    Update, ValuesList,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -323,6 +324,30 @@ pub(crate) fn select_calls_volatile(
     Ok(false)
 }
 
+pub(crate) fn prepare_oracle_table_function(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    settings: &Settings,
+    select: &mut Select,
+) -> SqlResult<()> {
+    let Some(from) = &mut select.from else {
+        return Ok(());
+    };
+    if !is_user_table_function(&from.first) {
+        return Ok(());
+    }
+    let mut preparing = Preparing {
+        writer,
+        tables,
+        settings,
+        prefetch: Prefetch::NonVolatile,
+    };
+    if preparing.table_function(&mut from.first)? {
+        select.filter = Some(and_false(select.filter.take(), from.first.name.position));
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_select(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -618,6 +643,9 @@ impl Preparing<'_> {
         if !is_user_table_function(table) {
             return Ok(false);
         }
+        if is_oracle_collection_table(table) {
+            return self.collection_table(table);
+        }
         let Some(generated) = &mut table.generated else {
             return Ok(false);
         };
@@ -668,6 +696,9 @@ impl Preparing<'_> {
         .map_err(|error| error.at_if_unplaced(position))?;
         let elements = match returned {
             Returned::Set(elements) => elements,
+            Returned::Value(value) if definition.dialect == Dialect::Oracle => {
+                oracle_collection_elements(value)
+            }
             Returned::Value(value) => vec![value],
         };
         let label = base_name(&function.name).to_owned();
@@ -705,6 +736,74 @@ impl Preparing<'_> {
         let replacement = values_table(table.name.text.clone(), renamed, rows, &types, position);
         table.generated = replacement.generated;
         Ok(empty)
+    }
+
+    fn collection_table(&mut self, table: &mut TableReference) -> SqlResult<bool> {
+        let Some(GeneratedTable::Function(function)) = table.generated.as_deref_mut() else {
+            return Ok(false);
+        };
+        let prefetch = std::mem::replace(&mut self.prefetch, Prefetch::Everything);
+        let prepared = function
+            .arguments
+            .iter_mut()
+            .try_for_each(|argument| self.expr(argument));
+        self.prefetch = prefetch;
+        prepared?;
+        let position = function.position;
+        let [collection] = function.arguments.as_slice() else {
+            return Err(SqlError::syntax(
+                "TABLE() takes one collection expression",
+                position,
+            ));
+        };
+        if !is_row_independent(collection) {
+            return Err(SqlError::not_supported(
+                "a TABLE() collection expression that reads columns of other FROM items is not supported yet",
+            )
+            .at(position));
+        }
+        let value = constant_evaluator().eval(collection, None)?;
+        let elements = oracle_collection_elements(value);
+        let (columns, types) = match elements.first().and_then(record_of) {
+            Some(record) => (
+                field_names(record),
+                record.fields.iter().map(|_| None).collect(),
+            ),
+            None => (vec![ORACLE_COLUMN_VALUE.to_owned()], vec![None]),
+        };
+        let rows: Vec<Vec<Value>> = elements.into_iter().map(row_of).collect();
+        let empty = rows.is_empty();
+        let replacement = values_table(table.name.text.clone(), columns, rows, &types, position);
+        table.generated = replacement.generated;
+        Ok(empty)
+    }
+}
+
+const ORACLE_COLUMN_VALUE: &str = "column_value";
+
+fn is_oracle_collection_table(table: &TableReference) -> bool {
+    matches!(
+        table.generated.as_deref(),
+        Some(GeneratedTable::Function(function)) if function.name == ORACLE_COLLECTION_TABLE
+    )
+}
+
+fn oracle_collection_elements(value: Value) -> Vec<Value> {
+    match value {
+        Value::Null => Vec::new(),
+        Value::Defined(defined) => match *defined {
+            DefinedValue::Record(record)
+                if record.names.len() == record.fields.len()
+                    && record
+                        .names
+                        .iter()
+                        .all(|name| name.parse::<u32>().is_ok()) =>
+            {
+                record.fields
+            }
+            other => vec![Value::Defined(Box::new(other))],
+        },
+        other => vec![other],
     }
 }
 
@@ -1107,7 +1206,13 @@ fn output_columns(
     let name = outputs
         .first()
         .and_then(|parameter| parameter.name.clone())
-        .unwrap_or_else(|| label.to_owned());
+        .unwrap_or_else(|| {
+            if definition.dialect == Dialect::Oracle {
+                ORACLE_COLUMN_VALUE.to_owned()
+            } else {
+                label.to_owned()
+            }
+        });
     (vec![name], vec![declared_type(definition)])
 }
 

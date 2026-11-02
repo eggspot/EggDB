@@ -1,12 +1,14 @@
-use super::Parser;
+use super::{Level, Parser};
 use crate::ast::{
-    AggregateFunction, BinaryOperator, ColumnDefinition, Expr, ExprKind, Literal, Name, OrderItem,
-    SelectItem, SequenceOptions, Statement, TableReference, UnaryOperator,
+    AggregateFunction, BinaryOperator, ColumnDefinition, Expr, ExprKind, GeneratedTable, Literal,
+    Name, ORACLE_COLLECTION_TABLE, OrderItem, SelectItem, SequenceOptions, Statement,
+    TableFunction, TableReference, UnaryOperator,
 };
 use crate::encoding::{IdentitySeed, integer_type_range};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::children;
 use crate::lexer::{TokenKind, swap_uniform_case};
+use crate::oracle_collections;
 use crate::oracle_intervals::{DEFAULT_LEADING_PRECISION, IntervalField, MAX_PRECISION, Qualifier};
 use crate::settings::Settings;
 use crate::types::{SqlType, Value};
@@ -1585,6 +1587,106 @@ impl Parser<'_> {
                 return Ok(states);
             }
         }
+    }
+
+    pub(super) fn oracle_infix_level(&self) -> Option<Level> {
+        let membership = |at: usize| {
+            (self.is_word_at(at, "member") || self.is_word_at(at, "submultiset"))
+                && self.is_word_at(at + 1, "of")
+        };
+        if membership(0) || (self.is_word("not") && membership(1)) {
+            return Some(Level::Pattern);
+        }
+        let set_word = ["union", "intersect", "except"]
+            .iter()
+            .any(|word| self.is_word_at(1, word));
+        (self.is_word("multiset") && set_word).then_some(Level::Additive)
+    }
+
+    pub(super) fn oracle_collection_infix(&mut self, left: Expr) -> SqlResult<Expr> {
+        let position = left.position;
+        if self.take_word("multiset") {
+            let all = |parser: &mut Self| {
+                if parser.take_word("distinct") {
+                    false
+                } else {
+                    parser.take_word("all");
+                    true
+                }
+            };
+            let name = if self.take_word("union") {
+                if all(self) {
+                    oracle_collections::MULTISET_UNION_ALL
+                } else {
+                    oracle_collections::MULTISET_UNION_DISTINCT
+                }
+            } else if self.take_word("intersect") {
+                if all(self) {
+                    oracle_collections::MULTISET_INTERSECT_ALL
+                } else {
+                    oracle_collections::MULTISET_INTERSECT_DISTINCT
+                }
+            } else {
+                self.expect_word("except")?;
+                if all(self) {
+                    oracle_collections::MULTISET_EXCEPT_ALL
+                } else {
+                    oracle_collections::MULTISET_EXCEPT_DISTINCT
+                }
+            };
+            let right = self.expression_above(Level::Additive)?;
+            return Ok(oracle_function(name, vec![left, right], position));
+        }
+        let negated = self.take_word("not");
+        let name = if self.take_word("member") {
+            oracle_collections::MEMBER_OF
+        } else {
+            self.expect_word("submultiset")?;
+            oracle_collections::SUBMULTISET_OF
+        };
+        self.expect_word("of")?;
+        let right = self.expression_above(Level::Pattern)?;
+        let test = oracle_function(name, vec![left, right], position);
+        Ok(if negated {
+            Expr {
+                kind: ExprKind::Unary(UnaryOperator::Not, Box::new(test)),
+                position,
+            }
+        } else {
+            test
+        })
+    }
+
+    pub(super) fn oracle_collection_table(&mut self) -> SqlResult<TableReference> {
+        let position = self.position();
+        self.at += 2;
+        let mut reference = if self.at_table_function() {
+            self.table_function()?
+        } else {
+            let collection = self.expression()?;
+            TableReference {
+                name: Name {
+                    text: ORACLE_COLLECTION_TABLE.to_owned(),
+                    position,
+                },
+                alias: None,
+                derived: None,
+                generated: Some(Box::new(GeneratedTable::Function(TableFunction {
+                    name: ORACLE_COLLECTION_TABLE.to_owned(),
+                    arguments: vec![collection],
+                    ordinality: false,
+                    column_names: Vec::new(),
+                    position,
+                }))),
+            }
+        };
+        self.expect(&TokenKind::RightParen)?;
+        if self.take_word("as") || self.at_bare_alias() {
+            let alias = self.name()?.text;
+            reference.name.text.clone_from(&alias);
+            reference.alias = Some(alias);
+        }
+        Ok(reference)
     }
 }
 

@@ -258,6 +258,8 @@ pub(crate) enum StepKind {
     Rollback {
         chain: bool,
     },
+    Goto(String),
+    Label(String),
     Null,
 }
 
@@ -290,6 +292,8 @@ impl StepKind {
             Self::Close(_) => "CLOSE",
             Self::Commit { .. } => "COMMIT",
             Self::Rollback { .. } => "ROLLBACK",
+            Self::Goto(_) => "GOTO",
+            Self::Label(_) => "label",
             Self::Null => "NULL",
         }
     }
@@ -895,6 +899,8 @@ fn step_expressions<'p>(kind: &'p StepKind, found: &mut Vec<&'p Fragment>) {
         | StepKind::Close(_)
         | StepKind::Commit { .. }
         | StepKind::Rollback { .. }
+        | StepKind::Goto(_)
+        | StepKind::Label(_)
         | StepKind::Null => {}
     }
 }

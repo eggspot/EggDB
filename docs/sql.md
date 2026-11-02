@@ -1304,10 +1304,22 @@ END;
   4,194,304 elements, a session 1,000 package states, a unit 1,000 open cursors; past a limit is
   an error, never a crash.
 
-Not supported yet (`0A000`, or `ORA-06550` with the reason at `CREATE`): `GOTO`, `PRAGMA
-AUTONOMOUS_TRANSACTION`, call specifications (`LANGUAGE`, `EXTERNAL`), user-defined aggregates,
-`PIPE ROW` and pipelined functions in `TABLE(...)`, collections in SQL (`TABLE(v)`, `MEMBER OF`),
-`OUT` binds in `EXECUTE IMMEDIATE ... USING`, `COMMIT` and `ROLLBACK` through `EXECUTE
+- **`GOTO` and labels**: `GOTO label` jumps to a `<<label>>` in its own statement sequence or an
+  enclosing one (out of loops, `IF`, blocks and from a handler to an enclosing block); a jump into
+  an `IF`, `CASE`, loop or block, or from a handler back into its block, is `PLS-00375` at
+  `CREATE`, an unknown label `PLS-00201`.
+- **Pipelined functions and collections in SQL**: `PIPELINED` functions with `PIPE ROW`, read with
+  `SELECT ... FROM TABLE(f(...))` (scalar rows in `COLUMN_VALUE`, record rows in their fields);
+  `TABLE(f(...))` of a function returning a nested table or varray and `TABLE(v)` of a PL/SQL
+  collection in a block's SQL; `x [NOT] MEMBER OF c`, `a [NOT] SUBMULTISET OF b`, `CARDINALITY`
+  (`NULL` for an empty collection) and `MULTISET UNION`/`INTERSECT`/`EXCEPT` with `ALL` or
+  `DISTINCT`.
+
+Not supported yet (`0A000`, or `ORA-06550` with the reason at `CREATE`): `PRAGMA
+AUTONOMOUS_TRANSACTION` (EggDB runs one write transaction at a time, so a routine cannot commit
+apart from its caller), call specifications (`LANGUAGE`, `EXTERNAL`), user-defined aggregates,
+`TABLE(...)` that reads columns of an earlier `FROM` item, `TABLE(...)` in a join, `IS A SET`,
+`SET(c)`, `MULTISET(subquery)`, `CAST(... AS type)` to a schema collection type, `OUT` binds in `EXECUTE IMMEDIATE ... USING`, `COMMIT` and `ROLLBACK` through `EXECUTE
 IMMEDIATE`, object types (`CREATE TYPE`), compound triggers, and Oracle-supplied packages other
 than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
 

@@ -9,6 +9,7 @@ mod oracle;
 mod partitions;
 mod plpgsql;
 mod plsql;
+mod plsql_goto;
 mod plsql_primary;
 mod plsql_routines;
 mod plsql_triggers;
@@ -2638,6 +2639,12 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }
+        if self.oracle()
+            && self.is_word("table")
+            && self.peek_kind_at(1) == &TokenKind::LeftParen
+        {
+            return self.oracle_collection_table();
+        }
         if self.sqlserver() && self.at_openjson() {
             return self.sqlserver_openjson();
         }
@@ -3401,8 +3408,13 @@ impl<'t> Parser<'t> {
         {
             return Some(level);
         }
-        if self.oracle() && self.is_operator("%") {
-            return None;
+        if self.oracle() {
+            if let Some(level) = self.oracle_infix_level() {
+                return Some(level);
+            }
+            if self.is_operator("%") {
+                return None;
+            }
         }
         match self.peek_kind() {
             TokenKind::Word(word) => match word.as_ref() {
@@ -3440,6 +3452,9 @@ impl<'t> Parser<'t> {
     fn infix(&mut self, left: Expr, level: Level) -> SqlResult<Expr> {
         if self.mysql() && self.mysql_infix_level().is_some() {
             return self.mysql_infix(left, level);
+        }
+        if self.oracle() && self.oracle_infix_level().is_some() {
+            return self.oracle_collection_infix(left);
         }
         match level {
             Level::Or => {

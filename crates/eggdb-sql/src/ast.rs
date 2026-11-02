@@ -1030,6 +1030,8 @@ pub(crate) struct ValuesList {
     pub(crate) position: usize,
 }
 
+pub(crate) const ORACLE_COLLECTION_TABLE: &str = "table";
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TableFunction {
     pub(crate) name: String,

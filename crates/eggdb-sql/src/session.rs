@@ -2678,6 +2678,13 @@ impl<'s> Session<'s> {
                         select,
                         crate::routines::Prefetch::NonVolatile,
                     )?;
+                } else if dialect == Dialect::Oracle {
+                    crate::routines::prepare_oracle_table_function(
+                        &mut crate::plpgsql::ReadOnlyWrite { inner: reader },
+                        tables,
+                        &settings,
+                        select,
+                    )?;
                 }
                 execute::select(reader, tables, select, false)
             }),

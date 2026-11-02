@@ -815,6 +815,9 @@ pub(crate) fn call(name: &str, values: &[Value], declared: &[Option<SqlType>]) -
         Ok(text_or_null(change(&text)))
     };
     match (name, values) {
+        (name, [left, right]) if crate::oracle_collections::is_operator(name) => {
+            crate::oracle_collections::call(name, left, right)
+        }
         ("oracle_concat", _) => concatenated(values, declared),
         ("oracle_divide", [left, right]) => divided(left, right),
         ("oracle_row_count", [value]) => row_count(value),

@@ -291,7 +291,14 @@ enum Flow {
     Next,
     Exit(Option<String>),
     Continue(Option<String>),
+    Goto(String),
     Return,
+}
+
+fn labelled_step_at(steps: &[Step], label: &str) -> Option<usize> {
+    steps
+        .iter()
+        .position(|step| matches!(&step.kind, StepKind::Label(found) if found == label))
 }
 
 enum Shape {
@@ -1344,10 +1351,18 @@ impl<'r> Run<'r> {
     }
 
     fn steps(&mut self, steps: &[Step]) -> SqlResult<Flow> {
-        for step in steps {
-            let flow = self.step(step)?;
-            if flow != Flow::Next {
-                return Ok(flow);
+        let mut at = 0;
+        while let Some(step) = steps.get(at) {
+            match self.step(step)? {
+                Flow::Next => at += 1,
+                Flow::Goto(label) => match labelled_step_at(steps, &label) {
+                    Some(target) => {
+                        crate::cancel::check()?;
+                        at = target;
+                    }
+                    None => return Ok(Flow::Goto(label)),
+                },
+                flow => return Ok(flow),
             }
         }
         Ok(Flow::Next)
@@ -1464,7 +1479,8 @@ impl<'r> Run<'r> {
             }
             StepKind::Commit { .. } => self.end_procedure_transaction(TransactionEnd::Commit),
             StepKind::Rollback { .. } => self.end_procedure_transaction(TransactionEnd::Rollback),
-            StepKind::Null => Ok(Flow::Next),
+            StepKind::Goto(label) => Ok(Flow::Goto(label.clone())),
+            StepKind::Label(_) | StepKind::Null => Ok(Flow::Next),
         }
     }
 

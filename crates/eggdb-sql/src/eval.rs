@@ -1483,6 +1483,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::bytea::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::oracle_collections::cardinality(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::arrays::function(name, &values) {
             return result;
         }
