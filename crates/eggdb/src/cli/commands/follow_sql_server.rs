@@ -22,6 +22,7 @@ const TRACKING_VERSION_QUERY: &str =
     "SELECT CAST(CHANGE_TRACKING_CURRENT_VERSION() AS nvarchar(max))";
 const CAPTURE_ENABLED_QUERY: &str =
     "SELECT CAST(is_cdc_enabled AS nvarchar(max)) FROM sys.databases WHERE database_id = DB_ID()";
+const LIVENESS_QUERY: &str = "SELECT CAST(1 AS nvarchar(max))";
 const MAX_LSN_QUERY: &str = "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1)";
 const CAPTURE_INSTANCES_QUERY: &str = "SELECT CAST(s.name AS nvarchar(max)), CAST(t.name AS nvarchar(max)), \
      CAST(c.capture_instance AS nvarchar(max)), \
@@ -561,6 +562,7 @@ impl Session<'_> {
         version: Option<i64>,
         started: Instant,
         counts: &mut FollowCounts,
+        created: &mut Vec<String>,
     ) -> Result<(), Failure> {
         let query = |source: &mut TdsClient, sql: &str| {
             source
@@ -588,6 +590,7 @@ impl Session<'_> {
         schemas.dedup();
         for schema in schemas.iter().filter(|schema| **schema != "dbo") {
             run(&format!("CREATE SCHEMA {}", quote_name(schema)))?;
+            created.push(format!("DROP SCHEMA {}", quote_name(schema)));
         }
         for table in tables {
             let mut definitions: Vec<String> = table
@@ -612,6 +615,7 @@ impl Session<'_> {
                 },
                 other => other,
             })?;
+            created.push(format!("DROP TABLE {}", table.qualified()));
         }
         for table in tables {
             if stop_signals::requested() {
@@ -1093,6 +1097,7 @@ impl Session<'_> {
         let _ = stop_signals::watch();
         let mut counts = FollowCounts::default();
         if saved.is_none() {
+            let mut created = Vec::new();
             let copied = self.copy_sql_server(
                 &mut source,
                 &target,
@@ -1101,11 +1106,13 @@ impl Session<'_> {
                 version,
                 started,
                 &mut counts,
+                &mut created,
             );
             if let Err(failure) = copied {
-                if !existed {
-                    let _ = std::fs::remove_file(&self.request.file);
+                if existed {
+                    return Err(self.undo_first_copy(Dialect::SqlServer, &created, failure));
                 }
+                let _ = std::fs::remove_file(&self.request.file);
                 return Err(failure);
             }
         }
@@ -1133,7 +1140,7 @@ impl Session<'_> {
             .map(|table| table_position(table, version))
             .collect();
         let reason = loop {
-            if let Err(error) = source.batch("SELECT 1") {
+            if let Err(error) = source.batch(LIVENESS_QUERY) {
                 if !matches!(error, TdsClientError::Io(_)) {
                     return Err(tds_failure(&target, &error));
                 }
@@ -1424,6 +1431,11 @@ fn capture_lost(target: &str, table: &str, instance: &str, minimum: Lsn, next: L
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_connection_check_reads_its_answer_as_text_as_every_query_does() {
+        assert_eq!(LIVENESS_QUERY, "SELECT CAST(1 AS nvarchar(max))");
+    }
 
     #[test]
     fn types_are_declared_as_sql_server_writes_them() {

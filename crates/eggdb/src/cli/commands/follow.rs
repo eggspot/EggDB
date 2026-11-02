@@ -230,6 +230,75 @@ pub(super) fn copy_stopped(file_display: &str) -> Failure {
     ))
 }
 
+pub(super) fn drop_what_the_copy_created(
+    store: &DatabaseStore<'_>,
+    dialect: Dialect,
+    undo: &[String],
+) -> Vec<String> {
+    let mut session = store.session(dialect);
+    let mut left: Vec<String> = undo.iter().rev().cloned().collect();
+    loop {
+        let before = left.len();
+        left.retain(|statement| session.execute(statement, &mut |_| {}).is_err());
+        if left.is_empty() || left.len() == before {
+            break;
+        }
+    }
+    let _ = session.close();
+    left
+}
+
+fn with_leftovers_note(failure: Failure, file_display: &str, left: &[String]) -> Failure {
+    let Some(first) = left.first() else {
+        return failure;
+    };
+    match failure {
+        Failure::Database {
+            message,
+            try_command,
+            exit,
+            code,
+        } => Failure::Database {
+            message: format!(
+                "{message}. The tables the copy created in {file_display} could not all be dropped; drop them before running the same command again: {}",
+                left.join("; ")
+            ),
+            try_command: try_command.or_else(|| Some(format!("{first};"))),
+            exit,
+            code,
+        },
+        other => other,
+    }
+}
+
+impl Session<'_> {
+    pub(super) fn undo_first_copy(
+        &self,
+        dialect: Dialect,
+        undo: &[String],
+        failure: Failure,
+    ) -> Failure {
+        if undo.is_empty() {
+            return failure;
+        }
+        let left = match self.open(Access::Write { create: false }, None) {
+            Ok(db) => drop_what_the_copy_created(&DatabaseStore(&db), dialect, undo),
+            Err(_) => undo.iter().rev().cloned().collect(),
+        };
+        with_leftovers_note(failure, &self.file_display, &left)
+    }
+}
+
+fn orphaned_slot_left(pending: &PendingSlot, path: &std::path::Path) -> String {
+    format!(
+        "  orphaned slot   {} of a follow stopped during its copy is still on {}; drop it there: {} Then delete {}, which keeps this note coming until it is gone\n",
+        pending.slot_name,
+        pending.identity,
+        drop_slot_command(&pending.slot_name),
+        path.display()
+    )
+}
+
 fn drop_slot_command(slot_name: &str) -> String {
     format!(
         "SELECT pg_catalog.pg_drop_replication_slot({});",
@@ -864,7 +933,7 @@ impl Session<'_> {
                     .string("file", &path.display().to_string())
                     .boolean("dropped", false),
                 &format!(
-                    "  orphaned slot   {} is not readable; a replication slot it named may still hold the source's WAL (see pg_replication_slots)\n",
+                    "  orphaned slot   {0} is not readable; a replication slot it named may still hold the source's WAL (see pg_replication_slots). Drop that slot on the source, then delete {0}\n",
                     path.display()
                 ),
             );
@@ -888,6 +957,7 @@ impl Session<'_> {
             JsonObject::new()
                 .string("event", "orphaned_slot")
                 .string("slot", &pending.slot_name)
+                .string("file", &path.display().to_string())
                 .boolean("dropped", dropped),
             &if dropped {
                 format!(
@@ -895,12 +965,7 @@ impl Session<'_> {
                     pending.slot_name
                 )
             } else {
-                format!(
-                    "  orphaned slot   {} of a follow stopped during its copy is still on {}; drop it there: {}\n",
-                    pending.slot_name,
-                    pending.identity,
-                    drop_slot_command(&pending.slot_name)
-                )
+                orphaned_slot_left(&pending, &path)
             },
         );
     }
@@ -1042,8 +1107,16 @@ impl Session<'_> {
             if created_publication { "true" } else { "false" },
         );
         saved.set(LSN, &format_lsn(consistent_point));
-        let copy_outcome =
-            self.copy_snapshot(catalog, target, &snapshot, &publication, &saved, counts);
+        let mut created = Vec::new();
+        let copy_outcome = self.copy_snapshot(
+            catalog,
+            target,
+            &snapshot,
+            &publication,
+            &saved,
+            counts,
+            &mut created,
+        );
         if let Err(failure) = copy_outcome {
             let slot_dropped = stream
                 .simple_query(&format!(
@@ -1058,9 +1131,12 @@ impl Session<'_> {
                         quote_identifier(&publication)
                     ))
                     .is_ok();
-            if !existed {
+            let failure = if existed {
+                self.undo_first_copy(Dialect::PostgreSql, &created, failure)
+            } else {
                 let _ = std::fs::remove_file(&self.request.file);
-            }
+                failure
+            };
             if slot_dropped && publication_dropped {
                 let _ = std::fs::remove_file(&pending_path);
                 return Err(failure);
@@ -1146,6 +1222,7 @@ impl Session<'_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn copy_snapshot(
         &mut self,
         catalog: &mut PgClient,
@@ -1154,6 +1231,7 @@ impl Session<'_> {
         publication: &str,
         saved: &SavedFollow,
         counts: &mut FollowCounts,
+        created: &mut Vec<String>,
     ) -> Result<(), Failure> {
         let failed = |error: ClientError| client_failure(target, &error);
         catalog
@@ -1275,9 +1353,10 @@ impl Session<'_> {
             target,
         )?;
         for sequence in &sequences {
+            let sequence_name = qualified(&text(&sequence[0]), &text(&sequence[1]));
             run(&format!(
                 "CREATE SEQUENCE {} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {}{}",
-                qualified(&text(&sequence[0]), &text(&sequence[1])),
+                sequence_name,
                 text(&sequence[2]),
                 text(&sequence[6]),
                 text(&sequence[4]),
@@ -1289,6 +1368,7 @@ impl Session<'_> {
                     ""
                 }
             ))?;
+            created.push(format!("DROP SEQUENCE {sequence_name}"));
         }
         let mut deferred = Vec::new();
         for table in &tables {
@@ -1363,6 +1443,7 @@ impl Session<'_> {
                     },
                     other => other,
                 })?;
+            created.push(format!("DROP TABLE {}", table.qualified()));
         }
         drop(run);
         self.follow_event(
@@ -1816,6 +1897,102 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn an_orphaned_slot_of_another_source_names_the_sidecar_to_delete() {
+        let pending = PendingSlot {
+            identity: "system 7 database shop".to_owned(),
+            slot_name: "eggdb_follow_1_2".to_owned(),
+            publication: "eggdb_follow".to_owned(),
+            created_publication: false,
+        };
+        let note = orphaned_slot_left(&pending, std::path::Path::new("dir/app.eggdb.follow-slot"));
+        assert!(note.contains("system 7 database shop"), "{note}");
+        assert!(
+            note.contains("SELECT pg_catalog.pg_drop_replication_slot('eggdb_follow_1_2');"),
+            "{note}"
+        );
+        assert!(
+            note.contains("Then delete dir/app.eggdb.follow-slot"),
+            "{note}"
+        );
+    }
+
+    fn database_with(statements: &[&str]) -> eggdb::Database {
+        let db = eggdb::Database::in_memory().expect("in memory");
+        let store = DatabaseStore(&db);
+        let mut session = store.session(Dialect::SqlServer);
+        for statement in statements {
+            session.execute(statement, &mut |_| {}).expect(statement);
+        }
+        let _ = session.close();
+        db
+    }
+
+    fn tables_of(db: &eggdb::Database) -> Vec<String> {
+        let store = DatabaseStore(db);
+        let mut session = store.session(Dialect::SqlServer);
+        let mut names = Vec::new();
+        session
+            .execute(
+                "SELECT table_schema + '.' + table_name FROM information_schema.tables \
+                 WHERE table_schema <> 'information_schema' ORDER BY 1",
+                &mut |result| {
+                    for row in &result.rows {
+                        names.extend(row.iter().filter_map(|value| value.to_text()));
+                    }
+                },
+            )
+            .expect("tables");
+        let _ = session.close();
+        names
+    }
+
+    #[test]
+    fn a_failed_first_copy_into_an_existing_file_drops_only_what_it_created() {
+        let db = database_with(&[
+            "CREATE TABLE dbo.kept (id int PRIMARY KEY)",
+            "CREATE SCHEMA sales",
+            "CREATE TABLE sales.orders (id int PRIMARY KEY)",
+            "CREATE TABLE sales.lines (id int PRIMARY KEY, order_id int REFERENCES sales.orders (id))",
+        ]);
+        let left = drop_what_the_copy_created(
+            &DatabaseStore(&db),
+            Dialect::SqlServer,
+            &[
+                "DROP SCHEMA [sales]".to_owned(),
+                "DROP TABLE [sales].[lines]".to_owned(),
+                "DROP TABLE [sales].[orders]".to_owned(),
+            ],
+        );
+        assert_eq!(left, Vec::<String>::new());
+        assert_eq!(tables_of(&db), ["dbo.kept"]);
+    }
+
+    #[test]
+    fn what_the_copy_could_not_drop_is_named_with_the_statements_to_run() {
+        let failure = with_leftovers_note(
+            copy_stopped("app.eggdb"),
+            "app.eggdb",
+            &["DROP TABLE [dbo].[orders]".to_owned()],
+        );
+        let Failure::Database {
+            message,
+            try_command,
+            ..
+        } = failure
+        else {
+            panic!("a database failure");
+        };
+        assert!(message.contains("could not all be dropped"), "{message}");
+        assert!(message.contains("DROP TABLE [dbo].[orders]"), "{message}");
+        assert_eq!(try_command.as_deref(), Some("DROP TABLE [dbo].[orders];"));
+        let untouched = with_leftovers_note(copy_stopped("app.eggdb"), "app.eggdb", &[]);
+        let Failure::Database { message, .. } = untouched else {
+            panic!("a database failure");
+        };
+        assert!(!message.contains("could not all be dropped"), "{message}");
     }
 
     #[test]

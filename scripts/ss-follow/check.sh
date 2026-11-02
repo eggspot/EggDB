@@ -10,6 +10,8 @@ change tracking and change data capture (CDC), and follows the database with egg
   key update arrive during the copy and after it; SIGTERM stops it;
 - --changes change-tracking --until caught-up reads every table through change tracking;
 - --changes cdc refuses notes, which has no capture instance;
+- a copy into an existing file that already has orders fails and drops the tables it created, so
+  the same command runs again once orders is gone;
 - CDC cleanup past the follow's position ends the follow with a message to copy afresh.
 Every copy is compared with SQL Server through go-sqlcmd against eggdb serve --tds-listen.
 SQLCMD names go-sqlcmd (default sqlcmd)."
@@ -168,6 +170,7 @@ grep -q '"table":"dbo.notes".*"changes":"change_tracking"' "$work/follow.out" ||
 writes_after_copy
 wait_for_capture 'last write'
 sleep 4
+kill -0 "$follow_pid" 2> /dev/null || fail "follow exited while following, before SIGTERM: $(tail -n 3 "$work/follow.out")"
 kill -TERM "$follow_pid"
 wait "$follow_pid" || fail "follow did not exit 0 after SIGTERM"
 follow_pid=
@@ -191,6 +194,27 @@ fi
 grep -q "dbo.notes" "$work/refused.err" || fail "--changes cdc did not name dbo.notes: $(cat "$work/refused.err")"
 grep -q "sp_cdc_enable_table" "$work/refused.err" || fail "--changes cdc did not say how to capture: $(cat "$work/refused.err")"
 
+rm -f "$work/existing.db"
+"$eggdb" sql --create --dialect sqlserver "$work/existing.db" -c "CREATE TABLE dbo.orders (id int PRIMARY KEY)" \
+  > /dev/null || fail "creating a file that already has dbo.orders failed"
+if SQLCMDPASSWORD=$source_password "$eggdb" follow "$work/existing.db" "$url" --changes change-tracking \
+  --until caught-up > "$work/existing.out" 2> "$work/existing.err"; then
+  fail "follow copied into a file that already has dbo.orders"
+fi
+grep -q "already has the source's table dbo.orders" "$work/existing.err" \
+  || fail "the refusal does not name dbo.orders: $(cat "$work/existing.err")"
+for created in dbo.customers dbo.notes; do
+  if "$eggdb" sql --dialect sqlserver "$work/existing.db" -c "SELECT COUNT(*) FROM $created" > /dev/null 2>&1; then
+    fail "the failed copy left $created in the file"
+  fi
+done
+"$eggdb" sql --dialect sqlserver "$work/existing.db" -c "DROP TABLE dbo.orders" > /dev/null \
+  || fail "dropping dbo.orders from the existing file failed"
+SQLCMDPASSWORD=$source_password "$eggdb" follow "$work/existing.db" "$url" --changes change-tracking \
+  --until caught-up --format json > "$work/existing.out" 2> "$work/follow.err" \
+  || fail "running the same follow again after the failed copy failed"
+grep -q '"reason":"caught_up"' "$work/existing.out" || fail "the second follow into the existing file did not catch up"
+
 rm -f "$work/cleaned.db"
 SQLCMDPASSWORD=$source_password "$eggdb" follow --create "$work/cleaned.db" "$url" --schema dbo --poll 20 --format json \
   > "$work/cleaned.out" 2> "$work/follow.err" &
@@ -213,4 +237,4 @@ follow_pid=
 grep -q "CDC cleanup removed changes" "$work/follow.err" || fail "no cleanup message: $(cat "$work/follow.err")"
 grep -q "Follow again into a new file" "$work/follow.err" || fail "the cleanup message does not say to copy afresh"
 
-echo "ss-follow check passed: CDC and change tracking chosen per table, live inserts, updates, deletes and a key update, --changes change-tracking with --until caught-up, --changes cdc refused, CDC cleanup detected"
+echo "ss-follow check passed: CDC and change tracking chosen per table, live inserts, updates, deletes and a key update, --changes change-tracking with --until caught-up, --changes cdc refused, a failed copy into an existing file undone, CDC cleanup detected"
