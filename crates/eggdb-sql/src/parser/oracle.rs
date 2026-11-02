@@ -1174,6 +1174,7 @@ impl<'t> Parser<'t> {
             "nvl2" => ("nvl2", 3, 3),
             "coalesce" => ("coalesce", 2, usize::MAX),
             "nullif" => ("nullif", 2, 2),
+            "cardinality" => ("cardinality", 1, 1),
             "decode" => ("oracle_decode", 3, MAX_DECODE_ARGUMENTS),
             "concat" => ("oracle_concat", 2, 2),
             "length" => ("oracle_length", 1, 1),
@@ -1232,7 +1233,7 @@ impl<'t> Parser<'t> {
         }
         let expr = match internal {
             "nvl" | "coalesce" => function("coalesce", arguments, position),
-            "nullif" => function("nullif", arguments, position),
+            "nullif" | "cardinality" => function(internal, arguments, position),
             "nvl2" => {
                 let mut arguments = arguments.into_iter();
                 let (Some(tested), Some(present), Some(absent)) =

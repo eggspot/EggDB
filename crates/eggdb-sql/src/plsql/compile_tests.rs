@@ -342,11 +342,9 @@ fn return_exit_and_raise_are_checked_where_they_appear() {
             .contains("PLS-00629")
     );
     let goto = failure("BEGIN GOTO done; END;");
-    assert_eq!(goto.state(), SqlState::FEATURE_NOT_SUPPORTED);
-    assert_compilation_error(
-        &goto,
-        "line 1, column 7:\nPL/SQL: GOTO is not supported yet",
-    );
+    assert_eq!(goto.state(), SqlState::UNDEFINED_OBJECT);
+    assert!(goto.message().contains("PLS-00201"), "{goto}");
+    assert!(goto.message().contains("DONE"), "{goto}");
 }
 
 #[test]
