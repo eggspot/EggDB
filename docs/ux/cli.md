@@ -3903,7 +3903,7 @@ JSON records.
 
 ### Synopsis
 `eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>]
-[--password-file <path>] [--poll <seconds>] [--until caught-up]`.
+[--password-file <path>] [--poll <seconds>] [--changes cdc|change-tracking] [--until caught-up]`.
 
 The source is `postgres://` (libpq's form) or `sqlserver://` (sqlcmd's words for encryption).
 A password inside the URL is a usage error, because every user's `ps` would show it.
@@ -3930,12 +3930,16 @@ that fails it, not only the first. Each message says what is wrong and how to fi
 - some tables have no primary key or replica identity (try `ALTER TABLE … REPLICA IDENTITY
   FULL;`);
 - the file already has the source's tables (category `exists`);
-- SQL Server's change tracking is off for the database (try `ALTER DATABASE … SET
-  CHANGE_TRACKING = ON …`) or for some tables;
-- the change retention was exceeded while following.
+- SQL Server's change tracking and CDC are off for the database (try `ALTER DATABASE … SET
+  CHANGE_TRACKING = ON …`), CDC is off with `--changes cdc` (try `EXEC sys.sp_cdc_enable_db;`),
+  or some tables have neither (try `ALTER TABLE … ENABLE CHANGE_TRACKING;` or
+  `EXEC sys.sp_cdc_enable_table …`), or a table read through CDC has no primary key;
+- the change retention was exceeded, or CDC's cleanup removed changes not yet applied, while
+  following.
 
-Usage errors (exit 2) cover a password in the URL, an unknown scheme, `--poll` or
-`--publication` for the wrong kind of source, `--until` with any value but `caught-up`, and
+Usage errors (exit 2) cover a password in the URL, an unknown scheme, `--poll`, `--changes` or
+`--publication` for the wrong kind of source, `--changes` with any value but `cdc` or
+`change-tracking`, `--until` with any value but `caught-up`, and
 stdin as the file.
 
 ### Decided by this design

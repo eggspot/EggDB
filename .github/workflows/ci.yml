@@ -1082,6 +1082,50 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  ss-follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-ss-follow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Pull SQL Server 2022 (a test source, never shipped) and get go-sqlcmd v1.10.0 (MIT), checked against its SHA-256
+        run: |
+          docker pull --quiet mcr.microsoft.com/mssql/server:2022-latest
+          mkdir -p "$RUNNER_TEMP/go-sqlcmd"
+          cd "$RUNNER_TEMP/go-sqlcmd"
+          curl --retry 3 -fsSL -o sqlcmd-linux-amd64.tar.bz2 https://github.com/microsoft/go-sqlcmd/releases/download/v1.10.0/sqlcmd-linux-amd64.tar.bz2
+          echo "92516d98c63d99b0994de5b61350c91f6915f9b76f139a59039fbcb225c2e987  sqlcmd-linux-amd64.tar.bz2" | sha256sum -c -
+          tar -xjf sqlcmd-linux-amd64.tar.bz2
+          tool=$(find "$PWD" -maxdepth 2 -type f -name sqlcmd | head -n 1)
+          [ -n "$tool" ] || { echo "::error::no sqlcmd in the go-sqlcmd archive"; exit 1; }
+          echo "SQLCMD=$tool" >> "$GITHUB_ENV"
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Follow a running SQL Server 2022 through CDC and change tracking while it takes writes, then compare
+        run: scripts/ss-follow/check.sh target/debug/eggdb "$RUNNER_TEMP/ss-follow"
+      - name: Keep the follow log and any difference
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ss-follow-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/ss-follow/*.out
+            ${{ runner.temp }}/ss-follow/*.err
+            ${{ runner.temp }}/ss-follow/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
   sqlalchemy-suite:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1440,7 +1484,7 @@ jobs:
           PY
 
   check:
-    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode, arrow, compatibility]
+    needs: [lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, footprint, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

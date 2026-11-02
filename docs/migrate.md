@@ -300,17 +300,44 @@ the other objects created, and `MS_Description` properties with the comments.
 
 ### Moving with no downtime: `eggdb follow`
 
-`eggdb follow` also copies a running SQL Server database whose change tracking is on
-(`ALTER DATABASE ... SET CHANGE_TRACKING = ON`, and `ENABLE CHANGE_TRACKING` on every table). It
-copies the tables, then asks `CHANGETABLE(CHANGES ...)` for changes every `--poll` seconds
-(default 5), until you stop it:
+`eggdb follow` also copies a running SQL Server database whose change data capture (CDC) or change
+tracking is on. It copies the tables, then asks for the changes every `--poll` seconds (default
+5), until you stop it:
 
 ```sh
 SQLCMDPASSWORD=... eggdb follow --create shop.db 'sqlserver://sa@sql.example.com/Shop?encrypt=strict&sslrootcert=ca.pem'
 ```
 
-The changes of one poll are applied together, so the copy is consistent at each poll's change
-version, not at each source transaction. Change data capture (CDC) is not read yet.
+Each table is read the way the source records its changes:
+- **CDC** when the database has CDC on (`sys.databases.is_cdc_enabled`) and the table has a
+  capture instance of all its columns (`cdc.change_tables`). EggDB reads
+  `cdc.fn_cdc_get_all_changes_<capture_instance>` for the LSN range from the last one it applied
+  (`sys.fn_cdc_increment_lsn`) to `sys.fn_cdc_get_max_lsn()`. A delete removes the row by its
+  primary key, an insert or an update's new image replaces it, and an update's old image removes
+  the old key, so a changed primary key moves too.
+- **Change tracking** otherwise, when the database and the table have it on: `CHANGETABLE(CHANGES
+  ...)` from the last version applied.
+
+`--changes cdc` or `--changes change-tracking` reads every table one way, and names every table
+that lacks it before anything is copied. To turn CDC on (it needs SQL Server Agent running, for
+the capture job; in the Linux container set `MSSQL_AGENT_ENABLED=true`):
+
+```sql
+EXEC sys.sp_cdc_enable_db;
+EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL;
+```
+
+Change tracking needs `ALTER DATABASE ... SET CHANGE_TRACKING = ON` and `ENABLE CHANGE_TRACKING`
+on every table instead.
+
+The changes of one poll are applied together, so the copy is consistent at each poll's position
+(the change tracking version and the CDC LSN, shown in the summary and in the `stopped` event's
+`change_version` and `lsn`), not at each source transaction. CDC sees a change once the capture
+job has read it from the log, a few seconds after the commit. The position is kept for the
+length of the follow: if CDC's cleanup job (or the change retention) removes changes the follow
+has not applied yet, it stops with exit 3 and says so; follow again into a new file to copy the
+database afresh, and keep the retention longer than any pause in the follow. A CDC table needs a
+primary key, and a capture instance that leaves out columns is not used.
 
 ## Oracle
 

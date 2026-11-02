@@ -236,6 +236,11 @@ impl Session<'_> {
                 "--poll is for SQL Server sources; PostgreSQL streams its changes".to_owned(),
             ));
         }
+        if self.request.follow.sql_server_changes.is_some() {
+            return Err(usage(
+                "--changes is for SQL Server sources; PostgreSQL streams its changes".to_owned(),
+            ));
+        }
         let mut options = parse_postgres_url(&source).map_err(usage)?;
         options.password = self.source_password(PASSWORD_VARIABLE)?;
         self.follow_postgres(options)

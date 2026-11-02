@@ -255,7 +255,10 @@ impl CommandName {
             | OptionName::TlsSelfSigned
             | OptionName::TlsMinVersion => self == Self::Serve,
             OptionName::PasswordFile => matches!(self, Self::Serve | Self::Follow),
-            OptionName::Publication | OptionName::Poll | OptionName::Until => self == Self::Follow,
+            OptionName::Publication
+            | OptionName::Poll
+            | OptionName::Until
+            | OptionName::Changes => self == Self::Follow,
             OptionName::Command => matches!(self, Self::Sql | Self::Shell | Self::Explain),
             OptionName::Dialect => matches!(
                 self,
@@ -428,6 +431,7 @@ enum OptionName {
     Publication,
     Poll,
     Until,
+    Changes,
     KeepGoing,
     Mode,
     Csv,
@@ -526,6 +530,7 @@ impl OptionName {
             b"publication" => Self::Publication,
             b"poll" => Self::Poll,
             b"until" => Self::Until,
+            b"changes" => Self::Changes,
             b"keep-going" => Self::KeepGoing,
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
@@ -704,6 +709,13 @@ pub(crate) struct FollowOptions {
     pub(crate) publication: Option<String>,
     pub(crate) poll_seconds: Option<u64>,
     pub(crate) until_caught_up: bool,
+    pub(crate) sql_server_changes: Option<SqlServerChanges>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqlServerChanges {
+    ChangeDataCapture,
+    ChangeTracking,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1517,6 +1529,19 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     )));
                 }
                 request.follow.until_caught_up = true;
+            }
+            OptionName::Changes => {
+                request.follow.sql_server_changes = Some(match value.as_encoded_bytes() {
+                    b"cdc" => SqlServerChanges::ChangeDataCapture,
+                    b"change-tracking" => SqlServerChanges::ChangeTracking,
+                    _ => {
+                        return Err(usage(format!(
+                            "{} takes cdc or change-tracking, not {}",
+                            option.spelled,
+                            shown(value)
+                        )));
+                    }
+                });
             }
             OptionName::IfAbsent => request.swap.if_absent = true,
             OptionName::Delete => request.swap.delete = true,

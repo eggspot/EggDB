@@ -27,4 +27,5 @@ catalog query and protocol message the tool is known to send, but no CI job runs
 | SSMS Generate Scripts, sqlpackage | 20, 162 | restore | supported | `restore_sqlserver` tests (D125) |
 | Oracle HR sample, SQL Developer, SQLcl CSV | 23ai | restore | supported | `oracle-apps` job and `restore_oracle` tests (D127) |
 | PostgreSQL logical replication | 10–17 | follow | supported | `pg-follow` job (D162) |
-| SQL Server change tracking | 2016+ | follow | expected to work | the TDS client and change-tracking queries; no SQL Server in CI (D162) |
+| SQL Server change tracking | 2016+ | follow | supported | `ss-follow` job against SQL Server 2022 (D162, DNEW-F-ss-cdc) |
+| SQL Server change data capture (CDC) | 2016+ | follow | supported | `ss-follow` job against SQL Server 2022 with SQL Server Agent: CDC and change tracking per table, cleanup detected (DNEW-F-ss-cdc) |

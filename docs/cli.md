@@ -1241,7 +1241,7 @@ ok: every table and row of the dump is in app.db; 2 objects skipped and 1 conseq
 ## `eggdb follow`
 
 ```
-eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--until caught-up]
+eggdb follow <file> <source-url> [--create] [--schema <list>] [--publication <name>] [--password-file <path>] [--poll <seconds>] [--changes cdc|change-tracking] [--until caught-up]
 ```
 
 Copies a running PostgreSQL or SQL Server database into the file and keeps the file in step with
@@ -1258,14 +1258,16 @@ because process listings show it.
 | `--schema <list>` | the schemas to copy, comma-separated; default every non-system schema |
 | `--publication <name>` | PostgreSQL: use this publication; default `eggdb_follow`, created `FOR ALL TABLES` and dropped at the stop |
 | `--password-file <path>` | the source's password is the file's first line |
-| `--poll <seconds>` | SQL Server: how often to ask change tracking for changes; default 5 |
+| `--poll <seconds>` | SQL Server: how often to ask CDC or change tracking for changes; default 5 |
+| `--changes cdc\|change-tracking` | SQL Server: read every table through CDC or through change tracking; default CDC for each table with a capture instance of all its columns, change tracking for the rest |
 | `--until caught-up` | stop by itself once every change committed so far is in the file |
 
 Before anything is copied it checks every precondition, and it names every table that fails one:
 - `wal_level=logical`, and the right to create a replication slot and, unless `--publication` is
   given, a publication;
 - a primary key or `REPLICA IDENTITY FULL` on every table;
-- with SQL Server, change tracking on the database and on every table.
+- with SQL Server, CDC or change tracking on the database, and a capture instance of all its
+  columns or change tracking on every table; a table read through CDC needs a primary key.
 
 Progress goes to stderr on a terminal, as fixed lines (connected, publication, slot, schema, one
 line per copied table) and then a `following` line with the lag. In a pipe each step is one JSON
