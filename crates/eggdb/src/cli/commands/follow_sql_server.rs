@@ -27,12 +27,16 @@ const MAX_LSN_QUERY: &str = "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_ls
 const COPY_START_QUERY: &str = "SELECT CONVERT(nvarchar(max), sys.fn_cdc_get_max_lsn(), 1), \
      CONVERT(nvarchar(max), CAST(DATEADD(second, -1, SYSDATETIME()) AS datetime), 121), \
      CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))";
+const EXACT_AFTER_QUERY: &str = "SELECT CONVERT(nvarchar(max), CAST(DATEADD(second, 1, SYSDATETIME()) AS datetime), 121), \
+     CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))";
 const CAPTURE_INSTANCES_QUERY: &str = "SELECT CAST(s.name AS nvarchar(max)), CAST(t.name AS nvarchar(max)), \
      CAST(c.capture_instance AS nvarchar(max)), \
-     CAST(CASE WHEN (SELECT COUNT(*) FROM cdc.captured_columns cc WHERE cc.object_id = c.object_id) \
-     = (SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id) THEN 1 ELSE 0 END AS nvarchar(max)) \
+     CAST(CASE WHEN c.supports_net_changes = 1 AND EXISTS (SELECT 1 FROM sys.indexes i \
+     WHERE i.object_id = t.object_id AND i.is_primary_key = 1 AND i.name = c.index_name) THEN 1 ELSE 0 END AS nvarchar(max)), \
+     CONVERT(nvarchar(max), sys.fn_cdc_get_min_lsn(c.capture_instance), 1), CAST(cc.column_name AS nvarchar(max)) \
      FROM cdc.change_tables c JOIN sys.tables t ON t.object_id = c.source_object_id \
-     JOIN sys.schemas s ON s.schema_id = t.schema_id ORDER BY c.create_date DESC";
+     JOIN sys.schemas s ON s.schema_id = t.schema_id JOIN cdc.captured_columns cc ON cc.object_id = c.object_id \
+     ORDER BY c.create_date DESC, c.object_id DESC, cc.column_ordinal";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Lsn(u128);
@@ -59,6 +63,10 @@ impl Lsn {
 
     fn is_valid(self) -> bool {
         self.0 != 0
+    }
+
+    fn before(self) -> Self {
+        Self(self.0.saturating_sub(1))
     }
 }
 
@@ -100,7 +108,11 @@ fn tracking_operation(code: &str) -> RowChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChangeSource {
     Tracking,
-    Capture { instance: String, next: Lsn },
+    Capture {
+        instance: String,
+        next: Lsn,
+        net_changes: bool,
+    },
 }
 
 impl ChangeSource {
@@ -114,43 +126,180 @@ impl ChangeSource {
     fn label(&self) -> &'static str {
         match self {
             Self::Tracking => "change tracking",
+            Self::Capture {
+                net_changes: true, ..
+            } => "CDC, net changes",
             Self::Capture { .. } => "CDC",
         }
     }
+
+    fn net_changes(&self) -> bool {
+        matches!(
+            self,
+            Self::Capture {
+                net_changes: true,
+                ..
+            }
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaptureInstance {
+    schema: String,
+    table: String,
+    name: String,
+    net_changes: bool,
+    minimum: Option<Lsn>,
+    columns: Vec<String>,
+}
+
+impl CaptureInstance {
+    fn is_of(&self, table: &SourceTable) -> bool {
+        self.schema == table.schema && self.table == table.name
+    }
+
+    fn captures(&self, columns: &[String]) -> bool {
+        columns.iter().all(|column| self.columns.contains(column))
+    }
+}
+
+fn capture_instances(rows: &TextRows) -> Vec<CaptureInstance> {
+    let mut instances: Vec<CaptureInstance> = Vec::new();
+    for row in rows {
+        let (schema, table, name, column) =
+            (cell(row, 0), cell(row, 1), cell(row, 2), cell(row, 5));
+        match instances.last_mut() {
+            Some(last) if last.name == name && last.schema == schema && last.table == table => {
+                last.columns.push(column);
+            }
+            _ => instances.push(CaptureInstance {
+                schema,
+                table,
+                name,
+                net_changes: cell(row, 3) == "1",
+                minimum: row.get(4).and_then(parse_lsn).filter(|lsn| lsn.is_valid()),
+                columns: vec![column],
+            }),
+        }
+    }
+    instances
+}
+
+fn instances_of<'a>(
+    instances: &'a [CaptureInstance],
+    schema: &str,
+    table: &str,
+) -> Vec<&'a CaptureInstance> {
+    instances
+        .iter()
+        .filter(|instance| instance.schema == schema && instance.table == table)
+        .collect()
+}
+
+fn capture_source(instance: &CaptureInstance) -> ChangeSource {
+    ChangeSource::Capture {
+        instance: instance.name.clone(),
+        next: Lsn(0),
+        net_changes: instance.net_changes,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyLeftOut {
+    instance: String,
+    columns: Vec<String>,
 }
 
 fn choose_changes(
     forced: Option<SqlServerChanges>,
     tracked: bool,
-    instance: Option<&str>,
-) -> Option<ChangeSource> {
-    let capture = |instance: &str| ChangeSource::Capture {
-        instance: instance.to_owned(),
-        next: Lsn(0),
+    instances: &[&CaptureInstance],
+    columns: &[String],
+    key: &[String],
+) -> Result<ChangeSource, Option<KeyLeftOut>> {
+    let usable: Vec<&CaptureInstance> = instances
+        .iter()
+        .copied()
+        .filter(|instance| instance.captures(key))
+        .collect();
+    let complete = usable
+        .iter()
+        .copied()
+        .find(|instance| instance.captures(columns));
+    let partial = usable.first().copied();
+    let tracking = || tracked.then_some(ChangeSource::Tracking);
+    let chosen = match forced {
+        Some(SqlServerChanges::ChangeTracking) => tracking(),
+        Some(SqlServerChanges::ChangeDataCapture) => complete.or(partial).map(capture_source),
+        None => complete
+            .map(capture_source)
+            .or_else(tracking)
+            .or_else(|| partial.map(capture_source)),
     };
-    match (forced, instance) {
-        (Some(SqlServerChanges::ChangeTracking), _) | (None, None) => {
-            tracked.then_some(ChangeSource::Tracking)
+    chosen.ok_or_else(|| {
+        if usable.is_empty() && forced != Some(SqlServerChanges::ChangeTracking) {
+            instances.first().map(|instance| KeyLeftOut {
+                instance: instance.name.clone(),
+                columns: key
+                    .iter()
+                    .filter(|column| !instance.columns.contains(column))
+                    .cloned()
+                    .collect(),
+            })
+        } else {
+            None
         }
-        (Some(SqlServerChanges::ChangeDataCapture) | None, Some(instance)) => {
-            Some(capture(instance))
-        }
-        (Some(SqlServerChanges::ChangeDataCapture), None) => None,
-    }
+    })
 }
 
+fn successor_of<'a>(
+    instances: &'a [CaptureInstance],
+    table: &SourceTable,
+    current: &str,
+) -> Option<&'a CaptureInstance> {
+    let theirs: Vec<&CaptureInstance> = instances
+        .iter()
+        .filter(|instance| instance.is_of(table))
+        .collect();
+    let newer = match theirs.iter().position(|instance| instance.name == current) {
+        Some(at) => &theirs[..at],
+        None => &theirs[..],
+    };
+    newer
+        .iter()
+        .rev()
+        .copied()
+        .find(|instance| instance.captures(&table.key) && instance.minimum.is_some())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceColumn {
     name: String,
     data_type: String,
     declared: String,
+    not_null: bool,
 }
 
+impl SourceColumn {
+    fn definition(&self) -> String {
+        format!(
+            "{} {}{}",
+            quote_name(&self.name),
+            self.declared,
+            if self.not_null { " NOT NULL" } else { "" }
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceTable {
     schema: String,
     name: String,
     columns: Vec<SourceColumn>,
     key: Vec<String>,
     changes: ChangeSource,
+    left_out: Vec<String>,
 }
 
 impl SourceTable {
@@ -175,23 +324,126 @@ impl SourceTable {
             .map(|column| quote_name(&column.name))
             .collect()
     }
+
+    fn followed_names(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect()
+    }
+
+    fn follows(&self, name: &str) -> bool {
+        self.columns.iter().any(|column| column.name == name)
+    }
+}
+
+fn split_captured(
+    columns: Vec<SourceColumn>,
+    captured: &[String],
+) -> (Vec<SourceColumn>, Vec<String>) {
+    let (followed, left_out): (Vec<SourceColumn>, Vec<SourceColumn>) = columns
+        .into_iter()
+        .partition(|column| captured.contains(&column.name));
+    (
+        followed,
+        left_out.into_iter().map(|column| column.name).collect(),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumedColumns {
+    followed: Vec<SourceColumn>,
+    left_out: Vec<String>,
+    dropped: Vec<String>,
+}
+
+fn resume_capture_columns(
+    table: &SourceTable,
+    target: &[String],
+    captured: Option<&[String]>,
+) -> Result<ResumedColumns, String> {
+    let dropped: Vec<String> = target
+        .iter()
+        .filter(|name| !table.follows(name))
+        .cloned()
+        .collect();
+    if let Some(key) = dropped.iter().find(|name| table.key.contains(name)) {
+        return Err(format!("primary key column {key} was dropped"));
+    }
+    let (followed, left_out): (Vec<SourceColumn>, Vec<SourceColumn>) = table
+        .columns
+        .iter()
+        .cloned()
+        .partition(|column| target.contains(&column.name));
+    if let Some(captured) = captured {
+        let uncaptured: Vec<&str> = followed
+            .iter()
+            .filter(|column| !captured.contains(&column.name))
+            .map(|column| column.name.as_str())
+            .collect();
+        if !uncaptured.is_empty() {
+            return Err(format!(
+                "the file has {}, which its CDC capture instance does not capture",
+                uncaptured.join(", ")
+            ));
+        }
+    }
+    Ok(ResumedColumns {
+        followed,
+        left_out: left_out.into_iter().map(|column| column.name).collect(),
+        dropped,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwitchPlan {
+    dropped: Vec<String>,
+    added: Vec<String>,
+    left_out: Vec<String>,
+}
+
+fn switch_plan(table: &SourceTable, successor: &CaptureInstance, now: &[String]) -> SwitchPlan {
+    let followed: Vec<&String> = now
+        .iter()
+        .filter(|name| successor.columns.contains(name))
+        .collect();
+    SwitchPlan {
+        dropped: table
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .filter(|name| !followed.contains(&name))
+            .collect(),
+        added: followed
+            .iter()
+            .filter(|name| !table.follows(name))
+            .map(|name| (*name).clone())
+            .collect(),
+        left_out: now
+            .iter()
+            .filter(|name| !followed.contains(name))
+            .cloned()
+            .collect(),
+    }
 }
 
 struct Unfollowable {
     schema: String,
     name: String,
-    partly_captured: bool,
+    key_left_out: Option<KeyLeftOut>,
 }
 
 impl Unfollowable {
     fn shown(&self) -> String {
-        if self.partly_captured {
-            format!(
-                "{}.{} (its CDC capture instance leaves out columns)",
-                self.schema, self.name
-            )
-        } else {
-            format!("{}.{}", self.schema, self.name)
+        match &self.key_left_out {
+            Some(left_out) => format!(
+                "{}.{} (its CDC capture instance {} leaves out primary key column {})",
+                self.schema,
+                self.name,
+                left_out.instance,
+                left_out.columns.join(", ")
+            ),
+            None => format!("{}.{}", self.schema, self.name),
         }
     }
 }
@@ -255,6 +507,53 @@ fn declared_type(
     }
 }
 
+fn table_filter(schema: &str, name: &str) -> String {
+    format!(
+        "TABLE_SCHEMA = {} AND TABLE_NAME = {}",
+        quote_unicode(schema),
+        quote_unicode(name)
+    )
+}
+
+fn table_columns_query(schema: &str, name: &str) -> String {
+    format!(
+        "SELECT CAST(COLUMN_NAME AS nvarchar(max)), CAST(DATA_TYPE AS nvarchar(max)), \
+         CAST(CHARACTER_MAXIMUM_LENGTH AS nvarchar(max)), CAST(NUMERIC_PRECISION AS nvarchar(max)), \
+         CAST(NUMERIC_SCALE AS nvarchar(max)), CAST(DATETIME_PRECISION AS nvarchar(max)), \
+         CAST(IS_NULLABLE AS nvarchar(max)) FROM INFORMATION_SCHEMA.COLUMNS WHERE {} ORDER BY ORDINAL_POSITION",
+        table_filter(schema, name)
+    )
+}
+
+fn source_columns(rows: &TextRows) -> Vec<SourceColumn> {
+    rows.iter()
+        .map(|column| {
+            let data_type = cell(column, 1);
+            SourceColumn {
+                name: cell(column, 0),
+                declared: declared_type(
+                    &data_type,
+                    column.get(2).and_then(Option::as_deref),
+                    column.get(3).and_then(Option::as_deref),
+                    column.get(4).and_then(Option::as_deref),
+                    column.get(5).and_then(Option::as_deref),
+                ),
+                data_type,
+                not_null: cell(column, 6) == "NO",
+            }
+        })
+        .collect()
+}
+
+fn key_query(schema: &str, name: &str) -> String {
+    format!(
+        "SELECT CAST(k.COLUMN_NAME AS nvarchar(max)) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS c \
+         JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k ON k.CONSTRAINT_NAME = c.CONSTRAINT_NAME AND k.TABLE_SCHEMA = c.TABLE_SCHEMA \
+         WHERE c.CONSTRAINT_TYPE = 'PRIMARY KEY' AND c.{} ORDER BY k.ORDINAL_POSITION",
+        table_filter(schema, name).replace(" AND TABLE_NAME", " AND c.TABLE_NAME")
+    )
+}
+
 fn first_rows(results: Vec<TextRows>) -> TextRows {
     results.into_iter().next().unwrap_or_default()
 }
@@ -289,12 +588,26 @@ fn precondition_failed(message: String, try_command: String) -> Failure {
     }
 }
 
-fn enable_capture_command(schema: &str, name: &str) -> String {
+fn enable_capture_command(schema: &str, name: &str, instance: Option<&str>) -> String {
     format!(
-        "EXEC sys.sp_cdc_enable_table @source_schema = {}, @source_name = {}, @role_name = NULL;",
+        "EXEC sys.sp_cdc_enable_table @source_schema = {}, @source_name = {}, @role_name = NULL{};",
         quote_unicode(schema),
-        quote_unicode(name)
+        quote_unicode(name),
+        instance.map_or(String::new(), |instance| format!(
+            ", @capture_instance = {}",
+            quote_unicode(instance)
+        ))
     )
+}
+
+fn second_instance_command(schema: &str, name: &str, current: &str) -> String {
+    let default = format!("{schema}_{name}");
+    let second = if current == format!("{default}_2") {
+        default
+    } else {
+        format!("{default}_2")
+    };
+    enable_capture_command(schema, name, Some(&second))
 }
 
 fn key_condition(table: &SourceTable, key_values: &[Option<String>]) -> String {
@@ -359,6 +672,64 @@ fn capture_key_values(table: &SourceTable, row: &[Option<String>]) -> Vec<Option
         .collect()
 }
 
+fn drop_column_statement(table: &SourceTable, column: &str) -> String {
+    format!(
+        "ALTER TABLE {} DROP COLUMN {}",
+        table.qualified(),
+        quote_name(column)
+    )
+}
+
+fn add_column_statement(table: &SourceTable, column: &SourceColumn) -> String {
+    format!(
+        "ALTER TABLE {} ADD {} {}",
+        table.qualified(),
+        quote_name(&column.name),
+        column.declared
+    )
+}
+
+fn backfill_query(table: &SourceTable, added: &[SourceColumn]) -> String {
+    let keys = table
+        .key
+        .iter()
+        .map(|key| text_expression(&quote_name(key), table.column_type(key)));
+    let values = added
+        .iter()
+        .map(|column| text_expression(&quote_name(&column.name), &column.data_type));
+    let selected: Vec<String> = keys.chain(values).collect();
+    format!("SELECT {} FROM {}", selected.join(", "), table.qualified())
+}
+
+fn backfill_statement(
+    table: &SourceTable,
+    added: &[SourceColumn],
+    row: &[Option<String>],
+) -> Option<String> {
+    let key_values = row.get(..table.key.len())?;
+    let values = row.get(table.key.len()..)?;
+    if values.len() != added.len() || added.is_empty() {
+        return None;
+    }
+    let assignments: Vec<String> = added
+        .iter()
+        .zip(values)
+        .map(|(column, value)| {
+            format!(
+                "{} = {}",
+                quote_name(&column.name),
+                literal(value, &column.data_type)
+            )
+        })
+        .collect();
+    Some(format!(
+        "UPDATE {} SET {} WHERE {}",
+        table.qualified(),
+        assignments.join(", "),
+        key_condition(table, key_values)
+    ))
+}
+
 fn tracking_changes_query(table: &SourceTable, from: i64, to: i64) -> String {
     let joined: Vec<String> = table
         .key
@@ -394,7 +765,13 @@ fn tracking_changes_query(table: &SourceTable, from: i64, to: i64) -> String {
     )
 }
 
-fn capture_changes_query(table: &SourceTable, instance: &str, from: Lsn, to: Lsn) -> String {
+fn capture_changes_query(
+    table: &SourceTable,
+    instance: &str,
+    from: Lsn,
+    to: Lsn,
+    net: bool,
+) -> String {
     let row_texts: Vec<String> = table
         .columns
         .iter()
@@ -405,12 +782,23 @@ fn capture_changes_query(table: &SourceTable, instance: &str, from: Lsn, to: Lsn
             )
         })
         .collect();
+    let (function, option, order) = if net {
+        (
+            "fn_cdc_get_net_changes_",
+            "N'all'",
+            "C.[__$operation], C.[__$start_lsn]",
+        )
+    } else {
+        (
+            "fn_cdc_get_all_changes_",
+            "N'all update old'",
+            "C.[__$start_lsn], C.[__$seqval], C.[__$operation]",
+        )
+    };
     format!(
-        "SELECT CAST(C.[__$operation] AS nvarchar(max)), {} \
-         FROM cdc.{}({}, {}, N'all update old') AS C \
-         ORDER BY C.[__$start_lsn], C.[__$seqval], C.[__$operation]",
+        "SELECT CAST(C.[__$operation] AS nvarchar(max)), {} FROM cdc.{}({}, {}, {option}) AS C ORDER BY {order}",
         row_texts.join(", "),
-        quote_name(&format!("fn_cdc_get_all_changes_{instance}")),
+        quote_name(&format!("{function}{instance}")),
         from.literal(),
         to.literal()
     )
@@ -432,61 +820,65 @@ fn capture_bounds_query(instance: &str, after: Lsn, committed_before_copy: Optio
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CopyStart {
+struct ServerTime {
     time: String,
     utc_offset_minutes: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CopyStartSkip {
-    Wait,
-    Apply,
-    Drop,
+enum CaptureClock {
+    Behind,
+    Passed,
+    OffsetChanged,
 }
 
-fn copy_start(rows: &TextRows) -> Option<CopyStart> {
+fn server_time(rows: &TextRows, at: usize) -> Option<ServerTime> {
     let row = rows.first()?;
     let time = row
-        .get(1)
+        .get(at)
         .cloned()
         .flatten()
         .filter(|time| !time.is_empty())?;
-    let utc_offset_minutes = row.get(2).and_then(whole_number)?;
-    Some(CopyStart {
+    let utc_offset_minutes = row.get(at + 1).and_then(whole_number)?;
+    Some(ServerTime {
         time,
         utc_offset_minutes,
     })
 }
 
-fn copy_start_check_query(start: &CopyStart) -> String {
+fn copy_start(rows: &TextRows) -> Option<ServerTime> {
+    server_time(rows, 1)
+}
+
+fn capture_clock_query(time: &ServerTime) -> String {
     format!(
         "SELECT CASE WHEN sys.fn_cdc_map_lsn_to_time(sys.fn_cdc_get_max_lsn()) > CONVERT(datetime, {}, 121) \
          THEN N'1' ELSE N'0' END, CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))",
-        quote_unicode(&start.time)
+        quote_unicode(&time.time)
     )
 }
 
-fn copy_start_skip(start: &CopyStart, check: &TextRows) -> CopyStartSkip {
+fn capture_clock(time: &ServerTime, check: &TextRows) -> CaptureClock {
     let Some(row) = check.first() else {
-        return CopyStartSkip::Drop;
+        return CaptureClock::OffsetChanged;
     };
-    if row.get(1).and_then(whole_number) != Some(start.utc_offset_minutes) {
-        return CopyStartSkip::Drop;
+    if row.get(1).and_then(whole_number) != Some(time.utc_offset_minutes) {
+        return CaptureClock::OffsetChanged;
     }
     if cell(row, 0) == "1" {
-        CopyStartSkip::Apply
+        CaptureClock::Passed
     } else {
-        CopyStartSkip::Wait
+        CaptureClock::Behind
     }
 }
 
 fn copy_start_after_poll(
-    start: Option<CopyStart>,
-    skip: Option<CopyStartSkip>,
-) -> Option<CopyStart> {
-    match skip {
-        Some(CopyStartSkip::Apply | CopyStartSkip::Drop) => None,
-        Some(CopyStartSkip::Wait) | None => start,
+    start: Option<ServerTime>,
+    clock: Option<CaptureClock>,
+) -> Option<ServerTime> {
+    match clock {
+        Some(CaptureClock::Passed | CaptureClock::OffsetChanged) => None,
+        Some(CaptureClock::Behind) | None => start,
     }
 }
 
@@ -497,6 +889,20 @@ fn first_change_after_copy(next: Lsn, bounds: &TextRows) -> Lsn {
         .and_then(parse_lsn)
         .filter(|lsn| lsn.is_valid())
         .map_or(next, |after_copy| next.max(after_copy))
+}
+
+fn exact_from_query(time: &ServerTime) -> String {
+    format!(
+        "SELECT CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', CONVERT(datetime, {}, 121))), 1)",
+        quote_unicode(&time.time)
+    )
+}
+
+fn exact_from_of(rows: &TextRows) -> Option<Lsn> {
+    match rows.first()?.first() {
+        Some(Some(text)) => Lsn::parse(text),
+        _ => Some(Lsn(0)),
+    }
 }
 
 fn position_text(version: Option<i64>, lsn: Option<Lsn>) -> String {
@@ -514,23 +920,55 @@ fn position_text(version: Option<i64>, lsn: Option<Lsn>) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SavedPosition {
     Tracking(i64),
-    Capture(Lsn),
+    Capture {
+        next: Lsn,
+        exact_from: Option<Lsn>,
+        instance: Option<String>,
+    },
 }
 
-fn table_position(table: &SourceTable, version: Option<i64>) -> String {
+const NO_LSN: &str = "-";
+
+fn table_position(table: &SourceTable, version: Option<i64>, exact_from: Option<Lsn>) -> String {
     match &table.changes {
         ChangeSource::Tracking => format!("change_tracking {}", version.unwrap_or(0)),
-        ChangeSource::Capture { next, .. } => format!("cdc {}", next.literal()),
+        ChangeSource::Capture { instance, next, .. } => format!(
+            "cdc {} {} {instance}",
+            next.literal(),
+            exact_from.map_or(NO_LSN.to_owned(), Lsn::literal)
+        ),
     }
 }
 
 fn read_position(text: &str) -> Option<SavedPosition> {
     match text.split_once(' ')? {
         ("change_tracking", version) => version.parse().ok().map(SavedPosition::Tracking),
-        ("cdc", lsn) => Lsn::parse(lsn).map(SavedPosition::Capture),
+        ("cdc", rest) => {
+            let mut parts = rest.splitn(3, ' ');
+            let next = Lsn::parse(parts.next()?)?;
+            match (parts.next(), parts.next()) {
+                (None, _) => Some(SavedPosition::Capture {
+                    next,
+                    exact_from: None,
+                    instance: None,
+                }),
+                (Some(exact_from), Some(instance)) if !instance.is_empty() => {
+                    Some(SavedPosition::Capture {
+                        next,
+                        exact_from: if exact_from == NO_LSN {
+                            None
+                        } else {
+                            Some(Lsn::parse(exact_from)?)
+                        },
+                        instance: Some(instance.to_owned()),
+                    })
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -615,6 +1053,514 @@ fn whole_number(value: &Option<String>) -> Option<i64> {
     value.as_deref().and_then(|text| text.parse().ok())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Notice {
+    LeftOut {
+        table: String,
+        instance: String,
+        columns: Vec<String>,
+        try_command: String,
+    },
+    Dropped {
+        table: String,
+        columns: Vec<String>,
+    },
+    Switched {
+        table: String,
+        from: String,
+        to: String,
+        added: Vec<String>,
+        dropped: Vec<String>,
+    },
+}
+
+fn notice_event(notice: &Notice) -> (JsonObject, String) {
+    match notice {
+        Notice::LeftOut {
+            table,
+            instance,
+            columns,
+            try_command,
+        } => (
+            JsonObject::new()
+                .string("event", "columns_left_out")
+                .string("table", table)
+                .string("instance", instance)
+                .string("columns", &columns.join(", "))
+                .string("try", try_command),
+            format!(
+                "  left out        {table}: {} (CDC capture instance {instance} does not capture it; to follow it, create a second one: {try_command})\n",
+                columns.join(", ")
+            ),
+        ),
+        Notice::Dropped { table, columns } => (
+            JsonObject::new()
+                .string("event", "columns_dropped")
+                .string("table", table)
+                .string("columns", &columns.join(", ")),
+            format!(
+                "  dropped column  {table}: {} (dropped on the source)\n",
+                columns.join(", ")
+            ),
+        ),
+        Notice::Switched {
+            table,
+            from,
+            to,
+            added,
+            dropped,
+        } => {
+            let mut changes = Vec::new();
+            if !added.is_empty() {
+                changes.push(format!("added {}", added.join(", ")));
+            }
+            if !dropped.is_empty() {
+                changes.push(format!("dropped {}", dropped.join(", ")));
+            }
+            (
+                JsonObject::new()
+                    .string("event", "capture_switched")
+                    .string("table", table)
+                    .string("from", from)
+                    .string("to", to)
+                    .string("added", &added.join(", "))
+                    .string("dropped", &dropped.join(", ")),
+                format!(
+                    "  switched        {table} from CDC capture instance {from} to {to}{}\n",
+                    if changes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", changes.join("; "))
+                    }
+                ),
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FollowPosition {
+    tables: Vec<SourceTable>,
+    version: Option<i64>,
+    lsn: Option<Lsn>,
+    copy_started: Option<ServerTime>,
+    exact_after: Option<ServerTime>,
+    exact_from: Option<Lsn>,
+}
+
+impl FollowPosition {
+    fn shown(&self) -> String {
+        position_text(self.version, self.lsn)
+    }
+
+    fn saved(&self) -> Vec<String> {
+        self.tables
+            .iter()
+            .map(|table| table_position(table, self.version, self.exact_from))
+            .collect()
+    }
+}
+
+struct PollContext<'a> {
+    target: &'a str,
+    database: &'a str,
+    file: &'a str,
+}
+
+#[derive(Default)]
+struct PollWork {
+    statements: Vec<String>,
+    counts: FollowCounts,
+    notices: Vec<Notice>,
+}
+
+enum PollError {
+    Lost(String),
+    Failed(Failure),
+}
+
+fn poll_error(target: &str, error: &TdsClientError) -> PollError {
+    match error {
+        TdsClientError::Io(error) => PollError::Lost(error.to_string()),
+        other => PollError::Failed(tds_failure(target, other)),
+    }
+}
+
+fn ask(source: &mut TdsClient, target: &str, sql: &str) -> Result<TextRows, PollError> {
+    source
+        .batch(sql)
+        .map(first_rows)
+        .map_err(|error| poll_error(target, &error))
+}
+
+fn follow_column_changes(
+    context: &PollContext,
+    table: &mut SourceTable,
+    now: &[String],
+    work: &mut PollWork,
+) -> Result<(), PollError> {
+    let known = table.followed_names();
+    let instance = match &table.changes {
+        ChangeSource::Capture { instance, .. } if !now.is_empty() => instance.clone(),
+        _ => {
+            return match column_change(&known, now) {
+                Some(change) => Err(PollError::Failed(schema_changed(
+                    context.target,
+                    &table.shown(),
+                    &change,
+                    context.file,
+                ))),
+                None => Ok(()),
+            };
+        }
+    };
+    let dropped: Vec<String> = known
+        .iter()
+        .filter(|name| !now.contains(name))
+        .cloned()
+        .collect();
+    if let Some(key) = dropped.iter().find(|name| table.key.contains(name)) {
+        return Err(PollError::Failed(source_failed(key_dropped(
+            context.target,
+            &table.shown(),
+            key,
+        ))));
+    }
+    let added: Vec<String> = now
+        .iter()
+        .filter(|name| !known.contains(name) && !table.left_out.contains(name))
+        .cloned()
+        .collect();
+    table.left_out.retain(|name| now.contains(name));
+    if !dropped.is_empty() {
+        for column in &dropped {
+            work.statements.push(drop_column_statement(table, column));
+        }
+        table
+            .columns
+            .retain(|column| !dropped.contains(&column.name));
+        work.counts.schema_changes += dropped.len() as u64;
+        work.notices.push(Notice::Dropped {
+            table: table.shown(),
+            columns: dropped,
+        });
+    }
+    if !added.is_empty() {
+        table.left_out.extend(added.iter().cloned());
+        work.notices.push(Notice::LeftOut {
+            table: table.shown(),
+            try_command: second_instance_command(&table.schema, &table.name, &instance),
+            instance,
+            columns: added,
+        });
+    }
+    Ok(())
+}
+
+fn switch_capture(
+    source: &mut TdsClient,
+    context: &PollContext,
+    table: &mut SourceTable,
+    successor: &CaptureInstance,
+    next: Lsn,
+    now: &[String],
+    work: &mut PollWork,
+) -> Result<(), PollError> {
+    let plan = switch_plan(table, successor, now);
+    if let Some(key) = plan.dropped.iter().find(|name| table.key.contains(name)) {
+        return Err(PollError::Failed(source_failed(key_dropped(
+            context.target,
+            &table.shown(),
+            key,
+        ))));
+    }
+    for column in &plan.dropped {
+        work.statements.push(drop_column_statement(table, column));
+    }
+    table
+        .columns
+        .retain(|column| !plan.dropped.contains(&column.name));
+    if !plan.added.is_empty() {
+        let metadata = source_columns(&ask(
+            source,
+            context.target,
+            &table_columns_query(&table.schema, &table.name),
+        )?);
+        let mut added = Vec::new();
+        for name in &plan.added {
+            let column = metadata
+                .iter()
+                .find(|column| &column.name == name)
+                .cloned()
+                .ok_or_else(|| {
+                    PollError::Failed(malformed_change(context.target, &table.shown()))
+                })?;
+            work.statements.push(add_column_statement(table, &column));
+            added.push(column);
+        }
+        table.columns.extend(added.iter().cloned());
+        if !table.key.is_empty() {
+            let rows = ask(source, context.target, &backfill_query(table, &added))?;
+            for row in &rows {
+                work.statements
+                    .push(backfill_statement(table, &added, row).ok_or_else(|| {
+                        PollError::Failed(malformed_change(context.target, &table.shown()))
+                    })?);
+            }
+        }
+    }
+    let from = match &table.changes {
+        ChangeSource::Capture { instance, .. } => instance.clone(),
+        ChangeSource::Tracking => String::new(),
+    };
+    table.left_out = plan.left_out;
+    table.changes = ChangeSource::Capture {
+        instance: successor.name.clone(),
+        next,
+        net_changes: successor.net_changes,
+    };
+    work.counts.schema_changes += (plan.added.len() + plan.dropped.len()) as u64;
+    work.notices.push(Notice::Switched {
+        table: table.shown(),
+        from,
+        to: successor.name.clone(),
+        added: plan.added,
+        dropped: plan.dropped,
+    });
+    Ok(())
+}
+
+fn poll(
+    source: &mut TdsClient,
+    context: &PollContext,
+    before: &FollowPosition,
+) -> Result<(FollowPosition, PollWork), PollError> {
+    let target = context.target;
+    let mut position = before.clone();
+    let mut work = PollWork::default();
+    let mut names_now: Vec<Vec<String>> = Vec::new();
+    if !position.tables.is_empty() {
+        let columns_now = ask(source, target, &columns_query(&position.tables))?;
+        for table in &mut position.tables {
+            let now = columns_of(&columns_now, table);
+            follow_column_changes(context, table, &now, &mut work)?;
+            names_now.push(now);
+        }
+    }
+    let current_version = match position.version {
+        Some(version) => Some(
+            first_value(&ask(source, target, TRACKING_VERSION_QUERY)?, whole_number)
+                .unwrap_or(version),
+        ),
+        None => None,
+    };
+    let current_lsn = match position.lsn {
+        Some(lsn) => Some(
+            first_value(&ask(source, target, MAX_LSN_QUERY)?, parse_lsn)
+                .unwrap_or(lsn)
+                .max(lsn),
+        ),
+        None => None,
+    };
+    let clock = match (&position.copy_started, current_lsn) {
+        (Some(start), Some(_)) => Some(capture_clock(
+            start,
+            &ask(source, target, &capture_clock_query(start))?,
+        )),
+        _ => None,
+    };
+    let skip_after = position
+        .copy_started
+        .as_ref()
+        .filter(|_| clock == Some(CaptureClock::Passed))
+        .map(|start| start.time.clone());
+    if let (Some(time), Some(_)) = (position.exact_after.clone(), current_lsn) {
+        match capture_clock(&time, &ask(source, target, &capture_clock_query(&time))?) {
+            CaptureClock::Passed => {
+                if let Some(from) = exact_from_of(&ask(source, target, &exact_from_query(&time))?) {
+                    position.exact_from = Some(from);
+                    position.exact_after = None;
+                }
+            }
+            CaptureClock::OffsetChanged => {
+                if let Some(now) = server_time(&ask(source, target, EXACT_AFTER_QUERY)?, 0) {
+                    position.exact_after = Some(now);
+                }
+            }
+            CaptureClock::Behind => {}
+        }
+    }
+    let reads_capture = position
+        .tables
+        .iter()
+        .any(|table| table.changes != ChangeSource::Tracking);
+    let instances = if reads_capture && current_lsn.is_some() {
+        capture_instances(&ask(source, target, CAPTURE_INSTANCES_QUERY)?)
+    } else {
+        Vec::new()
+    };
+    let version = position.version;
+    let exact_from = position.exact_from;
+    for (index, table) in position.tables.iter_mut().enumerate() {
+        match table.changes.clone() {
+            ChangeSource::Tracking => {
+                let (Some(from), Some(current)) = (version, current_version) else {
+                    continue;
+                };
+                let minimum = first_value(
+                    &ask(
+                        source,
+                        target,
+                        &format!(
+                            "SELECT CAST(CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID({})) AS nvarchar(max))",
+                            quote_unicode(&table.qualified())
+                        ),
+                    )?,
+                    whole_number,
+                )
+                .unwrap_or(0);
+                if minimum > from {
+                    return Err(PollError::Failed(source_failed(format!(
+                        "cannot follow {target}: the change retention of {} was exceeded while following: changes were lost. Follow again into a new file",
+                        context.database
+                    ))));
+                }
+                if table.key.is_empty() || current <= from {
+                    continue;
+                }
+                let changes = ask(
+                    source,
+                    target,
+                    &tracking_changes_query(table, from, current),
+                )?;
+                let key_length = table.key.len();
+                for change in &changes {
+                    let key_values = change.get(2..2 + key_length).unwrap_or_default();
+                    let row = (cell(change, 1) == "1")
+                        .then(|| change.get(2 + key_length..).unwrap_or_default());
+                    work.statements
+                        .extend(change_statements(table, key_values, row).ok_or_else(|| {
+                            PollError::Failed(malformed_change(target, &table.shown()))
+                        })?);
+                    count_change(&mut work.counts, tracking_operation(&cell(change, 0)));
+                }
+            }
+            ChangeSource::Capture {
+                instance,
+                next,
+                net_changes,
+            } => {
+                let Some(to) = current_lsn else {
+                    continue;
+                };
+                if clock == Some(CaptureClock::Behind) {
+                    continue;
+                }
+                let now = names_now.get(index).cloned().unwrap_or_default();
+                let current_exists = instances
+                    .iter()
+                    .any(|other| other.name == instance && other.is_of(table));
+                let successor = successor_of(&instances, table, &instance).cloned();
+                let starts = successor.as_ref().and_then(|successor| successor.minimum);
+                if let (Some(successor), Some(starts)) = (&successor, starts)
+                    && starts <= next
+                {
+                    switch_capture(source, context, table, successor, next, &now, &mut work)?;
+                    continue;
+                }
+                if !current_exists && let (Some(successor), Some(starts)) = (&successor, starts) {
+                    return Err(PollError::Failed(source_failed(capture_gap(
+                        target,
+                        &table.shown(),
+                        &instance,
+                        &successor.name,
+                        starts,
+                        next,
+                    ))));
+                }
+                let upper = starts.map_or(to, |starts| to.min(starts.before()));
+                let bounds = ask(
+                    source,
+                    target,
+                    &capture_bounds_query(&instance, upper, skip_after.as_deref()),
+                )?;
+                let next = first_change_after_copy(next, &bounds);
+                let minimum = first_value(&bounds, parse_lsn).unwrap_or(Lsn(0));
+                if !minimum.is_valid() || minimum > next {
+                    return Err(PollError::Failed(source_failed(capture_lost(
+                        target,
+                        &table.shown(),
+                        &instance,
+                        minimum,
+                        next,
+                    ))));
+                }
+                let advanced = if next > upper {
+                    next
+                } else {
+                    let following = bounds
+                        .first()
+                        .and_then(|row| row.get(1))
+                        .and_then(parse_lsn)
+                        .ok_or_else(|| {
+                            PollError::Failed(malformed_change(target, &table.shown()))
+                        })?;
+                    let net = net_changes && exact_from.is_some_and(|from| next >= from);
+                    let changes = ask(
+                        source,
+                        target,
+                        &capture_changes_query(table, &instance, next, upper, net),
+                    )?;
+                    for change in &changes {
+                        let Some(step) = capture_operation(&cell(change, 0)) else {
+                            continue;
+                        };
+                        let row = change.get(1..).unwrap_or_default();
+                        let image = match step {
+                            CaptureRow::BeforeUpdate | CaptureRow::Change(RowChange::Delete) => {
+                                None
+                            }
+                            CaptureRow::Change(_) => Some(row),
+                        };
+                        work.statements.extend(
+                            change_statements(table, &capture_key_values(table, row), image)
+                                .ok_or_else(|| {
+                                    PollError::Failed(malformed_change(target, &table.shown()))
+                                })?,
+                        );
+                        if let CaptureRow::Change(operation) = step {
+                            count_change(&mut work.counts, operation);
+                        }
+                    }
+                    following
+                };
+                match (&successor, starts) {
+                    (Some(successor), Some(starts)) if starts.before() <= to => {
+                        switch_capture(
+                            source,
+                            context,
+                            table,
+                            successor,
+                            next.max(starts),
+                            &now,
+                            &mut work,
+                        )?;
+                    }
+                    _ => {
+                        if let ChangeSource::Capture { next, .. } = &mut table.changes {
+                            *next = advanced;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    position.copy_started = copy_start_after_poll(position.copy_started.take(), clock);
+    position.version = position.version.max(current_version);
+    position.lsn = position.lsn.max(current_lsn);
+    Ok((position, work))
+}
+
 impl Session<'_> {
     pub(super) fn follow_sql_server(&mut self) -> Result<Exit, Failure> {
         let usage = |message: String| Failure::usage(message, Some(CommandName::Follow));
@@ -670,11 +1616,8 @@ impl Session<'_> {
             created.push(format!("DROP SCHEMA {}", quote_name(schema)));
         }
         for table in tables {
-            let mut definitions: Vec<String> = table
-                .columns
-                .iter()
-                .map(|column| format!("{} {}", quote_name(&column.name), column.declared))
-                .collect();
+            let mut definitions: Vec<String> =
+                table.columns.iter().map(SourceColumn::definition).collect();
             if !table.key.is_empty() {
                 let key: Vec<String> = table.key.iter().map(|name| quote_name(name)).collect();
                 definitions.push(format!("PRIMARY KEY ({})", key.join(", ")));
@@ -735,19 +1678,30 @@ impl Session<'_> {
             run("COMMIT TRANSACTION")?;
             counts.tables += 1;
             counts.rows_copied += rows.len() as u64;
+            let left_out = table.left_out.join(", ");
             self.follow_event(
                 JsonObject::new()
                     .string("event", "table_copied")
                     .string("table", &table.shown())
                     .number("rows", rows.len() as u64)
                     .number("elapsed_ms", copied_at.elapsed().as_millis() as u64)
-                    .string("changes", table.changes.name()),
+                    .string("changes", table.changes.name())
+                    .boolean("net_changes", table.changes.net_changes())
+                    .string_if_any(
+                        "left_out",
+                        Some(left_out.as_str()).filter(|columns| !columns.is_empty()),
+                    ),
                 &format!(
-                    "  copied          {:<28} {:>10} rows   {:.1} s   {}\n",
+                    "  copied          {:<28} {:>10} rows   {:.1} s   {}{}\n",
                     table.shown(),
                     rows.len(),
                     copied_at.elapsed().as_secs_f64(),
-                    table.changes.label()
+                    table.changes.label(),
+                    if left_out.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", leaves out {left_out} (not in its capture instance)")
+                    }
                 ),
             );
         }
@@ -764,7 +1718,10 @@ impl Session<'_> {
         );
         let mut state = SavedFollow::new(SQL_SERVER, identity);
         for table in tables {
-            state.set(&table_item(&table.shown()), &table_position(table, version));
+            state.set(
+                &table_item(&table.shown()),
+                &table_position(table, version, None),
+            );
         }
         let mut script = String::from("BEGIN;\n");
         for statement in state.create_statements() {
@@ -783,6 +1740,27 @@ impl Session<'_> {
             ))
         })?;
         Ok(())
+    }
+
+    fn reconnect_tds(
+        &mut self,
+        options: &TdsConnectOptions,
+        error: String,
+        position: &str,
+    ) -> Option<TdsClient> {
+        let deadline = Instant::now() + self.reconnect_for();
+        let mut message = error;
+        let mut attempt = 0u32;
+        while self.wait_to_reconnect(&mut attempt, &message, deadline) {
+            match TdsClient::connect(options) {
+                Ok(client) => {
+                    self.reconnected_event(attempt, position);
+                    return Some(client);
+                }
+                Err(error) => message = error.to_string(),
+            }
+        }
+        None
     }
 
     fn follow_tds(&mut self, options: TdsConnectOptions) -> Result<Exit, Failure> {
@@ -869,18 +1847,8 @@ impl Session<'_> {
             }
             _ => {}
         }
-        let instances: Vec<(String, String, String, bool)> = if capture_on {
-            first_rows(query(&mut source, CAPTURE_INSTANCES_QUERY)?)
-                .iter()
-                .map(|row| {
-                    (
-                        cell(row, 0),
-                        cell(row, 1),
-                        cell(row, 2),
-                        cell(row, 3) == "1",
-                    )
-                })
-                .collect()
+        let instances = if capture_on {
+            capture_instances(&first_rows(query(&mut source, CAPTURE_INSTANCES_QUERY)?))
         } else {
             Vec::new()
         };
@@ -907,60 +1875,64 @@ impl Session<'_> {
                  AND NOT (s.name = N'dbo' AND t.name = N'systranschemas'){schema_filter} ORDER BY s.name, t.name"
             ),
         )?);
-        let mut chosen = Vec::new();
+        let mut tables = Vec::new();
         let mut unfollowable = Vec::new();
         for row in &listed {
             let (schema, name) = (cell(row, 0), cell(row, 1));
             let tracked = tracking_on && cell(row, 2) == "1";
-            let instance = instances
+            let columns = source_columns(&first_rows(query(
+                &mut source,
+                &table_columns_query(&schema, &name),
+            )?));
+            let key: Vec<String> = first_rows(query(&mut source, &key_query(&schema, &name))?)
                 .iter()
-                .find(|(instance_schema, instance_table, _, _)| {
-                    *instance_schema == schema && *instance_table == name
-                });
-            let complete = instance
-                .filter(|(_, _, _, complete)| *complete)
-                .map(|(_, _, instance, _)| instance.as_str());
-            match choose_changes(forced, tracked, complete) {
-                Some(changes) => chosen.push((schema, name, changes)),
-                None => unfollowable.push(Unfollowable {
-                    partly_captured: instance.is_some() && complete.is_none(),
+                .map(|row| cell(row, 0))
+                .collect();
+            let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
+            let theirs = instances_of(&instances, &schema, &name);
+            match choose_changes(forced, tracked, &theirs, &names, &key) {
+                Ok(changes) => tables.push(SourceTable {
                     schema,
                     name,
+                    columns,
+                    key,
+                    changes,
+                    left_out: Vec::new(),
+                }),
+                Err(key_left_out) => unfollowable.push(Unfollowable {
+                    schema,
+                    name,
+                    key_left_out,
                 }),
             }
         }
         if let Some(first) = unfollowable.first() {
             let listed: Vec<String> = unfollowable.iter().map(Unfollowable::shown).collect();
+            let capture_command = match &first.key_left_out {
+                Some(left_out) => {
+                    second_instance_command(&first.schema, &first.name, &left_out.instance)
+                }
+                None => enable_capture_command(&first.schema, &first.name, None),
+            };
+            let tracking_command = format!(
+                "ALTER TABLE {}.{} ENABLE CHANGE_TRACKING;",
+                first.schema, first.name
+            );
             let (what, try_command) = match forced {
-                Some(SqlServerChanges::ChangeTracking) => (
-                    "are not tracked",
-                    format!(
-                        "ALTER TABLE {}.{} ENABLE CHANGE_TRACKING;",
-                        first.schema, first.name
-                    ),
-                ),
+                Some(SqlServerChanges::ChangeTracking) => ("are not tracked", tracking_command),
                 Some(SqlServerChanges::ChangeDataCapture) => (
-                    "have no CDC capture instance of every column",
-                    enable_capture_command(&first.schema, &first.name),
+                    "have no CDC capture instance that includes their primary key",
+                    capture_command,
                 ),
                 None if capture_on && !tracking_on => (
-                    "have no CDC capture instance of every column",
-                    enable_capture_command(&first.schema, &first.name),
+                    "have no CDC capture instance that includes their primary key",
+                    capture_command,
                 ),
                 None if capture_on => (
-                    "have neither change tracking nor a CDC capture instance of every column",
-                    format!(
-                        "ALTER TABLE {}.{} ENABLE CHANGE_TRACKING;",
-                        first.schema, first.name
-                    ),
+                    "have neither change tracking nor a CDC capture instance that includes their primary key",
+                    tracking_command,
                 ),
-                None => (
-                    "are not tracked",
-                    format!(
-                        "ALTER TABLE {}.{} ENABLE CHANGE_TRACKING;",
-                        first.schema, first.name
-                    ),
-                ),
+                None => ("are not tracked", tracking_command),
             };
             return Err(precondition_failed(
                 format!(
@@ -970,59 +1942,6 @@ impl Session<'_> {
                 ),
                 try_command,
             ));
-        }
-        let mut tables = Vec::new();
-        for (schema, name, changes) in chosen {
-            let filter = format!(
-                "TABLE_SCHEMA = {} AND TABLE_NAME = {}",
-                quote_unicode(&schema),
-                quote_unicode(&name)
-            );
-            let columns = first_rows(query(
-                &mut source,
-                &format!(
-                    "SELECT CAST(COLUMN_NAME AS nvarchar(max)), CAST(DATA_TYPE AS nvarchar(max)), \
-                     CAST(CHARACTER_MAXIMUM_LENGTH AS nvarchar(max)), CAST(NUMERIC_PRECISION AS nvarchar(max)), \
-                     CAST(NUMERIC_SCALE AS nvarchar(max)), CAST(DATETIME_PRECISION AS nvarchar(max)), \
-                     CAST(IS_NULLABLE AS nvarchar(max)) FROM INFORMATION_SCHEMA.COLUMNS WHERE {filter} ORDER BY ORDINAL_POSITION"
-                ),
-            )?)
-            .iter()
-            .map(|column| {
-                let data_type = cell(column, 1);
-                let declared = format!(
-                    "{}{}",
-                    declared_type(
-                        &data_type,
-                        column.get(2).and_then(Option::as_deref),
-                        column.get(3).and_then(Option::as_deref),
-                        column.get(4).and_then(Option::as_deref),
-                        column.get(5).and_then(Option::as_deref),
-                    ),
-                    if cell(column, 6) == "NO" { " NOT NULL" } else { "" }
-                );
-                SourceColumn { name: cell(column, 0), data_type, declared }
-            })
-            .collect();
-            let key = first_rows(query(
-                &mut source,
-                &format!(
-                    "SELECT CAST(k.COLUMN_NAME AS nvarchar(max)) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS c \
-                     JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k ON k.CONSTRAINT_NAME = c.CONSTRAINT_NAME AND k.TABLE_SCHEMA = c.TABLE_SCHEMA \
-                     WHERE c.CONSTRAINT_TYPE = 'PRIMARY KEY' AND c.{} ORDER BY k.ORDINAL_POSITION",
-                    filter.replace(" AND TABLE_NAME", " AND c.TABLE_NAME")
-                ),
-            )?)
-            .iter()
-            .map(|row| cell(row, 0))
-            .collect();
-            tables.push(SourceTable {
-                schema,
-                name,
-                columns,
-                key,
-                changes,
-            });
         }
         let keyless: Vec<String> = tables
             .iter()
@@ -1053,8 +1972,8 @@ impl Session<'_> {
         } else {
             None
         };
-        let mut copy_started: Option<CopyStart> = None;
-        let mut lsn: Option<Lsn> = if uses_capture {
+        let mut copy_started: Option<ServerTime> = None;
+        let lsn: Option<Lsn> = if uses_capture {
             let start = first_rows(query(&mut source, COPY_START_QUERY)?);
             copy_started = copy_start(&start);
             Some(first_value(&start, parse_lsn).unwrap_or(Lsn(0)))
@@ -1064,22 +1983,43 @@ impl Session<'_> {
         if let Some(start) = lsn {
             for table in &mut tables {
                 let shown = table.shown();
-                if let ChangeSource::Capture { instance, next } = &mut table.changes {
-                    let bounds = first_rows(query(
-                        &mut source,
-                        &capture_bounds_query(instance, start, None),
-                    )?);
-                    let minimum = first_value(&bounds, parse_lsn).filter(|lsn| lsn.is_valid());
-                    let following = bounds
-                        .first()
-                        .and_then(|row| row.get(1))
-                        .and_then(parse_lsn);
-                    let (Some(minimum), Some(following)) = (minimum, following) else {
-                        return Err(source_failed(format!(
-                            "cannot follow {target}: the CDC changes of {shown} cannot be read: capture instance {instance} is gone or this login may not read it. Grant the login its gating role, then follow again"
-                        )));
-                    };
-                    *next = minimum.max(following);
+                let ChangeSource::Capture {
+                    instance,
+                    next,
+                    net_changes,
+                } = &mut table.changes
+                else {
+                    continue;
+                };
+                let bounds = first_rows(query(
+                    &mut source,
+                    &capture_bounds_query(instance, start, None),
+                )?);
+                let minimum = first_value(&bounds, parse_lsn).filter(|lsn| lsn.is_valid());
+                let following = bounds
+                    .first()
+                    .and_then(|row| row.get(1))
+                    .and_then(parse_lsn);
+                let (Some(minimum), Some(following)) = (minimum, following) else {
+                    return Err(source_failed(format!(
+                        "cannot follow {target}: the CDC changes of {shown} cannot be read: capture instance {instance} is gone or this login may not read it. Grant the login its gating role, then follow again"
+                    )));
+                };
+                let older = (minimum > following)
+                    .then(|| {
+                        instances_of(&instances, &table.schema, &table.name)
+                            .into_iter()
+                            .filter(|other| other.name != *instance && other.captures(&table.key))
+                            .find(|other| other.minimum.is_some_and(|lsn| lsn <= following))
+                    })
+                    .flatten();
+                match older {
+                    Some(older) => {
+                        *instance = older.name.clone();
+                        *net_changes = older.net_changes;
+                        *next = following;
+                    }
+                    None => *next = minimum.max(following),
                 }
             }
         }
@@ -1094,6 +2034,17 @@ impl Session<'_> {
                 .unwrap_or_else(|| format!("{}:{}", options.host, options.port)),
             options.database
         );
+        let captured_by = |table: &SourceTable| -> Option<Vec<String>> {
+            let ChangeSource::Capture { instance, .. } = &table.changes else {
+                return None;
+            };
+            instances
+                .iter()
+                .find(|other| other.name == *instance && other.is_of(table))
+                .map(|other| other.columns.clone())
+        };
+        let mut carried: Vec<String> = Vec::new();
+        let mut exact_from: Option<Lsn> = None;
         let saved = if existed { self.saved_follow()? } else { None };
         if let Some(saved) = &saved {
             let cannot = |reason: String| {
@@ -1118,10 +2069,26 @@ impl Session<'_> {
                         );
                     }
                     (
-                        ChangeSource::Capture { next, .. },
-                        Some(SavedPosition::Capture(saved_next)),
+                        ChangeSource::Capture {
+                            instance,
+                            next,
+                            net_changes,
+                        },
+                        Some(SavedPosition::Capture {
+                            next: saved_next,
+                            exact_from: saved_exact_from,
+                            instance: saved_instance,
+                        }),
                     ) => {
                         *next = saved_next;
+                        if let Some(saved_instance) = saved_instance {
+                            *net_changes = instances
+                                .iter()
+                                .find(|other| other.name == saved_instance)
+                                .map_or(*net_changes, |other| other.net_changes);
+                            *instance = saved_instance;
+                        }
+                        exact_from = exact_from.or(saved_exact_from);
                     }
                     (_, None) => {
                         return Err(cannot(format!(
@@ -1141,23 +2108,54 @@ impl Session<'_> {
             }
             copy_started = None;
             let target_tables = self.target_table_columns()?;
-            for table in &tables {
-                let in_target = target_tables.iter().find(|(schema, name, _)| {
-                    *name == table.name && (*schema == table.schema || table.schema == "dbo")
-                });
-                if let Some((_, _, columns)) = in_target {
-                    let source_columns: Vec<String> = table
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect();
-                    if let Some(change) = column_change(columns, &source_columns) {
-                        return Err(schema_changed(
-                            &target,
-                            &table.shown(),
-                            &change,
-                            &self.file_display,
-                        ));
+            for table in &mut tables {
+                let in_target = target_tables
+                    .iter()
+                    .find(|(schema, name, _)| {
+                        *name == table.name && (*schema == table.schema || table.schema == "dbo")
+                    })
+                    .map(|(_, _, columns)| columns.clone());
+                let captured = captured_by(&*table);
+                match (&table.changes, in_target) {
+                    (ChangeSource::Tracking, Some(columns)) => {
+                        if let Some(change) = column_change(&columns, &table.followed_names()) {
+                            return Err(schema_changed(
+                                &target,
+                                &table.shown(),
+                                &change,
+                                &self.file_display,
+                            ));
+                        }
+                    }
+                    (ChangeSource::Tracking, None) => {}
+                    (ChangeSource::Capture { .. }, Some(columns)) => {
+                        let resumed = resume_capture_columns(table, &columns, captured.as_deref())
+                            .map_err(|change| {
+                                schema_changed(&target, &table.shown(), &change, &self.file_display)
+                            })?;
+                        carried.extend(
+                            resumed
+                                .dropped
+                                .iter()
+                                .map(|column| drop_column_statement(table, column)),
+                        );
+                        table.columns = resumed.followed;
+                        table.left_out = resumed.left_out;
+                        if !resumed.dropped.is_empty() {
+                            let (object, line) = notice_event(&Notice::Dropped {
+                                table: table.shown(),
+                                columns: resumed.dropped,
+                            });
+                            self.follow_event(object, &line);
+                        }
+                    }
+                    (ChangeSource::Capture { .. }, None) => {
+                        if let Some(captured) = captured {
+                            let (followed, left_out) =
+                                split_captured(std::mem::take(&mut table.columns), &captured);
+                            table.columns = followed;
+                            table.left_out = left_out;
+                        }
                     }
                 }
             }
@@ -1172,6 +2170,16 @@ impl Session<'_> {
                     tables.len()
                 ),
             );
+        } else {
+            for table in &mut tables {
+                let Some(captured) = captured_by(&*table) else {
+                    continue;
+                };
+                let (followed, left_out) =
+                    split_captured(std::mem::take(&mut table.columns), &captured);
+                table.columns = followed;
+                table.left_out = left_out;
+            }
         }
 
         let _ = stop_signals::watch();
@@ -1196,6 +2204,19 @@ impl Session<'_> {
                 return Err(failure);
             }
         }
+        let exact_after = if uses_capture && exact_from.is_none() {
+            server_time(&first_rows(query(&mut source, EXACT_AFTER_QUERY)?), 0)
+        } else {
+            None
+        };
+        let mut position = FollowPosition {
+            tables,
+            version,
+            lsn,
+            copy_started,
+            exact_after,
+            exact_from,
+        };
         let db = self.open(Access::Write { create: false }, None)?;
         let store = DatabaseStore(&db);
         let mut session = store.session(Dialect::SqlServer);
@@ -1208,224 +2229,84 @@ impl Session<'_> {
                 ))
             })
         };
-        let poll = Duration::from_secs(
+        let poll_every = Duration::from_secs(
             self.request
                 .follow
                 .poll_seconds
                 .unwrap_or(DEFAULT_POLL_SECONDS),
         );
+        let file = self.file_display.clone();
+        let context = PollContext {
+            target: &target,
+            database: &options.database,
+            file: &file,
+        };
         let mut polls = 0u64;
-        let mut saved_positions: Vec<String> = tables
-            .iter()
-            .map(|table| table_position(table, version))
-            .collect();
+        let mut saved_positions = position.saved();
         let reason = loop {
             if let Err(error) = source.batch(LIVENESS_QUERY) {
                 if !matches!(error, TdsClientError::Io(_)) {
                     return Err(tds_failure(&target, &error));
                 }
-                let deadline = Instant::now() + self.reconnect_for();
-                let mut message = error.to_string();
-                let mut attempt = 0u32;
-                let mut reconnected = false;
-                while self.wait_to_reconnect(&mut attempt, &message, deadline) {
-                    match TdsClient::connect(&options) {
-                        Ok(client) => {
-                            source = client;
-                            reconnected = true;
-                            break;
-                        }
-                        Err(error) => message = error.to_string(),
-                    }
-                }
-                if !reconnected {
-                    break if stop_signals::requested() {
-                        "interrupt"
-                    } else {
-                        "source_lost"
-                    };
-                }
-                self.reconnected_event(attempt, &position_text(version, lsn));
-            }
-            if !tables.is_empty() {
-                let columns_now = first_rows(query(&mut source, &columns_query(&tables))?);
-                for table in &tables {
-                    let known: Vec<String> = table
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect();
-                    if let Some(change) = column_change(&known, &columns_of(&columns_now, table)) {
-                        return Err(schema_changed(
-                            &target,
-                            &table.shown(),
-                            &change,
-                            &self.file_display,
-                        ));
-                    }
-                }
-            }
-            let current_version = match version {
-                Some(version) => Some(
-                    first_value(
-                        &first_rows(query(&mut source, TRACKING_VERSION_QUERY)?),
-                        whole_number,
-                    )
-                    .unwrap_or(version),
-                ),
-                None => None,
-            };
-            let current_lsn = match lsn {
-                Some(lsn) => Some(
-                    first_value(&first_rows(query(&mut source, MAX_LSN_QUERY)?), parse_lsn)
-                        .unwrap_or(lsn)
-                        .max(lsn),
-                ),
-                None => None,
-            };
-            let skip = match (&copy_started, current_lsn) {
-                (Some(start), Some(_)) => Some(copy_start_skip(
-                    start,
-                    &first_rows(query(&mut source, &copy_start_check_query(start))?),
-                )),
-                _ => None,
-            };
-            let skip_after = copy_started
-                .as_ref()
-                .filter(|_| skip == Some(CopyStartSkip::Apply))
-                .map(|start| start.time.clone());
-            let mut statements = Vec::new();
-            for table in &mut tables {
-                let advanced = match &table.changes {
-                    ChangeSource::Tracking => {
-                        let (Some(from), Some(current)) = (version, current_version) else {
-                            continue;
-                        };
-                        let minimum = first_value(
-                            &first_rows(query(
-                                &mut source,
-                                &format!(
-                                    "SELECT CAST(CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID({})) AS nvarchar(max))",
-                                    quote_unicode(&table.qualified())
-                                ),
-                            )?),
-                            whole_number,
-                        )
-                        .unwrap_or(0);
-                        if minimum > from {
-                            return Err(source_failed(format!(
-                                "cannot follow {target}: the change retention of {} was exceeded while following: changes were lost. Follow again into a new file",
-                                options.database
-                            )));
-                        }
-                        if table.key.is_empty() || current <= from {
-                            continue;
-                        }
-                        let changes = first_rows(query(
-                            &mut source,
-                            &tracking_changes_query(table, from, current),
-                        )?);
-                        let key_length = table.key.len();
-                        for change in &changes {
-                            let key_values = change.get(2..2 + key_length).unwrap_or_default();
-                            let row = (cell(change, 1) == "1")
-                                .then(|| change.get(2 + key_length..).unwrap_or_default());
-                            statements.extend(
-                                change_statements(table, key_values, row)
-                                    .ok_or_else(|| malformed_change(&target, &table.shown()))?,
-                            );
-                            count_change(&mut counts, tracking_operation(&cell(change, 0)));
-                        }
-                        None
-                    }
-                    ChangeSource::Capture { instance, next } => {
-                        let (Some(to), next) = (current_lsn, *next) else {
-                            continue;
-                        };
-                        if skip == Some(CopyStartSkip::Wait) {
-                            continue;
-                        }
-                        let bounds = first_rows(query(
-                            &mut source,
-                            &capture_bounds_query(instance, to, skip_after.as_deref()),
-                        )?);
-                        let next = first_change_after_copy(next, &bounds);
-                        let minimum = first_value(&bounds, parse_lsn).unwrap_or(Lsn(0));
-                        if !minimum.is_valid() || minimum > next {
-                            return Err(source_failed(capture_lost(
-                                &target,
-                                &table.shown(),
-                                instance,
-                                minimum,
-                                next,
-                            )));
-                        }
-                        if next > to {
-                            Some(next)
+                match self.reconnect_tds(&options, error.to_string(), &position.shown()) {
+                    Some(client) => source = client,
+                    None => {
+                        break if stop_signals::requested() {
+                            "interrupt"
                         } else {
-                            let following = bounds
-                                .first()
-                                .and_then(|row| row.get(1))
-                                .and_then(parse_lsn)
-                                .ok_or_else(|| malformed_change(&target, &table.shown()))?;
-                            let changes = first_rows(query(
-                                &mut source,
-                                &capture_changes_query(table, instance, next, to),
-                            )?);
-                            for change in &changes {
-                                let Some(step) = capture_operation(&cell(change, 0)) else {
-                                    continue;
-                                };
-                                let row = change.get(1..).unwrap_or_default();
-                                let image = match step {
-                                    CaptureRow::BeforeUpdate
-                                    | CaptureRow::Change(RowChange::Delete) => None,
-                                    CaptureRow::Change(_) => Some(row),
-                                };
-                                statements.extend(
-                                    change_statements(
-                                        table,
-                                        &capture_key_values(table, row),
-                                        image,
-                                    )
-                                    .ok_or_else(|| malformed_change(&target, &table.shown()))?,
-                                );
-                                if let CaptureRow::Change(operation) = step {
-                                    count_change(&mut counts, operation);
-                                }
-                            }
-                            Some(following)
-                        }
+                            "source_lost"
+                        };
                     }
-                };
-                if let (Some(advanced), ChangeSource::Capture { next, .. }) =
-                    (advanced, &mut table.changes)
-                {
-                    *next = advanced;
                 }
             }
-            copy_started = copy_start_after_poll(copy_started, skip);
+            let (polled, work) = match poll(&mut source, &context, &position) {
+                Ok(polled) => polled,
+                Err(PollError::Failed(failure)) => return Err(failure),
+                Err(PollError::Lost(message)) => {
+                    match self.reconnect_tds(&options, message, &position.shown()) {
+                        Some(client) => {
+                            source = client;
+                            continue;
+                        }
+                        None => {
+                            break if stop_signals::requested() {
+                                "interrupt"
+                            } else {
+                                "source_lost"
+                            };
+                        }
+                    }
+                }
+            };
             polls += 1;
-            let changed = !statements.is_empty();
-            version = version.max(current_version);
-            lsn = lsn.max(current_lsn);
-            let positions: Vec<String> = tables
-                .iter()
-                .map(|table| table_position(table, version))
-                .collect();
+            let changed = !work.statements.is_empty() || !carried.is_empty();
+            let positions = polled.saved();
             if changed || positions != saved_positions {
                 run("BEGIN TRANSACTION")?;
-                for statement in &statements {
+                for statement in carried.iter().chain(&work.statements) {
                     run(statement)?;
                 }
-                for (table, position) in tables.iter().zip(&positions) {
-                    run(&update_statement(&table_item(&table.shown()), position))?;
+                for (table, saved_position) in polled.tables.iter().zip(&positions) {
+                    run(&update_statement(
+                        &table_item(&table.shown()),
+                        saved_position,
+                    ))?;
                 }
                 run("COMMIT TRANSACTION")?;
+                carried.clear();
                 if changed {
                     counts.transactions += 1;
                 }
                 saved_positions = positions;
+            }
+            counts.inserts += work.counts.inserts;
+            counts.updates += work.counts.updates;
+            counts.deletes += work.counts.deletes;
+            counts.schema_changes += work.counts.schema_changes;
+            position = polled;
+            for notice in &work.notices {
+                let (object, line) = notice_event(notice);
+                self.follow_event(object, &line);
             }
             if self.request.follow.until_caught_up && !changed {
                 break "caught_up";
@@ -1433,13 +2314,13 @@ impl Session<'_> {
             if self.format != Format::Json {
                 self.messages.text(&format!(
                     "  following       poll every {} s, {polls} polls, {} changes applied, at {}\n",
-                    poll.as_secs(),
+                    poll_every.as_secs(),
                     counts.inserts + counts.updates + counts.deletes,
-                    position_text(version, lsn)
+                    position.shown()
                 ));
             }
             let slept = Instant::now();
-            while slept.elapsed() < poll && !stop_signals::requested() {
+            while slept.elapsed() < poll_every && !stop_signals::requested() {
                 std::thread::sleep(STOP_CHECK);
             }
             if stop_signals::requested() {
@@ -1448,7 +2329,8 @@ impl Session<'_> {
         };
         drop(run);
         let _ = session.close();
-        let position = position_text(version, lsn);
+        let (version, lsn) = (position.version, position.lsn);
+        let position = position.shown();
         let ok = reason != "source_lost";
         let verdict = if ok {
             format!(
@@ -1473,7 +2355,8 @@ impl Session<'_> {
                     .number("transactions", counts.transactions)
                     .number("inserts", counts.inserts)
                     .number("updates", counts.updates)
-                    .number("deletes", counts.deletes);
+                    .number("deletes", counts.deletes)
+                    .number("schema_changes", counts.schema_changes);
                 let summary = match version {
                     Some(version) => {
                         summary.number("change_version", u64::try_from(version).unwrap_or(0))
@@ -1489,7 +2372,7 @@ impl Session<'_> {
                 )
             }
             _ => self.out.text(&format!(
-                "followed {} into {} for {:.0} s ({})\n  tables          {}, {} rows copied\n  changes         {} polls applied inserts {}, updates {}, deletes {}\n  position        {position}\n{}: {verdict}\n",
+                "followed {} into {} for {:.0} s ({})\n  tables          {}, {} rows copied\n  changes         {} polls applied inserts {}, updates {}, deletes {}, schema changes {}\n  position        {position}\n{}: {verdict}\n",
                 options.shown(),
                 self.file_display,
                 started.elapsed().as_secs_f64(),
@@ -1504,6 +2387,7 @@ impl Session<'_> {
                 counts.inserts,
                 counts.updates,
                 counts.deletes,
+                counts.schema_changes,
                 if ok { "ok" } else { "stopped" },
             )),
         }
@@ -1529,6 +2413,20 @@ fn capture_lost(target: &str, table: &str, instance: &str, minimum: Lsn, next: L
             "cannot follow {target}: the CDC capture instance {instance} of {table} was dropped or can no longer be read while following. Follow again into a new file to copy it afresh"
         )
     }
+}
+
+fn capture_gap(target: &str, table: &str, old: &str, new: &str, starts: Lsn, next: Lsn) -> String {
+    format!(
+        "cannot follow {target}: the CDC capture instance {old} of {table} was dropped before the follow reached the start of {new} ({}), so the changes from {} up to it are lost. Follow again into a new file, and drop an old capture instance only after the follow's capture_switched event",
+        starts.literal(),
+        next.literal()
+    )
+}
+
+fn key_dropped(target: &str, table: &str, column: &str) -> String {
+    format!(
+        "cannot follow {target}: primary key column {column} of {table} was dropped on the source, so its CDC changes can no longer be applied by key. Follow again into a new file"
+    )
 }
 
 #[cfg(test)]
@@ -1565,6 +2463,41 @@ mod tests {
     }
 
     #[test]
+    fn source_columns_keep_their_type_and_nullability_apart() {
+        let rows = vec![
+            vec![
+                Some("id".to_owned()),
+                Some("int".to_owned()),
+                None,
+                Some("10".to_owned()),
+                Some("0".to_owned()),
+                None,
+                Some("NO".to_owned()),
+            ],
+            vec![
+                Some("note".to_owned()),
+                Some("nvarchar".to_owned()),
+                Some("40".to_owned()),
+                None,
+                None,
+                None,
+                Some("YES".to_owned()),
+            ],
+        ];
+        let columns = source_columns(&rows);
+        assert_eq!(columns[0].definition(), "[id] int NOT NULL");
+        assert_eq!(columns[1].definition(), "[note] nvarchar(40)");
+        assert!(
+            table_columns_query("dbo", "it's")
+                .contains("TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'it''s'")
+        );
+        assert!(
+            key_query("dbo", "orders")
+                .contains("c.TABLE_SCHEMA = N'dbo' AND c.TABLE_NAME = N'orders'")
+        );
+    }
+
+    #[test]
     fn values_travel_as_text_and_binary_converts_back() {
         assert_eq!(
             text_expression("[b]", "varbinary"),
@@ -1586,12 +2519,16 @@ mod tests {
         );
     }
 
-    fn orders() -> SourceTable {
-        let column = |name: &str, data_type: &str| SourceColumn {
+    fn column(name: &str, data_type: &str) -> SourceColumn {
+        SourceColumn {
             name: name.to_owned(),
             data_type: data_type.to_owned(),
             declared: data_type.to_owned(),
-        };
+            not_null: false,
+        }
+    }
+
+    fn orders() -> SourceTable {
         SourceTable {
             schema: "dbo".to_owned(),
             name: "orders".to_owned(),
@@ -1604,23 +2541,82 @@ mod tests {
             changes: ChangeSource::Capture {
                 instance: "dbo_orders".to_owned(),
                 next: Lsn(1),
+                net_changes: false,
             },
+            left_out: Vec::new(),
+        }
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn instance(name: &str, columns: &[&str], minimum: Option<u128>) -> CaptureInstance {
+        CaptureInstance {
+            schema: "dbo".to_owned(),
+            table: "orders".to_owned(),
+            name: name.to_owned(),
+            net_changes: false,
+            minimum: minimum.map(Lsn),
+            columns: names(columns),
         }
     }
 
     #[test]
     fn each_table_saves_its_position_and_reads_it_back() {
         let mut table = orders();
-        let saved = table_position(&table, Some(9));
-        assert_eq!(read_position(&saved), Some(SavedPosition::Capture(Lsn(1))));
+        let saved = table_position(&table, Some(9), None);
+        assert_eq!(saved, "cdc 0x00000000000000000001 - dbo_orders");
+        assert_eq!(
+            read_position(&saved),
+            Some(SavedPosition::Capture {
+                next: Lsn(1),
+                exact_from: None,
+                instance: Some("dbo_orders".to_owned()),
+            })
+        );
         table.changes = ChangeSource::Tracking;
-        assert_eq!(table_position(&table, Some(9)), "change_tracking 9");
+        assert_eq!(table_position(&table, Some(9), None), "change_tracking 9");
         assert_eq!(
             read_position("change_tracking 9"),
             Some(SavedPosition::Tracking(9))
         );
         assert_eq!(read_position("change_tracking nine"), None);
         assert_eq!(read_position("nothing"), None);
+    }
+
+    #[test]
+    fn a_cdc_position_carries_its_capture_instance_and_where_net_changes_are_exact() {
+        let mut table = orders();
+        table.changes = ChangeSource::Capture {
+            instance: "sales orders v2".to_owned(),
+            next: Lsn(0x2a),
+            net_changes: true,
+        };
+        let saved = table_position(&table, None, Some(Lsn(0x20)));
+        assert_eq!(
+            saved,
+            "cdc 0x0000000000000000002A 0x00000000000000000020 sales orders v2"
+        );
+        assert_eq!(
+            read_position(&saved),
+            Some(SavedPosition::Capture {
+                next: Lsn(0x2a),
+                exact_from: Some(Lsn(0x20)),
+                instance: Some("sales orders v2".to_owned()),
+            })
+        );
+        assert_eq!(
+            read_position("cdc 0x0000000000000000002A"),
+            Some(SavedPosition::Capture {
+                next: Lsn(0x2a),
+                exact_from: None,
+                instance: None,
+            })
+        );
+        assert_eq!(read_position("cdc 0x2A junk dbo_orders"), None);
+        assert_eq!(read_position("cdc 0x2A -"), None);
+        assert_eq!(read_position("cdc 0x2A - "), None);
     }
 
     #[test]
@@ -1676,6 +2672,8 @@ mod tests {
         }
         assert!(!Lsn::parse("0x00000000000000000000").unwrap().is_valid());
         assert_eq!(parse_lsn(&None), None);
+        assert_eq!(Lsn(0x2a).before(), Lsn(0x29));
+        assert_eq!(Lsn(0).before(), Lsn(0));
     }
 
     #[test]
@@ -1701,27 +2699,156 @@ mod tests {
     }
 
     #[test]
-    fn cdc_is_chosen_when_the_table_has_a_capture_instance_unless_forced() {
-        let capture = Some(ChangeSource::Capture {
-            instance: "dbo_t".to_owned(),
-            next: Lsn(0),
-        });
-        assert_eq!(choose_changes(None, true, Some("dbo_t")), capture);
-        assert_eq!(choose_changes(None, false, Some("dbo_t")), capture);
-        assert_eq!(
-            choose_changes(None, true, None),
-            Some(ChangeSource::Tracking)
+    fn capture_instances_are_read_one_row_per_captured_column_newest_first() {
+        let row = |instance: &str, net: &str, minimum: Option<&str>, column: &str| {
+            vec![
+                Some("dbo".to_owned()),
+                Some("orders".to_owned()),
+                Some(instance.to_owned()),
+                Some(net.to_owned()),
+                minimum.map(str::to_owned),
+                Some(column.to_owned()),
+            ]
+        };
+        let rows = vec![
+            row("dbo_orders_2", "1", None, "id"),
+            row("dbo_orders_2", "1", None, "extra"),
+            row("dbo_orders", "0", Some("0x0000002A000001F80003"), "id"),
+            row("dbo_orders", "0", Some("0x0000002A000001F80003"), "note"),
+        ];
+        let read = capture_instances(&rows);
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].name, "dbo_orders_2");
+        assert!(read[0].net_changes);
+        assert_eq!(read[0].minimum, None);
+        assert_eq!(read[0].columns, names(&["id", "extra"]));
+        assert_eq!(read[1].minimum, Lsn::parse("0x0000002A000001F80003"));
+        assert_eq!(read[1].columns, names(&["id", "note"]));
+        assert!(read[1].is_of(&orders()));
+        assert_eq!(instances_of(&read, "dbo", "orders").len(), 2);
+        assert!(instances_of(&read, "dbo", "other").is_empty());
+        assert!(capture_instances(&Vec::new()).is_empty());
+        assert!(CAPTURE_INSTANCES_QUERY.contains("cdc.captured_columns"));
+        assert!(CAPTURE_INSTANCES_QUERY.contains("i.is_primary_key = 1 AND i.name = c.index_name"));
+        assert!(
+            CAPTURE_INSTANCES_QUERY
+                .ends_with("ORDER BY c.create_date DESC, c.object_id DESC, cc.column_ordinal")
         );
-        assert_eq!(choose_changes(None, false, None), None);
+    }
+
+    #[test]
+    fn cdc_is_chosen_when_the_table_has_a_capture_instance_unless_forced() {
+        let whole = instance("dbo_t", &["id", "note"], Some(1));
+        let columns = names(&["id", "note"]);
+        let key = names(&["id"]);
+        let theirs = [&whole];
+        let capture = Ok(capture_source(&whole));
+        assert_eq!(choose_changes(None, true, &theirs, &columns, &key), capture);
+        assert_eq!(
+            choose_changes(None, false, &theirs, &columns, &key),
+            capture
+        );
+        assert_eq!(
+            choose_changes(None, true, &[], &columns, &key),
+            Ok(ChangeSource::Tracking)
+        );
+        assert_eq!(choose_changes(None, false, &[], &columns, &key), Err(None));
         let tracking = Some(SqlServerChanges::ChangeTracking);
         assert_eq!(
-            choose_changes(tracking, true, Some("dbo_t")),
-            Some(ChangeSource::Tracking)
+            choose_changes(tracking, true, &theirs, &columns, &key),
+            Ok(ChangeSource::Tracking)
         );
-        assert_eq!(choose_changes(tracking, false, Some("dbo_t")), None);
+        assert_eq!(
+            choose_changes(tracking, false, &theirs, &columns, &key),
+            Err(None)
+        );
         let cdc = Some(SqlServerChanges::ChangeDataCapture);
-        assert_eq!(choose_changes(cdc, true, Some("dbo_t")), capture);
-        assert_eq!(choose_changes(cdc, true, None), None);
+        assert_eq!(choose_changes(cdc, true, &theirs, &columns, &key), capture);
+        assert_eq!(choose_changes(cdc, true, &[], &columns, &key), Err(None));
+    }
+
+    #[test]
+    fn a_capture_instance_of_some_columns_is_followed_when_nothing_covers_every_column() {
+        let part = instance("dbo_t", &["id"], Some(1));
+        let columns = names(&["id", "note"]);
+        let key = names(&["id"]);
+        let theirs = [&part];
+        let capture = Ok(capture_source(&part));
+        assert_eq!(
+            choose_changes(None, true, &theirs, &columns, &key),
+            Ok(ChangeSource::Tracking)
+        );
+        assert_eq!(
+            choose_changes(None, false, &theirs, &columns, &key),
+            capture
+        );
+        let cdc = Some(SqlServerChanges::ChangeDataCapture);
+        assert_eq!(choose_changes(cdc, true, &theirs, &columns, &key), capture);
+        let whole = instance("dbo_t_2", &["id", "note"], Some(1));
+        assert_eq!(
+            choose_changes(cdc, true, &[&part, &whole], &columns, &key),
+            Ok(capture_source(&whole))
+        );
+    }
+
+    #[test]
+    fn a_capture_instance_without_the_primary_key_is_not_used_and_is_named() {
+        let keyless = instance("dbo_t", &["note"], Some(1));
+        let columns = names(&["id", "note"]);
+        let key = names(&["id"]);
+        let left_out = Err(Some(KeyLeftOut {
+            instance: "dbo_t".to_owned(),
+            columns: names(&["id"]),
+        }));
+        assert_eq!(
+            choose_changes(None, false, &[&keyless], &columns, &key),
+            left_out
+        );
+        assert_eq!(
+            choose_changes(
+                Some(SqlServerChanges::ChangeDataCapture),
+                true,
+                &[&keyless],
+                &columns,
+                &key
+            ),
+            left_out
+        );
+        assert_eq!(
+            choose_changes(None, true, &[&keyless], &columns, &key),
+            Ok(ChangeSource::Tracking)
+        );
+        let shown = Unfollowable {
+            schema: "dbo".to_owned(),
+            name: "t".to_owned(),
+            key_left_out: Some(KeyLeftOut {
+                instance: "dbo_t".to_owned(),
+                columns: names(&["id"]),
+            }),
+        }
+        .shown();
+        assert_eq!(
+            shown,
+            "dbo.t (its CDC capture instance dbo_t leaves out primary key column id)"
+        );
+    }
+
+    #[test]
+    fn only_the_captured_columns_are_followed_and_the_rest_are_named() {
+        let (followed, left_out) = split_captured(orders().columns, &names(&["id", "note"]));
+        let followed: Vec<&str> = followed.iter().map(|column| column.name.as_str()).collect();
+        assert_eq!(followed, vec!["note", "id"]);
+        assert_eq!(left_out, names(&["tag"]));
+    }
+
+    #[test]
+    fn net_changes_need_the_primary_key_as_the_instance_row_identifier() {
+        let mut net = instance("dbo_t", &["id"], Some(1));
+        net.net_changes = true;
+        assert!(capture_source(&net).net_changes());
+        assert_eq!(capture_source(&net).label(), "CDC, net changes");
+        assert!(!capture_source(&instance("dbo_t", &["id"], Some(1))).net_changes());
+        assert!(!ChangeSource::Tracking.net_changes());
     }
 
     #[test]
@@ -1729,7 +2856,7 @@ mod tests {
         let from = Lsn::parse("0x0000002A000001F80003").unwrap();
         let to = Lsn::parse("0x0000002B000000100001").unwrap();
         assert_eq!(
-            capture_changes_query(&orders(), "dbo_orders", from, to),
+            capture_changes_query(&orders(), "dbo_orders", from, to, false),
             "SELECT CAST(C.[__$operation] AS nvarchar(max)), CAST(C.[note] AS nvarchar(max)), \
              CAST(C.[id] AS nvarchar(max)), CONVERT(nvarchar(max), C.[tag], 1) \
              FROM cdc.[fn_cdc_get_all_changes_dbo_orders](0x0000002A000001F80003, 0x0000002B000000100001, N'all update old') AS C \
@@ -1746,6 +2873,47 @@ mod tests {
              CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(0x0000002B000000100001), 1), \
              CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', CONVERT(datetime, N'2026-11-02 11:40:01.123', 121))), 1)"
         );
+    }
+
+    #[test]
+    fn net_changes_read_the_final_row_of_each_key_with_deletes_first() {
+        let from = Lsn::parse("0x0000002A000001F80003").unwrap();
+        let to = Lsn::parse("0x0000002B000000100001").unwrap();
+        assert_eq!(
+            capture_changes_query(&orders(), "dbo_orders", from, to, true),
+            "SELECT CAST(C.[__$operation] AS nvarchar(max)), CAST(C.[note] AS nvarchar(max)), \
+             CAST(C.[id] AS nvarchar(max)), CONVERT(nvarchar(max), C.[tag], 1) \
+             FROM cdc.[fn_cdc_get_net_changes_dbo_orders](0x0000002A000001F80003, 0x0000002B000000100001, N'all') AS C \
+             ORDER BY C.[__$operation], C.[__$start_lsn]"
+        );
+    }
+
+    #[test]
+    fn net_changes_start_once_every_change_the_copy_saw_has_been_applied_one_by_one() {
+        assert_eq!(
+            EXACT_AFTER_QUERY,
+            "SELECT CONVERT(nvarchar(max), CAST(DATEADD(second, 1, SYSDATETIME()) AS datetime), 121), \
+             CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))"
+        );
+        let after = server_time(
+            &vec![vec![
+                Some("2026-11-03 01:40:02.000".to_owned()),
+                Some("0".to_owned()),
+            ]],
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            exact_from_query(&after),
+            "SELECT CONVERT(nvarchar(max), sys.fn_cdc_increment_lsn(sys.fn_cdc_map_time_to_lsn(N'largest less than or equal', CONVERT(datetime, N'2026-11-03 01:40:02.000', 121))), 1)"
+        );
+        assert_eq!(
+            exact_from_of(&vec![vec![Some("0x0000002A000001F80003".to_owned())]]),
+            Lsn::parse("0x0000002A000001F80003")
+        );
+        assert_eq!(exact_from_of(&vec![vec![None]]), Some(Lsn(0)));
+        assert_eq!(exact_from_of(&vec![vec![Some("junk".to_owned())]]), None);
+        assert_eq!(exact_from_of(&Vec::new()), None);
     }
 
     #[test]
@@ -1786,8 +2954,8 @@ mod tests {
         );
     }
 
-    fn started_at_utc_plus_one() -> CopyStart {
-        CopyStart {
+    fn started_at_utc_plus_one() -> ServerTime {
+        ServerTime {
             time: "2026-10-25 02:40:01.123".to_owned(),
             utc_offset_minutes: 60,
         }
@@ -1818,7 +2986,7 @@ mod tests {
         );
         assert_eq!(copy_start(&Vec::new()), None);
         assert_eq!(
-            copy_start_check_query(&started_at_utc_plus_one()),
+            capture_clock_query(&started_at_utc_plus_one()),
             "SELECT CASE WHEN sys.fn_cdc_map_lsn_to_time(sys.fn_cdc_get_max_lsn()) > CONVERT(datetime, N'2026-10-25 02:40:01.123', 121) \
              THEN N'1' ELSE N'0' END, CAST(DATEPART(TZOFFSET, SYSDATETIMEOFFSET()) AS nvarchar(max))"
         );
@@ -1828,64 +2996,56 @@ mod tests {
     fn the_copy_start_skip_waits_for_the_capture_job_then_applies_only_in_the_same_utc_offset() {
         let start = started_at_utc_plus_one();
         assert_eq!(
-            copy_start_skip(&start, &check("0", "60")),
-            CopyStartSkip::Wait
+            capture_clock(&start, &check("0", "60")),
+            CaptureClock::Behind
         );
         assert_eq!(
-            copy_start_skip(&start, &check("1", "60")),
-            CopyStartSkip::Apply
+            capture_clock(&start, &check("1", "60")),
+            CaptureClock::Passed
         );
         assert_eq!(
-            copy_start_skip(&start, &check("0", "0")),
-            CopyStartSkip::Drop
+            capture_clock(&start, &check("0", "0")),
+            CaptureClock::OffsetChanged
         );
         assert_eq!(
-            copy_start_skip(&start, &check("1", "0")),
-            CopyStartSkip::Drop
+            capture_clock(&start, &check("1", "0")),
+            CaptureClock::OffsetChanged
         );
         assert_eq!(
-            copy_start_skip(&start, &check("1", "junk")),
-            CopyStartSkip::Drop
+            capture_clock(&start, &check("1", "junk")),
+            CaptureClock::OffsetChanged
         );
-        assert_eq!(copy_start_skip(&start, &Vec::new()), CopyStartSkip::Drop);
+        assert_eq!(
+            capture_clock(&start, &Vec::new()),
+            CaptureClock::OffsetChanged
+        );
     }
 
     #[test]
     fn the_copy_start_skip_is_used_once_and_never_again_after_it_applies_or_is_dropped() {
         let start = Some(started_at_utc_plus_one());
         assert_eq!(
-            copy_start_after_poll(start.clone(), Some(CopyStartSkip::Wait)),
+            copy_start_after_poll(start.clone(), Some(CaptureClock::Behind)),
             start
         );
         assert_eq!(
-            copy_start_after_poll(start.clone(), Some(CopyStartSkip::Apply)),
+            copy_start_after_poll(start.clone(), Some(CaptureClock::Passed)),
             None
         );
         assert_eq!(
-            copy_start_after_poll(start.clone(), Some(CopyStartSkip::Drop)),
+            copy_start_after_poll(start.clone(), Some(CaptureClock::OffsetChanged)),
             None
         );
-        assert_eq!(copy_start_after_poll(None, Some(CopyStartSkip::Wait)), None);
+        assert_eq!(
+            copy_start_after_poll(None, Some(CaptureClock::Behind)),
+            None
+        );
         let mut state = start;
-        for poll in [
-            CopyStartSkip::Wait,
-            CopyStartSkip::Apply,
-            CopyStartSkip::Wait,
-        ] {
-            let skip = state.as_ref().map(|started| {
-                copy_start_skip(
-                    started,
-                    &check(
-                        if poll == CopyStartSkip::Wait {
-                            "0"
-                        } else {
-                            "1"
-                        },
-                        "60",
-                    ),
-                )
-            });
-            state = copy_start_after_poll(state, skip);
+        for passed in ["0", "1", "0"] {
+            let clock = state
+                .as_ref()
+                .map(|started| capture_clock(started, &check(passed, "60")));
+            state = copy_start_after_poll(state, clock);
         }
         assert_eq!(state, None);
     }
@@ -1925,5 +3085,312 @@ mod tests {
             "change tracking version 3, CDC LSN 0x00000000000000000001"
         );
         assert_eq!(position_text(None, None), "the copy (no tables)");
+    }
+
+    #[test]
+    fn a_newer_capture_instance_with_the_key_and_a_start_is_the_one_to_switch_to() {
+        let table = orders();
+        let old = instance("dbo_orders", &["id", "note", "tag"], Some(5));
+        let new = instance("dbo_orders_2", &["id", "note", "tag", "extra"], Some(9));
+        let both = vec![new.clone(), old.clone()];
+        assert_eq!(successor_of(&both, &table, "dbo_orders"), Some(&new));
+        assert_eq!(successor_of(&both, &table, "dbo_orders_2"), None);
+        let not_started = vec![instance("dbo_orders_2", &["id"], None), old.clone()];
+        assert_eq!(successor_of(&not_started, &table, "dbo_orders"), None);
+        let keyless = vec![instance("dbo_orders_2", &["note"], Some(9)), old.clone()];
+        assert_eq!(successor_of(&keyless, &table, "dbo_orders"), None);
+        assert_eq!(
+            successor_of(&[new.clone()], &table, "dbo_orders"),
+            Some(&new)
+        );
+        let mut elsewhere = new.clone();
+        elsewhere.table = "other".to_owned();
+        assert_eq!(successor_of(&[elsewhere, old], &table, "dbo_orders"), None);
+    }
+
+    #[test]
+    fn switching_instances_adds_the_new_captured_columns_and_drops_the_ones_it_leaves_out() {
+        let table = orders();
+        let new = instance("dbo_orders_2", &["id", "note", "extra"], Some(9));
+        let now = names(&["note", "id", "tag", "extra", "secret"]);
+        assert_eq!(
+            switch_plan(&table, &new, &now),
+            SwitchPlan {
+                dropped: names(&["tag"]),
+                added: names(&["extra"]),
+                left_out: names(&["tag", "secret"]),
+            }
+        );
+        let same = instance("dbo_orders_2", &["id", "note", "tag"], Some(9));
+        assert_eq!(
+            switch_plan(&table, &same, &names(&["note", "id", "tag"])),
+            SwitchPlan {
+                dropped: Vec::new(),
+                added: Vec::new(),
+                left_out: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn added_columns_are_filled_from_the_source_rows_by_key() {
+        let table = orders();
+        let extra = SourceColumn {
+            name: "extra".to_owned(),
+            data_type: "nvarchar".to_owned(),
+            declared: "nvarchar(50)".to_owned(),
+            not_null: true,
+        };
+        assert_eq!(
+            add_column_statement(&table, &extra),
+            "ALTER TABLE [dbo].[orders] ADD [extra] nvarchar(50)"
+        );
+        assert_eq!(
+            drop_column_statement(&table, "tag"),
+            "ALTER TABLE [dbo].[orders] DROP COLUMN [tag]"
+        );
+        let added = vec![extra];
+        assert_eq!(
+            backfill_query(&table, &added),
+            "SELECT CAST([id] AS nvarchar(max)), CAST([extra] AS nvarchar(max)) FROM [dbo].[orders]"
+        );
+        assert_eq!(
+            backfill_statement(
+                &table,
+                &added,
+                &[Some("7".to_owned()), Some("it's".to_owned())]
+            ),
+            Some("UPDATE [dbo].[orders] SET [extra] = N'it''s' WHERE [id] = N'7'".to_owned())
+        );
+        assert_eq!(
+            backfill_statement(&table, &added, &[Some("7".to_owned()), None]),
+            Some("UPDATE [dbo].[orders] SET [extra] = NULL WHERE [id] = N'7'".to_owned())
+        );
+        assert_eq!(
+            backfill_statement(&table, &added, &[Some("7".to_owned())]),
+            None
+        );
+        assert_eq!(
+            backfill_statement(&table, &[], &[Some("7".to_owned())]),
+            None
+        );
+    }
+
+    fn context() -> PollContext<'static> {
+        PollContext {
+            target: "db:1433/app",
+            database: "app",
+            file: "app.db",
+        }
+    }
+
+    #[test]
+    fn a_column_dropped_on_the_source_is_dropped_from_a_cdc_table_in_the_file() {
+        let mut table = orders();
+        let mut work = PollWork::default();
+        follow_column_changes(&context(), &mut table, &names(&["note", "id"]), &mut work)
+            .ok()
+            .unwrap();
+        assert_eq!(
+            work.statements,
+            vec!["ALTER TABLE [dbo].[orders] DROP COLUMN [tag]".to_owned()]
+        );
+        assert_eq!(table.followed_names(), names(&["note", "id"]));
+        assert_eq!(work.counts.schema_changes, 1);
+        assert_eq!(
+            work.notices,
+            vec![Notice::Dropped {
+                table: "dbo.orders".to_owned(),
+                columns: names(&["tag"]),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_column_added_on_the_source_is_named_once_while_the_capture_instance_leaves_it_out() {
+        let mut table = orders();
+        let mut work = PollWork::default();
+        let now = names(&["note", "id", "tag", "extra"]);
+        follow_column_changes(&context(), &mut table, &now, &mut work)
+            .ok()
+            .unwrap();
+        assert!(work.statements.is_empty());
+        assert_eq!(table.left_out, names(&["extra"]));
+        assert_eq!(
+            work.notices,
+            vec![Notice::LeftOut {
+                table: "dbo.orders".to_owned(),
+                instance: "dbo_orders".to_owned(),
+                columns: names(&["extra"]),
+                try_command: "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL, @capture_instance = N'dbo_orders_2';".to_owned(),
+            }]
+        );
+        let mut again = PollWork::default();
+        follow_column_changes(&context(), &mut table, &now, &mut again)
+            .ok()
+            .unwrap();
+        assert!(again.notices.is_empty());
+        follow_column_changes(
+            &context(),
+            &mut table,
+            &names(&["note", "id", "tag"]),
+            &mut again,
+        )
+        .ok()
+        .unwrap();
+        assert!(table.left_out.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_key_column_or_a_gone_table_stops_the_follow() {
+        let mut table = orders();
+        let mut work = PollWork::default();
+        let dropped_key =
+            follow_column_changes(&context(), &mut table, &names(&["note", "tag"]), &mut work);
+        assert!(matches!(dropped_key, Err(PollError::Failed(_))));
+        let gone = follow_column_changes(&context(), &mut orders(), &[], &mut work);
+        assert!(matches!(gone, Err(PollError::Failed(_))));
+        let mut tracked = orders();
+        tracked.changes = ChangeSource::Tracking;
+        let added = follow_column_changes(
+            &context(),
+            &mut tracked,
+            &names(&["note", "id", "tag", "extra"]),
+            &mut work,
+        );
+        assert!(matches!(added, Err(PollError::Failed(_))));
+        assert!(work.statements.is_empty());
+        assert_eq!(
+            key_dropped("db:1433/app", "dbo.orders", "id"),
+            "cannot follow db:1433/app: primary key column id of dbo.orders was dropped on the source, so its CDC changes can no longer be applied by key. Follow again into a new file"
+        );
+    }
+
+    #[test]
+    fn a_resumed_cdc_table_follows_the_columns_the_file_and_the_source_share() {
+        let table = orders();
+        let resumed = resume_capture_columns(
+            &table,
+            &names(&["note", "id", "gone"]),
+            Some(&names(&["id", "note", "tag"])),
+        )
+        .unwrap();
+        let followed: Vec<&str> = resumed
+            .followed
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(followed, vec!["note", "id"]);
+        assert_eq!(resumed.left_out, names(&["tag"]));
+        assert_eq!(resumed.dropped, names(&["gone"]));
+        assert_eq!(
+            resume_capture_columns(
+                &table,
+                &names(&["note", "id", "tag"]),
+                Some(&names(&["id", "note"]))
+            ),
+            Err("the file has tag, which its CDC capture instance does not capture".to_owned())
+        );
+        assert!(resume_capture_columns(&table, &names(&["note", "id", "tag"]), None).is_ok());
+        let mut keyless = orders();
+        keyless.columns.retain(|column| column.name != "id");
+        assert_eq!(
+            resume_capture_columns(&keyless, &names(&["note", "id"]), None),
+            Err("primary key column id was dropped".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_second_capture_instance_is_suggested_by_a_free_name() {
+        assert_eq!(
+            second_instance_command("dbo", "orders", "dbo_orders"),
+            "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL, @capture_instance = N'dbo_orders_2';"
+        );
+        assert_eq!(
+            second_instance_command("dbo", "orders", "dbo_orders_2"),
+            "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL, @capture_instance = N'dbo_orders';"
+        );
+        assert_eq!(
+            enable_capture_command("dbo", "orders", None),
+            "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL;"
+        );
+    }
+
+    #[test]
+    fn a_connection_lost_mid_poll_is_retried_and_any_other_error_stops_the_follow() {
+        let lost = TdsClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(matches!(poll_error("db", &lost), PollError::Lost(_)));
+        let refused = TdsClientError::Server {
+            number: 313,
+            message: "An insufficient number of arguments".to_owned(),
+        };
+        assert!(matches!(poll_error("db", &refused), PollError::Failed(_)));
+    }
+
+    #[test]
+    fn a_poll_only_moves_the_saved_position_when_it_is_committed() {
+        let before = FollowPosition {
+            tables: vec![orders()],
+            version: None,
+            lsn: Some(Lsn(1)),
+            copy_started: None,
+            exact_after: None,
+            exact_from: Some(Lsn(1)),
+        };
+        let mut after = before.clone();
+        if let ChangeSource::Capture { next, .. } = &mut after.tables[0].changes {
+            *next = Lsn(9);
+        }
+        assert_eq!(
+            before.saved(),
+            vec!["cdc 0x00000000000000000001 0x00000000000000000001 dbo_orders".to_owned()]
+        );
+        assert_ne!(before.saved(), after.saved());
+        assert_eq!(before.shown(), "CDC LSN 0x00000000000000000001");
+    }
+
+    #[test]
+    fn notices_are_one_json_event_and_one_line_each() {
+        let (object, line) = notice_event(&Notice::Switched {
+            table: "dbo.orders".to_owned(),
+            from: "dbo_orders".to_owned(),
+            to: "dbo_orders_2".to_owned(),
+            added: names(&["extra"]),
+            dropped: Vec::new(),
+        });
+        let json = object.line();
+        assert!(json.contains("\"event\":\"capture_switched\""));
+        assert!(json.contains("\"to\":\"dbo_orders_2\""));
+        assert_eq!(
+            line,
+            "  switched        dbo.orders from CDC capture instance dbo_orders to dbo_orders_2 (added extra)\n"
+        );
+        let (object, line) = notice_event(&Notice::Dropped {
+            table: "dbo.orders".to_owned(),
+            columns: names(&["tag"]),
+        });
+        assert!(object.line().contains("\"event\":\"columns_dropped\""));
+        assert_eq!(
+            line,
+            "  dropped column  dbo.orders: tag (dropped on the source)\n"
+        );
+    }
+
+    #[test]
+    fn an_old_capture_instance_dropped_too_early_names_the_lost_range() {
+        assert_eq!(
+            capture_gap(
+                "db:1433/app",
+                "dbo.orders",
+                "dbo_orders",
+                "dbo_orders_2",
+                Lsn(9),
+                Lsn(5)
+            ),
+            "cannot follow db:1433/app: the CDC capture instance dbo_orders of dbo.orders was dropped before the follow reached the start of dbo_orders_2 (0x00000000000000000009), so the changes from 0x00000000000000000005 up to it are lost. Follow again into a new file, and drop an old capture instance only after the follow's capture_switched event"
+        );
     }
 }

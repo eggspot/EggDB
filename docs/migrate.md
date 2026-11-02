@@ -330,9 +330,16 @@ Each table is read the way the source records its changes:
   `cdc.fn_cdc_get_all_changes_<capture_instance>` for the LSN range from the last one it applied
   (`sys.fn_cdc_increment_lsn`) to `sys.fn_cdc_get_max_lsn()`. A delete removes the row by its
   primary key, an insert or an update's new image replaces it, and an update's old image removes
-  the old key, so a changed primary key moves too.
+  the old key, so a changed primary key moves too. When the instance supports net changes with
+  the primary key as its row identifier, EggDB reads `cdc.fn_cdc_get_net_changes_<capture_instance>`
+  instead (one final row per changed row), once every change the copy could have seen has been
+  applied.
 - **Change tracking** otherwise, when the database and the table have it on: `CHANGETABLE(CHANGES
   ...)` from the last version applied.
+- **CDC of some columns** when the table's only capture instance leaves out columns
+  (`@captured_column_list`) and the table has no change tracking: only the captured columns are
+  copied and followed, and the `copied` line names the rest. The instance must capture the
+  primary key.
 
 `--changes cdc` or `--changes change-tracking` reads every table one way, and names every table
 that lacks it before anything is copied. To turn CDC on (it needs SQL Server Agent running, for
@@ -352,12 +359,31 @@ The changes of one poll are applied together, so the copy is consistent at each 
 job has read it from the log, a few seconds after the commit. Each table's position is saved in
 the file with the changes, so after Ctrl-C (or a crash) the same command resumes without copying
 again, as long as the server and database are the same. A connection lost between polls is
-retried for `--reconnect-for` seconds, like PostgreSQL's. If a followed table's columns change on
-the source, the follow stops with exit 3 and names the change: make the same change to the table
-in the file, then resume. If CDC's cleanup job (or the change retention) removes changes the
+retried for `--reconnect-for` seconds, like PostgreSQL's, and so is one lost in the middle of a
+poll: the poll is read again from the last applied position, so no change is lost or applied
+twice. If a table read through change tracking changes its columns on the source, the follow
+stops with exit 3 and names the change: make the same change to the table in the file, then
+resume. A table read through CDC keeps following: a column dropped on the source is dropped from
+the file, and a column added is named (a capture instance keeps the columns it was created with).
+To follow the new column, create a second capture instance, as Microsoft describes for column
+changes; the follow reads the old instance up to the first change of the new one, switches,
+adds the column and fills it from the source, and prints `switched`. Drop the old instance only
+after that:
+
+```sql
+EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL,
+  @capture_instance = N'dbo_orders_2';
+```
+
+Once `eggdb follow` prints `switched … to dbo_orders_2`, the old instance can go:
+
+```sql
+EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'orders', @capture_instance = N'dbo_orders';
+```
+ If CDC's cleanup job (or the change retention) removes changes the
 follow has not applied yet, it stops with exit 3 and says so; follow again into a new file to
 copy the database afresh, and keep the retention longer than any pause in the follow. A CDC table needs a
-primary key, and a capture instance that leaves out columns is not used.
+primary key, and its capture instance must capture it.
 
 ## Oracle
 

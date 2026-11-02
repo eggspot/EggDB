@@ -12,7 +12,11 @@ change tracking and change data capture (CDC), and follows the database with egg
 - --changes cdc refuses notes, which has no capture instance;
 - a copy into an existing file that already has orders fails and drops the tables it created, so
   the same command runs again once orders is gone;
-- CDC cleanup past the follow's position ends the follow with a message to copy afresh.
+- CDC cleanup past the follow's position ends the follow with a message to copy afresh;
+- shop.items has a capture instance of some of its columns with net changes: the follow copies and
+  follows only those, names the column left out and a column added on the source, switches to a
+  second capture instance created after the ALTER (filling the new column), and resumes from the
+  saved instance and LSN.
 Every copy is compared with SQL Server through go-sqlcmd against eggdb serve --tds-listen.
 SQLCMD names go-sqlcmd (default sqlcmd)."
 
@@ -123,6 +127,15 @@ wait_for_capture() {
 
 compare() {
   local file=$1
+  shift
+  local queries=("$@")
+  if [ ${#queries[@]} -eq 0 ]; then
+    queries=(
+      "SELECT CONCAT(id, N'|', name, N'|', COALESCE(email, N'<null>')) FROM dbo.customers ORDER BY id"
+      "SELECT CONCAT(id, N'|', customer_id, N'|', amount, N'|', COALESCE(note, N'<null>')) FROM dbo.orders ORDER BY id"
+      "SELECT CONCAT(id, N'|', COALESCE(body, N'<null>')) FROM dbo.notes ORDER BY id"
+    )
+  fi
   "$eggdb" serve "$file" --listen 127.0.0.1:0 --tds-listen 127.0.0.1:0 --tls-self-signed --database app \
     > "$work/serve.out" 2> "$work/serve.err" < /dev/null &
   serve_pid=$!
@@ -133,10 +146,7 @@ compare() {
   local tds_port
   tds_port=$(sed -n 's/.*"tds_port":\([0-9]*\).*/\1/p' "$work/serve.out" | head -n 1)
   [ -n "$tds_port" ] || fail "eggdb serve printed no TDS port: $(cat "$work/serve.out" "$work/serve.err")"
-  for query in \
-    "SELECT CONCAT(id, N'|', name, N'|', COALESCE(email, N'<null>')) FROM dbo.customers ORDER BY id" \
-    "SELECT CONCAT(id, N'|', customer_id, N'|', amount, N'|', COALESCE(note, N'<null>')) FROM dbo.orders ORDER BY id" \
-    "SELECT CONCAT(id, N'|', COALESCE(body, N'<null>')) FROM dbo.notes ORDER BY id"; do
+  for query in "${queries[@]}"; do
     source_sql -Q "SET NOCOUNT ON; $query" > "$work/source.out" || fail "querying SQL Server failed: $query"
     SQLCMDPASSWORD=$served_password "$sqlcmd" -S "127.0.0.1,$tds_port" -U eggdb -d app -N true -C -b -h -1 -W \
       -Q "SET NOCOUNT ON; $query" > "$work/target.out" 2> "$work/eggdb.err" \
@@ -238,4 +248,70 @@ follow_pid=
 grep -q "CDC cleanup removed changes" "$work/follow.err" || fail "no cleanup message: $(cat "$work/follow.err")"
 grep -q "Follow again into a new file" "$work/follow.err" || fail "the cleanup message does not say to copy afresh"
 
-echo "ss-follow check passed: CDC and change tracking chosen per table, live inserts, updates, deletes and a key update, --changes change-tracking with --until caught-up, --changes cdc refused, a failed copy into an existing file undone, CDC cleanup detected"
+wait_for_output() {
+  local pattern=$1 file=$2 what=$3
+  for _ in $(seq 1 120); do
+    grep -q "$pattern" "$file" 2> /dev/null && return 0
+    kill -0 "$follow_pid" 2> /dev/null || fail "follow exited before $what: $(tail -n 3 "$file")"
+    sleep 0.5
+  done
+  fail "$what did not happen: $(tail -n 3 "$file")"
+}
+
+wait_for_change_row() {
+  local change_table=$1 marker=$2
+  for _ in $(seq 1 120); do
+    captured=$(source_sql -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM cdc.$change_table WHERE name = N'$marker'" 2> /dev/null || true)
+    [ "$(echo "$captured" | tr -d '[:space:]')" != "0" ] && [ -n "$(echo "$captured" | tr -d '[:space:]')" ] && return 0
+    sleep 1
+  done
+  fail "CDC's capture job did not capture '$marker' into cdc.$change_table"
+}
+
+items_query="SELECT CONCAT(id, N'|', name, N'|', COALESCE(extra, N'<null>')) FROM shop.items ORDER BY id"
+source_sql -Q "CREATE SCHEMA shop" || fail "cannot create the schema shop"
+source_sql -Q "SET NOCOUNT ON;
+CREATE TABLE shop.items (id int PRIMARY KEY, name nvarchar(100) NOT NULL, secret nvarchar(100) NULL);
+EXEC sys.sp_cdc_enable_table @source_schema = N'shop', @source_name = N'items', @role_name = NULL,
+  @captured_column_list = N'id, name', @supports_net_changes = 1;
+WITH n AS (SELECT TOP (500) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects)
+INSERT INTO shop.items (id, name, secret) SELECT i, CONCAT(N'item ', i), N'hidden' FROM n;" \
+  || fail "cannot create shop.items with a capture instance of some columns"
+sleep 2
+rm -f "$work/items.db"
+SQLCMDPASSWORD=$source_password "$eggdb" follow --create "$work/items.db" "$url" --schema shop --poll 1 --format json \
+  > "$work/items.out" 2> "$work/follow.err" &
+follow_pid=$!
+wait_for_output '"event":"copied"' "$work/items.out" "the copy of shop.items"
+grep -q '"table":"shop.items".*"changes":"cdc".*"net_changes":true.*"left_out":"secret"' "$work/items.out" \
+  || fail "shop.items was not copied through its capture instance of some columns: $(grep table_copied "$work/items.out")"
+source_sql -Q "SET NOCOUNT ON; UPDATE shop.items SET name = N'before switch' WHERE id <= 10; DELETE FROM shop.items WHERE id = 11;" \
+  || fail "the writes before the ALTER failed"
+source_sql -Q "ALTER TABLE shop.items ADD extra nvarchar(50) NULL" || fail "adding shop.items.extra failed"
+source_sql -Q "SET NOCOUNT ON; UPDATE shop.items SET extra = N'early' WHERE id <= 5;" || fail "the writes after the ALTER failed"
+wait_for_output '"event":"columns_left_out","table":"shop.items","instance":"shop_items","columns":"extra"' "$work/items.out" \
+  "naming the column added on the source"
+source_sql -Q "EXEC sys.sp_cdc_enable_table @source_schema = N'shop', @source_name = N'items', @role_name = NULL,
+  @capture_instance = N'shop_items_2', @captured_column_list = N'id, name, extra', @supports_net_changes = 1" \
+  || fail "creating the second capture instance failed"
+source_sql -Q "SET NOCOUNT ON; UPDATE shop.items SET name = N'after switch', extra = N'late' WHERE id BETWEEN 20 AND 30;
+INSERT INTO shop.items (id, name, extra) VALUES (9001, N'items marker', N'new');" || fail "the writes after the second instance failed"
+wait_for_change_row shop_items_2_CT 'items marker'
+wait_for_output '"event":"capture_switched","table":"shop.items","from":"shop_items","to":"shop_items_2","added":"extra"' \
+  "$work/items.out" "the switch to the second capture instance"
+sleep 4
+kill -TERM "$follow_pid"
+wait "$follow_pid" || fail "the follow of shop.items did not exit 0 after SIGTERM"
+follow_pid=
+grep -q '"event":"stopped","ok":true' "$work/items.out" || fail "no stopped event for shop.items"
+compare "$work/items.db" "$items_query"
+source_sql -Q "SET NOCOUNT ON; UPDATE shop.items SET extra = N'resumed', name = N'resumed marker' WHERE id = 40; DELETE FROM shop.items WHERE id = 41;" \
+  || fail "the writes while the follow was stopped failed"
+wait_for_change_row shop_items_2_CT 'resumed marker'
+SQLCMDPASSWORD=$source_password "$eggdb" follow "$work/items.db" "$url" --schema shop --until caught-up --format json \
+  > "$work/items-resumed.out" 2> "$work/follow.err" || fail "resuming the follow of shop.items failed"
+grep -q '"event":"resumed"' "$work/items-resumed.out" || fail "the second follow of shop.items did not resume"
+grep -q '"reason":"caught_up"' "$work/items-resumed.out" || fail "the resumed follow of shop.items did not catch up"
+compare "$work/items.db" "$items_query"
+
+echo "ss-follow check passed: CDC and change tracking chosen per table, live inserts, updates, deletes and a key update, --changes change-tracking with --until caught-up, --changes cdc refused, a failed copy into an existing file undone, CDC cleanup detected, a capture instance of some columns with net changes followed, switched to a second instance after a column was added, and resumed"

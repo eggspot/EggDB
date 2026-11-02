@@ -3918,7 +3918,12 @@ applications at it now`, or `stopped: the source closed the connection; …` wit
 ### JSON
 One line per event: `connected`, `slot`, `schema`, `table_copied`, `copied`, `stopped`. The last
 carries `ok`, `reason` (`interrupt`, `caught_up` or `source_closed`), the counts, `lsn` or
-`change_version`, `slot_dropped`, `publication_dropped` and `verdict`.
+`change_version`, `slot_dropped`, `publication_dropped` and `verdict`. A SQL Server follow's
+`table_copied` also carries `changes` (`cdc` or `change_tracking`), `net_changes` and, for a CDC
+capture instance of some of the columns, `left_out` (the columns not copied or followed). Its
+column events are `columns_left_out` (a column added on the source that the capture instance does
+not capture, with `try`, the command for a second instance), `columns_dropped` and
+`capture_switched` (`from`, `to`, `added`, `dropped`); `stopped` carries `schema_changes` (D282).
 
 ### Errors
 Every precondition is checked before the first row is copied, and each check names every table
@@ -3933,9 +3938,13 @@ that fails it, not only the first. Each message says what is wrong and how to fi
 - SQL Server's change tracking and CDC are off for the database (try `ALTER DATABASE … SET
   CHANGE_TRACKING = ON …`), CDC is off with `--changes cdc` (try `EXEC sys.sp_cdc_enable_db;`),
   or some tables have neither (try `ALTER TABLE … ENABLE CHANGE_TRACKING;` or
-  `EXEC sys.sp_cdc_enable_table …`), or a table read through CDC has no primary key;
+  `EXEC sys.sp_cdc_enable_table …`), or a table's only capture instance leaves out a primary key
+  column (named, with a second instance's command), or a table read through CDC has no primary
+  key;
 - the change retention was exceeded, or CDC's cleanup removed changes not yet applied, while
-  following.
+  following;
+- a CDC table's primary key column was dropped on the source, or its old capture instance was
+  dropped before the follow reached the start of the new one (the lost LSN range is named).
 
 Usage errors (exit 2) cover a password in the URL, an unknown scheme, `--poll`, `--changes` or
 `--publication` for the wrong kind of source, `--changes` with any value but `cdc` or
@@ -3956,8 +3965,16 @@ stdin as the file.
 - **Second Ctrl-C.** A second Ctrl-C is not handled separately yet.
 - **Failed first copies.** With `--create`, a PostgreSQL copy that fails removes the new file.
   The file is not built as `<file>.following` and renamed into place.
-- **SQL Server sources.** A SQL Server copy reads change tracking only; CDC is a later item. The
-  changes of one poll are applied as one transaction.
+- **SQL Server sources.** Each table is read through CDC or change tracking (D261). A capture
+  instance of some of the columns is used when nothing covers every column: only its columns are
+  copied and followed, and the rest are named. An instance that supports net changes, keyed by
+  the primary key, is read with `cdc.fn_cdc_get_net_changes_<instance>` once every change the copy
+  could have seen has been applied one by one; there is no flag for it. A column dropped on the
+  source is dropped from the file; a column added is named until a second capture instance
+  includes it, and the follow then reads the old instance up to the new one's first LSN and
+  switches, adding the column and filling it from the source. A connection lost in the middle of
+  a poll is retried like one lost between polls, and the poll is read again from the last
+  applied position (D282). The changes of one poll are applied as one transaction.
 
 ## 31. `eggdb serve` on Unix sockets (part 4.M1-1)
 
