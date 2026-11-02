@@ -2,11 +2,15 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::fmt;
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use super::cocoa::{self, CgRect, CgSize};
-use super::{AccessNode, KeyPress, Window, WindowError, WindowEvent, WindowOptions, check_frame};
+use super::{
+    AccessNode, KeyPress, OpenFileDialog, Window, WindowError, WindowEvent, WindowOptions,
+    check_frame,
+};
 
 mod accessibility;
 
@@ -45,6 +49,12 @@ const VIEW_CLASS: &CStr = c"EggDBView";
 const VOID_OBJECT_TYPES: &CStr = c"v@:@";
 const OBJECT_GETTER_TYPES: &CStr = c"@@:";
 const DRAW_RECT_TYPES: &CStr = c"v@:{CGRect={CGPoint=dd}{CGSize=dd}}";
+const DRAG_OPERATION_TYPES: &CStr = c"Q@:@";
+const FILE_URL_PASTEBOARD_TYPE: &str = "public.file-url";
+const DRAG_OPERATION_NONE: u64 = 0;
+const DRAG_OPERATION_COPY: u64 = 1;
+const MODAL_RESPONSE_OK: u64 = 1;
+const MOST_DROPPED_FILES: u64 = 1024;
 
 const RTLD_LAZY: c_int = 0x1;
 const RTLD_LOCAL: c_int = 0x4;
@@ -85,6 +95,8 @@ type SendVoidSize = unsafe extern "C" fn(Id, Sel, CgSize);
 type SendVoidRect = unsafe extern "C" fn(Id, Sel, CgRect);
 type SendIdInteger = unsafe extern "C" fn(Id, Sel, isize) -> Id;
 type SendIdObjects = unsafe extern "C" fn(Id, Sel, *const Id, usize) -> Id;
+type SendIdIdId = unsafe extern "C" fn(Id, Sel, Id, Id) -> Id;
+type SendIdIdBool = unsafe extern "C" fn(Id, Sel, Id, ObjcBool) -> Id;
 type PostNotification = unsafe extern "C" fn(Id, Id);
 type SendIdF64 = unsafe extern "C" fn(Id, Sel, f64) -> Id;
 type SendIdRect = unsafe extern "C" fn(Id, Sel, CgRect) -> Id;
@@ -194,6 +206,8 @@ struct Runtime {
     send_void_rect: SendVoidRect,
     send_id_integer: SendIdInteger,
     send_id_objects: SendIdObjects,
+    send_id_id_id: SendIdIdId,
+    send_id_id_bool: SendIdIdBool,
     post_notification: PostNotification,
     send_id_f64: SendIdF64,
     send_id_rect: SendIdRect,
@@ -254,6 +268,8 @@ impl Runtime {
             send_void_rect: load!(objc, c"objc_msgSend", SendVoidRect),
             send_id_integer: load!(objc, c"objc_msgSend", SendIdInteger),
             send_id_objects: load!(objc, c"objc_msgSend", SendIdObjects),
+            send_id_id_id: load!(objc, c"objc_msgSend", SendIdIdId),
+            send_id_id_bool: load!(objc, c"objc_msgSend", SendIdIdBool),
             post_notification: load!(appkit, c"NSAccessibilityPostNotification", PostNotification),
             send_id_f64: load!(objc, c"objc_msgSend", SendIdF64),
             send_id_rect: load!(objc, c"objc_msgSend", SendIdRect),
@@ -402,7 +418,10 @@ impl Runtime {
         let resigned_key: extern "C" fn(Id, Sel, Id) = window_did_resign_key;
         let children: extern "C" fn(Id, Sel) -> Id = accessibility::accessibility_children;
         let focused: extern "C" fn(Id, Sel) -> Id = accessibility::accessibility_focused_element;
-        let methods: [(&CStr, *const c_void, &CStr); 11] = [
+        let drag_entered: extern "C" fn(Id, Sel, Id) -> u64 = dragging_entered;
+        let drag_exited: extern "C" fn(Id, Sel, Id) = dragging_exited;
+        let drag_performed: extern "C" fn(Id, Sel, Id) -> ObjcBool = perform_drag_operation;
+        let methods: [(&CStr, *const c_void, &CStr); 14] = [
             (c"drawRect:", draw as *const c_void, DRAW_RECT_TYPES),
             (c"keyDown:", key as *const c_void, VOID_OBJECT_TYPES),
             (
@@ -445,6 +464,21 @@ impl Runtime {
                 c"accessibilityFocusedUIElement",
                 focused as *const c_void,
                 OBJECT_GETTER_TYPES,
+            ),
+            (
+                c"draggingEntered:",
+                drag_entered as *const c_void,
+                DRAG_OPERATION_TYPES,
+            ),
+            (
+                c"draggingExited:",
+                drag_exited as *const c_void,
+                VOID_OBJECT_TYPES,
+            ),
+            (
+                c"performDragOperation:",
+                drag_performed as *const c_void,
+                BOOL_DELEGATE_TYPES,
             ),
         ];
         for (name, implementation, types) in methods {
@@ -562,7 +596,174 @@ extern "C" fn window_did_resign_key(view: Id, _selector: Sel, _notification: Id)
     }
 }
 
+extern "C" fn dragging_entered(view: Id, _selector: Sel, sender: Id) -> u64 {
+    let Some(state) = state_for(view) else {
+        return DRAG_OPERATION_NONE;
+    };
+    let paths = state.runtime.with_pool(|| state.dragged_files(sender));
+    if paths.is_empty() {
+        return DRAG_OPERATION_NONE;
+    }
+    state.push(WindowEvent::FileDragEntered(paths));
+    DRAG_OPERATION_COPY
+}
+
+extern "C" fn dragging_exited(view: Id, _selector: Sel, _sender: Id) {
+    if let Some(state) = state_for(view) {
+        state.push(WindowEvent::FileDragLeft);
+    }
+}
+
+extern "C" fn perform_drag_operation(view: Id, _selector: Sel, sender: Id) -> ObjcBool {
+    let Some(state) = state_for(view) else {
+        return NO;
+    };
+    let paths = state.runtime.with_pool(|| state.dragged_files(sender));
+    if paths.is_empty() {
+        return NO;
+    }
+    state.push(WindowEvent::FilesDropped(paths));
+    YES
+}
+
 impl WindowState {
+    fn dragged_files(&self, sender: Id) -> Vec<PathBuf> {
+        if sender.is_null() {
+            return Vec::new();
+        }
+        let runtime = &self.runtime;
+        let Ok(url_class) = runtime.class(c"NSURL") else {
+            return Vec::new();
+        };
+        let Ok(array_class) = runtime.class(c"NSArray") else {
+            return Vec::new();
+        };
+        // SAFETY: `sender` is the `NSDraggingInfo` AppKit passed to the drag method being
+        // answered; `draggingPasteboard` returns its pasteboard.
+        let pasteboard = unsafe { (runtime.send_id)(sender, runtime.selector(c"draggingPasteboard")) };
+        if pasteboard.is_null() {
+            return Vec::new();
+        }
+        let classes = [url_class];
+        // SAFETY: `classes` holds one live class object, and the count says so; the array
+        // returned is autoreleased into the caller's pool.
+        let class_list = unsafe {
+            (runtime.send_id_objects)(
+                array_class,
+                runtime.selector(c"arrayWithObjects:count:"),
+                classes.as_ptr(),
+                classes.len(),
+            )
+        };
+        if class_list.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: `pasteboard` is live, `class_list` is an `NSArray` of classes, and nil
+        // options are allowed; the array returned is autoreleased.
+        let urls = unsafe {
+            (runtime.send_id_id_id)(
+                pasteboard,
+                runtime.selector(c"readObjectsForClasses:options:"),
+                class_list,
+                std::ptr::null_mut(),
+            )
+        };
+        if urls.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: `urls` is a live `NSArray`; `count` returns an `NSUInteger`.
+        let count = unsafe { (runtime.send_u64)(urls, runtime.selector(c"count")) };
+        let mut paths = Vec::new();
+        for index in 0..count.min(MOST_DROPPED_FILES) {
+            // SAFETY: `index` is below the array's count; the element is an `NSURL`.
+            let url = unsafe {
+                (runtime.send_id_integer)(urls, runtime.selector(c"objectAtIndex:"), index as isize)
+            };
+            if url.is_null() {
+                continue;
+            }
+            // SAFETY: `url` is a live `NSURL`; `filePathURL` is nil for a URL that names no file.
+            let file_url = unsafe { (runtime.send_id)(url, runtime.selector(c"filePathURL")) };
+            if file_url.is_null() {
+                continue;
+            }
+            // SAFETY: `file_url` is a live file `NSURL`; `path` returns an `NSString`.
+            let path = unsafe { (runtime.send_id)(file_url, runtime.selector(c"path")) };
+            let text = runtime.text(path);
+            if !text.is_empty() {
+                paths.push(PathBuf::from(text));
+            }
+        }
+        paths
+    }
+
+    fn accept_file_drops(&self, view: Id) -> Result<(), WindowError> {
+        let runtime = &self.runtime;
+        let file_type = runtime.string(FILE_URL_PASTEBOARD_TYPE)?;
+        let array_class = runtime.class(c"NSArray")?;
+        let types = [file_type];
+        // SAFETY: `types` holds one live `NSString`, and the count says so; the array
+        // retains it and is autoreleased into the caller's pool.
+        let list = unsafe {
+            (runtime.send_id_objects)(
+                array_class,
+                runtime.selector(c"arrayWithObjects:count:"),
+                types.as_ptr(),
+                types.len(),
+            )
+        };
+        self.send_object_to(view, c"registerForDraggedTypes:", list);
+        self.send_to(file_type, c"release");
+        Ok(())
+    }
+
+    fn choose_file(&self, dialog: &OpenFileDialog) -> Result<Option<PathBuf>, WindowError> {
+        let runtime = &self.runtime;
+        let panel_class = runtime.class(c"NSOpenPanel")?;
+        // SAFETY: `openPanel` on `NSOpenPanel` returns an autoreleased panel.
+        let panel = unsafe { (runtime.send_id)(panel_class, runtime.selector(c"openPanel")) };
+        if panel.is_null() {
+            return Err(WindowError::Protocol(
+                "the open panel could not be created".to_owned(),
+            ));
+        }
+        self.send_flag_to(panel, c"setCanChooseFiles:", YES);
+        self.send_flag_to(panel, c"setCanChooseDirectories:", NO);
+        self.send_flag_to(panel, c"setAllowsMultipleSelection:", NO);
+        if let Some(directory) = &dialog.start_in {
+            let url_class = runtime.class(c"NSURL")?;
+            let path = runtime.string(&directory.to_string_lossy())?;
+            // SAFETY: `path` is a live `NSString`; the class method returns an autoreleased
+            // directory `NSURL`.
+            let url = unsafe {
+                (runtime.send_id_id_bool)(
+                    url_class,
+                    runtime.selector(c"fileURLWithPath:isDirectory:"),
+                    path,
+                    YES,
+                )
+            };
+            self.send_to(path, c"release");
+            self.send_object_to(panel, c"setDirectoryURL:", url);
+        }
+        // SAFETY: `panel` is live; `runModal` runs the panel's own event loop on this, the
+        // main, thread and returns an `NSModalResponse`.
+        let response = unsafe { (runtime.send_u64)(panel, runtime.selector(c"runModal")) };
+        self.send_object_to(self.window.get(), c"makeKeyAndOrderFront:", std::ptr::null_mut());
+        if response != MODAL_RESPONSE_OK {
+            return Ok(None);
+        }
+        // SAFETY: `panel` is live; `URL` returns the chosen file's `NSURL`, or nil.
+        let url = unsafe { (runtime.send_id)(panel, runtime.selector(c"URL")) };
+        if url.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: `url` is a live file `NSURL`; `path` returns an `NSString`.
+        let path = unsafe { (runtime.send_id)(url, runtime.selector(c"path")) };
+        let text = runtime.text(path);
+        Ok((!text.is_empty()).then(|| PathBuf::from(text)))
+    }
+
     fn push(&self, event: WindowEvent) {
         if let Ok(mut events) = self.events.try_borrow_mut() {
             events.push_back(event);
@@ -850,6 +1051,7 @@ impl WindowState {
         }
         state.view.set(view);
         register_view(view, state);
+        state.accept_file_drops(view)?;
         state.send_object_to(window, c"setContentView:", view);
         state.send_object_to(window, c"setDelegate:", view);
         state.send_to(window, c"center");
@@ -996,6 +1198,14 @@ impl Window for CocoaWindow {
         state
             .runtime
             .with_pool(|| state.update_accessibility(nodes));
+    }
+
+    fn choose_file_to_open(
+        &mut self,
+        dialog: &OpenFileDialog,
+    ) -> Result<Option<PathBuf>, WindowError> {
+        let state = &self.state;
+        state.runtime.with_pool(|| state.choose_file(dialog))
     }
 
     fn next_event(

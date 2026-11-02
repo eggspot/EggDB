@@ -13,6 +13,7 @@
 //! Linux and the BSDs ([`atspi`]).
 
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod atspi;
@@ -132,7 +133,7 @@ impl KeyPress {
 }
 
 /// Something that happened to a window.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
     /// A key was pressed while the window had the keyboard focus.
     Key(KeyPress),
@@ -151,6 +152,40 @@ pub enum WindowEvent {
     Focused(bool),
     /// The user asked to close the window (its close button or the window manager).
     CloseRequested,
+    /// A drag carrying these files came over the window. Backends that cannot see a drag
+    /// before its drop never send it.
+    FileDragEntered(Vec<PathBuf>),
+    /// The drag that [`WindowEvent::FileDragEntered`] announced left the window without a drop.
+    FileDragLeft,
+    /// Files were dropped onto the window, in the order the system listed them.
+    FilesDropped(Vec<PathBuf>),
+}
+
+/// One choice of an open-file dialog's file-type menu: its name and the patterns it shows,
+/// such as `EggDB databases` with `*.eggdb`, or `All files` with `*.*`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFilter {
+    /// The name the menu shows.
+    pub name: String,
+    /// The file name patterns, such as `*.eggdb`.
+    pub patterns: Vec<String>,
+}
+
+/// What an open-file dialog asks for ([`Window::choose_file_to_open`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OpenFileDialog {
+    /// The directory the dialog starts in; the system's choice when `None`.
+    pub start_in: Option<PathBuf>,
+    /// The file-type menu, the first one selected. Systems whose dialog has no such menu
+    /// (macOS's open panel) show every file.
+    pub filters: Vec<FileFilter>,
+}
+
+/// Whether this system has an open-file dialog that [`Window::choose_file_to_open`] shows:
+/// macOS (`NSOpenPanel`) and Windows (the common file dialog). Linux, the BSDs and the browser
+/// have none in the platform layer yet.
+pub const fn has_file_dialog() -> bool {
+    cfg!(any(target_os = "macos", windows))
 }
 
 /// Why a window could not be opened or used.
@@ -303,6 +338,19 @@ pub trait Window: fmt::Debug {
     fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
         let _ = nodes;
     }
+
+    /// Shows the system's open-file dialog over this window and waits for it: the chosen
+    /// file, or `None` when the user cancelled. Systems without one ([`has_file_dialog`]
+    /// is `false`) answer [`WindowError::Unsupported`].
+    fn choose_file_to_open(
+        &mut self,
+        dialog: &OpenFileDialog,
+    ) -> Result<Option<PathBuf>, WindowError> {
+        let _ = dialog;
+        Err(WindowError::Unsupported(
+            "this system has no open-file dialog in the platform layer yet",
+        ))
+    }
 }
 
 /// Checks that `rgba` holds exactly `width` × `height` pixels of four bytes.
@@ -371,6 +419,14 @@ pub fn open_window(options: &WindowOptions) -> Result<Box<dyn Window>, WindowErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_file_dialog_exists_exactly_on_macos_and_windows() {
+        assert_eq!(
+            has_file_dialog(),
+            cfg!(target_os = "macos") || cfg!(windows)
+        );
+    }
 
     #[test]
     fn a_frame_must_hold_four_bytes_per_pixel() {

@@ -2,9 +2,12 @@
 //! translating virtual-key codes and `WM_CHAR` UTF-16 units into the GUI's keys, reading the
 //! modifier state, packing the words of a message's parameters, turning a monitor's DPI into a
 //! scale, and converting an RGBA frame into the BGRA rows a 32-bit device-independent bitmap
-//! holds. The values come from Microsoft's public Win32 documentation.
+//! holds, the filter list and path buffers of the open-file dialog. The values come from
+//! Microsoft's public Win32 documentation.
 
-use super::{Key, KeyPress, Modifiers};
+use std::path::PathBuf;
+
+use super::{FileFilter, Key, KeyPress, Modifiers};
 
 /// The DPI Windows treats as a scale of 1.
 pub const BASE_DPI: u32 = 96;
@@ -196,11 +199,78 @@ pub fn wide_string(text: &str) -> Vec<u16> {
         .collect()
 }
 
+/// The `lpstrFilter` of an `OPENFILENAMEW`: each filter's name and its patterns joined by
+/// `;`, each string NUL-terminated, the list ended by a second NUL. NULs inside a name or a
+/// pattern are dropped; an empty list is a lone pair of NULs.
+pub fn open_file_filter(filters: &[FileFilter]) -> Vec<u16> {
+    let mut wide = Vec::new();
+    for filter in filters {
+        let patterns = filter.patterns.join(";");
+        for text in [filter.name.as_str(), patterns.as_str()] {
+            wide.extend(text.encode_utf16().filter(|&unit| unit != 0));
+            wide.push(0);
+        }
+    }
+    if wide.is_empty() {
+        wide.push(0);
+    }
+    wide.push(0);
+    wide
+}
+
+/// The path the dialog wrote into `buffer`: the UTF-16 units before the first NUL, or `None`
+/// when the buffer holds no path or the units are not valid UTF-16.
+pub fn path_from_wide_buffer(buffer: &[u16]) -> Option<PathBuf> {
+    let length = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
+    let units = buffer.get(..length)?;
+    if units.is_empty() {
+        return None;
+    }
+    String::from_utf16(units).ok().map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const HELD: i16 = i16::MIN;
+
+    #[test]
+    fn the_dialog_filter_is_name_and_patterns_pairs_ending_in_two_nuls() {
+        let filters = [
+            FileFilter {
+                name: "EggDB databases".to_owned(),
+                patterns: vec!["*.eggdb".to_owned()],
+            },
+            FileFilter {
+                name: "All files".to_owned(),
+                patterns: vec!["*.*".to_owned(), "*\0x".to_owned()],
+            },
+        ];
+        let expected: Vec<u16> = "EggDB databases\0*.eggdb\0All files\0*.*;*x\0\0"
+            .encode_utf16()
+            .collect();
+        assert_eq!(open_file_filter(&filters), expected);
+        assert_eq!(open_file_filter(&[]), vec![0, 0]);
+    }
+
+    #[test]
+    fn a_dialog_buffer_reads_up_to_its_first_nul() {
+        let mut buffer = vec![0u16; 16];
+        for (slot, unit) in buffer.iter_mut().zip("C:\\a.eggdb".encode_utf16()) {
+            *slot = unit;
+        }
+        assert_eq!(
+            path_from_wide_buffer(&buffer),
+            Some(PathBuf::from("C:\\a.eggdb"))
+        );
+        assert_eq!(path_from_wide_buffer(&[0; 4]), None);
+        assert_eq!(path_from_wide_buffer(&[0xD800, 0]), None);
+        assert_eq!(path_from_wide_buffer(&[]), None);
+    }
 
     fn with(shift: bool, control: bool, alt: bool) -> Modifiers {
         Modifiers {

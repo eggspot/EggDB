@@ -3,12 +3,14 @@ mod automation;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use super::win32::{self, Utf16Characters};
 use super::{
-    AccessNode, KeyPress, Modifiers, Window, WindowError, WindowEvent, WindowOptions, check_frame,
+    AccessNode, KeyPress, Modifiers, OpenFileDialog, Window, WindowError, WindowEvent,
+    WindowOptions, check_frame,
 };
 use automation::Automation;
 
@@ -53,6 +55,14 @@ const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_SYSKEYDOWN: u32 = 0x0104;
 const WM_DPICHANGED: u32 = 0x02E0;
+const WM_DROPFILES: u32 = 0x0233;
+const DRAG_QUERY_COUNT: u32 = u32::MAX;
+const MOST_DROPPED_FILES: u32 = 1024;
+const OFN_NOCHANGEDIR: u32 = 0x0000_0008;
+const OFN_PATHMUSTEXIST: u32 = 0x0000_0800;
+const OFN_FILEMUSTEXIST: u32 = 0x0000_1000;
+const OFN_EXPLORER: u32 = 0x0008_0000;
+const DIALOG_PATH_UNITS: usize = 32_768;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -129,9 +139,76 @@ struct BitmapInfo {
     colors: [u32; 1],
 }
 
+#[repr(C)]
+struct OpenFileName {
+    struct_size: u32,
+    owner: Handle,
+    instance: Handle,
+    filter: *const u16,
+    custom_filter: *mut u16,
+    custom_filter_units: u32,
+    filter_index: u32,
+    file: *mut u16,
+    file_units: u32,
+    file_title: *mut u16,
+    file_title_units: u32,
+    initial_directory: *const u16,
+    title: *const u16,
+    flags: u32,
+    file_offset: u16,
+    file_extension: u16,
+    default_extension: *const u16,
+    custom_data: isize,
+    hook: *const c_void,
+    template_name: *const u16,
+    reserved_pointer: *mut c_void,
+    reserved_word: u32,
+    flags_ex: u32,
+}
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> Handle;
+}
+
+#[link(name = "comdlg32")]
+unsafe extern "system" {
+    fn GetOpenFileNameW(dialog: *mut OpenFileName) -> i32;
+    fn CommDlgExtendedError() -> u32;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn DragAcceptFiles(window: Handle, accept: i32);
+    fn DragQueryFileW(drop: Handle, index: u32, file: *mut u16, units: u32) -> u32;
+    fn DragFinish(drop: Handle);
+}
+
+fn dropped_files(drop: Handle) -> Vec<PathBuf> {
+    // SAFETY: `drop` is the `HDROP` of the `WM_DROPFILES` being handled; asking for the
+    // count with a null buffer writes nothing.
+    let count = unsafe { DragQueryFileW(drop, DRAG_QUERY_COUNT, std::ptr::null_mut(), 0) };
+    let mut paths = Vec::new();
+    for index in 0..count.min(MOST_DROPPED_FILES) {
+        // SAFETY: as above; a null buffer asks for the path's length in UTF-16 units.
+        let units = unsafe { DragQueryFileW(drop, index, std::ptr::null_mut(), 0) };
+        let Some(capacity) = (units as usize).checked_add(1) else {
+            continue;
+        };
+        if capacity > DIALOG_PATH_UNITS {
+            continue;
+        }
+        let mut buffer = vec![0u16; capacity];
+        // SAFETY: `buffer` holds `capacity` writable units, the path's length plus its NUL,
+        // which is the size passed.
+        unsafe { DragQueryFileW(drop, index, buffer.as_mut_ptr(), capacity as u32) };
+        if let Some(path) = win32::path_from_wide_buffer(&buffer) {
+            paths.push(path);
+        }
+    }
+    // SAFETY: `drop` is released once, after the last query.
+    unsafe { DragFinish(drop) };
+    paths
 }
 
 #[link(name = "user32")]
@@ -428,6 +505,12 @@ fn handle_message(
         WM_ERASEBKGND => return Some(1),
         WM_GETOBJECT => return state.automation.answer_get_object(window, wparam, lparam),
         WM_CLOSE => state.push(WindowEvent::CloseRequested),
+        WM_DROPFILES => {
+            let paths = dropped_files(std::ptr::without_provenance_mut(wparam));
+            if !paths.is_empty() {
+                state.push(WindowEvent::FilesDropped(paths));
+            }
+        }
         WM_SETFOCUS => state.push(WindowEvent::Focused(true)),
         WM_KILLFOCUS => state.push(WindowEvent::Focused(false)),
         WM_SIZE => {
@@ -621,6 +704,9 @@ impl Win32Window {
         }
         let this = Self { window, state };
         this.state.automation.attach(this.window);
+        // SAFETY: `window` was just created by this backend; the call only lets it receive
+        // `WM_DROPFILES`.
+        unsafe { DragAcceptFiles(this.window, 1) };
         // SAFETY: `window` was just created by this backend.
         let dpi = unsafe { GetDpiForWindow(this.window) };
         this.state
@@ -760,6 +846,60 @@ impl Window for Win32Window {
                     MWMO_INPUTAVAILABLE,
                 )
             };
+        }
+    }
+
+    fn choose_file_to_open(
+        &mut self,
+        dialog: &OpenFileDialog,
+    ) -> Result<Option<PathBuf>, WindowError> {
+        let filter = win32::open_file_filter(&dialog.filters);
+        let initial = dialog
+            .start_in
+            .as_ref()
+            .map(|directory| win32::wide_string(&directory.to_string_lossy()));
+        let mut file = vec![0u16; DIALOG_PATH_UNITS];
+        let mut request = OpenFileName {
+            struct_size: std::mem::size_of::<OpenFileName>() as u32,
+            owner: self.window,
+            instance: std::ptr::null_mut(),
+            filter: filter.as_ptr(),
+            custom_filter: std::ptr::null_mut(),
+            custom_filter_units: 0,
+            filter_index: 1,
+            file: file.as_mut_ptr(),
+            file_units: DIALOG_PATH_UNITS as u32,
+            file_title: std::ptr::null_mut(),
+            file_title_units: 0,
+            initial_directory: initial.as_ref().map_or(std::ptr::null(), |wide| wide.as_ptr()),
+            title: std::ptr::null(),
+            flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            file_offset: 0,
+            file_extension: 0,
+            default_extension: std::ptr::null(),
+            custom_data: 0,
+            hook: std::ptr::null(),
+            template_name: std::ptr::null(),
+            reserved_pointer: std::ptr::null_mut(),
+            reserved_word: 0,
+            flags_ex: 0,
+        };
+        // SAFETY: `request` is a complete `OPENFILENAMEW` of its own size; the filter, the
+        // initial directory and the file buffer it points to stay alive for the call, and the
+        // buffer holds `file_units` writable units. The dialog runs its own message loop,
+        // which reaches this window's procedure through shared references only.
+        let chosen = unsafe { GetOpenFileNameW(&mut request) };
+        if chosen != 0 {
+            return Ok(win32::path_from_wide_buffer(&file));
+        }
+        // SAFETY: the call has no parameters and reads the thread's last dialog error.
+        let error = unsafe { CommDlgExtendedError() };
+        if error == 0 {
+            Ok(None)
+        } else {
+            Err(WindowError::Io(format!(
+                "the open-file dialog failed with error {error:#06x}"
+            )))
         }
     }
 }
