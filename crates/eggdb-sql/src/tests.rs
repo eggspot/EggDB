@@ -1918,6 +1918,14 @@ fn hash_joins_keep_every_column_read_after_the_join() {
             "SELECT l.id FROM l JOIN r ON r.id = l.k WHERE EXISTS (SELECT 1 FROM h WHERE h.w = r.w) ORDER BY 1",
             "SELECT l.id FROM l JOIN r ON r.id + 0 = l.k WHERE EXISTS (SELECT 1 FROM h WHERE h.w = r.w) ORDER BY 1",
         ),
+        (
+            "SELECT l.id FROM l WHERE EXISTS (SELECT 1 FROM h JOIN r ON r.id = h.k WHERE r.id = l.k) ORDER BY 1",
+            "SELECT l.id FROM l WHERE EXISTS (SELECT 1 FROM h JOIN r ON r.id + 0 = h.k WHERE r.id = l.k) ORDER BY 1",
+        ),
+        (
+            "SELECT l.id, (SELECT count(*) FROM h JOIN r ON r.id = h.k WHERE r.id = l.k) FROM l ORDER BY 1",
+            "SELECT l.id, (SELECT count(*) FROM h JOIN r ON r.id + 0 = h.k WHERE r.id = l.k) FROM l ORDER BY 1",
+        ),
     ];
     for (hashed, looped) in pairs {
         let expected = last(&mut session, looped);

@@ -3364,7 +3364,7 @@ fn select_or_explain(
                 reader,
                 joined,
                 first_key,
-                joined.needed_columns(select),
+                joined.needed_columns(select, late),
                 joined.filters_by_level(bound_filter.as_ref()),
                 &mut tables.row_counts,
                 &mut memory,

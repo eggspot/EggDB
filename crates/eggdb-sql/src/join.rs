@@ -827,9 +827,9 @@ fn mark_exprs(list: &[Source<'_>], needed: &mut [Vec<bool>], exprs: &[&Expr]) {
     }
 }
 
-/// The columns of each source a joined `SELECT` decodes, and the subset its output reads
-/// (select list, `GROUP BY`, `HAVING` and `ORDER BY`) once the join conditions and `WHERE`
-/// have been applied.
+/// The columns of each source a joined `SELECT` decodes, and the subset read once the join
+/// conditions and `WHERE` have been applied: the select list, `GROUP BY`, `HAVING`, `ORDER BY`
+/// and the correlated part of `WHERE` evaluated after the join.
 pub(crate) struct NeededColumns {
     read: Vec<Vec<bool>>,
     output: Vec<Vec<bool>>,
@@ -1649,7 +1649,7 @@ fn visit_exprs<'e>(expr: &'e Expr, visit: &mut dyn FnMut(&'e Expr)) {
 }
 
 impl JoinedFrom<'_> {
-    pub(crate) fn needed_columns(&self, select: &Select) -> NeededColumns {
+    pub(crate) fn needed_columns(&self, select: &Select, late: Option<&Expr>) -> NeededColumns {
         let list = &self.sources.list;
         let mut needed: Vec<Vec<bool>> = list
             .iter()
@@ -1667,6 +1667,7 @@ impl JoinedFrom<'_> {
         output_exprs.extend(select.group_by.iter());
         output_exprs.extend(select.having.iter());
         output_exprs.extend(select.order_by.iter().map(|item| &item.expr));
+        output_exprs.extend(late);
         mark_exprs(list, &mut needed, &output_exprs);
         let output = needed.clone();
         let mut condition_exprs: Vec<&Expr> = select.filter.iter().collect();
