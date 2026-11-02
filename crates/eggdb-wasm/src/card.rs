@@ -3,9 +3,9 @@ use std::cell::{Cell, RefCell};
 use eggdb_gui::browser::{
     accessibility_json, action_code, key_from_dom, modifiers_from_bits, theme_from_code,
 };
-use eggdb_gui::connect_screen::{self, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH};
+use eggdb_gui::connect_screen::{self, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH, frame_size};
 use eggdb_gui::main_window::Faces;
-use eggdb_gui::{BoxFace, Theme, TrueTypeFont};
+use eggdb_gui::{BoxFace, Canvas, Theme, TrueTypeFont};
 use eggdb_platform::window::KeyPress;
 
 use super::{INPUT, OUTPUT};
@@ -65,6 +65,25 @@ fn clamp_scale(scale: f32) -> f32 {
     }
 }
 
+fn fitted_scale(size: (u32, u32), scale: f32) -> f32 {
+    let scale = clamp_scale(scale);
+    let logical_pixels = f64::from(size.0) * f64::from(size.1);
+    let device_pixels = logical_pixels * f64::from(scale) * f64::from(scale);
+    let most = Canvas::MAX_PIXELS as f64;
+    if device_pixels <= most {
+        return scale;
+    }
+    let exceeds = |scale: f32| {
+        let (width, height) = frame_size(size, scale);
+        width as f64 * height as f64 > most
+    };
+    let mut fitted = ((most / logical_pixels).sqrt() as f32).min(scale);
+    while exceeds(fitted) {
+        fitted = fitted.next_down();
+    }
+    fitted
+}
+
 /// Renders the connect card for a `width` × `height` CSS-pixel canvas at `scale` device
 /// pixels per CSS pixel (`devicePixelRatio`) in theme `theme` (0 light, 1 dark, 2 high
 /// contrast). The answer is the frame's RGBA bytes, row by row, ready for `ImageData`; the
@@ -77,7 +96,9 @@ pub extern "C" fn eggdb_wasm_card_render(width: u32, height: u32, scale: f32, th
     let theme = Theme::of(theme_from_code(theme));
     let frame = CARD.with(|card| {
         let card = card.borrow();
-        with_faces(|faces| connect_screen::draw(&card, theme, faces, size, clamp_scale(scale)))
+        with_faces(|faces| {
+            connect_screen::draw(&card, theme, faces, size, fitted_scale(size, scale))
+        })
     });
     let frame_width = u32::try_from(frame.width()).unwrap_or(0);
     OUTPUT.with(|output| *output.borrow_mut() = frame.rgba_bytes());
@@ -200,6 +221,24 @@ mod tests {
         assert_eq!(eggdb_wasm_card_render(0, 0, f32::NAN, 7), 1);
         assert_eq!(output().len(), 4);
         assert_eq!(eggdb_wasm_card_render(100, 50, 100.0, 2), 800);
+    }
+
+    #[test]
+    fn the_largest_size_at_the_largest_scale_fits_the_pixel_limit() {
+        let largest = clamp_size(u32::MAX, u32::MAX);
+        let scale = fitted_scale(largest, MAX_SCALE);
+        let (width, height) = frame_size(largest, scale);
+        assert!(
+            width
+                .checked_mul(height)
+                .is_some_and(|count| count <= Canvas::MAX_PIXELS)
+        );
+        assert!(width >= 8000, "{width}");
+        assert_eq!(fitted_scale((1280, 800), 2.0), 2.0);
+        assert_eq!(fitted_scale((1280, 800), f32::NAN), 1.0);
+        let tall = (1, MAX_SIDE);
+        let (width, height) = frame_size(tall, fitted_scale(tall, MAX_SCALE));
+        assert!(width * height <= Canvas::MAX_PIXELS);
     }
 
     #[test]

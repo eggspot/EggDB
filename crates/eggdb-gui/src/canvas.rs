@@ -28,14 +28,48 @@ pub struct Canvas {
     pixels: Vec<Rgba>,
 }
 
+fn fitted_size(width: usize, height: usize) -> (usize, usize) {
+    if width
+        .checked_mul(height)
+        .is_some_and(|count| count <= Canvas::MAX_PIXELS)
+    {
+        return (width, height);
+    }
+    let ratio = (Canvas::MAX_PIXELS as f64 / (width as f64 * height as f64)).sqrt();
+    let fit = |side: usize| ((side as f64 * ratio).floor() as usize).clamp(1, Canvas::MAX_PIXELS);
+    let height = fit(height);
+    (fit(width).min(Canvas::MAX_PIXELS / height), height)
+}
+
 impl Canvas {
-    /// A `width` × `height` canvas filled with `background`.
+    /// The most pixels a canvas holds: 64 Mi (256 MiB of RGBA), more than an 8K display at
+    /// full density, and few enough that its byte count fits a 32-bit `usize`.
+    pub const MAX_PIXELS: usize = 64 * 1024 * 1024;
+
+    /// A `width` × `height` canvas filled with `background`. A size of more than
+    /// [`Canvas::MAX_PIXELS`] is reduced to fit, keeping its proportions, so a size that a
+    /// window system or a host asks for can never force a giant allocation; [`Canvas::width`]
+    /// and [`Canvas::height`] tell the size made.
     pub fn new(width: usize, height: usize, background: Rgba) -> Self {
+        let (width, height) = fitted_size(width, height);
         Self {
             width,
             height,
             pixels: vec![background; width * height],
         }
+    }
+
+    /// A `width` × `height` canvas filled with `background`, or `None` when it would hold
+    /// more than [`Canvas::MAX_PIXELS`].
+    pub fn try_new(width: usize, height: usize, background: Rgba) -> Option<Self> {
+        let count = width
+            .checked_mul(height)
+            .filter(|count| *count <= Self::MAX_PIXELS)?;
+        Some(Self {
+            width,
+            height,
+            pixels: vec![background; count],
+        })
     }
 
     /// The width in pixels.
@@ -218,6 +252,41 @@ mod tests {
 
     const WHITE: Rgba = Rgba::hex(0xFFFFFF);
     const BLACK: Rgba = Rgba::hex(0x000000);
+
+    #[test]
+    fn a_size_past_the_pixel_limit_is_refused_or_fitted_without_overflow() {
+        assert!(Canvas::try_new(usize::MAX, 2, WHITE).is_none());
+        assert!(Canvas::try_new(Canvas::MAX_PIXELS + 1, 1, WHITE).is_none());
+        assert!(Canvas::try_new(131_072, 131_072, WHITE).is_none());
+        assert_eq!(
+            Canvas::try_new(3, 2, WHITE).map(|canvas| canvas.pixels().len()),
+            Some(6)
+        );
+        assert_eq!(fitted_size(1280, 800), (1280, 800));
+        assert_eq!(fitted_size(0, 5), (0, 5));
+        for (width, height) in [
+            (usize::MAX, usize::MAX),
+            (usize::MAX, 1),
+            (1, usize::MAX),
+            (131_072, 131_072),
+            (65_535, 65_535),
+            (100_000, 3),
+        ] {
+            let (fitted_width, fitted_height) = fitted_size(width, height);
+            assert!(
+                fitted_width >= 1 && fitted_height >= 1,
+                "{width} x {height}"
+            );
+            assert!(
+                fitted_width
+                    .checked_mul(fitted_height)
+                    .is_some_and(|count| count <= Canvas::MAX_PIXELS),
+                "{width} x {height}"
+            );
+        }
+        assert_eq!(fitted_size(131_072, 131_072), (8192, 8192));
+        assert!(Canvas::new(usize::MAX, 0, WHITE).pixels().is_empty());
+    }
 
     #[test]
     fn whole_pixel_rects_are_exact_and_half_pixels_blend() {
