@@ -3,9 +3,14 @@ use crate::database::EggdbDb;
 use crate::status::{Failure, guarded};
 use crate::transaction::shared_database;
 use eggdb::Database;
-use eggdb::sql::{Dialect, OutputColumn, Parameter, QueryResult, Session, SqlResult, Store, Value};
+use eggdb::sql::{
+    CancelSignal, CopyChannel, Dialect, OutputColumn, Parameter, QueryResult, Session, SqlResult,
+    Store, Value,
+};
+use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_int};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// `eggdb_value.kind`: SQL's NULL; `data` is NULL.
 pub const EGGDB_NULL: i32 = 0;
@@ -64,7 +69,7 @@ pub struct EggdbResult {
     pub values: *const EggdbValue,
 }
 
-type SqlSession = Session<'static>;
+pub(crate) type SqlSession = Session<'static>;
 
 const OID_BOOL: u32 = 16;
 const OID_BYTEA: u32 = 17;
@@ -93,7 +98,7 @@ struct PendingResult {
 }
 
 #[derive(Debug, Default)]
-struct ResultBatch {
+pub(crate) struct ResultBatch {
     bytes: Vec<u8>,
     name_offsets: Vec<usize>,
     pending_values: Vec<PendingValue>,
@@ -325,28 +330,70 @@ enum Backend {
 /// [`eggdb_sql_open`], or on an EggDB server, from [`eggdb_sql_connect`]; closed by
 /// [`eggdb_sql_close`]. Outside a `BEGIN` block each statement is its own transaction; a block
 /// holds the database's one write transaction until `COMMIT` or `ROLLBACK`. One call at a time
-/// may use it, from any thread.
+/// may use it and the statements prepared on it, from any thread; [`eggdb_sql_cancel`] is the
+/// one call that may come from another thread meanwhile.
 pub struct EggdbSql {
+    cancel: Option<CancelSignal>,
+    open_statements: AtomicUsize,
+    state: UnsafeCell<SessionState>,
+}
+
+pub(crate) struct SessionState {
     backend: Backend,
     results: ResultBatch,
 }
 
 impl std::fmt::Debug for EggdbSql {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.backend {
-            Backend::Local {
-                session, database, ..
-            } => f
-                .debug_struct("EggdbSql")
-                .field("dialect", &session.dialect())
-                .field("database", &database.path())
-                .finish_non_exhaustive(),
-            Backend::Remote(client) => f
-                .debug_struct("EggdbSql")
-                .field("server", &client.server_version())
-                .finish_non_exhaustive(),
+        f.debug_struct("EggdbSql")
+            .field("cancellable", &self.cancel.is_some())
+            .field(
+                "open_statements",
+                &self.open_statements.load(Ordering::Acquire),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl EggdbSql {
+    fn new(backend: Backend) -> Self {
+        let cancel = match &backend {
+            Backend::Local { session, .. } => Some(session.cancel_signal()),
+            Backend::Remote(_) => None,
+        };
+        Self {
+            cancel,
+            open_statements: AtomicUsize::new(0),
+            state: UnsafeCell::new(SessionState {
+                backend,
+                results: ResultBatch::default(),
+            }),
         }
     }
+
+    pub(crate) fn statement_prepared(&self) {
+        self.open_statements.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn statement_finalized(&self) {
+        let _ = self
+            .open_statements
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |open| {
+                open.checked_sub(1)
+            });
+    }
+}
+
+pub(crate) unsafe fn session_state<'a>(
+    sql: *mut EggdbSql,
+    what: &str,
+) -> Result<&'a mut SessionState, Failure> {
+    // SAFETY: eggdb.h asks for a live SQL session handle.
+    let sql: &'a EggdbSql = unsafe { args::handle(sql, what) }?;
+    // SAFETY: eggdb.h lets one call at a time use a session and its statements, so no other
+    // reference to the state is live; eggdb_sql_cancel, the one call allowed alongside, reads
+    // only `cancel`, outside the cell.
+    Ok(unsafe { &mut *sql.state.get() })
 }
 
 fn dialect_named(name: Option<&str>) -> Result<Dialect, Failure> {
@@ -389,61 +436,96 @@ pub unsafe extern "C" fn eggdb_sql_open(
         // before `store` (field order).
         let store_ref: &'static Store<'static> = unsafe { &*Arc::as_ptr(&store) };
         let session = store_ref.session(dialect);
-        let handle = args::give(EggdbSql {
-            backend: Backend::Local {
-                session: Box::new(session),
-                store,
-                database,
-            },
-            results: ResultBatch::default(),
-        });
+        let handle = args::give(EggdbSql::new(Backend::Local {
+            session: Box::new(session),
+            store,
+            database,
+        }));
         // SAFETY: as for the first write to `sql`.
         unsafe { args::write(sql, handle, "sql") }
     })
 }
 
-impl EggdbSql {
+pub(crate) const REMOTE_UNSUPPORTED: &str = "a session on a server (eggdb_sql_connect) does not take prepared statements, COPY or cancelling yet; open the database in the process with eggdb_sql_open for them, or use eggdb_sql_execute_with_parameters";
+
+impl SessionState {
     fn run(
         &mut self,
         text: &str,
         parameters: Option<&[Parameter]>,
+        copy: Option<&mut dyn CopyChannel>,
     ) -> Result<(*const EggdbResult, usize), Failure> {
-        self.results.clear();
+        run_on(&mut self.backend, &mut self.results, text, parameters, copy)
+    }
+
+    pub(crate) fn local_session(&mut self) -> Result<&mut SqlSession, Failure> {
         match &mut self.backend {
-            Backend::Local { session, .. } => {
-                let mut gathered: Vec<QueryResult> = Vec::new();
-                let ran: SqlResult<()> = match parameters {
-                    Some(values) => session.execute_prepared(text, values, &mut |result| {
-                        gathered.push(result);
-                        true
-                    }),
-                    None => session.execute(text, &mut |result| gathered.push(result)),
-                };
-                ran.map_err(|error| Failure::sql(&error))?;
-                let dialect = session.dialect();
-                for result in &gathered {
-                    self.results.add(result, dialect);
+            Backend::Local { session, .. } => Ok(session.as_mut()),
+            Backend::Remote(_) => Err(Failure::invalid_argument(REMOTE_UNSUPPORTED)),
+        }
+    }
+
+    pub(crate) fn run_into(
+        &mut self,
+        batch: &mut ResultBatch,
+        text: &str,
+        parameters: &[Parameter],
+    ) -> Result<(*const EggdbResult, usize), Failure> {
+        run_on(&mut self.backend, batch, text, Some(parameters), None)
+    }
+}
+
+fn run_on(
+    backend: &mut Backend,
+    batch: &mut ResultBatch,
+    text: &str,
+    parameters: Option<&[Parameter]>,
+    copy: Option<&mut dyn CopyChannel>,
+) -> Result<(*const EggdbResult, usize), Failure> {
+    batch.clear();
+    match backend {
+        Backend::Local { session, .. } => {
+            session.cancel_signal().clear();
+            let mut gathered: Vec<QueryResult> = Vec::new();
+            let mut on_result = |result: QueryResult| {
+                gathered.push(result);
+                true
+            };
+            let ran: SqlResult<()> = match (parameters, copy) {
+                (Some(values), Some(copy)) => {
+                    session.execute_prepared_with_copy(text, values, &mut on_result, copy)
                 }
-            }
-            Backend::Remote(client) => {
-                let answered = match parameters {
-                    Some(values) => {
-                        let bound: Vec<Option<&[u8]>> = values
-                            .iter()
-                            .map(|value| value.value.as_deref().map(str::as_bytes))
-                            .collect();
-                        client.execute_with_parameters(text, &bound)
-                    }
-                    None => client.simple_query(text),
-                };
-                let gathered = answered.map_err(remote_failure)?;
-                for result in &gathered {
-                    self.results.add_remote(result);
-                }
+                (Some(values), None) => session.execute_prepared(text, values, &mut on_result),
+                (None, Some(copy)) => session.execute_with_copy(text, &mut on_result, copy),
+                (None, None) => session.execute_while(text, &mut on_result),
+            };
+            ran.map_err(|error| Failure::sql(&error))?;
+            let dialect = session.dialect();
+            for result in &gathered {
+                batch.add(result, dialect);
             }
         }
-        Ok(self.results.publish())
+        Backend::Remote(client) => {
+            if copy.is_some() {
+                return Err(Failure::invalid_argument(REMOTE_UNSUPPORTED));
+            }
+            let answered = match parameters {
+                Some(values) => {
+                    let bound: Vec<Option<&[u8]>> = values
+                        .iter()
+                        .map(|value| value.value.as_deref().map(str::as_bytes))
+                        .collect();
+                    client.execute_with_parameters(text, &bound)
+                }
+                None => client.simple_query(text),
+            };
+            let gathered = answered.map_err(remote_failure)?;
+            for result in &gathered {
+                batch.add_remote(result);
+            }
+        }
     }
+    Ok(batch.publish())
 }
 
 unsafe fn parameters(
@@ -494,7 +576,7 @@ unsafe fn parameters(
 /// Runs every statement in `text` (UTF-8, separated by semicolons) in order and puts their
 /// results in `*results`, one per statement, and their number in `*count`. The results belong
 /// to the session and stay valid until its next `eggdb_sql_execute`,
-/// `eggdb_sql_execute_with_parameters` or `eggdb_sql_close`. It stops at the first statement
+/// `eggdb_sql_execute_with_parameters`, `eggdb_sql_copy_in` or `eggdb_sql_close`. It stops at the first statement
 /// that fails, with `EGGDB_ERR_SQL`, its message from `eggdb_last_error` and its SQLSTATE from
 /// `eggdb_last_sqlstate`; the statements before it keep their effects, committed outside a
 /// block and pending inside one, and no results are given.
@@ -515,10 +597,10 @@ pub unsafe extern "C" fn eggdb_sql_execute(
         // SAFETY: eggdb.h asks for writable memory for one size_t at `count`.
         unsafe { args::write(count, 0, "count") }?;
         // SAFETY: eggdb.h asks for a live SQL session handle used by this call alone.
-        let sql = unsafe { args::handle_mut(sql, "sql") }?;
+        let state = unsafe { session_state(sql, "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated statement text.
         let text = unsafe { args::text(text, "text") }?;
-        let (published, len) = sql.run(text, None)?;
+        let (published, len) = state.run(text, None, None)?;
         // SAFETY: as for the first write to `results`.
         unsafe { args::write(results, published, "results") }?;
         // SAFETY: as for the first write to `count`.
@@ -549,12 +631,12 @@ pub unsafe extern "C" fn eggdb_sql_execute_with_parameters(
         // SAFETY: eggdb.h asks for writable memory for one size_t at `count`.
         unsafe { args::write(count, 0, "count") }?;
         // SAFETY: eggdb.h asks for a live SQL session handle used by this call alone.
-        let sql = unsafe { args::handle_mut(sql, "sql") }?;
+        let state = unsafe { session_state(sql, "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated statement text.
         let text = unsafe { args::text(text, "text") }?;
         // SAFETY: eggdb.h asks for `parameter_count` parameters at `parameters`.
         let values = unsafe { self::parameters(parameters, parameter_count) }?;
-        let (published, len) = sql.run(text, Some(&values))?;
+        let (published, len) = state.run(text, Some(&values), None)?;
         // SAFETY: as for the first write to `results`.
         unsafe { args::write(results, published, "results") }?;
         // SAFETY: as for the first write to `count`.
@@ -590,29 +672,43 @@ pub unsafe extern "C" fn eggdb_sql_connect(url: *const c_char, sql: *mut *mut Eg
         let options = eggdb_pgwire::client::parse_postgres_url_with_password(url)
             .map_err(Failure::invalid_argument)?;
         let client = eggdb_pgwire::client::PgClient::connect(&options).map_err(remote_failure)?;
-        let handle = args::give(EggdbSql {
-            backend: Backend::Remote(Box::new(client)),
-            results: ResultBatch::default(),
-        });
+        let handle = args::give(EggdbSql::new(Backend::Remote(Box::new(client))));
         // SAFETY: as for the first write to `sql`.
         unsafe { args::write(sql, handle, "sql") }
     })
 }
 
 /// Ends the SQL session and frees its handle: an open `BEGIN` block is rolled back. NULL does
-/// nothing.
+/// nothing. While statements prepared on it are not finalized it fails with `EGGDB_ERR_IN_USE`
+/// and leaves the session open.
 ///
 /// # Safety
-/// `sql` is NULL or a handle from `eggdb_sql_open` not closed yet; it and its results must not
-/// be used afterwards, whatever the status.
+/// `sql` is NULL or a handle from `eggdb_sql_open` not closed yet; unless the status is
+/// `EGGDB_ERR_IN_USE`, it and its results must not be used afterwards, whatever the status.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eggdb_sql_close(sql: *mut EggdbSql) -> c_int {
     guarded(|| {
+        if sql.is_null() {
+            return Ok(());
+        }
+        // SAFETY: eggdb.h asks for a live SQL session handle.
+        let open = unsafe { args::handle(sql, "sql") }?
+            .open_statements
+            .load(Ordering::Acquire);
+        if open > 0 {
+            return Err(Failure::new(
+                crate::status::EGGDB_ERR_IN_USE,
+                format!(
+                    "{open} prepared statement(s) still use this session; finalize them with eggdb_stmt_finalize, then close it"
+                ),
+            ));
+        }
         // SAFETY: the caller gives the handle up with this call (eggdb.h).
         let Some(handle) = (unsafe { args::take(sql) }) else {
             return Ok(());
         };
-        let EggdbSql { backend, results } = *handle;
+        let EggdbSql { state, .. } = *handle;
+        let SessionState { backend, results } = state.into_inner();
         drop(results);
         match backend {
             Backend::Local {
@@ -630,6 +726,128 @@ pub unsafe extern "C" fn eggdb_sql_close(sql: *mut EggdbSql) -> c_int {
                 Ok(())
             }
         }
+    })
+}
+
+/// Cancels the statement the session is running, as PostgreSQL's cancel request does: it stops
+/// at its next row (within ten milliseconds in `pg_sleep`) and its call returns `EGGDB_ERR_SQL`
+/// with SQLSTATE `57014`, rolled back as any failing statement is. It may be called from any
+/// thread while another thread runs `eggdb_sql_execute`, `eggdb_sql_execute_with_parameters`,
+/// `eggdb_sql_copy_in` or `eggdb_stmt_execute` on the session. A cancel that comes while no
+/// statement runs does nothing: the session's next call starts afresh. A session from
+/// `eggdb_sql_connect` fails with `EGGDB_ERR_INVALID_ARGUMENT`.
+///
+/// # Safety
+/// `sql` is a handle from `eggdb_sql_open` that stays open during the call (closing it on
+/// another thread at the same time is not allowed).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_sql_cancel(sql: *mut EggdbSql) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for a live SQL session handle; this reads only `cancel`, which
+        // no other call changes, so it may run beside the call using the session's state.
+        let sql = unsafe { args::handle(sql, "sql") }?;
+        let signal = sql
+            .cancel
+            .as_ref()
+            .ok_or_else(|| Failure::invalid_argument(REMOTE_UNSUPPORTED))?;
+        signal.cancel();
+        Ok(())
+    })
+}
+
+const COPY_PIECE_BYTES: usize = 64 * 1024;
+
+struct CopyInData<'a> {
+    remaining: &'a [u8],
+    started: bool,
+}
+
+fn copy_out_unsupported() -> eggdb::sql::SqlError {
+    eggdb::sql::SqlError::new(
+        eggdb::sql::SqlState::FEATURE_NOT_SUPPORTED,
+        "COPY ... TO STDOUT is not available through eggdb_sql_copy_in; read the rows with a SELECT",
+    )
+}
+
+impl CopyChannel for CopyInData<'_> {
+    fn start_copy_in(&mut self, _start: &eggdb::sql::CopyStart) -> SqlResult<()> {
+        if self.started {
+            return Err(eggdb::sql::SqlError::new(
+                eggdb::sql::SqlState::FEATURE_NOT_SUPPORTED,
+                "eggdb_sql_copy_in gives its data to one COPY ... FROM STDIN; run each COPY in a call of its own",
+            ));
+        }
+        self.started = true;
+        Ok(())
+    }
+
+    fn read_copy_data(&mut self, data: &mut Vec<u8>) -> SqlResult<bool> {
+        if self.remaining.is_empty() {
+            return Ok(false);
+        }
+        let (piece, rest) = self
+            .remaining
+            .split_at(self.remaining.len().min(COPY_PIECE_BYTES));
+        data.extend_from_slice(piece);
+        self.remaining = rest;
+        Ok(true)
+    }
+
+    fn start_copy_out(&mut self, _start: &eggdb::sql::CopyStart) -> SqlResult<()> {
+        Err(copy_out_unsupported())
+    }
+
+    fn write_copy_data(&mut self, _data: &[u8]) -> SqlResult<()> {
+        Err(copy_out_unsupported())
+    }
+
+    fn finish_copy_out(&mut self) -> SqlResult<()> {
+        Ok(())
+    }
+}
+
+/// Runs the statements in `text` as `eggdb_sql_execute` does, with `len` bytes at `data` as
+/// the data of the `COPY ... FROM STDIN` among them: text, CSV or binary, as the `COPY`'s
+/// options say. The `COPY` loads all its rows or none, and its result's tag is `"COPY <rows>"`.
+/// Load a large file in pieces of whole rows, one call each, inside a `BEGIN` block when they
+/// must commit together. A second `COPY ... FROM STDIN` in `text`, and any `COPY ... TO
+/// STDOUT`, fail with `EGGDB_ERR_SQL`; a session from `eggdb_sql_connect` fails with
+/// `EGGDB_ERR_INVALID_ARGUMENT`.
+///
+/// # Safety
+/// As for `eggdb_sql_execute`; `data` is NULL with a length of 0 or points to `len` readable
+/// bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_sql_copy_in(
+    sql: *mut EggdbSql,
+    text: *const c_char,
+    data: *const u8,
+    len: usize,
+    results: *mut *const EggdbResult,
+    count: *mut usize,
+) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for writable memory for one pointer at `results`.
+        unsafe { args::write(results, std::ptr::null(), "results") }?;
+        // SAFETY: eggdb.h asks for writable memory for one size_t at `count`.
+        unsafe { args::write(count, 0, "count") }?;
+        // SAFETY: eggdb.h asks for a live SQL session handle used by this call alone.
+        let state = unsafe { session_state(sql, "sql") }?;
+        state.local_session()?;
+        // SAFETY: eggdb.h asks for a NUL-terminated statement text.
+        let text = unsafe { args::text(text, "text") }?;
+        // SAFETY: eggdb.h asks for NULL with 0 or `len` readable bytes at `data`.
+        let data = unsafe { args::bytes(data, len, "data") }?;
+        let mut channel = CopyInData {
+            remaining: data,
+            started: false,
+        };
+        let copy: &mut dyn CopyChannel = &mut channel;
+        let (published, len) = state.run(text, None, Some(copy))?;
+        // SAFETY: as for the first write to `results`.
+        unsafe { args::write(results, published, "results") }?;
+        // SAFETY: as for the first write to `count`.
+        unsafe { args::write(count, len, "count") }
     })
 }
 

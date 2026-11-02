@@ -196,6 +196,76 @@ static void check_sql(eggdb_db *db) {
     CHECK_OK(eggdb_sql_close(postgres));
 }
 
+static void check_prepared_statements_and_copy(eggdb_db *db) {
+    eggdb_sql *sql = NULL;
+    CHECK_OK(eggdb_sql_open(db, "postgresql", &sql));
+    run_sql(sql, "CREATE TABLE readings (id bigint, sensor text, value double precision, "
+                 "ok boolean, raw bytea)",
+            1);
+
+    const char *insert_text = "INSERT INTO readings VALUES ($1, $2, $3, $4, $5)";
+    eggdb_stmt *insert = NULL;
+    CHECK_OK(eggdb_sql_prepare(sql, insert_text, strlen(insert_text), &insert));
+    size_t parameter_count = 0;
+    CHECK_OK(eggdb_stmt_parameter_count(insert, &parameter_count));
+    CHECK(parameter_count == 5);
+    const uint8_t raw[3] = {0, 0x7f, 0xff};
+    const eggdb_result *results = NULL;
+    size_t count = 0;
+    for (int64_t id = 1; id <= 3; id++) {
+        CHECK_OK(eggdb_stmt_bind_int64(insert, 1, id));
+        CHECK_OK(eggdb_stmt_bind_text(insert, 2, "north", 5));
+        CHECK_OK(eggdb_stmt_bind_double(insert, 3, (double)id / 4.0));
+        CHECK_OK(eggdb_stmt_bind_bool(insert, 4, id != 2));
+        CHECK_OK(eggdb_stmt_bind_blob(insert, 5, raw, sizeof raw));
+        CHECK_OK(eggdb_stmt_execute(insert, &results, &count));
+        CHECK(count == 1 && strcmp(results[0].tag, "INSERT 0 1") == 0);
+    }
+    CHECK(eggdb_stmt_bind_int64(insert, 6, 0) == EGGDB_ERR_INVALID_ARGUMENT);
+    CHECK(eggdb_sql_close(sql) == EGGDB_ERR_IN_USE);
+    CHECK_OK(eggdb_stmt_finalize(insert));
+
+    const char *select_text = "SELECT id, value, ok, raw FROM readings WHERE id = $1";
+    eggdb_stmt *select = NULL;
+    CHECK_OK(eggdb_sql_prepare(sql, select_text, strlen(select_text), &select));
+    size_t column_count = 0;
+    CHECK_OK(eggdb_stmt_column_count(select, &column_count));
+    CHECK(column_count == 4);
+    const char *column_name = NULL;
+    CHECK_OK(eggdb_stmt_column_name(select, 1, &column_name));
+    CHECK(strcmp(column_name, "value") == 0);
+    int32_t kind = EGGDB_NULL;
+    CHECK_OK(eggdb_stmt_column_type(select, 3, &kind));
+    CHECK(kind == EGGDB_BLOB);
+    CHECK_OK(eggdb_stmt_bind_int64(select, 1, 2));
+    CHECK_OK(eggdb_stmt_execute(select, &results, &count));
+    CHECK(count == 1 && results[0].row_count == 1);
+    CHECK(eggdb_result_value(&results[0], 0, 1)->real == 0.5);
+    CHECK(eggdb_result_value(&results[0], 0, 2)->integer == 0);
+    const eggdb_value *bytes_back = eggdb_result_value(&results[0], 0, 3);
+    CHECK(bytes_back->kind == EGGDB_BLOB && bytes_back->len == 3 &&
+          memcmp(bytes_back->data, raw, 3) == 0);
+    CHECK_OK(eggdb_stmt_clear_bindings(select));
+    CHECK_OK(eggdb_stmt_execute(select, &results, &count));
+    CHECK(count == 1 && results[0].row_count == 0);
+    CHECK_OK(eggdb_stmt_reset(select));
+    CHECK_OK(eggdb_stmt_finalize(select));
+
+    const char *rows = "10\tsouth\t1.5\tt\t\\\\x00\n11\twest\t\\N\tf\t\\N\n";
+    CHECK_OK(eggdb_sql_copy_in(sql, "COPY readings FROM STDIN", bytes(rows), strlen(rows),
+                               &results, &count));
+    CHECK(count == 1 && strcmp(results[0].tag, "COPY 2") == 0);
+    results = run_sql(sql, "SELECT count(*) FROM readings", 1);
+    CHECK(eggdb_result_value(&results[0], 0, 0)->integer == 5);
+
+    CHECK_OK(eggdb_sql_cancel(sql));
+    run_sql(sql, "SELECT 1", 1);
+    CHECK(eggdb_sql_prepare(sql, "SELECT 1; SELECT 2", 18, &select) == EGGDB_ERR_SQL);
+    CHECK(select == NULL);
+    CHECK_OK(eggdb_stmt_finalize(NULL));
+    CHECK_OK(eggdb_sql_close(sql));
+}
+
 static void check_backup_and_compaction(eggdb_db *db, const char *work) {
     char copy[4096];
     join_path(copy, sizeof copy, work, "api-check-copy.db");
@@ -254,6 +324,7 @@ int main(int argc, char **argv) {
     check_keys_and_values(db);
     check_collections_expiry_and_counters(db);
     check_sql(db);
+    check_prepared_statements_and_copy(db);
     check_backup_and_compaction(db, work);
     eggdb_compact_report compacted;
     CHECK_OK(eggdb_compact(db, &compacted));

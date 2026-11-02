@@ -29,11 +29,11 @@
 use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
 use eggdb_sql::StoreFailure;
 pub use eggdb_sql::{
-    ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck, IndexColumnOrder,
-    IndexSchema, Interval, IntervalFields, Numeric, NumericModifier, OneStatementError,
-    OneStatementRefusal, OutputColumn, Parameter, QueryResult, RESERVED_KEY_PREFIX, Session,
-    SqlError, SqlResult, SqlState, SqlType, TableSchema, TransactionStatus, Value,
-    ViewColumnSchema, ViewSchema, sqlite_result_code_name,
+    CancelSignal, ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck,
+    IndexColumnOrder, IndexSchema, Interval, IntervalFields, Numeric, NumericModifier,
+    OneStatementError, OneStatementRefusal, OutputColumn, Parameter, QueryResult,
+    RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType, TableSchema,
+    TransactionStatus, Value, ViewColumnSchema, ViewSchema, sqlite_result_code_name,
 };
 use eggdb_sql::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use std::ops::Bound;

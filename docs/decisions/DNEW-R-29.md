@@ -1,0 +1,54 @@
+## DNEW-R-29 The C API gets prepared statement handles with typed parameters, cancelling and COPY FROM STDIN; refines D142 and D17
+
+D142 left prepared statement handles, typed and binary parameters, `COPY` and cancelling out
+of the first C API. Every driver built on the C API (D16, D17) needs them: an ORM prepares a
+statement once and runs it with new values, a UI stops a long query, an import tool bulk-loads.
+
+- **Names.** The handle is `eggdb_stmt`, made by `eggdb_sql_prepare` and used by
+  `eggdb_stmt_*` functions (`bind_null`, `bind_int64`, `bind_double`, `bind_bool`,
+  `bind_text`, `bind_blob`, `clear_bindings`, `execute`, `reset`, `parameter_count`,
+  `column_count`, `column_name`, `column_type`, `finalize`). Session-level calls keep the
+  `eggdb_sql_` prefix: `eggdb_sql_prepare`, `eggdb_sql_cancel`, `eggdb_sql_copy_in`. *Why:* the
+  header already names each handle's functions after it (`eggdb_scan_open`/`next`/`free`,
+  `eggdb_sql_open`/`execute`/`close`); SQLite-style bare names (`eggdb_prepare`, `eggdb_step`)
+  would be the only functions not saying which handle they act on.
+- **Execution gives whole results.** `eggdb_stmt_execute` gives the statement's result through
+  the existing `eggdb_result`, owned by the statement (not the session) until its next run,
+  reset or finalize. There is no row-by-row `step` yet. *Why:* reading a batch in place is
+  D17's rule for crossings, the session already produces whole results, and statement-owned
+  results let an app keep one statement's rows while it runs others.
+- **Typed parameters are declared types.** An integer binds as a `bigint`, a double as a
+  `double precision` (its shortest exact text, `Infinity`, `NaN`), a boolean as a `boolean` and
+  bytes as a `bytea` (hex input form, which every dialect reads for a declared `bytea`); text
+  binds without a declared type, read as a literal of the type its place asks for. The values
+  go to `Session::execute_prepared` as `Parameter`s, so a typed value is converted to the
+  placeholder's type as a cast, as PostgreSQL does with a typed parameter of the extended
+  protocol, which drivers such as Npgsql send for every value. Unbound parameters are NULL, as
+  in SQLite. *Why:* no new conversion code, the same path as the wire protocols, and `SELECT $1`
+  with an integer gives an integer back.
+- **Prepare checks, execute parses.** `eggdb_sql_prepare` runs `Session::prepare` (one
+  statement, valid syntax, parameter count) and `Session::describe` (the columns, and missing
+  tables or columns fail there). The engine does not keep a parsed plan between runs, so each
+  run parses the text again; D142's reason for waiting is answered by giving the handle now
+  and keeping the plan inside it later without changing the API.
+- **Lifetimes.** A statement holds its session's pointer and counts as a use of it;
+  `eggdb_sql_close` fails with `EGGDB_ERR_IN_USE` while statements are not finalized, as
+  `eggdb_close` does while sessions are open. *Why:* that is the existing rule one level up,
+  and it turns a use-after-close into a status instead of undefined behavior.
+- **Cancelling.** `eggdb_sql_cancel` raises the session's `CancelSignal` and may run on another
+  thread beside the running call. The session's state sits in an `UnsafeCell`, and the signal
+  outside it, so the cancelling call never touches what the running call borrows mutably. Every
+  call that runs statements lowers the signal first, so a cancel that comes while nothing runs
+  does nothing, as PostgreSQL's cancel request. The statement fails with SQLSTATE `57014` and
+  `EGGDB_ERR_SQL`: no new status code.
+- **COPY.** `eggdb_sql_copy_in` runs the text through `Session::execute_with_copy` with a
+  channel that hands the caller's buffer to the one `COPY ... FROM STDIN` in 64 KiB pieces.
+  *Why:* the same machinery as `psql`, `pg_dump` files and the wire protocol, in every format
+  it reads; one call per piece of whole rows covers large loads without a callback across the
+  boundary.
+- **Server sessions** (`eggdb_sql_connect`) refuse the three with `EGGDB_ERR_INVALID_ARGUMENT`
+  for now: EggDB's PostgreSQL client has no Describe step, cancel request or copy-in yet.
+
+**Not yet:** a parsed plan kept in the handle, row-by-row results, `COPY ... TO STDOUT`, a
+streaming copy-in, the three on server sessions, asynchronous calls, and the drivers' use of
+the new calls.
