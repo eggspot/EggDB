@@ -43,6 +43,7 @@ mod clock;
 pub mod connection_limits;
 mod cpus;
 mod database_file;
+pub mod dbus;
 mod error;
 pub mod fonts;
 mod fs;
