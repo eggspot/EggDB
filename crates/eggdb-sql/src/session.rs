@@ -2898,7 +2898,7 @@ impl<'s> Session<'s> {
             Statement::Show { name } => self.show(name.as_deref()),
             Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
                 binding.create_table(writer, tables, create)?;
-                execute::create_table(writer, tables, create, dialect)
+                crate::sqlite_schema_text::create_table(writer, tables, create, dialect)
             }),
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;

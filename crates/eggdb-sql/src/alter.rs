@@ -1,6 +1,6 @@
 use crate::ast::{
-    AlterAction, AlterTable, ColumnDefinition, ColumnPlacement, ConstraintKind, ConstraintSpec, CreateIndex,
-    CreateSequence, IndexSpec, Name, SequenceOptions,
+    AlterAction, AlterTable, ColumnDefinition, ColumnPlacement, ConstraintKind, ConstraintSpec,
+    CreateIndex, CreateSequence, IndexSpec, Name, SequenceOptions,
 };
 use crate::constraints::{self, PreparedChecks};
 use crate::dialect::Dialect;
@@ -94,6 +94,7 @@ pub(crate) fn alter_table(
         )
         .at(alter.name.position));
     }
+    crate::sqlite_schema_text::forget(writer, &alter.name.text)?;
     let mut name = alter.name.text.clone();
     for action in &alter.actions {
         if let Some(notice) = apply(writer, tables, &mut name, action, dialect)? {

@@ -401,3 +401,23 @@ fn a_failed_block_refuses_key_value_writes_until_rollback() {
     assert!(stderr.contains("key not found: k"), "{stderr}");
     assert!(!text(&ran.stdout).contains("before"), "{}", text(&ran.stdout));
 }
+
+#[test]
+fn schema_in_sqlite_prints_each_create_statement_as_it_was_written() {
+    let directory = TempDirectory::new("shell-sqlite-schema");
+    let file = created(&directory);
+    let script = "CREATE TABLE items(id integer primary key,\n  name text);\n\
+        CREATE INDEX items_name ON items (name);\n\
+        CREATE TABLE other(n integer);\n\
+        .schema items\n";
+    let ran = shell(&file, &["--dialect", "sqlite"], script);
+    assert_eq!(ran.exit, 0, "{}", text(&ran.stderr));
+    let out = text(&ran.stdout);
+    assert!(
+        out.contains(
+            "CREATE TABLE items(id integer primary key,\n  name text);\nCREATE INDEX items_name ON items (name);\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("CREATE TABLE other"), "{out}");
+}

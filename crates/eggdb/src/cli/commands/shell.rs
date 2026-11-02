@@ -837,6 +837,9 @@ impl<'s> Shell<'s> {
             }
         };
         let dialect = self.sql.dialect();
+        if dialect == eggdb_sql::Dialect::Sqlite {
+            return self.sqlite_schema(console, &chosen);
+        }
         let text: String = chosen
             .iter()
             .map(|table| {
@@ -850,6 +853,35 @@ impl<'s> Shell<'s> {
             .collect();
         self.print(console, &text);
         Step::Continue(Exit::Done)
+    }
+
+    fn sqlite_schema(&mut self, console: &mut Console<'_>, chosen: &[&TableSchema]) -> Step {
+        let names: Vec<&str> = chosen.iter().map(|table| table.name.as_str()).collect();
+        let mut text = String::new();
+        let outcome = self.sql.execute(
+            "SELECT tbl_name, sql FROM sqlite_schema WHERE sql IS NOT NULL",
+            &mut |result: QueryResult| {
+                for row in &result.rows {
+                    if let [eggdb_sql::Value::Text(table), eggdb_sql::Value::Text(sql)] =
+                        row.as_slice()
+                        && names.contains(&table.as_str())
+                    {
+                        text.push_str(sql);
+                        text.push_str(";\n");
+                    }
+                }
+            },
+        );
+        match outcome {
+            Ok(()) => {
+                self.print(console, &text);
+                Step::Continue(Exit::Done)
+            }
+            Err(error) => {
+                self.print_sql_error(console, &error, "");
+                Step::Continue(exit_for(&error))
+            }
+        }
     }
 
     fn collection_names(&self) -> Vec<String> {

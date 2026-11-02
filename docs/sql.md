@@ -237,6 +237,11 @@ What it reads, on top of the statements of "What runs today":
   is built.
 - **The schema table**: `sqlite_schema` and `sqlite_master` (with `type`, `name`, `tbl_name`,
   `rootpage` and `sql`) list the tables; `sqlite_temp_schema`/`sqlite_temp_master` are empty.
+  A table created in SQLite's dialect keeps its `CREATE TABLE` text as SQLite stores it: as
+  written from the table's name on, after `CREATE TABLE ` (without `IF NOT EXISTS`). After an
+  `ALTER TABLE`, and for tables made in another dialect, `sql` is generated from the table's
+  definition. `eggdb shell --dialect sqlite` prints these texts for `.schema [table]`, each
+  followed by `;`, with the table's indexes and triggers.
 - **PRAGMAs**: `table_info(t)`, `table_list[(t)]`, `index_list(t)`, `index_info(i)`,
   `foreign_keys`, `user_version`, `journal_mode`, `synchronous` and `encoding`; unknown PRAGMAs
   do nothing, as in SQLite.
@@ -2279,7 +2284,8 @@ and `CHECK constraint failed: name` (an unnamed check is named by its text); MyS
 
 In MySQL a `REFERENCES` clause on a column is parsed and ignored, as MySQL does; write `FOREIGN
 KEY (column) REFERENCES ...`. MySQL's spellings: `ADD [COLUMN]`, `DROP [COLUMN]`, `MODIFY [COLUMN] definition` and `CHANGE
-[COLUMN] old definition` (the whole definition is replaced, as in MySQL), `ALTER [COLUMN] c SET
+[COLUMN] old definition` (the whole definition is replaced, as in MySQL), `FIRST` or `AFTER
+column` after `ADD`, `MODIFY` and `CHANGE` (the column moves there with its values), `ALTER [COLUMN] c SET
 DEFAULT | DROP DEFAULT`, `RENAME [TO | AS] name`, `RENAME COLUMN`, `ADD [CONSTRAINT [name]]
 PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK`, `DROP PRIMARY KEY`, `DROP FOREIGN KEY name`, `DROP
 CHECK name`, `DROP INDEX name` and `AUTO_INCREMENT = n` (accepted; the next value stays the
@@ -3673,8 +3679,9 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   between the rollback and the re-saving of the sequence (D114); a committed value never is.
   `serial` and identity columns have no visible sequence (`pg_get_serial_sequence` waits for
   item 37); `nextval` takes a name, not an OID.
-- `\d`, `SHOW CREATE TABLE`, `sqlite_schema` and `.schema` do not show `CHECK` and `FOREIGN KEY`
-  constraints yet.
+- `\d`, `sqlite_schema` (for a table changed after `CREATE TABLE` or made in another dialect)
+  and `.schema` outside SQLite's dialect do not show `CHECK` and `FOREIGN KEY` constraints yet;
+  MySQL's `SHOW CREATE TABLE` shows them.
 - An older EggDB release refuses a table that has constraints, is referenced by a foreign key or
   owns a sequence (format version 6), but it does not know sequences: on a file this release
   wrote, it ignores them, so it could create a table under a sequence's name or call a dropped
@@ -3798,8 +3805,8 @@ And more, not in the suite yet:
 - Indexes: a key on a column prefix (`KEY k (name(10))`) indexes the whole value, and a
   `UNIQUE` one answers 1235; `FULLTEXT` and `SPATIAL` keys answer 1235. `SHOW INDEX` gives
   `Cardinality` and `Sub_part` as `NULL`, and `EXPLAIN` gives `key_len`, `ref` and `rows` as
-  `NULL`. `ALTER TABLE ... ADD INDEX` answers 1235 (use `CREATE INDEX`), and `FIRST`/`AFTER`
-  in `ALTER TABLE` too. Foreign keys are checked when the statement ends, not row by row, and
+  `NULL`. `ALTER TABLE ... ADD INDEX` answers 1235 (use `CREATE INDEX`). Foreign keys are
+  checked when the statement ends, not row by row, and
   creating one makes no index on the child's columns (InnoDB makes one).
 
 ## Known differences from SQLite

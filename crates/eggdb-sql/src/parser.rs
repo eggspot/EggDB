@@ -1725,6 +1725,7 @@ impl<'t> Parser<'t> {
             false
         };
         let name = self.table_name()?;
+        let name_start = self.previous_start();
         if self.postgresql() && self.is_word("partition") && self.is_word_at(1, "of") {
             return self.create_partition_of(name, temporary, if_not_exists);
         }
@@ -1863,6 +1864,9 @@ impl<'t> Parser<'t> {
             comment,
             partition_by,
             partition_of: None,
+            sqlite_text: self
+                .sqlite()
+                .then(|| format!("CREATE TABLE {}", self.slice(name_start, self.previous_end()))),
         }))
     }
 

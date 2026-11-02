@@ -1,7 +1,8 @@
 use super::Parser;
 use crate::ast::{
     AlterAction, AlterSequence, AlterTable, ColumnDefinition, ColumnPlacement, ConstraintKind,
-    ConstraintSpec, CreateSequence, ForeignKeySpec, Name, ReferentialAction, SequenceOptions, Statement,
+    ConstraintSpec, CreateSequence, ForeignKeySpec, Name, ReferentialAction, SequenceOptions,
+    Statement,
 };
 use crate::encoding::{IdentityGeneration, IdentitySeed, integer_type_range};
 use crate::error::{SqlError, SqlResult, SqlState};

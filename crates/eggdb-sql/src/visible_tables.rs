@@ -569,6 +569,7 @@ fn table_setting_owner(key: &[u8]) -> Option<&[u8]> {
     let (&space, rest) = key.strip_prefix(NAMESPACE)?.split_first()?;
     if space == crate::statistics::STATISTICS_SPACE
         || space == crate::row_security::ROW_SECURITY_SPACE
+        || space == crate::sqlite_schema_text::SQLITE_TEXT_SPACE
     {
         Some(rest)
     } else if space == crate::roles::GRANT_SPACE || space == crate::row_security::POLICY_SPACE {

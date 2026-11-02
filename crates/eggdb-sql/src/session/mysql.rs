@@ -106,9 +106,9 @@ fn constraint_lines(table: &TableDefinition) -> Vec<String> {
         lines.push(format!(
             "  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){}{}",
             backticked(&key.name),
-            columns.join(", "),
+            columns.join(","),
             backticked(&key.parent),
-            parent_columns.join(", "),
+            parent_columns.join(","),
             referential_rule("DELETE", key.on_delete),
             referential_rule("UPDATE", key.on_update)
         ));

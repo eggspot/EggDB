@@ -101,6 +101,13 @@ impl<'t> Parser<'t> {
             .map_or(0, |token| token.end)
     }
 
+    pub(super) fn previous_start(&self) -> usize {
+        self.at
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
+            .map_or(0, |token| token.start)
+    }
+
     pub(super) fn slice(&self, start: usize, end: usize) -> String {
         self.text.get(start..end).unwrap_or_default().to_owned()
     }
