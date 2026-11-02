@@ -43,7 +43,7 @@ fn messages(session: &mut Session<'_>) -> Vec<String> {
 
 #[test]
 fn goto_jumps_forward_over_statements() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -60,7 +60,7 @@ fn goto_jumps_forward_over_statements() {
 
 #[test]
 fn goto_jumps_backward_to_repeat_statements() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -76,7 +76,7 @@ fn goto_jumps_backward_to_repeat_statements() {
 
 #[test]
 fn goto_leaves_loops_and_nested_blocks() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -96,7 +96,7 @@ fn goto_leaves_loops_and_nested_blocks() {
 
 #[test]
 fn goto_from_a_handler_reaches_the_enclosing_block() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -120,7 +120,7 @@ fn goto_from_a_handler_reaches_the_enclosing_block() {
 
 #[test]
 fn goto_labels_can_stack_and_name_loops() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -137,7 +137,7 @@ fn goto_labels_can_stack_and_name_loops() {
 
 #[test]
 fn goto_into_a_nested_statement_does_not_compile() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let into_if = failure(
         &mut session,
@@ -167,7 +167,7 @@ fn goto_into_a_nested_statement_does_not_compile() {
 
 #[test]
 fn a_procedure_with_goto_compiles_and_runs() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -187,7 +187,7 @@ fn a_procedure_with_goto_compiles_and_runs() {
 
 #[test]
 fn autonomous_transactions_are_refused_with_a_reason() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let refused = failure(
         &mut session,

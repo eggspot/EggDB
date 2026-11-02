@@ -31,7 +31,7 @@ fn sqlite_text(session: &mut Session<'_>, table: &str) -> String {
 
 #[test]
 fn mysql_first_and_after_move_columns_with_their_values() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::MySql);
     last(&mut session, "CREATE TABLE t (id INT PRIMARY KEY, b INT)");
     last(&mut session, "CREATE INDEX by_b ON t (b)");
@@ -73,7 +73,7 @@ fn mysql_first_and_after_move_columns_with_their_values() {
 
 #[test]
 fn first_and_after_belong_to_mysql_only() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = Session::new(&store);
     last(&mut session, "CREATE TABLE t (id int)");
     fails(&mut session, "ALTER TABLE t ADD COLUMN a int FIRST");
@@ -81,7 +81,7 @@ fn first_and_after_belong_to_mysql_only() {
 
 #[test]
 fn mysql_show_create_table_lists_foreign_keys_and_checks() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::MySql);
     last(&mut session, "CREATE TABLE p (id INT PRIMARY KEY)");
     last(
@@ -104,7 +104,7 @@ fn mysql_show_create_table_lists_foreign_keys_and_checks() {
 
 #[test]
 fn sqlite_schema_keeps_the_create_table_text_as_written() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
     last(
         &mut session,
@@ -133,7 +133,7 @@ fn sqlite_schema_keeps_the_create_table_text_as_written() {
 
 #[test]
 fn sqlite_schema_shows_the_current_definition_after_a_change() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
     last(&mut session, "CREATE TABLE pets(id integer primary key)");
     last(&mut session, "ALTER TABLE pets ADD COLUMN age integer");
@@ -155,7 +155,7 @@ fn sqlite_schema_shows_the_current_definition_after_a_change() {
 
 #[test]
 fn tables_made_in_other_dialects_show_generated_sqlite_text() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut postgres = Session::new(&store);
     last(&mut postgres, "CREATE TABLE made (id int PRIMARY KEY)");
     drop(postgres);

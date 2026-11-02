@@ -1025,66 +1025,6 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 77] = [
         collation: 0,
     },
     BuiltinType {
-        oid: 3500,
-        typname: "anyenum",
-        shown: "anyenum",
-        length: 4,
-        by_value: true,
-        kind: 'p',
-        category: 'P',
-        preferred: false,
-        element: 0,
-        array: 0,
-        align: 'i',
-        storage: 'p',
-        collation: 0,
-    },
-    BuiltinType {
-        oid: 5077,
-        typname: "anycompatible",
-        shown: "anycompatible",
-        length: 4,
-        by_value: true,
-        kind: 'p',
-        category: 'P',
-        preferred: false,
-        element: 0,
-        array: 0,
-        align: 'i',
-        storage: 'p',
-        collation: 0,
-    },
-    BuiltinType {
-        oid: 5078,
-        typname: "anycompatiblearray",
-        shown: "anycompatiblearray",
-        length: -1,
-        by_value: false,
-        kind: 'p',
-        category: 'P',
-        preferred: false,
-        element: 0,
-        array: 0,
-        align: 'd',
-        storage: 'x',
-        collation: 0,
-    },
-    BuiltinType {
-        oid: 5079,
-        typname: "anycompatiblenonarray",
-        shown: "anycompatiblenonarray",
-        length: 4,
-        by_value: true,
-        kind: 'p',
-        category: 'P',
-        preferred: false,
-        element: 0,
-        array: 0,
-        align: 'i',
-        storage: 'p',
-        collation: 0,
-    },
-    BuiltinType {
         oid: 2950,
         typname: "uuid",
         shown: "uuid",
@@ -1112,6 +1052,21 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 77] = [
         array: 0,
         align: 'i',
         storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 3500,
+        typname: "anyenum",
+        shown: "anyenum",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
         collation: 0,
     },
     BuiltinType {
@@ -1202,6 +1157,51 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 77] = [
         array: 0,
         align: 'i',
         storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 5077,
+        typname: "anycompatible",
+        shown: "anycompatible",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 5078,
+        typname: "anycompatiblearray",
+        shown: "anycompatiblearray",
+        length: -1,
+        by_value: false,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'd',
+        storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 5079,
+        typname: "anycompatiblenonarray",
+        shown: "anycompatiblenonarray",
+        length: 4,
+        by_value: true,
+        kind: 'p',
+        category: 'P',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'p',
         collation: 0,
     },
     BuiltinType {
@@ -1554,4 +1554,26 @@ pub(crate) fn assign(space: Space, requests: &[OidRequest]) -> Vec<u32> {
         assigned[index] = oid;
     }
     assigned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUILTIN_TYPES, builtin_type};
+
+    #[test]
+    fn builtin_types_are_sorted_by_oid_for_binary_search() {
+        assert!(
+            BUILTIN_TYPES
+                .windows(2)
+                .all(|pair| matches!(pair, [first, second] if first.oid < second.oid))
+        );
+    }
+
+    #[test]
+    fn every_builtin_type_is_found_by_its_oid() {
+        for expected in &BUILTIN_TYPES {
+            let found = builtin_type(expected.oid).map(|found| found.typname);
+            assert_eq!(found, Some(expected.typname));
+        }
+    }
 }

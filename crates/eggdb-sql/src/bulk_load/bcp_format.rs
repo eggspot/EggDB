@@ -192,7 +192,11 @@ impl BcpField {
         match column.sql_type {
             SqlType::Time(precision)
             | SqlType::Timestamp(precision)
-            | SqlType::TimestampTz(precision) => self.scale = Some(wire_time_scale(precision)),
+            | SqlType::TimestampTz(precision)
+                if matches!(self.data, FieldData::Native(native) if native.has_time_scale()) =>
+            {
+                self.scale = Some(wire_time_scale(precision));
+            }
             SqlType::Numeric(Some(modifier)) => {
                 self.precision = u8::try_from(modifier.precision)
                     .unwrap_or(LARGEST_DECIMAL_PRECISION)

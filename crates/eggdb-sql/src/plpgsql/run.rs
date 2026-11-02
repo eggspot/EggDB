@@ -116,6 +116,13 @@ enum RoutineWriter<'r> {
 }
 
 impl RoutineWriter<'_> {
+    fn reborrow(&mut self) -> RoutineWriter<'_> {
+        match self {
+            Self::Atomic(writer) => RoutineWriter::Atomic(&mut **writer),
+            Self::Nonatomic(control) => RoutineWriter::Nonatomic(&mut **control),
+        }
+    }
+
     fn get(&mut self) -> &mut dyn KeyValueWrite {
         match self {
             Self::Atomic(writer) => &mut **writer,
@@ -190,7 +197,7 @@ fn invoke_in(
             );
         }
     };
-    let mut run = Run::over(writer, tables, settings, &definition, label);
+    let mut run = Run::over(writer.reborrow(), tables, settings, &definition, label);
     let program = match definition.language {
         RoutineLanguage::PlPgSql | RoutineLanguage::PlSql | RoutineLanguage::MySql => {
             Some(crate::routines::compiled_program(run.tables, &definition)?)
@@ -249,7 +256,7 @@ pub(crate) fn run_inline_nonatomic(
 }
 
 fn run_inline_in(
-    writer: RoutineWriter<'_>,
+    mut writer: RoutineWriter<'_>,
     tables: &mut TableCache,
     settings: &Settings,
     code: &str,
@@ -258,7 +265,7 @@ fn run_inline_in(
     let definition = inline_definition(code);
     let program = super::compile_for_run(&definition)?;
     let label = format!("PL/pgSQL function {INLINE_NAME}");
-    let mut run = Run::over(writer, tables, settings, &definition, label);
+    let mut run = Run::over(writer.reborrow(), tables, settings, &definition, label);
     run.bind_parameters(Vec::new());
     run.program(&program)?;
     run.hand_over_cursors();

@@ -72,7 +72,7 @@ fn create_numbers_package(session: &mut Session<'_>) {
 
 #[test]
 fn a_pipelined_function_is_a_table_in_from() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_numbers_package(&mut session);
     assert_eq!(
@@ -91,7 +91,7 @@ fn a_pipelined_function_is_a_table_in_from() {
 
 #[test]
 fn a_function_returning_a_nested_table_is_a_table_in_from() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     create_numbers_package(&mut session);
     assert_eq!(
@@ -102,7 +102,7 @@ fn a_function_returning_a_nested_table_is_a_table_in_from() {
 
 #[test]
 fn pipe_row_needs_a_pipelined_function() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     let refused = failure(
         &mut session,
@@ -113,7 +113,7 @@ fn pipe_row_needs_a_pipelined_function() {
 
 #[test]
 fn a_collection_variable_is_a_table_in_plsql_sql() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -132,7 +132,7 @@ fn a_collection_variable_is_a_table_in_plsql_sql() {
 
 #[test]
 fn member_of_cardinality_and_multiset_operators_work_on_collections() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     run(
         &mut session,
@@ -178,7 +178,7 @@ fn member_of_cardinality_and_multiset_operators_work_on_collections() {
 
 #[test]
 fn member_as_a_column_alias_still_parses() {
-    let store = MemoryStore::new();
+    let store = MemoryStore::default();
     let mut session = session(&store);
     assert_eq!(column(&mut session, "SELECT 1 member FROM dual"), ["1"]);
 }

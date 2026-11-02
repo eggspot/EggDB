@@ -142,6 +142,7 @@ impl CatalogType {
             Self::AclItem => "aclitem",
             Self::AnyArray => "anyarray",
             Self::Void => "void",
+            Self::Pseudo(pseudo) => pseudo.name(),
             Self::Reg(kind) => kind.type_name(),
         }
     }

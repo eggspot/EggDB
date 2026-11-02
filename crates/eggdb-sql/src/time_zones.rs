@@ -3,7 +3,7 @@ mod compile;
 mod posix;
 
 use crate::datetime::{self, MICROS_PER_SECOND};
-pub(crate) use abbreviations::{AbbreviationRow, abbreviation_rows};
+pub(crate) use abbreviations::abbreviation_rows;
 use compile::{Compiled, LocalTime, SECONDS_PER_DAY, Source};
 use posix::PosixZone;
 use std::borrow::Cow;
