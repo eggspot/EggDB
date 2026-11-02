@@ -20,7 +20,7 @@ pub(crate) use raise::take_raised_notices;
 pub(crate) use run::{
     Call, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionControl,
     TransactionEnd, TriggerCall, invoke, invoke_nonatomic, local_program, local_routines,
-    run_anonymous_block, run_inline, run_inline_nonatomic, run_plsql_trigger,
+    routine_depth, run_anonymous_block, run_inline, run_inline_nonatomic, run_plsql_trigger,
     take_transaction_end,
 };
 pub(crate) use writes::ReadOnlyWrite;

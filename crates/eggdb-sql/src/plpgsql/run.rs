@@ -59,6 +59,10 @@ impl Drop for Depth {
     }
 }
 
+pub(crate) fn routine_depth() -> usize {
+    DEPTH.with(Cell::get)
+}
+
 fn enter_routine() -> SqlResult<Depth> {
     crate::stack_depth::check()?;
     DEPTH.with(|depth| {

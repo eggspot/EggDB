@@ -41,10 +41,11 @@ fn run_statement(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
     settings: &Settings,
-    statement: Statement,
+    mut statement: Statement,
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     crate::cancel::check()?;
+    crate::triggers::replace_transition_tables(&mut statement)?;
     crate::roles::check_statement(settings, &statement)?;
     let binding = Binding {
         settings,

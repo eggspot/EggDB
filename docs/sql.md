@@ -2257,8 +2257,14 @@ another dialect or from an EggDB extension (retention, ledger, change capture), 
 see every removed row. Dropping
 a table or view drops its triggers, and renaming one keeps them. Not yet: temporary and
 constraint and event triggers, SQL Server DDL and logon triggers, Oracle compound and event
-triggers, and transition tables (`REFERENCING`, `0A000` when the trigger fires). PostgreSQL statement triggers
-fire on `TRUNCATE` too.
+triggers, and transition tables in row-level triggers (`0A000` when the trigger fires). PostgreSQL statement triggers
+fire on `TRUNCATE` too. A PostgreSQL `AFTER ... FOR EACH STATEMENT` trigger declared with
+`REFERENCING OLD TABLE AS o NEW TABLE AS n` reads the rows its statement removed and added
+(for `UPDATE`, the old and new versions) as tables `o` and `n` in the statements of its trigger
+function, including rows that cascading foreign keys changed when their triggers fire; functions it
+calls don't see them. As in PostgreSQL, `OLD TABLE` needs `DELETE` or `UPDATE` and `NEW TABLE`
+needs `INSERT` or `UPDATE` among the events (`42P17`), and `TRUNCATE` triggers can't have them
+(`0A000`).
 
 ## Geometry (PostGIS-compatible functions)
 
@@ -2763,14 +2769,26 @@ In the PostgreSQL dialect (D158), users create and call their own functions and 
   than `WITH HOLD` close when their transaction ends, and `DISCARD ALL` closes them all. A
   cursor's rows are read when it is opened. `refcursor` is accepted as a type and holds the
   cursor's name as text.
+- Polymorphic types (DNEW-R-33c): parameters and results of `sql` and PL/pgSQL functions and
+  procedures may be `anyelement`, `anyarray`, `anynonarray`, `anyenum`, `anycompatible`,
+  `anycompatiblearray` and `anycompatiblenonarray`, also in `OUT` parameters, `RETURNS SETOF`,
+  `RETURNS TABLE` and `VARIADIC`. Each call resolves them from its arguments: every `any*`
+  argument of the `anyelement` family has the same type (an array's element for `anyarray`), the
+  `anycompatible` family takes the arguments' common type (`integer` and `numeric` give
+  `numeric`), and the routine runs with its parameters, variables declared `%TYPE` of them and
+  its result typed accordingly. Untyped literals take the type the other arguments give, or
+  `text`. Arguments that don't agree make the routine not a candidate, so the call fails with
+  `42883` as in PostgreSQL (a concrete overload wins over a polymorphic one); a default that
+  doesn't agree with the arguments is `42804`, and a polymorphic result without a polymorphic
+  argument of its family is refused at `CREATE` (`42P13`). `pg_proc` and `\df` show the
+  pseudo-types. `$0` is not declared yet, and an argument that is only `NULL` resolves to `text`.
 
 Limits (D45): calls nest at most 32 deep (`54001`), and fewer when the session's thread runs
 out of stack first (`54001`, "stack depth limit exceeded": the servers and the `eggdb` command
 give each session 16 MiB, an embedding program that runs deep routines gives its thread `eggdb_sql::SESSION_STACK_BYTES`
 and calls `eggdb_sql::set_thread_stack_size`), every loop and statement can be cancelled,
 a body nests at most 64 levels and holds at most 100,000 statements, a routine's text is at most
-1 MiB, and a routine or session holds at most 1000 open cursors. Not yet: polymorphic types (`anyelement`),
-`regprocedure`, functions that write when called once per row (`0A000`; call them on their
+1 MiB, and a routine or session holds at most 1000 open cursors. Not yet: `regprocedure`, functions that write when called once per row (`0A000`; call them on their
 own), set-returning functions other than as a `FROM` item or in a `SELECT` without `FROM`, and
 languages other than `sql` and `plpgsql`.
 

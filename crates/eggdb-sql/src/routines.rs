@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 mod calls;
 mod oracle;
+pub(crate) mod polymorphic;
 mod sqlserver;
 
 pub(crate) use calls::{
@@ -260,6 +261,7 @@ pub(crate) struct RoutineCache {
     entries: HashMap<String, CachedRoutines>,
     programs: Vec<(Arc<RoutineDefinition>, Arc<crate::plpgsql::Program>)>,
     tsql_programs: Vec<(Arc<RoutineDefinition>, Arc<crate::tsql::Program>)>,
+    specializations: Vec<polymorphic::Specialization>,
     pub(crate) packages: crate::plsql::PackageCache,
 }
 
@@ -536,6 +538,7 @@ fn check_returns(
     tables: &mut TableCache,
     definition: &RoutineDefinition,
 ) -> SqlResult<()> {
+    polymorphic::check_result(definition)?;
     let relation = match &definition.returns {
         RoutineReturns::One(ReturnType::Relation(name))
         | RoutineReturns::Set(ReturnType::Relation(name)) => name,
@@ -883,6 +886,8 @@ pub(crate) fn alter_routine(
 mod calls_tests;
 #[cfg(test)]
 mod mysql_tests;
+#[cfg(test)]
+mod polymorphic_tests;
 #[cfg(test)]
 mod sqlserver_tests;
 #[cfg(test)]

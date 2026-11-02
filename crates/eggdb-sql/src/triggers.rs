@@ -22,10 +22,12 @@ mod body;
 mod errors;
 mod functions;
 mod oracle;
+mod transition;
 mod views;
 
 pub(crate) use body::{BodyStep, ConditionalBranch, SignalStep, StepTarget, TriggerFrame};
 pub(crate) use functions::run_statement_function;
+pub(crate) use transition::replace_transition_tables;
 pub(crate) use views::{delete_instead_of_view, insert_instead_of_view, update_instead_of_view};
 
 #[cfg(test)]

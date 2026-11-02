@@ -307,15 +307,86 @@ fn dropping_a_trigger_function_needs_cascade() {
 }
 
 #[test]
-fn transition_tables_are_refused_when_the_trigger_fires() {
+fn statement_triggers_read_the_rows_a_statement_changed_from_transition_tables() {
+    let store = MemoryStore::default();
+    let mut session = prepared(
+        &store,
+        &[
+            ITEMS,
+            AUDIT,
+            "CREATE FUNCTION summary() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    added integer;
+    removed integer;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO audit (op, tbl, detail)
+            SELECT TG_OP, TG_TABLE_NAME, count(*)::text || ' rows, ' || coalesce(sum(price), 0)::text FROM fresh;
+    ELSIF TG_OP = 'UPDATE' THEN
+        SELECT sum(price) INTO added FROM fresh;
+        SELECT sum(price) INTO removed FROM stale;
+        INSERT INTO audit (op, tbl, detail) VALUES (TG_OP, TG_TABLE_NAME, removed::text || ' -> ' || added::text);
+    ELSE
+        INSERT INTO audit (op, tbl, detail)
+            SELECT TG_OP, TG_TABLE_NAME, min(s.name) || ',' || max(s.name) FROM stale AS s;
+    END IF;
+    RETURN NULL;
+END $$",
+            "CREATE TRIGGER items_added AFTER INSERT ON items REFERENCING NEW TABLE AS fresh \
+             FOR EACH STATEMENT EXECUTE FUNCTION summary()",
+            "CREATE TRIGGER items_changed AFTER UPDATE ON items \
+             REFERENCING OLD TABLE AS stale NEW TABLE AS fresh FOR EACH STATEMENT EXECUTE FUNCTION summary()",
+            "CREATE TRIGGER items_removed AFTER DELETE ON items REFERENCING OLD TABLE stale \
+             FOR EACH STATEMENT EXECUTE FUNCTION summary()",
+        ],
+    );
+    answer(
+        &mut session,
+        "INSERT INTO items VALUES (1, 'pen', 2), (2, 'ink', 3), (3, 'pad', 5)",
+    );
+    answer(&mut session, "UPDATE items SET price = price * 10 WHERE id < 3");
+    answer(&mut session, "DELETE FROM items WHERE id <> 2");
+    assert_eq!(
+        rows(&mut session, "SELECT op, tbl, detail FROM audit ORDER BY seq"),
+        vec![
+            "INSERT|items|3 rows, 10",
+            "UPDATE|items|5 -> 50",
+            "DELETE|items|pad,pen",
+        ]
+    );
+    answer(&mut session, "INSERT INTO items SELECT 9, 'cap', 1 WHERE false");
+    assert_eq!(
+        rows(&mut session, "SELECT detail FROM audit WHERE seq = 4"),
+        vec!["0 rows, 0"]
+    );
+}
+
+#[test]
+fn transition_tables_are_checked_when_the_trigger_is_created() {
     let store = MemoryStore::default();
     let mut session = prepared(
         &store,
         &[
             ITEMS,
             "CREATE FUNCTION summary() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
-            "CREATE TRIGGER items_summary AFTER INSERT ON items REFERENCING NEW TABLE AS added FOR EACH STATEMENT EXECUTE FUNCTION summary()",
         ],
+    );
+    let error = refusal(
+        &mut session,
+        "CREATE TRIGGER t AFTER INSERT ON items REFERENCING OLD TABLE AS gone \
+         FOR EACH STATEMENT EXECUTE FUNCTION summary()",
+    );
+    assert_eq!(error.state().code(), "42P17");
+    let error = refusal(
+        &mut session,
+        "CREATE TRIGGER t AFTER DELETE ON items REFERENCING NEW TABLE AS added \
+         FOR EACH STATEMENT EXECUTE FUNCTION summary()",
+    );
+    assert_eq!(error.state().code(), "42P17");
+    answer(
+        &mut session,
+        "CREATE TRIGGER per_row AFTER INSERT ON items REFERENCING NEW TABLE AS added \
+         FOR EACH ROW EXECUTE FUNCTION summary()",
     );
     let error = refusal(&mut session, "INSERT INTO items VALUES (1, 'pen', 2)");
     assert_eq!(error.state().code(), "0A000");

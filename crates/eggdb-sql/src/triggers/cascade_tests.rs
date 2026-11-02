@@ -385,3 +385,28 @@ fn sqlserver_instead_of_delete_on_a_cascaded_table_is_refused() {
     );
     assert!(rows(&mut session, "SELECT removed FROM dbo.audit").is_empty());
 }
+
+#[test]
+fn postgresql_transition_tables_hold_the_rows_cascades_changed() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_family(&store);
+    answer(
+        &mut session,
+        "CREATE FUNCTION log_gone() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO log (what)
+        SELECT format('%s gone %s-%s %s', TG_OP, min(id), max(id), count(*)) FROM gone;
+    RETURN NULL;
+END $$",
+    );
+    answer(
+        &mut session,
+        "CREATE TRIGGER child_gone AFTER DELETE ON child REFERENCING OLD TABLE AS gone \
+         FOR EACH STATEMENT EXECUTE FUNCTION log_gone()",
+    );
+    answer(&mut session, "DELETE FROM parent WHERE id = 1");
+    assert_eq!(
+        rows(&mut session, "SELECT what FROM log"),
+        vec!["DELETE gone 10-11 2"]
+    );
+}

@@ -349,7 +349,7 @@ impl<'t> Parser<'t> {
             && may_be_named
         {
             self.at += 1;
-            if let Ok(sql_type) = self.sql_type()
+            if let Ok(sql_type) = self.routine_type()
                 && self.ends_parameter()
             {
                 return Ok((Some(name), sql_type));
@@ -357,7 +357,7 @@ impl<'t> Parser<'t> {
             self.at = at;
         }
         let position = self.position();
-        let sql_type = self.sql_type()?;
+        let sql_type = self.routine_type()?;
         if self.is_operator("%") {
             return Err(SqlError::not_supported(
                 "a %TYPE reference in a routine's parameter list is not supported yet",
@@ -545,7 +545,7 @@ impl<'t> Parser<'t> {
                     return Err(too_many_parameters(self.position()));
                 }
                 let column = self.name()?;
-                let sql_type = self.sql_type()?;
+                let sql_type = self.routine_type()?;
                 columns.push((column.text, sql_type));
                 if !self.take(&TokenKind::Comma) {
                     break;
@@ -586,7 +586,7 @@ impl<'t> Parser<'t> {
             return Ok(ReturnType::Type(sql_type));
         }
         let at = self.at;
-        match self.sql_type() {
+        match self.routine_type() {
             Ok(sql_type) => Ok(ReturnType::Type(sql_type)),
             Err(error) => {
                 self.at = at;
@@ -596,6 +596,19 @@ impl<'t> Parser<'t> {
                 }
             }
         }
+    }
+
+    fn routine_type(&mut self) -> SqlResult<SqlType> {
+        let qualified = self.is_word("pg_catalog") && self.peek_kind_at(1) == &TokenKind::Dot;
+        let at = if qualified { 2 } else { 0 };
+        if let TokenKind::Word(word) = self.peek_kind_at(at)
+            && let Some(sql_type) = crate::pg_catalog::polymorphic_type_named(word.as_ref())
+            && self.peek_kind_at(at + 1) != &TokenKind::LeftBracket
+        {
+            self.at += at + 1;
+            return Ok(sql_type);
+        }
+        self.sql_type()
     }
 
     fn routine_target(&mut self) -> SqlResult<RoutineTarget> {

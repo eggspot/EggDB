@@ -29,9 +29,9 @@ fn must_return_trigger(name: &str) -> SqlError {
 
 fn transition_tables_not_supported() -> SqlError {
     SqlError::not_supported(
-        "transition tables (REFERENCING OLD TABLE or NEW TABLE) in a PostgreSQL trigger",
+        "transition tables (REFERENCING OLD TABLE or NEW TABLE) in a PostgreSQL row-level trigger",
     )
-    .with_hint("Query the table itself from the trigger function, or use a row-level trigger.")
+    .with_hint("Use FOR EACH STATEMENT to read the transition tables.")
 }
 
 fn mismatched_row(returned: usize, expected: usize) -> SqlError {
@@ -82,9 +82,6 @@ fn trigger_function(
             "the trigger does not run a function",
         ));
     };
-    if trigger.old_table.is_some() || trigger.new_table.is_some() {
-        return Err(transition_tables_not_supported());
-    }
     match routines::resolve_trigger_function(reader, tables, name)? {
         Some(definition) => Ok((definition, arguments.clone())),
         None => Err(errors::missing_function(name)),
@@ -151,6 +148,9 @@ pub(super) fn run_row_function(
     fired: FiredRow<'_>,
     new: Option<&mut Vec<Value>>,
 ) -> SqlResult<BodyEnd> {
+    if fired.trigger.old_table.is_some() || fired.trigger.new_table.is_some() {
+        return Err(transition_tables_not_supported());
+    }
     let (definition, arguments) = trigger_function(&*writer, tables, fired.trigger)?;
     let names: Vec<String> = fired
         .columns
@@ -224,6 +224,7 @@ pub(crate) fn run_statement_function(
         table_schema: schema_of(&call.table).to_owned(),
         arguments,
     };
+    let _transition = super::transition::enter(call);
     plpgsql::invoke(
         writer,
         tables,

@@ -201,6 +201,20 @@ fn replace_in_statement(statement: &mut Statement, materialized: &[Materialized]
     }
 }
 
+pub(crate) fn replace_named_tables(
+    statement: &mut Statement,
+    variables: &[(String, String)],
+) -> SqlResult<()> {
+    let materialized: Vec<Materialized> = variables
+        .iter()
+        .map(|(name, variable)| Materialized {
+            name: name.clone(),
+            variable: Some(variable.clone()),
+        })
+        .collect();
+    replace_in_statement(statement, &materialized)
+}
+
 fn table_query(table: &CommonTable, recursive: bool) -> Query {
     let position = table.name.position;
     let select = Select {

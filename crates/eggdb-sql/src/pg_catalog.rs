@@ -37,7 +37,7 @@ pub(crate) use snapshot::{
     load_for_stored_expressions, load_if_wanted, mentions_catalog, names_non_sequence_relation,
     routine_oid, session_user, snapshot_for, statement_settings, text_needs_catalog,
 };
-pub use types::{CatalogType, RegKind, RegValue};
+pub use types::{CatalogType, PseudoType, RegKind, RegValue};
 
 pub(crate) fn is_extension_type(oid: u32) -> bool {
     oids::EXTENSION_TYPES.contains(&oid)
@@ -57,7 +57,7 @@ pub(crate) fn operator_operand_type_name(sql_type: SqlType) -> String {
 
 pub(crate) use types::{
     cast_type_named, check_expression_tree_argument, convert, convert_from, oid_number,
-    parse_input, read_only, reg_value, system_catalog,
+    parse_input, polymorphic_type_named, read_only, reg_value, system_catalog,
 };
 
 pub(crate) fn catalog_reference(

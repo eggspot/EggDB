@@ -16,6 +16,27 @@ const MAX_BODY_NESTING: usize = 64;
 const MAX_BODY_STEPS: usize = 10_000;
 const MAX_DEFINER_TOKENS: usize = 12;
 
+fn check_transition_tables(events: TriggerEvents, old: bool, new: bool) -> SqlResult<()> {
+    let invalid = |message: &str| SqlError::new(SqlState::INVALID_OBJECT_DEFINITION, message);
+    if events.contains(TriggerEvent::Truncate) {
+        return Err(SqlError::not_supported(
+            "TRUNCATE triggers with transition tables are not supported",
+        ));
+    }
+    let update = events.contains(TriggerEvent::Update);
+    if old && !update && !events.contains(TriggerEvent::Delete) {
+        return Err(invalid(
+            "OLD TABLE can only be specified for a DELETE or UPDATE trigger",
+        ));
+    }
+    if new && !update && !events.contains(TriggerEvent::Insert) {
+        return Err(invalid(
+            "NEW TABLE can only be specified for an INSERT or UPDATE trigger",
+        ));
+    }
+    Ok(())
+}
+
 fn nested_too_deeply(position: usize) -> SqlError {
     SqlError::new(
         SqlState::STATEMENT_TOO_COMPLEX,
@@ -369,6 +390,7 @@ impl<'t> Parser<'t> {
         }
         let mut old_table = None;
         let mut new_table = None;
+        let referencing_at = self.position();
         if self.take_word("referencing") {
             loop {
                 let old = if self.take_word("old") {
@@ -390,6 +412,8 @@ impl<'t> Parser<'t> {
             if old_table.is_none() && new_table.is_none() {
                 return Err(self.unexpected());
             }
+            check_transition_tables(events, old_table.is_some(), new_table.is_some())
+                .map_err(|error| error.at(referencing_at))?;
         }
         let mut level = TriggerLevel::Statement;
         if self.take_word("for") {
