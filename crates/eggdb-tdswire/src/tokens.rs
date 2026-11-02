@@ -129,6 +129,7 @@ pub(crate) struct ServerMessage<'m> {
     pub(crate) severity: u8,
     pub(crate) text: &'m str,
     pub(crate) line: u32,
+    pub(crate) procedure: &'m str,
 }
 
 fn message_token(token: u8, message: &ServerMessage<'_>, state: u8) -> Vec<u8> {
@@ -138,7 +139,7 @@ fn message_token(token: u8, message: &ServerMessage<'_>, state: u8) -> Vec<u8> {
     body.push(message.severity);
     push_us_varchar(&mut body, message.text);
     push_b_varchar(&mut body, SERVER_NAME);
-    push_b_varchar(&mut body, "");
+    push_b_varchar(&mut body, message.procedure);
     body.extend_from_slice(&message.line.to_le_bytes());
     with_length(token, body)
 }
@@ -238,6 +239,7 @@ mod tests {
             severity: 16,
             text: "x",
             line: 2,
+            procedure: "",
         });
         assert_eq!(
             token,
@@ -252,6 +254,7 @@ mod tests {
                 severity: 16,
                 text: "x",
                 line: 1,
+                procedure: "",
             },
             7,
         );
@@ -262,11 +265,23 @@ mod tests {
                 severity: 0,
                 text: "x",
                 line: 1,
+                procedure: "",
             },
             1,
         );
         assert_eq!(printed[0], 0xAB);
         assert_eq!(printed[7..9], [1, 0]);
+        let in_procedure = error(&ServerMessage {
+            number: 50_000,
+            severity: 16,
+            text: "x",
+            line: 3,
+            procedure: "pq",
+        });
+        assert_eq!(
+            in_procedure[23..33],
+            [0, 2, b'p', 0, b'q', 0, 3, 0, 0, 0]
+        );
     }
 
     #[test]

@@ -6,8 +6,8 @@ use super::{
 use crate::arrays::ArrayValue;
 use crate::ast::{
     CallRoutine, Delete, Expr, ExprKind, FromClause, GeneratedTable, Insert, InsertSource, Literal,
-    Name, ORACLE_COLLECTION_TABLE, Query, Select, SelectItem, SetExpr, Statement, TableReference,
-    Update, ValuesList,
+    Name, ORACLE_COLLECTION_TABLE, Query, Select, SelectItem, SetExpr, Statement, TableFunction,
+    TableReference, Update, ValuesList,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -168,6 +168,87 @@ pub(crate) fn call_in_row(
         (Returned::Value(value), _) => Ok(value),
         (Returned::Set(_), _) => Err(set_not_allowed()),
     }
+}
+
+pub(crate) fn correlated_table_function_columns(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    function: &TableFunction,
+) -> SqlResult<Option<Vec<OutputColumn>>> {
+    let Some(found) = resolve(reader, tables, &function.name)? else {
+        return Ok(None);
+    };
+    let mut candidates = found
+        .routines
+        .iter()
+        .filter(|routine| routine.kind == RoutineKind::Function);
+    let (Some(definition), None) = (candidates.next(), candidates.next()) else {
+        return Ok(None);
+    };
+    let definition = Arc::clone(definition);
+    let mut columns = if is_inline_tsql_table(&definition) {
+        let settings = crate::pg_catalog::statement_settings();
+        let mut writer = ReadOnlyWrite { inner: reader };
+        crate::tsql::inline_table_columns(&mut writer, tables, &settings, &definition)?
+    } else if let RoutineReturns::Table(declared) = &definition.returns {
+        declared
+            .iter()
+            .map(|(name, sql_type)| OutputColumn {
+                name: name.clone(),
+                sql_type: Some(*sql_type),
+            })
+            .collect()
+    } else {
+        return Ok(None);
+    };
+    if function.ordinality {
+        columns.push(OutputColumn {
+            name: ORDINALITY_COLUMN.to_owned(),
+            sql_type: Some(SqlType::BigInt),
+        });
+    }
+    Ok(Some(columns))
+}
+
+pub(crate) fn correlated_table_function_rows(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    function: &TableFunction,
+    evaluator: &Evaluator<'_>,
+) -> SqlResult<Vec<Vec<Value>>> {
+    let mut values = Vec::with_capacity(function.arguments.len());
+    let mut names = Vec::with_capacity(function.arguments.len());
+    for argument in &function.arguments {
+        if is_default_argument(argument) {
+            values.push(Value::Null);
+            names.push(Some(DEFAULT_ARGUMENT.to_owned()));
+        } else {
+            values.push(evaluator.eval(argument, None)?);
+            names.push(None);
+        }
+    }
+    let settings = crate::pg_catalog::statement_settings();
+    let mut writer = ReadOnlyWrite { inner: reader };
+    let (returned, _) = call_function(
+        &mut writer,
+        tables,
+        &settings,
+        &function.name,
+        &names,
+        values,
+    )
+    .map_err(|error| error.at_if_unplaced(function.position))?;
+    let elements = match returned {
+        Returned::Set(elements) => elements,
+        Returned::Value(value) => vec![value],
+    };
+    let mut rows: Vec<Vec<Value>> = elements.into_iter().map(row_of).collect();
+    if function.ordinality {
+        for (number, row) in rows.iter_mut().enumerate() {
+            row.push(Value::BigInt(i64::try_from(number + 1).unwrap_or(i64::MAX)));
+        }
+    }
+    Ok(rows)
 }
 
 pub(crate) fn call_procedure(

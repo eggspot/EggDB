@@ -375,7 +375,9 @@ impl SqlError {
         self
     }
 
-    pub(crate) fn procedure(&self) -> Option<&str> {
+    /// The name of the innermost procedure the error escaped, as SQL Server reports it in
+    /// `ERROR_PROCEDURE()` and in a TDS `ERROR` token, or `None` outside a procedure.
+    pub fn procedure(&self) -> Option<&str> {
         self.report.procedure.as_deref()
     }
 

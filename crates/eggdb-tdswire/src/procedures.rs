@@ -485,6 +485,7 @@ impl Connection<'_> {
                     severity: error.severity,
                     text: &error.text,
                     line: 1,
+                    procedure: "",
                 });
                 tokens_out.extend(tokens::done(
                     DONE_PROC,

@@ -148,6 +148,7 @@ fn send_errors(wire: &mut Wire<'_>, errors: &[(u32, u8, &str)]) {
             severity: *severity,
             text,
             line: 1,
+            procedure: "",
         }));
     }
     body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
@@ -533,6 +534,7 @@ fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
         severity: 0,
         text: &format!("Changed database context to '{database}'."),
         line: 0,
+        procedure: "",
     }));
     body.extend(tokens::env_change_text(ENV_LANGUAGE, "us_english", ""));
     body.extend(tokens::info(&ServerMessage {
@@ -540,6 +542,7 @@ fn login_response(database: &str, packet_size: usize) -> Vec<u8> {
         severity: 0,
         text: "Changed language setting to us_english.",
         line: 0,
+        procedure: "",
     }));
     body.extend(tokens::env_change_collation());
     body.extend(tokens::env_change_text(
@@ -838,6 +841,7 @@ impl Connection<'_> {
             severity,
             text,
             line: 1,
+            procedure: "",
         });
         body.extend(tokens::done(DONE, DONE_ERROR, 0, 0));
         self.send_response(&body)
@@ -1206,6 +1210,7 @@ impl StepWriter<'_, '_> {
                 severity,
                 text: error.message(),
                 line,
+                procedure: error.procedure().unwrap_or(""),
             },
             error.sqlserver_state().unwrap_or(1),
         );
@@ -1253,6 +1258,7 @@ impl StepWriter<'_, '_> {
                     severity: message.severity,
                     text: &message.text,
                     line,
+                    procedure: "",
                 },
                 message.state,
             ));
@@ -1270,6 +1276,7 @@ impl StepWriter<'_, '_> {
                 severity: 0,
                 text: &format!("Changed database context to '{database}'."),
                 line: 1,
+                procedure: "",
             }));
             if !self.write(&body) {
                 return false;
@@ -1288,6 +1295,7 @@ impl StepWriter<'_, '_> {
                     severity: 15,
                     text: "The number of elements in the select list exceeds the maximum allowed number of 4096 elements.",
                     line: 1,
+                    procedure: "",
                 });
                 if !self.write(&token) {
                     return false;
