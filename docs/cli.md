@@ -985,8 +985,9 @@ block still open when the shell ends is rolled back with a `WARNING:`. Inside a 
 `get`, `del`, `incr` and `decr` run in the block's own transaction, so key-value writes and SQL
 are all-or-nothing together: `COMMIT` keeps both, `ROLLBACK` (or a block left open at the end)
 drops both, and `get` sees what the block wrote. In a failed block they are refused until
-`ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, and `expire`, `persist` and
-`cas` are refused inside a block for now; `scan`, `ttl`, `check`, `stats` and `backup` read the
+`ROLLBACK`, in a `BEGIN READ ONLY` block the writes are refused, while a `SAVEPOINT` is set
+`put`, `del`, `incr` and `decr` are refused (a `ROLLBACK TO SAVEPOINT` would not undo them;
+`RELEASE SAVEPOINT` lifts it), and `expire`, `persist` and `cas` are refused inside a block for now; `scan`, `ttl`, `check`, `stats` and `backup` read the
 last commit (D266).
 
 ```

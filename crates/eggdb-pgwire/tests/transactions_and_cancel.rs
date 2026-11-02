@@ -318,3 +318,68 @@ fn npgsql_type_loading_queries_answer_in_one_round_trip() {
     assert_eq!(int_array[3].as_deref(), Some("a"));
     assert_eq!(int_array[5].as_deref(), Some("23"));
 }
+
+fn with_committing_procedure(server: &TestServer) -> Client {
+    let mut client = with_table(server);
+    let created = client.query(
+        "CREATE PROCEDURE keep_one() LANGUAGE plpgsql AS $$ BEGIN \
+         INSERT INTO t VALUES (1); COMMIT; INSERT INTO t VALUES (2); INSERT INTO t VALUES (1); \
+         END $$",
+    );
+    assert_eq!(tags(&created), "CZ");
+    client
+}
+
+#[test]
+fn a_call_alone_in_a_query_message_commits_inside_the_procedure() {
+    let server = TestServer::start(8);
+    let mut client = with_committing_procedure(&server);
+    let (mut other, _) = Client::login(server.address);
+    let answer = client.query("CALL keep_one()");
+    assert_eq!(tags(&answer), "EZ");
+    assert_eq!(answer[0].code(), "23505");
+    assert_eq!(ready_status(&answer), b'I');
+    assert_eq!(count(&mut other), "1");
+
+    let answer = client.query("DO $$ BEGIN INSERT INTO t VALUES (7); COMMIT; END $$;");
+    assert_eq!(tags(&answer), "CZ");
+    assert_eq!(count(&mut other), "2");
+}
+
+#[test]
+fn a_call_among_other_statements_of_a_query_message_cannot_commit() {
+    let server = TestServer::start(8);
+    let mut client = with_committing_procedure(&server);
+    let answer = client.query("SELECT 1; CALL keep_one()");
+    assert_eq!(tags(&answer), "TDCEZ");
+    assert_eq!(answer[3].code(), "2D000");
+    assert_eq!(count(&mut client), "0");
+
+    let answer = client.query("DO $$ BEGIN INSERT INTO t VALUES (7); COMMIT; END $$; SELECT 1");
+    assert_eq!(tags(&answer), "EZ");
+    assert_eq!(answer[0].code(), "2D000");
+    assert_eq!(count(&mut client), "0");
+}
+
+#[test]
+fn an_executed_call_commits_inside_the_procedure_unless_the_pipeline_wrote_first() {
+    let server = TestServer::start(8);
+    let mut client = with_committing_procedure(&server);
+    let (mut other, _) = Client::login(server.address);
+    run_in_pipeline(&mut client, "CALL keep_one()");
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12EZ");
+    assert_eq!(answer[2].code(), "23505");
+    assert_eq!(ready_status(&answer), b'I');
+    assert_eq!(count(&mut other), "1");
+
+    assert_eq!(tags(&client.query("DELETE FROM t")), "CZ");
+    run_in_pipeline(&mut client, "INSERT INTO t VALUES (5)");
+    run_in_pipeline(&mut client, "CALL keep_one()");
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12C12EZ");
+    assert_eq!(answer[5].code(), "2D000");
+    assert_eq!(count(&mut other), "0");
+}

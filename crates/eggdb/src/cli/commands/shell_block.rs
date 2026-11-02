@@ -22,6 +22,18 @@ const IN_BLOCK: [CommandName; 5] = [
     CommandName::Decr,
 ];
 
+const WRITES: [CommandName; 4] = [
+    CommandName::Put,
+    CommandName::Del,
+    CommandName::Incr,
+    CommandName::Decr,
+];
+
+pub(super) struct BlockState {
+    pub(super) status: TransactionStatus,
+    pub(super) has_savepoints: bool,
+}
+
 pub(super) enum InBlock {
     ReadsTheLastCommit,
     Ran {
@@ -51,7 +63,7 @@ impl InBlock {
 
 pub(super) fn key_value_in_block(
     store: &SharedWriteStore<'_>,
-    status: TransactionStatus,
+    block: BlockState,
     request: &Request,
     file: &str,
 ) -> Result<InBlock, Failure> {
@@ -59,7 +71,7 @@ pub(super) fn key_value_in_block(
     if READS_THE_LAST_COMMIT.contains(&command) {
         return Ok(InBlock::ReadsTheLastCommit);
     }
-    if status == TransactionStatus::Failed {
+    if block.status == TransactionStatus::Failed {
         return Err(Failure::database(
             format!(
                 "cannot run {} in {file}: the transaction block failed; ROLLBACK ends it",
@@ -72,6 +84,16 @@ pub(super) fn key_value_in_block(
         return Err(Failure::usage(
             format!(
                 "{} cannot run inside a transaction block yet; COMMIT or ROLLBACK first",
+                command.name()
+            ),
+            Some(command),
+        ));
+    }
+    if block.has_savepoints && WRITES.contains(&command) {
+        return Err(Failure::usage(
+            format!(
+                "{} cannot run while a savepoint is set, since ROLLBACK TO SAVEPOINT would not \
+                 undo it; RELEASE SAVEPOINT, COMMIT or ROLLBACK first",
                 command.name()
             ),
             Some(command),

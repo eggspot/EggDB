@@ -405,6 +405,39 @@ fn a_failed_block_refuses_key_value_writes_until_rollback() {
 }
 
 #[test]
+fn key_value_writes_are_refused_while_a_savepoint_is_set() {
+    let directory = TempDirectory::new("shell-mixed-savepoint");
+    let file = created(&directory);
+    let script = "begin;\n\
+        put k before\n\
+        savepoint s;\n\
+        put k inside\n\
+        del k\n\
+        incr n\n\
+        rollback to savepoint s;\n\
+        get k\n\
+        release savepoint s;\n\
+        put k after\n\
+        commit;\n\
+        get k\n";
+    let ran = shell(&file, &["--keep-going"], script);
+    let stderr = text(&ran.stderr);
+    for command in ["put", "del", "incr"] {
+        assert!(
+            stderr.contains(&format!(
+                "{command} cannot run while a savepoint is set, since ROLLBACK TO SAVEPOINT \
+                 would not undo it; RELEASE SAVEPOINT, COMMIT or ROLLBACK first"
+            )),
+            "{stderr}"
+        );
+    }
+    assert_eq!(
+        text(&ran.stdout),
+        "BEGIN\nSAVEPOINT\nROLLBACK\nbefore\nRELEASE\nCOMMIT\nafter\n"
+    );
+}
+
+#[test]
 fn schema_in_sqlite_prints_each_create_statement_as_it_was_written() {
     let directory = TempDirectory::new("shell-sqlite-schema");
     let file = created(&directory);

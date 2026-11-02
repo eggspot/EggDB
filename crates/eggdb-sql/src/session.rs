@@ -58,6 +58,13 @@ fn walks_expressions(tokens: &[Token<'_>]) -> bool {
             })
 }
 
+fn only_separators_after(tokens: &[Token<'_>], at: usize) -> bool {
+    tokens.get(at..).is_none_or(|rest| {
+        rest.iter()
+            .all(|token| matches!(token.kind, TokenKind::Semicolon | TokenKind::End))
+    })
+}
+
 fn mentions_sequence_functions(tokens: &[Token<'_>]) -> bool {
     tokens.iter().enumerate().any(|(at, token)| {
         let TokenKind::Word(word) = &token.kind else {
@@ -408,6 +415,8 @@ pub struct Session<'s> {
     cancel: crate::cancel::CancelSignal,
     implicit_transaction: bool,
     block_is_implicit: bool,
+    statements_in_text: usize,
+    statement_stands_alone: bool,
     connection_settings: Option<Arc<Settings>>,
     pending_bulk_load: Option<String>,
     batch_context: Arc<crate::tsql::BatchContext>,
@@ -483,6 +492,8 @@ impl<'s> Session<'s> {
             extra_results: Vec::new(),
             cancel: crate::cancel::CancelSignal::default(),
             implicit_transaction: false,
+            statements_in_text: 0,
+            statement_stands_alone: false,
             block_is_implicit: false,
             connection_settings: None,
             pending_bulk_load: None,
@@ -1391,6 +1402,12 @@ impl<'s> Session<'s> {
         self.read(|reader, _| crate::indexes::check_indexes(reader))
     }
 
+    /// Whether a `SAVEPOINT` is set in the open block, so that a `ROLLBACK TO SAVEPOINT` could
+    /// undo part of it. Only writes made through this session's statements are undone.
+    pub fn has_savepoints(&self) -> bool {
+        self.savepoints.is_active()
+    }
+
     /// Whether a `BEGIN` block is open, failed or not. An implicit transaction
     /// ([`Session::start_implicit_transaction`]) is not one.
     pub fn in_block(&self) -> bool {
@@ -1573,6 +1590,7 @@ impl<'s> Session<'s> {
             script: false,
             bulk_rows: None,
         };
+        self.statements_in_text = 0;
         match self.run_tokens(
             text,
             &tokens,
@@ -1639,6 +1657,7 @@ impl<'s> Session<'s> {
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
         self.statement_start = 0;
+        self.statements_in_text = 0;
         if self.sqlserver() && client.bulk_rows.is_none() {
             let tokens = tokenize_in(text, self.dialect)?;
             if crate::tsql::uses_batch_logic(&tokens) {
@@ -1754,6 +1773,7 @@ impl<'s> Session<'s> {
                 return Ok(Flow::Finished { inline_end });
             }
             self.statement_start = parser.position();
+            self.statements_in_text = self.statements_in_text.saturating_add(1);
             let _status = self.enter_sqlserver_status();
             let _variables = self
                 .sqlserver()
@@ -1847,6 +1867,8 @@ impl<'s> Session<'s> {
             if self.batch_resume.is_some() {
                 self.batch_resume = Some(resume);
             }
+            self.statement_stands_alone =
+                self.statements_in_text == 1 && only_separators_after(tokens, resume.0);
             let statement_tokens = tokens.get(first_token..resume.0.min(tokens.len()));
             let uses_sequences = statement_tokens.is_some_and(mentions_sequence_functions);
             self.statement_walks_expressions = statement_tokens.is_none_or(walks_expressions);

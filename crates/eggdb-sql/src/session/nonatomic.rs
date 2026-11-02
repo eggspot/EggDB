@@ -170,7 +170,7 @@ impl<'s> Session<'s> {
         self.dialect == crate::dialect::Dialect::PostgreSql
             && matches!(self.block, super::Block::None)
             && self.autocommit()
-            && !self.implicit_transaction
+            && (!self.implicit_transaction || self.statement_stands_alone)
             && !self.savepoints.is_active()
     }
 

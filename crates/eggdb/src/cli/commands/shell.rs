@@ -1,6 +1,6 @@
 use super::collection::collections_count;
 use super::compact::shell_holds_the_file;
-use super::shell_block::{InBlock, key_value_in_block};
+use super::shell_block::{BlockState, InBlock, key_value_in_block};
 use super::shell_copy::{
     CopyEnd, CopyLines, ShellCopy, backslash_copy_arguments, parse_backslash_copy,
 };
@@ -1093,8 +1093,11 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
             Ok(Invocation::Run(request)) => request,
             _ => return None,
         };
-        let status = self.sql.transaction_status();
-        let exit = match key_value_in_block(self.store, status, &request, &self.file) {
+        let block = BlockState {
+            status: self.sql.transaction_status(),
+            has_savepoints: self.sql.has_savepoints(),
+        };
+        let exit = match key_value_in_block(self.store, block, &request, &self.file) {
             Ok(InBlock::ReadsTheLastCommit) => return None,
             Ok(InBlock::Ran {
                 printed,
