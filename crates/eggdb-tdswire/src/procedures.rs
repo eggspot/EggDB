@@ -715,6 +715,17 @@ impl Connection<'_> {
         procedure: &Procedure,
         parameters: &[RpcParameter],
     ) -> Result<Called, CallError> {
+        session.in_connection_dialect(|session| {
+            self.transact_sql_procedure(session, procedure, parameters)
+        })
+    }
+
+    fn transact_sql_procedure(
+        &mut self,
+        session: &mut Session<'_>,
+        procedure: &Procedure,
+        parameters: &[RpcParameter],
+    ) -> Result<Called, CallError> {
         let Procedure::Name(name) = procedure else {
             return Err(unknown_procedure(procedure));
         };

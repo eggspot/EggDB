@@ -65,6 +65,12 @@ impl<'t> Lexer<'t> {
                 self.at += 1;
                 Ok(TokenKind::Colon)
             }
+            b'@' if self
+                .peek(1)
+                .is_some_and(|next| next.is_ascii_alphabetic() || next == b'_') =>
+            {
+                self.at_sign_parameter()
+            }
             b'$' if self.peek(1).is_some_and(|next| next.is_ascii_digit()) => {
                 self.at += 1;
                 let digits_start = self.at;
@@ -162,6 +168,20 @@ impl<'t> Lexer<'t> {
         )))
     }
 
+    fn at_sign_parameter(&mut self) -> SqlResult<TokenKind<'t>> {
+        let start = self.at;
+        self.at += 1;
+        while self.peek(0).is_some_and(is_oracle_identifier_part) {
+            self.at += 1;
+        }
+        if self.at - start > MAX_IDENTIFIER_BYTES {
+            return Err(identifier_too_long(start));
+        }
+        Ok(TokenKind::Variable(Cow::Owned(
+            self.text[start..self.at].to_ascii_lowercase(),
+        )))
+    }
+
     fn bind_variable(&mut self) -> SqlResult<TokenKind<'t>> {
         let start = self.at;
         self.at += 1;
@@ -200,6 +220,20 @@ mod tests {
             .into_iter()
             .map(|token| token.kind)
             .collect()
+    }
+
+    #[test]
+    fn an_at_sign_name_is_a_tds_parameter_and_a_lone_at_sign_stays_invalid() {
+        assert_eq!(
+            oracle_kinds("@P0 = @Name_1"),
+            vec![
+                TokenKind::Variable("@p0".into()),
+                TokenKind::Operator("="),
+                TokenKind::Variable("@name_1".into()),
+                TokenKind::End,
+            ]
+        );
+        assert!(tokenize_in("@ 1", Dialect::Oracle).is_err());
     }
 
     #[test]

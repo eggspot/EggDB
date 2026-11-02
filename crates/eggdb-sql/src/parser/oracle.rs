@@ -1006,6 +1006,11 @@ impl<'t> Parser<'t> {
             TokenKind::NumberedParameter(number) => {
                 return self.parameter(&number.to_string(), position).map(Some);
             }
+            TokenKind::Variable(name) => {
+                let name = name.to_string();
+                self.at += 1;
+                return self.bound_parameter(&name, position).map(Some);
+            }
             TokenKind::Word(word) => match word.as_ref() {
                 "interval" => return self.oracle_interval_literal(position),
                 "sessiontimezone" | "dbtimezone" => {

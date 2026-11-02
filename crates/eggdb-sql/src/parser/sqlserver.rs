@@ -795,7 +795,7 @@ impl<'t> Parser<'t> {
         self.bound_parameter(name, position)
     }
 
-    fn bound_parameter(&self, name: &str, position: usize) -> SqlResult<Expr> {
+    pub(super) fn bound_parameter(&self, name: &str, position: usize) -> SqlResult<Expr> {
         let Parameters::Named(parameters) = self.parameters else {
             return Err(undeclared_variable(name, position));
         };

@@ -674,3 +674,59 @@ fn session_currency_and_numeric_characters_shape_to_char_and_to_number() {
         vec![vec![text("$1,234.5")]]
     );
 }
+
+fn parameterized(
+    session: &mut Session<'_>,
+    text: &str,
+    parameters: &[crate::NamedParameter],
+) -> Vec<Result<Vec<Vec<Value>>, SqlError>> {
+    let mut outcomes = Vec::new();
+    let ran = session.execute_parameterized_batch(text, parameters, &mut |step| {
+        outcomes.push(step.outcome.map(|result| result.rows));
+        true
+    });
+    if let Err(error) = ran {
+        outcomes.push(Err(error));
+    }
+    outcomes
+}
+
+#[test]
+fn at_sign_parameters_bind_by_name_in_any_order_in_oracle_sql() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut session,
+        "CREATE TABLE emp (id NUMBER PRIMARY KEY, name VARCHAR2(20))",
+    );
+    let parameters = [
+        crate::NamedParameter {
+            name: "@P1".to_owned(),
+            declared_type: Some(SqlType::Text),
+            value: text("Ada"),
+        },
+        crate::NamedParameter {
+            name: "@P0".to_owned(),
+            declared_type: Some(SqlType::BigInt),
+            value: Value::BigInt(1),
+        },
+    ];
+    let inserted = parameterized(
+        &mut session,
+        "INSERT INTO emp VALUES (@P0, @P1)",
+        &parameters,
+    );
+    assert!(inserted.iter().all(Result::is_ok), "{inserted:?}");
+    let selected = parameterized(
+        &mut session,
+        "SELECT NVL(name, 'x') FROM emp WHERE id = @p0 AND name = @P1",
+        &parameters,
+    );
+    assert_eq!(selected.len(), 1);
+    assert_eq!(
+        selected[0].as_ref().ok(),
+        Some(&vec![vec![text("Ada")]])
+    );
+    let missing = parameterized(&mut session, "SELECT @P2 FROM dual", &parameters);
+    assert!(missing.iter().any(Result::is_err), "{missing:?}");
+}

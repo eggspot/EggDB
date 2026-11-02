@@ -1246,7 +1246,11 @@ Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1
   (`IMPLICIT_TRANSACTIONS`, transaction manager requests, which run as Transact-SQL whichever
   dialect the connection chose). Oracle's DDL still commits what is open.
 - **Parameters and values**: pgjdbc's and libpq's `$1` placeholders work in Oracle's dialect
-  next to Oracle's `:name` and `:1`. Values go out with the protocol's closest types (`NUMBER`
+  next to Oracle's `:name` and `:1`, and over TDS the `@name` parameters of `sp_executesql`,
+  `sp_prepare` and `sp_prepexec` (`@P0`, as mssql-jdbc and SqlClient write them) are bound by
+  name in Oracle SQL too. A stored procedure called by name over RPC runs as Transact-SQL
+  whichever dialect the connection chose, its parameters given by position or by name in any
+  order and the omitted ones taking their defaults. Values go out with the protocol's closest types (`NUMBER`
   as `numeric`, `DATE` as `timestamp(0)`, `VARCHAR2` as `text` or `varchar`, over TDS as SQL
   Server's), so the drivers read them unchanged. A pooled TDS connection's reset returns to
   Transact-SQL.
@@ -1255,7 +1259,7 @@ Known differences: a query string that the previous dialect cannot split into to
 Oracle `q'[...]'` literal sent in one psql `-c` with the `SET` before it) fails before anything
 runs, so send the `SET` on its own; psql's backslash commands and pgjdbc's `DatabaseMetaData`
 read PostgreSQL's catalog, which Oracle's dialect does not answer (use the data dictionary); over
-TDS, `sp_executesql` parameters (`@name`) are read only in Transact-SQL, and mssql-jdbc's
+TDS, mssql-jdbc's
 `setAutoCommit(false)` sends Transact-SQL (`set implicit_transactions on`) that Oracle's dialect
 refuses, so use plain batches there.
 
