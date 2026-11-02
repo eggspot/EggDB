@@ -313,7 +313,40 @@ fn inline_data_start(text: &str, ranges: &[std::ops::Range<usize>], stop: CopySt
 
 const NO_TRANSACTION_WARNING: &str = "WARNING:  there is no transaction in progress";
 pub(crate) const PLSQL_BLOCK_TAG: &str = "PL/SQL BLOCK";
-const POSTGRESQL_CATALOG_QUALIFIER: &str = "pg_catalog.";
+const POSTGRESQL_CATALOG: &str = "pg_catalog";
+
+fn is_one_statement_naming_the_postgresql_catalog(text: &str) -> bool {
+    let mentions = text
+        .as_bytes()
+        .windows(POSTGRESQL_CATALOG.len())
+        .any(|window| window.eq_ignore_ascii_case(POSTGRESQL_CATALOG.as_bytes()));
+    if !mentions {
+        return false;
+    }
+    let Ok(tokens) = tokenize_in(text, Dialect::PostgreSql) else {
+        return false;
+    };
+    let mut ended = false;
+    let mut qualifies = false;
+    let mut previous: Option<&TokenKind<'_>> = None;
+    for token in &tokens {
+        match &token.kind {
+            TokenKind::End => break,
+            TokenKind::Semicolon => ended = true,
+            _ if ended => return false,
+            TokenKind::Dot => {
+                qualifies |= previous.is_some_and(|before| match before {
+                    TokenKind::Word(word) => word.eq_ignore_ascii_case(POSTGRESQL_CATALOG),
+                    TokenKind::QuotedIdentifier(name) => name == POSTGRESQL_CATALOG,
+                    _ => false,
+                });
+            }
+            _ => {}
+        }
+        previous = Some(&token.kind);
+    }
+    qualifies
+}
 
 fn aborted_block() -> SqlError {
     SqlError::new(
@@ -528,9 +561,7 @@ impl<'s> Session<'s> {
     fn reads_the_postgresql_catalog(&self, text: &str) -> bool {
         self.connection_dialect == Dialect::PostgreSql
             && self.dialect != Dialect::PostgreSql
-            && text
-                .to_ascii_lowercase()
-                .contains(POSTGRESQL_CATALOG_QUALIFIER)
+            && is_one_statement_naming_the_postgresql_catalog(text)
     }
 
     /// Runs `body` with the session reading its connection's dialect, then reads the dialect

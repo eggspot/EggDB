@@ -930,25 +930,37 @@ transaction; values convert as SQL Server converts text (`1`/`0` for `bit`, `202
 
 - `--unicode` reads bcp's Unicode character format (`bcp ... -w`): UTF-16LE with or without a
   byte order mark, with the same terminators (`eggdb_sql::BcpUnicodeInput` for embedders).
-- `--native` reads bcp's native format (`bcp ... -n`), laid out by the table's columns as `bcp
-  format ... -n` describes them: integers, `bit`, floats, `money`, `datetime` and
-  `uniqueidentifier` in their fixed sizes (with a one-byte length prefix when the column allows
-  NULL), `decimal` and the date and time types with a one-byte prefix, text as UTF-16 with a
-  two-byte prefix (eight bytes for `max`), and binary data with an eight-byte prefix; a prefix of
-  all `0xFF` bytes is NULL.
+- `--native` reads bcp's native format (`bcp ... -n`), each column laid out as `bcp format ...
+  -n` lays out the SQL Server type EggDB reports for it in `sys.columns`: `smallint`, `int`,
+  `bigint`, `bit`, `real`, `float`, `datetime` and `uniqueidentifier` in their fixed sizes (with
+  a one-byte length prefix when the column allows NULL), `decimal`, `numeric` and the date and
+  time types with a one-byte prefix, `nvarchar(n)` and `nchar(n)` as UTF-16 with a two-byte
+  prefix, and `nvarchar(max)` and `varbinary(max)` with an eight-byte prefix; a prefix of all
+  `0xFF` bytes is NULL. A column of a type with no native layout (an interval, an array, a
+  user-defined type) is an error (`0A000`) naming the column. EggDB keeps the engine type, not
+  the declared SQL Server type, so `tinyint`, `varchar`, `char`, `text`, `money`, `smallmoney`,
+  `smalldatetime`, `binary(n)`, `varbinary(n)` and `image` columns are reported (and laid out) as
+  `smallint`, `nvarchar`, `nchar`, `nvarchar(max)`, `decimal`, `datetime2(0)` and
+  `varbinary(max)`; a native file SQL Server wrote from a table with such columns lays them out
+  differently, so load it with the format file `bcp format ... -n -f` writes on the source
+  server (`--format-file`).
 - `--format-file <file>` reads the data as a bcp format file (`bcp ... -f`) lays it out, non-XML
   (version line, field count, then order, host type, prefix length, length, quoted terminator,
   server column order, name and collation per field) or XML (`<BCPFORMAT>` with `<RECORD>` and
-  `<ROW>`); a field with server column order 0, or one no `<COLUMN>` names, is skipped. A format
-  file that cannot be read is a usage error naming what is wrong (SQL Server's 4823).
+  `<ROW>`); a field with server column order 0, or one no `<COLUMN>` names, is skipped.
+  `SQLNCHAR` terminators are UTF-16 bytes as `bcp format ... -w` writes them (`"\t\0"`,
+  `"\r\0\n\0"`); one that is not (`"\t"`) is widened to UTF-16. `SQLCHAR` data is read as UTF-8
+  (bcp's `-C 65001`), so text in another code page with bytes over 127 is error 4864. A format
+  file that cannot be read, or one with no fields or a field with no prefix, no terminator and
+  a length of 0 (a row that reads no bytes), is a usage error naming what is wrong (SQL
+  Server's 4823).
 
 They go with `--dialect sqlserver` and one at a time; `--delimiter` and `--row-terminator` go
 only with the character layouts. Embedders use `eggdb_sql::BcpFileReader` (native or a
 `BcpFormat`) as the `BulkRows` of `Session::execute_bulk_load`, and `eggdb_sql::write_bcp_table`
 writes a table in the character, Unicode or native layout as `bcp ... out` does, with
-`BcpFormat::to_format_file` for its format file. Not yet: `eggdb export` writing bcp files, and
-`varchar` columns in native files are read as UTF-16 (`SQLNCHAR`) where bcp writes them as
-`SQLCHAR`.
+`BcpFormat::to_format_file` for its format file (`SQLNCHAR` terminators written as `"\t\0"`).
+Not yet: `eggdb export` writing bcp files, and `SQLCHAR` data in code pages other than UTF-8.
 
 `BULK INSERT t FROM 'file' WITH (...)` and `OPENROWSET(BULK 'file', ...)` parse with every option
 SQL Server documents (`FORMAT = 'CSV'`, `FIELDTERMINATOR`, `ROWTERMINATOR`, `FIRSTROW`,
@@ -1401,7 +1413,13 @@ END;
   `TABLE(f(...))` of a function returning a nested table or varray and `TABLE(v)` of a PL/SQL
   collection in a block's SQL; `x [NOT] MEMBER OF c`, `a [NOT] SUBMULTISET OF b`, `CARDINALITY`
   (`NULL` for an empty collection) and `MULTISET UNION`/`INTERSECT`/`EXCEPT` with `ALL` or
-  `DISTINCT`.
+  `DISTINCT`. `MEMBER OF` is `FALSE` for an empty collection, `NULL` for a `NULL` element or
+  collection and when no element matches but one is `NULL`. `SUBMULTISET OF` follows Oracle's
+  rules: an empty collection is a submultiset of anything (a `NULL` collection too), a `NULL`
+  collection on either side is otherwise `NULL`, and the result is `NULL` rather than `FALSE`
+  when replacing the `NULL` elements could make it `TRUE`. A `MULTISET` result holds at most
+  4,194,304 elements (`54000`, as a PL/SQL collection), and the operators match elements by
+  sorting, so large collections take time in proportion to n log n and can be cancelled.
 
 Not supported yet (`0A000`, or `ORA-06550` with the reason at `CREATE`): `PRAGMA
 AUTONOMOUS_TRANSACTION` (EggDB runs one write transaction at a time, so a routine cannot commit
