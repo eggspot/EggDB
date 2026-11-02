@@ -38,6 +38,18 @@ fn no_operator(symbol: &str, position: usize) -> SqlError {
 }
 
 impl Parser<'_> {
+    pub(super) fn prefix_operator_function(&self) -> Option<&'static str> {
+        let TokenKind::Operator(symbol) = self.peek_kind() else {
+            return None;
+        };
+        Some(match *symbol {
+            "~" => crate::ranges::INTEGER_NOT,
+            "%%" => crate::hstore_functions::TO_ARRAY_OPERATOR,
+            "%#" => crate::hstore_functions::TO_MATRIX_OPERATOR,
+            _ => return None,
+        })
+    }
+
     pub(super) fn regex_operator(&self) -> Option<BinaryOperator> {
         let TokenKind::Operator(symbol) = self.peek_kind() else {
             return None;

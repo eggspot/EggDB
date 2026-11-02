@@ -439,9 +439,8 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
             (crate::schemas::base_name(name).to_owned(), true)
         }
         ExprKind::Function { name, .. }
-            if crate::ranges::OPERATORS
-                .iter()
-                .any(|(_, internal)| *internal == name.as_str()) =>
+            if crate::ranges::is_operator_function(name)
+                || crate::hstore_functions::is_operator_function(name) =>
         {
             ("?column?".into(), false)
         }
@@ -1013,6 +1012,12 @@ impl Evaluator<'_> {
             | BinaryOperator::RegexNoMatchFolded => {
                 let text = self.eval(left, Some(SqlType::Text))?;
                 let pattern = self.eval(right, Some(SqlType::Text))?;
+                let (text, pattern, folded) = crate::citext::regex_operands(text, pattern);
+                let operator = match operator {
+                    BinaryOperator::RegexMatch if folded => BinaryOperator::RegexMatchFolded,
+                    BinaryOperator::RegexNoMatch if folded => BinaryOperator::RegexNoMatchFolded,
+                    other => other,
+                };
                 crate::regex::operator(operator, &text, &pattern)
             }
             BinaryOperator::JsonField
@@ -1425,6 +1430,9 @@ impl Evaluator<'_> {
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
             "pg_typeof" => return self.pg_typeof(arguments),
+            name if crate::hstore_functions::is_populate(name) => {
+                return crate::hstore_functions::populate_record(self, name, arguments);
+            }
             "to_tsvector"
             | "to_tsquery"
             | "plainto_tsquery"

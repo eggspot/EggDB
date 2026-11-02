@@ -58,8 +58,10 @@ pub(crate) const NOT_LEFT_OF: &str = "*range_not_left_of*";
 pub(crate) const ADJACENT: &str = "*range_adjacent*";
 const INTEGER_AND: &str = "*integer_and*";
 const INTEGER_OR: &str = "*integer_or*";
+const INTEGER_XOR: &str = "*integer_xor*";
+pub(crate) const INTEGER_NOT: &str = "*integer_not*";
 
-pub(crate) const OPERATORS: [(&str, &str); 8] = [
+pub(crate) const OPERATORS: [(&str, &str); 9] = [
     ("&&", OVERLAPS),
     ("<<", LEFT_OF),
     (">>", RIGHT_OF),
@@ -68,20 +70,47 @@ pub(crate) const OPERATORS: [(&str, &str); 8] = [
     ("-|-", ADJACENT),
     ("&", INTEGER_AND),
     ("|", INTEGER_OR),
+    ("#", INTEGER_XOR),
 ];
 
+pub(crate) fn is_operator_function(name: &str) -> bool {
+    name == INTEGER_NOT || OPERATORS.iter().any(|(_, internal)| *internal == name)
+}
+
 fn bitwise(name: &str, left: &Value, right: &Value) -> Option<SqlResult<Value>> {
-    if !matches!(name, INTEGER_AND | INTEGER_OR) {
-        return None;
-    }
     let (a, b) = (left.as_integer()?, right.as_integer()?);
-    let combined = if name == INTEGER_AND { a & b } else { a | b };
+    let combined = match name {
+        INTEGER_AND => a & b,
+        INTEGER_OR => a | b,
+        INTEGER_XOR => a ^ b,
+        _ => return None,
+    };
     let sql_type = match (left, right) {
         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => SqlType::BigInt,
         (Value::Integer(_), _) | (_, Value::Integer(_)) => SqlType::Integer,
         _ => SqlType::SmallInt,
     };
     Some(crate::types::integer_value(combined, sql_type))
+}
+
+fn integer_not(values: &[Value]) -> SqlResult<Value> {
+    let (value, sql_type) = match values {
+        [Value::Null] => return Ok(Value::Null),
+        [Value::SmallInt(value)] => (i64::from(*value), SqlType::SmallInt),
+        [Value::Integer(value)] => (i64::from(*value), SqlType::Integer),
+        [Value::BigInt(value)] => (*value, SqlType::BigInt),
+        other => {
+            let types: Vec<String> = other.iter().map(Value::type_name).collect();
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("operator does not exist: ~ {}", types.join(", ")),
+            )
+            .with_hint(
+                "No operator matches the given name and argument type. You might need to add an explicit type cast.",
+            ));
+        }
+    };
+    crate::types::integer_value(!value, sql_type)
 }
 
 const FUNCTIONS: [&str; 7] = [
@@ -640,6 +669,9 @@ fn side_test(name: &str, left: &RangeValue, right: &RangeValue) -> Option<bool> 
 }
 
 pub(crate) fn operator(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    if name == INTEGER_NOT {
+        return Some(integer_not(values));
+    }
     let symbol = OPERATORS.iter().find(|(_, internal)| *internal == name)?.0;
     let [left, right] = values else {
         return None;
@@ -951,10 +983,15 @@ pub(crate) fn function_type(
     argument: Option<SqlType>,
     second: Option<SqlType>,
 ) -> Option<Option<SqlType>> {
+    if name == INTEGER_NOT {
+        return Some(bitwise_type(argument, None));
+    }
     if OPERATORS.iter().any(|(_, internal)| *internal == name) {
         return Some(match (name, argument) {
             (LEFT_OF | RIGHT_OF, Some(sql_type)) if sql_type.is_numeric() => Some(sql_type),
-            (INTEGER_AND | INTEGER_OR, _) if bitwise_type(argument, second).is_some() => {
+            (INTEGER_AND | INTEGER_OR | INTEGER_XOR, _)
+                if bitwise_type(argument, second).is_some() =>
+            {
                 bitwise_type(argument, second)
             }
             _ => Some(SqlType::Boolean),

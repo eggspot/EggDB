@@ -1,17 +1,33 @@
 //! The operators and functions of PostgreSQL's `hstore` extension over EggDB's built-in
 //! `hstore` type (D259): `->`, `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-`, and
 //! `akeys`, `avals`, `skeys`, `svals`, `each`, `exist`, `defined`, `delete`, `slice`, `hstore`,
-//! `hstore_to_json`, `hstore_to_jsonb` and `hstore_to_array`.
+//! `hstore_to_json`, `hstore_to_jsonb`, `hstore_to_array` and `hstore_to_matrix`, the prefix
+//! operators `%%` and `%#`, and `populate_record` with its operator `#=` (D288).
 
 use crate::arrays::{ArrayElement, ArrayValue};
+use crate::ast::Expr;
 use crate::error::{SqlError, SqlResult, SqlState};
+use crate::eval::Evaluator;
 use crate::hstore::{HstoreValue, hstore_of};
 use crate::json_functions::RecordSink;
 use crate::set_returning::RowSink;
-use crate::types::{DefinedType, SqlType, Value};
+use crate::types::{DefinedKind, DefinedType, DefinedValue, SqlType, Value};
 
 pub(crate) const EACH: &str = "each";
 pub(crate) const EACH_COLUMNS: [&str; 2] = ["key", "value"];
+pub(crate) const POPULATE_RECORD: &str = "populate_record";
+pub(crate) const POPULATE_OPERATOR: &str = "*hstore_populate_record*";
+pub(crate) const TO_ARRAY_OPERATOR: &str = "*hstore_to_array*";
+pub(crate) const TO_MATRIX_OPERATOR: &str = "*hstore_to_matrix*";
+const OPERATOR_FUNCTIONS: [&str; 3] = [POPULATE_OPERATOR, TO_ARRAY_OPERATOR, TO_MATRIX_OPERATOR];
+
+pub(crate) fn is_operator_function(name: &str) -> bool {
+    OPERATOR_FUNCTIONS.contains(&name)
+}
+
+pub(crate) fn is_populate(name: &str) -> bool {
+    matches!(name, POPULATE_RECORD | POPULATE_OPERATOR)
+}
 
 const HSTORE: Option<SqlType> = Some(SqlType::Defined(DefinedType::HSTORE));
 const TEXT: Option<SqlType> = Some(SqlType::Text);
@@ -24,7 +40,9 @@ pub(crate) fn is_hstore_type(sql_type: Option<SqlType>) -> bool {
 pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     Some(match name {
         "akeys" | "avals" | "skeys" | "svals" | "hstore_to_json" | "hstore_to_jsonb"
-        | "hstore_to_array" => &[HSTORE],
+        | "hstore_to_array" | "hstore_to_matrix" | TO_ARRAY_OPERATOR | TO_MATRIX_OPERATOR => {
+            &[HSTORE]
+        }
         "exist" | "defined" => &[HSTORE, TEXT],
         "slice" => &[HSTORE, TEXT_ARRAY],
         "delete" => &[HSTORE, None],
@@ -34,7 +52,11 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
 
 pub(crate) fn result_type(name: &str, argument_count: usize) -> Option<SqlType> {
     match (name, argument_count) {
-        ("akeys" | "avals" | "hstore_to_array", 1) => TEXT_ARRAY,
+        (
+            "akeys" | "avals" | "hstore_to_array" | "hstore_to_matrix" | TO_ARRAY_OPERATOR
+            | TO_MATRIX_OPERATOR,
+            1,
+        ) => TEXT_ARRAY,
         ("exist" | "defined", 2) => Some(SqlType::Boolean),
         ("delete" | "slice", 2) | ("hstore", 1 | 2) => HSTORE,
         ("hstore_to_json", 1) => Some(SqlType::Json),
@@ -359,7 +381,8 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     Some(match (name, values) {
         ("akeys", [_]) => text_array(hstore.pairs().iter().map(|(key, _)| Some(key.clone()))),
         ("avals", [_]) => text_array(hstore.pairs().iter().map(|(_, value)| value.clone())),
-        ("hstore_to_array", [_]) => text_array(
+        ("hstore_to_matrix" | TO_MATRIX_OPERATOR, [_]) => matrix(hstore),
+        ("hstore_to_array" | TO_ARRAY_OPERATOR, [_]) => text_array(
             hstore
                 .pairs()
                 .iter()
@@ -381,6 +404,128 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("slice", [_, keys]) => sliced(hstore, keys),
         _ => Err(no_function(name, values)),
     })
+}
+
+fn matrix(hstore: &HstoreValue) -> SqlResult<Value> {
+    if hstore.pairs().is_empty() {
+        return text_array(Vec::new());
+    }
+    Err(SqlError::not_supported(
+        "hstore_to_matrix and %# of a non-empty hstore need multidimensional arrays, which are not supported yet",
+    ))
+}
+
+fn not_a_row_type() -> SqlError {
+    SqlError::new(
+        SqlState::INVALID_PARAMETER_VALUE,
+        "first argument must be a rowtype",
+    )
+}
+
+struct RecordShape {
+    type_oid: u32,
+    names: Vec<String>,
+    types: Vec<Option<SqlType>>,
+    fields: Vec<Value>,
+    anonymous: bool,
+}
+
+fn record_shape(record_type: Option<SqlType>, record: Value) -> SqlResult<RecordShape> {
+    let declared = record_type
+        .and_then(SqlType::defined)
+        .filter(|defined| defined.kind == DefinedKind::Composite);
+    let existing = match record {
+        Value::Null => None,
+        Value::Defined(defined) => match *defined {
+            DefinedValue::Record(record) => Some(record),
+            _ => return Err(not_a_row_type()),
+        },
+        _ => return Err(not_a_row_type()),
+    };
+    let type_oid = existing
+        .as_ref()
+        .map(|record| record.type_oid)
+        .or(declared.map(|defined| defined.oid))
+        .ok_or_else(not_a_row_type)?;
+    if let Some(attributes) = (type_oid != crate::records::RECORD_OID)
+        .then(|| crate::user_types::composite_attributes(type_oid))
+        .flatten()
+    {
+        let fields = match existing {
+            Some(record) if record.fields.len() == attributes.len() => record.fields,
+            Some(_) => return Err(not_a_row_type()),
+            None => vec![Value::Null; attributes.len()],
+        };
+        return Ok(RecordShape {
+            type_oid,
+            names: attributes.iter().map(|attribute| attribute.name.clone()).collect(),
+            types: attributes
+                .iter()
+                .map(|attribute| Some(attribute.sql_type))
+                .collect(),
+            fields,
+            anonymous: false,
+        });
+    }
+    let record = existing.ok_or_else(|| {
+        SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            "could not determine row type for result of populate_record",
+        )
+    })?;
+    let names = crate::records::field_names(&record);
+    if names.len() != record.fields.len() {
+        return Err(not_a_row_type());
+    }
+    Ok(RecordShape {
+        type_oid: record.type_oid,
+        types: record.fields.iter().map(Value::sql_type).collect(),
+        names,
+        fields: record.fields,
+        anonymous: true,
+    })
+}
+
+fn populated(record_type: Option<SqlType>, record: Value, pairs: &Value) -> SqlResult<Value> {
+    if pairs.is_null() {
+        return Ok(record);
+    }
+    let hstore = hstore_argument(pairs)
+        .ok_or_else(|| no_function(POPULATE_RECORD, &[record.clone(), pairs.clone()]))??;
+    let mut shape = record_shape(record_type, record)?;
+    let fields = shape.fields.iter_mut();
+    for ((name, sql_type), field) in shape.names.iter().zip(&shape.types).zip(fields) {
+        let Some(found) = hstore.get(name) else {
+            continue;
+        };
+        *field = match (found, sql_type) {
+            (None, _) => Value::Null,
+            (Some(text), Some(sql_type)) => crate::types::parse_input(text, *sql_type)?,
+            (Some(text), None) => Value::Text(text.to_owned()),
+        };
+    }
+    let names = if shape.anonymous { shape.names } else { Vec::new() };
+    Ok(crate::records::record_value(shape.type_oid, shape.fields, names))
+}
+
+/// `populate_record(record, hstore)` and `record #= hstore`: the record with each field whose
+/// name is a key of the hstore set to that key's value read as the field's type.
+pub(crate) fn populate_record(
+    evaluator: &Evaluator<'_>,
+    name: &str,
+    arguments: &[Expr],
+) -> SqlResult<Value> {
+    let [record, pairs] = arguments else {
+        let values = arguments
+            .iter()
+            .map(|argument| evaluator.eval(argument, None))
+            .collect::<SqlResult<Vec<_>>>()?;
+        return Err(no_function(name, &values));
+    };
+    let record_type = crate::typing::static_type(record, evaluator.scope);
+    let record = evaluator.eval(record, record_type)?;
+    let pairs = evaluator.eval(pairs, HSTORE)?;
+    populated(record_type, record, &pairs)
 }
 
 fn set_argument(name: &str, values: &[Value]) -> SqlResult<Option<HstoreValue>> {

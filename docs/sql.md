@@ -1901,14 +1901,19 @@ with PostgreSQL's array type OIDs in its text and binary forms. Array columns (`
 ARRAY`, in `CREATE TABLE`, `ALTER TABLE ... ADD COLUMN` and views) store one-dimensional arrays
 of every element type above; arrays of `name`, `oid`, `"char"`, `aclitem`, `int2vector` and
 `oidvector` stay catalog-only (`0A000` as a column). An array given to a text column is stored as
-its text. Multidimensional arrays, slices (`a[1:2]`), bounds in literals
-(`[1:2]={...}`) and arrays of other element types answer `0A000`. Parameters declared with an
-array type OID (`int4[]`, `text[]` and every array a column can hold) bind in the text and binary
-formats (D265). An array may
+its text. A literal may start with its bounds, `'[0:2]={1,2,3}'`, giving an array whose first
+subscript is 0; such an array prints with its bounds, keeps them when stored and in PostgreSQL's
+binary format both ways (parameters included), and `array_lower` reports them; bounds that do not
+match the elements are `22P02` (D288). `citext[]` and `hstore[]` columns work like the others
+(D288). Multidimensional arrays, slices (`a[1:2]`) and arrays of other element types answer
+`0A000`. Parameters declared with an array type OID (`int4[]`, `text[]` and every array a column
+can hold) bind in the text and binary formats (D265). An array may
 hold at most 2^27 elements (`54000`) and counts against the session's value limit.
 
 **Expressions**
-- Arithmetic `+ - * / % ^`, unary `-` and `+`, string concatenation `||`.
+- Arithmetic `+ - * / % ^`, unary `-` and `+`, string concatenation `||`; in the PostgreSQL
+  dialect the integer operators `&`, `|`, `#` (exclusive or) and prefix `~` (not) on `smallint`,
+  `integer` and `bigint`, with PostgreSQL's precedence (D131, D288).
 - Regular expressions (D128, D130): `text ~ pattern`, `~*` (ignoring case), `!~` and `!~*`, with
   PostgreSQL's advanced syntax: `.`, bracket expressions (`[a-z]`, `[^0-9]`, `[[:alpha:]]` and the
   other classes, `\d \w \s \D \W \S` inside brackets too, collating elements such as
@@ -2518,13 +2523,13 @@ coordinates, geography measures on the spheroid, transformations between other S
 
 `citext` and `hstore` are built in (D259): `CREATE EXTENSION citext` and
 `CREATE EXTENSION hstore` succeed and list in `pg_extension`, and the types keep PostgreSQL's
-names in `pg_type` (OIDs 9000 to 9003: the array types are listed there, but arrays of
-`citext` and `hstore` are not supported yet, so `ARRAY['a'::citext]` fails with `0A000`) and its
-text and binary forms on the wire.
+names in `pg_type` (OIDs 9000 to 9003, `citext[]` and `hstore[]` included, as columns, values and
+parameters, D288) and its text and binary forms on the wire.
 
 - `citext` keeps the text as written and compares, orders, groups, hashes and indexes by one
   full case fold, so a unique `citext` index refuses `'Ann'` next to `'ANN'`, and `LIKE` and
-  `ILIKE` on a `citext` value ignore case. Full case folding differs from PostgreSQL's
+  `ILIKE` on a `citext` value ignore case, and so do the regular expression operators `~`, `~*`,
+  `!~` and `!~*` when the value they test is `citext` (D288). Full case folding differs from PostgreSQL's
   `lower()`-based `citext`: `'ß'::citext = 'SS'` is true in EggDB and false in PostgreSQL (D259).
 - `hstore` keeps its pairs sorted as PostgreSQL does and prints `"a"=>"1", "b"=>NULL`. Its
   operators `->` (a key or an array of keys), `?`, `?|`, `?&`, `@>`, `<@`, `||` and `-` (a key,
@@ -2532,9 +2537,14 @@ text and binary forms on the wire.
   `exist`, `defined`, `delete`, `slice`, `hstore(text, text)`, `hstore(text[], text[])`,
   `hstore(text[])`, `hstore_to_json`, `hstore_to_jsonb` and `hstore_to_array` work as in
   PostgreSQL. `?` is an operator only in the PostgreSQL dialect.
+- The prefix operator `%%` gives an `hstore`'s keys and values alternating in a `text[]`, and
+  `populate_record(record, hstore)` and `record #= hstore` set each field of a composite value
+  whose name is a key to that key's value read as the field's type (`22023` when the first
+  argument is not a row) (D288).
 
-Not yet: `citext[]` and `hstore[]` columns, the `%%` and `%#` operators, `hstore_to_matrix`,
-`populate_record` and `#=`.
+Not yet: `hstore_to_matrix` and `%#` of a non-empty `hstore` (they need multidimensional arrays,
+`0A000`; an empty one gives `{}`), and the `citext` versions of `regexp_match`, `regexp_replace`,
+`replace`, `split_part`, `strpos` and `translate` (D288).
 
 ## Vectors (pgvector)
 
@@ -3385,8 +3395,8 @@ TEMP`, which runs and keeps the prepared statements. `SET SESSION AUTHORIZATION`
 `DEFAULT` or the session's own user (`0A000` for another). Array parameters bind in the text and
 binary formats with PostgreSQL's array type OIDs, and `pg_sleep`, `pg_notify`, the waiting
 advisory lock functions, `pg_advisory_unlock_all()` and functions declared `RETURNS void` report
-the `void` type (OID 2278) (D265). Known difference: a function returning `void` yields
-NULL where PostgreSQL yields an empty value.
+the `void` type (OID 2278) (D265). As in PostgreSQL, a PL/pgSQL function returning `void`
+yields an empty, non-NULL value and an SQL-language one yields NULL (D288).
 
 ## ORMs and migration tools
 
@@ -3870,8 +3880,8 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   for each row, so a long sliding frame costs its length per row; a correlated subquery cannot
   hold a window function in its select list (`0A000`).
 - Arrays and set-returning functions (D128): arrays cannot be stored in a table or a view, have
-  one dimension, and take the element types above; `x[1:2]`, `'[1:2]={1,2}'`, `ARRAY[[1, 2]]`
-  answer `0A000`. Set-returning functions run in `FROM` and as select-list
+  one dimension, and take the element types above; `x[1:2]` and `ARRAY[[1, 2]]` answer
+  `0A000`. Set-returning functions run in `FROM` and as select-list
   items; several of them in one select list run in lock-step, each input row giving as many rows
   as the longest one, the others padded with NULL, as in PostgreSQL 10 and later (D131); one
   inside an expression is `0A000`, and a function in `FROM` cannot name an item after it in the

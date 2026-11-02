@@ -68,16 +68,77 @@ fn malformed_literals_are_22p02_and_unsupported_forms_0a000() {
     ] {
         assert_eq!(refused(text), "22P02", "{text}");
     }
-    for text in ["{{1,2},{3,4}}", "[1:2]={1,2}", "{1,{2}}"] {
+    for text in ["{{1,2},{3,4}}", "[1:2][1:1]={{1},{2}}", "{1,{2}}"] {
         assert!(
             ["0A000", "22P02"].contains(&refused(text).as_str()),
             "{text}"
         );
     }
     assert_eq!(refused("{{1}}"), "0A000");
-    assert_eq!(refused("[0:1]={1,2}"), "0A000");
+    for text in [
+        "[0:1]={1}",
+        "[0:1]={1,2,3}",
+        "[1:2]={}",
+        "[1:2]{1,2}",
+        "[1:2={1,2}",
+        "[]={1}",
+        "[a:2]={1,2}",
+        "[2:1]={1,2}",
+    ] {
+        assert_eq!(refused(text), "22P02", "{text}");
+    }
+    assert_eq!(refused("[1:2][1:2]={{1,2},{3,4}}"), "0A000");
+    assert_eq!(refused("[0:99999999999]={1}"), "22003");
     assert_eq!(refused("{a}"), "22P02");
     assert_eq!(refused("{99999999999}"), "22003");
+}
+
+#[test]
+fn dimension_decorations_set_the_lower_bound_and_print_back() {
+    let bounded = |text: &str| {
+        let array = parse_text(text, ArrayElement::Integer).expect(text);
+        (array.lower_bound, array.items.len(), format_text(&array))
+    };
+    assert_eq!(bounded("[0:2]={1,2,3}"), (0, 3, "[0:2]={1,2,3}".to_owned()));
+    assert_eq!(
+        bounded("  [ -3 : -2 ] = { 7 , 8 } "),
+        (-3, 2, "[-3:-2]={7,8}".to_owned())
+    );
+    assert_eq!(bounded("[1:2]={1,2}"), (1, 2, "{1,2}".to_owned()));
+    assert_eq!(bounded("[3]={1,2,3}"), (1, 3, "{1,2,3}".to_owned()));
+    assert_eq!(
+        bounded("[+5:5]={NULL}"),
+        (5, 1, "[5:5]={NULL}".to_owned())
+    );
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT array_lower('[0:2]={10,20,30}'::int[], 1) AS l,              array_upper('[0:2]={10,20,30}'::int[], 1) AS u, ('[0:2]={10,20,30}'::int[])[0] AS z,              '[-1:0]={a,b}'::text[] AS t"
+        )
+        .unwrap(),
+        "l|u|z|t
+0|2|10|[-1:0]={a,b}
+SELECT 1"
+    );
+    run(&mut session, "CREATE TABLE shifted (id integer, a integer[])").unwrap();
+    run(
+        &mut session,
+        "INSERT INTO shifted VALUES (1, '[0:1]={5,6}'), (2, '{7}')",
+    )
+    .unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT id, a, array_lower(a, 1) AS l FROM shifted ORDER BY id"
+        )
+        .unwrap(),
+        "id|a|l
+1|[0:1]={5,6}|0
+2|{7}|1
+SELECT 1"
+    );
 }
 
 #[test]

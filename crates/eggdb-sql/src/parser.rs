@@ -3399,6 +3399,19 @@ impl<'t> Parser<'t> {
                 position,
             });
         }
+        if self.postgresql()
+            && let Some(function) = self.prefix_operator_function()
+        {
+            self.at += 1;
+            let operand = self.expression_above(Level::Additive)?;
+            return Ok(Expr {
+                kind: ExprKind::Function {
+                    name: function.to_owned(),
+                    arguments: vec![operand],
+                },
+                position,
+            });
+        }
         let operator = if self.take_operator("-") {
             UnaryOperator::Minus
         } else if self.take_operator("+") {
@@ -3538,6 +3551,17 @@ impl<'t> Parser<'t> {
                     self.at += 1;
                     let right = self.expression_above(Level::Additive)?;
                     return Ok(Self::binary(left, operator, right));
+                }
+                if self.postgresql() && self.take_operator("#=") {
+                    let right = self.expression_above(Level::Additive)?;
+                    let position = left.position;
+                    return Ok(Expr {
+                        kind: ExprKind::Function {
+                            name: crate::hstore_functions::POPULATE_OPERATOR.to_owned(),
+                            arguments: vec![left, right],
+                        },
+                        position,
+                    });
                 }
                 if self.postgresql()
                     && let TokenKind::Operator(symbol) = self.peek_kind()

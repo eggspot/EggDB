@@ -65,6 +65,15 @@ pub(crate) fn like_operands(value: Value, pattern: Value) -> (Value, Value, bool
     (as_text(value), as_text(pattern), true)
 }
 
+pub(crate) fn regex_operands(text: Value, pattern: Value) -> (Value, Value, bool) {
+    let folded = text_of(&text).is_some();
+    let as_text = |value: Value| match text_of(&value) {
+        Some(text) => Value::Text(text.to_owned()),
+        None => value,
+    };
+    (as_text(text), as_text(pattern), folded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{compare, compare_with_text, fold, text_of, value};

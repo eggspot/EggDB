@@ -320,6 +320,21 @@ fn functions_that_return_nothing_report_the_void_type() {
         "CREATE FUNCTION nothing() RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$",
     );
     assert_eq!(first_column_type(&mut session, "SELECT nothing()"), void);
+    last(
+        &mut session,
+        "CREATE FUNCTION nothing_in_sql() RETURNS void LANGUAGE sql AS 'SELECT 1'",
+    );
+    assert_eq!(
+        first_column_type(&mut session, "SELECT nothing_in_sql()"),
+        void
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT nothing() IS NULL AS p, nothing_in_sql() IS NULL AS s, nothing() AS v"
+        ),
+        "p|s|v\nf|t|\nSELECT 1"
+    );
     assert_eq!(
         last(
             &mut session,

@@ -835,7 +835,9 @@ impl<'r> Run<'r> {
             return Ok(Returned::Set(std::mem::take(&mut self.rows)));
         }
         match &definition.returns {
-            RoutineReturns::One(ReturnType::Void) => Ok(Returned::Value(Value::Null)),
+            RoutineReturns::One(ReturnType::Void) => {
+                Ok(Returned::Value(Value::Text(String::new())))
+            }
             RoutineReturns::One(ReturnType::Trigger) => match self.result.take() {
                 Some(value) => Ok(Returned::Value(value)),
                 None => Err(SqlError::new(

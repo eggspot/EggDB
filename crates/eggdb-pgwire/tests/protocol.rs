@@ -1211,9 +1211,13 @@ fn a_client_sees_citext_and_hstore_columns_by_their_type_oids_and_names() {
 }
 
 fn binary_int4_array(items: &[Option<i32>]) -> Vec<u8> {
+    binary_int4_array_from(1, items)
+}
+
+fn binary_int4_array_from(lower_bound: i32, items: &[Option<i32>]) -> Vec<u8> {
     let mut bytes = Vec::new();
     let has_nulls = i32::from(items.iter().any(Option::is_none));
-    for word in [1, has_nulls, 23, items.len() as i32, 1] {
+    for word in [1, has_nulls, 23, items.len() as i32, lower_bound] {
         bytes.extend_from_slice(&word.to_be_bytes());
     }
     for item in items {
@@ -1320,6 +1324,111 @@ fn array_parameters_bind_in_text_and_binary_with_postgresqls_array_oids() {
         .expect("ErrorResponse");
     assert_eq!(error.code(), "22P02");
     assert_eq!(ready_status(&answer), b'I');
+}
+
+fn binary_citext_array(items: &[&str]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for word in [1, 0, 9000, items.len() as i32, 1] {
+        bytes.extend_from_slice(&word.to_be_bytes());
+    }
+    for item in items {
+        bytes.extend_from_slice(&(item.len() as i32).to_be_bytes());
+        bytes.extend_from_slice(item.as_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn binary_arrays_keep_lower_bounds_other_than_one_and_citext_elements_both_ways() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query(
+        "CREATE TABLE shifted (id integer PRIMARY KEY, scores integer[], colors citext[])",
+    );
+    let scores = binary_int4_array_from(0, &[Some(5), Some(6)]);
+    let colors = binary_citext_array(&["Red", "BLUE"]);
+    client.send(
+        b'P',
+        &parse(
+            "insert",
+            "INSERT INTO shifted VALUES ($1, $2, $3)",
+            &[23, 1007, 9001],
+        ),
+    );
+    client.send(
+        b'B',
+        &bind(
+            "",
+            "insert",
+            &[0, 1, 1],
+            &[Some(b"1"), Some(&scores), Some(&colors)],
+            &[],
+        ),
+    );
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    assert_eq!(tags(&client.read_until_ready()), "12CZ");
+
+    let shown = client.query(
+        "SELECT scores, array_lower(scores, 1) AS lower, scores[0] AS first, colors FROM shifted",
+    );
+    assert_eq!(
+        rows(&shown),
+        [vec![
+            Some("[0:1]={5,6}".to_owned()),
+            Some("0".to_owned()),
+            Some("5".to_owned()),
+            Some("{Red,BLUE}".to_owned())
+        ]]
+    );
+
+    client.send(
+        b'P',
+        &parse(
+            "",
+            "SELECT scores, colors FROM shifted WHERE $1 = ANY(colors)",
+            &[9000],
+        ),
+    );
+    client.send(b'B', &bind("", "", &[0], &[Some(b"red")], &[1, 1]));
+    client.send(b'D', b"P\0");
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12TDCZ");
+    assert_eq!(
+        answer[2].column_types(),
+        [("scores".to_owned(), 1007, 1), ("colors".to_owned(), 9001, 1)]
+    );
+    assert_eq!(answer[3].raw_row(), [Some(scores), Some(colors)]);
+
+    client.send(b'P', &parse("", "SELECT array_lower($1, 1), $1", &[1007]));
+    let negative = binary_int4_array_from(-2, &[Some(1), None, Some(3)]);
+    client.send(b'B', &bind("", "", &[1], &[Some(&negative)], &[0, 1]));
+    client.send(b'E', &execute("", 0));
+    client.send(b'S', b"");
+    let answer = client.read_until_ready();
+    assert_eq!(tags(&answer), "12DCZ");
+    assert_eq!(answer[2].raw_row(), [Some(b"-2".to_vec()), Some(negative)]);
+}
+
+#[test]
+fn user_functions_returning_void_answer_as_postgresql_does_on_the_wire() {
+    let server = TestServer::start(8);
+    let (mut client, _) = Client::login(server.address);
+    client.query(
+        "CREATE FUNCTION quiet() RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$",
+    );
+    client.query(
+        "CREATE FUNCTION quiet_sql() RETURNS void LANGUAGE sql AS 'SELECT 1'",
+    );
+    let answer = client.query("SELECT quiet(), quiet_sql()");
+    assert_eq!(tags(&answer), "TDCZ");
+    assert_eq!(
+        answer[0].column_types(),
+        [("quiet".to_owned(), 2278, 0), ("quiet_sql".to_owned(), 2278, 0)]
+    );
+    assert_eq!(answer[1].raw_row(), [Some(Vec::new()), None]);
 }
 
 #[test]
