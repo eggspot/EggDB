@@ -901,6 +901,7 @@ impl<'r> Run<'r> {
 
     fn element_value(&self, value: Value) -> SqlResult<Value> {
         match self.shape() {
+            Shape::Scalar(Some(SqlType::Dynamic)) if record_of(&value).is_some() => Ok(value),
             Shape::Scalar(Some(sql_type)) => convert(value, sql_type, Conversion::Assignment),
             _ => Ok(value),
         }

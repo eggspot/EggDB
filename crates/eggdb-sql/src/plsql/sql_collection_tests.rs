@@ -90,6 +90,82 @@ fn a_pipelined_function_is_a_table_in_from() {
 }
 
 #[test]
+fn a_pipelined_function_piping_records_gives_their_fields_as_columns() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    run(
+        &mut session,
+        "CREATE TABLE emp (id NUMBER, name VARCHAR2(20))",
+    );
+    run(
+        &mut session,
+        "INSERT INTO emp VALUES (1, 'ann'), (2, 'bob')",
+    );
+    run(
+        &mut session,
+        "CREATE PACKAGE pk2 AS \
+           TYPE rec IS RECORD (a NUMBER, b VARCHAR2(10)); \
+           TYPE rec_tab IS TABLE OF rec; \
+           TYPE emp_tab IS TABLE OF emp%ROWTYPE; \
+           FUNCTION gen RETURN rec_tab PIPELINED; \
+           FUNCTION staff RETURN emp_tab PIPELINED; \
+         END pk2;",
+    );
+    run(
+        &mut session,
+        "CREATE PACKAGE BODY pk2 AS \
+           FUNCTION gen RETURN rec_tab PIPELINED IS \
+             r rec; \
+           BEGIN \
+             r.a := 1; r.b := 'x'; PIPE ROW (r); \
+             r.a := 2; r.b := 'y'; PIPE ROW (r); \
+             RETURN; \
+           END gen; \
+           FUNCTION staff RETURN emp_tab PIPELINED IS \
+             e emp%ROWTYPE; \
+           BEGIN \
+             FOR i IN 1..2 LOOP \
+               SELECT * INTO e FROM emp WHERE id = i; \
+               PIPE ROW (e); \
+             END LOOP; \
+             RETURN; \
+           END staff; \
+         END pk2;",
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT a, b FROM TABLE(pk2.gen()) ORDER BY a"),
+        [["1", "x"], ["2", "y"]]
+    );
+    assert_eq!(
+        column(
+            &mut session,
+            "SELECT t.b FROM TABLE(pk2.gen()) t WHERE t.a = 2"
+        ),
+        ["y"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT name, id FROM TABLE(pk2.staff()) ORDER BY id DESC"
+        ),
+        [["bob", "2"], ["ann", "1"]]
+    );
+    run(
+        &mut session,
+        "BEGIN \
+           INSERT INTO log SELECT a, b FROM TABLE(pk2.gen()); \
+           FOR s IN (SELECT id, name FROM TABLE(pk2.staff())) LOOP \
+             INSERT INTO log VALUES (s.id + 10, s.name); \
+           END LOOP; \
+         END;",
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT n, msg FROM log ORDER BY n"),
+        [["1", "x"], ["2", "y"], ["11", "ann"], ["12", "bob"]]
+    );
+}
+
+#[test]
 fn a_function_returning_a_nested_table_is_a_table_in_from() {
     let store = MemoryStore::default();
     let mut session = session(&store);
