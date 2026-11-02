@@ -42,6 +42,7 @@ const OPCODE_MAP_WINDOW: u8 = 8;
 const OPCODE_INTERN_ATOM: u8 = 16;
 const OPCODE_CHANGE_PROPERTY: u8 = 18;
 const OPCODE_GET_PROPERTY: u8 = 20;
+const OPCODE_TRANSLATE_COORDINATES: u8 = 40;
 const OPCODE_CREATE_GC: u8 = 55;
 const OPCODE_PUT_IMAGE: u8 = 72;
 const OPCODE_GET_KEYBOARD_MAPPING: u8 = 101;
@@ -640,6 +641,26 @@ pub fn get_keyboard_mapping(first: u8, count: u8) -> Result<Vec<u8>, WindowError
     request(OPCODE_GET_KEYBOARD_MAPPING, 0, &[first, count, 0, 0])
 }
 
+/// `TranslateCoordinates`: where the top left of `window` is in `destination`, usually the
+/// root window, so the window's place on the screen is known.
+pub fn translate_coordinates(window: u32, destination: u32) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&window.to_le_bytes());
+    body.extend_from_slice(&destination.to_le_bytes());
+    body.extend_from_slice(&[0, 0, 0, 0]);
+    request(OPCODE_TRANSLATE_COORDINATES, 0, &body)
+}
+
+/// The point in a `TranslateCoordinates` reply, in the destination window's pixels.
+pub fn parse_translate_coordinates_reply(reply: &[u8]) -> Result<(i32, i32), WindowError> {
+    if u8_at(reply, 0)? != 1 {
+        return Err(protocol("a TranslateCoordinates answer is not a reply"));
+    }
+    let x = u16_at(reply, 12)?.cast_signed();
+    let y = u16_at(reply, 14)?.cast_signed();
+    Ok((i32::from(x), i32::from(y)))
+}
+
 /// How many bytes follow a 32-byte packet's first 32: a reply's extra length, 0 otherwise.
 pub fn packet_remaining(header: &[u8; 32]) -> usize {
     if header[0] == 1 {
@@ -1100,6 +1121,19 @@ mod tests {
         assert_eq!(&image[12..24], &[2, 0, 1, 0, 0, 0, 3, 0, 0, 24, 0, 0]);
         assert_eq!(image.len(), 32);
         assert!(put_image(target, 1, 1, 0, 0, &vec![0; 300_000]).is_err());
+        assert_eq!(
+            translate_coordinates(0x0040_0001, 0x123).unwrap(),
+            vec![40, 0, 4, 0, 1, 0, 0x40, 0, 0x23, 1, 0, 0, 0, 0, 0, 0]
+        );
+        let mut translated = vec![0u8; 32];
+        translated[0] = 1;
+        translated[12..14].copy_from_slice(&(-20i16).to_le_bytes());
+        translated[14..16].copy_from_slice(&300i16.to_le_bytes());
+        assert_eq!(
+            parse_translate_coordinates_reply(&translated).unwrap(),
+            (-20, 300)
+        );
+        assert!(parse_translate_coordinates_reply(&translated[..13]).is_err());
         let property_request = get_property(0x123, ATOM_RESOURCE_MANAGER, 100).unwrap();
         assert_eq!(&property_request[..4], &[20, 0, 6, 0]);
         assert_eq!(

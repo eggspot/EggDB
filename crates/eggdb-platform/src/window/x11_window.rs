@@ -1,15 +1,18 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::atspi_bridge::{self, AtspiBridge};
 use super::x11::{self, ImageTarget, KeyboardMapping, Packet, PixelLayout, PropertyData};
-use super::{KeyPress, Window, WindowError, WindowEvent, WindowOptions, check_frame};
+use super::{AccessNode, KeyPress, Window, WindowError, WindowEvent, WindowOptions, check_frame};
 
 const LARGEST_REPLY: usize = 16 << 20;
 const RESOURCES_UNITS: u32 = 1 << 16;
 const SHORTEST_WAIT: Duration = Duration::from_millis(1);
+const BACKLOG_RETRY: Duration = Duration::from_millis(10);
 
 fn io_error(error: &std::io::Error) -> WindowError {
     WindowError::Io(error.to_string())
@@ -42,6 +45,7 @@ pub(crate) struct X11Window {
     pending: VecDeque<WindowEvent>,
     sequence: u16,
     window: u32,
+    root: u32,
     target: ImageTarget,
     layout: PixelLayout,
     maximum_request_length: u16,
@@ -53,6 +57,8 @@ pub(crate) struct X11Window {
     wm_delete_window: u32,
     size: (u32, u32),
     scale: f32,
+    accessibility: Option<AtspiBridge>,
+    origin_stale: bool,
 }
 
 impl X11Window {
@@ -96,6 +102,7 @@ impl X11Window {
             pending: VecDeque::new(),
             sequence: 0,
             window,
+            root: screen.root,
             target: ImageTarget {
                 drawable: window,
                 gc,
@@ -111,6 +118,8 @@ impl X11Window {
             wm_delete_window: 0,
             size: (0, 0),
             scale: 1.0,
+            accessibility: None,
+            origin_stale: false,
         };
         this.scale = this.read_scale(screen.root)?;
         this.wm_protocols = this.intern("WM_PROTOCOLS")?;
@@ -168,7 +177,60 @@ impl X11Window {
         )?)?;
         this.send(&x11::create_gc(gc, window)?)?;
         this.send(&x11::map_window(window)?)?;
+        this.accessibility = AtspiBridge::connect(&options.title);
+        this.origin_stale = this.accessibility.is_some();
         Ok(this)
+    }
+
+    fn update_accessibility(&mut self, update: impl FnOnce(&mut AtspiBridge) -> bool) {
+        if let Some(bridge) = &mut self.accessibility
+            && !update(bridge)
+        {
+            self.accessibility = None;
+        }
+    }
+
+    fn refresh_origin(&mut self) -> Result<(), WindowError> {
+        self.origin_stale = false;
+        let sequence = self.send(&x11::translate_coordinates(self.window, self.root)?)?;
+        let reply = self.reply(sequence)?;
+        let origin = x11::parse_translate_coordinates_reply(&reply)?;
+        let scale = self.scale;
+        if let Some(bridge) = &mut self.accessibility {
+            bridge.set_geometry(scale, origin);
+        }
+        Ok(())
+    }
+
+    fn read_packet_serving_accessibility(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Vec<u8>>, WindowError> {
+        loop {
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            let Some(bridge) = &mut self.accessibility else {
+                return self.read_packet(left);
+            };
+            if !bridge.pump() {
+                self.accessibility = None;
+                continue;
+            }
+            let (bus, backlog) = (bridge.fd(), bridge.has_backlog());
+            if let Some(packet) = self.read_packet(Some(Duration::ZERO))? {
+                return Ok(Some(packet));
+            }
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if left == Some(Duration::ZERO) {
+                return Ok(None);
+            }
+            let wait = if backlog {
+                Some(left.map_or(BACKLOG_RETRY, |left| left.min(BACKLOG_RETRY)))
+            } else {
+                left
+            };
+            atspi_bridge::wait_for_input(self.stream.as_raw_fd(), bus, wait)
+                .map_err(|error| io_error(&error))?;
+        }
     }
 
     fn send(&mut self, request: &[u8]) -> Result<u16, WindowError> {
@@ -299,6 +361,7 @@ impl X11Window {
                 width,
                 height,
             } if window == self.window => {
+                self.origin_stale = self.accessibility.is_some();
                 let size = (u32::from(width), u32::from(height));
                 (size != self.size).then(|| {
                     self.size = size;
@@ -318,8 +381,14 @@ impl X11Window {
             {
                 Some(WindowEvent::CloseRequested)
             }
-            Packet::FocusIn => Some(WindowEvent::Focused(true)),
-            Packet::FocusOut => Some(WindowEvent::Focused(false)),
+            Packet::FocusIn => {
+                self.update_accessibility(|bridge| bridge.set_window_active(true));
+                Some(WindowEvent::Focused(true))
+            }
+            Packet::FocusOut => {
+                self.update_accessibility(|bridge| bridge.set_window_active(false));
+                Some(WindowEvent::Focused(false))
+            }
             Packet::KeyboardMappingChanged => {
                 self.keyboard_stale = true;
                 None
@@ -381,14 +450,23 @@ impl Window for X11Window {
         &mut self,
         timeout: Option<Duration>,
     ) -> Result<Option<WindowEvent>, WindowError> {
+        let deadline = timeout.and_then(|wait| Instant::now().checked_add(wait));
         loop {
             if self.keyboard_stale {
                 self.refresh_keyboard()?;
             }
+            if self.origin_stale {
+                self.refresh_origin()?;
+            }
             if let Some(event) = self.pending.pop_front() {
                 return Ok(Some(event));
             }
-            let Some(packet) = self.read_packet(timeout)? else {
+            let packet = if self.accessibility.is_some() {
+                self.read_packet_serving_accessibility(deadline)?
+            } else {
+                self.read_packet(timeout)?
+            };
+            let Some(packet) = packet else {
                 return Ok(None);
             };
             let mut header = [0u8; 32];
@@ -397,5 +475,9 @@ impl Window for X11Window {
                 return Ok(Some(event));
             }
         }
+    }
+
+    fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
+        self.update_accessibility(|bridge| bridge.set_tree(nodes));
     }
 }

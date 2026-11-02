@@ -67,13 +67,22 @@ objects (`IRawElementProviderSimple`, `IRawElementProviderFragment` and
 `IRawElementProviderFragmentRoot`, our own vtables and declarations): each node gives its name,
 control type, keyboard focus, enabled state and bounding rectangle in screen pixels, the
 window's own node is the root the window hosts, and a focus move raises
-`UIA_AutomationFocusChangedEventId`. In the browser, `eggdb-wasm`'s
+`UIA_AutomationFocusChangedEventId`. On Linux and the BSDs the X11 backend speaks AT-SPI2
+itself over our own D-Bus code (`eggdb_platform::dbus`): it authenticates to the session bus
+with `EXTERNAL`, asks `org.a11y.Bus` for the accessibility bus, embeds the application in the
+registry with `Socket.Embed`, and serves `Accessible`, `Component`, `Application` and
+`Properties` for an application root whose frame is the window's node; focus moves, window
+activation, name, checked and selected changes and added or removed nodes become
+`Object:StateChanged`, `Focus`, `Window:Activate` and `Object:ChildrenChanged` events. The
+socket is non-blocking and polled with the X11 socket in the window's event loop (no thread);
+with no session or accessibility bus, or `NO_AT_BRIDGE=1`, the window runs without it. In the browser, `eggdb-wasm`'s
 `gui` feature (off by default, so the database module's size is unchanged) renders the same
 card for `web/card.js`, which puts the frame on a canvas and mirrors the tree into real
 `<input>`, `<button>` and `<a>` elements with ARIA roles over it, carrying the DOM focus.
 
 Left: Wayland, the clipboard, UI Automation's control patterns (Invoke, Toggle, Value,
-SelectionItem) and focus requests from screen readers, the AT-SPI2 (Linux) bridge, pointer
+SelectionItem) and focus requests from screen readers, AT-SPI2's `Text`, `Action` and
+`EditableText` interfaces and `GrabFocus`, pointer
 input in the native windows (hover, pressed, mouse focus without a ring), caret blinking,
 remembered window size and position, reading the OS theme, text in the browser without a font
 URL, and golden frames with pinned fonts (D191). Golden frames with the box typeface run now:

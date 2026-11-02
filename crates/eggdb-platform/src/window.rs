@@ -9,12 +9,13 @@
 //!
 //! Each window also takes the screen's accessibility tree ([`AccessNode`],
 //! [`Window::set_accessibility_tree`]) and hands it to the system's screen readers: through
-//! NSAccessibility on macOS and UI Automation on Windows ([`uia`]); AT-SPI2 on Linux comes
-//! next.
+//! NSAccessibility on macOS, UI Automation on Windows ([`uia`]) and AT-SPI2 over D-Bus on
+//! Linux and the BSDs ([`atspi`]).
 
 use std::fmt;
 use std::time::Duration;
 
+pub mod atspi;
 pub mod cocoa;
 pub mod uia;
 pub mod win32;
@@ -33,6 +34,15 @@ mod win32_window;
     target_os = "dragonfly"
 ))]
 mod x11_window;
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+mod atspi_bridge;
 
 /// What to open: the title and the size in logical pixels, which the backend multiplies by the
 /// display's scale.
