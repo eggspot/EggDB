@@ -183,6 +183,7 @@ pub(crate) fn refused_in_function(
         Statement::Savepoint(_) => "SAVE TRANSACTION",
         Statement::Analyze(_) => "UPDATE STATISTICS",
         Statement::Role(role) => role.tag(),
+        Statement::Database(command) => command.tag(),
         Statement::RowSecurity(statement) => statement.tag(),
         Statement::Listen(_) => "LISTEN",
         Statement::Unlisten(_) => "UNLISTEN",

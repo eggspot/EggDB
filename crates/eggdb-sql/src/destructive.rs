@@ -70,6 +70,8 @@ pub enum DestructiveKind {
     DropSequence,
     /// `DROP SCHEMA`.
     DropSchema,
+    /// `DROP DATABASE`, which removes a served database's file.
+    DropDatabase,
     /// `DROP TYPE ... CASCADE` or `DROP DOMAIN ... CASCADE`, which drops the columns of that
     /// type.
     DropType,
@@ -109,6 +111,7 @@ impl DestructiveKind {
             Self::DropIndex => "DROP INDEX",
             Self::DropSequence => "DROP SEQUENCE",
             Self::DropSchema => "DROP SCHEMA",
+            Self::DropDatabase => "DROP DATABASE",
             Self::DropType => "DROP TYPE ... CASCADE",
             Self::DropColumn => "ALTER TABLE ... DROP COLUMN",
             Self::DropConstraint => "ALTER TABLE ... DROP of a constraint, key or index",
@@ -176,6 +179,10 @@ pub(crate) fn classify(
             names, ..
         }) => dropped(DestructiveKind::DropView, names, false),
         Statement::MaterializedView(_) | Statement::InstallExtension { .. } => None,
+        Statement::Database(crate::served_databases::DatabaseStatement::Drop { names, .. }) => {
+            dropped(DestructiveKind::DropDatabase, names, false)
+        }
+        Statement::Database(crate::served_databases::DatabaseStatement::Create { .. }) => None,
         Statement::CreateTable(_)
         | Statement::Select(_)
         | Statement::Query(_)

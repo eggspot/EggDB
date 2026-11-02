@@ -1,6 +1,7 @@
 mod constraints;
 mod copy;
 mod cursors;
+mod databases;
 mod indexes;
 mod merge;
 mod mysql;
@@ -1612,6 +1613,9 @@ impl<'t> Parser<'t> {
         if !self.sqlite() && self.at_role_definition() {
             return self.create_role();
         }
+        if self.at_database_definition() {
+            return self.create_database();
+        }
         if self.postgresql() && self.is_word("policy") {
             return self.create_policy();
         }
@@ -2553,6 +2557,9 @@ impl<'t> Parser<'t> {
         self.at += 1;
         if !self.sqlite() && self.at_role_definition() {
             return self.drop_role();
+        }
+        if self.at_database_definition() {
+            return self.drop_database();
         }
         if self.postgresql() && self.is_word("policy") {
             return self.drop_policy();

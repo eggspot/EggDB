@@ -115,6 +115,7 @@ mod row_security;
 mod schema;
 mod schemas;
 mod sequences;
+mod served_databases;
 mod session;
 mod set_operations;
 mod set_returning;
@@ -276,6 +277,7 @@ pub use session::{
     Parameter, ParameterDeclaration, PreparedStatement, QueryResult, Session, StatementDescription,
     StoredProcedure, TransactionStatus,
 };
+pub use served_databases::{ServedDatabaseError, ServedDatabases, is_valid_database_name};
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
 pub use sqlserver_catalog::is_catalog_procedure;

@@ -1425,7 +1425,7 @@ fn role_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("rolsuper", flag(role.superuser))
                 .set("rolinherit", flag(true))
                 .set("rolcreaterole", flag(role.superuser))
-                .set("rolcreatedb", flag(role.superuser))
+                .set("rolcreatedb", flag(role.superuser || role.create_database))
                 .set("rolcanlogin", flag(role.login))
                 .set("rolreplication", flag(false))
                 .set("rolconnlimit", int(-1))

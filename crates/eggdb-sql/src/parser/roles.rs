@@ -122,9 +122,11 @@ impl Parser<'_> {
                 while self.take(&TokenKind::Comma) {
                     options.member_of.push(self.role_name()?.text);
                 }
+            } else if self.take_word("createdb") {
+                options.create_database = Some(true);
+            } else if self.take_word("nocreatedb") {
+                options.create_database = Some(false);
             } else if [
-                "createdb",
-                "nocreatedb",
                 "createrole",
                 "nocreaterole",
                 "inherit",

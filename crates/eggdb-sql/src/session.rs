@@ -392,6 +392,7 @@ pub struct Session<'s> {
     pending_user_types: Option<Arc<crate::user_types::Registry>>,
     plan_cache: crate::plan_cache::PlanCache,
     trigger_transaction: bool,
+    served_databases: Option<&'s dyn crate::served_databases::ServedDatabases>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -467,6 +468,7 @@ impl<'s> Session<'s> {
             pending_user_types: None,
             plan_cache: crate::plan_cache::PlanCache::default(),
             trigger_transaction: false,
+            served_databases: None,
         }
     }
 
@@ -715,6 +717,53 @@ impl<'s> Session<'s> {
     /// Names every database the server serves, which `pg_database` lists beside this one.
     pub fn set_database_names(&mut self, names: Vec<String>) {
         Arc::make_mut(&mut self.settings).database_names = names;
+    }
+
+    /// Gives the session the server's databases: `CREATE DATABASE` and `DROP DATABASE` run
+    /// through `served`, and the catalogs list its databases as they are at each statement.
+    pub fn set_served_databases(
+        &mut self,
+        served: &'s dyn crate::served_databases::ServedDatabases,
+    ) {
+        self.served_databases = Some(served);
+        self.refresh_database_names();
+    }
+
+    fn refresh_database_names(&mut self) {
+        let Some(served) = self.served_databases else {
+            return;
+        };
+        let names = served.names();
+        if names != self.settings.database_names {
+            self.set_database_names(names);
+        }
+    }
+
+    fn run_database_command(
+        &mut self,
+        statement: &crate::served_databases::DatabaseStatement,
+    ) -> SqlResult<QueryResult> {
+        let checked_role = self.settings.checked_role.clone();
+        let may_create_databases = match &checked_role {
+            None => true,
+            Some(role) => self
+                .read(|reader, _| crate::roles::stored_role(reader, role))?
+                .is_some_and(|role| role.create_database),
+        };
+        let settings = Arc::clone(&self.settings);
+        let result = crate::served_databases::run(
+            &crate::served_databases::DatabaseCommandContext {
+                served: self.served_databases,
+                dialect: self.dialect,
+                current_database: &settings.database,
+                superuser: checked_role.is_none(),
+                may_create_databases,
+                in_block: self.in_block(),
+            },
+            statement,
+        );
+        self.refresh_database_names();
+        result
     }
 
     /// Names a stored role this session runs as, like [`Session::identify`], and checks its
@@ -2537,6 +2586,10 @@ impl<'s> Session<'s> {
         {
             self.commit()?;
         }
+        if let Statement::Database(command) = statement {
+            return self.run_database_command(command);
+        }
+        self.refresh_database_names();
         let settings = Arc::clone(&self.settings);
         crate::roles::check_statement(&settings, statement)?;
         if let Some(most_rows) = self.max_result_rows
@@ -2612,6 +2665,10 @@ impl<'s> Session<'s> {
                     crate::row_security::run(writer, binding.settings, &statement)
                 })
             }
+            Statement::Database(command) => Err(SqlError::not_supported(format!(
+                "{} here",
+                command.tag()
+            ))),
             Statement::Role(role) => {
                 let mut role = role.clone();
                 let tag = role.tag();
@@ -3059,6 +3116,7 @@ impl<'s> Session<'s> {
                     | Statement::CreateSchema { .. }
                     | Statement::DropSchema { .. }
                     | Statement::RenameSchema { .. }
+                    | Statement::Database(_)
                     | Statement::CreateView(_)
                     | Statement::DropView { .. }
                     | Statement::AlterView(_)
