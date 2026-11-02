@@ -1,3 +1,5 @@
+mod automation;
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -5,7 +7,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use super::win32::{self, Utf16Characters};
-use super::{KeyPress, Modifiers, Window, WindowError, WindowEvent, WindowOptions, check_frame};
+use super::{
+    AccessNode, KeyPress, Modifiers, Window, WindowError, WindowEvent, WindowOptions, check_frame,
+};
+use automation::Automation;
 
 type Handle = *mut c_void;
 type WindowProcedure = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -42,6 +47,7 @@ const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETMINMAXINFO: u32 = 0x0024;
+const WM_GETOBJECT: u32 = 0x003D;
 const WM_NCCREATE: u32 = 0x0081;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
@@ -238,6 +244,7 @@ struct WindowState {
     size: Cell<(u32, u32)>,
     dpi: Cell<u32>,
     min_size: (u32, u32),
+    automation: Automation,
 }
 
 impl WindowState {
@@ -419,6 +426,7 @@ fn handle_message(
     match message {
         WM_PAINT => paint(window, state),
         WM_ERASEBKGND => return Some(1),
+        WM_GETOBJECT => return state.automation.answer_get_object(window, wparam, lparam),
         WM_CLOSE => state.push(WindowEvent::CloseRequested),
         WM_SETFOCUS => state.push(WindowEvent::Focused(true)),
         WM_KILLFOCUS => state.push(WindowEvent::Focused(false)),
@@ -587,6 +595,7 @@ impl Win32Window {
             size: Cell::new((0, 0)),
             dpi: Cell::new(win32::BASE_DPI),
             min_size: (options.min_width, options.min_height),
+            automation: Automation::default(),
         });
         // SAFETY: the class is registered, both strings are NUL-terminated and alive for the
         // call, and the creation parameter points to `state`, which this `Win32Window` keeps
@@ -611,6 +620,7 @@ impl Win32Window {
             return Err(last_error("CreateWindowExW"));
         }
         let this = Self { window, state };
+        this.state.automation.attach(this.window);
         // SAFETY: `window` was just created by this backend.
         let dpi = unsafe { GetDpiForWindow(this.window) };
         this.state
@@ -670,6 +680,7 @@ impl Win32Window {
 
 impl Drop for Win32Window {
     fn drop(&mut self) {
+        self.state.automation.detach(self.window);
         // SAFETY: `window` is ours; clearing the slot stops the procedure from reaching the
         // state, which is freed after this.
         unsafe { SetWindowLongPtrW(self.window, GWLP_USERDATA, 0) };
@@ -710,6 +721,10 @@ impl Window for Win32Window {
         // SAFETY: `window` is ours; this sends `WM_PAINT` now, which draws the stored frame.
         unsafe { UpdateWindow(self.window) };
         Ok(())
+    }
+
+    fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
+        self.state.automation.update(nodes, self.state.scale());
     }
 
     fn next_event(

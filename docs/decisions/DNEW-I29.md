@@ -61,12 +61,22 @@ Accessibility, as built: the screen produces its tree as a pure function of its 
 (`connect_screen::accessibility_tree`: stable ids, parents, generic roles, names, values and
 states, logical bounds) and hands it to `Window::set_accessibility_tree` after each frame. On
 macOS the backend keeps one `NSAccessibilityElement` per node, updated in place while the tree's
-shape is unchanged, and posts the focus and value notifications. In the browser, `eggdb-wasm`'s
+shape is unchanged, and posts the focus and value notifications. On Windows the backend answers
+`WM_GETOBJECT` for `UiaRootObjectId` with a UI Automation fragment root of our own COM
+objects (`IRawElementProviderSimple`, `IRawElementProviderFragment` and
+`IRawElementProviderFragmentRoot`, our own vtables and declarations): each node gives its name,
+control type, keyboard focus, enabled state and bounding rectangle in screen pixels, the
+window's own node is the root the window hosts, and a focus move raises
+`UIA_AutomationFocusChangedEventId`. In the browser, `eggdb-wasm`'s
 `gui` feature (off by default, so the database module's size is unchanged) renders the same
 card for `web/card.js`, which puts the frame on a canvas and mirrors the tree into real
 `<input>`, `<button>` and `<a>` elements with ARIA roles over it, carrying the DOM focus.
 
-Left: Wayland, the clipboard, the UI Automation (Windows) and AT-SPI2 (Linux) bridges, pointer
+Left: Wayland, the clipboard, UI Automation's control patterns (Invoke, Toggle, Value,
+SelectionItem) and focus requests from screen readers, the AT-SPI2 (Linux) bridge, pointer
 input in the native windows (hover, pressed, mouse focus without a ring), caret blinking,
 remembered window size and position, reading the OS theme, text in the browser without a font
-URL, and golden frames with pinned fonts (D191).
+URL, and golden frames with pinned fonts (D191). Golden frames with the box typeface run now:
+`eggdb-gui --png --box-text` in every theme at 1x and 2x is compared with the checksums in
+`crates/eggdb-gui/tests/data/reference-frames.txt` on Linux, macOS and Windows, and CI opens the
+X11 window under Xvfb (`--frames 3`).

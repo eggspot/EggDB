@@ -9,12 +9,14 @@
 //!
 //! Each window also takes the screen's accessibility tree ([`AccessNode`],
 //! [`Window::set_accessibility_tree`]) and hands it to the system's screen readers: through
-//! NSAccessibility on macOS; the other systems' bridges (UI Automation, AT-SPI2) come next.
+//! NSAccessibility on macOS and UI Automation on Windows ([`uia`]); AT-SPI2 on Linux comes
+//! next.
 
 use std::fmt;
 use std::time::Duration;
 
 pub mod cocoa;
+pub mod uia;
 pub mod win32;
 pub mod x11;
 
