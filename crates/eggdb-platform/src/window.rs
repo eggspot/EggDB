@@ -4,12 +4,17 @@
 //! Every operating system's window API stays behind [`open_window`] and the [`Window`] trait,
 //! so the GUI toolkit draws frames without knowing which system shows them. On Linux and the
 //! BSDs the backend speaks the X11 protocol itself over the display's Unix socket ([`x11`]);
-//! Windows and macOS answer [`WindowError::Unsupported`] until their backends land.
+//! on Windows it calls Win32 through our own declarations ([`win32`]); macOS answers
+//! [`WindowError::Unsupported`] until its backend lands.
 
 use std::fmt;
 use std::time::Duration;
 
+pub mod win32;
 pub mod x11;
+
+#[cfg(windows)]
+mod win32_window;
 
 #[cfg(any(
     target_os = "linux",
@@ -207,10 +212,8 @@ pub fn open_window(options: &WindowOptions) -> Result<Box<dyn Window>, WindowErr
     }
     #[cfg(windows)]
     {
-        let _ = options;
-        Err(WindowError::Unsupported(
-            "native windows on Windows (Win32) are not supported yet",
-        ))
+        let window = win32_window::Win32Window::open(options)?;
+        Ok(Box::new(window))
     }
     #[cfg(target_vendor = "apple")]
     {
@@ -250,6 +253,7 @@ mod tests {
         assert!(check_frame(u32::MAX, u32::MAX, &[]).is_err());
     }
 
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn without_a_display_opening_fails_with_an_error_not_a_panic() {
         if std::env::var_os("DISPLAY").is_some() {
