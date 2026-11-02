@@ -6,7 +6,11 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use super::cocoa::{self, CgRect, CgSize};
-use super::{KeyPress, Window, WindowError, WindowEvent, WindowOptions, check_frame};
+use super::{AccessNode, KeyPress, Window, WindowError, WindowEvent, WindowOptions, check_frame};
+
+mod accessibility;
+
+use accessibility::AccessElements;
 
 type Id = *mut c_void;
 type Sel = *const c_void;
@@ -39,6 +43,7 @@ const RECT_SENDER: &CStr = c"objc_msgSend";
 
 const VIEW_CLASS: &CStr = c"EggDBView";
 const VOID_OBJECT_TYPES: &CStr = c"v@:@";
+const OBJECT_GETTER_TYPES: &CStr = c"@@:";
 const DRAW_RECT_TYPES: &CStr = c"v@:{CGRect={CGPoint=dd}{CGSize=dd}}";
 
 const RTLD_LAZY: c_int = 0x1;
@@ -77,6 +82,10 @@ type SendVoidId = unsafe extern "C" fn(Id, Sel, Id);
 type SendVoidInteger = unsafe extern "C" fn(Id, Sel, isize);
 type SendVoidBool = unsafe extern "C" fn(Id, Sel, ObjcBool);
 type SendVoidSize = unsafe extern "C" fn(Id, Sel, CgSize);
+type SendVoidRect = unsafe extern "C" fn(Id, Sel, CgRect);
+type SendIdInteger = unsafe extern "C" fn(Id, Sel, isize) -> Id;
+type SendIdObjects = unsafe extern "C" fn(Id, Sel, *const Id, usize) -> Id;
+type PostNotification = unsafe extern "C" fn(Id, Id);
 type SendIdF64 = unsafe extern "C" fn(Id, Sel, f64) -> Id;
 type SendIdRect = unsafe extern "C" fn(Id, Sel, CgRect) -> Id;
 type SendNextEvent = unsafe extern "C" fn(Id, Sel, u64, Id, Id, ObjcBool) -> Id;
@@ -182,6 +191,10 @@ struct Runtime {
     send_void_integer: SendVoidInteger,
     send_void_bool: SendVoidBool,
     send_void_size: SendVoidSize,
+    send_void_rect: SendVoidRect,
+    send_id_integer: SendIdInteger,
+    send_id_objects: SendIdObjects,
+    post_notification: PostNotification,
     send_id_f64: SendIdF64,
     send_id_rect: SendIdRect,
     send_next_event: SendNextEvent,
@@ -211,7 +224,7 @@ impl fmt::Debug for Runtime {
 impl Runtime {
     fn load() -> Result<Self, WindowError> {
         let objc = open_library(LIBOBJC)?;
-        open_library(APPKIT)?;
+        let appkit = open_library(APPKIT)?;
         let foundation = open_library(FOUNDATION)?;
         let graphics = open_library(CORE_GRAPHICS)?;
         let core = open_library(CORE_FOUNDATION)?;
@@ -238,6 +251,10 @@ impl Runtime {
             send_void_integer: load!(objc, c"objc_msgSend", SendVoidInteger),
             send_void_bool: load!(objc, c"objc_msgSend", SendVoidBool),
             send_void_size: load!(objc, c"objc_msgSend", SendVoidSize),
+            send_void_rect: load!(objc, c"objc_msgSend", SendVoidRect),
+            send_id_integer: load!(objc, c"objc_msgSend", SendIdInteger),
+            send_id_objects: load!(objc, c"objc_msgSend", SendIdObjects),
+            post_notification: load!(appkit, c"NSAccessibilityPostNotification", PostNotification),
             send_id_f64: load!(objc, c"objc_msgSend", SendIdF64),
             send_id_rect: load!(objc, c"objc_msgSend", SendIdRect),
             send_next_event: load!(objc, c"objc_msgSend", SendNextEvent),
@@ -383,7 +400,9 @@ impl Runtime {
         let rescaled: extern "C" fn(Id, Sel, Id) = window_did_change_backing_properties;
         let became_key: extern "C" fn(Id, Sel, Id) = window_did_become_key;
         let resigned_key: extern "C" fn(Id, Sel, Id) = window_did_resign_key;
-        let methods: [(&CStr, *const c_void, &CStr); 9] = [
+        let children: extern "C" fn(Id, Sel) -> Id = accessibility::accessibility_children;
+        let focused: extern "C" fn(Id, Sel) -> Id = accessibility::accessibility_focused_element;
+        let methods: [(&CStr, *const c_void, &CStr); 11] = [
             (c"drawRect:", draw as *const c_void, DRAW_RECT_TYPES),
             (c"keyDown:", key as *const c_void, VOID_OBJECT_TYPES),
             (
@@ -417,6 +436,16 @@ impl Runtime {
                 resigned_key as *const c_void,
                 VOID_OBJECT_TYPES,
             ),
+            (
+                c"accessibilityChildren",
+                children as *const c_void,
+                OBJECT_GETTER_TYPES,
+            ),
+            (
+                c"accessibilityFocusedUIElement",
+                focused as *const c_void,
+                OBJECT_GETTER_TYPES,
+            ),
         ];
         for (name, implementation, types) in methods {
             self.add_method(class, name, implementation, types)?;
@@ -444,6 +473,7 @@ struct WindowState {
     frame: RefCell<Frame>,
     size: Cell<(u32, u32)>,
     scale: Cell<f32>,
+    access: RefCell<AccessElements>,
 }
 
 thread_local! {
@@ -839,6 +869,7 @@ impl WindowState {
             unregister_view(view);
         }
         self.runtime.with_pool(|| {
+            self.release_accessibility();
             self.send_object_to(window, c"setDelegate:", std::ptr::null_mut());
             self.send_object_to(window, c"orderOut:", std::ptr::null_mut());
             self.send_to(window, c"close");
@@ -911,6 +942,7 @@ impl CocoaWindow {
             frame: RefCell::new(Frame::default()),
             size: Cell::new((0, 0)),
             scale: Cell::new(1.0),
+            access: RefCell::new(AccessElements::default()),
         });
         let built = state
             .runtime
@@ -957,6 +989,13 @@ impl Window for CocoaWindow {
             self.state.send_to(view, c"displayIfNeeded");
         });
         Ok(())
+    }
+
+    fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
+        let state = &self.state;
+        state
+            .runtime
+            .with_pool(|| state.update_accessibility(nodes));
     }
 
     fn next_event(
@@ -1008,6 +1047,7 @@ mod tests {
         };
         assert!(runtime.class(c"NSWindow").is_ok());
         assert!(runtime.class(c"NSApplication").is_ok());
+        assert!(runtime.class(c"NSAccessibilityElement").is_ok());
         assert!(runtime.class(c"NoSuchEggDBClass").is_err());
         assert!(!runtime.default_mode.is_null());
         let first = runtime.view_class();

@@ -1,10 +1,11 @@
 //! The pure parts of the macOS (Cocoa) window backend, compiled and tested on every operating
 //! system: translating `NSEvent` key codes, modifier flags and characters into the GUI's keys,
 //! turning a view's size in points and its backing scale factor into device pixels, and placing
-//! a frame's image at the top left of a view whose origin is at the bottom left. The values
-//! come from Apple's public AppKit and Core Graphics documentation.
+//! a frame's image at the top left of a view whose origin is at the bottom left, and mapping
+//! accessibility nodes to NSAccessibility roles and frames. The values come from Apple's public
+//! AppKit, Core Graphics and NSAccessibility documentation.
 
-use super::{Key, Modifiers};
+use super::{AccessRect, AccessRole, Key, Modifiers};
 
 /// `NSEventModifierFlagShift`.
 pub const FLAG_SHIFT: u64 = 1 << 17;
@@ -162,9 +163,129 @@ pub fn frame_rect(width: u32, height: u32, scale: f32, view_height: f64) -> CgRe
     }
 }
 
+/// How a node is exposed through NSAccessibility: its `AXRole`, and whether its visible text is
+/// its value (static text) rather than its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AxRole {
+    /// The `NSAccessibilityRole` string, such as `AXButton`.
+    pub role: &'static str,
+    /// Whether the name is reported as the `AXValue`, as static text does.
+    pub name_is_value: bool,
+}
+
+/// The NSAccessibility role for `role`, `None` for the window, which `NSWindow` already exposes.
+pub fn ax_role(role: AccessRole) -> Option<AxRole> {
+    let (role, name_is_value) = match role {
+        AccessRole::Window => return None,
+        AccessRole::Group | AccessRole::TabPanel => ("AXGroup", false),
+        AccessRole::Heading => ("AXHeading", true),
+        AccessRole::TabList => ("AXTabGroup", false),
+        AccessRole::Tab => ("AXRadioButton", false),
+        AccessRole::Status => ("AXStaticText", true),
+        AccessRole::TextField => ("AXTextField", false),
+        AccessRole::Button => ("AXButton", false),
+        AccessRole::CheckBox => ("AXCheckBox", false),
+        AccessRole::Link => ("AXLink", false),
+    };
+    Some(AxRole {
+        role,
+        name_is_value,
+    })
+}
+
+/// A node's `accessibilityFrameInParentSpace`: `bounds` (logical pixels from the window's top
+/// left, which are points) in a view `view_height` points tall whose origin is at the bottom
+/// left, relative to the parent element's `parent` bounds when the parent is an element rather
+/// than the view.
+pub fn frame_in_parent_space(
+    bounds: AccessRect,
+    parent: Option<AccessRect>,
+    view_height: f64,
+) -> CgRect {
+    let bottom_up = |rect: AccessRect| {
+        (
+            f64::from(rect.x),
+            view_height - f64::from(rect.y) - f64::from(rect.height),
+        )
+    };
+    let (x, y) = bottom_up(bounds);
+    let (parent_x, parent_y) = parent.map_or((0.0, 0.0), bottom_up);
+    CgRect {
+        origin: CgPoint {
+            x: x - parent_x,
+            y: y - parent_y,
+        },
+        size: CgSize {
+            width: f64::from(bounds.width),
+            height: f64::from(bounds.height),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_role_but_the_window_has_an_ax_role() {
+        assert_eq!(ax_role(AccessRole::Window), None);
+        let button = ax_role(AccessRole::Button);
+        assert_eq!(
+            button,
+            Some(AxRole {
+                role: "AXButton",
+                name_is_value: false
+            })
+        );
+        assert_eq!(
+            ax_role(AccessRole::Tab).map(|ax| ax.role),
+            Some("AXRadioButton")
+        );
+        assert_eq!(
+            ax_role(AccessRole::TabList).map(|ax| ax.role),
+            Some("AXTabGroup")
+        );
+        assert_eq!(
+            ax_role(AccessRole::CheckBox).map(|ax| ax.role),
+            Some("AXCheckBox")
+        );
+        assert_eq!(
+            ax_role(AccessRole::TextField).map(|ax| ax.role),
+            Some("AXTextField")
+        );
+        assert!(ax_role(AccessRole::Status).is_some_and(|ax| ax.name_is_value));
+        assert!(ax_role(AccessRole::Heading).is_some_and(|ax| ax.name_is_value));
+    }
+
+    #[test]
+    fn frames_flip_to_a_bottom_left_origin_and_become_relative_to_the_parent() {
+        let card = AccessRect {
+            x: 360.0,
+            y: 140.0,
+            width: 560.0,
+            height: 480.0,
+        };
+        let input = AccessRect {
+            x: 384.0,
+            y: 282.0,
+            width: 420.0,
+            height: 28.0,
+        };
+        let in_view = frame_in_parent_space(input, None, 800.0);
+        assert_eq!(
+            in_view,
+            CgRect {
+                origin: CgPoint { x: 384.0, y: 490.0 },
+                size: CgSize {
+                    width: 420.0,
+                    height: 28.0
+                }
+            }
+        );
+        let in_card = frame_in_parent_space(input, Some(card), 800.0);
+        assert_eq!(in_card.origin, CgPoint { x: 24.0, y: 310.0 });
+        assert_eq!(in_card.size, in_view.size);
+    }
 
     #[test]
     fn modifier_flags_map_to_modifiers() {
