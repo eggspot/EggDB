@@ -1220,12 +1220,11 @@ pub fn draw(
 
 fn control_fill(pen: &Pen<'_, '_>, card: &ConnectCard, node: u32) -> (Rgba, Rgba) {
     let theme = pen.theme;
+    let fill = card.pointer.mix(node).blend(theme.bg0, theme.bg2, theme.bg2);
     if card.pointer.is_pressed(node) {
-        (theme.bg2, theme.border_strong)
-    } else if card.pointer.is_hovered(node) {
-        (theme.bg2, theme.border)
+        (fill, theme.border_strong)
     } else {
-        (theme.bg0, theme.border)
+        (fill, theme.border)
     }
 }
 
@@ -1536,12 +1535,10 @@ fn buttons(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
     let open = offset(OPEN, origin);
     let open_fill = if card.disabled() {
         theme.accent
-    } else if card.pointer.is_pressed(NODE_OPEN) {
-        theme.accent_pressed
-    } else if card.pointer.is_hovered(NODE_OPEN) {
-        theme.accent_hover
     } else {
-        theme.accent
+        card.pointer
+            .mix(NODE_OPEN)
+            .blend(theme.accent, theme.accent_hover, theme.accent_pressed)
     };
     pen.rounded(open, RADIUS_CONTROL, open_fill);
     let label = match (card.segment, card.disabled()) {

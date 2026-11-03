@@ -135,6 +135,7 @@ pub struct Workspace {
     caret_blinks: bool,
     window_active: bool,
     reduced_motion: bool,
+    fill_targets: (Option<u32>, Option<u32>),
     layout: Layout,
     settings_path: Option<PathBuf>,
 }
@@ -184,6 +185,7 @@ impl Workspace {
             caret_blinks: false,
             window_active: true,
             reduced_motion: false,
+            fill_targets: (None, None),
             layout: Layout::EggDb,
             settings_path: None,
         }
@@ -295,6 +297,34 @@ impl Workspace {
     /// asks.
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.reduced_motion = reduced;
+        if reduced {
+            self.pointer_look_mut().stop_fades();
+        }
+    }
+
+    fn tick_fades(&mut self, now: Instant) -> bool {
+        let before = self.fill_targets;
+        let reduced = self.reduced_motion;
+        let look = self.pointer_look_mut();
+        let targets = (look.hovered, look.pressed);
+        if reduced {
+            look.stop_fades();
+        } else if targets != before {
+            look.follow(before, now);
+        }
+        let changed = look.advance(now);
+        self.fill_targets = targets;
+        changed
+    }
+
+    /// How long until a fading fill needs a new frame, `None` when nothing fades
+    /// (`docs/ux/workspace.md` 10.8).
+    pub fn until_fade_changes(&self) -> Option<Duration> {
+        let look = match &self.screen {
+            Screen::Connect(card) => &card.pointer,
+            Screen::Main(window) => &window.pointer,
+        };
+        look.is_fading().then_some(pointer::FADE_FRAME_INTERVAL)
     }
 
     /// The window became active (`true`) or inactive: an inactive window's caret is solid
@@ -1373,11 +1403,13 @@ impl Workspace {
         });
     }
 
-    /// Moves time on to `now`: takes a finished open's answer, shows the progress state
-    /// after [`PROGRESS_DELAY`] and clears `Cancelled` after [`CANCELLED_SHOWN_FOR`].
-    /// Returns whether the screen changed.
+    /// Moves time on to `now`: starts and moves on the 80 ms hover and pressed fades (none
+    /// under reduced motion), takes a finished open's answer, shows the progress state after
+    /// [`PROGRESS_DELAY`] and clears `Cancelled` after [`CANCELLED_SHOWN_FOR`]. Returns
+    /// whether the screen changed.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = self.tick_read();
+        let mut changed = self.tick_fades(now);
+        changed |= self.tick_read();
         changed |= self.tick_run(now);
         if self.caret_blinks || !self.window_active {
             changed |= self.refresh_caret(now);

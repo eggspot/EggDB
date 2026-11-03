@@ -27,7 +27,7 @@ use crate::object_browser::{
     TreeAction, TreeItem,
 };
 use crate::plan_view::{self, PlanView};
-use crate::pointer::{self, CaretLook, PointerLook};
+use crate::pointer::{self, CaretLook, Fill, FillMix, PointerLook};
 use crate::connection::SessionId;
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
@@ -1420,6 +1420,21 @@ impl Painter<'_, '_> {
                 self.canvas
                     .fill_rounded_rect(rect, 4.0, theme.accent_pressed)
             }
+            Button::PrimaryFading(fill) => {
+                let color = fill.blend(theme.accent, theme.accent_hover, theme.accent_pressed);
+                self.canvas.fill_rounded_rect(rect, 4.0, color);
+            }
+            Button::SecondaryFading { fill, pressed } => {
+                let edge = if pressed {
+                    theme.border_strong
+                } else {
+                    theme.border
+                };
+                self.canvas.fill_rounded_rect(rect, 4.0, edge);
+                let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
+                let color = fill.blend(theme.bg0, theme.bg2, theme.bg2);
+                self.canvas.fill_rounded_rect(inner, 3.0, color);
+            }
             Button::SecondaryHovered | Button::SecondaryPressed => {
                 let edge = if kind == Button::SecondaryPressed {
                     theme.border_strong
@@ -1459,13 +1474,22 @@ pub(crate) enum Button {
     Secondary,
     SecondaryHovered,
     SecondaryPressed,
+    PrimaryFading(FillMix),
+    SecondaryFading { fill: FillMix, pressed: bool },
     Disabled,
     Ghost,
 }
 
 fn under_pointer(window: &MainWindow, id: u32, look: Button) -> Button {
     let pointer = window.pointer;
+    let fill = pointer.mix(id);
+    let fading = !fill.is(pointer.fill(id));
     match look {
+        Button::Primary if fading => Button::PrimaryFading(fill),
+        Button::Secondary if fading => Button::SecondaryFading {
+            fill,
+            pressed: pointer.fill(id) == Fill::Pressed,
+        },
         Button::Primary if pointer.is_pressed(id) => Button::PrimaryPressed,
         Button::Primary if pointer.is_hovered(id) => Button::PrimaryHovered,
         Button::Secondary if pointer.is_pressed(id) => Button::SecondaryPressed,
@@ -2045,9 +2069,11 @@ fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
             continue;
         }
         let left = tab_left(window, position, width);
-        let hovered = window.pointer.is_hovered(background_tab_node(window, position));
-        if hovered {
-            paint.rect(left, 44.0, width, 35.0, theme.bg1);
+        let node = background_tab_node(window, position);
+        let hovered = window.pointer.is_hovered(node);
+        let fill = window.pointer.mix(node);
+        if !fill.is(Fill::Rest) {
+            paint.rect(left, 44.0, width, 35.0, fill.blend(theme.bg2, theme.bg1, theme.bg1));
         }
         let next_is_background = position + 1 != window.tab_position && position + 1 < count;
         if next_is_background {

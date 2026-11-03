@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use eggdb_platform::window::{AccessNode, AccessRect};
 
+use crate::color::Rgba;
 use crate::connect_screen::{MIN_HEIGHT, MIN_WIDTH};
 use crate::font::Typeface;
 
@@ -22,10 +23,117 @@ pub const MAX_PASTE_BYTES: usize = 1 << 20;
 pub const PASTE_TOO_LARGE: &str = "Paste too large (limit 1 MB); open the file instead";
 /// The lines one wheel notch scrolls the grid (`docs/ux/workspace.md` 3.6).
 pub const WHEEL_ROWS_PER_NOTCH: f32 = 3.0;
+/// How long a hover or pressed fill takes to reach its new colour (`docs/ux/workspace.md`
+/// 10.8).
+pub const FILL_FADE: Duration = Duration::from_millis(80);
+/// How often the window draws while a fill fades.
+pub const FADE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// The most fills that fade at once; one more ends the furthest along at once.
+pub const MAX_FADES: usize = 4;
+const WHOLE: u16 = 1_000;
+
+/// The fill a control draws for the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fill {
+    /// Neither hovered nor pressed.
+    #[default]
+    Rest,
+    /// Under the pointer.
+    Hovered,
+    /// Held by a press with the pointer on it.
+    Pressed,
+}
+
+/// A fill part of the way between the three [`Fill`] colours, as thousandths of each that add
+/// up to 1000: what a fade draws at one moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FillMix {
+    /// Thousandths of the rest colour.
+    pub rest: u16,
+    /// Thousandths of the hover colour.
+    pub hovered: u16,
+    /// Thousandths of the pressed colour.
+    pub pressed: u16,
+}
+
+impl FillMix {
+    /// All of `fill`'s colour.
+    pub fn of(fill: Fill) -> Self {
+        let share = |wanted: Fill| if fill == wanted { WHOLE } else { 0 };
+        Self {
+            rest: share(Fill::Rest),
+            hovered: share(Fill::Hovered),
+            pressed: share(Fill::Pressed),
+        }
+    }
+
+    /// The mix `progress` thousandths of the way (clamped at 1000) from `self` to `target`.
+    pub fn toward(self, target: Fill, progress: u16) -> Self {
+        let progress = u32::from(progress.min(WHOLE));
+        let goal = Self::of(target);
+        let step = |from: u16, to: u16| {
+            let mixed = (u32::from(from) * (u32::from(WHOLE) - progress)
+                + u32::from(to) * progress)
+                / u32::from(WHOLE);
+            u16::try_from(mixed).unwrap_or(WHOLE)
+        };
+        let rest = step(self.rest, goal.rest);
+        let hovered = step(self.hovered, goal.hovered).min(WHOLE - rest);
+        Self {
+            rest,
+            hovered,
+            pressed: WHOLE - rest - hovered,
+        }
+    }
+
+    /// Whether the mix is all of `fill`'s colour.
+    pub fn is(self, fill: Fill) -> bool {
+        self == Self::of(fill)
+    }
+
+    /// The colour the mix draws with `rest`, `hovered` and `pressed` as the three fills: a
+    /// linear blend of each sRGB channel, opacity included.
+    pub fn blend(self, rest: Rgba, hovered: Rgba, pressed: Rgba) -> Rgba {
+        let channel = |of: fn(Rgba) -> u8| {
+            let sum = u32::from(of(rest)) * u32::from(self.rest)
+                + u32::from(of(hovered)) * u32::from(self.hovered)
+                + u32::from(of(pressed)) * u32::from(self.pressed);
+            u8::try_from((sum + u32::from(WHOLE) / 2) / u32::from(WHOLE)).unwrap_or(u8::MAX)
+        };
+        Rgba {
+            r: channel(|color| color.r),
+            g: channel(|color| color.g),
+            b: channel(|color| color.b),
+            a: channel(|color| color.a),
+        }
+    }
+}
+
+/// One node's fill on its way from the colour it drew to its new [`Fill`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FillFade {
+    /// The accessibility node id of the control.
+    pub node: u32,
+    /// The colour drawn when the fade started.
+    pub from: FillMix,
+    /// The fill the fade ends on.
+    pub to: Fill,
+    /// When the fade started.
+    pub started: Instant,
+    /// How far it has come, in thousandths of [`FILL_FADE`].
+    pub progress: u16,
+}
+
+impl FillFade {
+    fn mix(&self) -> FillMix {
+        self.from.toward(self.to, self.progress)
+    }
+}
 
 /// The pointer's effect on how a screen draws: the node under it, the node a press on it
-/// holds, and whether the keyboard focus last moved by a click, which keeps the focus ring off
-/// buttons, links, checkboxes and tabs (`docs/ux/workspace.md` 6.1).
+/// holds, whether the keyboard focus last moved by a click, which keeps the focus ring off
+/// buttons, links, checkboxes and tabs (`docs/ux/workspace.md` 6.1), and the fills fading to
+/// their new colour (10.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PointerLook {
     /// The accessibility node id under the pointer, when it offers an action.
@@ -34,6 +142,8 @@ pub struct PointerLook {
     pub pressed: Option<u32>,
     /// Whether the last focus move came from the pointer rather than a key.
     pub focus_by_pointer: bool,
+    /// The fills still fading, at most [`MAX_FADES`].
+    pub fades: [Option<FillFade>; MAX_FADES],
 }
 
 impl PointerLook {
@@ -46,6 +156,103 @@ impl PointerLook {
     /// Whether node `id` draws its pressed fill: held by a press with the pointer still on it.
     pub fn is_pressed(&self, id: u32) -> bool {
         self.pressed == Some(id) && self.hovered == Some(id)
+    }
+
+    /// The fill node `id` ends on.
+    pub fn fill(&self, id: u32) -> Fill {
+        if self.is_pressed(id) {
+            Fill::Pressed
+        } else if self.is_hovered(id) {
+            Fill::Hovered
+        } else {
+            Fill::Rest
+        }
+    }
+
+    /// The fill node `id` draws now: part of the way through its fade, or its [`fill`](Self::fill).
+    pub fn mix(&self, id: u32) -> FillMix {
+        self.fades
+            .iter()
+            .flatten()
+            .find(|fade| fade.node == id)
+            .map_or_else(|| FillMix::of(self.fill(id)), FillFade::mix)
+    }
+
+    /// Whether any fill is still fading.
+    pub fn is_fading(&self) -> bool {
+        self.fades.iter().any(Option::is_some)
+    }
+
+    /// Ends every fade at once, as reduced motion asks.
+    pub fn stop_fades(&mut self) {
+        self.fades = [None; MAX_FADES];
+    }
+
+    /// Starts an 80 ms fade at `now` for each node whose fill changed since the pointer was at
+    /// `before` (hovered, pressed): from the colour it drew then, so a quick in-and-out never
+    /// jumps.
+    pub fn follow(&mut self, before: (Option<u32>, Option<u32>), now: Instant) {
+        let earlier = PointerLook {
+            hovered: before.0,
+            pressed: before.1,
+            ..*self
+        };
+        let mut nodes = [before.0, before.1, self.hovered, self.pressed];
+        nodes.sort_unstable();
+        let mut last = None;
+        for id in nodes.into_iter().flatten() {
+            if last == Some(id) {
+                continue;
+            }
+            last = Some(id);
+            let to = self.fill(id);
+            if earlier.fill(id) != to {
+                self.start_fade(id, earlier.mix(id), to, now);
+            }
+        }
+    }
+
+    fn start_fade(&mut self, node: u32, from: FillMix, to: Fill, now: Instant) {
+        let fade = FillFade {
+            node,
+            from,
+            to,
+            started: now,
+            progress: 0,
+        };
+        let slot = self
+            .fades
+            .iter()
+            .position(|kept| kept.is_some_and(|kept| kept.node == node))
+            .or_else(|| self.fades.iter().position(Option::is_none))
+            .or_else(|| {
+                (0..MAX_FADES).max_by_key(|&at| self.fades[at].map_or(0, |kept| kept.progress))
+            });
+        if let Some(slot) = slot {
+            self.fades[slot] = Some(fade);
+        }
+    }
+
+    /// Moves every fade on to `now` and drops the finished ones. Returns whether a fill's
+    /// colour changed.
+    pub fn advance(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        for slot in &mut self.fades {
+            let Some(fade) = slot else {
+                continue;
+            };
+            let elapsed = now.saturating_duration_since(fade.started).as_millis();
+            let progress = elapsed * u128::from(WHOLE) / FILL_FADE.as_millis();
+            let progress = u16::try_from(progress.min(u128::from(WHOLE))).unwrap_or(WHOLE);
+            if progress != fade.progress {
+                fade.progress = progress;
+                changed = true;
+            }
+            if progress >= WHOLE {
+                *slot = None;
+            }
+        }
+        changed
     }
 }
 
@@ -294,6 +501,90 @@ mod tests {
             !look.is_hovered(4),
             "a press on another node keeps the hover off"
         );
+    }
+
+    #[test]
+    fn a_fill_mix_moves_linearly_toward_its_target_and_blends_each_channel() {
+        let rest = FillMix::of(Fill::Rest);
+        assert_eq!(
+            rest.toward(Fill::Hovered, 500),
+            FillMix {
+                rest: 500,
+                hovered: 500,
+                pressed: 0
+            }
+        );
+        assert!(rest.toward(Fill::Hovered, 1_000).is(Fill::Hovered));
+        assert!(rest.toward(Fill::Hovered, 4_000).is(Fill::Hovered));
+        assert!(rest.toward(Fill::Hovered, 0).is(Fill::Rest));
+        let third = rest.toward(Fill::Pressed, 333);
+        assert_eq!(third.rest + third.hovered + third.pressed, 1_000);
+        let black = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        let white = Rgba::hex(0xFF_FFFF);
+        assert_eq!(
+            rest.toward(Fill::Hovered, 500).blend(black, white, black),
+            Rgba {
+                r: 128,
+                g: 128,
+                b: 128,
+                a: 128
+            }
+        );
+        assert_eq!(FillMix::of(Fill::Pressed).blend(black, black, white), white);
+    }
+
+    #[test]
+    fn a_hover_fades_in_over_80_ms_and_a_quick_way_out_starts_from_the_drawn_colour() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut look = PointerLook {
+            hovered: Some(3),
+            ..PointerLook::default()
+        };
+        look.follow((None, None), at(0));
+        assert!(look.is_fading());
+        assert!(look.mix(3).is(Fill::Rest), "the first frame draws the old fill");
+        assert!(look.advance(at(40)));
+        assert_eq!(look.mix(3).hovered, 500);
+        look.hovered = None;
+        look.follow((Some(3), None), at(40));
+        assert_eq!(look.mix(3).hovered, 500, "no jump when the pointer leaves");
+        look.advance(at(80));
+        assert_eq!(look.mix(3).hovered, 250);
+        look.advance(at(120));
+        assert!(look.mix(3).is(Fill::Rest));
+        assert!(!look.is_fading(), "a finished fade is dropped");
+        assert!(!look.advance(at(200)), "nothing left to move");
+    }
+
+    #[test]
+    fn a_press_fades_from_hover_and_at_most_four_fills_fade_at_once() {
+        let start = Instant::now();
+        let mut look = PointerLook {
+            hovered: Some(1),
+            pressed: Some(1),
+            ..PointerLook::default()
+        };
+        look.follow((Some(1), None), start);
+        assert!(look.mix(1).is(Fill::Hovered));
+        look.advance(start + FILL_FADE);
+        assert!(look.mix(1).is(Fill::Pressed));
+        let mut look = PointerLook::default();
+        for id in 1..=6 {
+            let before = (look.hovered, None);
+            look.hovered = Some(id);
+            look.follow(before, start);
+        }
+        assert_eq!(look.fades.iter().flatten().count(), MAX_FADES);
+        assert!(look.mix(6).is(Fill::Rest), "the newest hover is fading in");
+        look.stop_fades();
+        assert!(!look.is_fading());
+        assert!(look.mix(6).is(Fill::Hovered), "stopped fades show their end");
     }
 
     #[test]
