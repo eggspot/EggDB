@@ -831,12 +831,17 @@ fn capture_bounds_query(instance: &str, after: Lsn, committed_before_copy: Optio
 enum CaptureStart {
     Started,
     NotYetStarted,
+    NotReadable,
     Unknown,
 }
 
 fn capture_start_query(instance: &str) -> String {
     format!(
-        "SELECT CAST(CASE WHEN start_lsn IS NULL THEN 0 ELSE 1 END AS nvarchar(max)) \
+        "SELECT CAST(CASE WHEN sys.fn_cdc_get_min_lsn(capture_instance) <> 0x00000000000000000000 THEN 1 \
+         WHEN IS_SRVROLEMEMBER(N'sysadmin') = 1 OR IS_MEMBER(N'db_owner') = 1 \
+         OR ((role_name IS NULL OR IS_MEMBER(role_name) = 1) \
+         AND HAS_PERMS_BY_NAME(QUOTENAME(OBJECT_SCHEMA_NAME(source_object_id)) + N'.' + QUOTENAME(OBJECT_NAME(source_object_id)), N'OBJECT', N'SELECT') = 1) THEN 0 \
+         ELSE 2 END AS nvarchar(max)) \
          FROM cdc.change_tables WHERE capture_instance = {}",
         quote_unicode(instance)
     )
@@ -846,7 +851,25 @@ fn capture_start(rows: &TextRows) -> CaptureStart {
     match first_value(rows, |value| Some(text(value))).as_deref() {
         Some("1") => CaptureStart::Started,
         Some("0") => CaptureStart::NotYetStarted,
+        Some("2") => CaptureStart::NotReadable,
         _ => CaptureStart::Unknown,
+    }
+}
+
+fn wait_for_capture_start(
+    mut read: impl FnMut(&str) -> Result<TextRows, Failure>,
+    instance: &str,
+    waited: Instant,
+    limit: Duration,
+    check: Duration,
+) -> Result<CaptureStart, Failure> {
+    let sql = capture_start_query(instance);
+    loop {
+        let start = capture_start(&read(&sql)?);
+        if start != CaptureStart::NotYetStarted || waited.elapsed() >= limit {
+            return Ok(start);
+        }
+        std::thread::sleep(check);
     }
 }
 
@@ -2019,15 +2042,15 @@ impl Session<'_> {
                 let ChangeSource::Capture { instance, .. } = &table.changes else {
                     continue;
                 };
-                while capture_start(&first_rows(query(
-                    &mut source,
-                    &capture_start_query(instance),
-                )?)) == CaptureStart::NotYetStarted
-                {
-                    if waited.elapsed() >= CAPTURE_START_WAIT {
-                        return Err(capture_not_started(&target, &table.shown(), instance));
-                    }
-                    std::thread::sleep(CAPTURE_START_CHECK);
+                let start = wait_for_capture_start(
+                    |sql| Ok(first_rows(query(&mut source, sql)?)),
+                    instance,
+                    waited,
+                    CAPTURE_START_WAIT,
+                    CAPTURE_START_CHECK,
+                )?;
+                if start == CaptureStart::NotYetStarted {
+                    return Err(capture_not_started(&target, &table.shown(), instance));
                 }
             }
         }
@@ -2760,16 +2783,20 @@ mod tests {
     #[test]
     fn a_capture_instance_whose_low_endpoint_is_not_set_yet_is_waited_for() {
         let answer = |value: Option<&str>| vec![vec![value.map(str::to_owned)]];
-        assert_eq!(
-            capture_start_query("it's"),
-            "SELECT CAST(CASE WHEN start_lsn IS NULL THEN 0 ELSE 1 END AS nvarchar(max)) \
-             FROM cdc.change_tables WHERE capture_instance = N'it''s'"
-        );
+        let query = capture_start_query("it's");
+        assert!(query.starts_with(
+            "SELECT CAST(CASE WHEN sys.fn_cdc_get_min_lsn(capture_instance) <> 0x00000000000000000000 THEN 1 "
+        ));
+        assert!(query.contains("IS_SRVROLEMEMBER(N'sysadmin') = 1 OR IS_MEMBER(N'db_owner') = 1"));
+        assert!(query.contains("role_name IS NULL OR IS_MEMBER(role_name) = 1"));
+        assert!(query.ends_with("FROM cdc.change_tables WHERE capture_instance = N'it''s'"));
+        assert!(!query.contains("start_lsn IS NULL"));
         assert_eq!(capture_start(&answer(Some("1"))), CaptureStart::Started);
         assert_eq!(
             capture_start(&answer(Some("0"))),
             CaptureStart::NotYetStarted
         );
+        assert_eq!(capture_start(&answer(Some("2"))), CaptureStart::NotReadable);
         assert_eq!(capture_start(&answer(None)), CaptureStart::Unknown);
         assert_eq!(capture_start(&Vec::new()), CaptureStart::Unknown);
         let Failure::Database {
@@ -2790,6 +2817,73 @@ mod tests {
             try_command.as_deref(),
             Some("EXEC sys.sp_cdc_start_job @job_type = N'capture';")
         );
+    }
+
+    fn capture_start_source(
+        answers: &[&str],
+    ) -> (
+        impl FnMut(&str) -> Result<TextRows, Failure> + use<>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let answers: Vec<String> = answers.iter().map(|answer| (*answer).to_owned()).collect();
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = asked.clone();
+        let read = move |sql: &str| {
+            assert!(sql.contains("sys.fn_cdc_get_min_lsn(capture_instance)"));
+            let at = counter.get();
+            counter.set(at + 1);
+            Ok(vec![vec![
+                answers.get(at).or(answers.last()).map(String::to_owned),
+            ]])
+        };
+        (read, asked)
+    }
+
+    #[test]
+    fn an_instance_whose_minimum_lsn_is_still_zero_for_a_sysadmin_is_waited_for_until_it_is_set() {
+        let (read, asked) = capture_start_source(&["0", "0", "1"]);
+        let started = wait_for_capture_start(
+            read,
+            "shop_items",
+            Instant::now(),
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        );
+        assert!(matches!(started, Ok(CaptureStart::Started)));
+        assert_eq!(asked.get(), 3);
+    }
+
+    #[test]
+    fn an_instance_whose_minimum_lsn_stays_zero_stops_the_wait_at_the_limit() {
+        let (read, asked) = capture_start_source(&["0"]);
+        let started = wait_for_capture_start(
+            read,
+            "shop_items",
+            Instant::now(),
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+        );
+        assert!(matches!(started, Ok(CaptureStart::NotYetStarted)));
+        assert!(asked.get() > 1);
+    }
+
+    #[test]
+    fn an_instance_the_login_may_not_read_is_not_waited_for() {
+        for (answer, expected) in [
+            ("2", CaptureStart::NotReadable),
+            ("unexpected", CaptureStart::Unknown),
+        ] {
+            let (read, asked) = capture_start_source(&[answer]);
+            let started = wait_for_capture_start(
+                read,
+                "shop_items",
+                Instant::now(),
+                Duration::from_secs(5),
+                Duration::from_millis(1),
+            );
+            assert!(matches!(started, Ok(start) if start == expected));
+            assert_eq!(asked.get(), 1);
+        }
     }
 
     #[test]
