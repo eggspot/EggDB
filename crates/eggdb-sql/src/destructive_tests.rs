@@ -1312,3 +1312,35 @@ fn a_joined_update_or_delete_calling_a_user_function_in_its_from_list_runs_code(
         );
     }
 }
+
+#[test]
+fn output_into_a_table_with_insert_triggers_runs_code() {
+    let store = MemoryStore::default();
+    Session::new(&store)
+        .execute(
+            "CREATE TABLE u (id integer PRIMARY KEY); \
+             CREATE TABLE log (id integer PRIMARY KEY, note text); \
+             CREATE TABLE quiet_log (note text); \
+             CREATE TABLE audit (note text); \
+             CREATE FUNCTION wipe_u() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM u; RETURN NEW; END $$; \
+             CREATE TRIGGER audit_wipes AFTER INSERT ON audit FOR EACH ROW EXECUTE FUNCTION wipe_u()",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        kind_with_keys(
+            &store,
+            Dialect::SqlServer,
+            "INSERT INTO log OUTPUT inserted.note INTO audit (note) VALUES (1, N'x')"
+        ),
+        Some(DestructiveKind::RunCode)
+    );
+    assert_eq!(
+        kind_with_keys(
+            &store,
+            Dialect::SqlServer,
+            "INSERT INTO log OUTPUT inserted.note INTO quiet_log (note) VALUES (1, N'x')"
+        ),
+        None
+    );
+}

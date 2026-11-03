@@ -2945,7 +2945,7 @@ fn percent_of(total: usize, percent: f64) -> usize {
     }
 }
 
-fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
+fn percent_value(expr: &Expr) -> SqlResult<Option<f64>> {
     let constants = Evaluator {
         scope: Scope::empty(),
         row: &[],
@@ -2953,11 +2953,22 @@ fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
     };
     reject_aggregates(expr, "FETCH")?;
     let value = constants.eval(expr, None)?;
-    Ok(crate::oracle_functions::decimal_of(&value)?.map_or(0.0, |percent| percent.to_f64()))
+    Ok(crate::oracle_functions::decimal_of(&value)?.map(|percent| percent.to_f64()))
+}
+
+fn fetch_percent(expr: &Expr) -> SqlResult<f64> {
+    Ok(percent_value(expr)?.unwrap_or(0.0))
 }
 
 fn top_percent(expr: &Expr) -> SqlResult<f64> {
-    let percent = fetch_percent(expr)?;
+    let Some(percent) = percent_value(expr)? else {
+        return Err(SqlError::new(
+            SqlState::INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
+            "TOP clause contains an invalid value.",
+        )
+        .with_sqlserver_code(1006)
+        .at(expr.position));
+    };
     if (0.0..=100.0).contains(&percent) {
         return Ok(percent);
     }
@@ -3110,7 +3121,7 @@ fn distinct_on_keys<'e>(
     let leading = sort_keys.len().min(keys.len());
     let matches_order = sort_keys[..leading].iter().all(|ordered| {
         keys.iter()
-            .any(|key| same_sort_key(key, ordered, projection))
+            .any(|key| same_sort_key(key, ordered, projection, scope))
     });
     if !matches_order {
         return Err(SqlError::new(
@@ -3129,6 +3140,16 @@ fn distinct_on_key<'e>(
     grouped: bool,
 ) -> SqlResult<SortKey<'e>> {
     match &expr.kind {
+        ExprKind::Literal(crate::ast::Literal::Integer(position))
+            if i32::try_from(*position).is_err() =>
+        {
+            Err(non_integer_distinct_on_constant(expr.position))
+        }
+        ExprKind::Literal(
+            crate::ast::Literal::String(_)
+            | crate::ast::Literal::Decimal(_)
+            | crate::ast::Literal::Boolean(_),
+        ) => Err(non_integer_distinct_on_constant(expr.position)),
         ExprKind::Literal(crate::ast::Literal::Integer(position)) => usize::try_from(*position)
             .ok()
             .filter(|&index| index >= 1 && index <= projection.columns.len())
@@ -3163,7 +3184,25 @@ fn distinct_on_key<'e>(
     }
 }
 
-fn same_sort_key(left: &SortKey<'_>, right: &SortKey<'_>, projection: &Projection<'_>) -> bool {
+fn non_integer_distinct_on_constant(position: usize) -> SqlError {
+    SqlError::syntax("non-integer constant in DISTINCT ON", position)
+}
+
+fn source_column(expr: &Expr, scope: Scope<'_>) -> Option<usize> {
+    match &expr.kind {
+        ExprKind::Column { qualifier, name } => {
+            scope.column(qualifier.as_deref(), name, expr.position).ok()
+        }
+        _ => None,
+    }
+}
+
+fn same_sort_key(
+    left: &SortKey<'_>,
+    right: &SortKey<'_>,
+    projection: &Projection<'_>,
+    scope: Scope<'_>,
+) -> bool {
     let output = |key: &SortKey<'_>| match key {
         SortKey::Output(index) => Some(*index),
         SortKey::Expr(expr) => projection.output_of(expr),
@@ -3171,7 +3210,10 @@ fn same_sort_key(left: &SortKey<'_>, right: &SortKey<'_>, projection: &Projectio
     match (output(left), output(right), left, right) {
         (Some(left), Some(right), _, _) => left == right,
         (None, None, SortKey::Expr(left), SortKey::Expr(right)) => {
-            shape_of(left) == shape_of(right)
+            match (source_column(left, scope), source_column(right, scope)) {
+                (Some(left), Some(right)) => left == right,
+                _ => shape_of(left) == shape_of(right),
+            }
         }
         _ => false,
     }

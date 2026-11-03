@@ -2,10 +2,9 @@ use crate::ast::{
     AlterAction, AlterRoutine, AlterRoutineAction, AlterTriggerAction, AssignedValue,
     BinaryOperator, CopySource, CreateRoutine, CursorCommand, Delete, DropRoutine, Expr, ExprKind,
     FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, Literal,
-    MaterializedViewCommand,
-    MergeStatement, MultitableInsert, MySqlStatement, Name, OnDuplicate, Query, ReferentialAction,
-    RoutineTarget, Select, SelectItem, SetExpr, SqlServerStatement, Statement, TableReference,
-    UnaryOperator, Update, VariableSource,
+    MaterializedViewCommand, MergeStatement, MultitableInsert, MySqlStatement, Name, OnDuplicate,
+    OutputInto, OutputTarget, Query, ReferentialAction, RoutineTarget, Select, SelectItem, SetExpr,
+    SqlServerStatement, Statement, TableReference, UnaryOperator, Update, VariableSource,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -421,7 +420,7 @@ fn sqlserver(
         }
         | SqlServerStatement::SelectAssign { query, .. } => classify(query, keys),
         SqlServerStatement::DeclareCursor(cursor) => classify(&cursor.query, keys),
-        SqlServerStatement::OutputInto(output) => classify(&output.statement, keys),
+        SqlServerStatement::OutputInto(output) => output_into(output, keys),
         SqlServerStatement::InsertBulk(bulk) => insert_runs_code(&bulk.table, keys),
         SqlServerStatement::Use(_)
         | SqlServerStatement::NoCount(_)
@@ -630,6 +629,16 @@ fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<Destructive
     }
     returning_user_functions(insert.returning.as_deref(), keys, &mut functions);
     DestructiveStatement::combined(found, running(functions.user))
+}
+
+fn output_into(output: &OutputInto, keys: &mut CatalogLookup<'_>) -> Option<DestructiveStatement> {
+    let found = classify(&output.statement, keys);
+    match &output.destination.target {
+        OutputTarget::Table(table) => {
+            DestructiveStatement::combined(found, insert_runs_code(&table.name, keys))
+        }
+        OutputTarget::Variable(_) => found,
+    }
 }
 
 fn multitable_inserted(

@@ -1760,6 +1760,14 @@ fn merge_top_limits_the_rows_it_changes() {
          WHEN MATCHED THEN DELETE",
     );
     assert_eq!(error.vendor_code(), Some(1031));
+    for text in [
+        "SELECT TOP (NULL) PERCENT id FROM stock",
+        "SELECT TOP (NULL) PERCENT WITH TIES id FROM stock ORDER BY id",
+    ] {
+        let error = error_of(&mut session, text);
+        assert_eq!(error.vendor_code(), Some(1006), "{text}");
+        assert_eq!(error.message(), "TOP clause contains an invalid value.");
+    }
 }
 
 #[test]

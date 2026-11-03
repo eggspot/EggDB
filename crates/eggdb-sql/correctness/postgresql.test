@@ -4654,6 +4654,28 @@ SELECT 1
 error 42P10
 SELECT DISTINCT ON (location) location, day FROM weather299 ORDER BY day
 
+rows
+SELECT DISTINCT ON (location) report FROM weather299 AS w ORDER BY w.location, day DESC
+----
+report
+sun
+clouds
+SELECT 2
+
+rows
+SELECT DISTINCT ON (w.location) report FROM weather299 AS w ORDER BY location, day
+----
+report
+snow
+rain
+SELECT 2
+
+error 42601
+SELECT DISTINCT ON ('x') location FROM weather299
+
+error 42601
+SELECT DISTINCT ON (99999999999999999999) location FROM weather299
+
 chapter queries-table-expressions, "Joined Tables": NATURAL joins use every column name both tables have
 ok
 CREATE TABLE letters299 (num int, name text)
@@ -4757,6 +4779,21 @@ CREATE RECURSIVE VIEW no_columns299 AS SELECT 1
 
 ok
 DROP VIEW nums_1_100
+
+ok
+CREATE TEMP RECURSIVE VIEW countdown299 (n) AS SELECT 1 UNION ALL SELECT n+1 FROM countdown299 WHERE n < 3
+
+rows
+SELECT n FROM countdown299 ORDER BY n
+----
+n
+1
+2
+3
+SELECT 3
+
+ok
+DROP VIEW countdown299
 
 chapter sql-select, "LIMIT Clause": FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }
 ok

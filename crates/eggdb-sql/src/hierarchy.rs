@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 pub(crate) const PARENT_SLOTS: usize = usize::MAX / 4;
 pub(crate) const LEVEL_SLOT: usize = usize::MAX / 2;
 const ROWS_BETWEEN_CANCEL_CHECKS: usize = 4096;
+const MAX_PATH_BYTES: usize = 4000;
 
 pub(crate) fn level_column() -> String {
     format!("{HIDDEN_COLUMN_MARKER}level")
@@ -39,6 +40,15 @@ fn separator_in_value(position: usize) -> SqlError {
         "when using SYS_CONNECT_BY_PATH function, cannot have separator as part of column value",
     )
     .with_oracle_code(30004)
+    .at(position)
+}
+
+fn path_too_long(position: usize) -> SqlError {
+    SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        "result of string concatenation is too long",
+    )
+    .with_oracle_code(1489)
     .at(position)
 }
 
@@ -99,12 +109,47 @@ fn mentions_level(expr: &Expr) -> bool {
         || crate::eval::children(expr).into_iter().any(mentions_level)
 }
 
-fn same_key(left: &Value, right: &Value) -> bool {
-    match (left.is_null(), right.is_null()) {
-        (true, true) => true,
-        (false, false) => compare_values(left, right) == Ordering::Equal,
-        _ => false,
+fn compare_prior_keys(rows: &[Vec<Value>], keys: &[usize], left: usize, right: usize) -> Ordering {
+    let key = |row: usize, input: usize| {
+        rows.get(row)
+            .and_then(|values| values.get(input))
+            .filter(|value| !value.is_null())
+    };
+    for &input in keys {
+        let order = match (key(left, input), key(right, input)) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(a), Some(b)) => compare_values(a, b),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
     }
+    Ordering::Equal
+}
+
+fn prior_key_classes(rows: &[Vec<Value>], keys: &[usize]) -> Vec<usize> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| compare_prior_keys(rows, keys, a, b));
+    let mut classes = vec![0; rows.len()];
+    let mut class = 0;
+    let mut previous: Option<usize> = None;
+    for row in order {
+        if let Some(before) = previous
+            && compare_prior_keys(rows, keys, before, row) != Ordering::Equal
+        {
+            class += 1;
+        }
+        if let Some(slot) = classes.get_mut(row) {
+            *slot = class;
+        }
+        previous = Some(row);
+    }
+    classes
 }
 
 struct KeyedRows {
@@ -169,6 +214,8 @@ struct Walk<'w> {
     level_dependent: bool,
     keyed: Option<KeyedRows>,
     known_children: Vec<Option<Vec<usize>>>,
+    prior_key_class: Vec<usize>,
+    classes_on_path: Vec<usize>,
     local: Vec<Value>,
     memory: WorkMemory,
 }
@@ -269,13 +316,32 @@ impl Walk<'_> {
         Ok(found)
     }
 
-    fn closes_cycle(&self, child: usize, path: &[Step]) -> bool {
-        let keys = &self.hierarchy.prior_inputs;
-        !keys.is_empty()
-            && path.iter().any(|step| {
-                keys.iter()
-                    .all(|&input| same_key(&self.cell(child, input), &self.cell(step.row, input)))
-            })
+    fn closes_cycle(&self, child: usize) -> bool {
+        self.prior_key_class
+            .get(child)
+            .and_then(|&class| self.classes_on_path.get(class))
+            .is_some_and(|&count| count > 0)
+    }
+
+    fn counted_on_path(&mut self, row: usize, entering: bool) {
+        let Some(&class) = self.prior_key_class.get(row) else {
+            return;
+        };
+        if let Some(count) = self.classes_on_path.get_mut(class) {
+            *count = if entering {
+                count.saturating_add(1)
+            } else {
+                count.saturating_sub(1)
+            };
+        }
+    }
+
+    fn leave_to(&mut self, path: &mut Vec<Step>, depth: usize) {
+        while path.len() > depth {
+            if let Some(step) = path.pop() {
+                self.counted_on_path(step.row, false);
+            }
+        }
     }
 
     fn step(&self, row: usize, parent: Option<&Step>) -> SqlResult<Step> {
@@ -295,6 +361,13 @@ impl Walk<'_> {
             let before = parent
                 .and_then(|step| step.paths.get(number))
                 .map_or("", String::as_str);
+            let bytes = before
+                .len()
+                .saturating_add(separator.len())
+                .saturating_add(text.len());
+            if bytes > MAX_PATH_BYTES {
+                return Err(path_too_long(self.hierarchy.position));
+            }
             paths.push(format!("{before}{separator}{text}"));
         }
         Ok(Step { row, paths })
@@ -333,6 +406,11 @@ impl Walk<'_> {
     }
 
     fn run(mut self) -> SqlResult<Vec<Vec<Value>>> {
+        self.memory.charge(
+            self.prior_key_class
+                .len()
+                .saturating_mul(2 * std::mem::size_of::<usize>()),
+        )?;
         let mut roots: Vec<usize> = (0..self.rows.len())
             .filter(|&row| self.starts(row))
             .collect();
@@ -342,14 +420,15 @@ impl Walk<'_> {
         let mut path: Vec<Step> = Vec::new();
         let mut emitted = Vec::new();
         while let Some((row, level)) = pending.pop() {
-            path.truncate(level.saturating_sub(1));
+            self.leave_to(&mut path, level.saturating_sub(1));
             let step = self.step(row, path.last())?;
             path.push(step);
+            self.counted_on_path(row, true);
             let children = self.children(row, level.saturating_add(1))?;
             let mut cycle = false;
             let mut kept = Vec::with_capacity(children.len());
             for &child in &children {
-                if self.closes_cycle(child, &path) {
+                if self.closes_cycle(child) {
                     if !self.hierarchy.no_cycle {
                         return Err(loop_in_user_data(self.hierarchy.position));
                     }
@@ -410,6 +489,8 @@ pub(crate) fn expanded(hierarchy: &Hierarchy, inner: QueryResult) -> SqlResult<Q
             child_type.is_some() && child_type == types.get(parent).copied().flatten()
         })
         .map(|(child, parent)| KeyedRows::new(&inner.rows, child, parent));
+    let prior_key_class = prior_key_classes(&inner.rows, &hierarchy.prior_inputs);
+    let classes_on_path = vec![0; prior_key_class.len()];
     let walk = Walk {
         hierarchy,
         rows: &inner.rows,
@@ -418,6 +499,8 @@ pub(crate) fn expanded(hierarchy: &Hierarchy, inner: QueryResult) -> SqlResult<Q
         connect,
         keyed,
         known_children: vec![None; inner.rows.len()],
+        prior_key_class,
+        classes_on_path,
         local: Vec::with_capacity(inputs.saturating_mul(2).saturating_add(1)),
         memory: WorkMemory::new(),
     };

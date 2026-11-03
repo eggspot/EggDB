@@ -7,12 +7,18 @@ pub(super) struct SelectIntoTable {
     temporary: bool,
 }
 
-fn not_first_query(position: usize) -> SqlError {
+fn not_first_query(sqlserver: bool, position: usize) -> SqlError {
+    if sqlserver {
+        return SqlError::syntax(
+            "SELECT INTO must be the first query in a statement containing a UNION, INTERSECT or EXCEPT operator.",
+            position,
+        )
+        .with_sqlserver_code(196);
+    }
     SqlError::syntax(
-        "SELECT INTO must be the first query in a statement containing a UNION, INTERSECT or EXCEPT operator.",
+        "INTO is only allowed on first SELECT of UNION/INTERSECT/EXCEPT",
         position,
     )
-    .with_sqlserver_code(196)
 }
 
 fn into_not_allowed(position: usize) -> SqlError {
@@ -49,8 +55,8 @@ impl Parser<'_> {
         {
             return Err(self.not_supported("SELECT INTO"));
         }
-        if matches!(self.select_into, Some(Some(_))) {
-            return Err(not_first_query(position));
+        if self.later_set_operand || matches!(self.select_into, Some(Some(_))) {
+            return Err(not_first_query(self.sqlserver(), position));
         }
         self.at += 1;
         let mut temporary = false;

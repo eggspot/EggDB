@@ -325,6 +325,7 @@ pub(crate) struct Parser<'t> {
     returns_values: bool,
     function_body: bool,
     select_into: Option<Option<select_into::SelectIntoTable>>,
+    later_set_operand: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -450,6 +451,7 @@ impl<'t> Parser<'t> {
             returns_values: false,
             function_body: false,
             select_into: None,
+            later_set_operand: false,
         }
     }
 
@@ -1698,6 +1700,9 @@ impl<'t> Parser<'t> {
                     || self.is_word("noneditionable")))
             || ((self.is_word("temp") || self.is_word("temporary") || self.is_word("recursive"))
                 && self.is_word_at(1, "view"))
+            || ((self.is_word("temp") || self.is_word("temporary"))
+                && self.is_word_at(1, "recursive")
+                && self.is_word_at(2, "view"))
         {
             return self.create_view(false);
         }

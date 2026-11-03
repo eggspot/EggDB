@@ -173,3 +173,65 @@ fn postgresql_select_into_creates_a_table_and_undoes_it_with_its_transaction() {
         "42P07"
     );
 }
+
+#[test]
+fn sqlserver_select_into_in_a_later_query_of_a_union_is_msg_196() {
+    let store = MemoryStore::default();
+    let mut session = sqlserver_products(&store);
+    for statement in [
+        "SELECT 1 AS a UNION SELECT 2 INTO later_only",
+        "SELECT id FROM products UNION ALL SELECT id INTO later_only FROM products",
+        "SELECT id FROM products EXCEPT SELECT id INTO later_only FROM products WHERE id = 1",
+        "SELECT id FROM products UNION SELECT id FROM products INTERSECT SELECT id INTO later_only FROM products",
+    ] {
+        let refused = error(&mut session, statement);
+        assert_eq!(refused.vendor_code(), Some(196), "{statement}");
+        assert!(
+            refused.message().starts_with("SELECT INTO must be the first query"),
+            "{statement}: {}",
+            refused.message()
+        );
+    }
+    assert!(
+        session
+            .execute("SELECT * FROM later_only", &mut |_| {})
+            .is_err()
+    );
+    assert_eq!(
+        tag(
+            &mut session,
+            "SELECT id INTO first_only FROM products UNION SELECT 9"
+        ),
+        "SELECT 4"
+    );
+}
+
+#[test]
+fn postgresql_select_into_in_a_later_query_of_a_union_is_42601() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    results(&mut session, "CREATE TABLE t (v int)");
+    for statement in [
+        "SELECT 1 AS a UNION SELECT 2 INTO later_only",
+        "SELECT v FROM t UNION SELECT v INTO later_only FROM t",
+        "SELECT v FROM t INTERSECT SELECT v INTO TEMP later_only FROM t",
+        "SELECT 1 INTO first_copy UNION SELECT 2 INTO second_copy",
+    ] {
+        let refused = error(&mut session, statement);
+        assert_eq!(refused.state().code(), "42601", "{statement}");
+        assert_eq!(
+            refused.message(),
+            "INTO is only allowed on first SELECT of UNION/INTERSECT/EXCEPT",
+            "{statement}"
+        );
+    }
+    for table in ["later_only", "first_copy", "second_copy"] {
+        assert_eq!(
+            error(&mut session, &format!("SELECT * FROM {table}"))
+                .state()
+                .code(),
+            "42P01",
+            "{table}"
+        );
+    }
+}

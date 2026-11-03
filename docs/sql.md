@@ -480,7 +480,7 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   in `CONNECT BY`: `SELECT LEVEL FROM dual CONNECT BY LEVEL <= 10`), `CONNECT_BY_ROOT expr`,
   `CONNECT_BY_ISLEAF`, `CONNECT_BY_ISCYCLE` (`ORA-30930` without `NOCYCLE`) and
   `SYS_CONNECT_BY_PATH(expr, 'separator')` (a constant separator, `ORA-30003`; a value holding it
-  is `ORA-30004`) can be selected, filtered, grouped and sorted. `WHERE` filters after the walk,
+  is `ORA-30004`; a path longer than 4,000 bytes is `ORA-01489`) can be selected, filtered, grouped and sorted. `WHERE` filters after the walk,
   so a filtered-out row's descendants stay. `ORDER SIBLINGS BY` sorts the rows under each parent
   (and the roots) and keeps the hierarchy; elsewhere it is `ORA-30929`. A loop (a child with the
   `PRIOR` values of one of its ancestors) is `ORA-01436`; with `NOCYCLE` the walk stops there and
@@ -1576,7 +1576,9 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   of rows equal in those expressions (NULLs equal), in `ORDER BY` order, before `LIMIT` and
   `OFFSET`; its expressions follow `ORDER BY`'s rules (an output column's number or alias, or
   any expression over the tables), and they must be the leftmost `ORDER BY` items in any order,
-  else `42P10` "SELECT DISTINCT ON expressions must match initial ORDER BY expressions". In a
+  else `42P10` "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" (a
+  column matches with or without its table's name). A constant that is not an integer is
+  `42601` "non-integer constant in DISTINCT ON". In a
   grouped query they name output columns (another expression is `0A000`), and beside a window or
   set-returning function in the select list they answer `0A000`. A view with `DISTINCT ON` is
   not automatically updatable.

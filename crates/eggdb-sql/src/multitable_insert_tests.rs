@@ -184,3 +184,38 @@ fn insert_all_reads_a_hierarchical_source() {
         vec!["15"]
     );
 }
+
+#[test]
+fn an_into_clause_that_gets_no_rows_is_still_checked() {
+    let store = MemoryStore::default();
+    let mut session = sales(&store);
+    assert_eq!(
+        error(
+            &mut session,
+            "INSERT ALL INTO no_such_table VALUES (id) SELECT id FROM sales WHERE 1 = 0"
+        )
+        .vendor_code(),
+        Some(942)
+    );
+    error(
+        &mut session,
+        "INSERT ALL INTO small_sales VALUES (id) SELECT id FROM sales WHERE 1 = 0",
+    );
+    error(
+        &mut session,
+        "INSERT FIRST WHEN amount < 100 THEN INTO small_sales VALUES (id, amount) \
+         WHEN amount > 1000 THEN INTO no_such_table VALUES (id) SELECT id, amount FROM sales",
+    );
+    assert_eq!(
+        lines(&mut session, "SELECT COUNT(*) FROM small_sales"),
+        vec!["0"]
+    );
+    assert_eq!(
+        tag(
+            &mut session,
+            "INSERT ALL INTO small_sales VALUES (id, amount) INTO sale_ids (id) VALUES (id) \
+             SELECT id, amount FROM sales WHERE 1 = 0"
+        ),
+        "INSERT 0 0"
+    );
+}

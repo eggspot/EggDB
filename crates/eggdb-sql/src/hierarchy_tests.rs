@@ -270,3 +270,74 @@ fn hierarchical_operators_are_refused_where_oracle_refuses_them() {
         "0A000"
     );
 }
+
+fn chain(store: &MemoryStore, depth: u32) -> Session<'_> {
+    let mut session = Session::with_dialect(store, Dialect::Oracle);
+    results(
+        &mut session,
+        "CREATE TABLE chain (id NUMBER PRIMARY KEY, parent_id NUMBER)",
+    );
+    results(
+        &mut session,
+        &format!(
+            "INSERT INTO chain SELECT LEVEL, LEVEL - 1 FROM dual CONNECT BY LEVEL <= {depth}"
+        ),
+    );
+    results(&mut session, "COMMIT");
+    session
+}
+
+#[test]
+fn a_deep_chain_is_walked_in_time_linear_in_its_rows() {
+    let store = MemoryStore::default();
+    let mut session = chain(&store, 20_000);
+    assert_eq!(
+        lines(
+            &mut session,
+            "SELECT COUNT(*), MAX(LEVEL) FROM chain START WITH parent_id = 0 \
+             CONNECT BY PRIOR id = parent_id"
+        ),
+        vec!["20000|20000"]
+    );
+    results(&mut session, "UPDATE chain SET parent_id = 20000 WHERE id = 1");
+    results(&mut session, "COMMIT");
+    assert_eq!(
+        error(
+            &mut session,
+            "SELECT COUNT(*) FROM chain START WITH id = 1 CONNECT BY PRIOR id = parent_id"
+        )
+        .vendor_code(),
+        Some(1436)
+    );
+    assert_eq!(
+        lines(
+            &mut session,
+            "SELECT COUNT(*), SUM(CONNECT_BY_ISCYCLE) FROM chain START WITH id = 1 \
+             CONNECT BY NOCYCLE PRIOR id = parent_id"
+        ),
+        vec!["20000|1"]
+    );
+}
+
+#[test]
+fn a_path_longer_than_4000_bytes_is_ora_01489() {
+    let store = MemoryStore::default();
+    let mut session = chain(&store, 2_000);
+    assert_eq!(
+        error(
+            &mut session,
+            "SELECT MAX(LENGTH(SYS_CONNECT_BY_PATH(id, ','))) FROM chain \
+             START WITH parent_id = 0 CONNECT BY PRIOR id = parent_id"
+        )
+        .vendor_code(),
+        Some(1489)
+    );
+    assert_eq!(
+        lines(
+            &mut session,
+            "SELECT MAX(LENGTH(SYS_CONNECT_BY_PATH(id, ','))) FROM chain \
+             START WITH parent_id = 0 CONNECT BY PRIOR id = parent_id AND LEVEL <= 100"
+        ),
+        vec!["292"]
+    );
+}

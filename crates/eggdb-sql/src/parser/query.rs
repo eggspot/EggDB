@@ -357,7 +357,7 @@ impl Parser<'_> {
             let position = self.position();
             self.at += 1;
             let all = self.set_quantifier(operator)?;
-            let right = self.set_term()?;
+            let right = self.later_operand(Self::set_term)?;
             left = self.set_operation(operator, all, left, right, position)?;
         }
         Ok(left)
@@ -369,10 +369,20 @@ impl Parser<'_> {
             let position = self.position();
             self.at += 1;
             let all = self.set_quantifier(operator)?;
-            let right = self.set_operand()?;
+            let right = self.later_operand(Self::set_operand)?;
             left = self.set_operation(operator, all, left, right, position)?;
         }
         Ok(left)
+    }
+
+    fn later_operand(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> SqlResult<SetExpr>,
+    ) -> SqlResult<SetExpr> {
+        let outer = std::mem::replace(&mut self.later_set_operand, true);
+        let parsed = parse(self);
+        self.later_set_operand = outer;
+        parsed
     }
 
     fn set_quantifier(&mut self, operator: SetOperator) -> SqlResult<bool> {

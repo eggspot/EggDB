@@ -202,15 +202,18 @@ MySQL, SQLite, Oracle), name their own escape character with `LIKE ... ESCAPE` i
 from columns, and create PostgreSQL `RECURSIVE` views (D299). Next for these: `DISTINCT ON` an
 expression outside the select list of a grouped query or beside a window function, `NATURAL`
 joins with a `LATERAL` item, SQLite's own error for an `ESCAPE` that is not one character,
-Oracle's `ORA-01424` for an escape character before anything but `%`, `_` or itself, and
-Transact-SQL's `[...]` classes in `LIKE`.
+Oracle's `ORA-01424` for an escape character before anything but `%`, `_` or itself,
+Transact-SQL's `[...]` classes in `LIKE`, SQLite's "no match" (not `22025`) for a `LIKE` pattern
+ending in its escape character, `\` as an ordinary character in SQLite and Transact-SQL `LIKE`
+without `ESCAPE`, and a `NATURAL` join's column-privilege check limited to the join's own group
+(not items before a comma).
 Users can now keep tied rows with PostgreSQL's `FETCH FIRST n ROWS WITH TIES` (and `FETCH FIRST n
 ROWS ONLY` as `LIMIT`), Transact-SQL's `TOP n PERCENT` and `TOP n [PERCENT] WITH TIES` with SQL
 Server's errors 1031 and 1062, and join each partition's values on every row with Transact-SQL's
 `STRING_AGG ... OVER (PARTITION BY ...)` and Oracle's analytic `LISTAGG ... OVER (PARTITION BY
 ...)`, in `WITHIN GROUP` order (D300). Next for these: `TOP ... PERCENT` in `UPDATE`, `DELETE` and
-`INSERT`, `LISTAGG (DISTINCT ...) OVER`, and PostgreSQL's `2201W` for a NULL count with `WITH
-TIES`.
+`INSERT`, `LISTAGG (DISTINCT ...) OVER`, PostgreSQL's `2201W` for a NULL count with `WITH
+TIES`, and Msg 1006 for a plain Transact-SQL `TOP (NULL)` (`TOP (NULL) PERCENT` is built).
 Users can now write Transact-SQL `MERGE` with two `WHEN MATCHED` clauses (one `UPDATE`, one
 `DELETE`), `$action` in its `OUTPUT` and `MERGE TOP (n) [PERCENT]`; send the rows of `OUTPUT` on
 `INSERT`, `UPDATE`, `DELETE` and `MERGE` into a table variable or a table with `OUTPUT ... INTO`
@@ -219,7 +222,11 @@ a query with `SELECT ... INTO new_table` in Transact-SQL (`#temporary` included)
 (`INTO [TEMPORARY] [TABLE]`) (D303). Next for these: `deleted.` in a Transact-SQL `UPDATE`'s
 `OUTPUT`, `CREATE TABLE ... AS`, `SELECT ... INTO` keeping the source columns' `NOT NULL` and
 identity, `DELETE` triggers fired by `MERGE`'s deletes, SQL Server's refusal of an `OUTPUT ...
-INTO` target with triggers, checks or foreign keys, PostgreSQL's `MERGE`, and describing a prepared `OUTPUT ... INTO` that still returns rows.
+INTO` target with triggers, checks or foreign keys, PostgreSQL's `MERGE`, describing a prepared
+`OUTPUT ... INTO` that still returns rows, `SELECT ... INTO` deriving a computed column's
+`decimal(p, s)` and a literal's own type as SQL Server does, dropping a procedure's `#temporary`
+tables when it returns, and "The MERGE statement conflicted with the REFERENCE constraint" for a
+`MERGE` delete that hits a referencing row.
 Users can now walk hierarchies in Oracle SQL with `START WITH ... CONNECT BY [NOCYCLE] PRIOR
 ...`, `LEVEL`, `SYS_CONNECT_BY_PATH`, `CONNECT_BY_ROOT`, `CONNECT_BY_ISLEAF`, `CONNECT_BY_ISCYCLE`
 and `ORDER SIBLINGS BY` (with `ORA-01436` for a loop and `SELECT LEVEL FROM dual CONNECT BY LEVEL

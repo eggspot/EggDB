@@ -102,12 +102,16 @@ pub(crate) fn run(
         walk_expressions: binding.walk_expressions,
         target_privilege: Some(Privilege::Insert),
     };
+    let null_row = vec![Value::Null; selected.columns.as_ref().map_or(0, Vec::len)];
     let mut inserted = 0;
     for (target, rows) in targets.into_iter().zip(rows_of) {
-        if rows.is_empty() {
-            continue;
-        }
-        inserted += rows.len();
+        let unused = rows.is_empty();
+        let rows = if unused {
+            vec![target_row(target, &null_row, insert.computed)]
+        } else {
+            rows
+        };
+        let count = rows.len();
         let mut statement = Insert {
             table: target.table.clone(),
             columns: target.columns.clone(),
@@ -119,6 +123,10 @@ pub(crate) fn run(
             overriding: None,
         };
         writing.insert(&*writer, tables, &mut statement)?;
+        if unused {
+            continue;
+        }
+        inserted += count;
         execute::insert(writer, tables, &statement)?;
     }
     Ok(QueryResult::command(format!("INSERT 0 {inserted}")))
