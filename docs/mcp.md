@@ -48,7 +48,7 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `list_tables` | the schemas, tables and views, with their column counts and comments |
 | `describe_table` | one table's or view's columns (types, `NOT NULL`, defaults, comments), primary key, indexes, comment, and its row count (exact up to 10,000) |
 | `write_sql` | only with `--allow-write`: runs **one** statement that may change the database, in its own transaction (below) |
-| `run_sql` | runs **one** SQL statement that reads, in a dialect: `postgresql` (the default), `mysql`, `sqlite` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
+| `run_sql` | runs **one** SQL statement that reads, in a dialect: `postgresql` (the default), `mysql`, `sqlite`, `sqlserver` or `oracle`, all on the same tables; returns at most `max_rows` rows (100 by default, at most 10,000) and 1 MiB |
 | `explain_query` | the plan for one `SELECT`, `UPDATE` or `DELETE`, without running it; give the statement without `EXPLAIN` (Oracle has no `EXPLAIN` yet) |
 | `sample_rows` | the first rows of a table or view as stored: a table's in primary-key order, a view's in its query's order; not a random sample (10 by default, at most 1,000) |
 | `kv_get` | the value under one key of the key-value store, by text or hexadecimal key; `collection` reads a named collection instead of the default key space (D292) |

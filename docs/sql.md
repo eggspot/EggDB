@@ -4102,7 +4102,6 @@ And more, not in the suite yet:
 - A statement that fails after it wrote rows rolls back the whole transaction, where Oracle
   rolls back only the statement (no statement savepoints yet); a failing single-row `INSERT`,
   `UPDATE` or `DELETE` that wrote nothing leaves the transaction as it was, as in Oracle.
-  `SAVEPOINT` is not supported yet.
 - `GENERATED ALWAYS` accepts a given value, and an identity column reuses the number of a
   deleted last row (Oracle's identity is a sequence that never goes back).
 - Result columns of expressions are named after the expression in upper case with spaces
@@ -4141,9 +4140,10 @@ And more, not in the suite yet:
   fire themselves again and the mutating-table check (`ORA-04091`) is not made.
 - `SYS_CONTEXT` takes only text constants as its arguments, and a third argument (the length)
   is accepted and ignored.
-- Not supported yet: `CONNECT BY`, outer joins with `(+)`, `SAVEPOINT`, `INSERT ALL`, `RETURNING ... INTO`, synonyms, database
-  links, `ROWID`, the regular-expression, analytic and XML functions, and views `WITH CHECK
-  OPTION` (refused).
+- Not supported yet: `CONNECT BY`, outer joins with `(+)`, `INSERT ALL`, `RETURNING ... INTO`,
+  synonyms, database links, `ROWID`, and the regular-expression, analytic and XML functions.
+  `SAVEPOINT` works as in every dialect (D173), and views `WITH CHECK OPTION` refuse rows they
+  would not show ([Schemas, views and comments](#schemas-views-and-comments)).
 - `NUMBER`'s range ends are not Oracle's: `TO_NUMBER('1e126')` gives a 127-digit value where
   Oracle raises `ORA-01426`, and a magnitude below `1e-130` does not underflow to 0.
 
