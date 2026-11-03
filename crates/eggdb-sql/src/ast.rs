@@ -35,6 +35,7 @@ pub(crate) enum Statement {
     Set {
         name: String,
         value: Option<String>,
+        scope: crate::settings::SettingScope,
     },
     Show {
         name: Option<String>,

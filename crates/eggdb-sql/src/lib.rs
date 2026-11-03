@@ -115,6 +115,7 @@ mod restore;
 mod result_row_cap;
 mod retention;
 mod roles;
+mod routine_settings;
 mod routines;
 mod row_security;
 mod schema;
@@ -235,6 +236,8 @@ mod table_ddl_tests;
 mod tests;
 #[cfg(test)]
 mod time_series_tests;
+#[cfg(test)]
+mod transaction_settings_tests;
 #[cfg(test)]
 mod user_type_tests;
 #[cfg(test)]

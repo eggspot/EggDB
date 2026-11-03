@@ -10,6 +10,7 @@ mod savepoints;
 mod sqlite;
 pub(crate) mod sqlserver;
 mod triggers;
+mod transaction_settings;
 mod tsql;
 
 pub use oracle_over_tds::{PlsqlParameter, PlsqlProcedure};
@@ -37,7 +38,7 @@ use crate::parser::{LiteralRows, Parameters, Parser, parameter_number};
 use crate::plan_cache::CachedStatement;
 use crate::plpgsql::TransactionEnd;
 use crate::sequences::{self, SequenceAdvance, SessionSequences};
-use crate::settings::{DIALECT_SETTING, Settings};
+use crate::settings::{DIALECT_SETTING, SettingScope, Settings};
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection};
 use crate::types::{SqlType, Value};
 use std::sync::Arc;
@@ -427,7 +428,7 @@ pub struct Session<'s> {
     statement_uses_sequences: bool,
     statement_walks_expressions: bool,
     search_path_cache: crate::schemas::PathCache,
-    search_path_at_begin: Option<String>,
+    transaction_settings: crate::settings::TransactionSettings,
     max_value_bytes: usize,
     max_row_bytes: usize,
     deadline: Option<std::time::Instant>,
@@ -506,7 +507,7 @@ impl<'s> Session<'s> {
             statement_uses_sequences: false,
             statement_walks_expressions: true,
             search_path_cache: crate::schemas::PathCache::default(),
-            search_path_at_begin: None,
+            transaction_settings: crate::settings::TransactionSettings::default(),
             max_value_bytes: crate::memory::MAX_VALUE_BYTES,
             max_row_bytes: crate::memory::MAX_ROW_BYTES,
             deadline: None,
@@ -1042,6 +1043,7 @@ impl<'s> Session<'s> {
         self.implicit_transaction = false;
         if !self.in_block() {
             self.advisory_locks.release_transaction_locks();
+            self.end_transaction_settings(commit);
         }
         if !std::mem::take(&mut self.block_is_implicit) {
             return Ok(());
@@ -1113,6 +1115,9 @@ impl<'s> Session<'s> {
     }
 
     fn reset_all_settings(&mut self) {
+        if self.settings_follow_transaction() {
+            self.transaction_settings.before_reset_all(&self.settings);
+        }
         match &self.connection_settings {
             Some(remembered) => {
                 let mut restored = Settings::clone(remembered);
@@ -1130,7 +1135,8 @@ impl<'s> Session<'s> {
             .connection_settings
             .as_ref()
             .and_then(|settings| settings.get(name).ok());
-        Arc::make_mut(&mut self.settings).set(name, remembered.as_deref())
+        self.change_setting(name, remembered.as_deref(), SettingScope::Session)
+            .map(drop)
     }
 
     fn discard(&mut self, target: DiscardTarget) -> SqlResult<QueryResult> {
@@ -1860,6 +1866,8 @@ impl<'s> Session<'s> {
                 crate::deferred_checks::enter(&self.deferred.modes);
                 let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
                 let result = self.insert_literal_rows(&mut rows);
+                let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
+                self.apply_routine_setting_changes(routine_changes);
                 let literal_tokens = tokens.get(literal_start..resume.0.min(tokens.len()));
                 self.record_statement(literal_tokens, text, started, &result);
                 let result = self.keep_deferred(result);
@@ -1976,9 +1984,12 @@ impl<'s> Session<'s> {
             self.enter_sequences(uses_sequences);
             self.extra_results.clear();
             crate::deferred_checks::enter(&self.deferred.modes);
+            let leftover_changes = crate::routine_settings::take_for_session(true);
+            self.apply_routine_setting_changes(leftover_changes);
             crate::portals::install(std::mem::take(&mut self.portals));
             let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
             let result = with_raised_notices(self.run(&mut statement, &mut io));
+            let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
             self.record_statement(statement_tokens, text, started, &result);
             self.portals = crate::portals::take();
             if matches!(self.block, Block::None) {
@@ -2009,6 +2020,7 @@ impl<'s> Session<'s> {
             _path.0.remember(&mut self.search_path_cache);
             self.leave_sequences();
             let settled = self.settle_sequences();
+            self.apply_routine_setting_changes(routine_changes);
             let result =
                 result.and_then(|result| self.apply_setting_changes(result, &setting_changes));
             let result = self.after_statement(result?, diagnostic);
@@ -2173,14 +2185,14 @@ impl<'s> Session<'s> {
     fn apply_setting_changes(
         &mut self,
         result: QueryResult,
-        changes: &[(String, String)],
+        changes: &[crate::settings::SettingChange],
     ) -> SqlResult<QueryResult> {
-        for (name, value) in changes {
+        for crate::settings::SettingChange { name, value, scope } in changes {
             if is_dialect_setting(name) {
-                self.choose_dialect(Some(value))?;
+                self.choose_dialect(value.as_deref())?;
                 continue;
             }
-            Arc::make_mut(&mut self.settings).set(name, Some(value))?;
+            self.change_setting(name, value.as_deref(), *scope)?;
         }
         Ok(result)
     }
@@ -2715,7 +2727,7 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         self.refuse_after_database_switch()?;
         match statement {
-            Statement::Set { name, value } if is_dialect_setting(name) => {
+            Statement::Set { name, value, .. } if is_dialect_setting(name) => {
                 return self
                     .choose_dialect(value.as_deref())
                     .map(|()| QueryResult::command("SET"));
@@ -3042,9 +3054,9 @@ impl<'s> Session<'s> {
                     None => result,
                 })
             }
-            Statement::Set { name, value } => Arc::make_mut(&mut self.settings)
-                .set(name, value.as_deref())
-                .map(|()| QueryResult::command("SET")),
+            Statement::Set { name, value, scope } => {
+                self.set_statement(name, value.as_deref(), *scope)
+            }
             Statement::Reset { name: Some(name) } => self
                 .reset_setting(name)
                 .map(|()| QueryResult::command("RESET")),
@@ -3643,9 +3655,6 @@ impl<'s> Session<'s> {
             match self.block {
                 Block::Writing(_) => {
                     self.block_is_implicit = false;
-                    if self.dialect == Dialect::PostgreSql {
-                        self.search_path_at_begin = self.settings.get("search_path").ok();
-                    }
                     return Ok(QueryResult::command("BEGIN"));
                 }
                 Block::Failed => return Err(aborted_block()),
@@ -3665,19 +3674,8 @@ impl<'s> Session<'s> {
                 } else {
                     Block::Writing(self.store.begin_boxed_write()?)
                 };
-                if self.dialect == Dialect::PostgreSql {
-                    self.search_path_at_begin = self.settings.get("search_path").ok();
-                }
                 Ok(QueryResult::command("BEGIN"))
             }
-        }
-    }
-
-    fn restore_search_path(&mut self) {
-        if let Some(path) = self.search_path_at_begin.take()
-            && self.settings.get("search_path").ok().as_deref() != Some(path.as_str())
-        {
-            let _ = Arc::make_mut(&mut self.settings).set("search_path", Some(&path));
         }
     }
 
@@ -3690,10 +3688,8 @@ impl<'s> Session<'s> {
         self.savepoints.clear();
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
-        if matches!(self.block, Block::Failed) {
-            self.restore_search_path();
-        }
-        self.search_path_at_begin = None;
+        let failed = matches!(self.block, Block::Failed);
+        self.end_transaction_settings(!failed);
         let pending = std::mem::take(&mut self.deferred.pending);
         self.deferred.clear();
         match std::mem::replace(&mut self.block, Block::None) {
@@ -3729,7 +3725,7 @@ impl<'s> Session<'s> {
         self.savepoints.clear();
         self.advisory_locks.release_transaction_locks();
         let implicit = std::mem::take(&mut self.block_is_implicit);
-        self.restore_search_path();
+        self.end_transaction_settings(false);
         match std::mem::replace(&mut self.block, Block::None) {
             Block::Writing(writer) => {
                 self.temporary.rollback();

@@ -84,6 +84,9 @@ pub(crate) fn column_storage(
             )
             .at(position))
         }
+        SqlType::Array(crate::arrays::ArrayElement::RefCursor) => {
+            Ok((SqlType::Array(crate::arrays::ArrayElement::Text), None))
+        }
         SqlType::Array(element) if !element.is_storable() => {
             Err(crate::arrays::unsupported_element(element.sql_type()).at(position))
         }

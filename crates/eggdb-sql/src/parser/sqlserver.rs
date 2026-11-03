@@ -995,6 +995,7 @@ impl<'t> Parser<'t> {
             return Ok(Statement::Set {
                 name: crate::settings::DIALECT_SETTING.to_owned(),
                 value: Some(value),
+                scope: crate::settings::SettingScope::Session,
             });
         }
         let option = match self.peek_kind() {

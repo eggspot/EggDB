@@ -36,7 +36,8 @@ use crate::routines::{
 };
 use crate::schemas::{base_name, display};
 use crate::session::{OutputColumn, QueryResult};
-use crate::settings::Settings;
+use crate::routine_settings::RoutineSettings;
+use crate::settings::{SettingChange, SettingScope, Settings};
 use crate::store::KeyValueWrite;
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};
 use std::cell::Cell;
@@ -199,15 +200,36 @@ fn invoke_in(
             );
         }
     };
+    let clause = if definition.dialect == Dialect::PostgreSql {
+        crate::routine_settings::enter_clause(settings, &definition.settings)?
+    } else {
+        None
+    };
+    let (clause, clause_settings) = clause.unzip();
     let mut run = Run::over(writer.reborrow(), tables, settings, &definition, label);
+    if let Some(applied) = clause_settings {
+        run.settings = RoutineSettings::Changed(Arc::new(applied));
+    }
+    let outcome = run_definition(&mut run, &definition, call);
+    if let Some(clause) = clause {
+        crate::routine_settings::leave_clause(clause);
+    }
+    outcome
+}
+
+fn run_definition(
+    run: &mut Run<'_>,
+    definition: &Arc<RoutineDefinition>,
+    call: Call<'_>,
+) -> SqlResult<Returned> {
     let program = match definition.language {
         RoutineLanguage::PlPgSql | RoutineLanguage::PlSql | RoutineLanguage::MySql => {
-            Some(crate::routines::compiled_program(run.tables, &definition)?)
+            Some(crate::routines::compiled_program(run.tables, definition)?)
         }
         RoutineLanguage::Sql | RoutineLanguage::Tsql => None,
     };
     if run.oracle {
-        run.attach_local(&definition);
+        run.attach_local(definition);
         if let Some(program) = &program {
             run.attach_packages(program)?;
         }
@@ -375,6 +397,15 @@ fn parsed(
     frame: &RoutineFrame,
     dialect: Dialect,
 ) -> SqlResult<Statement> {
+    parsed_changing_settings(text, settings, frame, dialect).map(|(statement, _)| statement)
+}
+
+fn parsed_changing_settings(
+    text: &str,
+    settings: &Settings,
+    frame: &RoutineFrame,
+    dialect: Dialect,
+) -> SqlResult<(Statement, Vec<SettingChange>)> {
     let tokens = tokenize_in(text, dialect)?;
     let mut parser = Parser::new(text, &tokens)
         .with_context(Parameters::Absent, settings)
@@ -384,7 +415,7 @@ fn parsed(
     if !parser.at_end() {
         return Err(parser.unexpected());
     }
-    Ok(statement)
+    Ok((statement, parser.take_setting_changes()))
 }
 
 fn output_target(argument: &crate::ast::Expr) -> Option<Target> {
@@ -489,7 +520,8 @@ fn takes_collation(sql_type: SqlType) -> bool {
 struct Run<'r> {
     writer: RoutineWriter<'r>,
     tables: &'r mut TableCache,
-    settings: &'r Settings,
+    settings: RoutineSettings<'r>,
+    settings_version: u64,
     definition: &'r RoutineDefinition,
     label: String,
     frame: RoutineFrame,
@@ -536,7 +568,8 @@ impl<'r> Run<'r> {
         Self {
             writer,
             tables,
-            settings,
+            settings: RoutineSettings::Given(settings),
+            settings_version: crate::routine_settings::NEVER_SYNCED,
             definition,
             label,
             frame: RoutineFrame::default(),
@@ -956,9 +989,9 @@ impl<'r> Run<'r> {
                 inner: self.writer.get(),
                 log: &mut self.undo,
             };
-            body(&mut writer, self.tables, self.settings)
+            body(&mut writer, self.tables, &*self.settings)
         } else {
-            body(self.writer.get(), self.tables, self.settings)
+            body(self.writer.get(), self.tables, &*self.settings)
         }
     }
 
@@ -972,13 +1005,70 @@ impl<'r> Run<'r> {
         }
     }
 
+    fn sync_settings(&mut self) {
+        if let Some(effective) =
+            crate::routine_settings::effective_if_changed(&mut self.settings_version)
+        {
+            self.settings = RoutineSettings::Changed(Arc::new(effective));
+        }
+    }
+
+    fn change_setting(
+        &mut self,
+        name: &str,
+        value: Option<&str>,
+        scope: SettingScope,
+    ) -> SqlResult<()> {
+        if name.eq_ignore_ascii_case(crate::settings::DIALECT_SETTING) {
+            return Err(SqlError::not_supported(
+                "SET eggdb.dialect inside a PL/pgSQL or SQL function",
+            ));
+        }
+        let changed = crate::routine_settings::change(&self.settings, name, value, scope)?;
+        self.settings = RoutineSettings::Changed(Arc::new(changed));
+        self.settings_version = crate::routine_settings::NEVER_SYNCED;
+        Ok(())
+    }
+
+    fn setting_statement(&mut self, statement: &Statement) -> Option<SqlResult<QueryResult>> {
+        if self.dialect() != Dialect::PostgreSql {
+            return None;
+        }
+        let (name, value, scope, tag) = match statement {
+            Statement::Set { name, value, scope } => (name, value.as_deref(), *scope, "SET"),
+            Statement::Reset { name: Some(name) } => (name, None, SettingScope::Session, "RESET"),
+            _ => return None,
+        };
+        Some(
+            self.change_setting(name, value, scope)
+                .map(|()| QueryResult::command(tag)),
+        )
+    }
+
+    fn execute_changing_settings(
+        &mut self,
+        statement: Statement,
+        changes: Vec<SettingChange>,
+    ) -> SqlResult<QueryResult> {
+        let result = self.execute(statement)?;
+        for change in changes {
+            self.change_setting(&change.name, change.value.as_deref(), change.scope)?;
+        }
+        Ok(result)
+    }
+
     fn execute(&mut self, statement: Statement) -> SqlResult<QueryResult> {
+        if let Some(result) = self.setting_statement(&statement) {
+            return result;
+        }
         let dialect = self.dialect();
         let mark = self.statement_mark();
         self.share_frame();
+        let entered = self.settings.enter();
         let outcome = self.with_writer(|writer, tables, settings| {
             run_sql(writer, tables, settings, statement, dialect)
         });
+        drop(entered);
         self.adopt_frame();
         self.end_statement(mark, outcome.is_ok())?;
         let mut result = outcome?;
@@ -994,13 +1084,15 @@ impl<'r> Run<'r> {
         }
         let dialect = self.dialect();
         self.refresh_cursor_attributes();
-        let Statement::Call(call) = parsed(text, self.settings, &self.frame, dialect)? else {
+        let Statement::Call(call) = parsed(text, &self.settings, &self.frame, dialect)? else {
             self.query_text(text)?;
             return Ok(Flow::Next);
         };
-        let written = parsed(text, self.settings, &RoutineFrame::default(), dialect).ok();
+        let written = parsed(text, &self.settings, &RoutineFrame::default(), dialect).ok();
         self.share_frame();
+        let entered = self.settings.enter();
         let outcome = self.called(call);
+        drop(entered);
         self.adopt_frame();
         let (mut result, sources) = outcome?;
         push_statement_notices(std::mem::take(&mut result.notices));
@@ -1022,25 +1114,30 @@ impl<'r> Run<'r> {
         &mut self,
         mut call: crate::ast::CallRoutine,
     ) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
-        let binding = crate::name_resolution::Binding {
-            settings: self.settings,
-            walk_expressions: true,
-            target_privilege: None,
-        };
         if !self.undo.is_recording()
             && let RoutineWriter::Nonatomic(control) = &mut self.writer
         {
+            let binding = crate::name_resolution::Binding {
+                settings: &*self.settings,
+                walk_expressions: true,
+                target_privilege: None,
+            };
             for argument in &mut call.arguments {
                 binding.condition(&**control, self.tables, argument)?;
             }
             return crate::routines::call_procedure_nonatomic(
                 &mut **control,
                 self.tables,
-                self.settings,
+                &self.settings,
                 &call,
             );
         }
         self.with_writer(|writer, tables, settings| {
+            let binding = crate::name_resolution::Binding {
+                settings,
+                walk_expressions: true,
+                target_privilege: None,
+            };
             for argument in &mut call.arguments {
                 binding.condition(&*writer, tables, argument)?;
             }
@@ -1050,8 +1147,9 @@ impl<'r> Run<'r> {
 
     fn query_text(&mut self, text: &str) -> SqlResult<QueryResult> {
         self.refresh_cursor_attributes();
-        let statement = parsed(text, self.settings, &self.frame, self.dialect())?;
-        self.execute(statement)
+        let (statement, changes) =
+            parsed_changing_settings(text, &self.settings, &self.frame, self.dialect())?;
+        self.execute_changing_settings(statement, changes)
     }
 
     fn text_value(&mut self, text: &str) -> SqlResult<Value> {
@@ -1320,6 +1418,7 @@ impl<'r> Run<'r> {
         }
         self.close_ended_cursors();
         let mark = self.undo.begin();
+        let settings_mark = crate::routine_settings::mark();
         let cursors = self.cursors.len();
         let error = match self.steps(&block.steps) {
             Ok(flow) => {
@@ -1337,6 +1436,7 @@ impl<'r> Run<'r> {
             return Err(error);
         };
         self.undo.roll_back(self.writer.get(), mark)?;
+        crate::routine_settings::undo_since(settings_mark);
         self.cursors.truncate(cursors);
         self.failure = None;
         self.handle(handler, error)
@@ -1388,6 +1488,7 @@ impl<'r> Run<'r> {
     }
 
     fn step(&mut self, step: &Step) -> SqlResult<Flow> {
+        self.sync_settings();
         let outcome = self.step_kind(&step.kind);
         if outcome.is_err() {
             self.fail_at(step.position, || format!("at {}", step.kind.name()));
@@ -1532,6 +1633,7 @@ impl<'r> Run<'r> {
             ));
         };
         let ended = control.end_transaction(self.tables, end);
+        crate::routine_settings::end_procedure_transaction(matches!(end, TransactionEnd::Commit));
         crate::portals::end_procedure_transaction();
         crate::advisory_locks::release_active_transaction_locks();
         self.close_ended_cursors();
@@ -2042,8 +2144,9 @@ impl<'r> Run<'r> {
             ));
             frame.positional.push(at);
         }
-        let statement = parsed(&text, self.settings, &frame, self.dialect())?;
-        self.execute(statement)
+        let (statement, changes) =
+            parsed_changing_settings(&text, &self.settings, &frame, self.dialect())?;
+        self.execute_changing_settings(statement, changes)
     }
 
     fn execute_dynamic(&mut self, dynamic: &DynamicSql) -> SqlResult<Flow> {
@@ -2165,7 +2268,7 @@ impl<'r> Run<'r> {
         if raise.level == RaiseLevel::Exception {
             return Err(fields.into_error());
         }
-        push_notice(raise.level, &fields.notice_message(), self.settings);
+        push_notice(raise.level, &fields.notice_message(), &self.settings);
         Ok(Flow::Next)
     }
 
@@ -2478,9 +2581,10 @@ impl<'r> Run<'r> {
         let mut number = 0;
         loop {
             number += 1;
-            let statement = {
+            self.sync_settings();
+            let (statement, changes) = {
                 let mut parser = Parser::new(text, &tokens)
-                    .with_context(Parameters::Absent, self.settings)
+                    .with_context(Parameters::Absent, &self.settings)
                     .in_dialect(Dialect::PostgreSql)
                     .with_routine_frame(&self.frame)
                     .resuming_at(resume);
@@ -2490,11 +2594,11 @@ impl<'r> Run<'r> {
                 }
                 let statement = parser.statement();
                 resume = parser.resume_point();
-                statement
+                (statement, parser.take_setting_changes())
             };
             let statement = statement.map_err(|error| self.sql_located(error, number))?;
             let result = self
-                .execute(statement)
+                .execute_changing_settings(statement, changes)
                 .map_err(|error| self.sql_located(error, number))?;
             last = Some(result);
         }

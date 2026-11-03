@@ -327,6 +327,95 @@ fn unrecognized(name: &str) -> SqlError {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingScope {
+    Session,
+    Transaction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SettingChange {
+    pub(crate) name: String,
+    pub(crate) value: Option<String>,
+    pub(crate) scope: SettingScope,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParameterValues {
+    values: BTreeMap<&'static str, String>,
+    custom: BTreeMap<String, String>,
+    time_zone: crate::time_zones::TimeZone,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SavedSettings {
+    values: ParameterValues,
+    transaction: TransactionSettings,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TransactionSettings {
+    at_begin: Option<ParameterValues>,
+    at_commit: BTreeMap<String, Option<String>>,
+}
+
+impl TransactionSettings {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.at_begin.is_none() && self.at_commit.is_empty()
+    }
+
+    pub(crate) fn before_change(&mut self, settings: &Settings, name: &str, scope: SettingScope) {
+        if self.at_begin.is_none() {
+            self.at_begin = Some(settings.parameter_values());
+        }
+        let name = Settings::name_of(name);
+        match scope {
+            SettingScope::Session => {
+                self.at_commit.remove(&name);
+            }
+            SettingScope::Transaction => {
+                if !self.at_commit.contains_key(&name) {
+                    let value = settings.get(&name).ok();
+                    self.at_commit.insert(name, value);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn before_reset_all(&mut self, settings: &Settings) {
+        if self.at_begin.is_none() {
+            self.at_begin = Some(settings.parameter_values());
+        }
+        self.at_commit.clear();
+    }
+
+    pub(crate) fn commit(&mut self, settings: &mut Settings) {
+        for (name, value) in std::mem::take(&mut self.at_commit) {
+            let _ = settings.set(&name, value.as_deref());
+        }
+        self.at_begin = None;
+    }
+
+    pub(crate) fn rollback(&mut self, settings: &mut Settings) {
+        if let Some(saved) = self.at_begin.take() {
+            settings.restore_parameter_values(saved);
+        }
+        self.at_commit.clear();
+    }
+
+    pub(crate) fn save(&self, settings: &Settings) -> SavedSettings {
+        SavedSettings {
+            values: settings.parameter_values(),
+            transaction: self.clone(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, settings: &mut Settings, saved: SavedSettings) {
+        settings.restore_parameter_values(saved.values);
+        *self = saved.transaction;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Settings {
     values: BTreeMap<&'static str, String>,
@@ -479,6 +568,29 @@ impl Settings {
         };
         self.values.insert(known.name, value);
         Ok(())
+    }
+
+    pub(crate) fn parameter_values(&self) -> ParameterValues {
+        ParameterValues {
+            values: self.values.clone(),
+            custom: self.custom.clone(),
+            time_zone: self.time_zone,
+        }
+    }
+
+    pub(crate) fn restore_parameter_values(&mut self, saved: ParameterValues) {
+        let dialect = self.custom.get(DIALECT_SETTING).cloned();
+        let user = self.values.get("session_authorization").cloned();
+        self.values = saved.values;
+        self.custom = saved.custom;
+        self.time_zone = saved.time_zone;
+        match dialect {
+            Some(dialect) => self.custom.insert(DIALECT_SETTING.to_owned(), dialect),
+            None => self.custom.remove(DIALECT_SETTING),
+        };
+        if let Some(user) = user {
+            self.values.insert("session_authorization", user);
+        }
     }
 
     pub(crate) fn set_session_user(&mut self, user: &str) {

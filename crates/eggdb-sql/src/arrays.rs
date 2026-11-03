@@ -69,9 +69,12 @@ pub enum ArrayElement {
     Citext,
     /// `hstore[]`.
     Hstore,
+    /// `refcursor[]`: cursor names, held as text; a table column declared `refcursor[]` holds
+    /// `text[]`.
+    RefCursor,
 }
 
-const ELEMENT_CODES: [(ArrayElement, u8); 28] = [
+const ELEMENT_CODES: [(ArrayElement, u8); 29] = [
     (ArrayElement::SmallInt, 1),
     (ArrayElement::Integer, 2),
     (ArrayElement::BigInt, 3),
@@ -100,6 +103,7 @@ const ELEMENT_CODES: [(ArrayElement, u8); 28] = [
     (ArrayElement::Bytea, 26),
     (ArrayElement::Citext, 27),
     (ArrayElement::Hstore, 28),
+    (ArrayElement::RefCursor, 29),
 ];
 
 impl ArrayElement {
@@ -133,6 +137,7 @@ impl ArrayElement {
             Self::Bytea => SqlType::Bytea,
             Self::Citext => SqlType::Defined(DefinedType::CITEXT),
             Self::Hstore => SqlType::Defined(DefinedType::HSTORE),
+            Self::RefCursor => SqlType::Catalog(CatalogType::RefCursor),
         }
     }
 
@@ -169,6 +174,7 @@ impl ArrayElement {
                 | Self::AclItem
                 | Self::Int2Vector
                 | Self::OidVector
+                | Self::RefCursor
         )
     }
 
@@ -188,6 +194,7 @@ impl ArrayElement {
             SqlType::Catalog(CatalogType::Name) => Self::Name,
             SqlType::Catalog(CatalogType::InternalChar) => Self::InternalChar,
             SqlType::Catalog(CatalogType::AclItem) => Self::AclItem,
+            SqlType::Catalog(CatalogType::RefCursor) => Self::RefCursor,
             SqlType::Date => Self::Date,
             SqlType::Timestamp(_) => Self::Timestamp,
             SqlType::TimestampTz(_) => Self::TimestampTz,
@@ -232,7 +239,7 @@ impl ArrayElement {
     fn is_string(self) -> bool {
         matches!(
             self,
-            Self::Text | Self::Varchar | Self::Name | Self::InternalChar
+            Self::Text | Self::Varchar | Self::Name | Self::InternalChar | Self::RefCursor
         )
     }
 
@@ -364,7 +371,8 @@ fn element_value(value: Value, element: ArrayElement, conversion: Conversion) ->
             | ArrayElement::Varchar
             | ArrayElement::Name
             | ArrayElement::InternalChar
-            | ArrayElement::AclItem,
+            | ArrayElement::AclItem
+            | ArrayElement::RefCursor,
         ) => Ok(Value::Text(text)),
         (value, element) => convert(value, element.sql_type(), conversion),
     }
@@ -455,7 +463,8 @@ fn element_from_text(text: &str, element: ArrayElement) -> SqlResult<Value> {
         | ArrayElement::Varchar
         | ArrayElement::Name
         | ArrayElement::InternalChar
-        | ArrayElement::AclItem => Ok(Value::Text(text.to_owned())),
+        | ArrayElement::AclItem
+        | ArrayElement::RefCursor => Ok(Value::Text(text.to_owned())),
         ArrayElement::Bpchar => Ok(Value::Bpchar(text.to_owned())),
         other => crate::types::parse_input(text, other.sql_type()),
     }

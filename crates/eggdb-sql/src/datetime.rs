@@ -63,6 +63,20 @@ pub(crate) fn enter_statement(zone: TimeZone) -> StatementClockGuard {
     StatementClockGuard(CURRENT.with(|current| current.replace(Some(clock))))
 }
 
+pub(crate) fn enter_zone(zone: TimeZone) -> StatementClockGuard {
+    let now = statement_now();
+    let previous = CURRENT.with(|current| {
+        current.replace(Some(StatementClock {
+            now: Some(now),
+            zone,
+        }))
+    });
+    StatementClockGuard(previous.map(|clock| StatementClock {
+        now: Some(now),
+        ..clock
+    }))
+}
+
 fn system_now() -> i64 {
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

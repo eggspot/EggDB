@@ -63,7 +63,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::interval::IntervalFields;
 use crate::lexer::{Token, TokenKind, swap_uniform_case};
 use crate::session::{NamedParameter, Parameter};
-use crate::settings::Settings;
+use crate::settings::{SettingScope, Settings};
 use crate::types::{NumericModifier, SqlType, Value};
 use std::borrow::Cow;
 
@@ -306,7 +306,7 @@ pub(crate) struct Parser<'t> {
     placeholders_seen: usize,
     query_depth: usize,
     queries: usize,
-    setting_changes: Vec<(String, String)>,
+    setting_changes: Vec<crate::settings::SettingChange>,
     pending_top: Option<Expr>,
     view_query_depth: Option<usize>,
     ignored_view_top: bool,
@@ -453,7 +453,7 @@ impl<'t> Parser<'t> {
         self
     }
 
-    pub(crate) fn take_setting_changes(&mut self) -> Vec<(String, String)> {
+    pub(crate) fn take_setting_changes(&mut self) -> Vec<crate::settings::SettingChange> {
         std::mem::take(&mut self.setting_changes)
     }
 
@@ -1070,10 +1070,14 @@ impl<'t> Parser<'t> {
 
     fn set(&mut self) -> SqlResult<Statement> {
         self.at += 1;
-        if self.is_word("local") {
+        let scope = if self.postgresql() && self.take_word("local") {
+            SettingScope::Transaction
+        } else if self.is_word("local") {
             return Err(self.not_supported("SET LOCAL"));
-        }
-        let session = self.take_word("session");
+        } else {
+            SettingScope::Session
+        };
+        let session = scope == SettingScope::Session && self.take_word("session");
         if self.is_word("characteristics") || self.is_word("transaction") {
             return self.set_transaction();
         }
@@ -1101,11 +1105,13 @@ impl<'t> Parser<'t> {
                 return Ok(Statement::Set {
                     name: "TimeZone".into(),
                     value: None,
+                    scope,
                 });
             }
             return Ok(Statement::Set {
                 name: "TimeZone".into(),
                 value: self.setting_value()?,
+                scope,
             });
         } else if self.take_word("names") {
             "client_encoding".to_owned()
@@ -1119,6 +1125,7 @@ impl<'t> Parser<'t> {
         Ok(Statement::Set {
             name,
             value: self.setting_value()?,
+            scope,
         })
     }
 
@@ -1215,6 +1222,7 @@ impl<'t> Parser<'t> {
             (true, Some(read_only)) => Ok(Statement::Set {
                 name: "default_transaction_read_only".to_owned(),
                 value: Some(if read_only { "on" } else { "off" }.to_owned()),
+                scope: SettingScope::Session,
             }),
             (false, Some(true)) => Err(self.not_supported("SET TRANSACTION READ ONLY")),
             _ => Ok(Statement::Ignored {
@@ -1499,14 +1507,16 @@ impl<'t> Parser<'t> {
         };
         self.at += 1;
         self.expect(&TokenKind::RightParen)?;
-        if local {
-            return Err(SqlError::not_supported(
-                "set_config with is_local true (SET LOCAL) is not supported yet",
-            )
-            .at(position));
-        }
         if let (Some(setting), Some(value)) = (setting, &value) {
-            self.setting_changes.push((setting, value.clone()));
+            self.setting_changes.push(crate::settings::SettingChange {
+                name: setting,
+                value: Some(value.clone()),
+                scope: if local {
+                    SettingScope::Transaction
+                } else {
+                    SettingScope::Session
+                },
+            });
         }
         Ok(Expr {
             kind: ExprKind::SessionValue {
@@ -2311,7 +2321,9 @@ impl<'t> Parser<'t> {
             }
         }
         match crate::arrays::ArrayElement::of(element) {
-            Some(found) if found.is_storable() => Ok(SqlType::Array(found)),
+            Some(found) if found.is_storable() || found == crate::arrays::ArrayElement::RefCursor => {
+                Ok(SqlType::Array(found))
+            }
             _ => Err(crate::arrays::unsupported_element(element).at(position)),
         }
     }

@@ -2273,9 +2273,10 @@ fn set_show_and_reset_remember_run_time_parameters() {
     assert_eq!(state(&mut session, "SET server_version = '1'"), "55P02");
     assert_eq!(state(&mut session, "SET no_such_thing = 1"), "42704");
     assert_eq!(state(&mut session, "SHOW no_such_thing"), "42704");
+    assert_eq!(last(&mut session, "SET LOCAL statement_timeout = 5"), "SET");
     assert_eq!(
-        state(&mut session, "SET LOCAL statement_timeout = 0"),
-        "0A000"
+        last(&mut session, "SHOW statement_timeout"),
+        "statement_timeout\n0\nSHOW"
     );
     assert_eq!(last(&mut session, "SET myapp.tenant = 'blue'"), "SET");
     assert_eq!(

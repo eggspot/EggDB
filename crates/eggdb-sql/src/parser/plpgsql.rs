@@ -582,7 +582,10 @@ impl<'t> Compiler<'t, '_> {
             return Ok(VariableType::Record);
         }
         if self.take_word("refcursor") {
-            return Ok(VariableType::RefCursor);
+            if self.kind() != &TokenKind::LeftBracket && !self.is_word("array") {
+                return Ok(VariableType::RefCursor);
+            }
+            self.parser.at = start;
         }
         if let TokenKind::Word(word) = self.kind()
             && let Some(sql_type) = crate::pg_catalog::cast_type_named(word.as_ref())

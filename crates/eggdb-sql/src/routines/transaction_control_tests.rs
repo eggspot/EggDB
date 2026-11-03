@@ -509,3 +509,219 @@ fn refcursor_is_a_type_of_its_own() {
         "c|t\nstored|text\nSELECT 1"
     );
 }
+
+fn shown(session: &mut Session<'_>, name: &str) -> String {
+    answer(session, &format!("SHOW {name}"))
+        .lines()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn a_routine_set_clause_applies_while_it_runs_and_the_old_value_comes_back_after() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "SET app.mode = 'outside'",
+            "CREATE SCHEMA hidden",
+            "CREATE TABLE hidden.notes (body text)",
+            "INSERT INTO hidden.notes VALUES ('found')",
+            "CREATE FUNCTION mode_inside() RETURNS text LANGUAGE plpgsql SET app.mode = 'inside' \
+             AS $$ BEGIN RETURN current_setting('app.mode'); END $$",
+            "CREATE FUNCTION sql_mode() RETURNS text LANGUAGE sql SET app.mode = 'sql' \
+             AS $$ SELECT current_setting('app.mode') $$",
+            "CREATE FUNCTION read_notes() RETURNS text LANGUAGE plpgsql SET search_path = hidden \
+             AS $$ BEGIN RETURN (SELECT body FROM notes); END $$",
+        ],
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT mode_inside()"),
+        "mode_inside\ninside\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT sql_mode()"),
+        "sql_mode\nsql\nSELECT 1"
+    );
+    assert_eq!(shown(&mut session, "app.mode"), "outside");
+    assert_eq!(
+        answer(&mut session, "SELECT read_notes()"),
+        "read_notes\nfound\nSELECT 1"
+    );
+    let error = refusal(&mut session, "SELECT body FROM notes");
+    assert_eq!(error.state(), SqlState::UNDEFINED_TABLE);
+}
+
+#[test]
+fn set_inside_a_function_lasts_for_the_session_and_set_local_to_the_transaction_end() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION set_both() RETURNS text LANGUAGE plpgsql AS $$ BEGIN \
+             SET app.kept = 'kept'; SET LOCAL app.local = 'local'; \
+             RETURN current_setting('app.kept') || ' ' || current_setting('app.local'); END $$",
+            "CREATE FUNCTION as_tenant() RETURNS text LANGUAGE plpgsql AS $$ BEGIN \
+             PERFORM set_config('app.tenant', 'blue', true); \
+             RETURN current_setting('app.tenant'); END $$",
+        ],
+    );
+    answer(&mut session, "BEGIN");
+    assert_eq!(
+        answer(&mut session, "SELECT set_both()"),
+        "set_both\nkept local\nSELECT 1"
+    );
+    assert_eq!(shown(&mut session, "app.local"), "local");
+    assert_eq!(
+        answer(&mut session, "SELECT as_tenant()"),
+        "as_tenant\nblue\nSELECT 1"
+    );
+    assert_eq!(shown(&mut session, "app.tenant"), "blue");
+    answer(&mut session, "COMMIT");
+    assert_eq!(shown(&mut session, "app.kept"), "kept");
+    assert_eq!(
+        refusal(&mut session, "SHOW app.local").state(),
+        SqlState::UNDEFINED_OBJECT
+    );
+    assert_eq!(
+        refusal(&mut session, "SHOW app.tenant").state(),
+        SqlState::UNDEFINED_OBJECT
+    );
+}
+
+#[test]
+fn a_set_clause_restores_set_local_inside_the_routine_but_keeps_a_plain_set() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION clause_and_sets() RETURNS void LANGUAGE plpgsql \
+             SET app.mode = 'clause' AS $$ BEGIN \
+             SET LOCAL app.mode = 'local'; SET app.other = 'plain'; END $$",
+            "CREATE FUNCTION overrides() RETURNS void LANGUAGE plpgsql \
+             SET app.mode = 'clause' AS $$ BEGIN SET app.mode = 'override'; END $$",
+            "SET app.mode = 'outer'",
+        ],
+    );
+    answer(&mut session, "BEGIN");
+    answer(&mut session, "SELECT clause_and_sets()");
+    assert_eq!(shown(&mut session, "app.mode"), "outer");
+    assert_eq!(shown(&mut session, "app.other"), "plain");
+    answer(&mut session, "COMMIT");
+    answer(&mut session, "SELECT overrides()");
+    assert_eq!(shown(&mut session, "app.mode"), "override");
+}
+
+#[test]
+fn a_procedure_commit_ends_its_set_local_and_a_rollback_undoes_its_uncommitted_set() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE TABLE seen (n integer, step text)",
+            "CREATE PROCEDURE settings_across_commits() LANGUAGE plpgsql AS $$ BEGIN \
+             SET LOCAL app.step = 'one'; \
+             INSERT INTO seen VALUES (1, current_setting('app.step')); COMMIT; \
+             INSERT INTO seen VALUES (2, current_setting('app.step')); \
+             SET app.step = 'two'; COMMIT; \
+             SET app.step = 'three'; ROLLBACK; \
+             INSERT INTO seen VALUES (3, current_setting('app.step')); END $$",
+            "SET app.step = 'start'",
+        ],
+    );
+    assert_eq!(answer(&mut session, "CALL settings_across_commits()"), "CALL");
+    assert_eq!(
+        answer(&mut session, "SELECT n, step FROM seen ORDER BY n"),
+        "n|step\n1|one\n2|start\n3|two\nSELECT 3"
+    );
+    assert_eq!(shown(&mut session, "app.step"), "two");
+}
+
+#[test]
+fn an_exception_block_undoes_the_settings_changed_inside_it() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION guarded_setting() RETURNS text LANGUAGE plpgsql AS $$ BEGIN \
+             SET app.guarded = 'before'; \
+             BEGIN SET app.guarded = 'inside'; RAISE EXCEPTION 'stop'; \
+             EXCEPTION WHEN raise_exception THEN NULL; END; \
+             RETURN current_setting('app.guarded'); END $$",
+        ],
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT guarded_setting()"),
+        "guarded_setting\nbefore\nSELECT 1"
+    );
+    assert_eq!(shown(&mut session, "app.guarded"), "before");
+}
+
+#[test]
+fn set_from_current_keeps_the_value_the_parameter_had_at_create() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "SET app.mode = 'captured'",
+            "CREATE FUNCTION captured() RETURNS text LANGUAGE sql SET app.mode FROM CURRENT \
+             AS $$ SELECT current_setting('app.mode') $$",
+            "SET app.mode = 'later'",
+        ],
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT captured()"),
+        "captured\ncaptured\nSELECT 1"
+    );
+    assert_eq!(shown(&mut session, "app.mode"), "later");
+}
+
+#[test]
+fn refcursor_arrays_hold_cursor_names_and_table_columns_hold_them_as_text_arrays() {
+    let store = MemoryStore::default();
+    let mut session = session_with(
+        &store,
+        &[
+            "CREATE FUNCTION open_two(a refcursor, b refcursor) RETURNS refcursor[] \
+             LANGUAGE plpgsql AS $$ BEGIN \
+             OPEN a FOR SELECT 1 AS n; OPEN b FOR SELECT 2 AS n; RETURN ARRAY[a, b]; END $$",
+            "CREATE FUNCTION count_names() RETURNS integer LANGUAGE plpgsql AS $$ \
+             DECLARE names refcursor[] := ARRAY['p', 'q']::refcursor[]; \
+             BEGIN RETURN array_length(names, 1); END $$",
+            "CREATE TABLE kept_many (c refcursor[])",
+        ],
+    );
+    answer(&mut session, "BEGIN");
+    assert_eq!(
+        answer(&mut session, "SELECT open_two('first_cursor', 'second_cursor')"),
+        "open_two\n{first_cursor,second_cursor}\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "FETCH ALL FROM second_cursor"),
+        "n\n2\nFETCH 1"
+    );
+    answer(&mut session, "COMMIT");
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT pg_typeof(ARRAY['a', 'b']::refcursor[]) AS t"
+        ),
+        "t\nrefcursor[]\nSELECT 1"
+    );
+    assert_eq!(
+        answer(&mut session, "SELECT count_names()"),
+        "count_names\n2\nSELECT 1"
+    );
+    assert_eq!(
+        crate::pg_catalog::type_oid(crate::types::SqlType::Array(
+            crate::arrays::ArrayElement::RefCursor
+        )),
+        2201
+    );
+    answer(&mut session, "INSERT INTO kept_many VALUES ('{x,y}')");
+    assert_eq!(
+        answer(&mut session, "SELECT c, pg_typeof(c) AS t FROM kept_many"),
+        "c|t\n{x,y}|text[]\nSELECT 1"
+    );
+}
