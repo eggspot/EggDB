@@ -63,6 +63,21 @@ try {
   clipboard.setData("text/plain", "pasted.eggdb");
   file.dispatchEvent(new ClipboardEvent("paste", { clipboardData: clipboard, bubbles: true, cancelable: true }));
   check(file.value.endsWith("pasted.eggdb"), `the paste left the File value ${file.value}`);
+  const box = card.canvas.getBoundingClientRect();
+  const pointer = (type, node, dx = node.width / 2) => card.mirror.dispatchEvent(new PointerEvent(type, { clientX: box.left + node.x + dx, clientY: box.top + node.y + node.height / 2, button: 0, pointerId: 1, bubbles: true, cancelable: true }));
+  const createNode = card.nodes.find((node) => node.name === "Create the file if it does not exist");
+  const create = card.mirror.querySelectorAll("input[type=checkbox]")[0];
+  const created = create.checked;
+  pointer("pointerdown", createNode);
+  pointer("pointerup", createNode);
+  check(create.checked !== created, "a click did not toggle Create the file if it does not exist");
+  check(document.activeElement === create, "a click did not move the focus to the checkbox");
+  const fileNode = card.nodes.find((node) => node.name === "File");
+  pointer("pointerdown", fileNode, 2);
+  pointer("pointermove", fileNode, fileNode.width - 2);
+  pointer("pointerup", fileNode, fileNode.width - 2);
+  check(document.activeElement === file, "a press did not focus the File input");
+  check(card.exports.eggdb_wasm_card_copied_text() === 1 && new TextDecoder().decode(card.output()) === file.value, "a drag did not select the File value");
   result.textContent = "eggdb-card-test: passed";
 } catch (error) {
   result.textContent = `eggdb-card-test: failed ${error}`;
