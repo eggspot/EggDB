@@ -190,6 +190,15 @@ everywhere but SQLite, `GROUPING_ID()` and Oracle's `GROUP_ID()`, in one pass ov
 (D298). Next for grouping sets: SQL Server's and Oracle's one-argument limit for `GROUPING`
 and their own error numbers for grouping-set mistakes, and grouping sets in a query with window
 functions checked against each manual.
+Users can now keep one row per key with PostgreSQL's `DISTINCT ON (...)` in `ORDER BY` order,
+join by every shared column name with `NATURAL [INNER | LEFT | RIGHT | FULL] JOIN` (PostgreSQL,
+MySQL, SQLite, Oracle), name their own escape character with `LIKE ... ESCAPE` in every dialect
+(and SQLite's `like(pattern, text, escape)`), match SQLite `GLOB` character classes and patterns
+from columns, and create PostgreSQL `RECURSIVE` views (D299). Next for these: `DISTINCT ON` an
+expression outside the select list of a grouped query or beside a window function, `NATURAL`
+joins with a `LATERAL` item, SQLite's own error for an `ESCAPE` that is not one character,
+Oracle's `ORA-01424` for an escape character before anything but `%`, `_` or itself, and
+Transact-SQL's `[...]` classes in `LIKE`.
 
 More tracks that run alongside the milestones, each starting where its dependencies land:
 - **The project (D21):** contributing guide, code of conduct, security policy, the stability

@@ -262,7 +262,10 @@ What it reads, on top of the statements of "What runs today":
   INTEGER PRIMARY KEY (rowid=?)`, `USE TEMP B-TREE FOR ORDER BY`). A duplicate is `UNIQUE
   constraint failed: t.a` with `SQLITE_CONSTRAINT_UNIQUE` (2067).
 - **Expressions**: `||`, `==`, `IS`/`IS NOT` between any two values, `LIKE` ignoring ASCII
-  case, `GLOB` with `*` and `?`, integers as conditions (`WHERE active`, `NOT 0`), `TRUE` and
+  case, `LIKE ... ESCAPE 'c'` and `like(pattern, text, escape)`, `GLOB` with `*`, `?` and
+  character classes (`[abc]`, `[a-z]`, `[^0-9]`, `]` first and `-` first or last as themselves,
+  an unclosed `[` matching nothing) and with a pattern from a column or a subquery, `NATURAL
+  [LEFT | RIGHT | FULL] JOIN`, integers as conditions (`WHERE active`, `NOT 0`), `TRUE` and
   `FALSE` as 1 and 0, comparisons giving 1 and 0, division and remainder by zero giving NULL,
   and result columns named by their text (`SELECT count(*)` gives a column `count(*)`).
 - **Compound selects and subqueries**: `UNION [ALL]`, `INTERSECT` and `EXCEPT`, all of one
@@ -1511,10 +1514,17 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
   `column2`, ... and each takes one type by the `UNION` rules below; rows of different lengths
   are `42601` (D128).
-- `SELECT [ALL | DISTINCT] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY [ALL | DISTINCT] grouping_item, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
+- `SELECT [ALL | DISTINCT | DISTINCT ON (expr, ...)] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY [ALL | DISTINCT] grouping_item, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
   `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
   `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
-  returns one row.
+  returns one row. `DISTINCT ON (expr, ...)` (PostgreSQL, D299) keeps the first row of each set
+  of rows equal in those expressions (NULLs equal), in `ORDER BY` order, before `LIMIT` and
+  `OFFSET`; its expressions follow `ORDER BY`'s rules (an output column's number or alias, or
+  any expression over the tables), and they must be the leftmost `ORDER BY` items in any order,
+  else `42P10` "SELECT DISTINCT ON expressions must match initial ORDER BY expressions". In a
+  grouped query they name output columns (another expression is `0A000`), and beside a window or
+  set-returning function in the select list they answer `0A000`. A view with `DISTINCT ON` is
+  not automatically updatable.
 - **Functions in `FROM`** (D128): `generate_series(start, stop [, step])` over `smallint`,
   `integer` and `bigint` (a step of 0 is `22023`; `numeric` and time stamps answer `0A000`) and
   `unnest(array)`, also written `pg_catalog.generate_series` and `pg_catalog.unnest`, with
@@ -1539,7 +1549,10 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   PostgreSQL. Transact-SQL's `CROSS APPLY` and `OUTER APPLY` are lateral joins too.
 - **Joins**: `a [INNER] JOIN b ON cond`, `a LEFT [OUTER] JOIN b ON cond`, `a RIGHT [OUTER] JOIN
   b ON cond`, `a FULL [OUTER] JOIN b ON cond`, `JOIN ... USING (columns)`,
-  `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional alias.
+  `a NATURAL [INNER | LEFT | RIGHT | FULL] JOIN b` (D299; not in Transact-SQL, no `FULL` in
+  MySQL), `a CROSS JOIN b` and `FROM a, b`, chained left to right, each table with an optional
+  alias. A `NATURAL` join is `USING` every column name both sides show, in the left side's
+  order; with none it is a cross join, and a name the left side has twice is `42702`.
   A right join keeps every row of its right table, a full join every row of both; the rows of
   the right table that matched nothing come after the others, extended with NULLs. With
   `RIGHT JOIN ... USING`, the `USING` column is the right table's; with `FULL JOIN ... USING`
@@ -2020,7 +2033,10 @@ hold at most 2^27 elements (`54000`) and counts against the session's value limi
   other collation is `42704`, a non-text operand `42804`); and type names written
   `pg_catalog.int4` (another schema is `42704`).
 - Comparisons `= <> != < <= > >=`, `BETWEEN`, `IN (list)`, `LIKE` and `ILIKE` with `%`, `_`
-  and `\` escapes, `IS [NOT] NULL`, `ISNULL`, `NOTNULL`, `IS [NOT] TRUE | FALSE | UNKNOWN`,
+  and `\` escapes, `[NOT] LIKE | ILIKE pattern ESCAPE 'c'` in every dialect (D299; `ESCAPE ''`
+  means no escape character, a longer one and a pattern ending in its escape character are
+  `22025`, `ESCAPE NULL` gives NULL; PostgreSQL's `like_escape(pattern, escape)` is the same
+  rewrite), `IS [NOT] NULL`, `ISNULL`, `NOTNULL`, `IS [NOT] TRUE | FALSE | UNKNOWN`,
   `IS [NOT] DISTINCT FROM`, each with its `NOT` form.
 - `AND`, `OR`, `NOT` with SQL's three-valued logic: `NULL AND false` is false, `NULL OR true`
   is true, anything else with NULL is NULL, and `WHERE` keeps only rows where the condition is
@@ -3134,7 +3150,10 @@ create in` when there is none). The other dialects have one schema: SQLite's `ma
 is the session's temporary schema), Oracle's `USER.t` for the session's user's own tables and
 `hr.t` for schema `hr` (D127), MySQL's `db.t` for the connected database.
 
-**Views**, in every dialect: `CREATE [OR REPLACE] VIEW name [(columns)] AS query`, `DROP VIEW
+**Views**, in every dialect: `CREATE [OR REPLACE] VIEW name [(columns)] AS query`, in PostgreSQL
+`CREATE [OR REPLACE] [TEMP] RECURSIVE VIEW name (columns) AS query` (D299; the column list is
+required, and the view is stored as `WITH RECURSIVE name (columns) AS (query) SELECT columns FROM
+name`, as the manual defines it), `DROP VIEW
 [IF EXISTS] name [, ...] [CASCADE | RESTRICT]`, and in PostgreSQL `ALTER VIEW [IF EXISTS] name
 RENAME TO new | SET SCHEMA s | OWNER TO role`. A view may use joins, groups, subqueries, `WITH`,
 set operations and other views. Its query is checked when it is created and expanded where it is
@@ -3785,8 +3804,7 @@ table's primary key and indexes, but a view with grouping, aggregates, `DISTINCT
 window or a computed column used by the condition, or one on the NULL side of an outer join, is
 still computed in full before the condition filters it; a view that is not automatically
 updatable has no rules to make it so (its `INSTEAD OF` triggers make it writable),
-there are no materialized or
-recursive views, renaming a table
+there are no materialized views, renaming a table
 or view that a view uses is `0A000` (PostgreSQL follows the rename), a view resolves its names
 with the search path it was created with when it is used, where PostgreSQL binds them once, a
 column `DEFAULT nextval('s')` finds an unqualified `s` through the search path when it runs, and
@@ -3948,7 +3966,7 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   `0A000`; `FULL JOIN ... USING` columns cannot be named unqualified from a subquery (`42702`). An `IN` list of constants is compared item by item (a list of
   more than 256 items is not used to choose a key range either), so a very long list against
   many rows is slow; `IN (SELECT ...)` looks values up in a hash set.
-- `NATURAL` joins, `DISTINCT ON`, hypothetical-set
+- Hypothetical-set
   aggregates (`rank(x) WITHIN GROUP (...)`), `percentile_cont` and `percentile_disc` over an array
   of fractions, `percentile_cont` between two `interval` values, and the other aggregates
   (`stddev`, `variance`, ...) fail with `0A000`. Window functions (D151) do not take `DISTINCT`
@@ -4090,8 +4108,8 @@ And more, not in the suite yet:
   kept in the file; foreign keys are never enforced.
 - Not supported yet: `CREATE INDEX`, `UNIQUE` and `CHECK` constraints, `COLLATE NOCASE`,
   generated columns, views, `ATTACH`, `VACUUM`, `UPDATE OR ...`, `VALUES` as a query,
-  `group_concat` and `total`, the JSON and math functions, `GLOB` character
-  classes and bare columns in aggregate queries.
+  `group_concat` and `total`, the JSON and math functions and bare columns in aggregate
+  queries.
 
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 610 cases from Oracle's SQL
@@ -4314,8 +4332,8 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - `JSON_TABLE`'s `PLAN` clause, `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
-- `DISTINCT ON`, `NATURAL` joins and the other aggregates
-  (`stddev`, `variance`, hypothetical-set aggregates).
+- The other aggregates (`stddev`, `variance`, hypothetical-set aggregates); `DISTINCT ON` over
+  any expression in a grouped query and beside window functions; `LATERAL ... NATURAL JOIN`.
 - Then the other dialects (item 23), each with its own correctness suite; for the PostgreSQL protocol,
   TLS, `information_schema` and the catalog queries of GUI tools beyond psql's `\d` family,
   and `LISTEN`/`NOTIFY` (M6a).
