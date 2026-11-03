@@ -4143,7 +4143,7 @@ And more, not in the suite yet:
   is accepted and ignored.
 - Not supported yet: `CONNECT BY`, outer joins with `(+)`, `INSERT ALL`, `RETURNING ... INTO`,
   synonyms, database links, `ROWID`, the XML functions, the regular-expression functions
-  (`REGEXP_LIKE`, `REGEXP_SUBSTR`, ...), and the ranking and offset window functions
+  (`REGEXP_LIKE`, `REGEXP_SUBSTR`, ...), the ranking and offset window functions
   (`ROW_NUMBER`, `RANK`, `LAG`, ...: `ORA-00904`), and Oracle-only analytic forms such as
   `RATIO_TO_REPORT`. Aggregates with `OVER` work.
   `SAVEPOINT` works as in every dialect (D173), and views `WITH CHECK OPTION` refuse rows they
