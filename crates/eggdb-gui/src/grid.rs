@@ -7,6 +7,9 @@ use crate::highlight::is_keyword;
 
 const MIN_COLUMN: f32 = 48.0;
 const MAX_COLUMN: f32 = 480.0;
+const MAX_DRAGGED_COLUMN: f32 = 960.0;
+const RESIZE_STEP: f32 = 8.0;
+const RESIZE_BIG_STEP: f32 = 32.0;
 const SAMPLED_ROWS: usize = 200;
 const CELL_PADDING: f32 = 12.0;
 const BLOB_BYTES_SHOWN: usize = 16;
@@ -18,6 +21,13 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 pub const ROW_HEIGHT: f32 = 24.0;
 /// The width of the row-number gutter.
 pub const GUTTER_WIDTH: f32 = 48.0;
+/// The advance of one character of the grid's monospace text, which sizes columns.
+pub const CHARACTER_ADVANCE: f32 = 8.0;
+
+/// The width `text` takes at [`CHARACTER_ADVANCE`] a character.
+pub fn measured(text: &str) -> f32 {
+    text.chars().count() as f32 * CHARACTER_ADVANCE
+}
 
 /// Each column's width (`docs/ux/gui.md`, "Grid"): the wider of its header and its first 200
 /// cells, measured by `width`, plus padding on both sides, between 48 and 480 pixels.
@@ -213,6 +223,8 @@ pub enum GridAnswer {
     OpenValue,
     /// `Shift+F10` or the menu key: open the grid's menu below the current cell.
     OpenMenu,
+    /// `Alt+Left`, `Alt+Right` or `Alt+Enter`: the current cell's column changed width.
+    Resized,
     /// A copy: the text for the clipboard and the toast that says what was copied.
     Copy {
         /// The copied text.
@@ -391,6 +403,17 @@ impl ResultGrid {
         let to = match press.key {
             Key::Tab if shift => return GridAnswer::LeaveBack,
             Key::Tab => return GridAnswer::LeaveForward,
+            Key::Enter if press.modifiers.alt => {
+                self.auto_fit(here.column);
+                return GridAnswer::Resized;
+            }
+            Key::Left | Key::Right if press.modifiers.alt => {
+                let step = if shift { RESIZE_BIG_STEP } else { RESIZE_STEP };
+                let step = if press.key == Key::Left { -step } else { step };
+                let width = self.widths.get(here.column).copied().unwrap_or(MIN_COLUMN);
+                self.set_width(here.column, width + step);
+                return GridAnswer::Resized;
+            }
             Key::Enter | Key::F2 => return GridAnswer::OpenValue,
             Key::F10 if shift => return GridAnswer::OpenMenu,
             Key::ContextMenu => return GridAnswer::OpenMenu,
@@ -501,6 +524,66 @@ impl ResultGrid {
             out.push('\n');
         }
         out
+    }
+
+    /// Sets column `column`'s width, between 48 and 960 pixels (`docs/ux/workspace.md` 9.5);
+    /// returns whether it changed.
+    pub fn set_width(&mut self, column: usize, width: f32) -> bool {
+        let Some(current) = self.widths.get_mut(column) else {
+            return false;
+        };
+        let width = width.round().clamp(MIN_COLUMN, MAX_DRAGGED_COLUMN);
+        let changed = *current != width;
+        *current = width;
+        changed
+    }
+
+    /// The width that fits column `column`: the wider of its header and its first 200
+    /// fetched cells, between 48 and 480 pixels.
+    pub fn fit_width(&self, column: usize) -> f32 {
+        let Some(name) = self.columns.get(column) else {
+            return MIN_COLUMN;
+        };
+        let kind = self.kind(column);
+        let cells: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .take(SAMPLED_ROWS)
+            .map(|row| {
+                vec![cell_text(row.get(column).and_then(|value| value.as_deref()), kind).0]
+            })
+            .collect();
+        column_widths(std::slice::from_ref(name), &cells, &measured)
+            .first()
+            .copied()
+            .unwrap_or(MIN_COLUMN)
+    }
+
+    /// Sets column `column` to the width that fits it; returns whether it changed.
+    pub fn auto_fit(&mut self, column: usize) -> bool {
+        let width = self.fit_width(column);
+        self.set_width(column, width)
+    }
+
+    /// Keeps `earlier`'s widths when it had the same column names in the same order, as a
+    /// tab's widths survive a run with the same columns (`docs/ux/workspace.md` 9.5).
+    pub fn keep_widths_of(&mut self, earlier: &ResultGrid) {
+        if earlier.columns == self.columns && earlier.widths.len() == self.widths.len() {
+            self.widths.clone_from(&earlier.widths);
+        }
+    }
+
+    /// Column `column`'s name and width as the status bar shows it while it is resized:
+    /// `name · 240 px`.
+    pub fn width_text(&self, column: usize) -> String {
+        let name = self.columns.get(column).map_or("", String::as_str);
+        let width = self.widths.get(column).copied().unwrap_or(0.0);
+        format!("{name} · {width:.0} px")
+    }
+
+    /// The columns' total width.
+    pub fn content_width(&self) -> f32 {
+        self.widths.iter().sum()
     }
 
     fn fetched_selection(&self) -> (Range<usize>, Range<usize>) {
@@ -801,7 +884,7 @@ fn json_value(value: Option<&str>, kind: ValueKind) -> String {
         ValueKind::Number | ValueKind::Ttl if numeric_literal(text) => text.to_owned(),
         ValueKind::Boolean => {
             let truth = matches!(text, "t" | "true" | "TRUE" | "1");
-            if truth { "true" } else { "false" }.to_owned()
+            String::from(if truth { "true" } else { "false" })
         }
         ValueKind::Json | ValueKind::Vector if is_json(text) => text.trim().to_owned(),
         ValueKind::Blob => json_string(&full_hex(text)),
@@ -1478,5 +1561,32 @@ mod tests {
         assert_eq!(grid.menu_item(GridMenuItem::OpenValue), GridAnswer::OpenValue);
         grid.menu_item(GridMenuItem::SelectAll);
         assert_eq!(grid.selection(), (0..3, 0..3));
+    }
+
+    #[test]
+    fn widths_stay_within_their_limits_and_survive_a_result_with_the_same_columns() {
+        let mut grid = customers();
+        assert!(grid.set_width(1, 2_000.0));
+        assert_eq!(grid.widths[1], 960.0);
+        grid.set_width(1, 10.0);
+        assert_eq!(grid.widths[1], 48.0);
+        assert!(!grid.set_width(7, 100.0));
+        grid.rows[0][1] = Some("x".repeat(100));
+        assert_eq!(grid.fit_width(1), 480.0);
+        assert_eq!(grid.fit_width(0), 48.0);
+        grid.set_width(2, 300.0);
+        let mut again = customers();
+        again.keep_widths_of(&grid);
+        assert_eq!(again.widths, grid.widths);
+        let mut other = ResultGrid::new(
+            vec!["id".into(), "note".into(), "name".into()],
+            vec![ValueKind::Number; 3],
+            Vec::new(),
+            0,
+            vec![60.0; 3],
+        );
+        other.keep_widths_of(&grid);
+        assert_eq!(other.widths, vec![60.0; 3]);
+        assert_eq!(grid.width_text(2), "note · 300 px");
     }
 }

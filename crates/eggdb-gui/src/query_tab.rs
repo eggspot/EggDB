@@ -16,7 +16,6 @@ use crate::value_view::{ValueAnswer, ValueView};
 
 const FIX_LABEL_CHARACTERS: usize = 40;
 const CANCELLED: &str = "57014";
-const TEXT_ADVANCE: f32 = 8.0;
 
 /// The rows the results body shows at the golden frame's size, for paging keys.
 pub const ROWS_IN_VIEW: usize = 13;
@@ -616,6 +615,12 @@ impl QueryTab {
                 self.open_grid_menu(GridMenu::at_current_cell());
                 TabAction::None
             }
+            GridAnswer::Resized => {
+                if let Some(grid) = &self.grid {
+                    self.notice = Some(grid.width_text(grid.current.column));
+                }
+                TabAction::None
+            }
             GridAnswer::Ignored => TabAction::None,
         }
     }
@@ -902,8 +907,7 @@ impl QueryTab {
                     .collect()
             })
             .collect();
-        let measure = |text: &str| text.chars().count() as f32 * TEXT_ADVANCE;
-        let widths = column_widths(&table.columns, &sample, &measure);
+        let widths = column_widths(&table.columns, &sample, &crate::grid::measured);
         let mut grid = ResultGrid::new(
             table.columns,
             table.kinds,
@@ -916,6 +920,9 @@ impl QueryTab {
         grid.focused = self.focus == TabFocus::Grid;
         self.value_view = None;
         self.grid_menu = None;
+        if let Some(earlier) = &self.grid {
+            grid.keep_widths_of(earlier);
+        }
         self.grid = Some(grid);
     }
 

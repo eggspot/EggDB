@@ -62,6 +62,7 @@ enum Drag {
     CardField { box_left: f32 },
     Editor,
     Grid,
+    Handle(main_window::GridHandle),
 }
 
 /// What the window around the workspace must do after an input.
@@ -348,7 +349,9 @@ impl Workspace {
         let tree = self.pointer_tree(faces, size);
         let mut changed = match self.drag {
             Some(drag) => self.drag_to(drag, &tree, faces, x, y),
-            None => false,
+            None => self
+                .main_window_mut()
+                .is_some_and(|window| window.hover_grid_handles(x, y)),
         };
         let hovered = pointer::hit_test(&tree, x, y).map(|node| node.id);
         let look = self.pointer_look_mut();
@@ -362,8 +365,11 @@ impl Workspace {
     /// The pointer left the window: nothing is hovered. Returns whether the frame changed.
     pub fn pointer_left(&mut self) -> bool {
         let look = self.pointer_look_mut();
-        let changed = look.hovered.is_some();
+        let mut changed = look.hovered.is_some();
         look.hovered = None;
+        if let Some(window) = self.main_window_mut().filter(|window| !window.resizing) {
+            changed |= window.column_edge.take().is_some() | window.scrollbar_hot.take().is_some();
+        }
         changed
     }
 
@@ -405,6 +411,15 @@ impl Workspace {
             .main_window_mut()
             .is_some_and(|window| window.press_outside_popover(x, y))
         {
+            return WorkspaceCommand::None;
+        }
+        if let Some(handle) = self
+            .main_window_mut()
+            .and_then(|window| window.press_grid_handle(x, y, clicks))
+        {
+            if handle != main_window::GridHandle::Done {
+                self.drag = Some(Drag::Handle(handle));
+            }
             return WorkspaceCommand::None;
         }
         let tree = self.pointer_tree(faces, size);
@@ -555,6 +570,9 @@ impl Workspace {
             return WorkspaceCommand::None;
         }
         self.drag = None;
+        if let Some(window) = self.main_window_mut() {
+            window.release_grid_handle();
+        }
         let Some(pressed) = self.pointer_look_mut().pressed.take() else {
             return WorkspaceCommand::None;
         };
@@ -629,6 +647,7 @@ impl Workspace {
                 window.drag_editor(faces, x, y);
                 (window.tab.editor.caret(), window.tab.editor.selection()) != before
             }
+            (Drag::Handle(handle), Screen::Main(window)) => window.drag_grid_handle(handle, x, y),
             (Drag::Grid, Screen::Main(window)) => {
                 let Some(at) = tree
                     .iter()

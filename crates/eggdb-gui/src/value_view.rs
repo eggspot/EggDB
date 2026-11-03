@@ -149,7 +149,7 @@ impl ValueView {
         let (text, placeholder) = shown_value(value, kind);
         let (lines, left_out) = wrapped_lines(&text, GLYPHS_PER_LINE, BODY_LIMIT);
         let blob_bytes = (kind == ValueKind::Blob && !placeholder)
-            .then(|| text.len().saturating_sub(2) / 2);
+            .then_some(text.len().saturating_sub(2) / 2);
         let detail = match blob_bytes {
             Some(bytes) => format!("{} · {}", kind.label(), bytes_label(bytes)),
             None => kind.label().to_owned(),

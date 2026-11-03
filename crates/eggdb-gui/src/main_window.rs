@@ -17,7 +17,7 @@ use crate::grid::{
     self, Cell, CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns,
     visible_rows,
 };
-use crate::grid_menu::{self, GridMenu, MenuOrigin};
+use crate::grid_menu::{self, GridMenu};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
 use crate::layout::{Layout, LayoutAction};
@@ -31,6 +31,7 @@ use crate::connection::SessionId;
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
 use crate::tab_strip::{self, ClosePrompt, PromptAnswer};
+use crate::scrollbar::{self, Axis, Extent};
 use crate::value_view;
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
@@ -153,6 +154,13 @@ pub struct MainWindow {
     /// Whether `Ctrl/Cmd+K` was pressed and the next key finishes the chord (`L` opens the
     /// layout picker).
     pub chord_started: bool,
+    /// The grid column whose right edge the pointer is over or drags (`docs/ux/workspace.md`
+    /// 9.5).
+    pub column_edge: Option<usize>,
+    /// Whether that edge is being dragged.
+    pub resizing: bool,
+    /// The grid scrollbar the pointer is over or drags, drawn wider (9.6).
+    pub scrollbar_hot: Option<Axis>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +241,9 @@ impl MainWindow {
             layout: Layout::EggDb,
             layout_picker: None,
             chord_started: false,
+            column_edge: None,
+            resizing: false,
+            scrollbar_hot: None,
         }
     }
 
@@ -1054,7 +1065,7 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
         object_browser::draw(&mut paint, &window.tree, access_text(window), sidebar_focus(window));
         tabs(&mut paint, window);
         editor(&mut paint, &window.tab, window.caret);
-        results(&mut paint, &window.tab, window.layout);
+        results(&mut paint, window);
     } else {
         placed_regions(&mut paint, window);
     }
@@ -1155,7 +1166,7 @@ fn placed_regions(paint: &mut Painter<'_, '_>, window: &MainWindow) {
             Area::Results => {
                 place(paint.canvas, placed);
                 splitter(paint);
-                results(paint, &window.tab, window.layout);
+                results(paint, window);
             }
             Area::StatusBar => continue,
         }
@@ -1702,6 +1713,19 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
         };
         paint.rect(caret_x.round(), caret_top, 2.0, LINE_HEIGHT, color);
     }
+    let extent = Extent {
+        viewport: visible as f32 * LINE_HEIGHT,
+        content: lines.len() as f32 * LINE_HEIGHT,
+        offset: first as f32 * LINE_HEIGHT,
+    };
+    let track = scrollbar::track_rect(
+        Axis::Vertical,
+        EDITOR_TOP,
+        bottom - EDITOR_TOP,
+        paint.centre_right,
+        bottom,
+    );
+    scrollbar::draw(paint, Axis::Vertical, track, extent, false);
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
         error_strip(paint, &error.strip_text(), error.fix_label().as_deref());
     }
@@ -1764,7 +1788,8 @@ fn warning_icon(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     paint.rect(x + 5.5, y + 4.0, 1.0, 4.0, color);
 }
 
-fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab, layout: Layout) {
+fn results(paint: &mut Painter<'_, '_>, window: &MainWindow) {
+    let (tab, layout) = (&window.tab, window.layout);
     let theme = paint.theme;
     let faces = paint.faces;
     let (centre_width, centre_right) = (paint.centre_width(), paint.centre_right);
@@ -1849,6 +1874,7 @@ fn results(paint: &mut Painter<'_, '_>, tab: &QueryTab, layout: Layout) {
         top = 446.0;
     }
     grid_body(paint, grid, top);
+    grid_handles(paint, grid, top, window);
 }
 
 const PLAN_SEGMENT_X: f32 = 428.0;
@@ -1943,6 +1969,25 @@ fn plan_body(paint: &mut Painter<'_, '_>, plan: &PlanView) {
 
 fn plan_area(centre_width: f32) -> Rect {
     Rect::new(260.0, 418.0, centre_width, BODY_BOTTOM - 418.0)
+}
+
+fn grid_handles(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32, window: &MainWindow) {
+    let theme = paint.theme;
+    if let Some(column) = window.column_edge {
+        let edges = grid.column_edges();
+        let edge = GRID_LEFT + edges.get(column + 1).copied().unwrap_or(0.0) - grid.scroll_x;
+        let bottom = if window.resizing { BODY_BOTTOM } else { top + grid::HEADER_HEIGHT };
+        if edge > GRID_LEFT {
+            paint.rect(edge - 2.0, top, 2.0, bottom - top, theme.accent);
+        }
+    }
+    for axis in [Axis::Vertical, Axis::Horizontal] {
+        if let Some(track) = grid_track(grid, axis, paint.centre_right) {
+            let extent = grid_extent(grid, axis, paint.centre_width());
+            let hot = window.scrollbar_hot == Some(axis);
+            scrollbar::draw(paint, axis, track, extent, hot);
+        }
+    }
 }
 
 fn grid_body(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32) {
@@ -2355,6 +2400,230 @@ impl MainWindow {
             return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
         }
         None
+    }
+}
+
+/// What a press on the grid's column edges or scrollbars started, for the drag that follows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridHandle {
+    /// A column's right edge, grabbed `grab` pixels right of it.
+    ColumnEdge {
+        /// The column.
+        column: usize,
+        /// Where the pointer is from the edge.
+        grab: f32,
+    },
+    /// A scrollbar's thumb, grabbed `grab` pixels from its start.
+    Thumb {
+        /// Which scrollbar.
+        axis: Axis,
+        /// Where the pointer is from the thumb's start.
+        grab: f32,
+    },
+    /// A double-click auto-fitted a column, or a press on a track paged; nothing to drag.
+    Done,
+}
+
+const EDGE_BAND_LEFT: f32 = 3.0;
+const EDGE_BAND_RIGHT: f32 = 2.0;
+
+fn grid_rows_in_view(grid: &ResultGrid) -> usize {
+    let body_top = grid_top(grid) + grid::HEADER_HEIGHT;
+    ((BODY_BOTTOM - body_top) / grid::ROW_HEIGHT).floor().max(1.0) as usize
+}
+
+/// The grid's extent along `axis` in a centre `centre_width` wide (`docs/ux/workspace.md`
+/// 9.6): whole rows down, pixels across past the gutter.
+pub fn grid_extent(grid: &ResultGrid, axis: Axis, centre_width: f32) -> Extent {
+    match axis {
+        Axis::Vertical => Extent {
+            viewport: grid_rows_in_view(grid) as f32 * grid::ROW_HEIGHT,
+            content: grid.rows.len() as f32 * grid::ROW_HEIGHT,
+            offset: grid.first_row as f32 * grid::ROW_HEIGHT,
+        },
+        Axis::Horizontal => Extent {
+            viewport: centre_width - grid::GUTTER_WIDTH,
+            content: grid.content_width(),
+            offset: grid.scroll_x,
+        },
+    }
+}
+
+/// The grid's scrollbar track along `axis` in the EggDB layout's coordinates, `None` while
+/// its content fits: at the body's right or bottom edge, each 10 shorter while the other
+/// shows.
+pub fn grid_track(grid: &ResultGrid, axis: Axis, centre_right: f32) -> Option<Rect> {
+    let centre_width = centre_right - SIDEBAR_RIGHT;
+    let vertical = grid_extent(grid, Axis::Vertical, centre_width).scrolls();
+    let horizontal = grid_extent(grid, Axis::Horizontal, centre_width).scrolls();
+    let body_top = grid_top(grid) + grid::HEADER_HEIGHT;
+    match axis {
+        Axis::Vertical if vertical => {
+            let end = if horizontal { BODY_BOTTOM - scrollbar::TRACK } else { BODY_BOTTOM };
+            Some(scrollbar::track_rect(axis, body_top, end - body_top, centre_right, BODY_BOTTOM))
+        }
+        Axis::Horizontal if horizontal => {
+            let end = if vertical { centre_right - scrollbar::TRACK } else { centre_right };
+            Some(scrollbar::track_rect(axis, GRID_LEFT, end - GRID_LEFT, centre_right, BODY_BOTTOM))
+        }
+        _ => None,
+    }
+}
+
+fn along(axis: Axis, track: Rect, x: f32, y: f32) -> (f32, f32) {
+    match axis {
+        Axis::Vertical => (y - track.y, track.h),
+        Axis::Horizontal => (x - track.x, track.w),
+    }
+}
+
+impl MainWindow {
+    fn results_grid(&self) -> Option<&ResultGrid> {
+        self.tab
+            .grid
+            .as_ref()
+            .filter(|_| self.tab.view == ResultView::Results)
+    }
+
+    fn edge_x(&self, grid: &ResultGrid, column: usize) -> f32 {
+        let edges = grid.column_edges();
+        GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x
+            + self.results_shift().0
+    }
+
+    /// The column whose right edge's 6-pixel band in the header holds (`x`, `y`); the
+    /// gutter's edge is not one.
+    pub fn column_edge_at(&self, x: f32, y: f32) -> Option<usize> {
+        let grid = self.results_grid()?;
+        let shift = self.results_shift();
+        let top = grid_top(grid) + shift.1;
+        if y < top || y >= top + grid::HEADER_HEIGHT {
+            return None;
+        }
+        let centre_width = self.centre_right() - SIDEBAR_RIGHT;
+        visible_columns(&grid.widths, grid.scroll_x, centre_width - grid::GUTTER_WIDTH)
+            .find(|&column| {
+                let edge = self.edge_x(grid, column + 1);
+                edge > GRID_LEFT + shift.0
+                    && x >= edge - EDGE_BAND_LEFT
+                    && x <= edge + EDGE_BAND_RIGHT
+            })
+    }
+
+    fn grid_track_at(&self, x: f32, y: f32) -> Option<(Axis, Rect)> {
+        let grid = self.results_grid()?;
+        let shift = self.results_shift();
+        [Axis::Vertical, Axis::Horizontal]
+            .into_iter()
+            .filter_map(|axis| {
+                grid_track(grid, axis, self.centre_right()).map(|track| (axis, shifted(track, shift)))
+            })
+            .find(|(_, track)| rect_contains(*track, x, y))
+    }
+
+    fn set_grid_offset(&mut self, axis: Axis, offset: f32) -> bool {
+        let Some(grid) = self.tab.grid.as_mut() else {
+            return false;
+        };
+        let before = (grid.first_row, grid.scroll_x);
+        match axis {
+            Axis::Vertical => {
+                let last = grid.rows.len().saturating_sub(grid_rows_in_view(grid));
+                grid.first_row = ((offset / grid::ROW_HEIGHT).round() as usize).min(last);
+            }
+            Axis::Horizontal => grid.scroll_x = offset.max(0.0),
+        }
+        (grid.first_row, grid.scroll_x) != before
+    }
+
+    /// The pointer moved to (`x`, `y`) with no drag: the column edge and the scrollbar under
+    /// it light up. Returns whether that changed.
+    pub fn hover_grid_handles(&mut self, x: f32, y: f32) -> bool {
+        if self.resizing {
+            return false;
+        }
+        let before = (self.column_edge, self.scrollbar_hot);
+        self.column_edge = self.column_edge_at(x, y);
+        self.scrollbar_hot = self.grid_track_at(x, y).map(|(axis, _)| axis);
+        (self.column_edge, self.scrollbar_hot) != before
+    }
+
+    /// A press at (`x`, `y`), `clicks` of a multi-click (`docs/ux/workspace.md` 9.5, 9.6): on
+    /// a column edge it starts a resize, or auto-fits on a double-click; on a scrollbar's
+    /// thumb it starts a drag, and on its track it pages toward the pointer. `None` when the
+    /// press is on neither.
+    pub fn press_grid_handle(&mut self, x: f32, y: f32, clicks: u8) -> Option<GridHandle> {
+        if let Some(column) = self.column_edge_at(x, y) {
+            let grid = self.tab.grid.as_ref()?;
+            let edge = self.edge_x(grid, column + 1);
+            let grid = self.tab.grid.as_mut()?;
+            if clicks == 2 {
+                grid.auto_fit(column);
+                self.tab.notice = Some(grid.width_text(column));
+                return Some(GridHandle::Done);
+            }
+            self.tab.notice = Some(grid.width_text(column));
+            self.column_edge = Some(column);
+            self.resizing = true;
+            return Some(GridHandle::ColumnEdge {
+                column,
+                grab: x - edge,
+            });
+        }
+        let (axis, track) = self.grid_track_at(x, y)?;
+        let grid = self.tab.grid.as_ref()?;
+        let extent = grid_extent(grid, axis, self.centre_right() - SIDEBAR_RIGHT);
+        let (pointer, length) = along(axis, track, x, y);
+        let thumb = scrollbar::thumb(length, extent)?;
+        if pointer >= thumb.start && pointer < thumb.start + thumb.length {
+            self.scrollbar_hot = Some(axis);
+            return Some(GridHandle::Thumb {
+                axis,
+                grab: pointer - thumb.start,
+            });
+        }
+        let offset = scrollbar::paged_offset(pointer, length, extent);
+        self.set_grid_offset(axis, offset);
+        Some(GridHandle::Done)
+    }
+
+    /// The pointer dragged `handle` to (`x`, `y`): the column takes the width up to the
+    /// pointer, or the thumb follows it. Returns whether the frame changed.
+    pub fn drag_grid_handle(&mut self, handle: GridHandle, x: f32, y: f32) -> bool {
+        match handle {
+            GridHandle::ColumnEdge { column, grab } => {
+                let Some(grid) = self.tab.grid.as_ref() else {
+                    return false;
+                };
+                let left = self.edge_x(grid, column);
+                let Some(grid) = self.tab.grid.as_mut() else {
+                    return false;
+                };
+                let changed = grid.set_width(column, x - grab - left);
+                self.tab.notice = Some(grid.width_text(column));
+                changed
+            }
+            GridHandle::Thumb { axis, grab } => {
+                let Some(grid) = self.results_grid() else {
+                    return false;
+                };
+                let shift = self.results_shift();
+                let Some(track) = grid_track(grid, axis, self.centre_right()) else {
+                    return false;
+                };
+                let track = shifted(track, shift);
+                let extent = grid_extent(grid, axis, self.centre_right() - SIDEBAR_RIGHT);
+                let (pointer, length) = along(axis, track, x, y);
+                let offset = scrollbar::dragged_offset(pointer, grab, 0.0, length, extent);
+                self.set_grid_offset(axis, offset)
+            }
+            GridHandle::Done => false,
+        }
+    }
+
+    /// The button went up: a resize or a thumb drag ends.
+    pub fn release_grid_handle(&mut self) {
+        self.resizing = false;
     }
 }
 
@@ -3205,6 +3474,7 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
             (x_of(column), top, width, 28.0),
         );
         header.cell = Some(AccessCell { row: 0, column });
+        header.description = Some(format!("width {:.0} px", grid.widths.get(column).copied().unwrap_or(0.0)));
         nodes.push(header);
     }
     let body_top = top + 28.0;
@@ -4091,11 +4361,130 @@ mod tests {
         };
         window.key(shift_f10, now);
         let menu = window.tab.grid_menu.expect("Shift+F10 opens the menu");
-        assert_eq!(menu.origin, MenuOrigin::CurrentCell);
+        assert_eq!(menu.origin, grid_menu::MenuOrigin::CurrentCell);
         assert_eq!(menu.highlighted, Some(0));
         assert_eq!(
             window.grid_menu_rect(),
             Some(Rect::new(388.0, 498.0, 240.0, 278.0))
         );
+    }
+
+    #[test]
+    fn a_header_edge_resizes_its_column_by_drag_and_fits_it_on_a_double_click() {
+        let mut window = MainWindow::sample();
+        assert_eq!(window.column_edge_at(387.0, 430.0), Some(0));
+        assert_eq!(window.column_edge_at(390.0, 430.0), Some(0));
+        assert_eq!(window.column_edge_at(380.0, 430.0), None);
+        assert_eq!(window.column_edge_at(307.0, 430.0), None);
+        assert_eq!(window.column_edge_at(387.0, 460.0), None);
+        assert!(window.hover_grid_handles(387.0, 430.0));
+        assert_eq!(window.column_edge, Some(0));
+        let handle = window.press_grid_handle(388.0, 430.0, 1);
+        assert_eq!(
+            handle,
+            Some(GridHandle::ColumnEdge {
+                column: 0,
+                grab: 0.0
+            })
+        );
+        let handle = handle.unwrap();
+        assert!(window.drag_grid_handle(handle, 500.0, 600.0));
+        assert_eq!(window.tab.grid.as_ref().unwrap().widths[0], 192.0);
+        assert_eq!(window.tab.notice.as_deref(), Some("id · 192 px"));
+        window.drag_grid_handle(handle, 2_000.0, 600.0);
+        assert_eq!(window.tab.grid.as_ref().unwrap().widths[0], 960.0);
+        window.drag_grid_handle(handle, 500.0, 600.0);
+        window.release_grid_handle();
+        assert!(!window.resizing);
+        assert_eq!(
+            window.press_grid_handle(500.0, 430.0, 2),
+            Some(GridHandle::Done)
+        );
+        assert_eq!(window.tab.grid.as_ref().unwrap().widths[0], 48.0);
+        let tree = accessibility_tree(&window);
+        let header = tree
+            .iter()
+            .find(|node| node.role == AccessRole::ColumnHeader && node.name == "id")
+            .unwrap();
+        assert_eq!(header.description.as_deref(), Some("width 48 px"));
+    }
+
+    #[test]
+    fn alt_keys_widen_narrow_and_fit_the_current_column() {
+        let mut window = MainWindow::sample();
+        let now = Instant::now();
+        window.key(primary_press('3'), now);
+        let alt = |key: Key, shift: bool| KeyPress {
+            key,
+            modifiers: eggdb_platform::window::Modifiers {
+                alt: true,
+                shift,
+                ..Default::default()
+            },
+        };
+        window.key(alt(Key::Right, false), now);
+        assert_eq!(window.tab.grid.as_ref().unwrap().widths[0], 88.0);
+        assert_eq!(window.tab.notice.as_deref(), Some("id · 88 px"));
+        window.key(alt(Key::Left, true), now);
+        assert_eq!(window.tab.grid.as_ref().unwrap().widths[0], 56.0);
+        window.key(alt(Key::Enter, false), now);
+        assert_eq!(window.tab.grid.as_ref().unwrap().widths[0], 48.0);
+        assert_eq!(window.tab.value_view, None);
+        assert_eq!(window.tab.grid.as_ref().unwrap().current, Cell::default());
+    }
+
+    #[test]
+    fn scrollbars_show_only_past_the_viewport_and_page_and_drag_the_rows() {
+        let window = MainWindow::sample();
+        let grid = window.tab.grid.as_ref().unwrap();
+        assert_eq!(grid_track(grid, Axis::Vertical, 1280.0), None);
+        assert_eq!(grid_track(grid, Axis::Horizontal, 1280.0), None);
+        let mut window = MainWindow::sample();
+        let rows: Vec<Vec<Option<String>>> = (1..=40)
+            .map(|n| vec![Some(n.to_string()), Some(format!("name {n}"))])
+            .collect();
+        window.tab.grid = Some(ResultGrid::new(
+            vec!["id".into(), "name".into()],
+            vec![ValueKind::Number, ValueKind::Text],
+            rows,
+            40,
+            vec![80.0, 240.0],
+        ));
+        let grid = window.tab.grid.as_ref().unwrap();
+        assert_eq!(
+            grid_track(grid, Axis::Vertical, 1280.0),
+            Some(Rect::new(1270.0, 446.0, 10.0, 330.0))
+        );
+        assert_eq!(grid_track(grid, Axis::Horizontal, 1280.0), None);
+        assert_eq!(
+            window.press_grid_handle(1275.0, 446.0 + 200.0, 1),
+            Some(GridHandle::Done)
+        );
+        assert_eq!(window.tab.grid.as_ref().unwrap().first_row, 13);
+        let handle = window
+            .press_grid_handle(1275.0, 446.0 + 117.0, 1)
+            .expect("a press on the thumb");
+        assert_eq!(
+            handle,
+            GridHandle::Thumb {
+                axis: Axis::Vertical,
+                grab: 10.0
+            }
+        );
+        assert!(window.drag_grid_handle(handle, 1275.0, 446.0 + 233.0));
+        assert_eq!(window.tab.grid.as_ref().unwrap().first_row, 27);
+        window.tab.grid.as_mut().unwrap().widths = vec![600.0, 600.0];
+        let grid = window.tab.grid.as_ref().unwrap();
+        assert_eq!(
+            grid_track(grid, Axis::Horizontal, 1280.0),
+            Some(Rect::new(308.0, 766.0, 962.0, 10.0))
+        );
+        assert_eq!(
+            grid_track(grid, Axis::Vertical, 1280.0),
+            Some(Rect::new(1270.0, 446.0, 10.0, 320.0))
+        );
+        let theme = Theme::of(ThemeKind::Light);
+        let canvas = draw(&window, theme, box_faces());
+        assert_ne!(canvas.pixel(1275, 700), Some(theme.bg0));
     }
 }
