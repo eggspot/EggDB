@@ -3,11 +3,12 @@ use crate::codec::{
     frame, take_frame,
 };
 use eggdb_keyspace::Keyspace;
+use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use eggdb_queues::Queues;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,13 +23,17 @@ const MOST_BUFFERED_BYTES: usize = 64 << 20;
 const NOT_FOUND: u16 = 404;
 const ACCESS_REFUSED: u16 = 403;
 const PRECONDITION_FAILED: u16 = 406;
+const RESOURCE_ERROR: u16 = 506;
+const OUT_OF_MEMORY_BUDGET: &str =
+    "RESOURCE_ERROR - the server's connections already hold their memory budget";
+const DELIVERY_FRAME_BYTES: usize = 64;
 const FRAME_ERROR: u16 = 501;
 const COMMAND_INVALID: u16 = 503;
 const CHANNEL_ERROR: u16 = 504;
 const NOT_IMPLEMENTED: u16 = 540;
 
 /// How the AMQP server runs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// The one user clients log in as with PLAIN.
     pub user: String,
@@ -36,6 +41,9 @@ pub struct ServerConfig {
     pub password_sha256: [u8; 32],
     /// The most connections served at once.
     pub max_connections: usize,
+    /// The memory every connection's unread frames, unfinished message bodies and deliveries
+    /// hold together, shared with the server's other listeners (D284, D307).
+    pub memory_budget: Arc<MemoryBudget>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -207,6 +215,7 @@ struct Connection<'s, 'b> {
     stage: Stage,
     channels: BTreeMap<u16, Channel>,
     outgoing: VecDeque<Vec<u8>>,
+    bodies_held: Reservation<'b>,
 }
 
 fn method(out: &Out, channel: u16) -> Vec<u8> {
@@ -214,6 +223,21 @@ fn method(out: &Out, channel: u16) -> Vec<u8> {
 }
 
 impl Connection<'_, '_> {
+    fn declared_body_bytes(&self) -> usize {
+        self.channels
+            .values()
+            .filter_map(|state| state.header.as_ref())
+            .map(|(size, _)| usize::try_from(*size).unwrap_or(usize::MAX))
+            .fold(0, usize::saturating_add)
+    }
+
+    fn release_finished_bodies(&mut self) {
+        let declared = self.declared_body_bytes();
+        if declared < self.bodies_held.bytes() {
+            self.bodies_held.hold_if_large(declared);
+        }
+    }
+
     fn send(&mut self, channel: u16, out: Out) {
         self.outgoing.push_back(method(&out, channel));
     }
@@ -258,7 +282,8 @@ impl Connection<'_, '_> {
         Ok(())
     }
 
-    fn pump(&mut self) -> Parsed<()> {
+    fn pump(&mut self, held: &mut Reservation<'_>) -> Parsed<()> {
+        let mut pumped_bytes = 0usize;
         let channels: Vec<u16> = self.channels.keys().copied().collect();
         for channel in channels {
             let consumers: Vec<(String, String, bool)> = match self.channels.get(&channel) {
@@ -291,6 +316,17 @@ impl Connection<'_, '_> {
                     .queues
                     .receive(&queue, room, LEASE_MS, now_ms())
                     .map_err(|error| error.to_string())?;
+                pumped_bytes = messages
+                    .iter()
+                    .map(|message| message.body.len().saturating_add(DELIVERY_FRAME_BYTES))
+                    .fold(pumped_bytes, usize::saturating_add);
+                if !held.hold_if_large(pumped_bytes) {
+                    let now = now_ms();
+                    for message in &messages {
+                        let _ = self.broker.queues.release(&queue, message.id, now);
+                    }
+                    return Ok(());
+                }
                 for message in messages {
                     let Some(state) = self.channels.get_mut(&channel) else {
                         break;
@@ -409,6 +445,13 @@ impl Connection<'_, '_> {
                     return Ok(false);
                 }
                 let properties = args.rest().to_vec();
+                let declared = self
+                    .declared_body_bytes()
+                    .saturating_add(usize::try_from(size).unwrap_or(usize::MAX));
+                if !self.bodies_held.hold_if_large(declared) {
+                    self.close_connection(RESOURCE_ERROR, OUT_OF_MEMORY_BUDGET, 60, 40);
+                    return Ok(false);
+                }
                 if let Some(state) = self.channels.get_mut(&incoming.channel) {
                     state.header = Some((size, properties));
                     if size == 0 {
@@ -931,7 +974,10 @@ pub(crate) fn serve_stream(
         stage: Stage::StartSent,
         channels: BTreeMap::new(),
         outgoing: VecDeque::new(),
+        bodies_held: config.memory_budget.empty_reservation(),
     };
+    let mut read_held = config.memory_budget.empty_reservation();
+    let mut outgoing_held = config.memory_budget.empty_reservation();
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     let outcome = loop {
@@ -940,7 +986,16 @@ pub(crate) fn serve_stream(
         }
         match reader.read(&mut chunk) {
             Ok(0) => break Ok(()),
-            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                if !read_held.hold_if_large(buffer.len().saturating_add(read)) {
+                    connection.close_connection(RESOURCE_ERROR, OUT_OF_MEMORY_BUDGET, 0, 0);
+                    while let Some(bytes) = connection.outgoing.pop_front() {
+                        writer.write_all(&bytes)?;
+                    }
+                    break Ok(());
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -952,7 +1007,7 @@ pub(crate) fn serve_stream(
         loop {
             match take_frame(&mut buffer) {
                 Ok(Some(incoming)) => match connection.handle(incoming) {
-                    Ok(true) => {}
+                    Ok(true) => connection.release_finished_bodies(),
                     Ok(false) => {
                         keep_going = false;
                         break;
@@ -981,12 +1036,14 @@ pub(crate) fn serve_stream(
                 }
             }
         }
+        read_held.hold_if_large(buffer.len());
         if keep_going && matches!(connection.stage, Stage::Open) {
-            let _ = connection.pump();
+            let _ = connection.pump(&mut outgoing_held);
         }
         while let Some(bytes) = connection.outgoing.pop_front() {
             writer.write_all(&bytes)?;
         }
+        outgoing_held.resize(0);
         if !keep_going {
             break Ok(());
         }

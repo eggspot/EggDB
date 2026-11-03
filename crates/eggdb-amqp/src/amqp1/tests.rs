@@ -10,6 +10,7 @@ fn config() -> ServerConfig {
         user: "eggdb".to_owned(),
         password_sha256: eggdb_crypto::sha256(b"secret"),
         max_connections: 4,
+        memory_budget: std::sync::Arc::default(),
     }
 }
 

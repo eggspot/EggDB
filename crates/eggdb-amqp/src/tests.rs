@@ -7,6 +7,7 @@ fn config() -> ServerConfig {
         user: "eggdb".to_owned(),
         password_sha256: eggdb_crypto::sha256(b"secret"),
         max_connections: 4,
+        memory_budget: std::sync::Arc::default(),
     }
 }
 
@@ -237,4 +238,52 @@ fn topic_patterns_match_as_the_specification_says() {
     let key = vec!["a"; 120].join(".");
     assert!(!topic_matches(&hostile, &key));
     assert!(topic_matches(&hostile, &format!("{key}.z")));
+}
+
+#[test]
+fn a_message_body_past_the_memory_budget_closes_its_connection_and_others_go_on() {
+    let keyspace = MemoryKeyspace::default();
+    let broker = Broker::new(&keyspace);
+    let budget = std::sync::Arc::new(eggdb_platform::connection_limits::MemoryBudget::new(
+        300_000,
+    ));
+    let config = ServerConfig {
+        memory_budget: std::sync::Arc::clone(&budget),
+        ..config()
+    };
+    let mut greedy = login("secret");
+    greedy.extend(declare(1, "jobs"));
+    greedy.extend(method(1, 60, 40, |out| {
+        out.short(0).shortstr("").shortstr("jobs").octet(0);
+    }));
+    let mut header = Out::default();
+    header.short(60).short(0).longlong(400_000).short(0);
+    greedy.extend(frame(FRAME_HEADER, 1, &header.bytes));
+    let mut output = Vec::new();
+    serve_stream(&broker, &config, greedy.as_slice(), &mut output, &|| false).unwrap();
+    let answers = methods(&output);
+    let close = answers
+        .iter()
+        .find(|(kind, class, id, _)| *kind == FRAME_METHOD && (*class, *id) == (10, 50))
+        .expect("a Connection.Close");
+    assert_eq!(u16::from_be_bytes([close.3[4], close.3[5]]), 506);
+    assert_eq!(budget.used_bytes(), 0);
+    let mut fitting = login("secret");
+    fitting.extend(declare(1, "jobs"));
+    fitting.extend(publish(1, "", "jobs", &vec![b'j'; 100_000]));
+    let mut output = Vec::new();
+    serve_stream(&broker, &config, fitting.as_slice(), &mut output, &|| false).unwrap();
+    assert!(
+        methods(&output)
+            .iter()
+            .all(|(_, class, id, _)| (*class, *id) != (10, 50))
+    );
+    assert_eq!(
+        eggdb_queues::Queues::new(&keyspace)
+            .depth("jobs", u64::MAX)
+            .unwrap()
+            .ready,
+        1
+    );
+    assert_eq!(budget.used_bytes(), 0);
 }
