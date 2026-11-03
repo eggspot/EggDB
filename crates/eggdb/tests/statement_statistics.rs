@@ -223,6 +223,10 @@ fn a_zero_threshold_logs_every_statement_as_one_line_without_its_values() {
     let mut client = connect(&server);
     with_accounts(&mut client);
     rows(&mut client, "SELECT secret FROM accounts WHERE id = 1");
+    rows(
+        &mut client,
+        "SELECT 'the session logged the statement before'",
+    );
     client.terminate();
     let stderr = stderr_after_stop(server);
     let line = stderr
