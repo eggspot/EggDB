@@ -511,7 +511,10 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   other dialects. `LISTAGG([ALL | DISTINCT] expr [, delimiter] [ON OVERFLOW ERROR | TRUNCATE
   ['indicator'] [WITH | WITHOUT COUNT]]) [WITHIN GROUP (ORDER BY ...)]` joins a group's values
   (NULLs left out, NULL for none); past 32,767 bytes it is `ORA-01489`, or truncated at the last
-  whole value with the indicator (`...`) and the count of values left out (D149).
+  whole value with the indicator (`...`) and the count of values left out (D149). The analytic
+  form `LISTAGG(...) [WITHIN GROUP (ORDER BY ...)] OVER ([PARTITION BY ...])` gives each row its
+  partition's values joined in `WITHIN GROUP` order; `ORDER BY` inside `OVER` is `ORA-30487` and
+  `DISTINCT` there answers `0A000` for now (D300).
 - **Length limit**: `LPAD`, `RPAD`, `REPLACE`, `||`, `UPPER`, `LOWER`, `INITCAP` and `TO_CHAR` refuse a result longer than
   1,000,000,000 bytes with `ORA-01489` before they build it.
 - **The data dictionary** (D134): `USER_`, `ALL_` and `DBA_` `TABLES`, `TAB_COLUMNS`,
@@ -572,7 +575,9 @@ SELECT @@VERSION
   before sending; the server reads `GO` as SQL Server does, as an ordinary word (`SELECT 1 GO`
   names its column `go`; `GO` alone is a syntax error). Scripts with `GO` for `eggdb restore`
   come with item 40.
-- `SELECT TOP n` and `TOP (expression)`; `N'...'` strings; `--` and nested `/* */` comments;
+- `SELECT TOP n` and `TOP (expression)`, with `PERCENT` (a percent of the rows the query finds,
+  rounded up; outside 0 to 100 is error 1031) and `WITH TIES` (the rows after the last one that
+  sort equal to it; without `ORDER BY` it is error 1062) (D300); `N'...'` strings; `--` and nested `/* */` comments;
   the operators `+ - * / % = <> != < > <= >= !< !>`.
 - **Types** (item 39, D123), written bare or bracketed in any case (`[decimal](18, 2)`, `AS
   DateTime2`), each kept as one of the engine's types, so PostgreSQL SQL reads the same columns:
@@ -633,7 +638,9 @@ SELECT @@VERSION
   `COUNT` returning `int` and `COUNT_BIG` `bigint`, `SUM` and `AVG` with SQL Server's result
   types (`int` for `tinyint`, `smallint` and `int`, `bigint`, `decimal(38, s)` and for `AVG`
   `decimal(38, max(s, 6))`, `float`; error 8115 past the type), `STRING_AGG` with `WITHIN GROUP
-  (ORDER BY ...)`. `STRING_SPLIT(text, separator [, enable_ordinal])` is a table with a `value`
+  (ORDER BY ...)`, also as a window function with `OVER ([PARTITION BY ...])` (the form Azure
+  Synapse documents; each row gets its partition's values joined in `WITHIN GROUP` order, D300).
+  `STRING_SPLIT(text, separator [, enable_ordinal])` is a table with a `value`
   column (and `ordinal`), and a one-character separator (error 214 otherwise). Dividing
   decimals gives SQL Server's precision and scale (`2 / 3.0` is `0.666666`, `10.0 / 4` is
   `2.500000000000`). `@@VERSION`, `@@SPID`, `@@SERVERNAME`, `@@TRANCOUNT`, `@@LANGUAGE`,
@@ -1514,7 +1521,10 @@ than `DBMS_OUTPUT` (`DBMS_SQL`, `UTL_FILE`, `DBMS_LOB`, ...).
   query and a `FROM` item (`(VALUES (1, 'a')) AS v(n, s)`): its columns are `column1`,
   `column2`, ... and each takes one type by the `UNION` rules below; rows of different lengths
   are `42601` (D128).
-- `SELECT [ALL | DISTINCT | DISTINCT ON (expr, ...)] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY [ALL | DISTINCT] grouping_item, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]]`.
+- `SELECT [ALL | DISTINCT | DISTINCT ON (expr, ...)] items [FROM from_item [join ...]] [WHERE expr] [GROUP BY [ALL | DISTINCT] grouping_item, ...] [HAVING expr] [ORDER BY expr [ASC | DESC] [NULLS FIRST | LAST], ...] [LIMIT n | ALL] [OFFSET n [ROW | ROWS]] [FETCH {FIRST | NEXT} [n] {ROW | ROWS} {ONLY | WITH TIES}]`.
+  `FETCH FIRST n ROWS ONLY` is `LIMIT n` (no count is 1); `WITH TIES` (D300) also returns the
+  rows after the last one that sort equal to it, and needs `ORDER BY` (else `42601`); `LIMIT`
+  and `FETCH` together are `42601`.
   `ORDER BY` takes an output column's number or alias, or any expression over the tables (with
   `DISTINCT`, only expressions in the select list, else `42P10`); a `SELECT` without `FROM`
   returns one row. `DISTINCT ON (expr, ...)` (PostgreSQL, D299) keeps the first row of each set
@@ -4146,7 +4156,7 @@ And more, not in the suite yet:
   `HH:MI:SS AM` and `DL` follows the documented `fmDay, Month dd, yyyy` (`December 1`), choices
   recorded in D149; `L` and `U` pad the leading symbol to twelve characters as the conversion
   table shows. Languages other than the seven above, `E`/`EE` (other calendars),
-  `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)`, `LISTAGG ... OVER` and `AT TIME ZONE` are not
+  `TO_DATE(... DEFAULT ... ON CONVERSION ERROR)`, `LISTAGG (DISTINCT ...) OVER` and `AT TIME ZONE` are not
   supported yet. Other string functions given a date (`SUBSTR(d, ...)`) write it by
   `NLS_DATE_FORMAT` whatever its type; a time stamp assigned to a character column takes the
   timestamp format only when it has a fractional second. `NEXTVAL` in a `MERGE`'s `VALUES` draws
@@ -4253,7 +4263,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
 - A user function's result without an alias (`SELECT dbo.f(1)`) is named after the function
   (`f`), where SQL Server leaves the column without a name. Functions run as `STABLE` ones: a
   function a statement calls sees the database as that statement started.
-- Not yet: `TOP ... PERCENT` and `WITH TIES`, `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
+- Not yet: `OUTPUT ... INTO`, `deleted.` in `UPDATE`,
   `SELECT ... INTO` and global `##temporary` tables (`##name` is the session's own table, like
   `#name`).
 - An identity column that is not the first column of the primary key. The next identity number
