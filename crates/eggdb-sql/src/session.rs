@@ -2706,7 +2706,14 @@ impl<'s> Session<'s> {
         let before_execution = lookups();
         let started = std::time::Instant::now();
         let mut statement = (*explain.statement).clone();
-        let result = self.run(&mut statement, io)?;
+        let (result, selects) = if crate::explain::PlannedStatement::of(&statement)
+            == Some(crate::explain::PlannedStatement::Select)
+        {
+            crate::step_times::record(|| self.run(&mut statement, io))
+        } else {
+            (self.run(&mut statement, io), Vec::new())
+        };
+        let result = result?;
         let execution = started.elapsed();
         let after_execution = lookups();
         let rows = crate::statement_statistics::rows_of(&result);
@@ -2726,6 +2733,7 @@ impl<'s> Session<'s> {
                 planning,
                 execution,
                 buffers,
+                selects,
             },
         ))
     }

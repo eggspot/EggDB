@@ -148,6 +148,7 @@ mod stack_depth;
 mod standards;
 pub mod statement_statistics;
 mod statistics;
+mod step_times;
 mod store;
 mod string_functions;
 mod subquery;

@@ -2912,7 +2912,7 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
     let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t WHERE n > 1");
     let lines: Vec<&str> = plan.lines().collect();
-    assert!(lines[1].ends_with("(actual rows=2 loops=1)"), "{plan}");
+    assert_eq!(actual_group(lines[1]).map(|(_, _, rows)| rows), Some(2), "{plan}");
     assert!(
         lines[lines.len() - 3].starts_with("Planning Time: "),
         "{plan}"
@@ -2926,11 +2926,12 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
         &mut session,
         "EXPLAIN (ANALYZE, COSTS OFF) DELETE FROM t WHERE id = 3",
     );
-    assert!(
+    assert_eq!(
         plan.lines()
             .nth(1)
-            .unwrap()
-            .ends_with("(actual rows=1 loops=1)"),
+            .and_then(actual_group)
+            .map(|(_, _, rows)| rows),
+        Some(1),
         "{plan}"
     );
     assert_eq!(
@@ -2941,6 +2942,73 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
         fails(&mut session, "EXPLAIN (FORMAT JSON) SELECT 1").state(),
         crate::SqlState::FEATURE_NOT_SUPPORTED
     );
+}
+
+fn actual_group(line: &str) -> Option<(f64, f64, u64)> {
+    let group = line.split_once(" (actual time=")?.1.strip_suffix(" loops=1)")?;
+    let (times, rows) = group.split_once(" rows=")?;
+    let (first, last) = times.split_once("..")?;
+    let three_decimals = |time: &str| {
+        time.split_once('.')
+            .is_some_and(|(_, decimals)| decimals.len() == 3)
+    };
+    if !three_decimals(first) || !three_decimals(last) {
+        return None;
+    }
+    let (first, last) = (first.parse::<f64>().ok()?, last.parse::<f64>().ok()?);
+    (first <= last).then_some((first, last, rows.parse().ok()?))
+}
+
+#[test]
+fn explain_analyze_times_the_scan_sort_and_limit_it_measures() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE TABLE t (id integer PRIMARY KEY, n integer)",
+    )
+    .unwrap();
+    run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
+    let plan = last(
+        &mut session,
+        "EXPLAIN ANALYZE SELECT * FROM t ORDER BY n DESC LIMIT 1",
+    );
+    let lines: Vec<&str> = plan.lines().collect();
+    assert!(lines[1].starts_with("Limit (actual time="), "{plan}");
+    assert!(lines[2].starts_with("  ->  Sort (actual time="), "{plan}");
+    assert!(
+        lines[3].starts_with("        ->  Seq Scan on t (actual time="),
+        "{plan}"
+    );
+    let measured: Vec<(f64, f64, u64)> = lines[1..4]
+        .iter()
+        .map(|line| actual_group(line).unwrap_or_else(|| panic!("{line} in {plan}")))
+        .collect();
+    let rows: Vec<u64> = measured.iter().map(|(_, _, rows)| *rows).collect();
+    assert_eq!(rows, [1, 1, 3], "{plan}");
+    assert!(
+        measured.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+        "a step ends no earlier than the steps under it: {plan}"
+    );
+    let execution: f64 = lines[lines.len() - 2]
+        .strip_prefix("Execution Time: ")
+        .and_then(|time| time.strip_suffix(" ms"))
+        .and_then(|time| time.parse().ok())
+        .unwrap_or_else(|| panic!("{plan}"));
+    assert!(measured[0].1 <= execution, "{plan}");
+    let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t LIMIT 0");
+    let lines: Vec<&str> = plan.lines().collect();
+    assert_eq!(actual_group(lines[1]).map(|(_, _, rows)| rows), Some(0), "{plan}");
+    assert_eq!(lines[2], "  ->  Seq Scan on t (never executed)", "{plan}");
+    run(&mut session, "CREATE TABLE u (id integer PRIMARY KEY, t_id integer)").unwrap();
+    run(&mut session, "INSERT INTO u VALUES (10, 1), (11, 3), (12, 9)").unwrap();
+    let plan = last(
+        &mut session,
+        "EXPLAIN ANALYZE SELECT * FROM u JOIN t ON t.id = u.t_id",
+    );
+    let lines: Vec<&str> = plan.lines().collect();
+    assert!(lines[1].contains(" (actual time="), "{plan}");
+    assert_eq!(actual_group(lines[1]).map(|(_, _, rows)| rows), Some(2), "{plan}");
 }
 
 #[test]

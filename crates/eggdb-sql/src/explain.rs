@@ -14,8 +14,10 @@ use crate::execute::{ExplainedQuery, ExplainedSource};
 use crate::join::JoinMethod;
 use crate::plan::{KeyChoice, Use};
 use crate::session::{OutputColumn, QueryResult};
+use crate::step_times::{MeasuredSelect, RowTimes};
 use crate::store::PageLookups;
 use crate::types::{SqlType, Value};
+use std::time::Duration;
 
 const MYSQL_COLUMNS: [&str; 12] = [
     "id",
@@ -85,9 +87,95 @@ pub(crate) struct Buffers {
 
 pub(crate) struct Analyzed {
     pub(crate) rows: u64,
-    pub(crate) planning: std::time::Duration,
-    pub(crate) execution: std::time::Duration,
+    pub(crate) planning: Duration,
+    pub(crate) execution: Duration,
     pub(crate) buffers: Option<Buffers>,
+    pub(crate) selects: Vec<MeasuredSelect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Measured {
+    Ran(RowTimes),
+    NeverExecuted,
+}
+
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn actual_group(measured: Measured) -> String {
+    match measured {
+        Measured::NeverExecuted => " (never executed)".to_owned(),
+        Measured::Ran(times) => format!(
+            " (actual time={:.3}..{:.3} rows={} loops=1)",
+            milliseconds(times.first_row.min(times.last_row)),
+            milliseconds(times.last_row),
+            times.rows
+        ),
+    }
+}
+
+fn source_measured(select: &MeasuredSelect) -> Measured {
+    select.source.map_or(Measured::NeverExecuted, Measured::Ran)
+}
+
+fn sort_measured(select: &MeasuredSelect) -> Measured {
+    let Some(source) = select.source else {
+        return Measured::NeverExecuted;
+    };
+    Measured::Ran(RowTimes {
+        first_row: source.last_row.min(select.output.last_row),
+        last_row: select.output.last_row,
+        rows: select
+            .output
+            .rows
+            .saturating_add(select.skipped)
+            .min(source.rows),
+    })
+}
+
+fn top_measured(measured: &[Option<Measured>], analyzed: &Analyzed) -> Measured {
+    let own = measured.first().copied().flatten();
+    let first_ran = measured.iter().take(2).find_map(|step| match step {
+        Some(Measured::Ran(times)) => Some(times.first_row),
+        _ => None,
+    });
+    let last_row = match own {
+        Some(Measured::Ran(times)) => times.last_row,
+        _ => analyzed.execution,
+    };
+    Measured::Ran(RowTimes {
+        first_row: first_ran.unwrap_or(last_row).min(last_row),
+        last_row,
+        rows: analyzed.rows,
+    })
+}
+
+fn measured_steps(query: &ExplainedQuery, analyzed: &Analyzed) -> Vec<Option<Measured>> {
+    let mut measured = vec![None; steps(query).len()];
+    let wrappers = usize::from(query.limited) + usize::from(query.sorted);
+    if query.appended {
+        let branches = analyzed.selects.iter().take(query.sources.len());
+        for (position, select) in branches.enumerate() {
+            if let Some(step) = measured.get_mut(wrappers + 1 + position) {
+                *step = Some(source_measured(select));
+            }
+        }
+    } else if let Some(select) = analyzed.selects.first() {
+        if let Some(step) = measured.get_mut(wrappers) {
+            *step = Some(source_measured(select));
+        }
+        if query.sorted
+            && let Some(step) = measured.get_mut(usize::from(query.limited))
+        {
+            *step = Some(sort_measured(select));
+        }
+    }
+    let top = top_measured(&measured, analyzed);
+    if let Some(step) = measured.first_mut() {
+        *step = Some(top);
+    }
+    measured
 }
 
 fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
@@ -101,14 +189,24 @@ fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
     (!parts.is_empty()).then(|| format!("{indent}Buffers: shared {}", parts.join(" ")))
 }
 
-/// `EXPLAIN ANALYZE` in PostgreSQL's text form: the plan, the rows the statement returned or
-/// changed on its top line, under `BUFFERS` the page lookups of the whole statement under the
-/// top node and those of planning under `Planning:`, and the planning and execution times.
+/// `EXPLAIN ANALYZE` in PostgreSQL's text form: the plan with `(actual time=a..b rows=n
+/// loops=1)` on the top node and on each scan, join, sort and append branch the executor
+/// measured (milliseconds from the start of execution to the step's first and last row;
+/// `(never executed)` for a step it never read), the rows the statement returned or changed on
+/// the top line, under `BUFFERS` the page lookups of the whole statement under the top node and
+/// those of planning under `Planning:`, and the planning and execution times.
 pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
-    let mut lines = postgresql_lines(query);
-    if let Some(top) = lines.first_mut() {
-        top.push_str(&format!(" (actual rows={} loops=1)", analyzed.rows));
-    }
+    let measured = measured_steps(query, &analyzed);
+    let mut lines: Vec<String> = postgresql_lines(query)
+        .into_iter()
+        .zip(measured)
+        .map(|(mut line, measured)| {
+            if let Some(measured) = measured {
+                line.push_str(&actual_group(measured));
+            }
+            line
+        })
+        .collect();
     if let Some(buffers) = &analyzed.buffers {
         if let Some(line) = buffers_line("  ", buffers.execution) {
             lines.insert(1.min(lines.len()), line);
@@ -120,11 +218,11 @@ pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> Que
     }
     lines.push(format!(
         "Planning Time: {:.3} ms",
-        analyzed.planning.as_secs_f64() * 1000.0
+        milliseconds(analyzed.planning)
     ));
     lines.push(format!(
         "Execution Time: {:.3} ms",
-        analyzed.execution.as_secs_f64() * 1000.0
+        milliseconds(analyzed.execution)
     ));
     QueryResult::rows(
         "EXPLAIN".to_owned(),
@@ -488,5 +586,101 @@ mod tests {
             Some("  Buffers: shared hit=5")
         );
         assert_eq!(buffers_line("  ", lookups(0, 0)), None);
+    }
+
+    fn micros(first_row: u64, last_row: u64, rows: u64) -> RowTimes {
+        RowTimes {
+            first_row: Duration::from_micros(first_row),
+            last_row: Duration::from_micros(last_row),
+            rows,
+        }
+    }
+
+    fn analyzed(rows: u64, selects: Vec<MeasuredSelect>) -> Analyzed {
+        Analyzed {
+            rows,
+            planning: Duration::from_micros(7),
+            execution: Duration::from_micros(100),
+            buffers: None,
+            selects,
+        }
+    }
+
+    fn plan_lines(query: &ExplainedQuery, analyzed: Analyzed) -> Vec<String> {
+        render_analyzed(query, analyzed)
+            .rows
+            .into_iter()
+            .filter_map(|row| match row.into_iter().next() {
+                Some(Value::Text(line)) => Some(line),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_measured_step_prints_postgresqls_actual_time_rows_and_loops() {
+        let measured = MeasuredSelect {
+            source: Some(micros(10, 25, 1)),
+            output: micros(10, 30, 1),
+            skipped: 0,
+        };
+        let lines = plan_lines(&ExplainedQuery::default(), analyzed(1, vec![measured]));
+        assert_eq!(lines[0], "Result (actual time=0.010..0.025 rows=1 loops=1)");
+        assert_eq!(lines[1], "Planning Time: 0.007 ms");
+        assert_eq!(lines[2], "Execution Time: 0.100 ms");
+    }
+
+    #[test]
+    fn a_sort_under_a_limit_starts_when_its_input_ends_and_counts_what_it_handed_up() {
+        let query = ExplainedQuery {
+            sorted: true,
+            limited: true,
+            ..ExplainedQuery::default()
+        };
+        let measured = MeasuredSelect {
+            source: Some(micros(5, 40, 3)),
+            output: micros(5, 60, 1),
+            skipped: 1,
+        };
+        let lines = plan_lines(&query, analyzed(1, vec![measured]));
+        assert_eq!(
+            lines[..3],
+            [
+                "Limit (actual time=0.040..0.100 rows=1 loops=1)",
+                "  ->  Sort (actual time=0.040..0.060 rows=2 loops=1)",
+                "        ->  Result (actual time=0.005..0.040 rows=3 loops=1)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_step_the_executor_never_read_says_never_executed() {
+        let query = ExplainedQuery {
+            sorted: true,
+            limited: true,
+            ..ExplainedQuery::default()
+        };
+        let measured = MeasuredSelect {
+            source: None,
+            output: micros(50, 50, 0),
+            skipped: 0,
+        };
+        let lines = plan_lines(&query, analyzed(0, vec![measured]));
+        assert_eq!(
+            lines[..3],
+            [
+                "Limit (actual time=0.100..0.100 rows=0 loops=1)",
+                "  ->  Sort (never executed)",
+                "        ->  Result (never executed)",
+            ]
+        );
+    }
+
+    #[test]
+    fn without_measured_steps_the_top_node_carries_the_statements_rows_and_time() {
+        assert_eq!(
+            plan_lines(&ExplainedQuery::default(), analyzed(4, Vec::new()))[0],
+            "Result (actual time=0.100..0.100 rows=4 loops=1)"
+        );
     }
 }

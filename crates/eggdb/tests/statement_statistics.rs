@@ -263,7 +263,8 @@ fn explain_analyze_buffers_prints_the_page_hits_and_reads_under_the_top_node() {
         "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM accounts",
     );
     assert!(
-        plan[0].starts_with("Seq Scan on accounts") && plan[0].ends_with("(actual rows=2 loops=1)"),
+        plan[0].starts_with("Seq Scan on accounts (actual time=")
+            && plan[0].ends_with(" rows=2 loops=1)"),
         "{plan:?}"
     );
     let buffers = &plan[1];

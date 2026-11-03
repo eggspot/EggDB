@@ -3528,6 +3528,7 @@ fn select_or_explain(
         limit,
         distinct: select.distinct,
     };
+    let meter = crate::step_times::claim();
     let mut memory = WorkMemory::new();
     let bound_filter = match (&joined, &select.filter) {
         (Some(_), Some(filter)) => Some(aggregate::bind(filter, scope)?),
@@ -3575,6 +3576,7 @@ fn select_or_explain(
         },
         late,
         correlation,
+        meter: meter.as_ref(),
     };
     if let Some(count) = select.source_row_limit {
         let wanted = usize::try_from(count).unwrap_or(usize::MAX);
@@ -3586,6 +3588,7 @@ fn select_or_explain(
             filter: None,
             late: None,
             correlation,
+            meter: None,
         };
     }
     if let Some(grouping) = &grouping {
@@ -3602,6 +3605,7 @@ fn select_or_explain(
             filter: None,
             late: None,
             correlation,
+            meter: None,
         };
     }
     let output = if sort_keys.is_empty() || (ordered && !limit.with_ties) {
@@ -3619,6 +3623,9 @@ fn select_or_explain(
             &mut memory,
         )?
     };
+    if let Some(meter) = &meter {
+        meter.finish(output.len(), window.skip);
+    }
     let tag = format!("SELECT {}", output.len());
     Ok(QueryResult::rows(tag, projection.columns, output))
 }
@@ -3703,6 +3710,7 @@ struct SourceRows<'a> {
     filter: Option<&'a Expr>,
     late: Option<&'a Expr>,
     correlation: Option<&'a Correlation<'a>>,
+    meter: Option<&'a crate::step_times::SelectMeter>,
 }
 
 impl SourceRows<'_> {
@@ -3711,6 +3719,14 @@ impl SourceRows<'_> {
     }
 
     fn for_each(&mut self, visit: &mut dyn FnMut(Vec<Value>) -> SqlResult<bool>) -> SqlResult<()> {
+        if let Some(meter) = self.meter.take() {
+            let read = self.for_each(&mut |row| {
+                meter.source_row();
+                visit(row)
+            });
+            meter.source_read();
+            return read;
+        }
         let Some(late) = self.late else {
             return self.for_each_early(visit);
         };
@@ -3770,6 +3786,14 @@ impl SourceRows<'_> {
         &mut self,
         visit: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
     ) -> SqlResult<()> {
+        if let Some(meter) = self.meter.take() {
+            let read = self.for_each_borrowed(&mut |row: &[Value]| {
+                meter.source_row();
+                visit(row)
+            });
+            meter.source_read();
+            return read;
+        }
         if self.late.is_some() {
             return self.for_each(&mut |row| visit(&row));
         }
