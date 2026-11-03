@@ -386,6 +386,10 @@ impl Workspace {
         if button == PointerButton::Middle {
             return self.middle_pressed(x, y, faces, size, now);
         }
+        if button == PointerButton::Secondary {
+            self.secondary_pressed(x, y, faces, size, now);
+            return WorkspaceCommand::None;
+        }
         if button != PointerButton::Primary || self.card_mut().is_some_and(|card| card.busy) {
             return WorkspaceCommand::None;
         }
@@ -397,8 +401,17 @@ impl Workspace {
             self.picker_outcome(outcome, now);
             return WorkspaceCommand::None;
         }
+        if self
+            .main_window_mut()
+            .is_some_and(|window| window.press_outside_popover(x, y))
+        {
+            return WorkspaceCommand::None;
+        }
         let tree = self.pointer_tree(faces, size);
-        let Some(node) = pointer::hit_test(&tree, x, y).cloned() else {
+        let Some(node) = pointer::hit_test(&tree, x, y)
+            .filter(|node| self.popover_allows(node.id))
+            .cloned()
+        else {
             return WorkspaceCommand::None;
         };
         {
@@ -442,7 +455,14 @@ impl Workspace {
                 {
                     grid.anchor = anchor;
                 }
-                self.drag = Some(Drag::Grid);
+                if clicks == 2
+                    && !extend
+                    && let Some(window) = self.main_window_mut()
+                {
+                    window.tab.open_value();
+                } else {
+                    self.drag = Some(Drag::Grid);
+                }
             }
             AccessRole::TreeItem => {
                 let action = if clicks == 2 {
@@ -456,6 +476,33 @@ impl Workspace {
         }
         self.pointer_look_mut().focus_by_pointer = true;
         command
+    }
+
+    fn popover_allows(&self, id: u32) -> bool {
+        match &self.screen {
+            Screen::Main(window) => window.popover_rect().is_none() || window.is_popover_node(id),
+            Screen::Connect(_) => true,
+        }
+    }
+
+    fn secondary_pressed(
+        &mut self,
+        x: f32,
+        y: f32,
+        faces: Faces<'_>,
+        size: (u32, u32),
+        now: Instant,
+    ) {
+        if self.picker_mut().is_some() || !matches!(self.screen, Screen::Main(_)) {
+            return;
+        }
+        self.input_at(now);
+        let tree = self.pointer_tree(faces, size);
+        if let Some(window) = self.main_window_mut()
+            && window.close_prompt.is_none()
+        {
+            window.context_press(&tree, x, y);
+        }
     }
 
     fn middle_pressed(

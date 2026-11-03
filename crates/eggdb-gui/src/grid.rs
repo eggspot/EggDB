@@ -94,6 +94,19 @@ impl ValueKind {
     pub fn right_aligned(self) -> bool {
         matches!(self, Self::Number | Self::Ttl)
     }
+
+    /// The kind's name as the full-value view's header gives it: `text`, `number`, `binary`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Number => "number",
+            Self::Text => "text",
+            Self::Boolean => "boolean",
+            Self::Json => "json",
+            Self::Blob => "binary",
+            Self::Vector => "vector",
+            Self::Ttl => "ttl",
+        }
+    }
 }
 
 /// How a cell's text is drawn.
@@ -198,6 +211,8 @@ pub enum GridAnswer {
     LeaveBack,
     /// `Enter` or `F2`: open the current cell's full value.
     OpenValue,
+    /// `Shift+F10` or the menu key: open the grid's menu below the current cell.
+    OpenMenu,
     /// A copy: the text for the clipboard and the toast that says what was copied.
     Copy {
         /// The copied text.
@@ -377,6 +392,8 @@ impl ResultGrid {
             Key::Tab if shift => return GridAnswer::LeaveBack,
             Key::Tab => return GridAnswer::LeaveForward,
             Key::Enter | Key::F2 => return GridAnswer::OpenValue,
+            Key::F10 if shift => return GridAnswer::OpenMenu,
+            Key::ContextMenu => return GridAnswer::OpenMenu,
             Key::Escape => {
                 self.anchor = self.current;
                 return GridAnswer::Moved;
@@ -486,6 +503,117 @@ impl ResultGrid {
         out
     }
 
+    fn fetched_selection(&self) -> (Range<usize>, Range<usize>) {
+        let (rows, columns) = self.selection();
+        let rows = rows.start.min(self.rows.len())..rows.end.min(self.rows.len());
+        let columns = columns.start.min(self.columns.len())..columns.end.min(self.columns.len());
+        (rows, columns)
+    }
+
+    /// The selection as RFC 4180 CSV (`docs/ux/workspace.md` 9.4): a header row of the
+    /// selected columns' names, fields joined by `,` and records by `\r\n` with no trailing
+    /// one, a field holding `,`, `"`, `\r` or `\n` quoted with `"` doubled, NULL empty and a
+    /// blob as `0x` and its full hex.
+    pub fn csv(&self) -> String {
+        let (rows, columns) = self.fetched_selection();
+        let mut records = Vec::with_capacity(rows.len() + 1);
+        let header: Vec<String> = columns
+            .clone()
+            .map(|column| csv_field(&self.columns[column]))
+            .collect();
+        records.push(header.join(","));
+        for row in rows {
+            let fields: Vec<String> = columns
+                .clone()
+                .map(|column| match self.value(Cell { row, column }) {
+                    None => String::new(),
+                    Some(text) if self.kind(column) == ValueKind::Blob => {
+                        csv_field(&full_hex(text))
+                    }
+                    Some(text) => csv_field(text),
+                })
+                .collect();
+            records.push(fields.join(","));
+        }
+        records.join("\r\n")
+    }
+
+    /// The selection as a pretty-printed JSON array of one object per selected row
+    /// (`docs/ux/workspace.md` 9.4): keys the column names in column order, a repeated name
+    /// suffixed `_2`, `_3`; numbers and booleans bare, NULL `null`, JSON and vectors embedded,
+    /// everything else a string.
+    pub fn json(&self) -> String {
+        let (rows, columns) = self.fetched_selection();
+        let keys = json_keys(&self.columns[columns.clone()]);
+        let mut objects = Vec::with_capacity(rows.len());
+        for row in rows {
+            let members: Vec<String> = columns
+                .clone()
+                .zip(&keys)
+                .map(|(column, key)| {
+                    let value = json_value(self.value(Cell { row, column }), self.kind(column));
+                    format!("{}:{value}", json_string(key))
+                })
+                .collect();
+            objects.push(format!("{{{}}}", members.join(",")));
+        }
+        pretty_json(&format!("[{}]", objects.join(",")))
+    }
+
+    fn copy_csv(&self) -> GridAnswer {
+        let (rows, columns) = self.fetched_selection();
+        GridAnswer::Copy {
+            text: self.csv(),
+            toast: crate::status_line::copied_csv_text(rows.len() * columns.len()),
+        }
+    }
+
+    fn copy_json(&self) -> GridAnswer {
+        let (rows, _) = self.fetched_selection();
+        GridAnswer::Copy {
+            text: self.json(),
+            toast: crate::status_line::copied_json_text(rows.len()),
+        }
+    }
+
+    /// Does what the grid's menu item `item` says (`docs/ux/workspace.md` 9.4).
+    pub fn menu_item(&mut self, item: GridMenuItem) -> GridAnswer {
+        let primary = |letter: char, shift: bool| KeyPress {
+            key: Key::Character(letter),
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                shift,
+                ..Default::default()
+            },
+        };
+        let shift_space = KeyPress {
+            key: Key::Space,
+            modifiers: eggdb_platform::window::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        let control_space = KeyPress {
+            key: Key::Space,
+            modifiers: eggdb_platform::window::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        };
+        let press = match item {
+            GridMenuItem::CopyAsCsv => return self.copy_csv(),
+            GridMenuItem::CopyAsJson => return self.copy_json(),
+            GridMenuItem::OpenValue => return GridAnswer::OpenValue,
+            GridMenuItem::Copy => primary('c', false),
+            GridMenuItem::CopyWithHeader => primary('c', true),
+            GridMenuItem::CopyAsInsert => primary('i', true),
+            GridMenuItem::SelectRow => shift_space,
+            GridMenuItem::SelectColumn => control_space,
+            GridMenuItem::SelectAll => primary('a', false),
+        };
+        self.key(press, 1)
+    }
+
     fn copy_tsv(&self, header: bool) -> GridAnswer {
         let (rows, columns) = self.selection_size();
         let rows = rows.min(self.rows.len().saturating_sub(self.selection().0.start));
@@ -541,6 +669,347 @@ impl ResultGrid {
             toast: crate::status_line::copied_inserts_text(statements),
         }
     }
+}
+
+/// One item of the grid's right-click menu (`docs/ux/workspace.md` 9.4), in its order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridMenuItem {
+    /// `Copy`: the selection as TSV.
+    Copy,
+    /// `Copy with header`: TSV with the column names first.
+    CopyWithHeader,
+    /// `Copy as INSERT`.
+    CopyAsInsert,
+    /// `Copy as CSV`.
+    CopyAsCsv,
+    /// `Copy as JSON`.
+    CopyAsJson,
+    /// `Open value`: the current cell's full-value view.
+    OpenValue,
+    /// `Select row`.
+    SelectRow,
+    /// `Select column`.
+    SelectColumn,
+    /// `Select all`.
+    SelectAll,
+}
+
+impl GridMenuItem {
+    /// Every item, top to bottom.
+    pub const ALL: [Self; 9] = [
+        Self::Copy,
+        Self::CopyWithHeader,
+        Self::CopyAsInsert,
+        Self::CopyAsCsv,
+        Self::CopyAsJson,
+        Self::OpenValue,
+        Self::SelectRow,
+        Self::SelectColumn,
+        Self::SelectAll,
+    ];
+
+    /// The item's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy",
+            Self::CopyWithHeader => "Copy with header",
+            Self::CopyAsInsert => "Copy as INSERT",
+            Self::CopyAsCsv => "Copy as CSV",
+            Self::CopyAsJson => "Copy as JSON",
+            Self::OpenValue => "Open value",
+            Self::SelectRow => "Select row",
+            Self::SelectColumn => "Select column",
+            Self::SelectAll => "Select all",
+        }
+    }
+
+    /// The item's shortcut as the menu shows it, with `primary` naming `Ctrl` or `Cmd`.
+    pub fn shortcut(self, primary: &str) -> Option<String> {
+        match self {
+            Self::Copy => Some(format!("{primary}+C")),
+            Self::CopyWithHeader => Some(format!("{primary}+Shift+C")),
+            Self::CopyAsInsert => Some(format!("{primary}+Shift+I")),
+            Self::OpenValue => Some("Enter".to_owned()),
+            Self::SelectRow => Some("Shift+Space".to_owned()),
+            Self::SelectColumn => Some(format!("{primary}+Space")),
+            Self::SelectAll => Some(format!("{primary}+A")),
+            Self::CopyAsCsv | Self::CopyAsJson => None,
+        }
+    }
+
+    /// Whether a separator follows the item, ending its group.
+    pub fn ends_group(self) -> bool {
+        matches!(self, Self::CopyAsJson | Self::OpenValue)
+    }
+}
+
+/// A blob's text as `0x` and its full hex, from PostgreSQL's `\x` form or an `0x` one.
+pub fn full_hex(text: &str) -> String {
+    let hex = text
+        .strip_prefix("\\x")
+        .or_else(|| text.strip_prefix("0x"))
+        .unwrap_or(text);
+    format!("0x{hex}")
+}
+
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_owned()
+    }
+}
+
+fn json_keys(names: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let mut key = name.clone();
+        let mut suffix = 2;
+        while keys.contains(&key) {
+            key = format!("{name}_{suffix}");
+            suffix += 1;
+        }
+        keys.push(key);
+    }
+    keys
+}
+
+/// `text` as a JSON string, quoted and escaped.
+pub fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0}'..='\u{1f}' => out.push_str(&format!("\\u{:04x}", character as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_value(value: Option<&str>, kind: ValueKind) -> String {
+    let Some(text) = value else {
+        return "null".to_owned();
+    };
+    match kind {
+        ValueKind::Number | ValueKind::Ttl if numeric_literal(text) => text.to_owned(),
+        ValueKind::Boolean => {
+            let truth = matches!(text, "t" | "true" | "TRUE" | "1");
+            if truth { "true" } else { "false" }.to_owned()
+        }
+        ValueKind::Json | ValueKind::Vector if is_json(text) => text.trim().to_owned(),
+        ValueKind::Blob => json_string(&full_hex(text)),
+        _ => json_string(text),
+    }
+}
+
+const JSON_DEPTH_LIMIT: usize = 256;
+
+/// Whether `text` is one JSON value (RFC 8259) with nothing after it, nested at most 256
+/// deep.
+pub fn is_json(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    json_element(bytes, &mut at, 0) && {
+        skip_json_space(bytes, &mut at);
+        at == bytes.len()
+    }
+}
+
+fn skip_json_space(bytes: &[u8], at: &mut usize) {
+    while bytes
+        .get(*at)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        *at += 1;
+    }
+}
+
+fn json_element(bytes: &[u8], at: &mut usize, depth: usize) -> bool {
+    if depth > JSON_DEPTH_LIMIT {
+        return false;
+    }
+    skip_json_space(bytes, at);
+    match bytes.get(*at) {
+        Some(b'{') => json_members(bytes, at, depth, b'}', true),
+        Some(b'[') => json_members(bytes, at, depth, b']', false),
+        Some(b'"') => json_string_token(bytes, at),
+        Some(b't') => json_word(bytes, at, b"true"),
+        Some(b'f') => json_word(bytes, at, b"false"),
+        Some(b'n') => json_word(bytes, at, b"null"),
+        Some(b'-' | b'0'..=b'9') => json_number(bytes, at),
+        _ => false,
+    }
+}
+
+fn json_members(bytes: &[u8], at: &mut usize, depth: usize, close: u8, object: bool) -> bool {
+    *at += 1;
+    skip_json_space(bytes, at);
+    if bytes.get(*at) == Some(&close) {
+        *at += 1;
+        return true;
+    }
+    loop {
+        if object {
+            skip_json_space(bytes, at);
+            if !json_string_token(bytes, at) {
+                return false;
+            }
+            skip_json_space(bytes, at);
+            if bytes.get(*at) != Some(&b':') {
+                return false;
+            }
+            *at += 1;
+        }
+        if !json_element(bytes, at, depth + 1) {
+            return false;
+        }
+        skip_json_space(bytes, at);
+        match bytes.get(*at) {
+            Some(b',') => *at += 1,
+            Some(&byte) if byte == close => {
+                *at += 1;
+                return true;
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn json_string_token(bytes: &[u8], at: &mut usize) -> bool {
+    if bytes.get(*at) != Some(&b'"') {
+        return false;
+    }
+    *at += 1;
+    while let Some(&byte) = bytes.get(*at) {
+        *at += 1;
+        match byte {
+            b'"' => return true,
+            b'\\' => match bytes.get(*at) {
+                Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => *at += 1,
+                Some(b'u') => {
+                    let digits = bytes.get(*at + 1..*at + 5);
+                    if !digits.is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit)) {
+                        return false;
+                    }
+                    *at += 5;
+                }
+                _ => return false,
+            },
+            0..=0x1f => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn json_word(bytes: &[u8], at: &mut usize, word: &[u8]) -> bool {
+    if bytes.get(*at..*at + word.len()) == Some(word) {
+        *at += word.len();
+        true
+    } else {
+        false
+    }
+}
+
+fn json_digits(bytes: &[u8], at: &mut usize) -> usize {
+    let start = *at;
+    while bytes.get(*at).is_some_and(u8::is_ascii_digit) {
+        *at += 1;
+    }
+    *at - start
+}
+
+fn json_number(bytes: &[u8], at: &mut usize) -> bool {
+    if bytes.get(*at) == Some(&b'-') {
+        *at += 1;
+    }
+    match bytes.get(*at) {
+        Some(b'0') => *at += 1,
+        Some(b'1'..=b'9') => {
+            json_digits(bytes, at);
+        }
+        _ => return false,
+    }
+    if bytes.get(*at) == Some(&b'.') {
+        *at += 1;
+        if json_digits(bytes, at) == 0 {
+            return false;
+        }
+    }
+    if matches!(bytes.get(*at), Some(b'e' | b'E')) {
+        *at += 1;
+        if matches!(bytes.get(*at), Some(b'+' | b'-')) {
+            *at += 1;
+        }
+        if json_digits(bytes, at) == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// `text` pretty-printed with a 2-space indent (`docs/ux/workspace.md` 9.3): a line per
+/// member and element, `": "` after keys, empty objects and arrays kept as `{}` and `[]`,
+/// strings untouched and keys in their stored order. Text that is not JSON (a PostgreSQL
+/// array such as `{1,2}`) is laid out by the same brackets and commas.
+pub fn pretty_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut depth: usize = 0;
+    let mut characters = text.chars().peekable();
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+    };
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => {
+                out.push('"');
+                let mut escaped = false;
+                for inner in characters.by_ref() {
+                    out.push(inner);
+                    match inner {
+                        '\\' if !escaped => escaped = true,
+                        '"' if !escaped => break,
+                        _ => escaped = false,
+                    }
+                }
+            }
+            '{' | '[' => {
+                while characters.next_if(|next| next.is_whitespace()).is_some() {}
+                let close = if character == '{' { '}' } else { ']' };
+                if characters.next_if_eq(&close).is_some() {
+                    out.push(character);
+                    out.push(close);
+                } else {
+                    out.push(character);
+                    depth += 1;
+                    newline(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(character);
+            }
+            ',' => {
+                out.push(',');
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            ' ' | '\t' | '\n' | '\r' => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn tsv_field(text: &str) -> String {
@@ -934,5 +1403,80 @@ mod tests {
         grid.scroll_by(0, -1, 13);
         assert_eq!(grid.scroll_x, 80.0);
         assert_eq!(grid.current, Cell { row: 2, column: 1 });
+    }
+
+    #[test]
+    fn copy_as_csv_quotes_what_needs_it_and_leaves_null_empty() {
+        let mut grid = customers();
+        grid.rows[1][1] = Some("Grace, \"Amazing\"".into());
+        grid.anchor = Cell { row: 0, column: 0 };
+        grid.current = Cell { row: 1, column: 2 };
+        assert_eq!(
+            grid.csv(),
+            "id,name,note\r\n1,Ada,\r\n2,\"Grace, \"\"Amazing\"\"\",O'Hara"
+        );
+        let GridAnswer::Copy { toast, .. } = grid.menu_item(GridMenuItem::CopyAsCsv) else {
+            panic!("Copy as CSV copies");
+        };
+        assert_eq!(toast, "Copied 6 cells as CSV");
+    }
+
+    #[test]
+    fn copy_as_json_embeds_numbers_json_and_null_and_suffixes_repeated_names() {
+        let grid = ResultGrid {
+            anchor: Cell { row: 0, column: 0 },
+            current: Cell { row: 1, column: 4 },
+            ..ResultGrid::new(
+                vec![
+                    "id".into(),
+                    "id".into(),
+                    "ok".into(),
+                    "doc".into(),
+                    "data".into(),
+                ],
+                vec![
+                    ValueKind::Number,
+                    ValueKind::Text,
+                    ValueKind::Boolean,
+                    ValueKind::Json,
+                    ValueKind::Blob,
+                ],
+                vec![
+                    vec![
+                        Some("1".into()),
+                        Some("a\"b".into()),
+                        Some("t".into()),
+                        Some("{\"k\": [1, 2]}".into()),
+                        Some("\\x0aff".into()),
+                    ],
+                    vec![Some("NaN".into()), None, Some("f".into()), Some("{1,2}".into()), None],
+                ],
+                2,
+                vec![60.0; 5],
+            )
+        };
+        assert_eq!(
+            grid.json(),
+            "[\n  {\n    \"id\": 1,\n    \"id_2\": \"a\\\"b\",\n    \"ok\": true,\n    \"doc\": {\n      \"k\": [\n        1,\n        2\n      ]\n    },\n    \"data\": \"0x0aff\"\n  },\n  {\n    \"id\": \"NaN\",\n    \"id_2\": null,\n    \"ok\": false,\n    \"doc\": \"{1,2}\",\n    \"data\": null\n  }\n]"
+        );
+        assert!(is_json("{\"a\": [1, -2.5e3, true, null, \"\\u00e9\"]}"));
+        assert!(!is_json("{1,2}"));
+        assert!(!is_json("[1,]"));
+        assert!(!is_json(&"[".repeat(10_000)));
+    }
+
+    #[test]
+    fn shift_f10_and_the_menu_key_open_the_menu() {
+        let mut grid = customers();
+        let shift_f10 = press(Key::F10, true, false);
+        assert_eq!(grid.key(shift_f10, 10), GridAnswer::OpenMenu);
+        assert_eq!(
+            grid.key(press(Key::ContextMenu, false, false), 10),
+            GridAnswer::OpenMenu
+        );
+        assert_eq!(grid.key(press(Key::F10, false, false), 10), GridAnswer::Ignored);
+        assert_eq!(grid.menu_item(GridMenuItem::OpenValue), GridAnswer::OpenValue);
+        grid.menu_item(GridMenuItem::SelectAll);
+        assert_eq!(grid.selection(), (0..3, 0..3));
     }
 }

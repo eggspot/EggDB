@@ -7,10 +7,12 @@ use eggdb_platform::window::{Key, KeyPress};
 use crate::connection::{ResultTable, SessionId, StatementFailure};
 use crate::dialect::QueryDialect;
 use crate::editor::{self, Editor};
-use crate::grid::{GridAnswer, ResultGrid, cell_text, column_widths};
+use crate::grid::{GridAnswer, GridMenuItem, ResultGrid, cell_text, column_widths};
+use crate::grid_menu::{GridMenu, MenuAnswer};
 use crate::plan_view::{Plan, PlanAnswer, PlanView, explain_statements};
 use crate::statements::{source_table, statement_at, statements};
 use crate::status_line;
+use crate::value_view::{ValueAnswer, ValueView};
 
 const FIX_LABEL_CHARACTERS: usize = 40;
 const CANCELLED: &str = "57014";
@@ -208,6 +210,10 @@ pub struct QueryTab {
     pub session: SessionId,
     /// Where the tab's kept session stands toward transactions after its last run.
     pub transaction: TransactionStatus,
+    /// The grid's open full-value view (`docs/ux/workspace.md` 9.3).
+    pub value_view: Option<ValueView>,
+    /// The grid's open right-click menu (`docs/ux/workspace.md` 9.4).
+    pub grid_menu: Option<GridMenu>,
 }
 
 impl QueryTab {
@@ -236,6 +242,8 @@ impl QueryTab {
             plan: None,
             session: SessionId::default(),
             transaction: TransactionStatus::Idle,
+            value_view: None,
+            grid_menu: None,
         }
     }
 
@@ -337,6 +345,29 @@ impl QueryTab {
         if let Some(highlighted) = self.dialect_menu {
             self.menu_key(press, highlighted);
             return TabAction::None;
+        }
+        if let Some(view) = &mut self.value_view {
+            return match view.key(press) {
+                ValueAnswer::Moved => TabAction::None,
+                ValueAnswer::Close => {
+                    self.value_view = None;
+                    TabAction::None
+                }
+                ValueAnswer::Copy { text, toast } => {
+                    self.notice = Some(toast.clone());
+                    TabAction::Copy { text, toast }
+                }
+            };
+        }
+        if let Some(menu) = &mut self.grid_menu {
+            return match menu.key(press) {
+                MenuAnswer::Moved => TabAction::None,
+                MenuAnswer::Close => {
+                    self.grid_menu = None;
+                    TabAction::None
+                }
+                MenuAnswer::Activate(item) => self.menu_item(item),
+            };
         }
         let run_all = primary && press.modifiers.shift;
         match press.key {
@@ -520,12 +551,45 @@ impl QueryTab {
         TabAction::None
     }
 
+    /// Opens the full-value view on the grid's current cell (`docs/ux/workspace.md` 9.3).
+    pub fn open_value(&mut self) {
+        self.grid_menu = None;
+        self.value_view = self
+            .grid
+            .as_ref()
+            .filter(|grid| grid.current.row < grid.rows.len())
+            .map(|grid| ValueView::open(grid, grid.current));
+    }
+
+    /// Opens the grid's right-click menu `menu`, closing the value view.
+    pub fn open_grid_menu(&mut self, menu: GridMenu) {
+        if self.grid.is_some() {
+            self.value_view = None;
+            self.grid_menu = Some(menu);
+        }
+    }
+
+    /// Closes the grid's menu and does what its `item` says.
+    pub fn menu_item(&mut self, item: GridMenuItem) -> TabAction {
+        self.grid_menu = None;
+        let Some(grid) = &mut self.grid else {
+            return TabAction::None;
+        };
+        let answer = grid.menu_item(item);
+        self.grid_answer(answer)
+    }
+
     fn grid_key(&mut self, press: KeyPress) -> TabAction {
         let Some(grid) = &mut self.grid else {
             self.focus(TabFocus::Editor);
             return TabAction::None;
         };
-        match grid.key(press, ROWS_IN_VIEW) {
+        let answer = grid.key(press, ROWS_IN_VIEW);
+        self.grid_answer(answer)
+    }
+
+    fn grid_answer(&mut self, answer: GridAnswer) -> TabAction {
+        match answer {
             GridAnswer::Copy { text, toast } => {
                 self.notice = Some(toast.clone());
                 TabAction::Copy { text, toast }
@@ -539,10 +603,20 @@ impl QueryTab {
                 TabAction::None
             }
             GridAnswer::Moved => {
-                grid.scroll_into_view(ROWS_IN_VIEW, crate::main_window::GRID_BODY_WIDTH);
+                if let Some(grid) = &mut self.grid {
+                    grid.scroll_into_view(ROWS_IN_VIEW, crate::main_window::GRID_BODY_WIDTH);
+                }
                 TabAction::None
             }
-            GridAnswer::OpenValue | GridAnswer::Ignored => TabAction::None,
+            GridAnswer::OpenValue => {
+                self.open_value();
+                TabAction::None
+            }
+            GridAnswer::OpenMenu => {
+                self.open_grid_menu(GridMenu::at_current_cell());
+                TabAction::None
+            }
+            GridAnswer::Ignored => TabAction::None,
         }
     }
 
@@ -840,6 +914,8 @@ impl QueryTab {
         grid.dialect = self.dialect;
         grid.source_table = statement.and_then(|sql| source_table(sql, self.dialect));
         grid.focused = self.focus == TabFocus::Grid;
+        self.value_view = None;
+        self.grid_menu = None;
         self.grid = Some(grid);
     }
 

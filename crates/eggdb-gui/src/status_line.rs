@@ -134,6 +134,30 @@ pub fn copied_cells_text(cells: usize) -> String {
     }
 }
 
+/// The `Copy as CSV` toast: `Copied 12 cells as CSV`.
+pub fn copied_csv_text(cells: usize) -> String {
+    match cells {
+        1 => "Copied 1 cell as CSV".to_owned(),
+        n => format!("Copied {} cells as CSV", thousands(n)),
+    }
+}
+
+/// The `Copy as JSON` toast: `Copied 3 rows as JSON`.
+pub fn copied_json_text(rows: usize) -> String {
+    format!("Copied {} as JSON", rows_text(rows))
+}
+
+/// The value view's copy toast: `Copied 1,204 characters`, or for a blob `Copied 184 bytes
+/// as hex`.
+pub fn copied_value_text(characters: usize, blob_bytes: Option<usize>) -> String {
+    match (blob_bytes, characters) {
+        (Some(1), _) => "Copied 1 byte as hex".to_owned(),
+        (Some(bytes), _) => format!("Copied {} bytes as hex", thousands(bytes)),
+        (None, 1) => "Copied 1 character".to_owned(),
+        (None, n) => format!("Copied {} characters", thousands(n)),
+    }
+}
+
 /// The `Copy as INSERT` toast: `Copied 3 INSERT statements`.
 pub fn copied_inserts_text(statements: usize) -> String {
     match statements {

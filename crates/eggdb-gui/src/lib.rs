@@ -56,6 +56,14 @@ pub mod plan_view;
 /// The query tabs' strip: tab widths, its scroll, new tab titles and the dialog that asks
 /// before a tab closes (`docs/ux/workspace.md` 9.1).
 pub mod tab_strip;
+/// The grid's right-click menu: its items, where it opens and its keys
+/// (`docs/ux/workspace.md` 9.4).
+pub mod grid_menu;
+/// Scrollbar geometry and drawing for the grid, the editor and the value view
+/// (`docs/ux/workspace.md` 9.6).
+pub mod scrollbar;
+/// The grid's full-value view on one cell (`docs/ux/workspace.md` 9.3).
+pub mod value_view;
 /// PNG encoding of rendered frames, for screenshots and tests.
 pub mod png;
 /// The pointer and the caret (`docs/ux/workspace.md` 6): hit testing on the accessibility

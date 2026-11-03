@@ -14,8 +14,10 @@ use crate::dialect::QueryDialect;
 use crate::editor::Position;
 use crate::font::{TextStyle, Typeface};
 use crate::grid::{
-    CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns, visible_rows,
+    self, Cell, CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns,
+    visible_rows,
 };
+use crate::grid_menu::{self, GridMenu, MenuOrigin};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
 use crate::layout::{Layout, LayoutAction};
@@ -29,6 +31,7 @@ use crate::connection::SessionId;
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
 use crate::tab_strip::{self, ClosePrompt, PromptAnswer};
+use crate::value_view;
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
 pub const GRID_BODY_WIDTH: f32 = 972.0;
@@ -390,6 +393,14 @@ impl MainWindow {
             return notches.is_finite() && self.scroll_tabs(notches);
         }
         let (down, right) = wheel_steps(&mut self.wheel_carry, down, right);
+        if let Some(rect) = self.value_view_rect()
+            && rect_contains(rect, x, y)
+            && let Some(view) = &mut self.tab.value_view
+        {
+            let before = view.first_line;
+            view.scroll_by(down);
+            return view.first_line != before;
+        }
         if over(NODE_GRID) {
             if let Some(grid) = self
                 .tab
@@ -489,6 +500,9 @@ impl MainWindow {
         if let Some(prompt) = &mut self.close_prompt {
             let answer = prompt.key(press);
             return self.prompt_answer(answer);
+        }
+        if self.tab.value_view.is_some() || self.tab.grid_menu.is_some() {
+            return WindowAction::Tab(self.tab.key(press));
         }
         if let Some(action) = self.tab_key(press) {
             return action;
@@ -1073,6 +1087,7 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
             paint.canvas.draw_anywhere();
         }
     }
+    popovers(&mut paint, window);
     if let Some(prompt) = &window.close_prompt {
         let size = (window.width.max(WIDTH) as f32, HEIGHT as f32);
         tab_strip::draw_prompt(&mut paint, prompt, size);
@@ -2169,6 +2184,206 @@ fn dialect_menu(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
     }
 }
 
+fn grid_top(grid: &ResultGrid) -> f32 {
+    if grid.truncated() { 446.0 } else { 418.0 }
+}
+
+/// The rect of `cell` of `grid` in the EggDB layout's coordinates, scrolled as the grid is.
+pub fn grid_cell_rect(grid: &ResultGrid, cell: Cell) -> Rect {
+    let edges = grid.column_edges();
+    let x_of =
+        |column: usize| GRID_LEFT + edges.get(column).copied().unwrap_or(0.0) - grid.scroll_x;
+    let rows_above = cell.row as f32 - grid.first_row as f32;
+    let top = grid_top(grid) + grid::HEADER_HEIGHT + grid::ROW_HEIGHT * rows_above;
+    let left = x_of(cell.column);
+    Rect::new(left, top, x_of(cell.column + 1) - left, grid::ROW_HEIGHT)
+}
+
+fn shifted(rect: Rect, shift: (f32, f32)) -> Rect {
+    Rect::new(rect.x + shift.0, rect.y + shift.1, rect.w, rect.h)
+}
+
+fn rect_contains(rect: Rect, x: f32, y: f32) -> bool {
+    x >= rect.x && y >= rect.y && x < rect.x + rect.w && y < rect.y + rect.h
+}
+
+fn is_value_view_node(id: u32) -> bool {
+    (value_view::NODE_VALUE_VIEW..=value_view::NODE_VALUE_COPY).contains(&id)
+}
+
+fn grid_menu_item_of(id: u32) -> Option<usize> {
+    let index = id.checked_sub(grid_menu::NODE_FIRST_GRID_MENU_ITEM)? as usize;
+    (index < grid::GridMenuItem::ALL.len()).then_some(index)
+}
+
+impl MainWindow {
+    fn results_shift(&self) -> (f32, f32) {
+        self.placed(Area::Results).map_or((0.0, 0.0), |placed| placed.shift)
+    }
+
+    /// Where the open full-value view shows, in window coordinates.
+    pub fn value_view_rect(&self) -> Option<Rect> {
+        let view = self.tab.value_view.as_ref()?;
+        let grid = self.tab.grid.as_ref()?;
+        let cell = grid_cell_rect(grid, view.cell);
+        let rect = value_view::popover_rect(cell, self.width.max(WIDTH) as f32);
+        Some(shifted(rect, self.results_shift()))
+    }
+
+    /// Where the grid's open menu shows, in window coordinates.
+    pub fn grid_menu_rect(&self) -> Option<Rect> {
+        let menu = self.tab.grid_menu.as_ref()?;
+        let grid = self.tab.grid.as_ref()?;
+        let width = self.width.max(WIDTH) as f32;
+        let cell = shifted(grid_cell_rect(grid, grid.current), self.results_shift());
+        Some(grid_menu::rect_for(menu.origin, cell, width))
+    }
+
+    /// The open popover's rect, the value view's or the grid menu's.
+    pub fn popover_rect(&self) -> Option<Rect> {
+        self.value_view_rect().or_else(|| self.grid_menu_rect())
+    }
+
+    /// Closes the value view and the grid's menu.
+    pub fn close_popovers(&mut self) {
+        self.tab.value_view = None;
+        self.tab.grid_menu = None;
+    }
+
+    /// Whether node `id` belongs to the open popover.
+    pub fn is_popover_node(&self, id: u32) -> bool {
+        (self.tab.value_view.is_some() && is_value_view_node(id))
+            || (self.tab.grid_menu.is_some()
+                && (id == grid_menu::NODE_GRID_MENU || grid_menu_item_of(id).is_some()))
+    }
+
+    /// A press of the primary button while a popover is open: outside it closes the popover
+    /// and the press does nothing else (`docs/ux/workspace.md` 9.3, 9.4). Returns whether a
+    /// popover was open and the press was outside it.
+    pub fn press_outside_popover(&mut self, x: f32, y: f32) -> bool {
+        match self.popover_rect() {
+            Some(rect) if !rect_contains(rect, x, y) => {
+                self.close_popovers();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The grid's menu item under (`x`, `y`), while the menu is open.
+    pub fn grid_menu_item_at(&self, x: f32, y: f32) -> Option<usize> {
+        grid_menu::item_at(self.grid_menu_rect()?, x, y)
+    }
+
+    /// A right-click at (`x`, `y`) over the results (`docs/ux/workspace.md` 9.4): on a cell
+    /// outside the selection it makes that cell current, inside it keeps the selection; on
+    /// the gutter or a header it selects that row or column; then the grid's menu opens at
+    /// the pointer. Returns whether it opened.
+    pub fn context_press(&mut self, tree: &[AccessNode], x: f32, y: f32) -> bool {
+        self.close_popovers();
+        if self.tab.view != ResultView::Results {
+            return false;
+        }
+        let hit = |role: AccessRole| {
+            tree.iter()
+                .rev()
+                .find(|node| node.role == role && pointer::contains(node.bounds, x, y))
+                .and_then(|node| node.cell)
+        };
+        let (cell, header) = (hit(AccessRole::Cell), hit(AccessRole::ColumnHeader));
+        let shift = self.results_shift();
+        let Some(grid) = self.tab.grid.as_mut().filter(|grid| !grid.rows.is_empty()) else {
+            return false;
+        };
+        let body_top = grid_top(grid) + grid::HEADER_HEIGHT + shift.1;
+        let gutter = (SIDEBAR_RIGHT + shift.0..GRID_LEFT - 1.0 + shift.0).contains(&x)
+            && (body_top..BODY_BOTTOM + shift.1).contains(&y);
+        if let Some(at) = cell {
+            let cell = Cell {
+                row: at.row,
+                column: at.column,
+            };
+            if !grid.is_selected(cell) {
+                grid.current = cell;
+                grid.anchor = cell;
+            }
+        } else if let Some(at) = header {
+            grid.current.column = at.column.min(grid.columns.len().saturating_sub(1));
+            grid.menu_item(grid::GridMenuItem::SelectColumn);
+        } else if gutter {
+            let row = grid.first_row + ((y - body_top) / grid::ROW_HEIGHT) as usize;
+            if row >= grid.rows.len() {
+                return false;
+            }
+            grid.current.row = row;
+            grid.menu_item(grid::GridMenuItem::SelectRow);
+        } else {
+            return false;
+        }
+        self.focus = WindowFocus::Tab;
+        self.tab.focus(TabFocus::Grid);
+        self.tab.open_grid_menu(GridMenu::at_pointer(x, y));
+        true
+    }
+
+    fn popover_access_keys(
+        &mut self,
+        node: &AccessNode,
+        action: &AccessAction,
+    ) -> Option<Vec<KeyPress>> {
+        if self.tab.value_view.is_some() {
+            if !is_value_view_node(node.id) {
+                self.tab.value_view = None;
+                return None;
+            }
+            let copy = node.id == value_view::NODE_VALUE_COPY;
+            if let Some(view) = &mut self.tab.value_view {
+                view.copy_focused = copy;
+            }
+            let invoked = copy && *action == AccessAction::Invoke;
+            return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
+        }
+        if self.tab.grid_menu.is_some() {
+            let Some(index) = grid_menu_item_of(node.id) else {
+                self.tab.grid_menu = None;
+                return None;
+            };
+            if let Some(menu) = &mut self.tab.grid_menu {
+                menu.highlighted = Some(index);
+            }
+            let invoked = *action == AccessAction::Invoke;
+            return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
+        }
+        None
+    }
+}
+
+fn popovers(paint: &mut Painter<'_, '_>, window: &MainWindow) {
+    if let (Some(view), Some(rect)) = (&window.tab.value_view, window.value_view_rect()) {
+        value_view::draw(paint, view, rect);
+    }
+    if let (Some(menu), Some(rect)) = (&window.tab.grid_menu, window.grid_menu_rect()) {
+        let hovered = window.pointer.hovered.and_then(grid_menu_item_of);
+        grid_menu::draw(paint, menu, rect, hovered);
+    }
+}
+
+fn popover_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
+    let open = window.tab.value_view.is_some() || window.tab.grid_menu.is_some();
+    if !open {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        node.state.focused = false;
+    }
+    if let (Some(view), Some(rect)) = (&window.tab.value_view, window.value_view_rect()) {
+        value_view::nodes(nodes, view, rect, NODE_GRID);
+    }
+    if let (Some(menu), Some(rect)) = (&window.tab.grid_menu, window.grid_menu_rect()) {
+        grid_menu::nodes(nodes, menu, rect, NODE_GRID);
+    }
+}
+
 /// The ids of the main window's accessibility nodes; grid cells count up from
 /// [`NODE_FIRST_CELL`] in reading order of the visible cells.
 pub const NODE_MAIN_WINDOW: u32 = 100;
@@ -2267,7 +2482,7 @@ fn primary_press(letter: char) -> KeyPress {
     }
 }
 
-fn primary_name() -> &'static str {
+pub(crate) fn primary_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "Cmd"
     } else {
@@ -2420,6 +2635,9 @@ impl MainWindow {
                 return vec![KeyPress::plain(Key::Enter)];
             }
             return vec![KeyPress::plain(Key::Escape)];
+        }
+        if let Some(keys) = self.popover_access_keys(node, action) {
+            return keys;
         }
         let invoked = *action == AccessAction::Invoke;
         if node.id == NODE_NEW_TAB {
@@ -2659,6 +2877,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
     for node in nodes.iter_mut().filter(|node| no_keys_reach_it_yet(node)) {
         node.actions = AccessActions::default();
     }
+    popover_nodes(&mut nodes, window);
     if let Some(prompt) = &window.close_prompt {
         for node in &mut nodes {
             node.state.focused = false;
@@ -3770,5 +3989,113 @@ mod tests {
             vec![primary('w')]
         );
         assert_eq!(window.tab.title, "Query 2");
+    }
+
+    #[test]
+    fn a_right_click_on_a_cell_makes_it_current_and_its_menu_copies_as_csv() {
+        let mut window = MainWindow::sample();
+        let tree = accessibility_tree(&window);
+        assert!(window.context_press(&tree, 508.0, 482.0));
+        let grid = window.tab.grid.as_ref().unwrap();
+        assert_eq!(grid.current, Cell { row: 1, column: 1 });
+        assert_eq!(grid.selection_size(), (1, 1));
+        assert_eq!(window.tab.focus, TabFocus::Grid);
+        assert_eq!(
+            window.grid_menu_rect(),
+            Some(Rect::new(508.0, 482.0, 240.0, 278.0))
+        );
+        let tree = accessibility_tree(&window);
+        let item = tree
+            .iter()
+            .find(|node| node.name == "Copy as CSV")
+            .cloned()
+            .expect("the menu's items are in the tree");
+        assert_eq!(item.parent, Some(grid_menu::NODE_GRID_MENU));
+        assert!(window.is_popover_node(item.id));
+        assert!(!window.is_popover_node(NODE_EDITOR));
+        let keys = window.access_keys(&item, &AccessAction::Invoke);
+        assert_eq!(keys, vec![KeyPress::plain(Key::Enter)]);
+        let action = window.key(KeyPress::plain(Key::Enter), Instant::now());
+        assert_eq!(
+            action,
+            WindowAction::Tab(TabAction::Copy {
+                text: "name\r\nGrace Hopper".to_owned(),
+                toast: "Copied 1 cell as CSV".to_owned(),
+            })
+        );
+        assert_eq!(window.tab.grid_menu, None);
+    }
+
+    #[test]
+    fn a_right_click_on_the_gutter_or_a_header_selects_its_row_or_column() {
+        let mut window = MainWindow::sample();
+        let tree = accessibility_tree(&window);
+        assert!(window.context_press(&tree, 280.0, 500.0));
+        let grid = window.tab.grid.as_ref().unwrap();
+        assert_eq!(grid.selection(), (2..3, 0..2));
+        window.close_popovers();
+        let tree = accessibility_tree(&window);
+        assert!(window.context_press(&tree, 340.0, 430.0));
+        let grid = window.tab.grid.as_ref().unwrap();
+        assert_eq!(grid.selection(), (0..3, 0..1));
+        assert!(window.press_outside_popover(1000.0, 200.0));
+        assert_eq!(window.tab.grid_menu, None);
+        let tree = accessibility_tree(&window);
+        assert!(!window.context_press(&tree, 700.0, 200.0));
+    }
+
+    #[test]
+    fn enter_opens_the_value_view_below_the_cell_and_escape_closes_it() {
+        let mut window = MainWindow::sample();
+        let now = Instant::now();
+        window.key(primary_press('3'), now);
+        window.key(KeyPress::plain(Key::Down), now);
+        window.key(KeyPress::plain(Key::Right), now);
+        window.key(KeyPress::plain(Key::Enter), now);
+        let view = window.tab.value_view.as_ref().expect("Enter opens the value view");
+        assert_eq!(view.cell, Cell { row: 1, column: 1 });
+        assert_eq!(view.name(), "name value");
+        assert_eq!(
+            window.value_view_rect(),
+            Some(Rect::new(388.0, 498.0, 480.0, 240.0))
+        );
+        let tree = accessibility_tree(&window);
+        let body = tree
+            .iter()
+            .find(|node| node.id == value_view::NODE_VALUE_BODY)
+            .expect("the body is in the tree");
+        assert_eq!(body.value.as_deref(), Some("Grace Hopper"));
+        assert!(body.state.focused && body.state.read_only);
+        assert_eq!(tree.iter().filter(|node| node.state.focused).count(), 1);
+        let theme = Theme::of(ThemeKind::Light);
+        let canvas = draw(&window, theme, box_faces());
+        assert_eq!(canvas.pixel(600, 600), Some(theme.bg0));
+        assert_eq!(canvas.pixel(600, 510), Some(theme.bg1));
+        let action = window.key(primary_press('c'), now);
+        assert_eq!(
+            action,
+            WindowAction::Tab(TabAction::Copy {
+                text: "Grace Hopper".to_owned(),
+                toast: "Copied 12 characters".to_owned(),
+            })
+        );
+        window.key(KeyPress::plain(Key::Escape), now);
+        assert_eq!(window.tab.value_view, None);
+        assert_eq!(window.tab.focus, TabFocus::Grid);
+        let shift_f10 = KeyPress {
+            key: Key::F10,
+            modifiers: eggdb_platform::window::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        window.key(shift_f10, now);
+        let menu = window.tab.grid_menu.expect("Shift+F10 opens the menu");
+        assert_eq!(menu.origin, MenuOrigin::CurrentCell);
+        assert_eq!(menu.highlighted, Some(0));
+        assert_eq!(
+            window.grid_menu_rect(),
+            Some(Rect::new(388.0, 498.0, 240.0, 278.0))
+        );
     }
 }
