@@ -351,6 +351,18 @@ and `numeric_and_time_keys_return_the_same_rows_with_and_without_indexes` compar
 over `numeric`, `date`, `timestamp` and `timestamptz` keys with and without indexes, through
 updates, deletes and inserts.
 
+## SQLite's dynamic typing and class-ordered keys (D305)
+`encoding/dynamic_keys_tests.rs` pins the key of every storage class and the integer edges
+(`i64::MIN`, `i64::MAX`, 2^53 + 1) to test vectors, checks 50,000 random pairs of mixed
+classes against an independent statement of SQLite's order (and that each key decodes and
+re-encodes to the same bytes, and every cut is an error), and feeds 200,000 hostile byte
+strings to the key decoder: each is an error or a canonical key, never a panic, and skipping
+agrees with decoding. Table definitions of version 13 are checked for their type tags, every
+truncation, flipped bytes, refusal by older readers and versions that do not match their
+columns; `BLOB`-only tables stay version 10. `type_affinity_tests.rs` runs each affinity,
+keys, unique and range lookups and a reopened store in the SQLite dialect, and the SQLite
+correctness suite covers the same cases against SQLite's documentation.
+
 ## Times, intervals, bytes, UUIDs and padded text (D113)
 Interval arithmetic is checked against a plain reference on 5,000 random pairs: sums,
 differences, negation, doubling and the three `justify` functions keep the length in

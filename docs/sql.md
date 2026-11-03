@@ -211,17 +211,25 @@ What it reads, on top of the statements of "What runs today":
   `:name`, `@name` and `$name` numbered as SQLite numbers them; a parameter without a value is
   NULL.
 - **Type affinity** from the declared type name, by datatype3.html's rules in order: a name
-  containing `INT` is an integer (`bigint`, 64 bits), `CHAR`, `CLOB` or `TEXT` text (lengths
-  such as `VARCHAR(10)` are not enforced, as in SQLite), `REAL`, `FLOA` or `DOUB` a real
-  (`double precision`), no type at all text; the rest (`NUMERIC` affinity) is a real, except
-  `BOOLEAN` (an integer) and names containing `DATE` or `TIME` (text, as SQLite's date
-  functions keep them: `DATE`, `DATETIME` and `TIMESTAMP` columns hold ISO 8601 text, as an
-  SQLite application writes it). `DECIMAL(p,s)` is a real, by the same rule. A column declared
-  `BLOB` holds every storage class as it is given, row by row (an integer, a real, text or a
-  blob, D153): `typeof()` tells which, `quote()` writes a blob as `X'0A0B'`, `length()` counts a
-  blob's bytes, and values of different classes compare and sort as SQLite orders them (numbers,
-  then text, then blobs). Blob literals are `x'0A0B'` (an even number of hexadecimal digits;
-  anything else is `unrecognized token`).
+  containing `INT` is an integer (`bigint`, 64 bits); `CHAR`, `CLOB` or `TEXT` gives `TEXT`
+  affinity (lengths such as `VARCHAR(10)` are not enforced, as in SQLite); `BLOB` or no type at
+  all gives `BLOB` affinity; `REAL`, `FLOA` or `DOUB` gives `REAL` affinity; the rest (`NUMERIC`,
+  `DECIMAL(p,s)`, `BOOLEAN`, `DATE`, `DATETIME`) gives `NUMERIC` affinity. A column of any
+  affinity but `INTEGER` holds every storage class, row by row, as SQLite's datatype page
+  says (D153, D305): `TEXT` stores a number as its text (`5` becomes `'5'`, `2.0` `'2.0'`);
+  `NUMERIC` stores text that is a well-formed integer or real as a number, preferring an integer
+  (`'3.0e+5'` becomes `300000`; `'0x10'`, `'abc'` and `'2024-02-29'` stay text) and a real that
+  is a whole number as an integer; `REAL` does the same and then makes every number a real (`7`
+  becomes `7.0`); `BLOB` keeps every value as given. `typeof()` tells which class a value has,
+  `quote()` writes a blob as `X'0A0B'`, `length()` counts a blob's bytes, and values of different
+  classes compare and sort as SQLite orders them (numbers, then text, then blobs; an integer and
+  a real compare by their exact values). A string compared with a column of `NUMERIC` or `REAL`
+  affinity takes that affinity first, so `amount = '12'` finds the integer `12`. These columns
+  can be keys, `UNIQUE` and indexed (D305): `3` and `3.0` are the same key, and a range such as
+  `k > 2.5` takes the larger numbers, then all text, then all blobs, as SQLite's comparison
+  does. `CAST` keeps its static types (`CAST(x AS TEXT)` is text, `AS REAL` a real). Blob
+  literals are `x'0A0B'` (an even number of hexadecimal digits; anything else is `unrecognized
+  token`).
 - **Row ids**: a column declared exactly `INTEGER PRIMARY KEY` (on the column or as the table's
   one-column key) is the row id: a NULL or missing value takes one more than the largest in
   the table; `AUTOINCREMENT` is accepted on it (and refused elsewhere, as in SQLite);
@@ -3794,6 +3802,30 @@ PostgreSQL sorts them (by key length, then bytes), and unsorted or duplicate key
 keys a `citext` is its case-folded text, keyed as text is. An older release refuses a version 11
 table by name. Table versions skip 8 and 12, which are view versions.
 
+A SQLite column that holds every storage class is type tag `24` when its affinity is `BLOB`
+(D153; written in version 10, as v0.2.0 writes it) and tag `25` followed by its affinity's code
+(`1` `TEXT`, `2` `NUMERIC`, `3` `REAL`) otherwise. Version 13 (D305, `AFFINITY_FORMAT_VERSION`)
+is written only for a table with a tag `25` column: the version 11 layout with tag `25` allowed.
+Every other table keeps its version and bytes; a version 13 table without such a column, tag
+`25` in an older version, a code other than those three, or tag `25` in a view or a
+user-defined type is damage, and an older release refuses a version 13 table by name. A view
+records no type for such a column. In rows these columns hold the tags of the four classes
+(`3` integer, `5` real, `7` text, `18` blob) whatever their affinity. In keys and index entries
+a value of such a column is `0x02` for NULL (after every value, as in other columns) or `0x01`
+followed by its class and its body, so the classes sort as SQLite orders them:
+- `0x01`, a number: the nearest 64-bit float in the order-preserving form other `double
+  precision` keys use (`-0.0` and every NaN written as `0.0` and the one canonical NaN), then a
+  16-bit big-endian offset with its sign bit flipped, the integer's distance from that float
+  (at most 1024, nonzero only for integers beyond 2^53; `0` for a real). Integers and reals
+  therefore order by exact value, and an integer and a real that are equal (`3`, `3.0`) have the
+  same key;
+- `0x02`, text: its UTF-8 bytes escaped and ended as `text` keys are (`0x00` written `0x00
+  0xFF`, then `0x00 0x01`);
+- `0x03`, a blob: its bytes, escaped and ended the same way.
+
+A key is read back only in its canonical form: an offset that does not round to its float, a
+non-canonical zero or NaN, an unknown class or text that is not UTF-8 is damage.
+
 A user-defined type is a record under the catalog prefix, `0x0A` and the type's schema-qualified
 name: record version `1`, its kind (as above), its 32-bit OID (16384 to 2^31-1, picked from a hash
 of its name and never reused while it exists), then an enum's labels (count; each its 64-bit sort
@@ -4178,20 +4210,23 @@ fixed:
   on expressions answer an error; an `ON CONFLICT (columns)` that names no unique key answers
   `42P10` with PostgreSQL's message; `sqlite_schema.sql` of an index is regenerated from the
   catalog.
-- A column of `INTEGER`, `TEXT`, `REAL` or `NUMERIC` affinity has one type: the affinity's.
-  SQLite's columns may hold any storage class, so a `NUMERIC` column given `7` keeps the integer
-  `7` where EggDB keeps the real `7.0`, and an `INTEGER` column given `'abc'` keeps the text
-  where EggDB answers `datatype mismatch`. Only `BLOB` columns hold every class (D153), and
-  they cannot be in a key or an index yet (`0A000`).
+- A column of `INTEGER` affinity has one type, `bigint`: an `INTEGER` column given `'abc'`
+  keeps the text in SQLite, where EggDB answers `datatype mismatch`. Columns of the other
+  affinities hold every storage class (D153, D305).
 - Dates and times: `date()`, `time()`, `datetime()`, `julianday()`, `strftime()`,
   `unixepoch()` and `CURRENT_TIMESTAMP` are not supported yet; `DATE` and `DATETIME` columns
   keep their text, as SQLite's do.
 
 And more, not in the suite yet:
-- Columns without a declared type are text, so `typeof()` says `text` for numbers stored
-  there, where SQLite gives them `BLOB` affinity as a `BLOB` column has. A real given to an
-  `INTEGER` column is rounded where SQLite keeps it as a real, and `CAST('abc' AS INTEGER)` is
-  an error where SQLite gives 0.
+- A real given to an `INTEGER` column is rounded where SQLite keeps it as a real, and
+  `CAST('abc' AS INTEGER)` is an error where SQLite gives 0. `CAST(x AS NUMERIC)` gives a
+  real where SQLite gives an integer for a whole number. An integer compared with a `TEXT`
+  column is not turned into text first (SQLite compares `t = 5` as `t = '5'`), and a column of
+  a view has no affinity of its own.
+- Tables made before D305 keep the types they were made with: their `TEXT`, untyped and `DATE`
+  columns stay `text` and their `REAL`, `NUMERIC` and `DECIMAL` columns `double precision`.
+- `PRAGMA table_info` shows `BLOB` for a column without a declared type, where SQLite shows an
+  empty type.
 - Names fold to lower case: result columns and `PRAGMA table_info` show `id` for a column
   declared `Id`. `PRAGMA table_info` and `sqlite_schema.sql` show the affinity's type name
   (`INTEGER`, `TEXT`, `REAL`) and a `CREATE TABLE` regenerated from the catalog, not the text
