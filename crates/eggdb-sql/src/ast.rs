@@ -540,6 +540,10 @@ pub(crate) enum SqlServerStatement {
         filter: Option<Expr>,
     },
     FormatOnly(bool),
+    Showplan {
+        kind: ShowplanKind,
+        on: bool,
+    },
     XactAbort(bool),
     InsertBulk(crate::bulk_load::InsertBulk),
     Declare(Vec<VariableDeclaration>),
@@ -953,6 +957,20 @@ pub(crate) struct Explain {
     pub(crate) analyze: bool,
     pub(crate) buffers: bool,
     pub(crate) statement: Box<Statement>,
+    pub(crate) plan_table: Option<PlanTableTarget>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PlanTableTarget {
+    pub(crate) statement_id: Option<String>,
+    pub(crate) table: Option<Name>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShowplanKind {
+    Text,
+    All,
+    StatisticsProfile,
 }
 
 #[derive(Debug, Clone, PartialEq)]

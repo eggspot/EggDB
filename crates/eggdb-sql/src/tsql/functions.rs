@@ -162,6 +162,7 @@ pub(crate) fn refused_in_function(
             | SqlServerStatement::ImplicitTransactions(_)
             | SqlServerStatement::IdentityInsert { .. }
             | SqlServerStatement::FormatOnly(_)
+            | SqlServerStatement::Showplan { .. }
             | SqlServerStatement::XactAbort(_) => "SET ON/OFF",
             SqlServerStatement::InsertBulk(_) => "INSERT BULK",
             SqlServerStatement::Use(_)

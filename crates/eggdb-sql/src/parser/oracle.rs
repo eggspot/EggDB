@@ -1676,7 +1676,12 @@ impl Parser<'_> {
     pub(super) fn oracle_collection_table(&mut self) -> SqlResult<TableReference> {
         let position = self.position();
         self.at += 2;
-        let mut reference = if self.at_table_function() {
+        let mut reference = if self.is_word("dbms_xplan")
+            && self.peek_kind_at(1) == &TokenKind::Dot
+            && self.is_word_at(2, "display")
+        {
+            self.plan_display(position)?
+        } else if self.at_table_function() {
             self.table_function()?
         } else {
             let collection = self.expression()?;
@@ -1703,6 +1708,37 @@ impl Parser<'_> {
             reference.alias = Some(alias);
         }
         Ok(reference)
+    }
+}
+
+impl Parser<'_> {
+    fn plan_display(&mut self, position: usize) -> SqlResult<TableReference> {
+        self.at += 3;
+        let mut arguments = Vec::new();
+        if self.take(&TokenKind::LeftParen) && !self.take(&TokenKind::RightParen) {
+            loop {
+                arguments.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(TableReference {
+            name: Name {
+                text: ORACLE_COLLECTION_TABLE.to_owned(),
+                position,
+            },
+            alias: None,
+            derived: None,
+            generated: Some(Box::new(GeneratedTable::Function(TableFunction {
+                name: crate::explain::PLAN_DISPLAY_FUNCTION.to_owned(),
+                arguments,
+                ordinality: false,
+                column_names: Vec::new(),
+                position,
+            }))),
+        })
     }
 }
 

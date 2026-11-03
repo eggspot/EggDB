@@ -434,6 +434,7 @@ fn sqlserver(
         | SqlServerStatement::UpdateVariable { .. }
         | SqlServerStatement::DeleteVariable { .. }
         | SqlServerStatement::FormatOnly(_)
+        | SqlServerStatement::Showplan { .. }
         | SqlServerStatement::XactAbort(_)
         | SqlServerStatement::Declare(_)
         | SqlServerStatement::SetVariable { .. }

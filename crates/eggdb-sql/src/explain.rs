@@ -1,4 +1,14 @@
-use crate::ast::ExplainStyle;
+mod oracle_plan;
+mod showplan;
+
+pub(crate) use oracle_plan::{
+    DisplayedRow, MOST_DISPLAYED_ROWS, PLAN_DISPLAY_FUNCTION, PLAN_TABLE, create_plan_table,
+    display_lines,
+    insert_plan_row, missing_plan_lines, plan_rows,
+};
+pub(crate) use showplan::{showplan_all, showplan_text};
+
+use crate::ast::{ExplainStyle, Statement};
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
 use crate::execute::{ExplainedQuery, ExplainedSource};
@@ -159,84 +169,144 @@ fn postgresql_scan(source: &ExplainedSource) -> String {
     }
 }
 
-fn postgresql_inner(source: &ExplainedSource, method: JoinMethod) -> Vec<(usize, String)> {
-    let relation = named_relation(source);
+enum Step<'q> {
+    Result,
+    Append,
+    Sort,
+    Limit,
+    NestedLoop,
+    HashJoin,
+    Hash,
+    Scan(&'q ExplainedSource),
+    FullScan(&'q ExplainedSource),
+    KeyLookup(&'q ExplainedSource, KeyChoice),
+}
+
+fn inner_steps(source: &ExplainedSource, method: JoinMethod) -> Vec<(usize, Step<'_>)> {
     match method {
-        JoinMethod::PrimaryKey => vec![(
-            0,
-            format!(
-                "Index Scan using {} on {relation}",
-                key_name(&source.table, KeyChoice::Primary, Dialect::PostgreSql)
-            ),
-        )],
-        JoinMethod::Index(position) => vec![(
-            0,
-            format!(
-                "Index Scan using {} on {relation}",
-                source.table.indexes[position].name
-            ),
-        )],
-        JoinMethod::Hash => vec![
-            (0, "Hash".to_owned()),
-            (1, format!("Seq Scan on {relation}")),
-        ],
-        JoinMethod::Loop => vec![(0, format!("Seq Scan on {relation}"))],
+        JoinMethod::PrimaryKey => vec![(0, Step::KeyLookup(source, KeyChoice::Primary))],
+        JoinMethod::Index(position) => {
+            vec![(0, Step::KeyLookup(source, KeyChoice::Index(position)))]
+        }
+        JoinMethod::Hash => vec![(0, Step::Hash), (1, Step::FullScan(source))],
+        JoinMethod::Loop => vec![(0, Step::FullScan(source))],
     }
 }
 
-fn postgresql_tree(query: &ExplainedQuery, upto: usize) -> Vec<(usize, String)> {
+fn join_steps(query: &ExplainedQuery, upto: usize) -> Vec<(usize, Step<'_>)> {
     let Some(source) = query.sources.get(upto) else {
         return Vec::new();
     };
     let Some(method) = source.join else {
-        return vec![(0, postgresql_scan(source))];
+        return vec![(0, Step::Scan(source))];
     };
-    let mut lines = vec![(
+    let mut steps = vec![(
         0,
         match method {
-            JoinMethod::Hash => "Hash Join".to_owned(),
-            _ => "Nested Loop".to_owned(),
+            JoinMethod::Hash => Step::HashJoin,
+            _ => Step::NestedLoop,
         },
     )];
-    let outer = postgresql_tree(query, upto.saturating_sub(1));
-    lines.extend(outer.into_iter().map(|(level, text)| (level + 1, text)));
-    lines.extend(
-        postgresql_inner(source, method)
+    let outer = join_steps(query, upto.saturating_sub(1));
+    steps.extend(outer.into_iter().map(|(level, step)| (level + 1, step)));
+    steps.extend(
+        inner_steps(source, method)
             .into_iter()
-            .map(|(level, text)| (level + 1, text)),
+            .map(|(level, step)| (level + 1, step)),
     );
-    lines
+    steps
+}
+
+fn under<'q>(top: Step<'q>, steps: Vec<(usize, Step<'q>)>) -> Vec<(usize, Step<'q>)> {
+    std::iter::once((0, top))
+        .chain(steps.into_iter().map(|(level, step)| (level + 1, step)))
+        .collect()
+}
+
+fn steps(query: &ExplainedQuery) -> Vec<(usize, Step<'_>)> {
+    let mut steps = if query.sources.is_empty() {
+        vec![(0, Step::Result)]
+    } else if query.appended {
+        under(
+            Step::Append,
+            query
+                .sources
+                .iter()
+                .map(|source| (0, Step::Scan(source)))
+                .collect(),
+        )
+    } else {
+        join_steps(query, query.sources.len() - 1)
+    };
+    if query.sorted {
+        steps = under(Step::Sort, steps);
+    }
+    if query.limited {
+        steps = under(Step::Limit, steps);
+    }
+    steps
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlannedStatement {
+    Select,
+    Update,
+    Delete,
+}
+
+impl PlannedStatement {
+    pub(crate) fn of(statement: &Statement) -> Option<Self> {
+        match statement {
+            Statement::Select(_) | Statement::Query(_) => Some(Self::Select),
+            Statement::Update(_) => Some(Self::Update),
+            Statement::Delete(_) => Some(Self::Delete),
+            _ => None,
+        }
+    }
+}
+
+fn steps_without_hashes(query: &ExplainedQuery) -> Vec<(usize, Step<'_>)> {
+    let mut ancestors: Vec<(usize, bool)> = Vec::new();
+    let mut kept = Vec::new();
+    for (level, step) in steps(query) {
+        while ancestors.last().is_some_and(|(at, _)| *at >= level) {
+            ancestors.pop();
+        }
+        let hashes = ancestors.iter().filter(|(_, hash)| *hash).count();
+        let hash = matches!(step, Step::Hash);
+        ancestors.push((level, hash));
+        if !hash {
+            kept.push((level.saturating_sub(hashes), step));
+        }
+    }
+    kept
+}
+
+fn postgresql_step(step: &Step<'_>) -> String {
+    match step {
+        Step::Result => "Result".to_owned(),
+        Step::Append => "Append".to_owned(),
+        Step::Sort => "Sort".to_owned(),
+        Step::Limit => "Limit".to_owned(),
+        Step::NestedLoop => "Nested Loop".to_owned(),
+        Step::HashJoin => "Hash Join".to_owned(),
+        Step::Hash => "Hash".to_owned(),
+        Step::Scan(source) => postgresql_scan(source),
+        Step::FullScan(source) => format!("Seq Scan on {}", named_relation(source)),
+        Step::KeyLookup(source, key) => format!(
+            "Index Scan using {} on {}",
+            key_name(&source.table, *key, Dialect::PostgreSql),
+            named_relation(source)
+        ),
+    }
 }
 
 fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
-    let mut tree = if query.sources.is_empty() {
-        vec![(0, "Result".to_owned())]
-    } else if query.appended {
-        std::iter::once((0, "Append".to_owned()))
-            .chain(
-                query
-                    .sources
-                    .iter()
-                    .map(|source| (1, postgresql_scan(source))),
-            )
-            .collect()
-    } else {
-        postgresql_tree(query, query.sources.len() - 1)
-    };
-    if query.sorted {
-        tree = std::iter::once((0, "Sort".to_owned()))
-            .chain(tree.into_iter().map(|(level, text)| (level + 1, text)))
-            .collect();
-    }
-    if query.limited {
-        tree = std::iter::once((0, "Limit".to_owned()))
-            .chain(tree.into_iter().map(|(level, text)| (level + 1, text)))
-            .collect();
-    }
-    tree.into_iter()
-        .map(|(level, text)| match level {
-            0 => text,
-            _ => format!("{}->  {text}", " ".repeat(6 * level - 4)),
+    steps(query)
+        .into_iter()
+        .map(|(level, step)| match level {
+            0 => postgresql_step(&step),
+            _ => format!("{}->  {}", " ".repeat(6 * level - 4), postgresql_step(&step)),
         })
         .collect()
 }

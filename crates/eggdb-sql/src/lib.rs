@@ -201,6 +201,8 @@ mod hierarchy_tests;
 #[cfg(test)]
 mod implicit_transaction_tests;
 #[cfg(test)]
+mod dialect_plan_tests;
+#[cfg(test)]
 mod index_tests;
 #[cfg(test)]
 mod insert_select_tests;

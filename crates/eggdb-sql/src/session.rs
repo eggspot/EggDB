@@ -444,6 +444,7 @@ pub struct Session<'s> {
     identity_insert_table: Option<String>,
     keeps_identity_values: bool,
     statement_start: usize,
+    shown_statement: Option<String>,
     table_variables: crate::table_variables::TableVariables,
     extra_results: Vec<QueryResult>,
     cancel: crate::cancel::CancelSignal,
@@ -523,6 +524,7 @@ impl<'s> Session<'s> {
             identity_insert_table: None,
             keeps_identity_values: false,
             statement_start: 0,
+            shown_statement: None,
             table_variables: crate::table_variables::TableVariables::default(),
             extra_results: Vec::new(),
             cancel: crate::cancel::CancelSignal::default(),
@@ -1385,6 +1387,7 @@ impl<'s> Session<'s> {
             Statement::Show { name } => Ok(Some(self.show_columns(name.as_deref()))),
             Statement::MySql(statement) => self.describe_mysql(statement),
             Statement::Pragma(pragma) => Ok(self.pragma_columns(pragma)),
+            Statement::Explain(explain) if explain.plan_table.is_some() => Ok(None),
             Statement::Explain(explain) => {
                 Ok(Some(crate::explain::columns(explain.style, self.dialect)))
             }
@@ -1991,6 +1994,15 @@ impl<'s> Session<'s> {
             let leftover_changes = crate::routine_settings::take_for_session(true);
             self.apply_routine_setting_changes(leftover_changes);
             crate::portals::install(std::mem::take(&mut self.portals));
+            if self.sqlserver()
+                && (self.settings.sqlserver.showplan.is_some()
+                    || self.settings.sqlserver.statistics_profile)
+            {
+                let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);
+                self.shown_statement = text
+                    .get(self.statement_start..end)
+                    .map(|shown| shown.trim().trim_end_matches(';').trim_end().to_owned());
+            }
             let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
             let result = with_raised_notices(self.run(&mut statement, &mut io));
             let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
@@ -2832,6 +2844,20 @@ impl<'s> Session<'s> {
         {
             return Ok(QueryResult::command("FMTONLY"));
         }
+        if self.sqlserver()
+            && let Some(kind) = self.settings.sqlserver.showplan
+            && !sqlserver::runs_under_showplan(statement)
+        {
+            return self.showplan(statement, binding, kind);
+        }
+        let profiled = if self.sqlserver() && self.settings.sqlserver.statistics_profile {
+            self.statement_plan(statement, binding).ok().flatten()
+        } else {
+            None
+        };
+        if self.oracle() {
+            self.show_plan_displays(statement)?;
+        }
         let result = match statement {
             Statement::Select(select) if format_only => self.read(|reader, tables| {
                 binding.select(reader, tables, select)?;
@@ -3084,6 +3110,10 @@ impl<'s> Session<'s> {
                 }
                 crate::indexes::drop_index(writer, tables, drop, dialect)
             }),
+            Statement::Explain(explain) if explain.plan_table.is_some() => {
+                let explain = explain.clone();
+                self.explain_into_plan_table(&explain)
+            }
             Statement::Explain(explain) if explain.analyze => {
                 let explain = explain.clone();
                 self.explain_analyze(&explain, io)
@@ -3308,6 +3338,15 @@ impl<'s> Session<'s> {
                 ));
             }
         };
+        if let (Some(plan), Ok(answer)) = (&profiled, &result) {
+            let text = self.shown_statement.take().unwrap_or_default();
+            let rows = crate::statement_statistics::rows_of(answer);
+            self.extra_results.push(crate::explain::showplan_all(
+                Some((&plan.0, plan.1)),
+                &text,
+                Some(rows),
+            ));
+        }
         if result.is_err() {
             self.fail_block_in_postgresql();
             if let Statement::Insert(insert) = statement

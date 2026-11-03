@@ -1,5 +1,7 @@
 use super::Parser;
-use crate::ast::{CreateIndex, DropIndex, Explain, ExplainStyle, IndexSpec, Name, Statement};
+use crate::ast::{
+    CreateIndex, DropIndex, Explain, ExplainStyle, IndexSpec, Name, PlanTableTarget, Statement,
+};
 use crate::encoding::{IndexMethod, SortOptions};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::TokenKind;
@@ -391,7 +393,7 @@ impl Parser<'_> {
             ExplainStyle::QueryPlan
         } else {
             if self.oracle() {
-                return Err(self.not_supported("EXPLAIN PLAN"));
+                return self.oracle_explain_plan();
             }
             if self.postgresql() && (self.take_word("analyze") || self.take_word("analyse")) {
                 analyze = true;
@@ -418,6 +420,43 @@ impl Parser<'_> {
             analyze,
             buffers,
             statement: Box::new(statement),
+            plan_table: None,
+        }))
+    }
+
+    fn oracle_explain_plan(&mut self) -> SqlResult<Statement> {
+        self.expect_word("plan")?;
+        let mut target = PlanTableTarget {
+            statement_id: None,
+            table: None,
+        };
+        if self.take_word("set") {
+            self.expect_word("statement_id")?;
+            if !self.take_operator("=") {
+                return Err(self.unexpected());
+            }
+            let TokenKind::String(text) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            target.statement_id = Some(text.as_ref().to_owned());
+            self.at += 1;
+        }
+        if self.take_word("into") {
+            target.table = Some(self.table_name()?);
+        }
+        self.expect_word("for")?;
+        if !(self.is_word("select") || self.is_word("update") || self.is_word("delete")) {
+            return Err(self.not_supported(
+                "EXPLAIN PLAN of a statement other than SELECT, UPDATE or DELETE",
+            ));
+        }
+        let statement = self.statement_body()?;
+        Ok(Statement::Explain(Explain {
+            style: ExplainStyle::Plan,
+            analyze: false,
+            buffers: false,
+            statement: Box::new(statement),
+            plan_table: Some(target),
         }))
     }
 }

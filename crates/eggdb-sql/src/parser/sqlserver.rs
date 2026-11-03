@@ -4,7 +4,7 @@ use super::{Parameters, Parser};
 use crate::ast::{
     AlterSequence, ColumnDefinition, Comment, CommentTarget, CreateSequence, Expr, ExprKind,
     Literal, Name, ProcedureCall, Query, RelationKind, SequenceOptions, SetExpr,
-    SqlServerStatement, Statement, TableReference,
+    ShowplanKind, SqlServerStatement, Statement, TableReference,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -1022,6 +1022,33 @@ impl<'t> Parser<'t> {
             "xact_abort" => {
                 let on = self.on_or_off()?;
                 Ok(Statement::SqlServer(SqlServerStatement::XactAbort(on)))
+            }
+            "showplan_text" | "showplan_all" => {
+                let kind = if option == "showplan_text" {
+                    ShowplanKind::Text
+                } else {
+                    ShowplanKind::All
+                };
+                let on = self.on_or_off()?;
+                Ok(Statement::SqlServer(SqlServerStatement::Showplan { kind, on }))
+            }
+            "showplan_xml" => Err(not_supported("SET SHOWPLAN_XML").at(position)),
+            "statistics" => {
+                if self.take_word("profile") {
+                    let on = self.on_or_off()?;
+                    return Ok(Statement::SqlServer(SqlServerStatement::Showplan {
+                        kind: ShowplanKind::StatisticsProfile,
+                        on,
+                    }));
+                }
+                if self.take_word("io") || self.take_word("time") {
+                    self.on_or_off()?;
+                    return Ok(accepted_set());
+                }
+                if self.is_word("xml") {
+                    return Err(not_supported("SET STATISTICS XML").at(position));
+                }
+                Err(self.unexpected())
             }
             "numeric_roundabort" => {
                 if self.on_or_off()? {
