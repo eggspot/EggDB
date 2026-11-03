@@ -126,6 +126,7 @@ fn reason(status: u16) -> &'static str {
         401 => "Unauthorized",
         403 => "Forbidden",
         413 => "Content Too Large",
+        429 => "Too Many Requests",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -645,7 +646,7 @@ mod tests {
                 b"POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 300000\r\n\r\n",
             );
             assert!(refused.starts_with("HTTP/1.1 429 "), "{refused}");
-            assert!(refused.ends_with("slow down"), "{refused}");
+            assert!(refused.ends_with("slow down\n"), "{refused}");
             let large = exchange(address, b"GET /large HTTP/1.1\r\n\r\n");
             assert!(large.starts_with("HTTP/1.1 429 "), "{large}");
             let mut fitting = b"POST /echo HTTP/1.1\r\nContent-Length: 100000\r\n\r\n".to_vec();
