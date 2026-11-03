@@ -111,6 +111,9 @@ pub struct MainWindow {
     pub pointer: PointerLook,
     /// How the editor's caret draws at this moment of its blink.
     pub caret: CaretLook,
+    /// The rows and columns the wheel moved by that did not add up to a whole step yet, down
+    /// and right, so a touchpad's small deltas still scroll.
+    pub wheel_carry: (f32, f32),
 }
 
 impl MainWindow {
@@ -134,6 +137,7 @@ impl MainWindow {
             background_tabs: Vec::new(),
             pointer: PointerLook::default(),
             caret: CaretLook::On,
+            wheel_carry: (0.0, 0.0),
         }
     }
 
@@ -177,9 +181,10 @@ impl MainWindow {
         self.tab.editor.select_to(at);
     }
 
-    /// Scrolls what is under (`x`, `y`) by the wheel's `lines_down` and `lines_right`
-    /// (`Shift` turns vertical steps horizontal): the grid by three rows or columns a notch,
-    /// the object tree by three rows. Returns whether anything moved.
+    /// Scrolls what is under (`x`, `y`) by the wheel's `lines_down` and `lines_right`, one line
+    /// a notch on every platform (`Shift` turns vertical steps horizontal): the grid by
+    /// [`pointer::WHEEL_ROWS_PER_NOTCH`] rows or columns a notch, the object tree by as many
+    /// rows; parts of a step add up over events. Returns whether anything moved.
     pub fn wheel(
         &mut self,
         tree: &[AccessNode],
@@ -199,7 +204,7 @@ impl MainWindow {
         } else {
             (lines_down, lines_right)
         };
-        let steps = |lines: f32| (lines * pointer::WHEEL_ROWS_PER_NOTCH).round() as isize;
+        let (down, right) = wheel_steps(&mut self.wheel_carry, down, right);
         if over(NODE_GRID) {
             if let Some(grid) = self
                 .tab
@@ -208,7 +213,7 @@ impl MainWindow {
                 .filter(|_| self.tab.view == ResultView::Results)
             {
                 let before = (grid.first_row, grid.scroll_x);
-                grid.scroll_by(steps(down), steps(right), crate::query_tab::ROWS_IN_VIEW);
+                grid.scroll_by(down, right, crate::query_tab::ROWS_IN_VIEW);
                 return (grid.first_row, grid.scroll_x) != before;
             }
             return false;
@@ -220,7 +225,7 @@ impl MainWindow {
                 .rows()
                 .len()
                 .saturating_sub(object_browser::ROWS_IN_VIEW);
-            self.tree.first_row = before.saturating_add_signed(steps(down)).min(last);
+            self.tree.first_row = before.saturating_add_signed(down).min(last);
             return self.tree.first_row != before;
         }
         false
@@ -434,6 +439,17 @@ fn sample_index(name: &str, table: &str, column: &str, unique: bool) -> CatalogI
         unique,
         ddl: format!("CREATE {kind} {name} ON {table} ({column});"),
     }
+}
+
+/// The whole rows (or columns) down and right that `lines_down` and `lines_right` scroll at
+/// [`pointer::WHEEL_ROWS_PER_NOTCH`] a line, with `carry`'s parts of a row from earlier events
+/// added and the new parts left in it.
+pub fn wheel_steps(carry: &mut (f32, f32), lines_down: f32, lines_right: f32) -> (isize, isize) {
+    let finite = |lines: f32| if lines.is_finite() { lines } else { 0.0 };
+    let down = carry.0 + finite(lines_down) * pointer::WHEEL_ROWS_PER_NOTCH;
+    let right = carry.1 + finite(lines_right) * pointer::WHEEL_ROWS_PER_NOTCH;
+    *carry = (down.fract(), right.fract());
+    (down.trunc() as isize, right.trunc() as isize)
 }
 
 /// The catalog of [`MainWindow::sample`]'s `shop`.
@@ -796,18 +812,23 @@ pub(crate) fn focus_ring(paint: &mut Painter<'_, '_>, rect: Rect) {
 }
 
 pub(crate) fn elided(face: &dyn Typeface, text: &str, max_width: f32, size: f32) -> String {
-    if face.width(text, size) <= max_width {
-        return text.to_owned();
-    }
-    let mut kept: Vec<char> = text.chars().take(ELIDE_SCAN_LIMIT).collect();
-    while !kept.is_empty() {
-        kept.pop();
-        let candidate: String = kept.iter().chain(std::iter::once(&'…')).collect();
-        if face.width(&candidate, size) <= max_width {
-            return candidate;
+    let ellipsis = face.advance('…', size);
+    let mut width = 0.0;
+    let mut longest_with_ellipsis = None;
+    for (scanned, (at, character)) in text.char_indices().enumerate() {
+        if width + ellipsis <= max_width {
+            longest_with_ellipsis = Some(at);
+        }
+        width += face.advance(character, size);
+        let more_than_scanned =
+            scanned + 1 >= ELIDE_SCAN_LIMIT && at + character.len_utf8() < text.len();
+        if width > max_width || more_than_scanned {
+            return longest_with_ellipsis
+                .and_then(|end| text.get(..end))
+                .map_or_else(String::new, |kept| format!("{kept}…"));
         }
     }
-    String::new()
+    text.to_owned()
 }
 
 const TAB_WIDTH: f32 = 140.0;
@@ -931,12 +952,16 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
                 tab.editor.position_at(range.end),
             )
         });
-    let squiggle = tab.error.as_ref().map(|error| {
-        (
-            tab.editor.position_at(error.range.start),
-            tab.editor.position_at(error.range.end),
-        )
-    });
+    let squiggle = tab
+        .error
+        .as_ref()
+        .and_then(|error| error.range.clone())
+        .map(|range| {
+            (
+                tab.editor.position_at(range.start),
+                tab.editor.position_at(range.end),
+            )
+        });
     let mut caret_x = 320.0;
     for (number, line) in lines.iter().enumerate().skip(first).take(visible) {
         let top = EDITOR_TEXT_TOP + LINE_HEIGHT * (number - first) as f32;
@@ -2150,6 +2175,35 @@ mod tests {
             mono: &BoxFace,
         };
         (draw(&MainWindow::sample(), theme, faces), theme)
+    }
+
+    #[test]
+    fn elided_keeps_what_fits_and_scans_a_long_text_only_as_far_as_it_shows() {
+        let face = BoxFace;
+        let size = 10.0;
+        let advance = face.advance('a', size);
+        assert_eq!(elided(&face, "abc", advance * 3.0, size), "abc");
+        let shown = elided(&face, "abcdef", advance * 3.0, size);
+        assert!(
+            shown.ends_with('…') && shown.len() < "abcdef".len() + 3,
+            "{shown}"
+        );
+        assert!(face.width(&shown, size) <= advance * 3.0);
+        let long = "é".repeat(1 << 20);
+        let cut = elided(&face, &long, advance * 4.0, size);
+        assert!(cut.ends_with('…'));
+        assert!(elided(&face, &long, f32::MAX, size).chars().count() <= ELIDE_SCAN_LIMIT);
+        assert_eq!(elided(&face, "abc", 0.0, size), "");
+    }
+
+    #[test]
+    fn wheel_steps_take_one_notch_as_three_rows_and_add_up_touchpad_parts() {
+        let mut carry = (0.0, 0.0);
+        assert_eq!(wheel_steps(&mut carry, 1.0, 0.0), (3, 0));
+        assert_eq!(wheel_steps(&mut carry, -1.0, 0.0), (-3, 0));
+        assert_eq!(wheel_steps(&mut carry, 0.2, 0.0), (0, 0));
+        assert_eq!(wheel_steps(&mut carry, 0.2, 0.0), (1, 0));
+        assert_eq!(wheel_steps(&mut carry, f32::NAN, f32::INFINITY), (0, 0));
     }
 
     #[test]

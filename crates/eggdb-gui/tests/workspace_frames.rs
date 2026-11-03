@@ -16,7 +16,8 @@ use eggdb_gui::connect_screen::{
     NODE_PASSWORD, NODE_PORT, NODE_PROTOCOL, NODE_STATUS_LINE, NODE_TLS_WARNING, NODE_URL,
     NODE_USE_TLS, NODE_USER, Segment, TLS_WARNING, TextField, accessibility_tree,
 };
-use eggdb_gui::connection::EngineConnector;
+use eggdb_gui::connection::{CancelHandle, EngineConnector};
+use eggdb_gui::dialect::QueryDialect;
 use eggdb_gui::main_window::{self, Faces, MainWindow};
 use eggdb_gui::png::encode_png;
 use eggdb_gui::workspace::{Screen, Workspace};
@@ -378,6 +379,55 @@ fn the_server_segment_fills_its_fields_from_the_typed_url() {
     let nodes = accessibility_tree(&checked, BOX_FACES, SIZE);
     assert!(nodes.iter().all(|node| node.id != NODE_TLS_WARNING));
     assert_eq!(checked.server.url.value(), "postgresql://ada@db:5433/shop");
+}
+
+#[test]
+fn a_rolled_back_run_inside_an_open_transaction_keeps_the_sessions_own_work() {
+    let server = start_server();
+    let mut workspace = server_workspace();
+    let url = format!(
+        "postgresql://{SERVER_USER}@127.0.0.1:{}/shop?sslmode=disable",
+        server.port
+    );
+    connect(&mut workspace, &url, SERVER_PASSWORD);
+    let connection = workspace.connection_mut().expect("the connection is held");
+    let count = |connection: &mut eggdb_gui::connection::Connection| {
+        connection
+            .run("SELECT count(*) FROM t")
+            .ok()
+            .and_then(|mut tables| tables.pop())
+            .and_then(|mut table| table.rows.pop())
+            .and_then(|mut row| row.pop())
+            .flatten()
+    };
+    connection.run("CREATE TABLE t (id integer)").unwrap();
+    connection.run("INSERT INTO t VALUES (1)").unwrap();
+    let cancel = CancelHandle::default();
+    let outcomes = connection.run_rolled_back(
+        QueryDialect::PostgreSql,
+        "EXPLAIN (ANALYZE, BUFFERS) /* audit */ DELETE FROM t",
+        &cancel,
+    );
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert_eq!(count(connection).as_deref(), Some("1"));
+    connection.run("BEGIN").unwrap();
+    connection.run("INSERT INTO t VALUES (2)").unwrap();
+    let outcomes = connection.run_rolled_back(
+        QueryDialect::PostgreSql,
+        "EXPLAIN (ANALYZE, BUFFERS) CREATE TABLE copy AS SELECT * FROM t",
+        &cancel,
+    );
+    assert_eq!(outcomes.len(), 4, "{outcomes:?}");
+    assert!(outcomes.first().is_some_and(Result::is_ok));
+    assert_eq!(
+        count(connection).as_deref(),
+        Some("2"),
+        "the open work stays"
+    );
+    connection.run("ROLLBACK").unwrap();
+    assert_eq!(count(connection).as_deref(), Some("1"));
+    assert!(connection.run("SELECT * FROM copy").is_err());
+    drop(server);
 }
 
 #[test]

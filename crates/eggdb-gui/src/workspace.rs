@@ -31,6 +31,23 @@ pub const CANCELLED_SHOWN_FOR: Duration = Duration::from_secs(2);
 pub const NOTICE_SHOWN_FOR: Duration = Duration::from_secs(2);
 
 type RunAnswer = (Connection, Vec<Result<Vec<ResultTable>, StatementFailure>>);
+type OpenAnswer = Result<(Connection, Catalog), ConnectFailure>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CatalogRead {
+    Catalog,
+    Sample(String),
+}
+
+enum CatalogAnswer {
+    Catalog(Result<Catalog, StatementFailure>),
+    Sample(inspector::Sample),
+}
+
+struct Reading {
+    read: CatalogRead,
+    answer: Receiver<(Connection, CatalogAnswer)>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Drag {
@@ -69,18 +86,23 @@ struct Running {
 struct Opening {
     target: ConnectTarget,
     started: Instant,
-    answer: Receiver<Result<Connection, ConnectFailure>>,
+    answer: Receiver<OpenAnswer>,
 }
 
 /// The client's state from the connect card to the main window: it turns the card's actions
-/// into opens on a [`Connector`], runs each open off the window's thread so `Esc` can stop
-/// it, and holds the [`Connection`] the main window works on.
+/// into opens on a [`Connector`], runs each open, run and catalog read off the window's thread
+/// so the window never waits on the database, and holds the [`Connection`] the main window
+/// works on.
 pub struct Workspace {
     screen: Screen,
     connection: Option<Connection>,
     connector: Arc<dyn Connector>,
     opening: Option<Opening>,
     running: Option<Running>,
+    reading: Option<Reading>,
+    run_waiting_for_connection: Option<mpsc::Sender<Connection>>,
+    catalog_wanted: bool,
+    sample_wanted: Option<String>,
     status_until: Option<Instant>,
     notice_until: Option<Instant>,
     clipboard: Box<dyn Clipboard>,
@@ -122,6 +144,10 @@ impl Workspace {
             connector,
             opening: None,
             running: None,
+            reading: None,
+            run_waiting_for_connection: None,
+            catalog_wanted: false,
+            sample_wanted: None,
             status_until: None,
             notice_until: None,
             clipboard: Box::new(MemoryClipboard::default()),
@@ -546,34 +572,129 @@ impl Workspace {
     }
 
     fn inspect(&mut self, item: TreeItem) {
-        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut())
-        else {
+        let Screen::Main(window) = &self.screen else {
             return;
         };
         let Some(name) = inspector::sampled_name(&window.tree, item) else {
             return;
         };
-        if window
+        let shown = window
             .inspector
             .sample
             .as_ref()
-            .is_some_and(|sample| sample.of == name)
-        {
+            .is_some_and(|sample| sample.of == name);
+        let being_read = self
+            .reading
+            .as_ref()
+            .is_some_and(|reading| reading.read == CatalogRead::Sample(name.clone()));
+        if shown || being_read {
             return;
         }
-        window.inspector.sample = Some(inspector::fetch_sample(connection, &name));
+        self.sample_wanted = Some(name);
+        self.start_read();
     }
 
-    /// Reads the catalog again and shows it in the tree, keeping its expanded, current and
-    /// selected rows; nothing happens while a run holds the connection.
+    /// Reads the catalog again off the window's thread and shows it in the tree when it
+    /// arrives, keeping its expanded, current and selected rows; while a run or another read
+    /// holds the connection, the read starts once it is back.
     pub fn refresh_catalog(&mut self) {
-        let (Screen::Main(window), Some(connection)) = (&mut self.screen, self.connection.as_mut())
-        else {
+        if matches!(self.screen, Screen::Main(_)) {
+            self.catalog_wanted = true;
+            self.start_read();
+        }
+    }
+
+    fn start_read(&mut self) {
+        if self.reading.is_some() || self.run_waiting_for_connection.is_some() {
+            return;
+        }
+        let read = if self.catalog_wanted {
+            self.catalog_wanted = false;
+            CatalogRead::Catalog
+        } else if let Some(name) = self.sample_wanted.take() {
+            CatalogRead::Sample(name)
+        } else {
             return;
         };
-        if let Ok(catalog) = connection.catalog() {
-            window.tree.set_catalog(catalog);
-            window.inspector.sample = None;
+        let Some(mut connection) = self.connection.take() else {
+            match read {
+                CatalogRead::Catalog => self.catalog_wanted = true,
+                CatalogRead::Sample(name) => self.sample_wanted = Some(name),
+            }
+            return;
+        };
+        let (send, answer) = mpsc::channel();
+        let worker_read = read.clone();
+        std::thread::spawn(move || {
+            let answer = match worker_read {
+                CatalogRead::Catalog => CatalogAnswer::Catalog(connection.catalog()),
+                CatalogRead::Sample(name) => {
+                    CatalogAnswer::Sample(inspector::fetch_sample(&mut connection, &name))
+                }
+            };
+            let _ = send.send((connection, answer));
+        });
+        self.reading = Some(Reading { read, answer });
+    }
+
+    fn finish_read(&mut self, connection: Connection, answer: CatalogAnswer) {
+        self.reading = None;
+        if let Screen::Main(window) = &mut self.screen {
+            match answer {
+                CatalogAnswer::Catalog(Ok(catalog)) => {
+                    window.tree.set_catalog(catalog);
+                    window.inspector.sample = None;
+                }
+                CatalogAnswer::Catalog(Err(_)) => {}
+                CatalogAnswer::Sample(sample) => window.inspector.sample = Some(sample),
+            }
+        }
+        self.connection_back(connection);
+    }
+
+    fn connection_back(&mut self, connection: Connection) {
+        match self.run_waiting_for_connection.take() {
+            Some(run) => {
+                if let Err(mpsc::SendError(connection)) = run.send(connection) {
+                    self.connection = Some(connection);
+                    self.start_read();
+                }
+            }
+            None => {
+                self.connection = Some(connection);
+                self.start_read();
+            }
+        }
+    }
+
+    fn tick_read(&mut self) -> bool {
+        let Some(reading) = &self.reading else {
+            return false;
+        };
+        match reading.answer.try_recv() {
+            Ok((connection, answer)) => {
+                self.finish_read(connection, answer);
+                true
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.reading = None;
+                false
+            }
+            Err(TryRecvError::Empty) => false,
+        }
+    }
+
+    /// Waits up to `limit` for the catalog and sample reads in flight or waiting for the
+    /// connection, and shows their answers; for scripted runs and tests.
+    pub fn wait_for_reads(&mut self, limit: Duration) {
+        let until = Instant::now() + limit;
+        while let Some(reading) = &self.reading {
+            let left = until.saturating_duration_since(Instant::now());
+            match reading.answer.recv_timeout(left) {
+                Ok((connection, answer)) => self.finish_read(connection, answer),
+                Err(mpsc::RecvTimeoutError::Disconnected) => self.reading = None,
+                Err(mpsc::RecvTimeoutError::Timeout) => return,
+            }
         }
     }
 
@@ -621,9 +742,16 @@ impl Workspace {
     }
 
     fn start_run(&mut self, request: RunRequest, now: Instant) {
-        let Some(mut connection) = self.connection.take() else {
-            return;
-        };
+        let (hand_over, handed) = mpsc::channel::<Connection>();
+        match self.connection.take() {
+            Some(connection) => {
+                let _ = hand_over.send(connection);
+            }
+            None if self.reading.is_some() && self.run_waiting_for_connection.is_none() => {
+                self.run_waiting_for_connection = Some(hand_over);
+            }
+            None => return,
+        }
         let (send, answer) = mpsc::channel();
         let cancel = CancelHandle::default();
         let worker_cancel = cancel.clone();
@@ -634,16 +762,15 @@ impl Workspace {
             .as_ref()
             .is_some_and(|explain| explain.rolled_back);
         std::thread::spawn(move || {
-            let outcomes = connection.run_script(dialect, &statements, &worker_cancel);
-            let left_open =
-                outcomes.len() < statements.len() && outcomes.first().is_some_and(Result::is_ok);
-            if rolled_back && left_open {
-                let _ = connection.run_script(
-                    dialect,
-                    &["ROLLBACK".to_owned()],
-                    &CancelHandle::default(),
-                );
-            }
+            let Ok(mut connection) = handed.recv() else {
+                return;
+            };
+            let outcomes = match statements.first() {
+                Some(statement) if rolled_back => {
+                    connection.run_rolled_back(dialect, statement, &worker_cancel)
+                }
+                _ => connection.run_script(dialect, &statements, &worker_cancel),
+            };
             let _ = send.send((connection, outcomes));
         });
         if let Some(window) = self.main_window_mut() {
@@ -659,7 +786,6 @@ impl Workspace {
 
     fn finish_run(&mut self, running: Running, answer: RunAnswer, now: Instant) {
         let (connection, outcomes) = answer;
-        self.connection = Some(connection);
         let elapsed = now.saturating_duration_since(running.started);
         let changed_schema = outcomes
             .iter()
@@ -668,9 +794,10 @@ impl Workspace {
         if let Some(window) = self.main_window_mut() {
             window.tab.finish(&running.request, outcomes, elapsed);
         }
-        if changed_schema {
-            self.refresh_catalog();
+        if changed_schema && matches!(self.screen, Screen::Main(_)) {
+            self.catalog_wanted = true;
         }
+        self.connection_back(connection);
     }
 
     fn tick_run(&mut self, now: Instant) -> bool {
@@ -701,16 +828,26 @@ impl Workspace {
         }
     }
 
-    /// Waits for the running query to end, up to `limit`, and takes its outcome; for scripted
-    /// runs and tests that render a run's result.
+    /// Waits for the running query to end, up to `limit`, and takes its outcome, then for the
+    /// catalog read a schema change starts; for scripted runs and tests that render a run's
+    /// result.
     pub fn wait_for_run(&mut self, limit: Duration) {
+        let until = Instant::now() + limit;
+        self.wait_for_reads(limit);
         let Some(running) = self.running.take() else {
             return;
         };
-        match running.answer.recv_timeout(limit) {
+        match running
+            .answer
+            .recv_timeout(until.saturating_duration_since(Instant::now()))
+        {
             Ok(answer) => self.finish_run(running, answer, Instant::now()),
-            Err(_) => self.running = Some(running),
+            Err(_) => {
+                self.running = Some(running);
+                return;
+            }
         }
+        self.wait_for_reads(until.saturating_duration_since(Instant::now()));
     }
 
     /// Puts `text` in the editor, the caret at its end, and runs it as `Ctrl/Cmd+Enter`
@@ -852,7 +989,11 @@ impl Workspace {
         let connector = Arc::clone(&self.connector);
         let request = target.clone();
         std::thread::spawn(move || {
-            let _ = sender.send(connector.connect(&request));
+            let answer = connector.connect(&request).map(|mut connection| {
+                let catalog = opening_catalog(&mut connection);
+                (connection, catalog)
+            });
+            let _ = sender.send(answer);
         });
         self.opening = Some(Opening {
             target,
@@ -865,7 +1006,8 @@ impl Workspace {
     /// after [`PROGRESS_DELAY`] and clears `Cancelled` after [`CANCELLED_SHOWN_FOR`].
     /// Returns whether the screen changed.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = self.tick_run(now);
+        let mut changed = self.tick_read();
+        changed |= self.tick_run(now);
         if self.caret_blinks || !self.window_active {
             changed |= self.refresh_caret(now);
         }
@@ -925,11 +1067,11 @@ impl Workspace {
         }
     }
 
-    fn finish(&mut self, answer: Result<Connection, ConnectFailure>) {
+    fn finish(&mut self, answer: OpenAnswer) {
         self.opening = None;
         match answer {
-            Ok(mut connection) => {
-                self.screen = Screen::Main(Box::new(main_window_for(&mut connection)));
+            Ok((connection, catalog)) => {
+                self.screen = Screen::Main(Box::new(main_window_for(&connection, catalog)));
                 self.connection = Some(connection);
             }
             Err(failure) => {
@@ -941,14 +1083,23 @@ impl Workspace {
     }
 }
 
-/// The main window as it first shows `connection` (`docs/ux/workspace.md` 1.7): its name and
-/// location in the toolbar, its catalog in the object tree, one empty `Query 1` editor.
-pub fn main_window_for(connection: &mut Connection) -> MainWindow {
-    let writable = !connection.read_only();
-    let catalog = connection
+/// The catalog the main window first shows for `connection`: its full catalog, else its
+/// table names; it reads the database, so it runs off the window's thread.
+pub fn opening_catalog(connection: &mut Connection) -> Catalog {
+    connection
         .catalog()
-        .unwrap_or_else(|_| Catalog::of_tables(connection.table_names().unwrap_or_default()));
-    MainWindow::with_catalog(connection.name(), connection.location(), writable, catalog)
+        .unwrap_or_else(|_| Catalog::of_tables(connection.table_names().unwrap_or_default()))
+}
+
+/// The main window as it first shows `connection` (`docs/ux/workspace.md` 1.7): its name and
+/// location in the toolbar, `catalog` in the object tree, one empty `Query 1` editor.
+pub fn main_window_for(connection: &Connection, catalog: Catalog) -> MainWindow {
+    MainWindow::with_catalog(
+        connection.name(),
+        connection.location(),
+        !connection.read_only(),
+        catalog,
+    )
 }
 
 /// Whether `statement` may change what the object tree lists: a `CREATE`, `ALTER`, `DROP`
@@ -1154,6 +1305,35 @@ mod tests {
         assert!(path.exists(), "Create was checked at first start");
         drop(workspace);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_run_started_while_the_catalog_is_read_waits_for_the_connection_and_runs() {
+        let directory = scratch("read-then-run");
+        let now = Instant::now();
+        let mut workspace = workspace(Arc::new(EngineConnector), directory.clone());
+        type_text(&mut workspace, "reads.eggdb", now);
+        workspace.key(KeyPress::plain(Key::Enter), now);
+        workspace.wait_for_open(Duration::from_secs(10));
+        workspace.refresh_catalog();
+        assert!(workspace.connection_mut().is_none(), "the read holds it");
+        workspace.run_text("CREATE TABLE late (id integer)", false, now);
+        assert!(workspace.is_running());
+        workspace.wait_for_run(Duration::from_secs(10));
+        let Screen::Main(window) = workspace.screen() else {
+            panic!("the main window stays");
+        };
+        assert_eq!(window.tab.messages, ["CREATE TABLE"]);
+        assert!(
+            window
+                .tree
+                .catalog
+                .tables
+                .iter()
+                .any(|table| table.name == "late"),
+            "the schema change read the catalog again"
+        );
+        assert!(workspace.connection_mut().is_some());
     }
 
     #[test]

@@ -546,6 +546,15 @@ pub enum PropertyData<'d> {
     Words(&'d [u32]),
 }
 
+/// Whether an error the server sent about request `sequence` with `major_opcode` came from
+/// answering another client's selection request: a `ChangeProperty` on its window or the
+/// `SendEvent` that notifies it, among the requests in `serving`. That window may be gone
+/// already, so the error is the other client's and must not end this one's event loop.
+pub fn is_selection_serving_error(major_opcode: u8, sequence: u16, serving: &[u16]) -> bool {
+    matches!(major_opcode, OPCODE_CHANGE_PROPERTY | OPCODE_SEND_EVENT)
+        && serving.contains(&sequence)
+}
+
 /// `ChangeProperty` in mode `Replace`: sets `property` of `window` to `data` of type `kind`.
 pub fn change_property(
     window: u32,
@@ -1170,6 +1179,28 @@ pub fn scale_from_resources(resources: &[u8]) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_selection_serving_errors_are_ignored() {
+        let serving = [7, 9];
+        assert!(is_selection_serving_error(
+            OPCODE_CHANGE_PROPERTY,
+            7,
+            &serving
+        ));
+        assert!(is_selection_serving_error(OPCODE_SEND_EVENT, 9, &serving));
+        assert!(!is_selection_serving_error(
+            OPCODE_CHANGE_PROPERTY,
+            8,
+            &serving
+        ));
+        assert!(!is_selection_serving_error(
+            OPCODE_GET_PROPERTY,
+            7,
+            &serving
+        ));
+        assert!(!is_selection_serving_error(OPCODE_SEND_EVENT, 9, &[]));
+    }
 
     #[test]
     fn display_names_parse_to_a_socket_and_tcp_is_refused() {

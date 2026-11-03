@@ -57,8 +57,9 @@ pub struct InlineError {
     pub code: String,
     /// The engine's message.
     pub message: String,
-    /// The bytes of the editor's text the squiggle is under.
-    pub range: Range<usize>,
+    /// The bytes of the editor's text the squiggle is under; `None` when the text changed
+    /// while the statement ran, so the run's offsets no longer point into it.
+    pub range: Option<Range<usize>>,
     /// The 1-based line of the error's position.
     pub line: usize,
     /// The 1-based column, in characters.
@@ -108,6 +109,8 @@ pub struct RunRequest {
     pub all: bool,
     /// What `Explain` explains, when the run is one.
     pub explain: Option<ExplainRun>,
+    /// The editor's text when the run was asked for, which `starts` are offsets into.
+    pub source_text: String,
 }
 
 /// The statement an `Explain` run explains and how its answer is read.
@@ -119,11 +122,12 @@ pub struct ExplainRun {
     pub statement: Range<usize>,
     /// The statement's text.
     pub statement_text: String,
-    /// Which of the run's statements answers with the plan.
+    /// Which of the run's outcomes answers with the plan.
     pub plan_at: usize,
     /// How many bytes were put before the statement.
     pub prefix_len: usize,
-    /// Whether the run is wrapped in a transaction that is rolled back.
+    /// Whether the run goes through [`crate::connection::Connection::run_rolled_back`], so
+    /// nothing it writes stays.
     pub rolled_back: bool,
 }
 
@@ -259,6 +263,7 @@ impl QueryTab {
             dialect: self.dialect,
             all,
             explain: None,
+            source_text: text,
         })
     }
 
@@ -279,6 +284,7 @@ impl QueryTab {
             starts: vec![start; count],
             dialect: self.dialect,
             all: false,
+            source_text: base.source_text.clone(),
             explain: Some(ExplainRun {
                 analyze,
                 statement: start..start + statement.len(),
@@ -581,7 +587,7 @@ impl QueryTab {
         elapsed: Duration,
     ) {
         if let Some(explain) = &request.explain {
-            self.finish_explain(explain, outcomes, elapsed);
+            self.finish_explain(explain, &request.source_text, outcomes, elapsed);
             return;
         }
         let was_stopping = self.stopping;
@@ -656,6 +662,7 @@ impl QueryTab {
     fn finish_explain(
         &mut self,
         explain: &ExplainRun,
+        source_text: &str,
         outcomes: Vec<Result<Vec<ResultTable>, StatementFailure>>,
         elapsed: Duration,
     ) {
@@ -701,6 +708,7 @@ impl QueryTab {
                     dialect: self.dialect,
                     all: false,
                     explain: None,
+                    source_text: source_text.to_owned(),
                 };
                 self.show_error(&shifted, &original, 0);
             }
@@ -772,22 +780,31 @@ impl QueryTab {
     }
 
     fn show_error(&mut self, failure: &StatementFailure, request: &RunRequest, index: usize) {
-        let text = self.editor.text();
+        let text = request.source_text.as_str();
         let start = request.starts.get(index).copied().unwrap_or(0);
         let statement_len = request.statements.get(index).map_or(0, String::len);
         let range = match failure.position {
             Some(position) => {
-                let from = (start + position).min(text.len());
-                from..token_end(&text, from).max(from)
+                let from = char_boundary_at_or_before(text, start.saturating_add(position));
+                from..token_end(text, from).max(from)
             }
-            None => start..(start + statement_len).min(text.len()),
+            None => {
+                char_boundary_at_or_before(text, start)
+                    ..char_boundary_at_or_before(text, start.saturating_add(statement_len))
+            }
         };
-        let at = self.editor.position_at(range.start);
-        self.editor.place_caret(at);
+        let unchanged = self.editor.text() == text;
+        let at = if unchanged {
+            let at = self.editor.position_at(range.start);
+            self.editor.place_caret(at);
+            at
+        } else {
+            Editor::new(text).position_at(range.start)
+        };
         self.error = Some(InlineError {
             code: failure.code.clone(),
             message: failure.message.clone(),
-            range,
+            range: unchanged.then_some(range),
             line: at.line + 1,
             column: at.column + 1,
             fix: failure.hint.clone(),
@@ -806,10 +823,21 @@ fn last_tag_has_rows(messages: &[String]) -> bool {
     })
 }
 
+fn char_boundary_at_or_before(text: &str, offset: usize) -> usize {
+    let mut at = offset.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
 /// Where the token that starts at byte `from` of `text` ends: a word, a quoted name or one
-/// character, so the squiggle covers it.
+/// character, so the squiggle covers it; `from` itself when it is past the end or inside a
+/// character.
 pub fn token_end(text: &str, from: usize) -> usize {
-    let rest = &text[from..];
+    let Some(rest) = text.get(from..) else {
+        return from;
+    };
     let mut characters = rest.char_indices();
     let Some((_, first)) = characters.next() else {
         return from;
@@ -972,6 +1000,35 @@ mod tests {
     }
 
     #[test]
+    fn an_error_after_the_text_changed_during_the_run_shows_no_squiggle_and_does_not_panic() {
+        let mut tab = QueryTab::with_text("Query 1", "SELECT * FROM users;");
+        let request = tab.run_request(false).unwrap();
+        tab.started();
+        tab.editor
+            .place_caret(editor::Position { line: 0, column: 0 });
+        tab.editor.paste("ééééééé\u{1F600}");
+        let failure = StatementFailure {
+            code: "42P01".into(),
+            message: "relation \"users\" does not exist".into(),
+            hint: None,
+            position: Some(14),
+            report: Vec::new(),
+        };
+        tab.finish(&request, vec![Err(failure)], Duration::from_millis(1));
+        let error = tab.error.clone().unwrap();
+        assert_eq!(error.range, None);
+        assert_eq!((error.line, error.column), (1, 15));
+        assert_eq!(tab.editor.text(), "ééééééé\u{1F600}SELECT * FROM users;");
+    }
+
+    #[test]
+    fn token_end_inside_a_character_or_past_the_end_stays_put() {
+        assert_eq!(token_end("é", 1), 1);
+        assert_eq!(token_end("ab", 9), 9);
+        assert_eq!(char_boundary_at_or_before("aé", 2), 1);
+    }
+
+    #[test]
     fn an_error_puts_the_squiggle_the_strip_and_the_engines_lines_up() {
         let mut tab = QueryTab::with_text("Query 1", "SELECT 1;\nSELECT * FROM users;");
         let request = tab.run_request(false).unwrap();
@@ -988,7 +1045,7 @@ mod tests {
         tab.started();
         tab.finish(&request, vec![Err(failure)], Duration::from_millis(1));
         let error = tab.error.clone().unwrap();
-        assert_eq!(error.range, 24..29);
+        assert_eq!(error.range, Some(24..29));
         assert_eq!(
             error.strip_text(),
             "Error 42P01: relation \"users\" does not exist · Ln 2, Col 15"
@@ -1118,11 +1175,13 @@ mod tests {
         };
         assert_eq!(
             request.statements,
-            [
-                "BEGIN",
-                "EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t WHERE id = 1",
-                "ROLLBACK"
-            ]
+            ["EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t WHERE id = 1"]
+        );
+        assert!(
+            request
+                .explain
+                .as_ref()
+                .is_some_and(|explain| explain.rolled_back)
         );
         let failure = StatementFailure {
             code: "42P01".to_owned(),
@@ -1142,7 +1201,7 @@ mod tests {
             .error
             .as_ref()
             .expect("the squiggle sits under the table's name");
-        assert_eq!(error.range, 12..13);
+        assert_eq!(error.range, Some(12..13));
         let mut oracle = QueryTab::with_text("Query 1", "SELECT 1 FROM dual");
         oracle.set_dialect(QueryDialect::Oracle);
         assert_eq!(

@@ -201,9 +201,11 @@ pub enum WindowEvent {
         /// The modifier keys held.
         modifiers: Modifiers,
     },
-    /// The wheel or the touchpad scrolled at (`x`, `y`) device pixels, by lines: positive
-    /// `lines_down` asks to see what is further down, positive `lines_right` what is further
-    /// right (already turned the way the user's scrolling direction setting says).
+    /// The wheel or the touchpad scrolled at (`x`, `y`) device pixels, by lines, one line a
+    /// wheel notch on every platform, a touchpad's travel in fractions of one; the client
+    /// decides how far a line scrolls: positive `lines_down` asks to see what is further
+    /// down, positive `lines_right` what is further right (already turned the way the user's
+    /// scrolling direction setting says).
     Wheel {
         /// The horizontal position in device pixels.
         x: f32,

@@ -531,7 +531,11 @@ impl ResultGrid {
 
     fn copy_inserts(&self) -> GridAnswer {
         let text = self.insert_statements();
-        let statements = text.lines().count();
+        let statements = self
+            .selection()
+            .0
+            .filter(|&row| row < self.rows.len())
+            .count();
         GridAnswer::Copy {
             text,
             toast: crate::status_line::copied_inserts_text(statements),
@@ -789,6 +793,15 @@ mod tests {
             panic!("Ctrl+Shift+I copies INSERTs");
         };
         assert_eq!(toast, "Copied 2 INSERT statements");
+        grid.rows[0][1] = Some("A\nda".to_owned());
+        let GridAnswer::Copy { toast, .. } = grid.key(press(Key::Character('I'), true, true), 10)
+        else {
+            panic!("Ctrl+Shift+I copies INSERTs");
+        };
+        assert_eq!(
+            toast, "Copied 2 INSERT statements",
+            "a line break is no statement"
+        );
         grid.dialect = QueryDialect::MySql;
         grid.source_table = None;
         grid.anchor = Cell { row: 1, column: 2 };

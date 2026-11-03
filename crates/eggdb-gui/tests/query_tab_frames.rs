@@ -244,7 +244,7 @@ fn an_error_shows_the_squiggle_the_strip_and_the_engines_lines() {
         error.strip_text(),
         "Error 42P01: relation \"users\" does not exist · Ln 1, Col 15"
     );
-    assert_eq!(error.range, 14..19);
+    assert_eq!(error.range, Some(14..19));
     assert_eq!(
         (tab.summary.as_str(), tab.view),
         ("Error", ResultView::Messages)

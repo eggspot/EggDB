@@ -15,6 +15,7 @@ use super::{
 };
 
 const LARGEST_REPLY: usize = 16 << 20;
+const SELECTION_SERVING_REMEMBERED: usize = 64;
 const RESOURCES_UNITS: u32 = 1 << 16;
 const SHORTEST_WAIT: Duration = Duration::from_millis(1);
 const BACKLOG_RETRY: Duration = Duration::from_millis(10);
@@ -68,6 +69,7 @@ pub(crate) struct X11Window {
     incoming: Vec<u8>,
     pending: VecDeque<WindowEvent>,
     sequence: u16,
+    selection_serving: VecDeque<u16>,
     window: u32,
     root: u32,
     target: ImageTarget,
@@ -127,6 +129,7 @@ impl X11Window {
             incoming: Vec::new(),
             pending: VecDeque::new(),
             sequence: 0,
+            selection_serving: VecDeque::new(),
             window,
             root: screen.root,
             target: ImageTarget {
@@ -287,6 +290,15 @@ impl X11Window {
         Ok(self.sequence)
     }
 
+    fn send_serving_selection(&mut self, request: &[u8]) -> Result<(), WindowError> {
+        let sequence = self.send(request)?;
+        if self.selection_serving.len() >= SELECTION_SERVING_REMEMBERED {
+            self.selection_serving.pop_front();
+        }
+        self.selection_serving.push_back(sequence);
+        Ok(())
+    }
+
     fn fill(&mut self, wanted: usize) -> Result<bool, WindowError> {
         let mut chunk = [0u8; 4096];
         while self.incoming.len() < wanted {
@@ -383,6 +395,19 @@ impl X11Window {
 
     fn translate(&mut self, packet: Packet) -> Result<Option<WindowEvent>, WindowError> {
         Ok(match packet {
+            Packet::Error {
+                sequence,
+                major_opcode,
+                ..
+            } if x11::is_selection_serving_error(
+                major_opcode,
+                sequence,
+                self.selection_serving.make_contiguous(),
+            ) =>
+            {
+                self.selection_serving.retain(|&served| served != sequence);
+                None
+            }
             Packet::Error {
                 code,
                 sequence,
@@ -514,7 +539,7 @@ impl X11Window {
                 };
                 let answer = if answered { property } else { x11::ATOM_NONE };
                 let event = x11::selection_notify_event(time, requestor, selection, target, answer);
-                self.send(&x11::send_event(requestor, &event)?)?;
+                self.send_serving_selection(&x11::send_event(requestor, &event)?)?;
                 self.stream.flush().map_err(|error| io_error(&error))?;
                 None
             }
@@ -539,7 +564,7 @@ impl X11Window {
         if target == atoms.targets {
             let mut offered = vec![atoms.targets];
             offered.extend(atoms.text_targets());
-            self.send(&x11::change_property(
+            self.send_serving_selection(&x11::change_property(
                 requestor,
                 property,
                 x11::ATOM_ATOM,
@@ -564,7 +589,7 @@ impl X11Window {
         } else {
             text.into_bytes()
         };
-        self.send(&x11::change_property(
+        self.send_serving_selection(&x11::change_property(
             requestor,
             property,
             target,

@@ -266,7 +266,7 @@ impl Plan {
         rows: &[Vec<Option<String>>],
         columns: (usize, usize, usize),
     ) -> Result<Self, PlanError> {
-        if rows.len() > MAX_NODES {
+        if rows.len() >= MAX_NODES {
             return Err(PlanError::TooManyNodes);
         }
         let cell = |row: &Vec<Option<String>>, at: usize| {
@@ -721,19 +721,22 @@ pub fn milliseconds_text(milliseconds: f64) -> String {
 pub struct ExplainStatements {
     /// What runs, in order.
     pub statements: Vec<String>,
-    /// Which of them answers with the plan.
+    /// Which outcome answers with the plan: `1` when the run is rolled back, after the
+    /// outcome of the `BEGIN` or `SAVEPOINT` that opens it.
     pub plan_at: usize,
     /// How many bytes were put before the statement, to move an error's position back.
     pub prefix_len: usize,
-    /// Whether the statements are wrapped in a transaction that is rolled back.
+    /// Whether the statement runs through [`crate::connection::Connection::run_rolled_back`],
+    /// so nothing it writes stays.
     pub rolled_back: bool,
 }
 
 /// The statements that explain `statement` in `dialect` (`docs/ux/workspace.md` 5.1):
-/// `EXPLAIN`, or `EXPLAIN (ANALYZE, BUFFERS)` with `analyze` inside a transaction that is
-/// rolled back when the statement writes; SQLite's `EXPLAIN QUERY PLAN`. A statement that
-/// already starts with `EXPLAIN` runs as it is. The error is the `Messages` text for a
-/// dialect EggDB cannot explain in yet.
+/// `EXPLAIN`, or `EXPLAIN (ANALYZE, BUFFERS)` with `analyze`, which is always rolled back
+/// whatever the statement is, since a leading comment, `CREATE TABLE … AS`, `SELECT … INTO`,
+/// `EXECUTE` or a function can write; SQLite's `EXPLAIN QUERY PLAN`. A statement that already
+/// starts with `EXPLAIN` runs as it is, rolled back too since it may say `ANALYZE`. The error
+/// is the `Messages` text for a dialect EggDB cannot explain in yet.
 pub fn explain_statements(
     dialect: QueryDialect,
     statement: &str,
@@ -747,12 +750,7 @@ pub fn explain_statements(
         .collect();
     let first = words.first().map_or("", String::as_str);
     if first == EXPLAIN_WORD {
-        return Ok(ExplainStatements {
-            statements: vec![statement.to_owned()],
-            plan_at: 0,
-            prefix_len: 0,
-            rolled_back: false,
-        });
+        return Ok(rolled_back(statement.to_owned(), 0));
     }
     let not_yet = match dialect {
         QueryDialect::Oracle => Some(("Oracle's", "Oracle's EXPLAIN PLAN")),
@@ -777,14 +775,8 @@ pub fn explain_statements(
     };
     let explained = format!("{prefix}{statement}");
     let prefix_len = prefix.len();
-    let writes = analyze && matches!(first, "insert" | "update" | "delete" | "merge" | "with");
-    Ok(if writes {
-        ExplainStatements {
-            statements: vec!["BEGIN".to_owned(), explained, "ROLLBACK".to_owned()],
-            plan_at: 1,
-            prefix_len,
-            rolled_back: true,
-        }
+    Ok(if analyze {
+        rolled_back(explained, prefix_len)
     } else {
         ExplainStatements {
             statements: vec![explained],
@@ -793,6 +785,15 @@ pub fn explain_statements(
             rolled_back: false,
         }
     })
+}
+
+fn rolled_back(statement: String, prefix_len: usize) -> ExplainStatements {
+    ExplainStatements {
+        statements: vec![statement],
+        plan_at: 1,
+        prefix_len,
+        rolled_back: true,
+    }
 }
 
 /// Where a node sits in the drawn tree, from the tree's top-left corner.
@@ -1391,6 +1392,17 @@ Execution Time: 10.400 ms";
             Err(PlanError::Empty)
         );
         let _ = Plan::from_sqlite_rows(&[vec![None]], (0, 1, 3));
+        let flat = |count: usize| -> Vec<Vec<Option<String>>> {
+            (1..=count)
+                .map(|id| row(&id.to_string(), "0", "SCAN t"))
+                .collect()
+        };
+        let largest = Plan::from_sqlite_rows(&flat(MAX_NODES - 1), (0, 1, 3)).unwrap();
+        assert_eq!(largest.nodes.len(), MAX_NODES, "the root counts");
+        assert_eq!(
+            Plan::from_sqlite_rows(&flat(MAX_NODES), (0, 1, 3)),
+            Err(PlanError::TooManyNodes)
+        );
     }
 
     #[test]
@@ -1499,19 +1511,30 @@ Execution Time: 10.400 ms";
             explain_statements(QueryDialect::PostgreSql, "UPDATE t SET a = 1", true).unwrap();
         assert_eq!(
             analyzed.statements,
-            [
-                "BEGIN",
-                "EXPLAIN (ANALYZE, BUFFERS) UPDATE t SET a = 1",
-                "ROLLBACK"
-            ]
+            ["EXPLAIN (ANALYZE, BUFFERS) UPDATE t SET a = 1"]
         );
         assert!(analyzed.rolled_back);
         assert_eq!(analyzed.plan_at, 1);
-        let read = explain_statements(QueryDialect::PostgreSql, "select 1", true).unwrap();
-        assert_eq!((read.statements.len(), read.rolled_back), (1, false));
+        for hidden_write in [
+            "/* audit */ DELETE FROM t",
+            "CREATE TABLE copy AS SELECT * FROM t",
+            "SELECT * INTO copy FROM t",
+            "select 1",
+        ] {
+            let read = explain_statements(QueryDialect::PostgreSql, hidden_write, true).unwrap();
+            assert!(read.rolled_back, "{hidden_write}");
+        }
+        let typed = explain_statements(
+            QueryDialect::PostgreSql,
+            "EXPLAIN ANALYZE DELETE FROM t",
+            false,
+        )
+        .unwrap();
+        assert!(typed.rolled_back);
         let sqlite = explain_statements(QueryDialect::Sqlite, "SELECT 1", false).unwrap();
         assert_eq!(sqlite.statements, ["EXPLAIN QUERY PLAN SELECT 1"]);
         let typed = explain_statements(QueryDialect::Oracle, "explain select 1", false).unwrap();
+        assert_eq!(typed.plan_at, 1);
         assert_eq!(
             (typed.statements, typed.prefix_len),
             (vec!["explain select 1".to_owned()], 0)

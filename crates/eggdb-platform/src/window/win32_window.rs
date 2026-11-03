@@ -436,9 +436,9 @@ fn pointer_message(
             unsafe { ScreenToClient(window, &mut point) };
             let notches = win32::wheel_notches(wparam);
             let (lines_down, lines_right) = if message == WM_MOUSEWHEEL {
-                (-notches * WHEEL_LINES_PER_NOTCH, 0.0)
+                (-notches, 0.0)
             } else {
-                (0.0, notches * WHEEL_LINES_PER_NOTCH)
+                (0.0, notches)
             };
             state.push(WindowEvent::Wheel {
                 x: point.x as f32,
@@ -476,8 +476,6 @@ fn pointer_message(
         }
     }
 }
-
-const WHEEL_LINES_PER_NOTCH: f32 = 3.0;
 
 struct OpenedClipboard;
 

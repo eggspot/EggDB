@@ -16,7 +16,10 @@ use crate::grid::ValueKind;
 pub const ROW_LIMIT: usize = 100_000;
 
 const USER_TABLES: &str = "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY tablename";
-const AUTHENTICATION_FAILED: &str = "28P01";
+const AUTHENTICATION_CLASS: &str = "28";
+const QUERY_CANCELED: &str = "57014";
+const NO_ACTIVE_TRANSACTION: &str = "25P01";
+const ROLLED_BACK_SAVEPOINT: &str = "eggdb_explain_analyze";
 const DATABASE_MISSING: &str = "3D000";
 
 /// What the connect card asks to open: a database file or a server.
@@ -135,6 +138,20 @@ impl StatementFailure {
             hint: error.hint().map(str::to_owned),
             position: error.position().filter(|&position| position <= text.len()),
             report: error_lines(error, text),
+        }
+    }
+
+    pub(crate) fn cancelled() -> Self {
+        let message = "canceling statement due to user request".to_owned();
+        Self {
+            code: QUERY_CANCELED.to_owned(),
+            report: vec![
+                format!("ERROR:  {message}"),
+                format!("SQLSTATE:  {QUERY_CANCELED}"),
+            ],
+            message,
+            hint: None,
+            position: None,
         }
     }
 
@@ -392,6 +409,10 @@ impl Connection {
                 let mut session = store.session(dialect.engine());
                 cancel.arm(Stopper::File(session.cancel_signal()));
                 for statement in statements {
+                    if cancel.is_cancelled() {
+                        outcomes.push(Err(StatementFailure::cancelled()));
+                        break;
+                    }
                     let mut tables = Vec::new();
                     let ran =
                         session.execute(statement, &mut |result| tables.push(file_result(result)));
@@ -412,6 +433,10 @@ impl Connection {
                     cancel.arm(Stopper::Server(request));
                 }
                 for statement in statements {
+                    if cancel.is_cancelled() {
+                        outcomes.push(Err(StatementFailure::cancelled()));
+                        break;
+                    }
                     let ran = client
                         .simple_query(statement)
                         .map(|results| results.into_iter().map(server_result).collect())
@@ -424,6 +449,55 @@ impl Connection {
                 }
                 cancel.disarm();
             }
+        }
+        outcomes
+    }
+
+    /// Runs `statement` in `dialect` so that nothing it writes stays, whatever it is: on a
+    /// server session that already has a transaction open, between `SAVEPOINT` and
+    /// `ROLLBACK TO SAVEPOINT`, so the session's own work stays; else inside `BEGIN` and
+    /// `ROLLBACK`. The outcomes start with the opening statement's, then the statement's,
+    /// then the closing statements'; a session whose transaction already failed gets that
+    /// failure and runs nothing.
+    pub fn run_rolled_back(
+        &mut self,
+        dialect: QueryDialect,
+        statement: &str,
+        cancel: &CancelHandle,
+    ) -> Vec<Result<Vec<ResultTable>, StatementFailure>> {
+        let undo = CancelHandle::default();
+        if matches!(self.link, Link::Server(_)) {
+            let savepoint = format!("SAVEPOINT {ROLLED_BACK_SAVEPOINT}");
+            let mut opened = self.run_script(dialect, &[savepoint], &undo);
+            match opened.pop() {
+                Some(Ok(tables)) => {
+                    let mut outcomes = vec![Ok(tables)];
+                    outcomes.extend(self.run_script(dialect, &[statement.to_owned()], cancel));
+                    outcomes.extend(self.run_script(
+                        dialect,
+                        &[
+                            format!("ROLLBACK TO SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
+                            format!("RELEASE SAVEPOINT {ROLLED_BACK_SAVEPOINT}"),
+                        ],
+                        &undo,
+                    ));
+                    return outcomes;
+                }
+                Some(Err(failure)) if failure.code != NO_ACTIVE_TRANSACTION => {
+                    return vec![Err(failure)];
+                }
+                _ => {}
+            }
+        }
+        let script = [
+            "BEGIN".to_owned(),
+            statement.to_owned(),
+            "ROLLBACK".to_owned(),
+        ];
+        let mut outcomes = self.run_script(dialect, &script, cancel);
+        let began = outcomes.first().is_some_and(Result::is_ok);
+        if began && outcomes.len() < script.len() && matches!(self.link, Link::Server(_)) {
+            outcomes.extend(self.run_script(dialect, &["ROLLBACK".to_owned()], &undo));
         }
         outcomes
     }
@@ -658,7 +732,7 @@ pub fn server_failure(options: &ConnectOptions, error: &ClientError) -> ConnectF
         ),
         ClientError::Server { code, message } => {
             let (fix, field) = match code.as_str() {
-                AUTHENTICATION_FAILED => (
+                state if state.starts_with(AUTHENTICATION_CLASS) => (
                     Some("check the user name and password".to_owned()),
                     FailureField::Password,
                 ),
@@ -780,6 +854,42 @@ mod tests {
             resolve_typed_path("~/x.eggdb", None, current),
             PathBuf::from("/work/~/x.eggdb")
         );
+    }
+
+    fn count_of(connection: &mut Connection, table: &str) -> Option<String> {
+        connection
+            .run(&format!("SELECT count(*) FROM {table}"))
+            .ok()?
+            .pop()?
+            .rows
+            .pop()?
+            .pop()?
+    }
+
+    #[test]
+    fn rolled_back_runs_leave_no_change_whatever_the_statement_starts_with() {
+        let path = scratch("rolled-back").join("shop.eggdb");
+        let _ = std::fs::remove_file(&path);
+        let mut connection = EngineConnector
+            .connect(&file(path.clone(), true, false))
+            .unwrap();
+        connection.run("CREATE TABLE t (id integer)").unwrap();
+        connection.run("INSERT INTO t VALUES (1), (2)").unwrap();
+        let cancel = CancelHandle::default();
+        for statement in [
+            "/* audit */ DELETE FROM t",
+            "EXPLAIN (ANALYZE, BUFFERS) -- note\nDELETE FROM t",
+            "CREATE TABLE copy AS SELECT * FROM t",
+            "EXPLAIN (ANALYZE, BUFFERS) CREATE TABLE copy AS SELECT * FROM t",
+        ] {
+            let outcomes = connection.run_rolled_back(QueryDialect::PostgreSql, statement, &cancel);
+            assert!(outcomes.first().is_some_and(Result::is_ok), "{statement}");
+            assert_eq!(count_of(&mut connection, "t").as_deref(), Some("2"));
+            assert!(
+                connection.run("SELECT * FROM copy").is_err(),
+                "{statement} left its table"
+            );
+        }
     }
 
     #[test]
@@ -930,6 +1040,18 @@ mod tests {
             "Error 28P01: password authentication failed for user \"ada\""
         );
         assert_eq!(authentication.field, FailureField::Password);
+        let unauthorized = server_failure(
+            &options,
+            &ClientError::Server {
+                code: "28000".to_owned(),
+                message: "no pg_hba.conf entry for user \"ada\"".to_owned(),
+            },
+        );
+        assert_eq!(unauthorized.field, FailureField::Password);
+        assert_eq!(
+            unauthorized.try_line().as_deref(),
+            Some("Try: check the user name and password")
+        );
         let missing = server_failure(
             &options,
             &ClientError::Server {

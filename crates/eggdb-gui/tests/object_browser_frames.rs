@@ -274,6 +274,7 @@ fn the_inspector_docks_from_1440_px_and_shows_the_selected_table() {
     press(&mut workspace, Key::Down);
     press(&mut workspace, Key::Down);
     press(&mut workspace, Key::Space);
+    workspace.wait_for_reads(LIMIT);
     let shown = window(&mut workspace);
     assert_eq!(shown.tree.selected, Some(TreeItem::Table(1)));
     let sample = shown
