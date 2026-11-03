@@ -9,6 +9,9 @@ use super::atspi_bridge::{self, AtspiBridge};
 use super::x11::{
     self, ButtonCode, ImageTarget, KeyboardMapping, Packet, PixelLayout, PropertyData,
 };
+use super::x11_incr::{
+    self, IncomingIncr, IncrProgress, IncrStep, MAX_OUTGOING_TRANSFERS, OutgoingIncr,
+};
 use super::{
     AccessNode, KeyPress, MAX_CLIPBOARD_TEXT_BYTES, Window, WindowError, WindowEvent,
     WindowOptions, check_clipboard_text, check_frame,
@@ -88,6 +91,8 @@ pub(crate) struct X11Window {
     origin_stale: bool,
     atoms: ClipboardAtoms,
     owned_clipboard: Option<String>,
+    outgoing: Vec<OutgoingIncr>,
+    changed_property: Option<u32>,
     screen_number: u32,
 }
 
@@ -153,6 +158,8 @@ impl X11Window {
             origin_stale: false,
             atoms: ClipboardAtoms::default(),
             owned_clipboard: None,
+            outgoing: Vec::new(),
+            changed_property: None,
             screen_number: name.screen,
         };
         this.scale = this.read_scale(screen.root)?;
@@ -184,7 +191,8 @@ impl X11Window {
             | x11::EVENT_BUTTON_PRESS
             | x11::EVENT_BUTTON_RELEASE
             | x11::EVENT_POINTER_MOTION
-            | x11::EVENT_LEAVE_WINDOW;
+            | x11::EVENT_LEAVE_WINDOW
+            | x11::EVENT_PROPERTY_CHANGE;
         this.send(&x11::create_window(
             window,
             screen.root,
@@ -530,6 +538,18 @@ impl X11Window {
             Packet::LeaveNotify { window, mode } if window == self.window && mode == 0 => {
                 Some(WindowEvent::PointerLeft)
             }
+            Packet::PropertyNotify {
+                window,
+                atom,
+                state,
+            } => {
+                if window == self.window && state == x11::PROPERTY_NEW_VALUE {
+                    self.changed_property = Some(atom);
+                } else if state == x11::PROPERTY_DELETED {
+                    self.continue_transfer(window, atom)?;
+                }
+                None
+            }
             Packet::SelectionClear { owner, selection }
                 if owner == self.window && selection == self.atoms.clipboard =>
             {
@@ -598,14 +618,14 @@ impl X11Window {
         let largest = usize::from(self.maximum_request_length)
             .saturating_mul(4)
             .saturating_sub(SELECTION_REQUEST_HEADER_BYTES);
-        if text.len() > largest {
-            return Ok(false);
-        }
         let bytes = if target == x11::ATOM_STRING {
             latin1(&text)
         } else {
             text.into_bytes()
         };
+        if bytes.len() > largest {
+            return self.start_transfer(requestor, property, target, bytes);
+        }
         self.send_serving_selection(&x11::change_property(
             requestor,
             property,
@@ -613,6 +633,94 @@ impl X11Window {
             PropertyData::Bytes(&bytes),
         )?)?;
         Ok(true)
+    }
+
+    fn start_transfer(
+        &mut self,
+        requestor: u32,
+        property: u32,
+        target: u32,
+        bytes: Vec<u8>,
+    ) -> Result<bool, WindowError> {
+        self.drop_stalled_transfers()?;
+        let busy = self
+            .outgoing
+            .iter()
+            .any(|transfer| transfer.is_for(requestor, property));
+        if busy || self.outgoing.len() >= MAX_OUTGOING_TRANSFERS {
+            return Ok(false);
+        }
+        let chunk =
+            x11_incr::incr_chunk_size(self.maximum_request_length, SELECTION_REQUEST_HEADER_BYTES);
+        let transfer = OutgoingIncr::new(requestor, property, target, bytes, chunk, Instant::now());
+        self.send_serving_selection(&x11::select_events(
+            requestor,
+            x11::EVENT_PROPERTY_CHANGE,
+        )?)?;
+        self.send_serving_selection(&x11::change_property(
+            requestor,
+            property,
+            self.atoms.incr,
+            PropertyData::Words(&[transfer.announced_size()]),
+        )?)?;
+        self.outgoing.push(transfer);
+        Ok(true)
+    }
+
+    fn continue_transfer(&mut self, window: u32, property: u32) -> Result<(), WindowError> {
+        let Some(at) = self
+            .outgoing
+            .iter()
+            .position(|transfer| transfer.is_for(window, property))
+        else {
+            return Ok(());
+        };
+        let transfer = &mut self.outgoing[at];
+        let target = transfer.target;
+        let request = match transfer.next(Instant::now()) {
+            IncrStep::Chunk(range) => Some(x11::change_property(
+                window,
+                property,
+                target,
+                PropertyData::Bytes(transfer.bytes(range)),
+            )?),
+            IncrStep::End => Some(x11::change_property(
+                window,
+                property,
+                target,
+                PropertyData::Bytes(&[]),
+            )?),
+            IncrStep::Done => None,
+        };
+        match request {
+            Some(request) => self.send_serving_selection(&request)?,
+            None => self.end_transfer(at)?,
+        }
+        self.stream.flush().map_err(|error| io_error(&error))
+    }
+
+    fn end_transfer(&mut self, at: usize) -> Result<(), WindowError> {
+        let transfer = self.outgoing.swap_remove(at);
+        let still_used = self
+            .outgoing
+            .iter()
+            .any(|other| other.requestor == transfer.requestor);
+        if still_used {
+            return Ok(());
+        }
+        self.send_serving_selection(&x11::select_events(transfer.requestor, 0)?)
+    }
+
+    fn drop_stalled_transfers(&mut self) -> Result<(), WindowError> {
+        let now = Instant::now();
+        while let Some(at) = self
+            .outgoing
+            .iter()
+            .position(|transfer| transfer.is_stalled(now))
+        {
+            self.end_transfer(at)?;
+        }
+        Ok(())
     }
 
     fn wait_for_selection(&mut self, deadline: Instant) -> Result<Option<u32>, WindowError> {
@@ -643,6 +751,56 @@ impl X11Window {
                         self.pending.push_back(event);
                     }
                 }
+            }
+        }
+    }
+
+    fn wait_for_new_value(&mut self, property: u32, deadline: Instant) -> Result<(), WindowError> {
+        loop {
+            if self.changed_property.take() == Some(property) {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(WindowError::Io(
+                    "the clipboard's owner stopped sending its text".to_owned(),
+                ));
+            }
+            let Some(packet) = self.read_packet(Some(left))? else {
+                continue;
+            };
+            let mut header = [0u8; 32];
+            header.copy_from_slice(packet.get(..32).unwrap_or(&[0; 32]));
+            match x11::parse_packet(&header) {
+                Packet::Reply { .. } => {}
+                packet => {
+                    if let Some(event) = self.translate(packet)? {
+                        self.pending.push_back(event);
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_in_increments(
+        &mut self,
+        property: u32,
+        announced: Option<u32>,
+    ) -> Result<String, WindowError> {
+        let mut incoming = IncomingIncr::new(announced, MAX_CLIPBOARD_TEXT_BYTES)?;
+        loop {
+            self.wait_for_new_value(property, Instant::now() + CLIPBOARD_ANSWER_LIMIT)?;
+            let sequence = self.send(&x11::get_property_deleting(
+                self.window,
+                property,
+                CLIPBOARD_REPLY_UNITS,
+            )?)?;
+            let reply = self.reply(sequence)?;
+            if x11::parse_property_type(&reply)? == x11::ATOM_NONE {
+                continue;
+            }
+            if incoming.take(x11::parse_property_reply(&reply)?)? == IncrProgress::Done {
+                return Ok(incoming.into_text());
             }
         }
     }
@@ -778,9 +936,9 @@ impl Window for X11Window {
         let reply = self.reply(sequence)?;
         let kind = x11::parse_property_type(&reply)?;
         if kind == atoms.incr {
-            return Err(WindowError::Unsupported(
-                "the clipboard's owner sends its text in increments, which is not read yet",
-            ));
+            let announced = x11_incr::incr_lower_bound(x11::parse_property_reply(&reply)?);
+            self.changed_property = None;
+            return self.read_in_increments(property, announced).map(Some);
         }
         let bytes = x11::parse_property_reply(&reply)?;
         if bytes.len() > MAX_CLIPBOARD_TEXT_BYTES {

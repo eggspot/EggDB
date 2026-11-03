@@ -3,9 +3,11 @@
 //! the display name, `MIT-MAGIC-COOKIE-1` from an Xauthority file, connection setup, the
 //! requests `CreateWindow`, `ChangeProperty`, `MapWindow`, `InternAtom`, `GetProperty`,
 //! `CreateGC`, `PutImage`, `GetKeyboardMapping`, and for the `CLIPBOARD` selection
-//! `SetSelectionOwner`, `ConvertSelection` and `SendEvent`, their replies, and the events a
-//! window reads (keys, buttons, motion, selections). Every message is little-endian (the client chooses the byte order at setup). Parsing
-//! never panics: a short or inconsistent message is a [`WindowError::Protocol`].
+//! `SetSelectionOwner`, `ConvertSelection`, `SendEvent` and `ChangeWindowAttributes` (for the
+//! `INCR` transfers in [`super::x11_incr`]), their replies, and the events a window reads (keys,
+//! buttons, motion, properties, selections). Every message is little-endian (the client
+//! chooses the byte order at setup). Parsing never panics: a short or inconsistent message is a
+//! [`WindowError::Protocol`].
 
 use super::{Key, Modifiers, PointerButton, WindowError};
 
@@ -45,6 +47,12 @@ pub const EVENT_BUTTON_RELEASE: u32 = 0x0000_0008;
 pub const EVENT_LEAVE_WINDOW: u32 = 0x0000_0020;
 /// The event mask bit for `MotionNotify` with or without a button held.
 pub const EVENT_POINTER_MOTION: u32 = 0x0000_0040;
+/// The `PropertyChange` event mask bit: `PropertyNotify` when a property of the window changes.
+pub const EVENT_PROPERTY_CHANGE: u32 = 0x0040_0000;
+/// A `PropertyNotify` state: the property was given a new value.
+pub const PROPERTY_NEW_VALUE: u8 = 0;
+/// A `PropertyNotify` state: the property was deleted.
+pub const PROPERTY_DELETED: u8 = 1;
 /// The `Time` value `CurrentTime`.
 pub const CURRENT_TIME: u32 = 0;
 /// The atom value `None`, as in a refused `SelectionNotify`.
@@ -53,6 +61,7 @@ pub const ATOM_NONE: u32 = 0;
 pub const EVENT_CODE_SELECTION_NOTIFY: u8 = 31;
 
 const OPCODE_CREATE_WINDOW: u8 = 1;
+const OPCODE_CHANGE_WINDOW_ATTRIBUTES: u8 = 2;
 const OPCODE_MAP_WINDOW: u8 = 8;
 const OPCODE_INTERN_ATOM: u8 = 16;
 const OPCODE_CHANGE_PROPERTY: u8 = 18;
@@ -548,12 +557,25 @@ pub enum PropertyData<'d> {
 }
 
 /// Whether an error the server sent about request `sequence` with `major_opcode` came from
-/// answering another client's selection request: a `ChangeProperty` on its window or the
+/// answering another client's selection request: a `ChangeProperty` on its window, the
+/// `ChangeWindowAttributes` that follows an `INCR` transfer's deletions on it, or the
 /// `SendEvent` that notifies it, among the requests in `serving`. That window may be gone
 /// already, so the error is the other client's and must not end this one's event loop.
 pub fn is_selection_serving_error(major_opcode: u8, sequence: u16, serving: &[u16]) -> bool {
-    matches!(major_opcode, OPCODE_CHANGE_PROPERTY | OPCODE_SEND_EVENT)
-        && serving.contains(&sequence)
+    matches!(
+        major_opcode,
+        OPCODE_CHANGE_PROPERTY | OPCODE_CHANGE_WINDOW_ATTRIBUTES | OPCODE_SEND_EVENT
+    ) && serving.contains(&sequence)
+}
+
+/// `ChangeWindowAttributes` with only the event mask: this client hears `event_mask`'s events
+/// on `window`, another client's window too (each client has its own mask on a window).
+pub fn select_events(window: u32, event_mask: u32) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&window.to_le_bytes());
+    body.extend_from_slice(&CW_EVENT_MASK.to_le_bytes());
+    body.extend_from_slice(&event_mask.to_le_bytes());
+    request(OPCODE_CHANGE_WINDOW_ATTRIBUTES, 0, &body)
 }
 
 /// `ChangeProperty` in mode `Replace`: sets `property` of `window` to `data` of type `kind`.
@@ -1112,6 +1134,15 @@ pub enum Packet {
         /// 0 for a normal leave, 1 and 2 for leaves caused by grabs.
         mode: u8,
     },
+    /// A property of a window changed: given a new value or deleted.
+    PropertyNotify {
+        /// The window.
+        window: u32,
+        /// The property's atom.
+        atom: u32,
+        /// [`PROPERTY_NEW_VALUE`] or [`PROPERTY_DELETED`].
+        state: u8,
+    },
     /// Another client took a selection this one owned.
     SelectionClear {
         /// The window that owned it.
@@ -1197,6 +1228,11 @@ pub fn parse_packet(header: &[u8; 32]) -> Packet {
         8 => Packet::LeaveNotify {
             window: word(12),
             mode: header[30],
+        },
+        28 => Packet::PropertyNotify {
+            window: word(4),
+            atom: word(8),
+            state: header[16],
         },
         29 => Packet::SelectionClear {
             owner: word(8),
@@ -1312,6 +1348,32 @@ mod tests {
             &serving
         ));
         assert!(!is_selection_serving_error(OPCODE_SEND_EVENT, 9, &[]));
+        assert!(is_selection_serving_error(
+            OPCODE_CHANGE_WINDOW_ATTRIBUTES,
+            7,
+            &serving
+        ));
+    }
+
+    #[test]
+    fn property_notifications_and_event_selection_are_encoded_as_the_spec_lays_them_out() {
+        assert_eq!(
+            select_events(0x0040_0001, EVENT_PROPERTY_CHANGE).unwrap(),
+            vec![2, 0, 4, 0, 1, 0, 0x40, 0, 0, 0x08, 0, 0, 0, 0, 0x40, 0]
+        );
+        let deleted = packet(28, |bytes| {
+            bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
+            bytes[8..12].copy_from_slice(&300u32.to_le_bytes());
+            bytes[16] = PROPERTY_DELETED;
+        });
+        assert_eq!(
+            parse_packet(&deleted),
+            Packet::PropertyNotify {
+                window: 9,
+                atom: 300,
+                state: PROPERTY_DELETED
+            }
+        );
     }
 
     #[test]
