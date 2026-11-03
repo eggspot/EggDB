@@ -40,8 +40,11 @@ pub mod highlight;
 /// The inspector: the selected object's columns, indexes, DDL and sample rows
 /// (`docs/ux/workspace.md` 4.3).
 pub mod inspector;
-/// The window layout: panes, splitters and their sizes.
+/// The main window's layouts (`docs/ux/gui-layouts.md`): EggDB's own and those that work like
+/// clients people already know, each with its regions, labels and shortcut table.
 pub mod layout;
+/// The layout picker: the dialog that lists the layouts and applies one.
+pub mod layout_picker;
 /// The main window: what it draws and how it answers input.
 pub mod main_window;
 /// The object browser: the sidebar's tree of the catalog, its filter and keys
@@ -59,6 +62,8 @@ pub mod pointer;
 /// The query tab: its editor, dialect, runs, results and inline errors
 /// (`docs/ux/workspace.md` 2).
 pub mod query_tab;
+/// What the client keeps per user between starts, such as the layout.
+pub mod settings;
 /// Splitting an editor's text into statements by each dialect's rules.
 pub mod statements;
 /// The status line's and status bar's strings (`docs/ux/workspace.md` 2.4).
