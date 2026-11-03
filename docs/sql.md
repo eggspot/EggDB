@@ -2786,9 +2786,13 @@ rows in a table of that name, `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WI
 replaces them with the query's current rows in one transaction, and `DROP MATERIALIZED VIEW [IF
 EXISTS] name[, ...]` removes it. The defining queries are kept in
 `eggdb_internal.materialized_views`. Reads of a materialized view are reads of its table, so
-they are as fast as any table and see the rows of the last refresh. Not yet: keeping the rows up
-to date on every commit (incremental maintenance), column name lists, and indexes on the view
-being kept across a refresh.
+they are as fast as any table and see the rows of the last refresh. A materialized view may be
+named in any schema (`CREATE MATERIALIZED VIEW reports.daily AS ...`), takes indexes like a
+table, and is created, refreshed and dropped inside a transaction block like any other statement:
+the first one in a database leaves the block usable (D308). Not yet: keeping the rows up to date
+on every commit (incremental maintenance), column name lists, indexes on the view being kept
+across a refresh, and `pg_class` showing it as a materialized view (`relkind` `m`) rather than a
+table.
 
 ## Change streams (eggdb_cdc)
 

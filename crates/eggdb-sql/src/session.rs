@@ -391,6 +391,10 @@ fn is_one_statement_naming_the_postgresql_catalog(text: &str) -> bool {
     qualifies
 }
 
+fn materialized_view_key(name: &str) -> String {
+    crate::dump::sql_string(&crate::schemas::display(name))
+}
+
 fn aborted_block() -> SqlError {
     SqlError::new(
         SqlState::IN_FAILED_SQL_TRANSACTION,
@@ -2325,25 +2329,23 @@ impl<'s> Session<'s> {
         }
     }
 
+    fn materialized_views_registered(&mut self) -> SqlResult<bool> {
+        let internal = crate::schemas::qualified("eggdb_internal", "materialized_views");
+        self.read(|reader, _| Ok(reader.get(&crate::encoding::table_key(&internal))?.is_some()))
+    }
+
     fn materialized_view_query(&mut self, name: &str) -> SqlResult<Option<String>> {
-        let rows = match self.run_quietly(&format!(
-            "SELECT query FROM eggdb_internal.materialized_views WHERE name = {}",
-            crate::dump::sql_string(name)
-        )) {
-            Ok(results) => results
-                .into_iter()
-                .flat_map(|result| result.rows)
-                .collect::<Vec<_>>(),
-            Err(error)
-                if matches!(
-                    error.state(),
-                    SqlState::UNDEFINED_TABLE | SqlState::INVALID_SCHEMA_NAME
-                ) =>
-            {
-                Vec::new()
-            }
-            Err(error) => return Err(error),
-        };
+        if !self.materialized_views_registered()? {
+            return Ok(None);
+        }
+        let rows = self
+            .run_quietly(&format!(
+                "SELECT query FROM eggdb_internal.materialized_views WHERE name = {}",
+                materialized_view_key(name)
+            ))?
+            .into_iter()
+            .flat_map(|result| result.rows)
+            .collect::<Vec<_>>();
         Ok(rows
             .into_iter()
             .next()
@@ -2359,7 +2361,7 @@ impl<'s> Session<'s> {
     ) -> SqlResult<QueryResult> {
         use crate::ast::MaterializedViewCommand;
         let written = |name: &str| {
-            name.split('.')
+            name.split(crate::schemas::QUALIFIER)
                 .map(crate::schema::quoted)
                 .collect::<Vec<_>>()
                 .join(".")
@@ -2415,7 +2417,7 @@ impl<'s> Session<'s> {
                     session.run_quietly(&format!("CREATE TABLE {table} ({})", columns.join(", ")))?;
                     session.run_quietly(&format!(
                         "INSERT INTO eggdb_internal.materialized_views VALUES ({}, {})",
-                        crate::dump::sql_string(&name_text),
+                        materialized_view_key(&name_text),
                         crate::dump::sql_string(&query)
                     ))?;
                     if with_data {
@@ -2462,7 +2464,7 @@ impl<'s> Session<'s> {
                         session.run_quietly(&format!("DROP TABLE {}", written(name)))?;
                         session.run_quietly(&format!(
                             "DELETE FROM eggdb_internal.materialized_views WHERE name = {}",
-                            crate::dump::sql_string(name)
+                            materialized_view_key(name)
                         ))?;
                     }
                     Ok(())
