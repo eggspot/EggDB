@@ -14,13 +14,17 @@ pub(super) const MAX_QUERIES: usize = 1024;
 #[derive(Default)]
 pub(super) struct QueryTail {
     pub(super) order_by: Vec<OrderItem>,
+    pub(super) siblings: Vec<OrderItem>,
     pub(super) limit: Option<Expr>,
     pub(super) offset: Option<Expr>,
 }
 
 impl QueryTail {
     fn is_empty(&self) -> bool {
-        self.order_by.is_empty() && self.limit.is_none() && self.offset.is_none()
+        self.order_by.is_empty()
+            && self.siblings.is_empty()
+            && self.limit.is_none()
+            && self.offset.is_none()
     }
 }
 
@@ -227,11 +231,19 @@ impl Parser<'_> {
                         crate::window::resolve_references(&mut item.expr, windows)?;
                     }
                 }
+                if self.oracle() {
+                    super::hierarchy::apply_ordering(&mut select, tail.siblings)?;
+                }
                 select.limit = tail.limit;
                 select.offset = tail.offset;
                 (SetExpr::Select(select), QueryTail::default())
             }
-            body => (body, tail),
+            body => {
+                if let Some(item) = tail.siblings.first() {
+                    return Err(super::hierarchy::siblings_not_allowed(item.expr.position));
+                }
+                (body, tail)
+            }
         };
         Ok(Query {
             with,
@@ -478,9 +490,15 @@ impl Parser<'_> {
 
     pub(super) fn query_tail(&mut self) -> SqlResult<QueryTail> {
         let mut order_by = Vec::new();
+        let mut siblings = Vec::new();
         if self.take_word("order") {
+            let in_siblings = self.oracle() && self.take_word("siblings");
             self.expect_word("by")?;
-            order_by = self.order_items()?;
+            if in_siblings {
+                siblings = self.order_items()?;
+            } else {
+                order_by = self.order_items()?;
+            }
         }
         let mut limit = None;
         let mut offset = None;
@@ -581,6 +599,7 @@ impl Parser<'_> {
         }
         let tail = QueryTail {
             order_by,
+            siblings,
             limit,
             offset,
         };
@@ -642,6 +661,7 @@ impl Parser<'_> {
                 column_names,
                 dialect: self.dialect,
                 lateral: false,
+                hierarchy: None,
             })),
             generated: None,
         })

@@ -2,9 +2,9 @@ use crate::ast::{
     AlterAction, AlterRoutine, AlterRoutineAction, AlterTriggerAction, AssignedValue,
     BinaryOperator, CopySource, CreateRoutine, CursorCommand, Delete, DropRoutine, Expr, ExprKind,
     GeneratedTable, Insert, InsertSource, InsertValue, Literal, MaterializedViewCommand,
-    MergeStatement, MySqlStatement, Name, OnDuplicate, Query, ReferentialAction, RoutineTarget,
-    Select, SelectItem, SetExpr, SqlServerStatement, Statement, TableReference, UnaryOperator,
-    Update, VariableSource,
+    MergeStatement, MultitableInsert, MySqlStatement, Name, OnDuplicate, Query, ReferentialAction,
+    RoutineTarget, Select, SelectItem, SetExpr, SqlServerStatement, Statement, TableReference,
+    UnaryOperator, Update, VariableSource,
 };
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -391,6 +391,7 @@ pub(crate) fn classify(
         Statement::With(with) => crate::with_statement::classify(with, keys),
         Statement::Merge(merge) => merged(merge, keys),
         Statement::CreateTableAs(create) => classify(&create.query, keys),
+        Statement::MultitableInsert(insert) => multitable_inserted(insert, keys),
     }
 }
 
@@ -606,6 +607,19 @@ fn inserted(insert: &Insert, keys: &mut CatalogLookup<'_>) -> Option<Destructive
         }
     }
     returning_user_functions(insert.returning.as_deref(), keys, &mut functions);
+    DestructiveStatement::combined(found, running(functions.user))
+}
+
+fn multitable_inserted(
+    insert: &MultitableInsert,
+    keys: &mut CatalogLookup<'_>,
+) -> Option<DestructiveStatement> {
+    let mut found = None;
+    for target in insert.targets() {
+        found = DestructiveStatement::combined(found, insert_runs_code(&target.table.name, keys));
+    }
+    let mut functions = CalledFunctions::default();
+    query_user_functions(&insert.source, keys, &mut functions);
     DestructiveStatement::combined(found, running(functions.user))
 }
 

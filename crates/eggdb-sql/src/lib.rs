@@ -52,6 +52,7 @@ mod foreign;
 mod geo_functions;
 mod grouping_sets;
 mod hash_index;
+mod hierarchy;
 mod hstore;
 mod hstore_functions;
 mod hyperloglog;
@@ -71,6 +72,7 @@ mod md5;
 mod memory;
 mod merge;
 mod migration;
+mod multitable_insert;
 mod mysql_catalog;
 mod mysql_errors;
 mod mysql_variables;
@@ -194,6 +196,8 @@ mod geo_tests;
 #[cfg(test)]
 mod grouping_sets_tests;
 #[cfg(test)]
+mod hierarchy_tests;
+#[cfg(test)]
 mod implicit_transaction_tests;
 #[cfg(test)]
 mod index_tests;
@@ -211,6 +215,8 @@ mod materialized_view_tests;
 mod memory_store;
 #[cfg(test)]
 mod migration_tool_tests;
+#[cfg(test)]
+mod multitable_insert_tests;
 #[cfg(test)]
 mod one_statement_tests;
 #[cfg(test)]

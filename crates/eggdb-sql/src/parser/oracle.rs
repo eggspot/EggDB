@@ -486,7 +486,7 @@ impl<'t> Parser<'t> {
                 return Err(self.unexpected());
             }
             "insert" if self.is_word_at(1, "all") || self.is_word_at(1, "first") => {
-                return Err(self.not_supported("INSERT ALL and INSERT FIRST"));
+                self.multitable_insert()?
             }
             _ => return self.plsql_statement(),
         };
@@ -1072,7 +1072,9 @@ impl<'t> Parser<'t> {
                         position,
                     }
                 }
-                "rowid" | "level" | "prior" | "uid" => {
+                "level" | "prior" | "connect_by_root" | "connect_by_isleaf"
+                | "connect_by_iscycle" => return self.hierarchical_primary(word, position),
+                "rowid" | "uid" => {
                     return Err(self.not_supported(&word.to_ascii_uppercase()));
                 }
                 _ => return Ok(None),
@@ -1169,6 +1171,10 @@ impl<'t> Parser<'t> {
         }
         if name.text == "listagg" {
             return self.oracle_listagg(name).map(Some);
+        }
+        if name.text == "sys_connect_by_path" {
+            let arguments = self.oracle_arguments()?;
+            return Ok(Some(function("sys_connect_by_path", arguments, position)));
         }
         if crate::ast::AggregateFunction::named(&name.text).is_some() {
             return Ok(None);

@@ -3285,6 +3285,11 @@ impl<'s> Session<'s> {
             Statement::CreateTableAs(create) => self.write("SELECT INTO", |writer, tables| {
                 crate::create_table_as::run(writer, tables, binding, dialect, create)
             }),
+            Statement::MultitableInsert(insert) => {
+                self.write_firing_triggers("INSERT", |writer, tables| {
+                    crate::multitable_insert::run(writer, tables, binding, insert)
+                })
+            }
             Statement::SqlServer(SqlServerStatement::OutputInto(output)) => {
                 self.run_output_into(output, binding)
             }

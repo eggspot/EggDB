@@ -1879,6 +1879,10 @@ fn prepare_reference(
             let overlay = Overlay::new(env.reader, &prepared.temp);
             run_query(&env.with_reader(&overlay), tables, &derived.query, ctes)?
         };
+        let result = match &derived.hierarchy {
+            Some(hierarchy) => crate::hierarchy::expanded(hierarchy, result)?,
+            None => result,
+        };
         let columns = result.columns.unwrap_or_default();
         let label = reference.alias.as_deref().unwrap_or("unnamed_subquery");
         let temp = prepared.temp.add(

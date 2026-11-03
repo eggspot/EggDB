@@ -3,9 +3,11 @@ mod copy;
 mod cursors;
 mod databases;
 mod grouping_sets;
+mod hierarchy;
 mod indexes;
 mod joined_dml;
 mod merge;
+mod multitable_insert;
 mod mysql;
 mod mysql_routines;
 mod oracle;
@@ -3083,6 +3085,11 @@ impl<'t> Parser<'t> {
         } else {
             (self.filter()?, None)
         };
+        let hierarchical = if self.oracle() {
+            self.hierarchical_clause()?
+        } else {
+            None
+        };
         let (group_by, grouping_sets) = if self.take_word("group") {
             self.expect_word("by")?;
             self.group_by()?
@@ -3106,9 +3113,6 @@ impl<'t> Parser<'t> {
             }
         }
         self.select_windows = Some(windows);
-        if self.oracle() && (self.is_word("connect") || self.is_word("start")) {
-            return Err(self.not_supported("hierarchical queries (CONNECT BY)"));
-        }
         if self.oracle() {
             oracle::reject_rownum_outside_where(&items, &group_by, having.as_ref(), &[])?;
         }
@@ -3120,7 +3124,7 @@ impl<'t> Parser<'t> {
         } else {
             items
         };
-        Ok(Select {
+        let select = Select {
             distinct,
             items,
             from,
@@ -3133,7 +3137,15 @@ impl<'t> Parser<'t> {
             source_row_limit,
             grouping_sets,
             distinct_on,
-        })
+        };
+        match hierarchical {
+            Some(clause) => hierarchy::connect_by(select, clause),
+            None if self.oracle() => {
+                hierarchy::reject_outside_hierarchy(&select)?;
+                Ok(select)
+            }
+            None => Ok(select),
+        }
     }
 
     fn distinct_on(&mut self) -> SqlResult<Vec<Expr>> {

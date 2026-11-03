@@ -1157,6 +1157,7 @@ fn derived_rows(
             column_names: Vec::new(),
             dialect,
             lateral: false,
+            hierarchy: None,
         })),
         generated: None,
     }

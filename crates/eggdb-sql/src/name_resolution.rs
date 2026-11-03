@@ -993,6 +993,7 @@ impl<'a> Resolver<'a> {
                 .collect(),
             dialect,
             lateral: false,
+            hierarchy: None,
         }));
         Ok(())
     }
@@ -1117,6 +1118,7 @@ impl<'a> Resolver<'a> {
                 column_names,
                 dialect: view.dialect,
                 lateral: false,
+                hierarchy: None,
             }
         };
         if reference.alias.is_none() {
@@ -1149,6 +1151,7 @@ impl Resolver<'_> {
                 column_names: Vec::new(),
                 dialect: view.dialect,
                 lateral: false,
+                hierarchy: None,
             }),
             Dialect::Sqlite if view.has_column_list => {
                 let present = self.output_columns(&query)?;
@@ -1168,6 +1171,7 @@ impl Resolver<'_> {
                     column_names,
                     dialect: view.dialect,
                     lateral: false,
+                    hierarchy: None,
                 })
             }
             Dialect::Sqlite => Ok(DerivedTable {
@@ -1175,6 +1179,7 @@ impl Resolver<'_> {
                 column_names: Vec::new(),
                 dialect: view.dialect,
                 lateral: false,
+                hierarchy: None,
             }),
             Dialect::MySql | Dialect::Oracle | Dialect::SqlServer => {
                 let present = self.output_columns(&query)?;
@@ -1188,6 +1193,7 @@ impl Resolver<'_> {
                     column_names: Vec::new(),
                     dialect: view.dialect,
                     lateral: false,
+                    hierarchy: None,
                 })
             }
         }
@@ -1335,6 +1341,7 @@ fn select_from(
                     column_names,
                     dialect,
                     lateral: false,
+                    hierarchy: None,
                 })),
                 generated: None,
             },

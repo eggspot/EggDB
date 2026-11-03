@@ -91,6 +91,7 @@ pub(crate) enum Statement {
     SqlServer(SqlServerStatement),
     Merge(Box<MergeStatement>),
     CreateTableAs(Box<CreateTableAs>),
+    MultitableInsert(Box<MultitableInsert>),
     AlterSession(Vec<(String, String)>),
     Discard(DiscardTarget),
     Cursor(CursorCommand),
@@ -432,6 +433,49 @@ pub(crate) struct CreateTableAs {
     pub(crate) name: Name,
     pub(crate) temporary: bool,
     pub(crate) query: Statement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MultitableInsertKind {
+    All,
+    First,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MultitableInsert {
+    pub(crate) kind: MultitableInsertKind,
+    pub(crate) source: Query,
+    pub(crate) computed: usize,
+    pub(crate) branches: Vec<InsertBranch>,
+    pub(crate) otherwise: Vec<InsertTarget>,
+}
+
+impl MultitableInsert {
+    pub(crate) fn targets(&self) -> impl Iterator<Item = &InsertTarget> {
+        self.branches
+            .iter()
+            .flat_map(|branch| &branch.targets)
+            .chain(&self.otherwise)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertBranch {
+    pub(crate) condition: Option<usize>,
+    pub(crate) targets: Vec<InsertTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertTarget {
+    pub(crate) table: TableReference,
+    pub(crate) columns: Option<Vec<Name>>,
+    pub(crate) values: Option<Vec<TargetValue>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetValue {
+    Computed(usize),
+    Default,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1176,6 +1220,26 @@ pub(crate) struct DerivedTable {
     pub(crate) column_names: Vec<Name>,
     pub(crate) dialect: Dialect,
     pub(crate) lateral: bool,
+    pub(crate) hierarchy: Option<Box<Hierarchy>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Hierarchy {
+    pub(crate) inputs: usize,
+    pub(crate) start: Option<usize>,
+    pub(crate) connect: Expr,
+    pub(crate) prior_inputs: Vec<usize>,
+    pub(crate) no_cycle: bool,
+    pub(crate) siblings: Vec<(usize, crate::types::SortDirection)>,
+    pub(crate) outputs: Vec<HierarchyOutput>,
+    pub(crate) position: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HierarchyOutput {
+    Path { input: usize, separator: String },
+    Root(usize),
+    Prior(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
