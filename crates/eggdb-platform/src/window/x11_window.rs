@@ -215,7 +215,13 @@ impl X11Window {
                 self.accessibility = None;
                 continue;
             }
+            let requests = bridge.take_requests();
             let (bus, backlog) = (bridge.fd(), bridge.has_backlog());
+            if !requests.is_empty() {
+                self.pending
+                    .extend(requests.into_iter().map(WindowEvent::AccessRequested));
+                return Ok(Some(Vec::new()));
+            }
             if let Some(packet) = self.read_packet(Some(Duration::ZERO))? {
                 return Ok(Some(packet));
             }
@@ -469,6 +475,9 @@ impl Window for X11Window {
             let Some(packet) = packet else {
                 return Ok(None);
             };
+            if packet.is_empty() {
+                continue;
+            }
             let mut header = [0u8; 32];
             header.copy_from_slice(packet.get(..32).unwrap_or(&[0; 32]));
             if let Some(event) = self.translate(x11::parse_packet(&header))? {

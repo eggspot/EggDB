@@ -823,6 +823,9 @@ impl Window for Win32Window {
                 return Ok(Some(event));
             }
             self.pump();
+            for request in self.state.automation.take_requests() {
+                self.state.push(WindowEvent::AccessRequested(request));
+            }
             if let Some(event) = self.state.pop() {
                 return Ok(Some(event));
             }

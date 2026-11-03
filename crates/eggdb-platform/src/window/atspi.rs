@@ -1,17 +1,23 @@
 //! The pure parts of the AT-SPI2 bridge on Linux and the BSDs, compiled and tested on every
 //! operating system: the object paths and references the bridge answers with, each
 //! [`AccessRole`]'s AT-SPI role and each node's state set, the answers to the
-//! `org.a11y.atspi.Accessible`, `Component` and `Application` methods and the D-Bus
-//! `Properties` calls a screen reader such as Orca makes, and the `Object:StateChanged`,
-//! `Focus`, `ChildrenChanged` and `Window` events raised when the tree or the window's focus
-//! changes. The values come from the public AT-SPI2 D-Bus interface descriptions; the socket
-//! that carries the messages is the caller's (D256).
+//! `org.a11y.atspi.Accessible`, `Component`, `Application`, `Action`, `Text`, `EditableText`,
+//! `Selection`, `Table` and `TableCell` methods and the D-Bus `Properties` calls a screen
+//! reader such as Orca makes, the requests those calls queue for the window
+//! ([`AtspiApplication::take_requests`]), and the `Object:StateChanged`, `TextChanged`,
+//! `TextCaretMoved`, `TextSelectionChanged`, `SelectionChanged`, `PropertyChange`, `Focus`,
+//! `ChildrenChanged` and `Window` events raised when the tree or the window's focus changes.
+//! The values come from the public AT-SPI2 D-Bus interface descriptions; the socket that
+//! carries the messages is the caller's (D256, D278).
 //!
 //! The application is the root object; the window's own node becomes its frame, because no
 //! other part of the system exposes an X11 window to AT-SPI2.
 
 use super::uia::is_keyboard_focusable;
-use super::{AccessNode, AccessRect, AccessRole, focused_node};
+use super::{
+    AccessAction, AccessCaret, AccessNode, AccessRect, AccessRequest, AccessRole,
+    MAX_ACCESS_VALUE_CHARS, access_request, focused_node,
+};
 use crate::dbus::{Message, MessageKind, NO_REPLY_EXPECTED, Value};
 
 /// The session bus name of the service that knows the accessibility bus's address.
@@ -30,6 +36,20 @@ pub const ACCESSIBLE_INTERFACE: &str = "org.a11y.atspi.Accessible";
 pub const COMPONENT_INTERFACE: &str = "org.a11y.atspi.Component";
 /// `org.a11y.atspi.Application`.
 pub const APPLICATION_INTERFACE: &str = "org.a11y.atspi.Application";
+/// `org.a11y.atspi.Action`, offered by nodes a screen reader may activate, toggle or expand.
+pub const ACTION_INTERFACE: &str = "org.a11y.atspi.Action";
+/// `org.a11y.atspi.Text`, offered by text fields and text areas.
+pub const TEXT_INTERFACE: &str = "org.a11y.atspi.Text";
+/// `org.a11y.atspi.EditableText`, offered by text nodes whose value can be replaced.
+pub const EDITABLE_TEXT_INTERFACE: &str = "org.a11y.atspi.EditableText";
+/// `org.a11y.atspi.Selection`, offered by tab lists, trees and grids.
+pub const SELECTION_INTERFACE: &str = "org.a11y.atspi.Selection";
+/// `org.a11y.atspi.Table`, offered by grids that know their size.
+pub const TABLE_INTERFACE: &str = "org.a11y.atspi.Table";
+/// `org.a11y.atspi.TableCell`, offered by cells that know where they are.
+pub const TABLE_CELL_INTERFACE: &str = "org.a11y.atspi.TableCell";
+/// The most screen-reader requests kept until the window takes them; later ones are refused.
+pub const MAX_QUEUED_REQUESTS: usize = 64;
 /// `org.a11y.atspi.Socket`, whose `Embed` registers an application.
 pub const SOCKET_INTERFACE: &str = "org.a11y.atspi.Socket";
 /// `org.freedesktop.DBus.Properties`.
@@ -52,8 +72,12 @@ const UNKNOWN_PROPERTY: &str = "org.freedesktop.DBus.Error.UnknownProperty";
 const PROPERTY_READ_ONLY: &str = "org.freedesktop.DBus.Error.PropertyReadOnly";
 const INVALID_ARGS: &str = "org.freedesktop.DBus.Error.InvalidArgs";
 
+/// `ATSPI_ROLE_ALERT`.
+pub const ROLE_ALERT: u32 = 2;
 /// `ATSPI_ROLE_CHECK_BOX`.
 pub const ROLE_CHECK_BOX: u32 = 7;
+/// `ATSPI_ROLE_COMBO_BOX`.
+pub const ROLE_COMBO_BOX: u32 = 11;
 /// `ATSPI_ROLE_FRAME`.
 pub const ROLE_FRAME: u32 = 23;
 /// `ATSPI_ROLE_PAGE_TAB`.
@@ -66,6 +90,18 @@ pub const ROLE_PANEL: u32 = 39;
 pub const ROLE_PUSH_BUTTON: u32 = 43;
 /// `ATSPI_ROLE_STATUS_BAR`.
 pub const ROLE_STATUS_BAR: u32 = 54;
+/// `ATSPI_ROLE_TABLE`.
+pub const ROLE_TABLE: u32 = 55;
+/// `ATSPI_ROLE_TABLE_CELL`.
+pub const ROLE_TABLE_CELL: u32 = 56;
+/// `ATSPI_ROLE_TABLE_COLUMN_HEADER`.
+pub const ROLE_TABLE_COLUMN_HEADER: u32 = 57;
+/// `ATSPI_ROLE_TEXT`.
+pub const ROLE_TEXT: u32 = 61;
+/// `ATSPI_ROLE_TOOL_BAR`.
+pub const ROLE_TOOL_BAR: u32 = 63;
+/// `ATSPI_ROLE_TREE`.
+pub const ROLE_TREE: u32 = 65;
 /// `ATSPI_ROLE_APPLICATION`.
 pub const ROLE_APPLICATION: u32 = 75;
 /// `ATSPI_ROLE_ENTRY`.
@@ -74,19 +110,29 @@ pub const ROLE_ENTRY: u32 = 79;
 pub const ROLE_HEADING: u32 = 83;
 /// `ATSPI_ROLE_LINK`.
 pub const ROLE_LINK: u32 = 88;
+/// `ATSPI_ROLE_TREE_ITEM`.
+pub const ROLE_TREE_ITEM: u32 = 91;
 
 /// `ATSPI_STATE_ACTIVE`.
 pub const STATE_ACTIVE: u32 = 1;
 /// `ATSPI_STATE_CHECKED`.
 pub const STATE_CHECKED: u32 = 4;
+/// `ATSPI_STATE_COLLAPSED`.
+pub const STATE_COLLAPSED: u32 = 5;
 /// `ATSPI_STATE_EDITABLE`.
 pub const STATE_EDITABLE: u32 = 7;
 /// `ATSPI_STATE_ENABLED`.
 pub const STATE_ENABLED: u32 = 8;
+/// `ATSPI_STATE_EXPANDABLE`.
+pub const STATE_EXPANDABLE: u32 = 9;
+/// `ATSPI_STATE_EXPANDED`.
+pub const STATE_EXPANDED: u32 = 10;
 /// `ATSPI_STATE_FOCUSABLE`.
 pub const STATE_FOCUSABLE: u32 = 11;
 /// `ATSPI_STATE_FOCUSED`.
 pub const STATE_FOCUSED: u32 = 12;
+/// `ATSPI_STATE_MULTI_LINE`.
+pub const STATE_MULTI_LINE: u32 = 17;
 /// `ATSPI_STATE_SELECTABLE`.
 pub const STATE_SELECTABLE: u32 = 22;
 /// `ATSPI_STATE_SELECTED`.
@@ -99,10 +145,44 @@ pub const STATE_SHOWING: u32 = 25;
 pub const STATE_SINGLE_LINE: u32 = 26;
 /// `ATSPI_STATE_VISIBLE`.
 pub const STATE_VISIBLE: u32 = 30;
+/// `ATSPI_STATE_INVALID_ENTRY`.
+pub const STATE_INVALID_ENTRY: u32 = 36;
+/// `ATSPI_STATE_SELECTABLE_TEXT`.
+pub const STATE_SELECTABLE_TEXT: u32 = 38;
 /// `ATSPI_STATE_IS_DEFAULT`.
 pub const STATE_IS_DEFAULT: u32 = 39;
 /// `ATSPI_STATE_CHECKABLE`.
 pub const STATE_CHECKABLE: u32 = 41;
+/// `ATSPI_STATE_HAS_POPUP`.
+pub const STATE_HAS_POPUP: u32 = 42;
+/// `ATSPI_STATE_READ_ONLY`.
+pub const STATE_READ_ONLY: u32 = 43;
+
+/// `ATSPI_TEXT_GRANULARITY_CHAR`.
+pub const GRANULARITY_CHAR: u32 = 0;
+/// `ATSPI_TEXT_GRANULARITY_WORD`.
+pub const GRANULARITY_WORD: u32 = 1;
+/// `ATSPI_TEXT_GRANULARITY_SENTENCE`, answered as a line.
+pub const GRANULARITY_SENTENCE: u32 = 2;
+/// `ATSPI_TEXT_GRANULARITY_LINE`.
+pub const GRANULARITY_LINE: u32 = 3;
+/// `ATSPI_TEXT_GRANULARITY_PARAGRAPH`, answered as a line.
+pub const GRANULARITY_PARAGRAPH: u32 = 4;
+
+/// `ATSPI_TEXT_BOUNDARY_CHAR`.
+pub const BOUNDARY_CHAR: u32 = 0;
+/// `ATSPI_TEXT_BOUNDARY_WORD_START`.
+pub const BOUNDARY_WORD_START: u32 = 1;
+/// `ATSPI_TEXT_BOUNDARY_WORD_END`.
+pub const BOUNDARY_WORD_END: u32 = 2;
+/// `ATSPI_TEXT_BOUNDARY_SENTENCE_START`, answered as a line.
+pub const BOUNDARY_SENTENCE_START: u32 = 3;
+/// `ATSPI_TEXT_BOUNDARY_SENTENCE_END`, answered as a line.
+pub const BOUNDARY_SENTENCE_END: u32 = 4;
+/// `ATSPI_TEXT_BOUNDARY_LINE_START`.
+pub const BOUNDARY_LINE_START: u32 = 5;
+/// `ATSPI_TEXT_BOUNDARY_LINE_END`.
+pub const BOUNDARY_LINE_END: u32 = 6;
 
 /// `ATSPI_COORD_TYPE_SCREEN`.
 pub const COORD_SCREEN: u32 = 0;
@@ -129,6 +209,15 @@ pub fn role(role: AccessRole) -> u32 {
         AccessRole::Button => ROLE_PUSH_BUTTON,
         AccessRole::CheckBox => ROLE_CHECK_BOX,
         AccessRole::Link => ROLE_LINK,
+        AccessRole::Toolbar => ROLE_TOOL_BAR,
+        AccessRole::ComboBox => ROLE_COMBO_BOX,
+        AccessRole::TextArea => ROLE_TEXT,
+        AccessRole::Alert => ROLE_ALERT,
+        AccessRole::Tree => ROLE_TREE,
+        AccessRole::TreeItem => ROLE_TREE_ITEM,
+        AccessRole::Grid => ROLE_TABLE,
+        AccessRole::ColumnHeader => ROLE_TABLE_COLUMN_HEADER,
+        AccessRole::Cell => ROLE_TABLE_CELL,
     }
 }
 
@@ -145,43 +234,112 @@ pub fn role_name(role: AccessRole) -> &'static str {
         AccessRole::Button => "push button",
         AccessRole::CheckBox => "check box",
         AccessRole::Link => "link",
+        AccessRole::Toolbar => "tool bar",
+        AccessRole::ComboBox => "combo box",
+        AccessRole::TextArea => "text",
+        AccessRole::Alert => "alert",
+        AccessRole::Tree => "tree",
+        AccessRole::TreeItem => "tree item",
+        AccessRole::Grid => "table",
+        AccessRole::ColumnHeader => "table column header",
+        AccessRole::Cell => "table cell",
     }
+}
+
+fn is_text_role(role: AccessRole) -> bool {
+    matches!(role, AccessRole::TextField | AccessRole::TextArea)
+}
+
+fn is_focusable(node: &AccessNode) -> bool {
+    !node.state.disabled && (is_keyboard_focusable(node) || node.actions.focus)
+}
+
+fn is_selectable(node: &AccessNode) -> bool {
+    node.actions.select
+        || matches!(
+            node.role,
+            AccessRole::Tab | AccessRole::TreeItem | AccessRole::Cell
+        )
+}
+
+fn is_selection_container(node: &AccessNode) -> bool {
+    matches!(
+        node.role,
+        AccessRole::TabList | AccessRole::Tree | AccessRole::Grid
+    )
+}
+
+fn has_text(node: &AccessNode) -> bool {
+    is_text_role(node.role)
+        && (node.value.is_some() || node.caret.is_some() || node.actions.set_value)
+}
+
+fn description(node: &AccessNode) -> &str {
+    node.description
+        .as_deref()
+        .or(node.placeholder.as_deref())
+        .unwrap_or_default()
 }
 
 /// The AT-SPI states of a node, in ascending order; `window_active` adds `ACTIVE` to the
 /// window's own node.
 pub fn states(node: &AccessNode, window_active: bool) -> Vec<u32> {
+    let state = node.state;
     let mut states = vec![STATE_VISIBLE, STATE_SHOWING];
-    if !node.state.disabled {
+    if !state.disabled {
         states.extend([STATE_ENABLED, STATE_SENSITIVE]);
     }
-    if is_keyboard_focusable(node) {
+    if is_focusable(node) {
         states.push(STATE_FOCUSABLE);
     }
-    if node.state.focused {
+    if state.focused {
         states.push(STATE_FOCUSED);
     }
+    if node.role == AccessRole::Window && window_active {
+        states.push(STATE_ACTIVE);
+    }
+    if node.role == AccessRole::CheckBox || state.checked.is_some() {
+        states.push(STATE_CHECKABLE);
+        if state.checked == Some(true) {
+            states.push(STATE_CHECKED);
+        }
+    }
+    if is_selectable(node) {
+        states.push(STATE_SELECTABLE);
+        if state.selected {
+            states.push(STATE_SELECTED);
+        }
+    }
+    match state.expanded {
+        Some(true) => states.extend([STATE_EXPANDABLE, STATE_EXPANDED]),
+        Some(false) => states.extend([STATE_EXPANDABLE, STATE_COLLAPSED]),
+        None => {}
+    }
     match node.role {
-        AccessRole::Window if window_active => states.push(STATE_ACTIVE),
-        AccessRole::CheckBox => {
-            states.push(STATE_CHECKABLE);
-            if node.state.checked == Some(true) {
-                states.push(STATE_CHECKED);
-            }
-        }
-        AccessRole::Tab => {
-            states.push(STATE_SELECTABLE);
-            if node.state.selected {
-                states.push(STATE_SELECTED);
-            }
-        }
-        AccessRole::TextField => states.extend([STATE_EDITABLE, STATE_SINGLE_LINE]),
+        AccessRole::TextField => states.push(STATE_SINGLE_LINE),
+        AccessRole::TextArea => states.push(STATE_MULTI_LINE),
+        AccessRole::ComboBox => states.push(STATE_HAS_POPUP),
         _ => {}
     }
-    if node.state.default_button {
+    if is_text_role(node.role) {
+        if !state.read_only {
+            states.push(STATE_EDITABLE);
+        }
+        if node.caret.is_some() {
+            states.push(STATE_SELECTABLE_TEXT);
+        }
+    }
+    if state.read_only {
+        states.push(STATE_READ_ONLY);
+    }
+    if state.invalid {
+        states.push(STATE_INVALID_ENTRY);
+    }
+    if state.default_button {
         states.push(STATE_IS_DEFAULT);
     }
     states.sort_unstable();
+    states.dedup();
     states
 }
 
@@ -286,12 +444,71 @@ fn contains(bounds: AccessRect, x: f32, y: f32) -> bool {
     x >= bounds.x && y >= bounds.y && x < bounds.x + bounds.width && y < bounds.y + bounds.height
 }
 
-fn event(
+fn nearest_ancestor<'a>(
+    nodes: &'a [AccessNode],
+    node: &AccessNode,
+    wanted: impl Fn(&AccessNode) -> bool,
+) -> Option<&'a AccessNode> {
+    let mut current = node;
+    for _ in 0..nodes.len() {
+        let Object::Node(parent) = parent_object(nodes, current) else {
+            return None;
+        };
+        let next = nodes.iter().find(|other| other.id == parent)?;
+        if wanted(next) {
+            return Some(next);
+        }
+        current = next;
+    }
+    None
+}
+
+fn grid_of<'a>(nodes: &'a [AccessNode], node: &AccessNode) -> Option<&'a AccessNode> {
+    nearest_ancestor(nodes, node, |ancestor| ancestor.role == AccessRole::Grid)
+}
+
+fn grid_members<'a>(
+    nodes: &'a [AccessNode],
+    grid: u32,
+    role: AccessRole,
+) -> impl Iterator<Item = &'a AccessNode> {
+    nodes.iter().filter(move |node| {
+        node.role == role
+            && node.cell.is_some()
+            && grid_of(nodes, node).is_some_and(|found| found.id == grid)
+    })
+}
+
+fn selected_items(nodes: &[AccessNode], container: u32) -> Vec<u32> {
+    nodes
+        .iter()
+        .filter(|node| {
+            node.state.selected
+                && is_selectable(node)
+                && nearest_ancestor(nodes, node, is_selection_container)
+                    .is_some_and(|found| found.id == container)
+        })
+        .map(|node| node.id)
+        .collect()
+}
+
+fn selection_owner(nodes: &[AccessNode], node: &AccessNode) -> Object {
+    nearest_ancestor(nodes, node, is_selection_container).map_or_else(
+        || parent_object(nodes, node),
+        |found| Object::Node(found.id),
+    )
+}
+
+fn offset_value(offset: usize) -> Value {
+    Value::Int32(i32::try_from(offset).unwrap_or(i32::MAX))
+}
+
+fn event_with_details(
     path: &str,
     interface: &str,
     member: &str,
     detail: &str,
-    detail1: i32,
+    (detail1, detail2): (i32, i32),
     any: Value,
 ) -> Message {
     Message::signal(
@@ -302,11 +519,22 @@ fn event(
         vec![
             Value::String(detail.to_owned()),
             Value::Int32(detail1),
-            Value::Int32(0),
+            Value::Int32(detail2),
             Value::Variant(Box::new(any)),
             Value::Array("{sv}".to_owned(), Vec::new()),
         ],
     )
+}
+
+fn event(
+    path: &str,
+    interface: &str,
+    member: &str,
+    detail: &str,
+    detail1: i32,
+    any: Value,
+) -> Message {
+    event_with_details(path, interface, member, detail, (detail1, 0), any)
 }
 
 fn state_changed(object: Object, state: &str, on: bool) -> Message {
@@ -318,6 +546,151 @@ fn state_changed(object: Object, state: &str, on: bool) -> Message {
         i32::from(on),
         Value::Int32(0),
     )
+}
+
+fn property_changed(object: Object, property: &str, value: &str) -> Message {
+    event(
+        &object.path(),
+        OBJECT_EVENTS,
+        "PropertyChange",
+        property,
+        0,
+        Value::String(value.to_owned()),
+    )
+}
+
+fn text_changed(
+    object: Object,
+    kind: &str,
+    chars: &[char],
+    (start, end): (usize, usize),
+) -> Message {
+    let length = end.saturating_sub(start);
+    let carried = text_slice(
+        chars,
+        start,
+        end.min(start.saturating_add(MAX_ACCESS_VALUE_CHARS)),
+    );
+    let to_i32 = |number: usize| i32::try_from(number).unwrap_or(i32::MAX);
+    event_with_details(
+        &object.path(),
+        OBJECT_EVENTS,
+        "TextChanged",
+        kind,
+        (to_i32(start), to_i32(length)),
+        Value::String(carried),
+    )
+}
+
+fn text_changed_events(object: Object, old: &str, new: &str) -> Vec<Message> {
+    let old: Vec<char> = old.chars().collect();
+    let new: Vec<char> = new.chars().collect();
+    let prefix = old
+        .iter()
+        .zip(&new)
+        .take_while(|(before, after)| before == after)
+        .count();
+    let room = old.len().min(new.len()).saturating_sub(prefix);
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(before, after)| before == after)
+        .count();
+    let deleted = (prefix, old.len().saturating_sub(suffix));
+    let inserted = (prefix, new.len().saturating_sub(suffix));
+    let mut events = Vec::new();
+    if deleted.1 > deleted.0 {
+        events.push(text_changed(object, "delete", &old, deleted));
+    }
+    if inserted.1 > inserted.0 {
+        events.push(text_changed(object, "insert", &new, inserted));
+    }
+    events
+}
+
+fn caret_events(object: Object, before: Option<AccessCaret>, now: AccessCaret) -> Vec<Message> {
+    let mut events = Vec::new();
+    if before.map(|caret| caret.caret) != Some(now.caret) {
+        events.push(event(
+            &object.path(),
+            OBJECT_EVENTS,
+            "TextCaretMoved",
+            "",
+            i32::try_from(now.caret).unwrap_or(i32::MAX),
+            Value::Int32(0),
+        ));
+    }
+    let is_empty = |(start, end): (usize, usize)| start == end;
+    let (was, range) = (before.map(AccessCaret::range), now.range());
+    if was != Some(range) && !(was.is_none_or(is_empty) && is_empty(range)) {
+        events.push(event(
+            &object.path(),
+            OBJECT_EVENTS,
+            "TextSelectionChanged",
+            "",
+            0,
+            Value::Int32(0),
+        ));
+    }
+    events
+}
+
+fn node_change_events(before: &AccessNode, node: &AccessNode) -> Vec<Message> {
+    let object = Object::Node(node.id);
+    let mut events = Vec::new();
+    if before.name != node.name {
+        events.push(property_changed(object, "accessible-name", &node.name));
+    }
+    if description(before) != description(node) {
+        events.push(property_changed(
+            object,
+            "accessible-description",
+            description(node),
+        ));
+    }
+    if before.value != node.value {
+        let value = node.value.as_deref().unwrap_or_default();
+        if is_text_role(node.role) {
+            events.extend(text_changed_events(
+                object,
+                before.value.as_deref().unwrap_or_default(),
+                value,
+            ));
+        } else {
+            events.push(property_changed(object, "accessible-value", value));
+        }
+    }
+    let (was, now) = (before.state, node.state);
+    if was.checked != now.checked {
+        events.push(state_changed(object, "checked", now.checked == Some(true)));
+    }
+    if was.selected != now.selected {
+        events.push(state_changed(object, "selected", now.selected));
+    }
+    if was.expanded.is_some() != now.expanded.is_some() {
+        events.push(state_changed(object, "expandable", now.expanded.is_some()));
+    }
+    if (was.expanded == Some(true)) != (now.expanded == Some(true)) {
+        events.push(state_changed(
+            object,
+            "expanded",
+            now.expanded == Some(true),
+        ));
+    }
+    if was.invalid != now.invalid {
+        events.push(state_changed(object, "invalid-entry", now.invalid));
+    }
+    if was.read_only != now.read_only {
+        events.push(state_changed(object, "read-only", now.read_only));
+    }
+    if is_text_role(node.role)
+        && let Some(caret) = node.caret
+    {
+        events.extend(caret_events(object, before.caret, caret));
+    }
+    events
 }
 
 #[derive(Debug)]
@@ -373,6 +746,297 @@ fn str_argument(body: &[Value], index: usize) -> Result<&str, CallError> {
     }
 }
 
+fn text_slice(chars: &[char], start: usize, end: usize) -> String {
+    chars
+        .get(start..end)
+        .map(|slice| slice.iter().collect())
+        .unwrap_or_default()
+}
+
+fn offset_from_start(offset: i32, length: usize) -> usize {
+    usize::try_from(offset).map_or(0, |offset| offset.min(length))
+}
+
+fn offset_to_end(offset: i32, length: usize) -> usize {
+    usize::try_from(offset).map_or(length, |offset| offset.min(length))
+}
+
+fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn word_range(chars: &[char], at: usize) -> (usize, usize) {
+    let length = chars.len();
+    let at = at.min(length);
+    let is_word = |index: usize| chars.get(index).copied().is_some_and(is_word_char);
+    let inside = if is_word(at) {
+        Some(at)
+    } else {
+        (0..at)
+            .rev()
+            .find(|&index| is_word(index))
+            .or_else(|| (at..length).find(|&index| is_word(index)))
+    };
+    let Some(inside) = inside else {
+        return (at, at);
+    };
+    let start = (0..inside)
+        .rev()
+        .take_while(|&index| is_word(index))
+        .last()
+        .unwrap_or(inside);
+    let end = (inside..length)
+        .find(|&index| !is_word(index))
+        .unwrap_or(length);
+    (start, end)
+}
+
+fn line_range(chars: &[char], at: usize) -> (usize, usize) {
+    let length = chars.len();
+    let at = at.min(length);
+    let is_break = |index: usize| chars.get(index) == Some(&'\n');
+    let start = (0..at)
+        .rev()
+        .find(|&index| is_break(index))
+        .map_or(0, |index| index + 1);
+    let end = (at..length)
+        .find(|&index| is_break(index))
+        .unwrap_or(length);
+    (start, end)
+}
+
+fn char_range(chars: &[char], at: usize) -> (usize, usize) {
+    let at = at.min(chars.len());
+    (at, at.saturating_add(1).min(chars.len()))
+}
+
+fn granularity_range(
+    chars: &[char],
+    at: usize,
+    granularity: u32,
+) -> Result<(usize, usize), CallError> {
+    match granularity {
+        GRANULARITY_CHAR => Ok(char_range(chars, at)),
+        GRANULARITY_WORD => Ok(word_range(chars, at)),
+        GRANULARITY_SENTENCE | GRANULARITY_LINE | GRANULARITY_PARAGRAPH => {
+            Ok(line_range(chars, at))
+        }
+        _ => Err(CallError::new(
+            INVALID_ARGS,
+            format!("no text granularity {granularity}"),
+        )),
+    }
+}
+
+fn boundary_range(chars: &[char], at: usize, boundary: u32) -> Result<(usize, usize), CallError> {
+    let length = chars.len();
+    let is_word = |index: usize| chars.get(index).copied().is_some_and(is_word_char);
+    match boundary {
+        BOUNDARY_CHAR => Ok(char_range(chars, at)),
+        BOUNDARY_WORD_START => {
+            let (start, end) = word_range(chars, at);
+            let next = (end..length)
+                .find(|&index| is_word(index))
+                .unwrap_or(length);
+            Ok((start, next))
+        }
+        BOUNDARY_WORD_END => {
+            let (start, end) = word_range(chars, at);
+            let previous = (0..start)
+                .rev()
+                .find(|&index| is_word(index))
+                .map_or(0, |index| index + 1);
+            Ok((previous, end))
+        }
+        BOUNDARY_SENTENCE_START | BOUNDARY_LINE_START => {
+            let (start, end) = line_range(chars, at);
+            Ok((start, if end < length { end + 1 } else { end }))
+        }
+        BOUNDARY_SENTENCE_END | BOUNDARY_LINE_END => {
+            let (start, end) = line_range(chars, at);
+            Ok((start.saturating_sub(1), end))
+        }
+        _ => Err(CallError::new(
+            INVALID_ARGS,
+            format!("no text boundary type {boundary}"),
+        )),
+    }
+}
+
+fn text_answer(chars: &[char], (start, end): (usize, usize)) -> Vec<Value> {
+    vec![
+        Value::String(text_slice(chars, start, end)),
+        offset_value(start),
+        offset_value(end),
+    ]
+}
+
+fn byte_prefix(text: &str, length: i32) -> &str {
+    let Ok(limit) = usize::try_from(length) else {
+        return text;
+    };
+    if limit >= text.len() {
+        return text;
+    }
+    (0..=limit)
+        .rev()
+        .find(|&index| text.is_char_boundary(index))
+        .and_then(|index| text.get(..index))
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeAction {
+    Click,
+    Toggle,
+    ExpandOrContract,
+}
+
+impl NodeAction {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Click => "click",
+            Self::Toggle => "toggle",
+            Self::ExpandOrContract => "expand or contract",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Click => "Activates it",
+            Self::Toggle => "Turns it on or off",
+            Self::ExpandOrContract => "Shows or hides what it holds",
+        }
+    }
+
+    fn key_binding(self, node: &AccessNode) -> &str {
+        match self {
+            Self::Click => node.shortcut.as_deref().unwrap_or_default(),
+            Self::Toggle | Self::ExpandOrContract => "",
+        }
+    }
+
+    fn request(self, node: &AccessNode) -> AccessAction {
+        match self {
+            Self::Click => AccessAction::Invoke,
+            Self::Toggle => AccessAction::Toggle,
+            Self::ExpandOrContract if node.state.expanded == Some(true) => AccessAction::Collapse,
+            Self::ExpandOrContract => AccessAction::Expand,
+        }
+    }
+}
+
+fn node_actions(node: &AccessNode) -> Vec<NodeAction> {
+    let offered = [
+        (node.actions.invoke, NodeAction::Click),
+        (node.actions.toggle, NodeAction::Toggle),
+        (node.actions.expand_collapse, NodeAction::ExpandOrContract),
+    ];
+    offered
+        .into_iter()
+        .filter(|(offers, _)| *offers)
+        .map(|(_, action)| action)
+        .collect()
+}
+
+fn node_interfaces(node: &AccessNode) -> Vec<&'static str> {
+    let mut interfaces = vec![ACCESSIBLE_INTERFACE, COMPONENT_INTERFACE];
+    if !node_actions(node).is_empty() {
+        interfaces.push(ACTION_INTERFACE);
+    }
+    if has_text(node) {
+        interfaces.push(TEXT_INTERFACE);
+        if node.actions.set_value {
+            interfaces.push(EDITABLE_TEXT_INTERFACE);
+        }
+    }
+    if is_selection_container(node) {
+        interfaces.push(SELECTION_INTERFACE);
+    }
+    if node.role == AccessRole::Grid && node.table.is_some() {
+        interfaces.push(TABLE_INTERFACE);
+    }
+    if node.role == AccessRole::Cell && node.cell.is_some() {
+        interfaces.push(TABLE_CELL_INTERFACE);
+    }
+    interfaces
+}
+
+fn node_chars(node: &AccessNode) -> Vec<char> {
+    node.value.as_deref().unwrap_or_default().chars().collect()
+}
+
+fn set_caret(anchor: usize, caret: usize) -> AccessAction {
+    AccessAction::SetCaret(AccessCaret { anchor, caret })
+}
+
+fn text_request(
+    node: &AccessNode,
+    member: &str,
+    body: &[Value],
+) -> Result<Option<AccessAction>, CallError> {
+    let length = node_chars(node).len();
+    let selection = node
+        .caret
+        .map(AccessCaret::range)
+        .filter(|(start, end)| start != end);
+    Ok(match member {
+        "SetCaretOffset" => {
+            let offset = offset_from_start(i32_argument(body, 0)?, length);
+            Some(set_caret(offset, offset))
+        }
+        "SetSelection" => {
+            let index = i32_argument(body, 0)?;
+            let start = offset_from_start(i32_argument(body, 1)?, length);
+            let end = offset_to_end(i32_argument(body, 2)?, length);
+            (index == 0).then(|| set_caret(start, end))
+        }
+        "AddSelection" => {
+            let start = offset_from_start(i32_argument(body, 0)?, length);
+            let end = offset_to_end(i32_argument(body, 1)?, length);
+            selection.is_none().then(|| set_caret(start, end))
+        }
+        "RemoveSelection" => {
+            let index = i32_argument(body, 0)?;
+            let caret = node.caret.map_or(0, |caret| caret.caret.min(length));
+            (index == 0 && selection.is_some()).then(|| set_caret(caret, caret))
+        }
+        _ => return Err(CallError::unknown_method(TEXT_INTERFACE, member)),
+    })
+}
+
+fn editable_text_request(
+    node: &AccessNode,
+    member: &str,
+    body: &[Value],
+) -> Result<Option<AccessAction>, CallError> {
+    let chars = node_chars(node);
+    let length = chars.len();
+    Ok(match member {
+        "SetTextContents" => Some(AccessAction::SetValue(str_argument(body, 0)?.to_owned())),
+        "InsertText" => {
+            let position = offset_from_start(i32_argument(body, 0)?, length);
+            let inserted = byte_prefix(str_argument(body, 1)?, i32_argument(body, 2)?);
+            if length.saturating_add(inserted.chars().count()) > MAX_ACCESS_VALUE_CHARS {
+                return Ok(None);
+            }
+            let mut value = text_slice(&chars, 0, position);
+            value.push_str(inserted);
+            value.push_str(&text_slice(&chars, position, length));
+            Some(AccessAction::SetValue(value))
+        }
+        "DeleteText" => {
+            let start = offset_from_start(i32_argument(body, 0)?, length);
+            let end = offset_to_end(i32_argument(body, 1)?, length).max(start);
+            let mut value = text_slice(&chars, 0, start);
+            value.push_str(&text_slice(&chars, end, length));
+            Some(AccessAction::SetValue(value))
+        }
+        "CutText" | "PasteText" => None,
+        _ => return Err(CallError::unknown_method(EDITABLE_TEXT_INTERFACE, member)),
+    })
+}
+
 /// The application as AT-SPI2 sees it: the accessibility tree, the unique bus name its
 /// objects live at, the desktop it is embedded in and the window's place on the screen. It
 /// answers method calls and turns tree changes into events; [`Message`]s it returns carry
@@ -387,6 +1051,7 @@ pub struct AtspiApplication {
     scale: f32,
     origin: (i32, i32),
     window_active: bool,
+    requests: Vec<AccessRequest>,
 }
 
 impl AtspiApplication {
@@ -401,7 +1066,26 @@ impl AtspiApplication {
             scale: 1.0,
             origin: (0, 0),
             window_active: false,
+            requests: Vec::new(),
         }
+    }
+
+    /// The requests screen readers made since the last call, oldest first; at most
+    /// [`MAX_QUEUED_REQUESTS`] are kept.
+    pub fn take_requests(&mut self) -> Vec<AccessRequest> {
+        std::mem::take(&mut self.requests)
+    }
+
+    fn queue(&mut self, id: u32, action: Option<AccessAction>) -> Value {
+        let request = action.and_then(|action| access_request(&self.nodes, id, action));
+        let queued = match request {
+            Some(request) if self.requests.len() < MAX_QUEUED_REQUESTS => {
+                self.requests.push(request);
+                true
+            }
+            _ => false,
+        };
+        Value::Boolean(queued)
     }
 
     /// The `Socket.Embed` call that registers the application with the registry.
@@ -438,10 +1122,12 @@ impl AtspiApplication {
     }
 
     /// Replaces the tree and returns the events for what changed: nodes added and removed,
-    /// names, checked and selected states, and the focus moving.
+    /// names, descriptions, values, text, carets and selections, checked, selected,
+    /// expanded and invalid states, and the focus moving.
     pub fn set_tree(&mut self, nodes: &[AccessNode]) -> Vec<Message> {
         let old = std::mem::replace(&mut self.nodes, nodes.to_vec());
         let mut events = Vec::new();
+        let mut selection_owners = Vec::new();
         for removed in old.iter().filter(|node| self.node(node.id).is_none()) {
             events.push(event(
                 &parent_object(&old, removed).path(),
@@ -464,27 +1150,23 @@ impl AtspiApplication {
                 ));
                 continue;
             };
-            let object = Object::Node(node.id);
-            if before.name != node.name {
-                events.push(event(
-                    &object.path(),
-                    OBJECT_EVENTS,
-                    "PropertyChange",
-                    "accessible-name",
-                    0,
-                    Value::String(node.name.clone()),
-                ));
-            }
-            if before.state.checked != node.state.checked {
-                events.push(state_changed(
-                    object,
-                    "checked",
-                    node.state.checked == Some(true),
-                ));
-            }
+            events.extend(node_change_events(before, node));
             if before.state.selected != node.state.selected {
-                events.push(state_changed(object, "selected", node.state.selected));
+                let owner = selection_owner(&self.nodes, node);
+                if !selection_owners.contains(&owner) {
+                    selection_owners.push(owner);
+                }
             }
+        }
+        for owner in selection_owners {
+            events.push(event(
+                &owner.path(),
+                OBJECT_EVENTS,
+                "SelectionChanged",
+                "",
+                0,
+                Value::Int32(0),
+            ));
         }
         let had_frame = old.iter().any(|node| node.role == AccessRole::Window);
         if self.window_active && !had_frame && self.frame().is_some() {
@@ -582,11 +1264,27 @@ impl AtspiApplication {
         reference(&self.unique_name, &object.path())
     }
 
-    fn interfaces(object: Object) -> &'static [&'static str] {
+    fn interfaces(&self, object: Object) -> Vec<&'static str> {
         match object {
-            Object::Application => &[ACCESSIBLE_INTERFACE, APPLICATION_INTERFACE],
-            Object::Node(_) => &[ACCESSIBLE_INTERFACE, COMPONENT_INTERFACE],
+            Object::Application => vec![ACCESSIBLE_INTERFACE, APPLICATION_INTERFACE],
+            Object::Node(id) => self.node(id).map_or_else(
+                || vec![ACCESSIBLE_INTERFACE, COMPONENT_INTERFACE],
+                node_interfaces,
+            ),
         }
+    }
+
+    fn introspection(&self, object: Option<Object>) -> String {
+        let interfaces = object.map_or_else(Vec::new, |object| self.interfaces(object));
+        let mut xml = String::from("<node>");
+        for interface in interfaces
+            .iter()
+            .chain([&PROPERTIES_INTERFACE, &INTROSPECTABLE_INTERFACE])
+        {
+            xml.push_str(&format!("<interface name=\"{interface}\"/>"));
+        }
+        xml.push_str("</node>");
+        xml
     }
 
     fn reply(&mut self, call: &Message) -> Result<Vec<Value>, CallError> {
@@ -598,7 +1296,7 @@ impl AtspiApplication {
         });
         match call.interface.as_deref() {
             Some(INTROSPECTABLE_INTERFACE) if member == "Introspect" => {
-                return Ok(vec![Value::String(introspection(object))]);
+                return Ok(vec![Value::String(self.introspection(object))]);
             }
             Some(PEER_INTERFACE) if member == "Ping" => return Ok(Vec::new()),
             _ => {}
@@ -607,7 +1305,7 @@ impl AtspiApplication {
             object.ok_or_else(|| CallError::new(UNKNOWN_OBJECT, format!("no object at {path}")))?;
         match call.interface.as_deref() {
             Some(PROPERTIES_INTERFACE) => self.properties_call(object, member, &call.body),
-            Some(interface) if Self::interfaces(object).contains(&interface) => {
+            Some(interface) if self.interfaces(object).contains(&interface) => {
                 self.interface_call(object, interface, member, &call.body)
             }
             Some(interface) => Err(CallError::new(
@@ -615,7 +1313,7 @@ impl AtspiApplication {
                 format!("{path} has no interface {interface}"),
             )),
             None => {
-                for interface in Self::interfaces(object) {
+                for interface in self.interfaces(object) {
                     match self.interface_call(object, interface, member, &call.body) {
                         Err(error) if error.name == UNKNOWN_METHOD => {}
                         result => return result,
@@ -636,6 +1334,14 @@ impl AtspiApplication {
         match (interface, object) {
             (ACCESSIBLE_INTERFACE, _) => self.accessible_call(object, member, body),
             (COMPONENT_INTERFACE, Object::Node(id)) => self.component_call(id, member, body),
+            (ACTION_INTERFACE, Object::Node(id)) => self.action_call(id, member, body),
+            (TEXT_INTERFACE, Object::Node(id)) => self.text_call(id, member, body),
+            (EDITABLE_TEXT_INTERFACE, Object::Node(id)) => {
+                self.editable_text_call(id, member, body)
+            }
+            (SELECTION_INTERFACE, Object::Node(id)) => self.selection_call(id, member, body),
+            (TABLE_INTERFACE, Object::Node(id)) => self.table_call(id, member, body),
+            (TABLE_CELL_INTERFACE, Object::Node(id)) => self.table_cell_call(id, member, body),
             (APPLICATION_INTERFACE, Object::Application) if member == "GetLocale" => {
                 Ok(vec![Value::String("C".to_owned())])
             }
@@ -684,24 +1390,13 @@ impl AtspiApplication {
                     state_set(&states).into_iter().map(Value::UInt32).collect(),
                 )
             }
-            "GetAttributes" => Value::Array(
-                "{ss}".to_owned(),
-                attributes(node)
-                    .into_iter()
-                    .map(|(key, value)| {
-                        Value::DictEntry(
-                            Box::new(Value::String(key.to_owned())),
-                            Box::new(Value::String(value.to_owned())),
-                        )
-                    })
-                    .collect(),
-            ),
+            "GetAttributes" => string_map(attributes(node)),
             "GetApplication" => self.reference(Object::Application),
             "GetInterfaces" => Value::Array(
                 "s".to_owned(),
-                Self::interfaces(object)
-                    .iter()
-                    .map(|name| Value::String((*name).to_owned()))
+                self.interfaces(object)
+                    .into_iter()
+                    .map(|name| Value::String(name.to_owned()))
                     .collect(),
             ),
             _ => return Err(CallError::unknown_method(ACCESSIBLE_INTERFACE, member)),
@@ -751,11 +1446,14 @@ impl AtspiApplication {
     }
 
     fn component_call(
-        &self,
+        &mut self,
         id: u32,
         member: &str,
         body: &[Value],
     ) -> Result<Vec<Value>, CallError> {
+        if member == "GrabFocus" {
+            return Ok(vec![self.queue(id, Some(AccessAction::Focus))]);
+        }
         let node = self
             .node(id)
             .ok_or_else(|| CallError::new(UNKNOWN_OBJECT, format!("no node {id}")))?;
@@ -801,7 +1499,6 @@ impl AtspiApplication {
                 LAYER_WIDGET
             })],
             "GetMDIZOrder" => vec![Value::Int16(0)],
-            "GrabFocus" => vec![Value::Boolean(false)],
             "GetAlpha" => vec![Value::Double(1.0)],
             _ => return Err(CallError::unknown_method(COMPONENT_INTERFACE, member)),
         })
@@ -812,6 +1509,9 @@ impl AtspiApplication {
             Object::Application => None,
             Object::Node(id) => self.node(id),
         };
+        if !self.interfaces(object).contains(&interface) {
+            return None;
+        }
         match (interface, object) {
             (ACCESSIBLE_INTERFACE, _) => {
                 let parent = match (object, node) {
@@ -832,10 +1532,7 @@ impl AtspiApplication {
                     ),
                     (
                         "Description",
-                        text(
-                            node.and_then(|node| node.placeholder.as_deref())
-                                .unwrap_or_default(),
-                        ),
+                        text(node.map(description).unwrap_or_default()),
                     ),
                     ("Parent", parent),
                     ("ChildCount", Value::Int32(child_count)),
@@ -864,9 +1561,403 @@ impl AtspiApplication {
                 ("AtspiVersion", Value::String(ATSPI_VERSION.to_owned())),
                 ("Id", Value::Int32(self.id)),
             ]),
-            (COMPONENT_INTERFACE, Object::Node(_)) => Some(Vec::new()),
+            (COMPONENT_INTERFACE | EDITABLE_TEXT_INTERFACE, Object::Node(_)) => Some(Vec::new()),
+            (_, Object::Node(id)) => self.node_properties(id, interface),
             _ => None,
         }
+    }
+
+    fn node_properties(&self, id: u32, interface: &str) -> Option<Vec<(&'static str, Value)>> {
+        let node = self.node(id)?;
+        let count = |number: usize| Value::Int32(i32::try_from(number).unwrap_or(i32::MAX));
+        match interface {
+            ACTION_INTERFACE => Some(vec![("NActions", count(node_actions(node).len()))]),
+            TEXT_INTERFACE => {
+                let length = node_chars(node).len();
+                let caret = node.caret.map_or(Value::Int32(-1), |caret| {
+                    offset_value(caret.caret.min(length))
+                });
+                Some(vec![
+                    ("CharacterCount", count(length)),
+                    ("CaretOffset", caret),
+                ])
+            }
+            SELECTION_INTERFACE => Some(vec![(
+                "NSelectedChildren",
+                count(selected_items(&self.nodes, id).len()),
+            )]),
+            TABLE_INTERFACE => {
+                let table = node.table.unwrap_or_default();
+                Some(vec![
+                    ("NRows", count(table.rows)),
+                    ("NColumns", count(table.columns)),
+                    ("Caption", null_reference()),
+                    ("Summary", null_reference()),
+                    ("NSelectedRows", Value::Int32(0)),
+                    ("NSelectedColumns", Value::Int32(0)),
+                ])
+            }
+            TABLE_CELL_INTERFACE => {
+                let cell = node.cell.unwrap_or_default();
+                let table = grid_of(&self.nodes, node)
+                    .map_or_else(null_reference, |grid| self.reference(Object::Node(grid.id)));
+                Some(vec![
+                    ("ColumnSpan", Value::Int32(1)),
+                    (
+                        "Position",
+                        Value::Struct(vec![count(cell.row), count(cell.column)]),
+                    ),
+                    ("RowSpan", Value::Int32(1)),
+                    ("Table", table),
+                ])
+            }
+            _ => None,
+        }
+    }
+
+    fn action_call(
+        &mut self,
+        id: u32,
+        member: &str,
+        body: &[Value],
+    ) -> Result<Vec<Value>, CallError> {
+        let node = self
+            .node(id)
+            .ok_or_else(|| CallError::new(UNKNOWN_OBJECT, format!("no node {id}")))?;
+        let actions = node_actions(node);
+        let chosen = |index: i32| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| actions.get(index).copied())
+        };
+        let text = |value: &str| Value::String(value.to_owned());
+        let value = match member {
+            "GetNActions" => Value::Int32(i32::try_from(actions.len()).unwrap_or(i32::MAX)),
+            "GetName" | "GetLocalizedName" => {
+                text(chosen(i32_argument(body, 0)?).map_or("", NodeAction::name))
+            }
+            "GetDescription" => {
+                text(chosen(i32_argument(body, 0)?).map_or("", NodeAction::description))
+            }
+            "GetKeyBinding" => {
+                text(chosen(i32_argument(body, 0)?).map_or("", |action| action.key_binding(node)))
+            }
+            "GetActions" => Value::Array(
+                "(sss)".to_owned(),
+                actions
+                    .iter()
+                    .map(|action| {
+                        Value::Struct(vec![
+                            text(action.name()),
+                            text(action.description()),
+                            text(action.key_binding(node)),
+                        ])
+                    })
+                    .collect(),
+            ),
+            "DoAction" => {
+                let request = chosen(i32_argument(body, 0)?).map(|action| action.request(node));
+                return Ok(vec![self.queue(id, request)]);
+            }
+            _ => return Err(CallError::unknown_method(ACTION_INTERFACE, member)),
+        };
+        Ok(vec![value])
+    }
+
+    fn text_call(
+        &mut self,
+        id: u32,
+        member: &str,
+        body: &[Value],
+    ) -> Result<Vec<Value>, CallError> {
+        let node = self
+            .node(id)
+            .ok_or_else(|| CallError::new(UNKNOWN_OBJECT, format!("no node {id}")))?;
+        if matches!(
+            member,
+            "SetCaretOffset" | "SetSelection" | "AddSelection" | "RemoveSelection"
+        ) {
+            let request = text_request(node, member, body)?;
+            return Ok(vec![self.queue(id, request)]);
+        }
+        let chars = node_chars(node);
+        let length = chars.len();
+        let selection = node
+            .caret
+            .map(AccessCaret::range)
+            .map(|(start, end)| (start.min(length), end.min(length)))
+            .filter(|(start, end)| start != end);
+        let at = || -> Result<usize, CallError> {
+            Ok(offset_from_start(i32_argument(body, 0)?, length))
+        };
+        let no_attributes = || string_map(Vec::new());
+        Ok(match member {
+            "GetText" => {
+                let start = offset_from_start(i32_argument(body, 0)?, length);
+                let end = offset_to_end(i32_argument(body, 1)?, length).max(start);
+                vec![Value::String(text_slice(&chars, start, end))]
+            }
+            "GetCharacterAtOffset" => {
+                let index = usize::try_from(i32_argument(body, 0)?).ok();
+                let character = index.and_then(|index| chars.get(index)).copied();
+                vec![Value::Int32(character.map_or(0, |character| {
+                    i32::try_from(u32::from(character)).unwrap_or(0)
+                }))]
+            }
+            "GetStringAtOffset" => text_answer(
+                &chars,
+                granularity_range(&chars, at()?, u32_argument(body, 1)?)?,
+            ),
+            "GetTextAtOffset" => text_answer(
+                &chars,
+                boundary_range(&chars, at()?, u32_argument(body, 1)?)?,
+            ),
+            "GetTextBeforeOffset" => {
+                let boundary = u32_argument(body, 1)?;
+                let (start, _) = boundary_range(&chars, at()?, boundary)?;
+                if start == 0 {
+                    text_answer(&chars, (0, 0))
+                } else {
+                    text_answer(&chars, boundary_range(&chars, start - 1, boundary)?)
+                }
+            }
+            "GetTextAfterOffset" => {
+                let boundary = u32_argument(body, 1)?;
+                let (_, end) = boundary_range(&chars, at()?, boundary)?;
+                if end >= length {
+                    text_answer(&chars, (length, length))
+                } else {
+                    text_answer(&chars, boundary_range(&chars, end, boundary)?)
+                }
+            }
+            "GetNSelections" => vec![Value::Int32(i32::from(selection.is_some()))],
+            "GetSelection" => {
+                let index = i32_argument(body, 0)?;
+                let (start, end) = selection.filter(|_| index == 0).unwrap_or((0, 0));
+                vec![offset_value(start), offset_value(end)]
+            }
+            "GetAttributes" | "GetAttributeRun" => {
+                at()?;
+                vec![no_attributes(), Value::Int32(0), offset_value(length)]
+            }
+            "GetAttributeValue" => vec![Value::String(String::new())],
+            "GetDefaultAttributes" | "GetDefaultAttributeSet" => vec![no_attributes()],
+            "GetCharacterExtents" | "GetRangeExtents" => {
+                let coord_type =
+                    u32_argument(body, if member == "GetRangeExtents" { 2 } else { 1 })?;
+                let (x, y, width, height) = self.extents(node, coord_type);
+                vec![
+                    Value::Int32(x),
+                    Value::Int32(y),
+                    Value::Int32(width),
+                    Value::Int32(height),
+                ]
+            }
+            "GetOffsetAtPoint" => vec![Value::Int32(-1)],
+            "ScrollSubstringTo" | "ScrollSubstringToPoint" => vec![Value::Boolean(false)],
+            _ => return Err(CallError::unknown_method(TEXT_INTERFACE, member)),
+        })
+    }
+
+    fn editable_text_call(
+        &mut self,
+        id: u32,
+        member: &str,
+        body: &[Value],
+    ) -> Result<Vec<Value>, CallError> {
+        if member == "CopyText" {
+            return Ok(Vec::new());
+        }
+        let node = self
+            .node(id)
+            .ok_or_else(|| CallError::new(UNKNOWN_OBJECT, format!("no node {id}")))?;
+        let request = editable_text_request(node, member, body)?;
+        Ok(vec![self.queue(id, request)])
+    }
+
+    fn selection_call(
+        &mut self,
+        id: u32,
+        member: &str,
+        body: &[Value],
+    ) -> Result<Vec<Value>, CallError> {
+        let child = |index: i32| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| children(&self.nodes, Object::Node(id)).get(index).copied())
+        };
+        let value = match member {
+            "GetSelectedChild" => {
+                let index = i32_argument(body, 0)?;
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| selected_items(&self.nodes, id).get(index).copied())
+                    .map_or_else(null_reference, |child| self.reference(Object::Node(child)))
+            }
+            "SelectChild" => {
+                let Some(child) = child(i32_argument(body, 0)?) else {
+                    return Ok(vec![Value::Boolean(false)]);
+                };
+                return Ok(vec![self.queue(child, Some(AccessAction::Select))]);
+            }
+            "IsChildSelected" => Value::Boolean(
+                child(i32_argument(body, 0)?)
+                    .and_then(|child| self.node(child))
+                    .is_some_and(|child| child.state.selected),
+            ),
+            "DeselectSelectedChild" | "DeselectChild" | "SelectAll" | "ClearSelection" => {
+                Value::Boolean(false)
+            }
+            _ => return Err(CallError::unknown_method(SELECTION_INTERFACE, member)),
+        };
+        Ok(vec![value])
+    }
+
+    fn cell_at(&self, grid: u32, row: i32, column: i32) -> Option<&AccessNode> {
+        let (row, column) = (usize::try_from(row).ok()?, usize::try_from(column).ok()?);
+        grid_members(&self.nodes, grid, AccessRole::Cell).find(|node| {
+            node.cell
+                .is_some_and(|cell| cell.row == row && cell.column == column)
+        })
+    }
+
+    fn column_header(&self, grid: u32, column: i32) -> Option<&AccessNode> {
+        let column = usize::try_from(column).ok()?;
+        grid_members(&self.nodes, grid, AccessRole::ColumnHeader)
+            .find(|node| node.cell.is_some_and(|cell| cell.column == column))
+    }
+
+    fn table_call(&self, id: u32, member: &str, body: &[Value]) -> Result<Vec<Value>, CallError> {
+        let table = self
+            .node(id)
+            .ok_or_else(|| CallError::new(UNKNOWN_OBJECT, format!("no node {id}")))?
+            .table
+            .unwrap_or_default();
+        let to_i32 = |number: usize| i32::try_from(number).unwrap_or(-1);
+        let cells = table.rows.saturating_mul(table.columns);
+        let index_of = |row: i32, column: i32| {
+            let (row, column) = (usize::try_from(row).ok()?, usize::try_from(column).ok()?);
+            if row >= table.rows || column >= table.columns {
+                return None;
+            }
+            row.checked_mul(table.columns)?.checked_add(column)
+        };
+        let position_of = |index: i32| {
+            usize::try_from(index)
+                .ok()
+                .filter(|&index| index < cells && table.columns > 0)
+                .map(|index| (index / table.columns, index % table.columns))
+        };
+        let reference_to = |node: Option<&AccessNode>| {
+            node.map_or_else(null_reference, |node| self.reference(Object::Node(node.id)))
+        };
+        let pair = || -> Result<(i32, i32), CallError> {
+            Ok((i32_argument(body, 0)?, i32_argument(body, 1)?))
+        };
+        Ok(match member {
+            "GetAccessibleAt" => {
+                let (row, column) = pair()?;
+                vec![reference_to(self.cell_at(id, row, column))]
+            }
+            "GetIndexAt" => {
+                let (row, column) = pair()?;
+                vec![Value::Int32(index_of(row, column).map_or(-1, to_i32))]
+            }
+            "GetRowAtIndex" => vec![Value::Int32(
+                position_of(i32_argument(body, 0)?).map_or(-1, |(row, _)| to_i32(row)),
+            )],
+            "GetColumnAtIndex" => vec![Value::Int32(
+                position_of(i32_argument(body, 0)?).map_or(-1, |(_, column)| to_i32(column)),
+            )],
+            "GetRowDescription" => vec![Value::String(String::new())],
+            "GetColumnDescription" => vec![Value::String(
+                self.column_header(id, i32_argument(body, 0)?)
+                    .map(|header| header.name.clone())
+                    .unwrap_or_default(),
+            )],
+            "GetRowExtentAt" | "GetColumnExtentAt" => {
+                let (row, column) = pair()?;
+                vec![Value::Int32(i32::from(index_of(row, column).is_some()))]
+            }
+            "GetRowHeader" => vec![null_reference()],
+            "GetColumnHeader" => {
+                vec![reference_to(self.column_header(id, i32_argument(body, 0)?))]
+            }
+            "GetSelectedRows" | "GetSelectedColumns" => {
+                vec![Value::Array("i".to_owned(), Vec::new())]
+            }
+            "IsRowSelected"
+            | "IsColumnSelected"
+            | "AddRowSelection"
+            | "AddColumnSelection"
+            | "RemoveRowSelection"
+            | "RemoveColumnSelection" => vec![Value::Boolean(false)],
+            "IsSelected" => {
+                let (row, column) = pair()?;
+                vec![Value::Boolean(
+                    self.cell_at(id, row, column)
+                        .is_some_and(|cell| cell.state.selected),
+                )]
+            }
+            "GetRowColumnExtentsAtIndex" => {
+                let index = i32_argument(body, 0)?;
+                match position_of(index) {
+                    Some((row, column)) => {
+                        let selected = self
+                            .cell_at(id, to_i32(row), to_i32(column))
+                            .is_some_and(|cell| cell.state.selected);
+                        vec![
+                            Value::Boolean(true),
+                            Value::Int32(to_i32(row)),
+                            Value::Int32(to_i32(column)),
+                            Value::Int32(1),
+                            Value::Int32(1),
+                            Value::Boolean(selected),
+                        ]
+                    }
+                    None => vec![
+                        Value::Boolean(false),
+                        Value::Int32(0),
+                        Value::Int32(0),
+                        Value::Int32(0),
+                        Value::Int32(0),
+                        Value::Boolean(false),
+                    ],
+                }
+            }
+            _ => return Err(CallError::unknown_method(TABLE_INTERFACE, member)),
+        })
+    }
+
+    fn table_cell_call(
+        &self,
+        id: u32,
+        member: &str,
+        _body: &[Value],
+    ) -> Result<Vec<Value>, CallError> {
+        let node = self
+            .node(id)
+            .ok_or_else(|| CallError::new(UNKNOWN_OBJECT, format!("no node {id}")))?;
+        let cell = node.cell.unwrap_or_default();
+        let count = |number: usize| Value::Int32(i32::try_from(number).unwrap_or(i32::MAX));
+        Ok(match member {
+            "GetRowColumnSpan" => vec![
+                count(cell.row),
+                count(cell.column),
+                Value::Int32(1),
+                Value::Int32(1),
+            ],
+            "GetRowHeaderCells" => vec![Value::Array("(so)".to_owned(), Vec::new())],
+            "GetColumnHeaderCells" => {
+                let headers = grid_of(&self.nodes, node)
+                    .and_then(|grid| self.column_header(grid.id, i32::try_from(cell.column).ok()?))
+                    .map(|header| self.reference(Object::Node(header.id)))
+                    .into_iter()
+                    .collect();
+                vec![Value::Array("(so)".to_owned(), headers)]
+            }
+            _ => return Err(CallError::unknown_method(TABLE_CELL_INTERFACE, member)),
+        })
     }
 
     fn properties_call(
@@ -923,34 +2014,56 @@ impl AtspiApplication {
     }
 }
 
-fn attributes(node: Option<&AccessNode>) -> Vec<(&'static str, &'static str)> {
-    let mut attributes = vec![("toolkit", TOOLKIT_NAME)];
-    match node.map(|node| node.role) {
-        Some(AccessRole::Heading) => attributes.push(("level", "1")),
-        Some(AccessRole::Status) => {
-            attributes.extend([("live", "polite"), ("container-live", "polite")]);
+fn string_map(entries: Vec<(&str, String)>) -> Value {
+    Value::Array(
+        "{ss}".to_owned(),
+        entries
+            .into_iter()
+            .map(|(key, value)| {
+                Value::DictEntry(
+                    Box::new(Value::String(key.to_owned())),
+                    Box::new(Value::String(value)),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn attributes(node: Option<&AccessNode>) -> Vec<(&'static str, String)> {
+    let mut attributes = vec![("toolkit", TOOLKIT_NAME.to_owned())];
+    let Some(node) = node else {
+        return attributes;
+    };
+    let live = |politeness: &str| {
+        [
+            ("live", politeness.to_owned()),
+            ("container-live", politeness.to_owned()),
+        ]
+    };
+    match node.role {
+        AccessRole::Heading => attributes.push(("level", "1".to_owned())),
+        AccessRole::Status => attributes.extend(live("polite")),
+        AccessRole::Alert => attributes.extend(live("assertive")),
+        AccessRole::TreeItem => {
+            if let Some(position) = node.tree_position {
+                attributes.extend([
+                    ("level", position.level.to_string()),
+                    ("posinset", position.position.to_string()),
+                    ("setsize", position.set_size.to_string()),
+                ]);
+            }
         }
         _ => {}
+    }
+    if let Some(shortcut) = &node.shortcut {
+        attributes.push(("keyshortcuts", shortcut.clone()));
     }
     attributes
 }
 
-fn introspection(object: Option<Object>) -> String {
-    let interfaces = object.map_or(&[][..], AtspiApplication::interfaces);
-    let mut xml = String::from("<node>");
-    for interface in interfaces
-        .iter()
-        .chain([&PROPERTIES_INTERFACE, &INTROSPECTABLE_INTERFACE])
-    {
-        xml.push_str(&format!("<interface name=\"{interface}\"/>"));
-    }
-    xml.push_str("</node>");
-    xml
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::AccessState;
+    use super::super::{AccessActions, AccessCell, AccessTable, AccessTreePosition};
     use super::*;
 
     const UNIQUE: &str = ":1.42";
@@ -961,15 +2074,13 @@ mod tests {
             parent,
             role,
             name: name.to_owned(),
-            value: None,
-            placeholder: None,
-            state: AccessState::default(),
             bounds: AccessRect {
                 x: 10.0 * id as f32,
                 y: 20.0,
                 width: 100.0,
                 height: 30.0,
             },
+            ..AccessNode::default()
         }
     }
 
@@ -1628,5 +2739,644 @@ mod tests {
             String::new(),
             Some(0)
         )));
+    }
+
+    fn editor_tree() -> Vec<AccessNode> {
+        let mut window = node(1, None, AccessRole::Window, "Query");
+        window.bounds = AccessRect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let mut run = node(11, Some(10), AccessRole::Button, "Run");
+        run.actions.invoke = true;
+        run.shortcut = Some("Ctrl+Enter".to_owned());
+        let mut wrap = node(12, Some(10), AccessRole::CheckBox, "Wrap lines");
+        wrap.actions.toggle = true;
+        wrap.state.checked = Some(false);
+        let mut host = node(20, Some(1), AccessRole::TextField, "Host");
+        host.value = Some("shop.eggdb".to_owned());
+        host.caret = Some(AccessCaret {
+            anchor: 4,
+            caret: 10,
+        });
+        host.actions = AccessActions {
+            set_value: true,
+            focus: true,
+            ..AccessActions::default()
+        };
+        let mut public = node(31, Some(30), AccessRole::TreeItem, "public");
+        public.state.expanded = Some(false);
+        public.state.selected = true;
+        public.actions = AccessActions {
+            expand_collapse: true,
+            select: true,
+            ..AccessActions::default()
+        };
+        public.tree_position = Some(AccessTreePosition {
+            level: 1,
+            position: 1,
+            set_size: 2,
+        });
+        public.description = Some("2 tables".to_owned());
+        let mut sales = node(32, Some(30), AccessRole::TreeItem, "sales");
+        sales.actions.select = true;
+        sales.tree_position = Some(AccessTreePosition {
+            level: 1,
+            position: 2,
+            set_size: 2,
+        });
+        let mut results = node(40, Some(1), AccessRole::Grid, "Results");
+        results.table = Some(AccessTable {
+            rows: 100,
+            columns: 2,
+        });
+        let in_grid = |id: u32, role: AccessRole, name: &str, column: usize| {
+            let mut member = node(id, Some(40), role, name);
+            member.cell = Some(AccessCell { row: 0, column });
+            member
+        };
+        let mut ada = in_grid(44, AccessRole::Cell, "Ada", 1);
+        ada.state.selected = true;
+        vec![
+            window,
+            node(10, Some(1), AccessRole::Toolbar, "Query tools"),
+            run,
+            wrap,
+            host,
+            node(30, Some(1), AccessRole::Tree, "Objects"),
+            public,
+            sales,
+            results,
+            in_grid(41, AccessRole::ColumnHeader, "id", 0),
+            in_grid(42, AccessRole::ColumnHeader, "name", 1),
+            in_grid(43, AccessRole::Cell, "1", 0),
+            ada,
+        ]
+    }
+
+    fn editor() -> AtspiApplication {
+        let mut application = AtspiApplication::new(UNIQUE, "eggdb-gui");
+        application.set_tree(&editor_tree());
+        application
+    }
+
+    fn ask_node(
+        application: &mut AtspiApplication,
+        id: u32,
+        interface: &str,
+        member: &str,
+        body: Vec<Value>,
+    ) -> Vec<Value> {
+        answer_body(
+            application,
+            &Object::Node(id).path(),
+            interface,
+            member,
+            body,
+        )
+    }
+
+    fn property(application: &mut AtspiApplication, id: u32, interface: &str, name: &str) -> Value {
+        let body = ask_node(
+            application,
+            id,
+            PROPERTIES_INTERFACE,
+            "Get",
+            vec![
+                Value::String(interface.to_owned()),
+                Value::String(name.to_owned()),
+            ],
+        );
+        match body.as_slice() {
+            [Value::Variant(value)] => (**value).clone(),
+            other => panic!("not one variant: {other:?}"),
+        }
+    }
+
+    fn interfaces_of(application: &mut AtspiApplication, id: u32) -> Vec<String> {
+        match ask_node(
+            application,
+            id,
+            ACCESSIBLE_INTERFACE,
+            "GetInterfaces",
+            vec![],
+        )
+        .as_slice()
+        {
+            [Value::Array(_, names)] => names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            other => panic!("not a list of names: {other:?}"),
+        }
+    }
+
+    fn text(value: &str) -> Value {
+        Value::String(value.to_owned())
+    }
+
+    fn requested(node: u32, action: AccessAction) -> AccessRequest {
+        AccessRequest { node, action }
+    }
+
+    #[test]
+    fn new_roles_and_states_follow_the_atspi_enumeration() {
+        assert_eq!(role(AccessRole::Toolbar), 63);
+        assert_eq!(role(AccessRole::ComboBox), 11);
+        assert_eq!(role(AccessRole::TextArea), 61);
+        assert_eq!(role(AccessRole::Alert), 2);
+        assert_eq!(role(AccessRole::Tree), 65);
+        assert_eq!(role(AccessRole::TreeItem), 91);
+        assert_eq!(role(AccessRole::Grid), 55);
+        assert_eq!(role(AccessRole::ColumnHeader), 57);
+        assert_eq!(role(AccessRole::Cell), 56);
+        assert_eq!(role_name(AccessRole::Toolbar), "tool bar");
+        assert_eq!(role_name(AccessRole::ComboBox), "combo box");
+        assert_eq!(role_name(AccessRole::TreeItem), "tree item");
+        assert_eq!(role_name(AccessRole::ColumnHeader), "table column header");
+        assert_eq!(role_name(AccessRole::Cell), "table cell");
+        let mut query = node(9, None, AccessRole::TextArea, "Query");
+        query.value = Some("select 1".to_owned());
+        query.state.invalid = true;
+        let editable = states(&query, false);
+        for state in [STATE_MULTI_LINE, STATE_EDITABLE, STATE_INVALID_ENTRY] {
+            assert!(editable.contains(&state), "{state}");
+        }
+        assert!(!editable.contains(&STATE_SINGLE_LINE));
+        query.state.read_only = true;
+        let read_only = states(&query, false);
+        assert!(read_only.contains(&STATE_READ_ONLY));
+        assert!(!read_only.contains(&STATE_EDITABLE));
+        let nodes = editor_tree();
+        let collapsed = states(&nodes[6], false);
+        for state in [
+            STATE_EXPANDABLE,
+            STATE_COLLAPSED,
+            STATE_SELECTABLE,
+            STATE_SELECTED,
+        ] {
+            assert!(collapsed.contains(&state), "{state}");
+        }
+        assert!(!collapsed.contains(&STATE_EXPANDED));
+        let mut expanded = nodes[6].clone();
+        expanded.state.expanded = Some(true);
+        assert!(states(&expanded, false).contains(&STATE_EXPANDED));
+        assert!(!states(&nodes[7], false).contains(&STATE_EXPANDABLE));
+        assert!(states(&nodes[4], false).contains(&STATE_FOCUSABLE));
+        assert!(states(&nodes[4], false).contains(&STATE_SELECTABLE_TEXT));
+        assert!(states(&nodes[12], false).contains(&STATE_SELECTED));
+    }
+
+    #[test]
+    fn each_node_offers_the_interfaces_its_kind_needs() {
+        let mut application = editor();
+        let with = |extra: &[&str]| -> Vec<String> {
+            [ACCESSIBLE_INTERFACE, COMPONENT_INTERFACE]
+                .iter()
+                .chain(extra)
+                .map(|name| (*name).to_owned())
+                .collect()
+        };
+        assert_eq!(interfaces_of(&mut application, 10), with(&[]));
+        assert_eq!(
+            interfaces_of(&mut application, 11),
+            with(&[ACTION_INTERFACE])
+        );
+        assert_eq!(
+            interfaces_of(&mut application, 20),
+            with(&[TEXT_INTERFACE, EDITABLE_TEXT_INTERFACE])
+        );
+        assert_eq!(
+            interfaces_of(&mut application, 30),
+            with(&[SELECTION_INTERFACE])
+        );
+        assert_eq!(
+            interfaces_of(&mut application, 31),
+            with(&[ACTION_INTERFACE])
+        );
+        assert_eq!(
+            interfaces_of(&mut application, 40),
+            with(&[SELECTION_INTERFACE, TABLE_INTERFACE])
+        );
+        assert_eq!(
+            interfaces_of(&mut application, 44),
+            with(&[TABLE_CELL_INTERFACE])
+        );
+        let xml = ask_node(
+            &mut application,
+            40,
+            INTROSPECTABLE_INTERFACE,
+            "Introspect",
+            vec![],
+        );
+        assert!(matches!(xml.as_slice(), [Value::String(xml)] if xml.contains(TABLE_INTERFACE)));
+        let missing = call(
+            &Object::Node(10).path(),
+            TEXT_INTERFACE,
+            "GetText",
+            vec![Value::Int32(0), Value::Int32(-1)],
+        );
+        let reply = application.answer(&missing).expect("a reply");
+        assert_eq!(reply.kind, MessageKind::Error);
+        assert_eq!(reply.error_name.as_deref(), Some(UNKNOWN_INTERFACE));
+        let attributes = ask_node(
+            &mut application,
+            31,
+            ACCESSIBLE_INTERFACE,
+            "GetAttributes",
+            vec![],
+        );
+        let entry =
+            |key: &str, value: &str| Value::DictEntry(Box::new(text(key)), Box::new(text(value)));
+        assert!(matches!(attributes.as_slice(), [Value::Array(_, entries)]
+            if entries.contains(&entry("level", "1"))
+                && entries.contains(&entry("posinset", "1"))
+                && entries.contains(&entry("setsize", "2"))));
+        assert_eq!(
+            property(&mut application, 31, ACCESSIBLE_INTERFACE, "Description"),
+            text("2 tables")
+        );
+    }
+
+    #[test]
+    fn actions_queue_invoke_toggle_and_expand_and_refuse_other_indexes() {
+        let mut application = editor();
+        assert_eq!(
+            property(&mut application, 11, ACTION_INTERFACE, "NActions"),
+            Value::Int32(1)
+        );
+        assert_eq!(
+            ask_node(
+                &mut application,
+                11,
+                ACTION_INTERFACE,
+                "GetName",
+                vec![Value::Int32(0)]
+            ),
+            vec![text("click")]
+        );
+        assert_eq!(
+            ask_node(&mut application, 11, ACTION_INTERFACE, "GetActions", vec![]),
+            vec![Value::Array(
+                "(sss)".to_owned(),
+                vec![Value::Struct(vec![
+                    text("click"),
+                    text("Activates it"),
+                    text("Ctrl+Enter")
+                ])]
+            )]
+        );
+        let act = |application: &mut AtspiApplication, id: u32, index: i32| {
+            ask_node(
+                application,
+                id,
+                ACTION_INTERFACE,
+                "DoAction",
+                vec![Value::Int32(index)],
+            )
+        };
+        assert_eq!(act(&mut application, 11, 0), vec![Value::Boolean(true)]);
+        assert_eq!(act(&mut application, 12, 0), vec![Value::Boolean(true)]);
+        assert_eq!(act(&mut application, 31, 0), vec![Value::Boolean(true)]);
+        assert_eq!(act(&mut application, 11, 1), vec![Value::Boolean(false)]);
+        assert_eq!(act(&mut application, 11, -1), vec![Value::Boolean(false)]);
+        assert_eq!(
+            application.take_requests(),
+            vec![
+                requested(11, AccessAction::Invoke),
+                requested(12, AccessAction::Toggle),
+                requested(31, AccessAction::Expand),
+            ]
+        );
+        assert!(application.take_requests().is_empty());
+        for _ in 0..MAX_QUEUED_REQUESTS {
+            assert_eq!(act(&mut application, 11, 0), vec![Value::Boolean(true)]);
+        }
+        assert_eq!(act(&mut application, 11, 0), vec![Value::Boolean(false)]);
+        assert_eq!(application.take_requests().len(), MAX_QUEUED_REQUESTS);
+    }
+
+    #[test]
+    fn text_reads_the_value_caret_and_selection_in_characters() {
+        let mut application = editor();
+        let mut read = |member: &str, body: Vec<Value>| {
+            ask_node(&mut application, 20, TEXT_INTERFACE, member, body)
+        };
+        let offsets = |start: i32, end: i32| vec![Value::Int32(start), Value::Int32(end)];
+        assert_eq!(read("GetText", offsets(0, -1)), vec![text("shop.eggdb")]);
+        assert_eq!(read("GetText", offsets(5, 99)), vec![text("eggdb")]);
+        assert_eq!(read("GetText", offsets(8, 3)), vec![text("")]);
+        assert_eq!(read("GetNSelections", vec![]), vec![Value::Int32(1)]);
+        assert_eq!(read("GetSelection", vec![Value::Int32(0)]), offsets(4, 10));
+        assert_eq!(read("GetSelection", vec![Value::Int32(1)]), offsets(0, 0));
+        assert_eq!(
+            read(
+                "GetStringAtOffset",
+                vec![Value::Int32(6), Value::UInt32(GRANULARITY_WORD)]
+            ),
+            vec![text("eggdb"), Value::Int32(5), Value::Int32(10)]
+        );
+        assert_eq!(
+            read(
+                "GetStringAtOffset",
+                vec![Value::Int32(3), Value::UInt32(GRANULARITY_LINE)]
+            ),
+            vec![text("shop.eggdb"), Value::Int32(0), Value::Int32(10)]
+        );
+        assert_eq!(
+            read(
+                "GetTextAtOffset",
+                vec![Value::Int32(1), Value::UInt32(BOUNDARY_CHAR)]
+            ),
+            vec![text("h"), Value::Int32(1), Value::Int32(2)]
+        );
+        assert_eq!(
+            read(
+                "GetTextAtOffset",
+                vec![Value::Int32(0), Value::UInt32(BOUNDARY_WORD_START)]
+            ),
+            vec![text("shop."), Value::Int32(0), Value::Int32(5)]
+        );
+        assert_eq!(
+            read("GetCharacterAtOffset", vec![Value::Int32(4)]),
+            vec![Value::Int32(46)]
+        );
+        assert_eq!(
+            read("SetCaretOffset", vec![Value::Int32(2)]),
+            vec![Value::Boolean(true)]
+        );
+        assert_eq!(
+            read(
+                "SetSelection",
+                vec![Value::Int32(0), Value::Int32(0), Value::Int32(4)]
+            ),
+            vec![Value::Boolean(true)]
+        );
+        assert_eq!(
+            property(&mut application, 20, TEXT_INTERFACE, "CaretOffset"),
+            Value::Int32(10)
+        );
+        assert_eq!(
+            property(&mut application, 20, TEXT_INTERFACE, "CharacterCount"),
+            Value::Int32(10)
+        );
+        assert_eq!(
+            application.take_requests(),
+            vec![
+                requested(20, set_caret(2, 2)),
+                requested(20, set_caret(0, 4)),
+            ]
+        );
+    }
+
+    #[test]
+    fn editable_text_turns_each_edit_into_one_new_value() {
+        let mut application = editor();
+        let mut edit = |member: &str, body: Vec<Value>| {
+            ask_node(&mut application, 20, EDITABLE_TEXT_INTERFACE, member, body)
+        };
+        let done = vec![Value::Boolean(true)];
+        assert_eq!(edit("SetTextContents", vec![text("db.local")]), done);
+        assert_eq!(
+            edit(
+                "InsertText",
+                vec![Value::Int32(4), text("-eu"), Value::Int32(3)]
+            ),
+            done
+        );
+        assert_eq!(
+            edit(
+                "InsertText",
+                vec![Value::Int32(99), text("/x"), Value::Int32(-1)]
+            ),
+            done
+        );
+        assert_eq!(
+            edit("DeleteText", vec![Value::Int32(4), Value::Int32(-1)]),
+            done
+        );
+        assert_eq!(
+            edit("PasteText", vec![Value::Int32(0)]),
+            vec![Value::Boolean(false)]
+        );
+        assert_eq!(
+            edit("CopyText", vec![Value::Int32(0), Value::Int32(4)]),
+            vec![]
+        );
+        let value = |text: &str| requested(20, AccessAction::SetValue(text.to_owned()));
+        assert_eq!(
+            application.take_requests(),
+            vec![
+                value("db.local"),
+                value("shop-eu.eggdb"),
+                value("shop.eggdb/x"),
+                value("shop"),
+            ]
+        );
+    }
+
+    #[test]
+    fn grab_focus_queues_a_focus_request_for_nodes_that_take_it() {
+        let mut application = editor();
+        assert_eq!(
+            ask_node(
+                &mut application,
+                20,
+                COMPONENT_INTERFACE,
+                "GrabFocus",
+                vec![]
+            ),
+            vec![Value::Boolean(true)]
+        );
+        assert_eq!(
+            ask_node(
+                &mut application,
+                43,
+                COMPONENT_INTERFACE,
+                "GrabFocus",
+                vec![]
+            ),
+            vec![Value::Boolean(false)]
+        );
+        assert_eq!(
+            application.take_requests(),
+            vec![requested(20, AccessAction::Focus)]
+        );
+    }
+
+    #[test]
+    fn tables_find_cells_and_headers_by_row_and_column() {
+        let mut application = editor();
+        assert_eq!(
+            property(&mut application, 40, TABLE_INTERFACE, "NRows"),
+            Value::Int32(100)
+        );
+        assert_eq!(
+            property(&mut application, 40, TABLE_INTERFACE, "NColumns"),
+            Value::Int32(2)
+        );
+        assert_eq!(
+            property(&mut application, 44, TABLE_CELL_INTERFACE, "Position"),
+            Value::Struct(vec![Value::Int32(0), Value::Int32(1)])
+        );
+        assert_eq!(
+            property(&mut application, 44, TABLE_CELL_INTERFACE, "Table"),
+            node_reference(40)
+        );
+        assert_eq!(
+            ask_node(
+                &mut application,
+                44,
+                TABLE_CELL_INTERFACE,
+                "GetRowColumnSpan",
+                vec![]
+            ),
+            vec![
+                Value::Int32(0),
+                Value::Int32(1),
+                Value::Int32(1),
+                Value::Int32(1)
+            ]
+        );
+        let mut table = |member: &str, row: i32, column: i32| {
+            ask_node(
+                &mut application,
+                40,
+                TABLE_INTERFACE,
+                member,
+                vec![Value::Int32(row), Value::Int32(column)],
+            )
+        };
+        assert_eq!(table("GetAccessibleAt", 0, 1), vec![node_reference(44)]);
+        assert_eq!(table("GetAccessibleAt", 50, 0), vec![null_reference()]);
+        assert_eq!(table("GetIndexAt", 1, 1), vec![Value::Int32(3)]);
+        assert_eq!(table("GetIndexAt", 100, 0), vec![Value::Int32(-1)]);
+        assert_eq!(table("IsSelected", 0, 1), vec![Value::Boolean(true)]);
+        assert_eq!(table("GetRowExtentAt", 0, 0), vec![Value::Int32(1)]);
+        let mut by_index = |member: &str, index: i32| {
+            ask_node(
+                &mut application,
+                40,
+                TABLE_INTERFACE,
+                member,
+                vec![Value::Int32(index)],
+            )
+        };
+        assert_eq!(by_index("GetColumnHeader", 1), vec![node_reference(42)]);
+        assert_eq!(by_index("GetColumnDescription", 0), vec![text("id")]);
+        assert_eq!(by_index("GetRowAtIndex", 3), vec![Value::Int32(1)]);
+        assert_eq!(by_index("GetColumnAtIndex", 3), vec![Value::Int32(1)]);
+        assert_eq!(by_index("GetRowAtIndex", 200), vec![Value::Int32(-1)]);
+    }
+
+    #[test]
+    fn selection_reports_the_selected_child_and_selects_by_index() {
+        let mut application = editor();
+        assert_eq!(
+            property(
+                &mut application,
+                30,
+                SELECTION_INTERFACE,
+                "NSelectedChildren"
+            ),
+            Value::Int32(1)
+        );
+        let mut select = |member: &str, index: i32| {
+            ask_node(
+                &mut application,
+                30,
+                SELECTION_INTERFACE,
+                member,
+                vec![Value::Int32(index)],
+            )
+        };
+        assert_eq!(select("GetSelectedChild", 0), vec![node_reference(31)]);
+        assert_eq!(select("GetSelectedChild", 1), vec![null_reference()]);
+        assert_eq!(select("IsChildSelected", 0), vec![Value::Boolean(true)]);
+        assert_eq!(select("SelectChild", 1), vec![Value::Boolean(true)]);
+        assert_eq!(select("SelectChild", 9), vec![Value::Boolean(false)]);
+        assert_eq!(
+            application.take_requests(),
+            vec![requested(32, AccessAction::Select)]
+        );
+    }
+
+    #[test]
+    fn text_changes_are_a_deletion_then_an_insertion_between_the_common_ends() {
+        let object = Object::Node(20);
+        let change = |detail: &str, offset: i32| {
+            (
+                object.path(),
+                "TextChanged".to_owned(),
+                detail.to_owned(),
+                Some(offset),
+            )
+        };
+        let deleted = text_changed_events(object, "shop.eggdb", "shop");
+        assert_eq!(summary(&deleted), vec![change("delete", 4)]);
+        assert_eq!(
+            deleted.first().map(|event| event.body.get(2..4)),
+            Some(Some(
+                &[Value::Int32(6), Value::Variant(Box::new(text(".eggdb")))][..]
+            ))
+        );
+        let replaced = text_changed_events(object, "aXb", "aYYb");
+        assert_eq!(
+            summary(&replaced),
+            vec![change("delete", 1), change("insert", 1)]
+        );
+        let unicode = text_changed_events(object, "héllo", "hé llo");
+        assert_eq!(summary(&unicode), vec![change("insert", 2)]);
+        assert!(text_changed_events(object, "same", "same").is_empty());
+    }
+
+    #[test]
+    fn tree_changes_raise_text_caret_expanded_and_selection_events() {
+        let mut application = editor();
+        let mut nodes = editor_tree();
+        nodes[4].value = Some("shop.eu.eggdb".to_owned());
+        nodes[4].caret = Some(AccessCaret {
+            anchor: 7,
+            caret: 7,
+        });
+        nodes[6].state.expanded = Some(true);
+        nodes[6].description = Some("3 tables".to_owned());
+        nodes[12].state.selected = false;
+        let events = application.set_tree(&nodes);
+        let entry = |id: u32, member: &str, detail: &str, detail1: i32| {
+            (
+                Object::Node(id).path(),
+                member.to_owned(),
+                detail.to_owned(),
+                Some(detail1),
+            )
+        };
+        assert_eq!(
+            summary(&events),
+            vec![
+                entry(20, "TextChanged", "insert", 5),
+                entry(20, "TextCaretMoved", "", 7),
+                entry(20, "TextSelectionChanged", "", 0),
+                entry(31, "PropertyChange", "accessible-description", 0),
+                entry(31, "StateChanged", "expanded", 1),
+                entry(44, "StateChanged", "selected", 0),
+                entry(40, "SelectionChanged", "", 0),
+            ]
+        );
+        assert_eq!(
+            events.first().map(|event| event.body.get(2..4)),
+            Some(Some(
+                &[Value::Int32(3), Value::Variant(Box::new(text("eu.")))][..]
+            ))
+        );
+        for mut event in events {
+            event.serial = 9;
+            let decoded = Message::decode(&event.encode().unwrap()).unwrap();
+            assert_eq!(signature_of_body(&decoded), "siiva{sv}");
+        }
+        assert!(application.set_tree(&nodes).is_empty());
     }
 }
