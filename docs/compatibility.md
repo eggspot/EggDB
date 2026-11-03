@@ -73,3 +73,24 @@ tabs), and its dialect stays the one the transaction began in until `COMMIT` or 
 back) or holds text asks first. Tabs narrow from 140 to 100 px as they are added, and from ten
 tabs the strip scrolls with the wheel, always keeping the active tab in view. On a server, the
 first tab that runs uses the connection the client opened, and each other tab opens its own.
+
+## The result grid's value view, menu, column widths and scrollbars
+
+In the grid (D310, `docs/ux/workspace.md` 9.3 to 9.6), `Enter`, `F2` or a double-click opens the
+current cell's full value: text with its line breaks, JSON and arrays pretty-printed with a
+2-space indent in stored order, a vector one value a line, a blob as `0x` and its full hex. The
+body stops after 1 MB with `… and 2.1 MB more`, but `Copy` and `Ctrl/Cmd+C` copy the whole value;
+`Esc`, `Enter` or `F2` close it. A right-click, `Shift+F10` or the menu key opens the grid's menu:
+`Copy` (TSV), `Copy with header`, `Copy as INSERT` in the tab's dialect, `Copy as CSV` (RFC 4180:
+a header row, `\r\n` between records, fields with `,`, `"` or line breaks quoted, NULL empty),
+`Copy as JSON` (an array of objects keyed by column name, a repeated name as `name_2`; numbers
+and booleans bare, NULL `null`, JSON embedded, the rest strings), `Open value` and the select
+items. A right-click on the row numbers or a header selects that row or column first.
+
+Drag a header's right edge to resize its column (48 to 960 px), double-click the edge to fit it to
+its header and first 200 rows (up to 480 px), or press `Alt+Left` / `Alt+Right` (`Shift` for 32
+px) and `Alt+Enter` on the current cell. A tab keeps its widths when the next run returns the same
+column names in the same order. Scrollbars show only while the grid's rows or columns, or the
+editor's lines, do not fit; a press on the track pages and the grid's thumb drags. The header
+names the kind of value (`text`, `number`, `json`, `binary`) rather than the column's SQL type
+for now.
