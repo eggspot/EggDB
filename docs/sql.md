@@ -3918,7 +3918,10 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   `numeric` values, as in PostgreSQL 14: they sort between the finite values and `NaN`, follow
   PostgreSQL's arithmetic (`Infinity - Infinity` is `NaN`, `x / Infinity` is 0), cast to and from
   `double precision`, fail with `0A000` when cast to an integer and with `22003` in a
-  `numeric(p,s)` column (D290). `^` with a non-integer exponent, or an integer one whose exact result
+  `numeric(p,s)` column (D290). `scale(x)` is the number of digits a value shows after the point,
+  `min_scale(x)` the fewest that still give it exactly, and `trim_scale(x)` the value with its
+  trailing fractional zeros dropped (`8.4100` gives 4, 2 and `8.41`); of `NaN` or an infinity the
+  first two are NULL and `trim_scale` returns it unchanged (D302). `^` with a non-integer exponent, or an integer one whose exact result
   would need more than 2,000 digits, is computed in double precision (15 significant digits).
 - `date` and time stamps take ISO 8601 and PostgreSQL's ISO style only: `infinity`, `epoch`,
   `now`, `today`, month names (`Feb 29 2024`) and `MDY`/`DMY` forms (`02/29/2024`) answer

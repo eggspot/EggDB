@@ -4718,3 +4718,39 @@ fn infinite_time_stamps_and_dates_follow_postgresql() {
         "1"
     );
 }
+
+#[test]
+fn scale_min_scale_and_trim_scale_follow_postgresql() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for (sql, shown) in [
+        ("SELECT scale(8.4100)", "4"),
+        ("SELECT min_scale(8.4100)", "2"),
+        ("SELECT trim_scale(8.4100)", "8.41"),
+        ("SELECT scale(42)", "0"),
+        ("SELECT min_scale(1000::bigint)", "0"),
+        ("SELECT trim_scale(0.000)", "0"),
+        ("SELECT trim_scale('-1.2300')", "-1.23"),
+        ("SELECT scale('NaN'::numeric)", "NULL"),
+        ("SELECT min_scale('Infinity'::numeric)", "NULL"),
+        ("SELECT trim_scale('-Infinity'::numeric)", "-Infinity"),
+        ("SELECT trim_scale('NaN'::numeric)", "NaN"),
+        ("SELECT scale(NULL::numeric)", "NULL"),
+        ("SELECT pg_typeof(scale(1.5))::text", "integer"),
+        ("SELECT pg_typeof(trim_scale(1.50))::text", "numeric"),
+    ] {
+        assert_eq!(one_value(&mut session, sql), shown, "{sql}");
+    }
+    last(
+        &mut session,
+        "CREATE TABLE prices (amount numeric(10, 4)); INSERT INTO prices VALUES (2.5), (3.1250)",
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT scale(amount) AS s, min_scale(amount) AS m, trim_scale(amount) AS t \
+             FROM prices ORDER BY amount"
+        ),
+        "s|m|t\n4|1|2.5\n4|3|3.125\nSELECT 2"
+    );
+}

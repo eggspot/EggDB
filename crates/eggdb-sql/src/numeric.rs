@@ -347,7 +347,7 @@ impl Numeric {
         self.infinite
     }
 
-    fn is_special(&self) -> bool {
+    pub(crate) fn is_special(&self) -> bool {
         self.nan || self.infinite
     }
 
@@ -778,6 +778,37 @@ impl Numeric {
             ordering.reverse()
         } else {
             ordering
+        }
+    }
+
+    pub(crate) fn minimum_scale(&self) -> Option<u16> {
+        if self.is_special() {
+            return None;
+        }
+        if self.limbs.is_empty() {
+            return Some(0);
+        }
+        let mut trailing_zeros = 0usize;
+        for &limb in self.limbs.iter() {
+            if limb == 0 {
+                trailing_zeros += LIMB_DIGITS;
+                continue;
+            }
+            let mut rest = limb;
+            while rest % 10 == 0 {
+                trailing_zeros += 1;
+                rest /= 10;
+            }
+            break;
+        }
+        let scale = usize::from(self.scale).saturating_sub(trailing_zeros);
+        Some(u16::try_from(scale).unwrap_or(self.scale))
+    }
+
+    pub(crate) fn trimmed_scale(&self) -> SqlResult<Self> {
+        match self.minimum_scale() {
+            Some(scale) => self.truncated(i64::from(scale)),
+            None => Ok(self.clone()),
         }
     }
 
@@ -1371,6 +1402,30 @@ mod tests {
         assert!(Numeric::parse(&"9".repeat(MAX_INTEGRAL_DIGITS)).is_ok());
         assert!(Numeric::parse("1e999999999999").is_err());
         assert!(Numeric::parse("1e-1001").is_err());
+    }
+
+    #[test]
+    fn minimum_and_trimmed_scales_follow_the_manual() {
+        let cases = [
+            ("8.4100", 4, Some(2), "8.41"),
+            ("1000", 0, Some(0), "1000"),
+            ("0.000", 3, Some(0), "0"),
+            ("1.000000000000", 12, Some(0), "1"),
+            ("1234567890.1000000000", 10, Some(1), "1234567890.1"),
+            ("0.00000000000000000001", 20, Some(20), "0.00000000000000000001"),
+            ("-1.50", 2, Some(1), "-1.5"),
+            ("1000000000.000000000", 9, Some(0), "1000000000"),
+        ];
+        for (input, scale, minimum, trimmed) in cases {
+            let number = n(input);
+            assert_eq!(number.scale(), scale, "{input}");
+            assert_eq!(number.minimum_scale(), minimum, "{input}");
+            assert_eq!(shown(number.trimmed_scale()), trimmed, "{input}");
+        }
+        assert_eq!(Numeric::nan().minimum_scale(), None);
+        assert_eq!(Numeric::infinity(false).minimum_scale(), None);
+        assert_eq!(shown(Numeric::nan().trimmed_scale()), "NaN");
+        assert_eq!(shown(Numeric::infinity(true).trimmed_scale()), "-Infinity");
     }
 
     #[test]

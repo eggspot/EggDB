@@ -352,6 +352,8 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
             _ => None,
         },
         ("json_array_length" | "jsonb_array_length", [_]) => Some(SqlType::Integer),
+        ("scale" | "min_scale", [_]) => Some(SqlType::Integer),
+        ("trim_scale", [_]) => Some(SqlType::Numeric(None)),
         ("round" | "trunc" | "ceil" | "ceiling" | "floor", [argument, ..]) => {
             match static_type(argument, scope)? {
                 SqlType::Numeric(_) => Some(SqlType::Numeric(None)),

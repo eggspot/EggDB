@@ -1764,6 +1764,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
     const INTERVAL: Option<SqlType> = Some(SqlType::INTERVAL);
     Some(match name {
         "split_part" => &[TEXT, TEXT, INTEGER],
+        "scale" | "min_scale" | "trim_scale" => &[Some(SqlType::Numeric(None))],
         "replace" | "translate" => &[TEXT, TEXT, TEXT],
         "strpos" | "position" | "starts_with" => &[TEXT, TEXT],
         "left" | "right" | "repeat" => &[TEXT, INTEGER],
@@ -2109,6 +2110,19 @@ fn numeric_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         {
             let number = Value::Numeric(Numeric::from_i64(whole.as_integer().unwrap_or(0)));
             return numeric_function(name, &[number, count.clone()]);
+        }
+        ("scale" | "min_scale" | "trim_scale", [Value::Null]) => Ok(Value::Null),
+        ("scale" | "min_scale", [Value::Numeric(number)]) if number.is_special() => {
+            Ok(Value::Null)
+        }
+        ("scale", [Value::Numeric(number)]) => Ok(Value::Integer(i32::from(number.scale()))),
+        ("min_scale", [Value::Numeric(number)]) => Ok(number
+            .minimum_scale()
+            .map_or(Value::Null, |scale| Value::Integer(i32::from(scale)))),
+        ("trim_scale", [Value::Numeric(number)]) => number.trimmed_scale().map(Value::Numeric),
+        ("scale" | "min_scale" | "trim_scale", [whole]) if whole.as_integer().is_some() => {
+            let number = Value::Numeric(Numeric::from_i64(whole.as_integer().unwrap_or(0)));
+            return numeric_function(name, &[number]);
         }
         ("ceil" | "ceiling", [Value::Numeric(number)]) => number.ceiling().map(Value::Numeric),
         ("floor", [Value::Numeric(number)]) => number.floor().map(Value::Numeric),
