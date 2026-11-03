@@ -259,7 +259,10 @@ fn a_foreign_key_or_a_view_across_the_list_keeps_the_listed_table_from_changing(
     refused(&mut session, "TRUNCATE parents");
     refused(&mut session, "DROP TABLE parents");
     runs(&mut session, "INSERT INTO orders VALUES (2, 1, 'second')");
-    runs(&mut session, "UPDATE orders SET note = 'changed' WHERE id = 1");
+    runs(
+        &mut session,
+        "UPDATE orders SET note = 'changed' WHERE id = 1",
+    );
     let referencing = refused(&mut session, "ALTER TABLE orders ADD COLUMN extra integer");
     assert!(
         referencing.contains("\"orders\" has a foreign key to table \"customers\""),
@@ -563,7 +566,10 @@ fn a_table_listed_with_columns_takes_inserts_and_changes_to_its_listed_columns()
     };
     let mut session = Session::new(&limited);
     runs(&mut session, "INSERT INTO secrets VALUES (2)");
-    runs(&mut session, "INSERT INTO secrets VALUES (1) ON CONFLICT (id) DO NOTHING");
+    runs(
+        &mut session,
+        "INSERT INTO secrets VALUES (1) ON CONFLICT (id) DO NOTHING",
+    );
     assert_eq!(
         refused(&mut session, "DELETE FROM secrets WHERE id = 1"),
         "cannot delete rows of \"secrets\" or change their key: this session may read only some of its columns (--tables), and the row would take the others with it"
@@ -611,7 +617,10 @@ fn a_table_listed_with_columns_takes_inserts_and_changes_to_its_listed_columns()
     );
     session.close().unwrap();
     assert_eq!(
-        shown(&store, "SELECT id, coalesce(code, '-') AS code FROM secrets ORDER BY id"),
+        shown(
+            &store,
+            "SELECT id, coalesce(code, '-') AS code FROM secrets ORDER BY id"
+        ),
         "id|code\n1|swordfish\n2|-\nSELECT 2"
     );
     let limited = ConfinedStore {
@@ -689,7 +698,10 @@ fn a_new_row_gives_hidden_columns_their_defaults_and_a_change_keeps_their_values
     let store = staff();
     let limited = staff_limited(&store);
     let mut session = Session::new(&limited);
-    runs(&mut session, "INSERT INTO staff (id, name, team) VALUES (2, 'Grace', 'core')");
+    runs(
+        &mut session,
+        "INSERT INTO staff (id, name, team) VALUES (2, 'Grace', 'core')",
+    );
     runs(&mut session, "UPDATE staff SET name = 'Ida' WHERE id = 1");
     runs(
         &mut session,
@@ -702,7 +714,10 @@ fn a_new_row_gives_hidden_columns_their_defaults_and_a_change_keeps_their_values
             &mut |result| returned.push(render(&result)),
         )
         .unwrap();
-    assert_eq!(returned.last().unwrap(), "id|name|team|bonus\n1|Ada|core|10\nUPDATE 1");
+    assert_eq!(
+        returned.last().unwrap(),
+        "id|name|team|bonus\n1|Ada|core|10\nUPDATE 1"
+    );
     session.close().unwrap();
     assert_eq!(
         shown(
@@ -735,7 +750,10 @@ fn a_change_to_a_listed_column_moves_the_hidden_index_entries_with_it() {
     session.close().unwrap();
     assert_eq!(index_entries(&store, "staff_by_team_and_salary"), 1);
     assert_eq!(
-        shown(&store, "SELECT id FROM staff WHERE team = 'ops' AND salary = 9000"),
+        shown(
+            &store,
+            "SELECT id FROM staff WHERE team = 'ops' AND salary = 9000"
+        ),
         "id\n1\nSELECT 1"
     );
     assert_eq!(
@@ -843,7 +861,10 @@ fn hidden_columns_that_need_a_generated_value_or_a_check_against_other_rows_refu
         error.message(),
         "null value in a column of relation \"required\" that this session cannot see violates not-null constraint"
     );
-    runs(&mut session, "UPDATE coded SET name = 'renamed' WHERE id = 1");
+    runs(
+        &mut session,
+        "UPDATE coded SET name = 'renamed' WHERE id = 1",
+    );
     session.close().unwrap();
     for table in ["counted", "required", "owned", "picked"] {
         assert_eq!(
@@ -865,14 +886,23 @@ fn a_rolled_back_savepoint_undoes_a_write_to_a_table_listed_with_columns() {
     let mut session = Session::new(&limited);
     runs(&mut session, "BEGIN");
     runs(&mut session, "SAVEPOINT before");
-    runs(&mut session, "INSERT INTO staff (id, name, team) VALUES (4, 'Kay', 'web')");
+    runs(
+        &mut session,
+        "INSERT INTO staff (id, name, team) VALUES (4, 'Kay', 'web')",
+    );
     runs(&mut session, "UPDATE staff SET team = 'ops' WHERE id = 1");
     runs(&mut session, "ROLLBACK TO SAVEPOINT before");
-    runs(&mut session, "INSERT INTO staff (id, name, team) VALUES (5, 'Lin', 'web')");
+    runs(
+        &mut session,
+        "INSERT INTO staff (id, name, team) VALUES (5, 'Lin', 'web')",
+    );
     runs(&mut session, "COMMIT");
     session.close().unwrap();
     assert_eq!(
-        shown(&store, "SELECT id, team, salary, note FROM staff ORDER BY id"),
+        shown(
+            &store,
+            "SELECT id, team, salary, note FROM staff ORDER BY id"
+        ),
         "id|team|salary|note\n1|core|9000|secret note\n5|web|1000|none\nSELECT 2"
     );
     assert_eq!(index_entries(&store, "staff_by_team_and_salary"), 2);
@@ -914,7 +944,10 @@ fn a_view_listed_with_columns_shows_only_those_and_cannot_be_changed() {
         "cannot change view \"roster\": this session may read only some of its columns (--tables)"
     );
     refused(&mut session, "DROP VIEW roster");
-    fails(&mut session, "INSERT INTO roster (id, name) VALUES (9, 'Zed')");
+    fails(
+        &mut session,
+        "INSERT INTO roster (id, name) VALUES (9, 'Zed')",
+    );
     session.close().unwrap();
     assert_eq!(
         shown(&store, "SELECT count(*) FROM staff"),
@@ -948,7 +981,11 @@ fn a_row_whose_foreign_key_points_at_an_unlisted_table_is_checked_without_showin
         "UPDATE orders SET customer = 99 WHERE id = 1",
     ] {
         let error = fails(&mut session, sql);
-        assert_eq!(error.state(), SqlState::FOREIGN_KEY_VIOLATION, "{sql}: {error}");
+        assert_eq!(
+            error.state(),
+            SqlState::FOREIGN_KEY_VIOLATION,
+            "{sql}: {error}"
+        );
         let text = format!("{error} {:?}", error.detail());
         assert!(!text.contains("4111"), "{sql}: {text}");
         assert!(!text.contains("card"), "{sql}: {text}");
@@ -957,7 +994,10 @@ fn a_row_whose_foreign_key_points_at_an_unlisted_table_is_checked_without_showin
     session.close().unwrap();
     let mut mysql = Session::with_dialect(&limited, crate::Dialect::MySql);
     let error = fails(&mut mysql, "INSERT INTO orders VALUES (5, 77, 'mysql')");
-    assert!(error.message().contains("REFERENCES `customers`)"), "{error}");
+    assert!(
+        error.message().contains("REFERENCES `customers`)"),
+        "{error}"
+    );
     assert!(!error.message().contains("`id`)"), "{error}");
     mysql.close().unwrap();
     let mut sqlite = Session::with_dialect(&limited, crate::Dialect::Sqlite);

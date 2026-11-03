@@ -912,7 +912,10 @@ mod tests {
         assert_eq!(like_escape_text("a\\_", Some('\\')).unwrap(), "a\\_");
         assert_eq!(like_escape_text("a\\%", None).unwrap(), "a\\\\%");
         assert_eq!(
-            like_escape_text("a#", Some('#')).unwrap_err().state().code(),
+            like_escape_text("a#", Some('#'))
+                .unwrap_err()
+                .state()
+                .code(),
             "22025"
         );
         assert!(crate::eval::like("a_c", &like_escape_text("a!_c", Some('!')).unwrap()).unwrap());

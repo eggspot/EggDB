@@ -548,7 +548,10 @@ mod tests {
         };
         look.follow((None, None), at(0));
         assert!(look.is_fading());
-        assert!(look.mix(3).is(Fill::Rest), "the first frame draws the old fill");
+        assert!(
+            look.mix(3).is(Fill::Rest),
+            "the first frame draws the old fill"
+        );
         assert!(look.advance(at(40)));
         assert_eq!(look.mix(3).hovered, 500);
         look.hovered = None;
@@ -584,7 +587,10 @@ mod tests {
         assert!(look.mix(6).is(Fill::Rest), "the newest hover is fading in");
         look.stop_fades();
         assert!(!look.is_fading());
-        assert!(look.mix(6).is(Fill::Hovered), "stopped fades show their end");
+        assert!(
+            look.mix(6).is(Fill::Hovered),
+            "stopped fades show their end"
+        );
     }
 
     #[test]

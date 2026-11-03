@@ -693,10 +693,7 @@ impl X11Window {
         let chunk =
             x11_incr::incr_chunk_size(self.maximum_request_length, SELECTION_REQUEST_HEADER_BYTES);
         let transfer = OutgoingIncr::new(requestor, property, target, bytes, chunk, Instant::now());
-        self.send_serving_selection(&x11::select_events(
-            requestor,
-            x11::EVENT_PROPERTY_CHANGE,
-        )?)?;
+        self.send_serving_selection(&x11::select_events(requestor, x11::EVENT_PROPERTY_CHANGE)?)?;
         self.send_serving_selection(&x11::change_property(
             requestor,
             property,

@@ -2133,9 +2133,7 @@ fn numeric_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
             return numeric_function(name, &[number, count.clone()]);
         }
         ("scale" | "min_scale" | "trim_scale", [Value::Null]) => Ok(Value::Null),
-        ("scale" | "min_scale", [Value::Numeric(number)]) if number.is_special() => {
-            Ok(Value::Null)
-        }
+        ("scale" | "min_scale", [Value::Numeric(number)]) if number.is_special() => Ok(Value::Null),
         ("scale", [Value::Numeric(number)]) => Ok(Value::Integer(i32::from(number.scale()))),
         ("min_scale", [Value::Numeric(number)]) => Ok(number
             .minimum_scale()

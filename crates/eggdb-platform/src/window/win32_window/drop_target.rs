@@ -57,7 +57,8 @@ struct StorageMedium {
     release_owner: *mut c_void,
 }
 
-type GetData = unsafe extern "system" fn(*mut c_void, *const FormatEtc, *mut StorageMedium) -> HResult;
+type GetData =
+    unsafe extern "system" fn(*mut c_void, *const FormatEtc, *mut StorageMedium) -> HResult;
 
 #[repr(C)]
 struct DataObjectVtable {
@@ -75,7 +76,8 @@ struct DropTargetVtable {
     query_interface: unsafe extern "system" fn(*mut c_void, *const Guid, Out) -> HResult,
     add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
     release: unsafe extern "system" fn(*mut c_void) -> u32,
-    drag_enter: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, Point, *mut u32) -> HResult,
+    drag_enter:
+        unsafe extern "system" fn(*mut c_void, *mut c_void, u32, Point, *mut u32) -> HResult,
     drag_over: unsafe extern "system" fn(*mut c_void, u32, Point, *mut u32) -> HResult,
     drag_leave: unsafe extern "system" fn(*mut c_void) -> HResult,
     drop: unsafe extern "system" fn(*mut c_void, *mut c_void, u32, Point, *mut u32) -> HResult,
@@ -128,7 +130,11 @@ impl DropTarget {
         left
     }
 
-    fn answer(&self, effect: *mut u32, update: impl FnOnce(&mut FileDragTarget, u32) -> u32) -> HResult {
+    fn answer(
+        &self,
+        effect: *mut u32,
+        update: impl FnOnce(&mut FileDragTarget, u32) -> u32,
+    ) -> HResult {
         let Some(allowed) = read_effect(effect) else {
             return E_POINTER;
         };
@@ -197,15 +203,22 @@ fn data_paths(data: *mut c_void) -> Vec<PathBuf> {
     paths
 }
 
-unsafe extern "system" fn query_interface(this: *mut c_void, iid: *const Guid, out: Out) -> HResult {
+unsafe extern "system" fn query_interface(
+    this: *mut c_void,
+    iid: *const Guid,
+    out: Out,
+) -> HResult {
     if out.is_null() {
         return E_POINTER;
     }
     // SAFETY: COM passes a valid IID pointer or null; null is refused.
-    let known = unsafe { iid.as_ref() }.is_some_and(|&iid| iid == IID_IUNKNOWN || iid == IID_IDROPTARGET);
+    let known =
+        unsafe { iid.as_ref() }.is_some_and(|&iid| iid == IID_IUNKNOWN || iid == IID_IDROPTARGET);
     let interface = if known {
         let target = DropTarget::at(this);
-        target.references.set(target.references.get().saturating_add(1));
+        target
+            .references
+            .set(target.references.get().saturating_add(1));
         this
     } else {
         std::ptr::null_mut()
@@ -259,7 +272,11 @@ unsafe extern "system" fn drag_over(
 
 unsafe extern "system" fn drag_leave(this: *mut c_void) -> HResult {
     let target = DropTarget::at(this);
-    let left = target.drag.try_borrow_mut().ok().and_then(|mut drag| drag.leave());
+    let left = target
+        .drag
+        .try_borrow_mut()
+        .ok()
+        .and_then(|mut drag| drag.leave());
     if let Some(event) = left {
         target.state.push(event);
     }

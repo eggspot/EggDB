@@ -125,7 +125,8 @@ impl Parser<'_> {
     }
 
     fn at_grouping_construct(&self) -> bool {
-        let called = |word: &str| self.is_word(word) && self.peek_kind_at(1) == &TokenKind::LeftParen;
+        let called =
+            |word: &str| self.is_word(word) && self.peek_kind_at(1) == &TokenKind::LeftParen;
         called("rollup")
             || called("cube")
             || (self.is_word("grouping") && self.is_word_at(1, "sets"))

@@ -403,7 +403,11 @@ fn postgresql_lines(query: &ExplainedQuery) -> Vec<String> {
         .into_iter()
         .map(|(level, step)| match level {
             0 => postgresql_step(&step),
-            _ => format!("{}->  {}", " ".repeat(6 * level - 4), postgresql_step(&step)),
+            _ => format!(
+                "{}->  {}",
+                " ".repeat(6 * level - 4),
+                postgresql_step(&step)
+            ),
         })
         .collect()
 }

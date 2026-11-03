@@ -179,7 +179,9 @@ pub(crate) fn draw(
             b: 0,
             a: alpha,
         };
-        paint.canvas.fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
+        paint
+            .canvas
+            .fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
     }
     paint.canvas.fill_rounded_rect(rect, 6.0, theme.border);
     paint.canvas.fill_rounded_rect(
@@ -279,11 +281,22 @@ mod tests {
     #[test]
     fn the_menu_opens_at_the_pointer_or_below_the_cell_and_stays_in_the_window() {
         assert_eq!(
-            rect_for(MenuOrigin::Pointer { x: 500.0, y: 460.0 }, Rect::new(0.0, 0.0, 0.0, 0.0), 1280.0),
+            rect_for(
+                MenuOrigin::Pointer { x: 500.0, y: 460.0 },
+                Rect::new(0.0, 0.0, 0.0, 0.0),
+                1280.0
+            ),
             Rect::new(500.0, 460.0, WIDTH, HEIGHT)
         );
         assert_eq!(
-            rect_for(MenuOrigin::Pointer { x: 1200.0, y: 600.0 }, Rect::new(0.0, 0.0, 0.0, 0.0), 1280.0),
+            rect_for(
+                MenuOrigin::Pointer {
+                    x: 1200.0,
+                    y: 600.0
+                },
+                Rect::new(0.0, 0.0, 0.0, 0.0),
+                1280.0
+            ),
             Rect::new(1040.0, 322.0, WIDTH, HEIGHT)
         );
         assert_eq!(

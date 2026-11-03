@@ -149,8 +149,8 @@ impl ValueView {
         let value = grid.value(cell);
         let (text, placeholder) = shown_value(value, kind);
         let (lines, left_out) = wrapped_lines(&text, GLYPHS_PER_LINE, BODY_LIMIT);
-        let blob_bytes = (kind == ValueKind::Blob && !placeholder)
-            .then_some(text.len().saturating_sub(2) / 2);
+        let blob_bytes =
+            (kind == ValueKind::Blob && !placeholder).then_some(text.len().saturating_sub(2) / 2);
         let detail = match blob_bytes {
             Some(bytes) => format!("{} · {}", kind.label(), bytes_label(bytes)),
             None => kind.label().to_owned(),
@@ -265,18 +265,31 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &ValueView, rect: Rect) {
             b: 0,
             a: alpha,
         };
-        paint.canvas.fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
+        paint
+            .canvas
+            .fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
     }
     paint.canvas.fill_rounded_rect(rect, 6.0, theme.border);
     let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
     paint.canvas.fill_rounded_rect(inner, 5.0, theme.bg0);
     paint.canvas.fill_rounded_rect(
-        Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, HEADER_HEIGHT - 1.0),
+        Rect::new(
+            rect.x + 1.0,
+            rect.y + 1.0,
+            rect.w - 2.0,
+            HEADER_HEIGHT - 1.0,
+        ),
         5.0,
         theme.bg1,
     );
     paint.rect(rect.x + 1.0, rect.y + 16.0, rect.w - 2.0, 15.0, theme.bg1);
-    paint.rect(rect.x, rect.y + HEADER_HEIGHT - 1.0, rect.w, 1.0, theme.border);
+    paint.rect(
+        rect.x,
+        rect.y + HEADER_HEIGHT - 1.0,
+        rect.w,
+        1.0,
+        theme.border,
+    );
     let detail = format!(" · {}", view.detail);
     let detail_width = faces.ui.width(&detail, BODY.0);
     let room = (NAME_RIGHT - TEXT_LEFT - detail_width).max(40.0);
@@ -290,7 +303,14 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, view: &ValueView, rect: Rect) {
         theme.text_primary,
     );
     let detail = elided(faces.ui, &detail, rect.x + NAME_RIGHT - pen, BODY.0);
-    paint.text(faces.ui, &detail, pen, rect.y + 7.0, BODY, theme.text_secondary);
+    paint.text(
+        faces.ui,
+        &detail,
+        pen,
+        rect.y + 7.0,
+        BODY,
+        theme.text_secondary,
+    );
     let copy = copy_rect(rect);
     let label = if view.copyable() {
         theme.text_primary
@@ -458,7 +478,13 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         )]];
-        let grid = ResultGrid::new(vec!["n".to_owned()], vec![ValueKind::Text], rows, 1, vec![60.0]);
+        let grid = ResultGrid::new(
+            vec!["n".to_owned()],
+            vec![ValueKind::Text],
+            rows,
+            1,
+            vec![60.0],
+        );
         let mut view = ValueView::open(&grid, Cell::default());
         view.key(press(Key::Down));
         assert_eq!(view.first_line, 1);

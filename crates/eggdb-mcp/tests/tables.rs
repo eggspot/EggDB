@@ -471,7 +471,11 @@ fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
         sampled.contains("Ada") && !sampled.contains("123-45-6789"),
         "{sampled}"
     );
-    let renamed = write(&mut server, 12, "UPDATE people SET name = 'Ida' WHERE id = 1");
+    let renamed = write(
+        &mut server,
+        12,
+        "UPDATE people SET name = 'Ida' WHERE id = 1",
+    );
     assert_eq!(text_at(structured(&renamed), &["committed"]), "true");
     let inserted = write(
         &mut server,
@@ -479,10 +483,7 @@ fn a_table_listed_with_columns_shows_only_those_to_every_tool() {
         "INSERT INTO people VALUES (2, 'Grace') RETURNING *",
     );
     assert_eq!(text_at(structured(&inserted), &["committed"]), "true");
-    assert!(
-        !format!("{inserted:?}").contains("ssn"),
-        "{inserted:?}"
-    );
+    assert!(!format!("{inserted:?}").contains("ssn"), "{inserted:?}");
     assert_eq!(
         write_refused(&mut server, 14, "UPDATE people SET ssn = 'x'").0,
         "42703"

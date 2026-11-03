@@ -39,7 +39,9 @@ pub(crate) fn run(
     let columns = output.destination.columns.as_deref();
     if columns.is_some_and(|columns| columns.len() != split.width) {
         return Err(crate::tsql::columns_mismatch(
-            columns.and_then(<[Name]>::first).map_or(0, |name| name.position),
+            columns
+                .and_then(<[Name]>::first)
+                .map_or(0, |name| name.position),
         ));
     }
     match (&output.destination.target, variable) {

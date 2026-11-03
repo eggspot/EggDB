@@ -209,7 +209,12 @@ mod tests {
         }
         assert_eq!(
             chunks,
-            vec![b"abcd".to_vec(), b"efgh".to_vec(), b"ij".to_vec(), Vec::new()]
+            vec![
+                b"abcd".to_vec(),
+                b"efgh".to_vec(),
+                b"ij".to_vec(),
+                Vec::new()
+            ]
         );
         assert_eq!(transfer.next(now), IncrStep::Done);
     }

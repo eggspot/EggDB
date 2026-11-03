@@ -1,8 +1,7 @@
 use super::Parser;
 use crate::ast::{
     DerivedTable, Expr, FromClause, InsertBranch, InsertTarget, InsertValue, MultitableInsert,
-    MultitableInsertKind, Name, Query, Select, SelectItem, Statement, TableReference,
-    TargetValue,
+    MultitableInsertKind, Name, Query, Select, SelectItem, Statement, TableReference, TargetValue,
 };
 use crate::dialect::Dialect;
 use crate::error::SqlResult;

@@ -106,15 +106,33 @@ fn dynamic_keys_match_their_test_vectors() {
 #[test]
 fn an_integer_and_a_real_compare_exactly() {
     let two_to_53 = 9_007_199_254_740_992.0;
-    assert_eq!(integer_against_real(9_007_199_254_740_993, two_to_53), Ordering::Greater);
-    assert_eq!(integer_against_real(9_007_199_254_740_992, two_to_53), Ordering::Equal);
+    assert_eq!(
+        integer_against_real(9_007_199_254_740_993, two_to_53),
+        Ordering::Greater
+    );
+    assert_eq!(
+        integer_against_real(9_007_199_254_740_992, two_to_53),
+        Ordering::Equal
+    );
     assert_eq!(integer_against_real(3, 3.5), Ordering::Less);
     assert_eq!(integer_against_real(-3, -3.5), Ordering::Greater);
     assert_eq!(integer_against_real(0, -0.0), Ordering::Equal);
-    assert_eq!(integer_against_real(i64::MAX, 9_223_372_036_854_775_808.0), Ordering::Less);
-    assert_eq!(integer_against_real(i64::MIN, -9_223_372_036_854_775_808.0), Ordering::Equal);
-    assert_eq!(integer_against_real(i64::MIN, f64::NEG_INFINITY), Ordering::Greater);
-    assert_eq!(integer_against_real(i64::MAX, f64::INFINITY), Ordering::Less);
+    assert_eq!(
+        integer_against_real(i64::MAX, 9_223_372_036_854_775_808.0),
+        Ordering::Less
+    );
+    assert_eq!(
+        integer_against_real(i64::MIN, -9_223_372_036_854_775_808.0),
+        Ordering::Equal
+    );
+    assert_eq!(
+        integer_against_real(i64::MIN, f64::NEG_INFINITY),
+        Ordering::Greater
+    );
+    assert_eq!(
+        integer_against_real(i64::MAX, f64::INFINITY),
+        Ordering::Less
+    );
     assert_eq!(integer_against_real(0, f64::NAN), Ordering::Less);
 }
 
@@ -378,7 +396,10 @@ fn blob_columns_keep_writing_version_10_with_tag_24_as_v0_2_0_did() {
     assert_eq!(encoded[type_after(&encoded, "anything_blob")], 24);
     assert_eq!(TableDefinition::decode("t", &encoded), Ok(table));
     encoded[0] = AFFINITY_FORMAT_VERSION;
-    assert!(damaged(&encoded), "a version 13 table needs a column with an affinity");
+    assert!(
+        damaged(&encoded),
+        "a version 13 table needs a column with an affinity"
+    );
 }
 
 #[test]

@@ -630,7 +630,10 @@ fn a_procedure_commit_ends_its_set_local_and_a_rollback_undoes_its_uncommitted_s
             "SET app.step = 'start'",
         ],
     );
-    assert_eq!(answer(&mut session, "CALL settings_across_commits()"), "CALL");
+    assert_eq!(
+        answer(&mut session, "CALL settings_across_commits()"),
+        "CALL"
+    );
     assert_eq!(
         answer(&mut session, "SELECT n, step FROM seen ORDER BY n"),
         "n|step\n1|one\n2|start\n3|two\nSELECT 3"
@@ -694,7 +697,10 @@ fn refcursor_arrays_hold_cursor_names_and_table_columns_hold_them_as_text_arrays
     );
     answer(&mut session, "BEGIN");
     assert_eq!(
-        answer(&mut session, "SELECT open_two('first_cursor', 'second_cursor')"),
+        answer(
+            &mut session,
+            "SELECT open_two('first_cursor', 'second_cursor')"
+        ),
         "open_two\n{first_cursor,second_cursor}\nSELECT 1"
     );
     assert_eq!(

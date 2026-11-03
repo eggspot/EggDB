@@ -99,10 +99,10 @@ fn first_text(results: Vec<QueryResult>) -> Option<String> {
 }
 
 fn plan_table_name(target: &crate::ast::PlanTableTarget) -> String {
-    target
-        .table
-        .as_ref()
-        .map_or_else(|| crate::explain::PLAN_TABLE.to_owned(), |name| name.text.clone())
+    target.table.as_ref().map_or_else(
+        || crate::explain::PLAN_TABLE.to_owned(),
+        |name| name.text.clone(),
+    )
 }
 
 fn written(name: &str) -> String {

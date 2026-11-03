@@ -446,9 +446,8 @@ impl Parser<'_> {
         }
         self.expect_word("for")?;
         if !(self.is_word("select") || self.is_word("update") || self.is_word("delete")) {
-            return Err(self.not_supported(
-                "EXPLAIN PLAN of a statement other than SELECT, UPDATE or DELETE",
-            ));
+            return Err(self
+                .not_supported("EXPLAIN PLAN of a statement other than SELECT, UPDATE or DELETE"));
         }
         let statement = self.statement_body()?;
         Ok(Statement::Explain(Explain {

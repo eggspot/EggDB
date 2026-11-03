@@ -3,8 +3,8 @@ mod cursors;
 use super::{Parameters, Parser};
 use crate::ast::{
     AlterSequence, ColumnDefinition, Comment, CommentTarget, CreateSequence, Expr, ExprKind,
-    Literal, Name, ProcedureCall, Query, RelationKind, SequenceOptions, SetExpr,
-    ShowplanKind, SqlServerStatement, Statement, TableReference,
+    Literal, Name, ProcedureCall, Query, RelationKind, SequenceOptions, SetExpr, ShowplanKind,
+    SqlServerStatement, Statement, TableReference,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -1030,7 +1030,10 @@ impl<'t> Parser<'t> {
                     ShowplanKind::All
                 };
                 let on = self.on_or_off()?;
-                Ok(Statement::SqlServer(SqlServerStatement::Showplan { kind, on }))
+                Ok(Statement::SqlServer(SqlServerStatement::Showplan {
+                    kind,
+                    on,
+                }))
             }
             "showplan_xml" => Err(not_supported("SET SHOWPLAN_XML").at(position)),
             "statistics" => {

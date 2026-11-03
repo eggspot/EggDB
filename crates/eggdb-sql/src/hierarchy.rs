@@ -80,15 +80,18 @@ fn equal_keys(connect: &Expr) -> Option<(usize, usize)> {
         ExprKind::And(operands) => operands.iter().collect(),
         _ => vec![connect],
     };
-    conjuncts.into_iter().find_map(|conjunct| match &conjunct.kind {
-        ExprKind::Binary(BinaryOperator::Equal, left, right) => match (&left.kind, &right.kind) {
-            (ExprKind::Slot { index: a, .. }, ExprKind::Slot { index: b, .. }) => {
-                paired_keys(*a, *b).or_else(|| paired_keys(*b, *a))
-            }
+    conjuncts
+        .into_iter()
+        .find_map(|conjunct| match &conjunct.kind {
+            ExprKind::Binary(BinaryOperator::Equal, left, right) => match (&left.kind, &right.kind)
+            {
+                (ExprKind::Slot { index: a, .. }, ExprKind::Slot { index: b, .. }) => {
+                    paired_keys(*a, *b).or_else(|| paired_keys(*b, *a))
+                }
+                _ => None,
+            },
             _ => None,
-        },
-        _ => None,
-    })
+        })
 }
 
 fn mentions_level(expr: &Expr) -> bool {
@@ -284,7 +287,8 @@ impl Walk<'_> {
             };
             let value = self.cell(row, *input);
             let declared = self.types.get(*input).copied().flatten();
-            let text = crate::oracle_functions::text_with_type(&value, declared).unwrap_or_default();
+            let text =
+                crate::oracle_functions::text_with_type(&value, declared).unwrap_or_default();
             if text.contains(separator.as_str()) {
                 return Err(separator_in_value(self.hierarchy.position));
             }
@@ -329,9 +333,12 @@ impl Walk<'_> {
     }
 
     fn run(mut self) -> SqlResult<Vec<Vec<Value>>> {
-        let mut roots: Vec<usize> = (0..self.rows.len()).filter(|&row| self.starts(row)).collect();
+        let mut roots: Vec<usize> = (0..self.rows.len())
+            .filter(|&row| self.starts(row))
+            .collect();
         self.in_sibling_order(&mut roots);
-        let mut pending: Vec<(usize, usize)> = roots.into_iter().rev().map(|row| (row, 1)).collect();
+        let mut pending: Vec<(usize, usize)> =
+            roots.into_iter().rev().map(|row| (row, 1)).collect();
         let mut path: Vec<Step> = Vec::new();
         let mut emitted = Vec::new();
         while let Some((row, level)) = pending.pop() {

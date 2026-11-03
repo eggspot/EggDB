@@ -125,10 +125,7 @@ fn write_chunked(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     writer.write_all(&[0, 0])
 }
 
-fn read_message(
-    reader: &mut impl Read,
-    held: &mut Reservation<'_>,
-) -> io::Result<Option<Vec<u8>>> {
+fn read_message(reader: &mut impl Read, held: &mut Reservation<'_>) -> io::Result<Option<Vec<u8>>> {
     held.resize(0);
     let mut payload = Vec::new();
     loop {

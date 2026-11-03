@@ -678,17 +678,35 @@ mod tests {
         let triggers: Vec<(String, String, String)> = catalog
             .triggers
             .iter()
-            .map(|trigger| (trigger.name.clone(), trigger.table.clone(), trigger.summary()))
+            .map(|trigger| {
+                (
+                    trigger.name.clone(),
+                    trigger.table.clone(),
+                    trigger.summary(),
+                )
+            })
             .collect();
         assert_eq!(
             triggers,
             vec![
-                ("orders_audit".to_owned(), "orders".to_owned(), "Trigger · AFTER UPDATE on orders".to_owned()),
-                ("orders_check".to_owned(), "orders".to_owned(), "Trigger · BEFORE INSERT on orders".to_owned()),
+                (
+                    "orders_audit".to_owned(),
+                    "orders".to_owned(),
+                    "Trigger · AFTER UPDATE on orders".to_owned()
+                ),
+                (
+                    "orders_check".to_owned(),
+                    "orders".to_owned(),
+                    "Trigger · BEFORE INSERT on orders".to_owned()
+                ),
             ]
         );
         assert_eq!(catalog.triggers_of("orders").count(), 2);
-        assert!(catalog.triggers[0].action.contains("INSERT INTO audit"), "{}", catalog.triggers[0].action);
+        assert!(
+            catalog.triggers[0].action.contains("INSERT INTO audit"),
+            "{}",
+            catalog.triggers[0].action
+        );
         assert_eq!(catalog.triggers_of("customers").count(), 0);
         drop(database);
         let _ = std::fs::remove_file(&path);
@@ -712,7 +730,10 @@ mod tests {
         ]);
         assert_eq!(triggers.len(), 2);
         assert_eq!(triggers[0].events_text(), "INSERT, UPDATE");
-        assert_eq!(triggers[0].summary(), "Trigger · BEFORE INSERT, UPDATE on orders");
+        assert_eq!(
+            triggers[0].summary(),
+            "Trigger · BEFORE INSERT, UPDATE on orders"
+        );
         assert_eq!(triggers[1].name, "");
     }
 

@@ -425,13 +425,11 @@ fn json_path_query_tz_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>)
 }
 
 fn text_arguments(name: &str, types: &[Option<SqlType>]) -> SqlResult<()> {
-    let texts = types
-        .iter()
-        .all(|sql_type| {
-            sql_type.is_none_or(|sql_type| {
-                sql_type.is_character() || crate::citext::is_citext_type(sql_type)
-            })
-        });
+    let texts = types.iter().all(|sql_type| {
+        sql_type.is_none_or(|sql_type| {
+            sql_type.is_character() || crate::citext::is_citext_type(sql_type)
+        })
+    });
     if (2..=3).contains(&types.len()) && texts {
         Ok(())
     } else {

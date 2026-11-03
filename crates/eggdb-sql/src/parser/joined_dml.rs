@@ -247,8 +247,8 @@ impl Parser<'_> {
         let tables = self.joined_tables()?;
         let mut positions: Vec<usize> = Vec::with_capacity(labels.len());
         for label in &labels {
-            let at =
-                position_of(&tables, &label.text, false).ok_or_else(|| unknown_deleted_table(label))?;
+            let at = position_of(&tables, &label.text, false)
+                .ok_or_else(|| unknown_deleted_table(label))?;
             if !positions.contains(&at) {
                 positions.push(at);
             }

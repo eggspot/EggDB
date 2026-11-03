@@ -239,7 +239,10 @@ fn wrong_passwords_and_bad_input_are_refused() {
 fn a_frame_declares_the_bytes_it_will_take() {
     assert_eq!(pending_frame_bytes(b""), 0);
     assert_eq!(pending_frame_bytes(b"PUB a 300000\r\n"), 14 + 300_000 + 2);
-    assert_eq!(pending_frame_bytes(b"hpub a r 2 300000\r\nxy"), 19 + 300_000 + 2);
+    assert_eq!(
+        pending_frame_bytes(b"hpub a r 2 300000\r\nxy"),
+        19 + 300_000 + 2
+    );
     assert_eq!(pending_frame_bytes(b"PUB a 3000"), 10);
     assert_eq!(pending_frame_bytes(b"PING\r\n"), 6);
     assert_eq!(pending_frame_bytes(b"PUB a lots\r\n"), 12);

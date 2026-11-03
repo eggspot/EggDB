@@ -350,6 +350,9 @@ fn a_request_past_the_memory_budget_is_answered_like_a_tripped_circuit_breaker()
     let response = crate::over_memory_budget();
     assert_eq!(response.status, 429);
     let text = body(&response);
-    assert!(text.contains("\"type\":\"circuit_breaking_exception\""), "{text}");
+    assert!(
+        text.contains("\"type\":\"circuit_breaking_exception\""),
+        "{text}"
+    );
     assert!(text.contains("\"status\":429"), "{text}");
 }

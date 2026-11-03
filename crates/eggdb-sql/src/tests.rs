@@ -2912,7 +2912,11 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     run(&mut session, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)").unwrap();
     let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t WHERE n > 1");
     let lines: Vec<&str> = plan.lines().collect();
-    assert_eq!(actual_group(lines[1]).map(|(_, _, rows)| rows), Some(2), "{plan}");
+    assert_eq!(
+        actual_group(lines[1]).map(|(_, _, rows)| rows),
+        Some(2),
+        "{plan}"
+    );
     assert!(
         lines[lines.len() - 3].starts_with("Planning Time: "),
         "{plan}"
@@ -2945,7 +2949,10 @@ fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
 }
 
 fn actual_group(line: &str) -> Option<(f64, f64, u64)> {
-    let group = line.split_once(" (actual time=")?.1.strip_suffix(" loops=1)")?;
+    let group = line
+        .split_once(" (actual time=")?
+        .1
+        .strip_suffix(" loops=1)")?;
     let (times, rows) = group.split_once(" rows=")?;
     let (first, last) = times.split_once("..")?;
     let three_decimals = |time: &str| {
@@ -2998,17 +3005,33 @@ fn explain_analyze_times_the_scan_sort_and_limit_it_measures() {
     assert!(measured[0].1 <= execution, "{plan}");
     let plan = last(&mut session, "EXPLAIN ANALYZE SELECT * FROM t LIMIT 0");
     let lines: Vec<&str> = plan.lines().collect();
-    assert_eq!(actual_group(lines[1]).map(|(_, _, rows)| rows), Some(0), "{plan}");
+    assert_eq!(
+        actual_group(lines[1]).map(|(_, _, rows)| rows),
+        Some(0),
+        "{plan}"
+    );
     assert_eq!(lines[2], "  ->  Seq Scan on t (never executed)", "{plan}");
-    run(&mut session, "CREATE TABLE u (id integer PRIMARY KEY, t_id integer)").unwrap();
-    run(&mut session, "INSERT INTO u VALUES (10, 1), (11, 3), (12, 9)").unwrap();
+    run(
+        &mut session,
+        "CREATE TABLE u (id integer PRIMARY KEY, t_id integer)",
+    )
+    .unwrap();
+    run(
+        &mut session,
+        "INSERT INTO u VALUES (10, 1), (11, 3), (12, 9)",
+    )
+    .unwrap();
     let plan = last(
         &mut session,
         "EXPLAIN ANALYZE SELECT * FROM u JOIN t ON t.id = u.t_id",
     );
     let lines: Vec<&str> = plan.lines().collect();
     assert!(lines[1].contains(" (actual time="), "{plan}");
-    assert_eq!(actual_group(lines[1]).map(|(_, _, rows)| rows), Some(2), "{plan}");
+    assert_eq!(
+        actual_group(lines[1]).map(|(_, _, rows)| rows),
+        Some(2),
+        "{plan}"
+    );
 }
 
 #[test]

@@ -159,7 +159,10 @@ fn set_local_in_an_implicit_transaction_lasts_until_it_ends() {
     let mut session = Session::new(&store);
     session.start_implicit_transaction();
     assert_eq!(
-        answer(&mut session, "SET LOCAL app.mode = 'implicit'; SHOW app.mode"),
+        answer(
+            &mut session,
+            "SET LOCAL app.mode = 'implicit'; SHOW app.mode"
+        ),
         "app.mode\nimplicit\nSHOW"
     );
     session.commit_implicit_transaction().unwrap();

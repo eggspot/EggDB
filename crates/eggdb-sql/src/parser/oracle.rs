@@ -893,7 +893,12 @@ impl<'t> Parser<'t> {
             if distinct {
                 return Err(self.not_supported("LISTAGG (DISTINCT ...) OVER"));
             }
-            self.whole_partition_aggregate(AggregateFunction::ArrayAgg, vec![text], order, position)?
+            self.whole_partition_aggregate(
+                AggregateFunction::ArrayAgg,
+                vec![text],
+                order,
+                position,
+            )?
         } else {
             let argument = if order.is_empty() {
                 text

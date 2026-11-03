@@ -1,8 +1,6 @@
 use std::time::Instant;
 
-use eggdb_platform::window::{
-    AccessAction, AccessNode, AccessRole, Key, Modifiers, PointerButton,
-};
+use eggdb_platform::window::{AccessAction, AccessNode, AccessRole, Key, Modifiers, PointerButton};
 
 use crate::accessibility::action_keys;
 use crate::color::ThemeKind;
@@ -612,7 +610,11 @@ mod tests {
         card.move_focus(crate::connect_screen::Focus::Open);
         let mut pointer = CardPointer::default();
         let tree = accessibility_tree(&card, box_faces(), SIZE);
-        let file = tree.iter().find(|node| node.id == NODE_FILE).unwrap().bounds;
+        let file = tree
+            .iter()
+            .find(|node| node.id == NODE_FILE)
+            .unwrap()
+            .bounds;
         let middle = file.y + file.height / 2.0;
         let start = (file.x + 1.0, middle);
         pointer.pressed(
@@ -625,7 +627,10 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(card.focused_field().map(|field| field.caret()), Some(0));
-        assert_eq!(card.focused_field().and_then(|field| field.selection()), None);
+        assert_eq!(
+            card.focused_field().and_then(|field| field.selection()),
+            None
+        );
         let end = (file.x + file.width - 2.0, middle);
         assert!(pointer.moved(&mut card, box_faces(), SIZE, end));
         let value_length = card.file.value().chars().count();
@@ -643,7 +648,11 @@ mod tests {
         let mut card = ConnectCard::first_start();
         let mut pointer = CardPointer::default();
         let tree = accessibility_tree(&card, box_faces(), SIZE);
-        let file = tree.iter().find(|node| node.id == NODE_FILE).unwrap().bounds;
+        let file = tree
+            .iter()
+            .find(|node| node.id == NODE_FILE)
+            .unwrap()
+            .bounds;
         let at = (file.x + 1.0, file.y + file.height / 2.0);
         let now = Instant::now();
         for clicks in 0..2 {

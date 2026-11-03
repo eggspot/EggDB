@@ -94,7 +94,10 @@ fn distinct_on_is_checked_against_order_by_and_its_dialect() {
         "CREATE VIEW latest_orders AS SELECT DISTINCT ON (customer) customer, id FROM orders ORDER BY customer, id DESC",
     );
     assert_eq!(
-        last(&mut session, "SELECT * FROM latest_orders WHERE customer = 'bob'"),
+        last(
+            &mut session,
+            "SELECT * FROM latest_orders WHERE customer = 'bob'"
+        ),
         "customer|id\nbob|4\nSELECT 1"
     );
     assert_eq!(
@@ -146,6 +149,9 @@ fn natural_joins_compare_shared_names_and_report_ambiguous_ones() {
     );
     let sqlserver_store = MemoryStore::default();
     let mut sqlserver = Session::with_dialect(&sqlserver_store, Dialect::SqlServer);
-    last(&mut sqlserver, "CREATE TABLE a (id INT); CREATE TABLE b (id INT)");
+    last(
+        &mut sqlserver,
+        "CREATE TABLE a (id INT); CREATE TABLE b (id INT)",
+    );
     assert!(state(&mut sqlserver, "SELECT * FROM a NATURAL JOIN b").starts_with("42"));
 }

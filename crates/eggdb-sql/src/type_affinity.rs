@@ -30,7 +30,9 @@ impl TypeAffinity {
     }
 
     pub(crate) fn of_code(code: u8) -> Option<Self> {
-        Self::ALL.into_iter().find(|affinity| affinity.code() == code)
+        Self::ALL
+            .into_iter()
+            .find(|affinity| affinity.code() == code)
     }
 
     pub(crate) fn sqlite_name(self) -> &'static str {
@@ -88,7 +90,8 @@ fn as_number(value: Value) -> Value {
 fn whole_when_exact(value: Value) -> Value {
     match value {
         Value::Double(number)
-            if number.fract() == 0.0 && (-LARGEST_WHOLE_REAL..LARGEST_WHOLE_REAL).contains(&number) =>
+            if number.fract() == 0.0
+                && (-LARGEST_WHOLE_REAL..LARGEST_WHOLE_REAL).contains(&number) =>
         {
             Value::BigInt(number as i64)
         }
@@ -102,7 +105,10 @@ pub(crate) fn number_of_text(text: &str) -> Option<Value> {
         .strip_prefix(['+', '-'])
         .unwrap_or(literal)
         .as_bytes();
-    let digits_before = unsigned.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    let digits_before = unsigned
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
     let mut at = digits_before;
     let mut digits_after = 0;
     if unsigned.get(at) == Some(&b'.') {
@@ -225,12 +231,20 @@ mod tests {
         assert_eq!(affinity.stored(Value::Double(2.0)), text("2.0"));
         assert_eq!(affinity.stored(Value::Double(f64::NAN)), Value::Null);
         assert_eq!(affinity.stored(text("x")), text("x"));
-        assert_eq!(affinity.stored(Value::Bytea(vec![0])), Value::Bytea(vec![0]));
+        assert_eq!(
+            affinity.stored(Value::Bytea(vec![0])),
+            Value::Bytea(vec![0])
+        );
     }
 
     #[test]
     fn blob_affinity_keeps_every_value() {
-        for value in [Value::BigInt(1), Value::Double(1.0), text("1"), Value::Bytea(vec![])] {
+        for value in [
+            Value::BigInt(1),
+            Value::Double(1.0),
+            text("1"),
+            Value::Bytea(vec![]),
+        ] {
             assert_eq!(TypeAffinity::Blob.stored(value.clone()), value);
         }
     }

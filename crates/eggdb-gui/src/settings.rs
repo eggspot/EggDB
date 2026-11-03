@@ -50,7 +50,6 @@ impl ClientSettings {
         text
     }
 
-    /// The settings in the file at `path`; none when it is missing or unreadable.
     /// The value of the `name = value` line named `name`, when the file has one.
     pub fn value(&self, name: &str) -> Option<&str> {
         self.other_lines.iter().find_map(|line| {
@@ -73,6 +72,7 @@ impl ClientSettings {
         }
     }
 
+    /// The settings in the file at `path`; none when it is missing or unreadable.
     pub fn load(path: &Path) -> Self {
         std::fs::read(path)
             .map(|bytes| Self::parse(&String::from_utf8_lossy(&bytes)))
@@ -81,7 +81,10 @@ impl ClientSettings {
 
     /// Writes the settings to `path`, creating its directory; only the user can read it.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(directory) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(directory) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             eggdb_platform::user_files::create_private_directory(directory)?;
         }
         let mut file = eggdb_platform::user_files::open_private_rewrite(path)?;
@@ -136,7 +139,13 @@ mod tests {
 
     #[test]
     fn hostile_bytes_read_as_no_layout_without_failing() {
-        for text in ["=", "layout", "layout = \u{0}", "\u{feff}layout = ssms", "layout = = ssms"] {
+        for text in [
+            "=",
+            "layout",
+            "layout = \u{0}",
+            "\u{feff}layout = ssms",
+            "layout = = ssms",
+        ] {
             let settings = ClientSettings::parse(text);
             assert_eq!(settings.layout, None, "{text:?}");
         }
@@ -144,10 +153,8 @@ mod tests {
 
     #[test]
     fn settings_are_saved_and_loaded_from_a_file() {
-        let directory = std::env::temp_dir().join(format!(
-            "eggdb-gui-settings-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-gui-settings-{}", std::process::id()));
         let path = directory.join("nested").join(FILE_NAME);
         assert_eq!(ClientSettings::load(&path), ClientSettings::default());
         let settings = ClientSettings {
@@ -155,6 +162,9 @@ mod tests {
             ..ClientSettings::default()
         };
         settings.save(&path).expect("settings are written");
-        assert_eq!(ClientSettings::load(&path).layout, Some(Layout::RedisInsight));
+        assert_eq!(
+            ClientSettings::load(&path).layout,
+            Some(Layout::RedisInsight)
+        );
     }
 }

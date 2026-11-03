@@ -1451,8 +1451,7 @@ mod tests {
         assert_eq!((explain.statement_at, explain.plan_at), (1, 2));
         let mut sqlserver = QueryTab::with_text("Query 1", "SELECT 1");
         sqlserver.set_dialect(QueryDialect::SqlServer);
-        let TabAction::Run(request) = sqlserver.key(press(Key::Character('e'), false, true))
-        else {
+        let TabAction::Run(request) = sqlserver.key(press(Key::Character('e'), false, true)) else {
             panic!("Ctrl+E explains in SQL Server's dialect");
         };
         let explain = request.explain.clone().expect("an explain run");

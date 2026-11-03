@@ -91,7 +91,10 @@ fn the_first_materialized_view_is_created_inside_a_transaction_block() {
         &mut session,
         "CREATE MATERIALIZED VIEW dingalings_v AS SELECT * FROM dingalings",
     );
-    run(&mut session, "CREATE INDEX mat_index ON dingalings_v (data)");
+    run(
+        &mut session,
+        "CREATE INDEX mat_index ON dingalings_v (data)",
+    );
     assert_eq!(
         run(&mut session, "SELECT count(*) FROM dingalings_v"),
         run(&mut session, "SELECT 2::bigint AS count")
@@ -156,7 +159,10 @@ fn materialized_views_live_in_the_schema_they_are_named_in() {
          REFRESH MATERIALIZED VIEW test_schema.dingalings_v",
     );
     assert_eq!(
-        run(&mut session, "SELECT count(*) FROM test_schema.dingalings_v"),
+        run(
+            &mut session,
+            "SELECT count(*) FROM test_schema.dingalings_v"
+        ),
         run(&mut session, "SELECT 2::bigint AS count")
     );
     run(

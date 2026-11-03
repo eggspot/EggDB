@@ -145,14 +145,20 @@ impl ClosePrompt {
         let transaction = tab.transaction != TransactionStatus::Idle;
         let unsaved = !tab.is_keys() && !tab.editor.text().is_empty();
         let (reason, title, body) = if tab.running {
-            let mut body = "The running statement is cancelled and the rows fetched so far are discarded.".to_owned();
+            let mut body =
+                "The running statement is cancelled and the rows fetched so far are discarded."
+                    .to_owned();
             if transaction {
                 body.push_str(" Its open transaction rolls back.");
             }
             if unsaved {
                 body.push_str(" Its text is unsaved.");
             }
-            (CloseReason::Running, format!("Stop {name} and close it?"), body)
+            (
+                CloseReason::Running,
+                format!("Stop {name} and close it?"),
+                body,
+            )
         } else if transaction {
             let mut body = format!(
                 "{name} has an open transaction. Closing rolls it back; nothing from it is kept."
@@ -220,9 +226,8 @@ pub fn dialog_rect(size: (f32, f32)) -> Rect {
 /// label at the body text's average advance plus its padding.
 pub fn button_rects(prompt: &ClosePrompt, dialog: Rect) -> (Rect, Rect) {
     let (keep, close) = prompt.buttons();
-    let width = |label: &str| {
-        (label.chars().count() as f32 * LABEL_ADVANCE + 24.0).max(DIALOG_BUTTON_MIN)
-    };
+    let width =
+        |label: &str| (label.chars().count() as f32 * LABEL_ADVANCE + 24.0).max(DIALOG_BUTTON_MIN);
     let close_width = width(close);
     let keep_width = width(keep);
     let close_x = dialog.x + DIALOG_BUTTONS_RIGHT - close_width;
@@ -266,11 +271,18 @@ pub fn wrapped(face: &dyn Typeface, text: &str, width: f32, limit: usize) -> Vec
 pub(crate) fn draw_prompt(paint: &mut Painter<'_, '_>, prompt: &ClosePrompt, size: (f32, f32)) {
     let theme = paint.theme;
     let faces = paint.faces;
-    paint.canvas.fill_rect(Rect::new(0.0, 0.0, size.0, size.1), theme.scrim);
+    paint
+        .canvas
+        .fill_rect(Rect::new(0.0, 0.0, size.0, size.1), theme.scrim);
     let dialog = dialog_rect(size);
     paint.canvas.fill_rounded_rect(dialog, 8.0, theme.border);
     paint.canvas.fill_rounded_rect(
-        Rect::new(dialog.x + 1.0, dialog.y + 1.0, dialog.w - 2.0, dialog.h - 2.0),
+        Rect::new(
+            dialog.x + 1.0,
+            dialog.y + 1.0,
+            dialog.w - 2.0,
+            dialog.h - 2.0,
+        ),
         7.0,
         theme.bg0,
     );
@@ -345,7 +357,12 @@ pub(crate) fn prompt_nodes(
     let (keep, close) = button_rects(prompt, dialog);
     for (id, label, rect, focused) in [
         (NODE_CLOSE_KEEP, keep_label, keep, !prompt.default_focused),
-        (NODE_CLOSE_CONFIRM, close_label, close, prompt.default_focused),
+        (
+            NODE_CLOSE_CONFIRM,
+            close_label,
+            close,
+            prompt.default_focused,
+        ),
     ] {
         let mut button = AccessNode {
             id,

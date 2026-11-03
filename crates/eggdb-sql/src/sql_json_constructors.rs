@@ -262,7 +262,8 @@ fn is_json(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value> {
     if arguments.len() != 4 {
         return Err(malformed(IS_JSON));
     }
-    let shape = JsonShape::of_code(code_at(IS_JSON, arguments, 1)?).ok_or_else(|| malformed(IS_JSON))?;
+    let shape =
+        JsonShape::of_code(code_at(IS_JSON, arguments, 1)?).ok_or_else(|| malformed(IS_JSON))?;
     let unique_keys = flag_at(IS_JSON, arguments, 2)?;
     let negated = flag_at(IS_JSON, arguments, 3)?;
     let value = evaluator.eval(subject, None)?;

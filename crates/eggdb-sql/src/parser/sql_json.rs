@@ -339,10 +339,10 @@ impl Parser<'_> {
                     let type_position = self.position();
                     let sql_type = self.cast_type()?;
                     if !crate::sql_json_constructors::serializes_to(sql_type) {
-                        return Err(
-                            crate::sql_json_constructors::unsupported_serialize_type(sql_type)
-                                .at(type_position),
-                        );
+                        return Err(crate::sql_json_constructors::unsupported_serialize_type(
+                            sql_type,
+                        )
+                        .at(type_position));
                     }
                     self.json_format_clause()?;
                     Some(sql_type)

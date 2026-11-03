@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 use eggdb_gui::browser::{
-    CardPointer, PointerAnswer, accessibility_json, action_code, key_from_dom,
-    modifiers_from_bits, pointer_button_from_dom, theme_from_code,
+    CardPointer, PointerAnswer, accessibility_json, action_code, key_from_dom, modifiers_from_bits,
+    pointer_button_from_dom, theme_from_code,
 };
 use eggdb_gui::connect_screen::{self, ConnectCard, DEFAULT_HEIGHT, DEFAULT_WIDTH, frame_size};
 use eggdb_gui::main_window::Faces;

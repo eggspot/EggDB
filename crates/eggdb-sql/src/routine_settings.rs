@@ -142,7 +142,10 @@ pub(crate) fn enter_clause(
     let scope = ClauseScope {
         start,
         count: clause.len(),
-        names: clause.iter().map(|(name, _)| Settings::name_of(name)).collect(),
+        names: clause
+            .iter()
+            .map(|(name, _)| Settings::name_of(name))
+            .collect(),
     };
     Ok(Some((scope, next)))
 }
@@ -161,7 +164,11 @@ pub(crate) fn leave_clause(scope: ClauseScope) {
 }
 
 pub(crate) fn mark() -> usize {
-    JOURNAL.with(|journal| journal.try_borrow().map_or(0, |journal| journal.entries.len()))
+    JOURNAL.with(|journal| {
+        journal
+            .try_borrow()
+            .map_or(0, |journal| journal.entries.len())
+    })
 }
 
 pub(crate) fn undo_since(at: usize) {
@@ -260,7 +267,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(inside.get("app.mode").unwrap(), "inner");
-        let local = change(&inside, "app.mode", Some("local"), SettingScope::Transaction).unwrap();
+        let local = change(
+            &inside,
+            "app.mode",
+            Some("local"),
+            SettingScope::Transaction,
+        )
+        .unwrap();
         assert_eq!(local.get("app.mode").unwrap(), "local");
         let mut synced = NEVER_SYNCED;
         leave_clause(scope);
@@ -292,7 +305,13 @@ mod tests {
         let (scope, inside) = enter_clause(&base, &[("app.other".into(), "x".into())])
             .unwrap()
             .unwrap();
-        change(&inside, "app.tenant", Some("blue"), SettingScope::Transaction).unwrap();
+        change(
+            &inside,
+            "app.tenant",
+            Some("blue"),
+            SettingScope::Transaction,
+        )
+        .unwrap();
         leave_clause(scope);
         assert_eq!(
             take_for_session(true),

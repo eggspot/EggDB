@@ -1059,9 +1059,8 @@ impl Window for Win32Window {
         let mut animates: i32 = 1;
         // SAFETY: `SPI_GETCLIENTAREAANIMATION` writes one `BOOL` to the pointer, which is a
         // live `i32` of this frame.
-        let read = unsafe {
-            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &raw mut animates, 0)
-        };
+        let read =
+            unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &raw mut animates, 0) };
         read != 0 && animates == 0
     }
 

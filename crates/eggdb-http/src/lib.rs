@@ -351,8 +351,11 @@ impl<'b> Limits<'b> {
 /// The plain answer to a request the server's memory budget cannot take: `503`, with
 /// `Retry-After`, so clients back off and try again.
 pub fn over_memory_budget_response() -> Response {
-    Response::text(503, "the server's connections already hold their memory budget")
-        .with_header("Retry-After", "1")
+    Response::text(
+        503,
+        "the server's connections already hold their memory budget",
+    )
+    .with_header("Retry-After", "1")
 }
 
 fn serve_one(

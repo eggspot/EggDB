@@ -826,8 +826,7 @@ impl Connection {
         } else {
             self.run_in_session(session, dialect, &run.before, cancel)
         };
-        let ready =
-            outcomes.len() == run.before.len() && outcomes.iter().all(Result::is_ok);
+        let ready = outcomes.len() == run.before.len() && outcomes.iter().all(Result::is_ok);
         if ready {
             let ran = if run.rolled_back {
                 self.run_rolled_back_on(Some(session), dialect, &run.statements, cancel)
@@ -876,7 +875,12 @@ impl Connection {
                 Some(Ok(tables)) => {
                     let mut outcomes = vec![Ok(tables)];
                     outcomes.extend(self.run_on(session, dialect, statements, cancel));
-                    outcomes.extend(self.run_on(session, dialect, &words.back_to_savepoint(), &undo));
+                    outcomes.extend(self.run_on(
+                        session,
+                        dialect,
+                        &words.back_to_savepoint(),
+                        &undo,
+                    ));
                     return outcomes;
                 }
                 Some(Err(failure)) if failure.code != NO_ACTIVE_TRANSACTION => {
@@ -1426,8 +1430,12 @@ mod tests {
         let path = scratch("bracketed").join("shop.eggdb");
         let _ = std::fs::remove_file(&path);
         let mut connection = EngineConnector.connect(&file(path, true, false)).unwrap();
-        connection.run("CREATE TABLE t (id integer PRIMARY KEY, b integer)").unwrap();
-        connection.run("INSERT INTO t VALUES (1, 10), (2, 20)").unwrap();
+        connection
+            .run("CREATE TABLE t (id integer PRIMARY KEY, b integer)")
+            .unwrap();
+        connection
+            .run("INSERT INTO t VALUES (1, 10), (2, 20)")
+            .unwrap();
         let cancel = CancelHandle::default();
         let tab = SessionId(3);
         let showplan = BracketedRun {
@@ -1439,7 +1447,11 @@ mod tests {
         let outcomes =
             connection.run_bracketed_in_session(tab, QueryDialect::SqlServer, &showplan, &cancel);
         assert_eq!(outcomes.len(), 3, "{outcomes:?}");
-        let plan = outcomes[1].as_ref().ok().and_then(|tables| tables.last()).cloned();
+        let plan = outcomes[1]
+            .as_ref()
+            .ok()
+            .and_then(|tables| tables.last())
+            .cloned();
         assert!(
             plan.is_some_and(|table| table.columns.iter().any(|column| column == "NodeId")),
             "{outcomes:?}"
@@ -1457,8 +1469,16 @@ mod tests {
             &["SELECT b FROM t WHERE id = 2".to_owned()],
             &cancel,
         );
-        let rows = ran.last().and_then(|outcome| outcome.as_ref().ok()).and_then(|tables| tables.last()).map(|table| table.rows.clone());
-        assert_eq!(rows, Some(vec![vec![Some("20".to_owned())]]), "showplan is off again");
+        let rows = ran
+            .last()
+            .and_then(|outcome| outcome.as_ref().ok())
+            .and_then(|tables| tables.last())
+            .map(|table| table.rows.clone());
+        assert_eq!(
+            rows,
+            Some(vec![vec![Some("20".to_owned())]]),
+            "showplan is off again"
+        );
         let profile = BracketedRun {
             before: vec!["SET STATISTICS PROFILE ON".to_owned()],
             statements: vec!["DELETE FROM t WHERE id = 1".to_owned()],
@@ -1477,10 +1497,18 @@ mod tests {
             rolled_back: true,
             ..BracketedRun::default()
         };
-        let outcomes =
-            connection.run_bracketed_in_session(SessionId(4), QueryDialect::Oracle, &oracle, &cancel);
+        let outcomes = connection.run_bracketed_in_session(
+            SessionId(4),
+            QueryDialect::Oracle,
+            &oracle,
+            &cancel,
+        );
         assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
-        let display = outcomes[2].as_ref().ok().and_then(|tables| tables.last()).cloned();
+        let display = outcomes[2]
+            .as_ref()
+            .ok()
+            .and_then(|tables| tables.last())
+            .cloned();
         assert!(
             display.is_some_and(|table| table.columns == ["PLAN_TABLE_OUTPUT"]),
             "{outcomes:?}"
@@ -1500,10 +1528,19 @@ mod tests {
         let cancel = CancelHandle::default();
         let tab = SessionId(1);
         let run = |connection: &mut Connection, session: SessionId, sql: &str| {
-            connection.run_in_session(session, QueryDialect::PostgreSql, &[sql.to_owned()], &cancel)
+            connection.run_in_session(
+                session,
+                QueryDialect::PostgreSql,
+                &[sql.to_owned()],
+                &cancel,
+            )
         };
         assert!(run(&mut connection, tab, "BEGIN").iter().all(Result::is_ok));
-        assert!(run(&mut connection, tab, "INSERT INTO t VALUES (1)").iter().all(Result::is_ok));
+        assert!(
+            run(&mut connection, tab, "INSERT INTO t VALUES (1)")
+                .iter()
+                .all(Result::is_ok)
+        );
         assert_eq!(count_of(&mut connection, "t").as_deref(), Some("0"));
         let mysql = connection.run_in_session(
             tab,
@@ -1512,7 +1549,10 @@ mod tests {
             &CancelHandle::default(),
         );
         let refused = mysql.last().and_then(|outcome| outcome.as_ref().err());
-        assert_eq!(refused.map(|failure| failure.code.as_str()), Some(ACTIVE_TRANSACTION));
+        assert_eq!(
+            refused.map(|failure| failure.code.as_str()),
+            Some(ACTIVE_TRANSACTION)
+        );
         assert_eq!(
             refused.map(|failure| failure.message.as_str()),
             Some(
@@ -1520,13 +1560,28 @@ mod tests {
             )
         );
         let seen = run(&mut connection, tab, "SELECT count(*) FROM t");
-        let rows = seen.last().and_then(|outcome| outcome.as_ref().ok()).and_then(|tables| tables.last()).map(|table| table.rows.clone());
+        let rows = seen
+            .last()
+            .and_then(|outcome| outcome.as_ref().ok())
+            .and_then(|tables| tables.last())
+            .map(|table| table.rows.clone());
         assert_eq!(rows, Some(vec![vec![Some("1".to_owned())]]));
-        assert!(run(&mut connection, tab, "COMMIT").iter().all(Result::is_ok));
+        assert!(
+            run(&mut connection, tab, "COMMIT")
+                .iter()
+                .all(Result::is_ok)
+        );
         assert_eq!(count_of(&mut connection, "t").as_deref(), Some("1"));
         assert!(run(&mut connection, tab, "BEGIN").iter().all(Result::is_ok));
-        assert!(run(&mut connection, tab, "INSERT INTO t VALUES (2)").iter().all(Result::is_ok));
-        assert_eq!(connection.transaction_status(tab), TransactionStatus::InBlock);
+        assert!(
+            run(&mut connection, tab, "INSERT INTO t VALUES (2)")
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert_eq!(
+            connection.transaction_status(tab),
+            TransactionStatus::InBlock
+        );
         connection.close_session(tab);
         assert_eq!(connection.transaction_status(tab), TransactionStatus::Idle);
         assert_eq!(count_of(&mut connection, "t").as_deref(), Some("1"));
@@ -1543,10 +1598,17 @@ mod tests {
         let cancelled = CancelHandle::default();
         cancelled.cancel();
         let tab = SessionId(7);
-        let stopped =
-            connection.run_in_session(tab, QueryDialect::PostgreSql, &["SELECT 1".to_owned()], &cancelled);
+        let stopped = connection.run_in_session(
+            tab,
+            QueryDialect::PostgreSql,
+            &["SELECT 1".to_owned()],
+            &cancelled,
+        );
         assert_eq!(
-            stopped.last().and_then(|outcome| outcome.as_ref().err()).map(|failure| failure.code.as_str()),
+            stopped
+                .last()
+                .and_then(|outcome| outcome.as_ref().err())
+                .map(|failure| failure.code.as_str()),
             Some(QUERY_CANCELED)
         );
         let next = connection.run_in_session(

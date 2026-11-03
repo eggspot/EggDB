@@ -107,8 +107,15 @@ impl LayoutPicker {
             },
             Key::Tab => {
                 let order = [PickerFocus::List, PickerFocus::Cancel, PickerFocus::Apply];
-                let at = order.iter().position(|focus| *focus == self.focus).unwrap_or(0);
-                let next = if held.shift { at + order.len() - 1 } else { at + 1 };
+                let at = order
+                    .iter()
+                    .position(|focus| *focus == self.focus)
+                    .unwrap_or(0);
+                let next = if held.shift {
+                    at + order.len() - 1
+                } else {
+                    at + 1
+                };
                 self.focus = order[next % order.len()];
             }
             Key::Up if self.focus == PickerFocus::List => {
@@ -199,22 +206,24 @@ pub fn row_rect(size: (f32, f32), index: usize) -> Rect {
 
 /// The row under (`x`, `y`) in a window of `size`, if any.
 pub fn row_at(size: (f32, f32), x: f32, y: f32) -> Option<usize> {
-    (0..Layout::ALL.len()).find(|index| {
-        contains(row_rect(size, *index), x, y)
-    })
+    (0..Layout::ALL.len()).find(|index| contains(row_rect(size, *index), x, y))
 }
 
 /// Answers a press of the pointer at (`x`, `y`) in a window of `size` with `clicks` counted:
 /// a row is highlighted or (double click) applied, `Cancel` keeps, `Apply` applies, and a
 /// press on the scrim outside the dialog keeps the layout.
-pub fn press_at(picker: &mut LayoutPicker, size: (f32, f32), x: f32, y: f32, clicks: u8) -> PickerOutcome {
+pub fn press_at(
+    picker: &mut LayoutPicker,
+    size: (f32, f32),
+    x: f32,
+    y: f32,
+    clicks: u8,
+) -> PickerOutcome {
     if let Some(row) = row_at(size, x, y) {
         return picker.click_row(row, clicks);
     }
     let origin = dialog_origin(size);
-    let inside = |rect: Rect| {
-        contains(offset(rect, origin), x, y)
-    };
+    let inside = |rect: Rect| contains(offset(rect, origin), x, y);
     if inside(CANCEL) {
         return PickerOutcome::Keep;
     }
@@ -270,13 +279,23 @@ impl Ink<'_, '_> {
             line_height: metrics.1 * s,
             color,
         };
-        face.draw_text(self.canvas, text, (at.0 * s).round(), (at.1 * s).round(), style);
+        face.draw_text(
+            self.canvas,
+            text,
+            (at.0 * s).round(),
+            (at.1 * s).round(),
+            style,
+        );
     }
 
     fn line(&mut self, from: (f32, f32), to: (f32, f32), width: f32, color: crate::Rgba) {
         let s = self.scale;
-        self.canvas
-            .line((from.0 * s, from.1 * s), (to.0 * s, to.1 * s), width * s, color);
+        self.canvas.line(
+            (from.0 * s, from.1 * s),
+            (to.0 * s, to.1 * s),
+            width * s,
+            color,
+        );
     }
 
     fn centred(&mut self, text: &str, rect: Rect, color: crate::Rgba) {
@@ -333,7 +352,12 @@ pub fn draw(
     let dialog = offset(Rect::new(0.0, 0.0, DIALOG_SIZE.0, DIALOG_SIZE.1), origin);
     ink.rounded(dialog, 8.0, theme.border);
     ink.rounded(
-        Rect::new(dialog.x + 1.0, dialog.y + 1.0, dialog.w - 2.0, dialog.h - 2.0),
+        Rect::new(
+            dialog.x + 1.0,
+            dialog.y + 1.0,
+            dialog.w - 2.0,
+            dialog.h - 2.0,
+        ),
         7.0,
         theme.bg0,
     );
@@ -380,8 +404,18 @@ pub fn draw(
         );
         if layout == picker.active {
             let (x, y) = (origin.0 + 36.0, row.y + 9.0);
-            ink.line((x + 2.0, y + 6.0), (x + 5.0, y + 9.0), 1.5, theme.text_primary);
-            ink.line((x + 5.0, y + 9.0), (x + 10.0, y + 3.0), 1.5, theme.text_primary);
+            ink.line(
+                (x + 2.0, y + 6.0),
+                (x + 5.0, y + 9.0),
+                1.5,
+                theme.text_primary,
+            );
+            ink.line(
+                (x + 5.0, y + 9.0),
+                (x + 10.0, y + 3.0),
+                1.5,
+                theme.text_primary,
+            );
         }
     }
     for (index, line) in note_lines(faces.ui).iter().enumerate() {
@@ -396,7 +430,12 @@ pub fn draw(
     let cancel = offset(CANCEL, origin);
     ink.rounded(cancel, 4.0, theme.border);
     ink.rounded(
-        Rect::new(cancel.x + 1.0, cancel.y + 1.0, cancel.w - 2.0, cancel.h - 2.0),
+        Rect::new(
+            cancel.x + 1.0,
+            cancel.y + 1.0,
+            cancel.w - 2.0,
+            cancel.h - 2.0,
+        ),
         3.0,
         theme.bg0,
     );
@@ -412,7 +451,12 @@ pub fn draw(
 }
 
 fn grow(rect: Rect, by: f32) -> Rect {
-    Rect::new(rect.x - by, rect.y - by, rect.w + 2.0 * by, rect.h + 2.0 * by)
+    Rect::new(
+        rect.x - by,
+        rect.y - by,
+        rect.w + 2.0 * by,
+        rect.h + 2.0 * by,
+    )
 }
 
 fn ring(ink: &mut Ink<'_, '_>, rect: Rect, theme: Theme) {
@@ -452,7 +496,11 @@ fn node(id: u32, parent: u32, role: AccessRole, name: &str, rect: Rect) -> Acces
 /// The picker's accessibility nodes under `parent` in a window of `size`: the dialog, its
 /// title, the list with one item per layout (position, highlighted as selected, the active
 /// one checked), the trademark note and the two buttons.
-pub fn accessibility_nodes(picker: &LayoutPicker, parent: u32, size: (f32, f32)) -> Vec<AccessNode> {
+pub fn accessibility_nodes(
+    picker: &LayoutPicker,
+    parent: u32,
+    size: (f32, f32),
+) -> Vec<AccessNode> {
     let origin = dialog_origin(size);
     let dialog_rect = offset(Rect::new(0.0, 0.0, DIALOG_SIZE.0, DIALOG_SIZE.1), origin);
     let mut dialog = node(NODE_DIALOG, parent, AccessRole::Group, TITLE, dialog_rect);
@@ -507,7 +555,13 @@ pub fn accessibility_nodes(picker: &LayoutPicker, parent: u32, size: (f32, f32))
         (NODE_CANCEL, "Cancel", CANCEL, PickerFocus::Cancel),
         (NODE_APPLY, "Apply", APPLY, PickerFocus::Apply),
     ] {
-        let mut button = node(id, NODE_DIALOG, AccessRole::Button, name, offset(rect, origin));
+        let mut button = node(
+            id,
+            NODE_DIALOG,
+            AccessRole::Button,
+            name,
+            offset(rect, origin),
+        );
         button.state.focused = picker.focus == focus;
         button.state.default_button = id == NODE_APPLY;
         button.actions.invoke = true;
@@ -519,7 +573,11 @@ pub fn accessibility_nodes(picker: &LayoutPicker, parent: u32, size: (f32, f32))
 /// The keys that do a screen reader's `action` on the picker's `node`: a row is
 /// highlighted (and applied on invoke), `Cancel` keeps and `Apply` applies. Nodes outside the
 /// picker get nothing, as the window under it takes no input.
-pub fn access_keys(picker: &mut LayoutPicker, node: &AccessNode, action: &AccessAction) -> Vec<KeyPress> {
+pub fn access_keys(
+    picker: &mut LayoutPicker,
+    node: &AccessNode,
+    action: &AccessAction,
+) -> Vec<KeyPress> {
     let invoke = *action == AccessAction::Invoke;
     match node.id {
         NODE_CANCEL if invoke => vec![KeyPress::plain(Key::Escape)],
@@ -580,7 +638,10 @@ mod tests {
         key(&mut picker, Key::Down);
         key(&mut picker, Key::Down);
         assert_eq!(key(&mut picker, Key::Escape), PickerOutcome::Keep);
-        assert_eq!(key(&mut picker, Key::Enter), PickerOutcome::Apply(Layout::PgAdmin));
+        assert_eq!(
+            key(&mut picker, Key::Enter),
+            PickerOutcome::Apply(Layout::PgAdmin)
+        );
         assert_eq!(Layout::PgAdmin.key(), "pgadmin");
     }
 
@@ -596,7 +657,10 @@ mod tests {
         assert_eq!(key(&mut picker, Key::Enter), PickerOutcome::Keep);
         key(&mut picker, Key::Tab);
         assert_eq!(picker.focus, PickerFocus::Apply);
-        assert_eq!(key(&mut picker, Key::Space), PickerOutcome::Apply(Layout::PgAdmin));
+        assert_eq!(
+            key(&mut picker, Key::Space),
+            PickerOutcome::Apply(Layout::PgAdmin)
+        );
         key(&mut picker, Key::Tab);
         assert_eq!(picker.focus, PickerFocus::List);
         let back = KeyPress {
@@ -608,7 +672,10 @@ mod tests {
         };
         picker.key(back);
         assert_eq!(picker.focus, PickerFocus::Apply);
-        assert_eq!(key(&mut picker, Key::Space), PickerOutcome::Apply(Layout::PgAdmin));
+        assert_eq!(
+            key(&mut picker, Key::Space),
+            PickerOutcome::Apply(Layout::PgAdmin)
+        );
         let mut unchanged = LayoutPicker::opened(Layout::Compass);
         assert_eq!(key(&mut unchanged, Key::Enter), PickerOutcome::Keep);
         assert_eq!(key(&mut unchanged, Key::Space), PickerOutcome::Open);
@@ -625,14 +692,32 @@ mod tests {
         picker.focus = PickerFocus::Apply;
         assert_eq!(picker.click_row(4, 1), PickerOutcome::Open);
         assert_eq!(picker.focus, PickerFocus::List);
-        assert_eq!(picker.click_row(5, 2), PickerOutcome::Apply(Layout::Workbench));
+        assert_eq!(
+            picker.click_row(5, 2),
+            PickerOutcome::Apply(Layout::Workbench)
+        );
         assert_eq!(picker.click_row(99, 2), PickerOutcome::Open);
-        assert_eq!(press_at(&mut picker, size, 400.0, 200.0, 1), PickerOutcome::Open);
+        assert_eq!(
+            press_at(&mut picker, size, 400.0, 200.0, 1),
+            PickerOutcome::Open
+        );
         assert_eq!(picker.highlighted, 1);
-        assert_eq!(press_at(&mut picker, size, 380.0, 170.0, 1), PickerOutcome::Open);
-        assert_eq!(press_at(&mut picker, size, 820.0, 610.0, 1), PickerOutcome::Apply(Layout::Ssms));
-        assert_eq!(press_at(&mut picker, size, 730.0, 610.0, 1), PickerOutcome::Keep);
-        assert_eq!(press_at(&mut picker, size, 10.0, 10.0, 1), PickerOutcome::Keep);
+        assert_eq!(
+            press_at(&mut picker, size, 380.0, 170.0, 1),
+            PickerOutcome::Open
+        );
+        assert_eq!(
+            press_at(&mut picker, size, 820.0, 610.0, 1),
+            PickerOutcome::Apply(Layout::Ssms)
+        );
+        assert_eq!(
+            press_at(&mut picker, size, 730.0, 610.0, 1),
+            PickerOutcome::Keep
+        );
+        assert_eq!(
+            press_at(&mut picker, size, 10.0, 10.0, 1),
+            PickerOutcome::Keep
+        );
     }
 
     #[test]
@@ -650,8 +735,14 @@ mod tests {
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[0].state.checked, Some(true));
         assert!(rows[2].state.selected && rows[2].name == "Works like pgAdmin 4");
-        assert_eq!(rows[7].tree_position.map(|position| position.position), Some(8));
-        let apply = nodes.iter().find(|node| node.id == NODE_APPLY).expect("Apply");
+        assert_eq!(
+            rows[7].tree_position.map(|position| position.position),
+            Some(8)
+        );
+        let apply = nodes
+            .iter()
+            .find(|node| node.id == NODE_APPLY)
+            .expect("Apply");
         assert!(apply.state.default_button);
         let row = nodes
             .iter()
@@ -664,7 +755,10 @@ mod tests {
             access_keys(&mut picker, &row, &AccessAction::Invoke),
             vec![KeyPress::plain(Key::Enter)]
         );
-        assert_eq!(picker.key(KeyPress::plain(Key::Enter)), PickerOutcome::Apply(Layout::Compass));
+        assert_eq!(
+            picker.key(KeyPress::plain(Key::Enter)),
+            PickerOutcome::Apply(Layout::Compass)
+        );
         assert!(access_keys(&mut picker, &nodes[0], &AccessAction::Invoke).is_empty());
     }
 }

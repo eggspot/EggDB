@@ -107,14 +107,21 @@ fn a_typed_path_opens_the_main_window_on_the_file() {
 #[test]
 fn layout_opens_the_main_window_in_a_familiar_layout_and_the_settings_file_keeps_one() {
     let directory = scratch("layout");
-    let frame = binary_png(&directory, &["--open", "layout.eggdb", "--layout", "mysql-workbench"]);
+    let frame = binary_png(
+        &directory,
+        &["--open", "layout.eggdb", "--layout", "mysql-workbench"],
+    );
     let opened = MainWindow::opened("layout", "layout.eggdb", true, Vec::new());
     let workbench = MainWindow {
         layout: Layout::Workbench,
         ..opened.clone()
     };
     let library = main_window::draw(&workbench, Theme::of(ThemeKind::Light), BOX_FACES);
-    assert_eq!(frame, encode_png(&library), "the main window works like MySQL Workbench");
+    assert_eq!(
+        frame,
+        encode_png(&library),
+        "the main window works like MySQL Workbench"
+    );
     let settings = directory.join("gui-settings");
     std::fs::write(&settings, "layout = ssms\n").expect("the settings file is written");
     let output = directory.join("kept.png");

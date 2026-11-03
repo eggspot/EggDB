@@ -232,9 +232,12 @@ impl ObjectTree {
             TreeItem::TableTriggers(index) => TreeItem::TableTriggers(table(index)?),
             TreeItem::Trigger(index) => {
                 let old = old.triggers.get(index)?;
-                TreeItem::Trigger(self.catalog.triggers.iter().position(|found| {
-                    found.name == old.name && found.table == old.table
-                })?)
+                TreeItem::Trigger(
+                    self.catalog
+                        .triggers
+                        .iter()
+                        .position(|found| found.name == old.name && found.table == old.table)?,
+                )
             }
             TreeItem::Column {
                 table: owner,
@@ -810,8 +813,16 @@ fn icon_key(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
 
 fn icon_bolt(paint: &mut Painter<'_, '_>, x: f32, y: f32) {
     let color = paint.theme.text_secondary;
-    let points = [(7.0, 0.0), (3.0, 7.0), (6.0, 7.0), (5.0, 12.0), (9.0, 5.0), (6.0, 5.0), (7.0, 0.0)]
-        .map(|(dx, dy)| (x + dx, y + dy));
+    let points = [
+        (7.0, 0.0),
+        (3.0, 7.0),
+        (6.0, 7.0),
+        (5.0, 12.0),
+        (9.0, 5.0),
+        (6.0, 5.0),
+        (7.0, 0.0),
+    ]
+    .map(|(dx, dy)| (x + dx, y + dy));
     paint.polyline(&points, 1.5, color);
 }
 
@@ -858,7 +869,14 @@ pub(crate) fn draw(
         .take(ROWS_IN_VIEW)
     {
         let y = ROWS_TOP + ROW_HEIGHT * (offset - tree.first_row) as f32;
-        draw_row(paint, tree, row, (y, width), access, focus == SidebarFocus::Tree);
+        draw_row(
+            paint,
+            tree,
+            row,
+            (y, width),
+            access,
+            focus == SidebarFocus::Tree,
+        );
     }
 }
 
@@ -1236,9 +1254,14 @@ mod tests {
         assert_eq!(trigger.detail.as_deref(), Some("INSERT, UPDATE"));
         assert_eq!(trigger.level, 4);
         assert_eq!(trigger.expanded, None);
-        assert_eq!(tree.name_of(TreeItem::Trigger(0)).as_deref(), Some("orders_stamp"));
+        assert_eq!(
+            tree.name_of(TreeItem::Trigger(0)).as_deref(),
+            Some("orders_stamp")
+        );
         assert!(
-            !rows.iter().any(|row| row.item == TreeItem::TableTriggers(0)),
+            !rows
+                .iter()
+                .any(|row| row.item == TreeItem::TableTriggers(0)),
             "a table without triggers has no Triggers group"
         );
         let mut refreshed = shop();
@@ -1254,7 +1277,11 @@ mod tests {
         );
         tree.current = TreeItem::Trigger(0);
         tree.set_catalog(refreshed);
-        assert_eq!(tree.current, TreeItem::Trigger(1), "the refresh keeps the trigger by name");
+        assert_eq!(
+            tree.current,
+            TreeItem::Trigger(1),
+            "the refresh keeps the trigger by name"
+        );
     }
 
     #[test]
@@ -1271,15 +1298,36 @@ mod tests {
         ] {
             tree.expanded.insert(open);
         }
-        tree.current = TreeItem::Column { table: 1, column: 1 };
-        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(1)));
-        assert_eq!(tree.selected, Some(TreeItem::Column { table: 1, column: 1 }));
+        tree.current = TreeItem::Column {
+            table: 1,
+            column: 1,
+        };
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(1))
+        );
+        assert_eq!(
+            tree.selected,
+            Some(TreeItem::Column {
+                table: 1,
+                column: 1
+            })
+        );
         tree.current = TreeItem::Index(2);
-        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(2)));
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(2))
+        );
         tree.current = TreeItem::TableIndex(0);
-        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(0)));
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(0))
+        );
         tree.current = TreeItem::Trigger(0);
-        assert_eq!(tree.key(press(Key::Enter), now), TreeAction::Open(TreeItem::Table(1)));
+        assert_eq!(
+            tree.key(press(Key::Enter), now),
+            TreeAction::Open(TreeItem::Table(1))
+        );
         tree.expanded.insert(TreeItem::Group(Group::Sequences));
         tree.current = TreeItem::Sequence(0);
         assert_eq!(tree.key(press(Key::Enter), now), TreeAction::None);

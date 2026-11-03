@@ -237,7 +237,10 @@ fn hierarchical_operators_are_refused_where_oracle_refuses_them() {
             30930,
         ),
         ("SELECT LEVEL FROM employees", 1788),
-        ("SELECT last_name FROM employees ORDER SIBLINGS BY last_name", 30929),
+        (
+            "SELECT last_name FROM employees ORDER SIBLINGS BY last_name",
+            30929,
+        ),
         (
             "SELECT SYS_CONNECT_BY_PATH(last_name, ' ') FROM employees \
              START WITH employee_id = 102 CONNECT BY PRIOR employee_id = manager_id",
@@ -250,7 +253,11 @@ fn hierarchical_operators_are_refused_where_oracle_refuses_them() {
         ),
     ];
     for (text, code) in cases {
-        assert_eq!(error(&mut session, text).vendor_code(), Some(code), "{text}");
+        assert_eq!(
+            error(&mut session, text).vendor_code(),
+            Some(code),
+            "{text}"
+        );
     }
     assert_eq!(
         error(

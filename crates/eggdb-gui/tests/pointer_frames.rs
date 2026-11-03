@@ -178,7 +178,11 @@ fn a_hover_fill_fades_in_over_80_ms_and_changes_at_once_under_reduced_motion() {
     assert!(workspace.tick(start + FILL_FADE));
     let (canvas, _) = frame(&mut workspace);
     assert_eq!(pixel(&canvas, padding.0, padding.1), Some(theme.bg2));
-    assert_eq!(workspace.until_fade_changes(), None, "no frames once it ends");
+    assert_eq!(
+        workspace.until_fade_changes(),
+        None,
+        "no frames once it ends"
+    );
     workspace.set_reduced_motion(true);
     workspace.pointer_moved(700.0, 600.0, BOX_FACES, WINDOW);
     workspace.tick(start + FILL_FADE * 2);

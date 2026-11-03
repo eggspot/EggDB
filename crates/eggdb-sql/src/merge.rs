@@ -42,7 +42,10 @@ fn subquery_refused(position: usize) -> SqlError {
         .at(position)
 }
 
-pub(crate) fn source_definition(columns: &[crate::session::OutputColumn], label: &str) -> TableDefinition {
+pub(crate) fn source_definition(
+    columns: &[crate::session::OutputColumn],
+    label: &str,
+) -> TableDefinition {
     TableDefinition {
         name: label.to_owned(),
         columns: columns
@@ -852,6 +855,7 @@ fn push_update_outputs(stored: &StoredUpdates, outputs: &mut Vec<OutputRow>) {
             inserted: Some(new_row.clone()),
             deleted: Some(old_row.clone()),
             source_index: *source_index,
+            action: "UPDATE",
         });
     }
 }

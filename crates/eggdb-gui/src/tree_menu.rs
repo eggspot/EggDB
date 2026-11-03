@@ -238,7 +238,8 @@ impl TreeMenu {
         let mut at = from;
         loop {
             at = if down {
-                at.checked_add(1).filter(|&next| next < TreeMenuItem::ALL.len())?
+                at.checked_add(1)
+                    .filter(|&next| next < TreeMenuItem::ALL.len())?
             } else {
                 at.checked_sub(1)?
             };
@@ -278,16 +279,14 @@ impl TreeMenu {
             Key::End => self.highlighted = last,
             Key::Character(letter) => {
                 let from = self.highlighted.map_or(0, |at| at + 1);
-                let found = (0..count)
-                    .map(|step| (from + step) % count)
-                    .find(|&index| {
-                        self.enabled[index]
-                            && TreeMenuItem::ALL[index]
-                                .label(self.expanded)
-                                .chars()
-                                .next()
-                                .is_some_and(|initial| initial.eq_ignore_ascii_case(&letter))
-                    });
+                let found = (0..count).map(|step| (from + step) % count).find(|&index| {
+                    self.enabled[index]
+                        && TreeMenuItem::ALL[index]
+                            .label(self.expanded)
+                            .chars()
+                            .next()
+                            .is_some_and(|initial| initial.eq_ignore_ascii_case(&letter))
+                });
                 if found.is_some() {
                     self.highlighted = found;
                 }
@@ -319,7 +318,9 @@ pub(crate) fn draw(
             b: 0,
             a: alpha,
         };
-        paint.canvas.fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
+        paint
+            .canvas
+            .fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
     }
     paint.canvas.fill_rounded_rect(rect, 6.0, theme.border);
     paint.canvas.fill_rounded_rect(
@@ -450,7 +451,14 @@ mod tests {
             [true, true, true, true, true, false]
         );
         assert_eq!(
-            enabled_for(TreeItem::Column { table: 0, column: 1 }, true, true),
+            enabled_for(
+                TreeItem::Column {
+                    table: 0,
+                    column: 1
+                },
+                true,
+                true
+            ),
             [true, true, true, true, true, false]
         );
         assert_eq!(
@@ -481,7 +489,14 @@ mod tests {
             Rect::new(60.0, 502.0, WIDTH, HEIGHT)
         );
         assert_eq!(
-            rect_for(TreeMenuOrigin::Pointer { x: 1200.0, y: 300.0 }, (0.0, 0.0), 1280.0),
+            rect_for(
+                TreeMenuOrigin::Pointer {
+                    x: 1200.0,
+                    y: 300.0
+                },
+                (0.0, 0.0),
+                1280.0
+            ),
             Rect::new(1040.0, 300.0, WIDTH, HEIGHT)
         );
     }
@@ -514,9 +529,18 @@ mod tests {
             TreeMenuOrigin::Pointer { x: 10.0, y: 10.0 },
         );
         assert_eq!(pointer.highlighted, None);
-        assert_eq!(pointer.key(KeyPress::plain(Key::Enter)), TreeMenuAnswer::Moved);
+        assert_eq!(
+            pointer.key(KeyPress::plain(Key::Enter)),
+            TreeMenuAnswer::Moved
+        );
         pointer.highlighted = Some(3);
-        assert_eq!(pointer.key(KeyPress::plain(Key::Enter)), TreeMenuAnswer::Moved);
-        assert_eq!(pointer.key(KeyPress::plain(Key::Escape)), TreeMenuAnswer::Close);
+        assert_eq!(
+            pointer.key(KeyPress::plain(Key::Enter)),
+            TreeMenuAnswer::Moved
+        );
+        assert_eq!(
+            pointer.key(KeyPress::plain(Key::Escape)),
+            TreeMenuAnswer::Close
+        );
     }
 }

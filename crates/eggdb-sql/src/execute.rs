@@ -3108,9 +3108,10 @@ fn distinct_on_keys<'e>(
         .map(|expr| distinct_on_key(expr, projection, scope, grouped))
         .collect::<SqlResult<Vec<_>>>()?;
     let leading = sort_keys.len().min(keys.len());
-    let matches_order = sort_keys[..leading]
-        .iter()
-        .all(|ordered| keys.iter().any(|key| same_sort_key(key, ordered, projection)));
+    let matches_order = sort_keys[..leading].iter().all(|ordered| {
+        keys.iter()
+            .any(|key| same_sort_key(key, ordered, projection))
+    });
     if !matches_order {
         return Err(SqlError::new(
             SqlState::INVALID_COLUMN_REFERENCE,
@@ -3142,16 +3143,19 @@ fn distinct_on_key<'e>(
         ExprKind::Column {
             qualifier: None,
             name,
-        } if projection.columns.iter().any(|column| &column.name == name) => Ok(
-            SortKey::Output(projection.output_named(name, expr.position)?),
-        ),
-        _ if grouped => projection.output_of(expr).map(SortKey::Output).ok_or_else(|| {
-            SqlError::not_supported(
-                "DISTINCT ON an expression outside the select list of a grouped query",
-            )
-            .with_hint("Name the output column, or its position, in DISTINCT ON.")
-            .at(expr.position)
-        }),
+        } if projection.columns.iter().any(|column| &column.name == name) => Ok(SortKey::Output(
+            projection.output_named(name, expr.position)?,
+        )),
+        _ if grouped => projection
+            .output_of(expr)
+            .map(SortKey::Output)
+            .ok_or_else(|| {
+                SqlError::not_supported(
+                    "DISTINCT ON an expression outside the select list of a grouped query",
+                )
+                .with_hint("Name the output column, or its position, in DISTINCT ON.")
+                .at(expr.position)
+            }),
         _ => {
             check_columns(expr, scope)?;
             Ok(SortKey::Expr(expr))
@@ -3166,7 +3170,9 @@ fn same_sort_key(left: &SortKey<'_>, right: &SortKey<'_>, projection: &Projectio
     };
     match (output(left), output(right), left, right) {
         (Some(left), Some(right), _, _) => left == right,
-        (None, None, SortKey::Expr(left), SortKey::Expr(right)) => shape_of(left) == shape_of(right),
+        (None, None, SortKey::Expr(left), SortKey::Expr(right)) => {
+            shape_of(left) == shape_of(right)
+        }
         _ => false,
     }
 }

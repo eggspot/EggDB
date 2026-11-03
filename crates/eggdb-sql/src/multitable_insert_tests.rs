@@ -65,7 +65,10 @@ fn insert_all_without_conditions_puts_every_row_into_every_table() {
         "INSERT 0 6"
     );
     assert_eq!(
-        lines(&mut session, "SELECT id, amount FROM small_sales ORDER BY id"),
+        lines(
+            &mut session,
+            "SELECT id, amount FROM small_sales ORDER BY id"
+        ),
         vec!["1|50", "2|150", "3|500"]
     );
     assert_eq!(
@@ -98,7 +101,10 @@ fn insert_all_with_when_puts_each_row_into_every_table_whose_condition_holds() {
         vec!["2", "3"]
     );
     assert_eq!(
-        lines(&mut session, "SELECT COUNT(*) FROM sale_ids WHERE note = 'seen'"),
+        lines(
+            &mut session,
+            "SELECT COUNT(*) FROM sale_ids WHERE note = 'seen'"
+        ),
         vec!["3"]
     );
 }
@@ -140,7 +146,10 @@ fn a_failing_target_undoes_the_whole_statement() {
         &mut session,
         "INSERT ALL INTO sale_ids (id) VALUES (id) INTO keyed (id) VALUES (id) SELECT id FROM sales",
     );
-    assert_eq!(lines(&mut session, "SELECT COUNT(*) FROM sale_ids"), vec!["0"]);
+    assert_eq!(
+        lines(&mut session, "SELECT COUNT(*) FROM sale_ids"),
+        vec!["0"]
+    );
     assert_eq!(lines(&mut session, "SELECT COUNT(*) FROM keyed"), vec!["1"]);
 }
 

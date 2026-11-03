@@ -58,7 +58,9 @@ impl Session<'_> {
                     .change_setting(&change.name, Some(value.as_str()), change.scope)
                     .map(drop),
                 None if change.scope == SettingScope::Session => self.reset_setting(&change.name),
-                None => self.change_setting(&change.name, None, change.scope).map(drop),
+                None => self
+                    .change_setting(&change.name, None, change.scope)
+                    .map(drop),
             };
         }
     }

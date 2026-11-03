@@ -1694,7 +1694,10 @@ mod tests {
                     (0, "Gtk/EnableAnimations", &off),
                 ],
             );
-            assert_eq!(xsettings_integer(&data, XSETTINGS_ENABLE_ANIMATIONS), Some(0));
+            assert_eq!(
+                xsettings_integer(&data, XSETTINGS_ENABLE_ANIMATIONS),
+                Some(0)
+            );
             assert!(xsettings_reduce_motion(&data));
             let on = word(1);
             let animating = xsettings(big_endian, &[(0, "Gtk/EnableAnimations", &on)]);
@@ -1717,16 +1720,28 @@ mod tests {
     fn hostile_xsettings_data_answers_none_without_panicking() {
         let data = xsettings(false, &[(0, "Gtk/EnableAnimations", &0u32.to_le_bytes())]);
         for end in 0..data.len() {
-            assert_eq!(xsettings_integer(&data[..end], XSETTINGS_ENABLE_ANIMATIONS), None);
+            assert_eq!(
+                xsettings_integer(&data[..end], XSETTINGS_ENABLE_ANIMATIONS),
+                None
+            );
         }
         let mut huge = data.clone();
         huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(xsettings_integer(&huge, "missing"), None);
         let mut unknown = data.clone();
         unknown[12] = 9;
-        assert_eq!(xsettings_integer(&unknown, XSETTINGS_ENABLE_ANIMATIONS), None);
-        let string = xsettings(false, &[(1, "Gtk/EnableAnimations", &[0xFF, 0xFF, 0xFF, 0xFF])]);
-        assert_eq!(xsettings_integer(&string, XSETTINGS_ENABLE_ANIMATIONS), None);
+        assert_eq!(
+            xsettings_integer(&unknown, XSETTINGS_ENABLE_ANIMATIONS),
+            None
+        );
+        let string = xsettings(
+            false,
+            &[(1, "Gtk/EnableAnimations", &[0xFF, 0xFF, 0xFF, 0xFF])],
+        );
+        assert_eq!(
+            xsettings_integer(&string, XSETTINGS_ENABLE_ANIMATIONS),
+            None
+        );
     }
 
     #[test]

@@ -42,7 +42,9 @@ impl Extent {
         if self.range() <= 0.0 {
             return 0;
         }
-        (self.offset / self.range() * 100.0).round().clamp(0.0, 100.0) as u8
+        (self.offset / self.range() * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u8
     }
 }
 
@@ -74,7 +76,13 @@ pub fn thumb(track: f32, extent: Extent) -> Option<Thumb> {
 /// The offset a thumb dragged to `pointer` sets, grabbed `grab` from its start, on a track
 /// starting at `track_start` and `track` long: `(pointer − grab − trackStart) / (L − thumb) ×
 /// (T − V)`, clamped.
-pub fn dragged_offset(pointer: f32, grab: f32, track_start: f32, track: f32, extent: Extent) -> f32 {
+pub fn dragged_offset(
+    pointer: f32,
+    grab: f32,
+    track_start: f32,
+    track: f32,
+    extent: Extent,
+) -> f32 {
     let Some(thumb) = thumb(track, extent) else {
         return 0.0;
     };
@@ -127,7 +135,13 @@ fn faded(color: Rgba, alpha: f32) -> Rgba {
 
 /// Draws the scrollbar for `extent` in `track` along `axis`, nothing when the content fits:
 /// the thumb `textDisabled` at 60 %, or `textSecondary` while `hot` (hovered or dragged).
-pub(crate) fn draw(paint: &mut Painter<'_, '_>, axis: Axis, track: Rect, extent: Extent, hot: bool) {
+pub(crate) fn draw(
+    paint: &mut Painter<'_, '_>,
+    axis: Axis,
+    track: Rect,
+    extent: Extent,
+    hot: bool,
+) {
     let length = match axis {
         Axis::Vertical => track.h,
         Axis::Horizontal => track.w,

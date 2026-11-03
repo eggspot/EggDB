@@ -112,7 +112,10 @@ fn a_natural_join_reads_every_column_name_both_sides_have() {
     );
     let without_salary = scopes(vec![vec![staff("s"), only_id]]);
     assert!(without_salary.check_natural(1).is_ok());
-    let unknown_columns = scopes(vec![vec![staff("s"), ScopeItem::opaque(Some("d".to_owned()))]]);
+    let unknown_columns = scopes(vec![vec![
+        staff("s"),
+        ScopeItem::opaque(Some("d".to_owned())),
+    ]]);
     assert!(is_denied(unknown_columns.check_natural(1)));
     let hidden_on_the_right = scopes(vec![vec![teams("t"), staff("s")]]);
     assert!(is_denied(hidden_on_the_right.check_natural(1)));

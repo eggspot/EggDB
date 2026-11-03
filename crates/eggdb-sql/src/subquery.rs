@@ -472,9 +472,7 @@ fn single_item(select: &Select, shape: LookupShape) -> Option<&Expr> {
     let fits = match shape {
         LookupShape::Existence => false,
         LookupShape::Members => true,
-        LookupShape::Aggregate => {
-            !select.removes_duplicates() && columns_only_in_aggregates(expr)
-        }
+        LookupShape::Aggregate => !select.removes_duplicates() && columns_only_in_aggregates(expr),
     };
     (plain && fits).then_some(expr)
 }

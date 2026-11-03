@@ -8,8 +8,8 @@ use eggdb_queues::Queues;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_HEADER: &[u8; 8] = b"AMQP\x00\x00\x09\x01";

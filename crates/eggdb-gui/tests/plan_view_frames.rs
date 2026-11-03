@@ -206,11 +206,7 @@ fn oracle_explains_through_dbms_xplan_and_keeps_no_plan_table_row() {
     assert_eq!(plan.plan.nodes[1].operation, "TABLE ACCESS FULL CUSTOMERS");
     assert_eq!(plan.plan.nodes[1].relation.as_deref(), Some("CUSTOMERS"));
     assert!(plan.plan.text[0].starts_with("Plan hash value: "));
-    workspace.run_text(
-        "SELECT count(*) FROM plan_table",
-        false,
-        Instant::now(),
-    );
+    workspace.run_text("SELECT count(*) FROM plan_table", false, Instant::now());
     workspace.wait_for_run(LIMIT);
     let tab = &window(&mut workspace).tab;
     let kept = tab
@@ -238,8 +234,14 @@ fn oracle_explains_through_dbms_xplan_and_keeps_no_plan_table_row() {
 fn sql_server_explains_with_showplan_all_and_measures_with_statistics_profile() {
     let directory = scratch("sqlserver");
     let mut workspace = with_customers(&directory);
-    window(&mut workspace).tab.set_dialect(QueryDialect::SqlServer);
-    workspace.explain_text("SELECT * FROM customers WHERE id = 2", false, Instant::now());
+    window(&mut workspace)
+        .tab
+        .set_dialect(QueryDialect::SqlServer);
+    workspace.explain_text(
+        "SELECT * FROM customers WHERE id = 2",
+        false,
+        Instant::now(),
+    );
     workspace.wait_for_run(LIMIT);
     let tab = &window(&mut workspace).tab;
     assert_eq!(tab.view, ResultView::Plan, "{:?}", tab.messages);
@@ -247,7 +249,9 @@ fn sql_server_explains_with_showplan_all_and_measures_with_statistics_profile() 
     assert!(!plan.plan.analyze);
     assert_eq!(plan.plan.nodes[0].operation, "SELECT");
     assert!(
-        plan.plan.nodes[1].operation.starts_with("Clustered Index Seek [customers]"),
+        plan.plan.nodes[1]
+            .operation
+            .starts_with("Clustered Index Seek [customers]"),
         "{:?}",
         plan.plan.nodes
     );
@@ -293,7 +297,10 @@ fn hovering_a_node_fills_it_shows_its_tooltip_after_600_ms_and_a_click_selects_i
         .find(|node| node.id == NODE_FIRST_PLAN_NODE + 2)
         .map(|node| node.bounds)
         .expect("the node is in the tree");
-    let centre = (bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0);
+    let centre = (
+        bounds.x + bounds.width / 2.0,
+        bounds.y + bounds.height / 2.0,
+    );
     let start = Instant::now();
     assert!(workspace.pointer_moved(centre.0, centre.1, BOX_FACES, WINDOW));
     assert_eq!(window(&mut workspace).hovered_plan_node(), Some(2));
@@ -304,14 +311,22 @@ fn hovering_a_node_fills_it_shows_its_tooltip_after_600_ms_and_a_click_selects_i
         "the hovered node fills bg2"
     );
     let _ = workspace.tick(start);
-    assert_eq!(window(&mut workspace).tab.plan.as_ref().unwrap().tooltip, None);
-    let wait = workspace.until_plan_tooltip(start).expect("a tooltip is due");
+    assert_eq!(
+        window(&mut workspace).tab.plan.as_ref().unwrap().tooltip,
+        None
+    );
+    let wait = workspace
+        .until_plan_tooltip(start)
+        .expect("a tooltip is due");
     assert!(wait <= Duration::from_millis(600), "{wait:?}");
     assert!(workspace.tick(start + Duration::from_millis(600)));
     let plan = window(&mut workspace).tab.plan.clone().unwrap();
     assert_eq!(plan.tooltip, Some((2, TooltipCause::Pointer)));
     assert_eq!(plan.tooltip_lines(2)[0], "Seq Scan on customers c");
-    assert_eq!(workspace.until_plan_tooltip(start + Duration::from_millis(600)), None);
+    assert_eq!(
+        workspace.until_plan_tooltip(start + Duration::from_millis(600)),
+        None
+    );
     let (canvas, theme) = draw(window(&mut workspace));
     let tip_top = bounds.y + NODE_HEIGHT + 4.0;
     assert_eq!(
@@ -339,7 +354,10 @@ fn hovering_a_node_fills_it_shows_its_tooltip_after_600_ms_and_a_click_selects_i
     assert_eq!(plan.highlight, Some(at..at + "customers".len()));
     assert!(workspace.pointer_moved(1.0, 1.0, BOX_FACES, WINDOW));
     assert!(workspace.tick(start + Duration::from_millis(800)));
-    assert_eq!(window(&mut workspace).tab.plan.as_ref().unwrap().tooltip, None);
+    assert_eq!(
+        window(&mut workspace).tab.plan.as_ref().unwrap().tooltip,
+        None
+    );
 }
 
 #[test]
@@ -352,7 +370,10 @@ fn ctrl_shift_space_shows_the_current_nodes_tooltip_at_once_and_esc_hides_it() {
     assert_eq!(plan.tooltip, Some((1, TooltipCause::Keyboard)));
     let lines = plan.tooltip_lines(1);
     assert_eq!(lines[0], "Seq Scan on orders o");
-    assert!(lines[1].starts_with("cost 0.00..20.00 · rows 10"), "{lines:?}");
+    assert!(
+        lines[1].starts_with("cost 0.00..20.00 · rows 10"),
+        "{lines:?}"
+    );
     let _ = window.key(chord(Key::Escape, false, false), Instant::now());
     let plan = window.tab.plan.as_ref().unwrap();
     assert_eq!((plan.tooltip, plan.current), (None, 1));

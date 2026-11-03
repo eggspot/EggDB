@@ -190,6 +190,8 @@ mod correctness;
 #[cfg(test)]
 mod destructive_tests;
 #[cfg(test)]
+mod dialect_plan_tests;
+#[cfg(test)]
 mod distinct_on_and_natural_join_tests;
 #[cfg(test)]
 mod engine_limits_tests;
@@ -201,8 +203,6 @@ mod grouping_sets_tests;
 mod hierarchy_tests;
 #[cfg(test)]
 mod implicit_transaction_tests;
-#[cfg(test)]
-mod dialect_plan_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]

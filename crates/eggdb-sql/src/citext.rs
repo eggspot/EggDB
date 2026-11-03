@@ -104,11 +104,7 @@ fn subject_is_citext(values: &[Value]) -> bool {
 }
 
 fn flags_position(name: &str) -> usize {
-    if name == "regexp_replace" {
-        3
-    } else {
-        2
-    }
+    if name == "regexp_replace" { 3 } else { 2 }
 }
 
 fn add_case_insensitive_flag(name: &str, values: &mut Vec<Value>) {
@@ -189,8 +185,7 @@ fn split_part(values: &[Value]) -> Option<SqlResult<Value>> {
 
 fn position(values: &[Value]) -> Option<SqlResult<Value>> {
     let (text, wanted) = (text_argument(values, 0)?, text_argument(values, 1)?);
-    let lowered = case_mapped(text, false)
-        .and_then(|text| Ok((text, case_mapped(wanted, false)?)));
+    let lowered = case_mapped(text, false).and_then(|text| Ok((text, case_mapped(wanted, false)?)));
     Some(lowered.and_then(|(text, wanted)| {
         crate::string_functions::function("strpos", &[Value::Text(text), Value::Text(wanted)])
             .unwrap_or(Ok(Value::Null))
@@ -239,7 +234,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 
 #[cfg(test)]
 mod tests {
-    use super::{compare, compare_with_text, fold, literal_pattern, regexp_arguments, text_of, value};
+    use super::{
+        compare, compare_with_text, fold, literal_pattern, regexp_arguments, text_of, value,
+    };
     use crate::types::Value;
     use std::cmp::Ordering;
 
@@ -304,25 +301,51 @@ mod tests {
                 .map(|value| value.to_text().unwrap_or_default())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(flags("regexp_match", &[value("A".to_owned()), text("a")]), ["A", "a", "i"]);
         assert_eq!(
-            flags("regexp_match", &[value("A".to_owned()), text("a"), text("g")]),
+            flags("regexp_match", &[value("A".to_owned()), text("a")]),
+            ["A", "a", "i"]
+        );
+        assert_eq!(
+            flags(
+                "regexp_match",
+                &[value("A".to_owned()), text("a"), text("g")]
+            ),
             ["A", "a", "gi"]
         );
         assert_eq!(
-            flags("regexp_match", &[value("A".to_owned()), text("a"), text("c")]),
+            flags(
+                "regexp_match",
+                &[value("A".to_owned()), text("a"), text("c")]
+            ),
             ["A", "a", "c"]
         );
         assert_eq!(
-            flags("regexp_replace", &[value("A".to_owned()), text("a"), text("b")]),
+            flags(
+                "regexp_replace",
+                &[value("A".to_owned()), text("a"), text("b")]
+            ),
             ["A", "a", "b", "i"]
         );
         assert_eq!(
-            flags("regexp_replace", &[value("A".to_owned()), text("a"), text("b"), Value::Integer(1)]),
+            flags(
+                "regexp_replace",
+                &[
+                    value("A".to_owned()),
+                    text("a"),
+                    text("b"),
+                    Value::Integer(1)
+                ]
+            ),
             ["A", "a", "b", "1"]
         );
-        assert_eq!(flags("regexp_match", &[text("A"), value("a".to_owned())]), ["A", "a"]);
-        assert_eq!(flags("regexp_like", &[value("A".to_owned()), text("a")]), ["A", "a"]);
+        assert_eq!(
+            flags("regexp_match", &[text("A"), value("a".to_owned())]),
+            ["A", "a"]
+        );
+        assert_eq!(
+            flags("regexp_like", &[value("A".to_owned()), text("a")]),
+            ["A", "a"]
+        );
     }
 
     #[test]

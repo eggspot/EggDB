@@ -25,9 +25,7 @@ fn target_row(target: &InsertTarget, row: &[Value], computed: usize) -> Vec<Inse
         Some(values) => values
             .iter()
             .map(|value| match value {
-                TargetValue::Computed(at) => {
-                    constant(row.get(*at).cloned().unwrap_or(Value::Null))
-                }
+                TargetValue::Computed(at) => constant(row.get(*at).cloned().unwrap_or(Value::Null)),
                 TargetValue::Default => InsertValue::Default,
             })
             .collect(),

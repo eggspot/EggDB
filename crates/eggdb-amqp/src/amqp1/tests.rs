@@ -130,7 +130,10 @@ fn run_writes(
 ) -> Vec<Vec<(u64, Value, Vec<u8>)>> {
     let broker = Broker::new(keyspace);
     let mut writes = Writes(Vec::new());
-    serve_stream(&broker, config, Chunks(chunks.into()), &mut writes, &|| false).unwrap();
+    serve_stream(&broker, config, Chunks(chunks.into()), &mut writes, &|| {
+        false
+    })
+    .unwrap();
     writes.0.iter().map(|write| performatives(write)).collect()
 }
 
@@ -290,12 +293,7 @@ fn deliveries_past_the_memory_budget_wait_until_the_ones_before_them_are_written
     );
     let transfers_per_write: Vec<usize> = writes
         .iter()
-        .map(|replies| {
-            replies
-                .iter()
-                .filter(|(code, _, _)| *code == 0x14)
-                .count()
-        })
+        .map(|replies| replies.iter().filter(|(code, _, _)| *code == 0x14).count())
         .filter(|&count| count > 0)
         .collect();
     assert_eq!(transfers_per_write, [1, 1], "{writes:?}");

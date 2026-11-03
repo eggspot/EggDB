@@ -240,7 +240,9 @@ fn grouping_sets_keep_postgresql_errors() {
     assert_eq!(
         refused(
             &mut session,
-            &format!("SELECT count(*) FROM items_sold GROUP BY CUBE ({twelve}), CUBE (size, sales)")
+            &format!(
+                "SELECT count(*) FROM items_sold GROUP BY CUBE ({twelve}), CUBE (size, sales)"
+            )
         ),
         "too many grouping sets present (maximum 4096)"
     );
@@ -325,7 +327,13 @@ fn mysql_with_rollup_adds_the_super_aggregate_rows_of_its_manual() {
 fn mysql_and_sqlite_refuse_the_standard_grouping_constructs() {
     let store = MemoryStore::default();
     let mut session = mysql_sales(&store);
-    assert!(run(&mut session, "SELECT year FROM sales GROUP BY ROLLUP (year)").is_err());
+    assert!(
+        run(
+            &mut session,
+            "SELECT year FROM sales GROUP BY ROLLUP (year)"
+        )
+        .is_err()
+    );
     let sqlite_store = MemoryStore::default();
     let mut sqlite = Session::with_dialect(&sqlite_store, Dialect::Sqlite);
     last(&mut sqlite, "CREATE TABLE t (a INTEGER)");

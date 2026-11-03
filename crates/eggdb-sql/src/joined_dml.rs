@@ -338,10 +338,7 @@ fn matched_rows(
     Ok(matched)
 }
 
-fn refuse_subqueries<'e>(
-    exprs: impl IntoIterator<Item = &'e Expr>,
-    clause: &str,
-) -> SqlResult<()> {
+fn refuse_subqueries<'e>(exprs: impl IntoIterator<Item = &'e Expr>, clause: &str) -> SqlResult<()> {
     for expr in exprs {
         if crate::subquery::mentions_subquery(expr) {
             return Err(subquery_refused(clause, expr.position));

@@ -227,9 +227,16 @@ impl Plan {
             let trimmed = line.trim();
             if trimmed.starts_with('|') {
                 let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
-                let cells: Vec<&str> = inner.strip_suffix('|').unwrap_or(inner).split('|').collect();
+                let cells: Vec<&str> = inner
+                    .strip_suffix('|')
+                    .unwrap_or(inner)
+                    .split('|')
+                    .collect();
                 let Some(names) = &header else {
-                    if cells.iter().any(|cell| cell.trim().eq_ignore_ascii_case("Operation")) {
+                    if cells
+                        .iter()
+                        .any(|cell| cell.trim().eq_ignore_ascii_case("Operation"))
+                    {
                         header = Some(cells.iter().map(|cell| cell.trim().to_owned()).collect());
                     }
                     continue;
@@ -261,7 +268,12 @@ impl Plan {
                 continue;
             }
             let numbered = trimmed.split_once(" - ").and_then(|(id, rest)| {
-                let id = id.trim().trim_start_matches('*').trim().parse::<u64>().ok()?;
+                let id = id
+                    .trim()
+                    .trim_start_matches('*')
+                    .trim()
+                    .parse::<u64>()
+                    .ok()?;
                 let index = ids.iter().find(|(known, _)| *known == id)?.1;
                 Some((index, rest.trim()))
             });
@@ -315,7 +327,8 @@ impl Plan {
         };
         let mut ids: Vec<(String, usize)> = Vec::new();
         for row in &table.rows {
-            let cell = |place: Option<usize>| place.and_then(|place| row.get(place).cloned().flatten());
+            let cell =
+                |place: Option<usize>| place.and_then(|place| row.get(place).cloned().flatten());
             let text = cell(at.text).unwrap_or_default();
             plan.text.extend(text.lines().map(str::to_owned));
             let parent_id = cell(Some(parent_at)).unwrap_or_default();
@@ -327,8 +340,8 @@ impl Plan {
             let operator = cell(at.kind).is_none_or(|kind| kind.eq_ignore_ascii_case("PLAN_ROW"));
             let mut node = if operator {
                 let argument = cell(at.argument);
-                let physical = cell(at.physical)
-                    .unwrap_or_else(|| showplan_physical(&text).to_owned());
+                let physical =
+                    cell(at.physical).unwrap_or_else(|| showplan_physical(&text).to_owned());
                 let (operation, relation) = sqlserver_operation(&physical, argument.as_deref());
                 let mut details: Vec<String> = cell(at.logical)
                     .filter(|logical| *logical != physical)
@@ -351,7 +364,10 @@ impl Plan {
             let executes = cell(at.executes).as_deref().and_then(number);
             let rows = cell(at.rows).as_deref().and_then(number);
             node.estimated_rows = cell(at.estimated_rows).as_deref().and_then(number);
-            node.cost = cell(at.cost).as_deref().and_then(number).map(|total| (0.0, total));
+            node.cost = cell(at.cost)
+                .as_deref()
+                .and_then(number)
+                .map(|total| (0.0, total));
             node.loops = executes.filter(|executes| *executes > 0.0);
             node.never_executed = executes == Some(0.0);
             node.actual_rows = rows.map(|rows| rows / node.loops.unwrap_or(1.0));
@@ -859,7 +875,12 @@ impl XplanRow {
                 .position(|known| known.eq_ignore_ascii_case(name))
                 .and_then(|place| cells.get(place).copied())
         };
-        let id = cell("Id")?.trim().trim_start_matches('*').trim().parse().ok()?;
+        let id = cell("Id")?
+            .trim()
+            .trim_start_matches('*')
+            .trim()
+            .parse()
+            .ok()?;
         let raw = cell("Operation")?;
         let operation = raw.trim();
         if operation.is_empty() {
@@ -1544,7 +1565,10 @@ impl PlanView {
     /// [`TOOLTIP_DELAY`], or hides a tooltip the pointer showed when `node` is `None`; a
     /// tooltip the keyboard showed stays. Returns whether the tooltip changed.
     pub fn show_pointer_tooltip(&mut self, node: Option<usize>) -> bool {
-        let wanted = match (node.filter(|&node| node < self.plan.nodes.len()), self.tooltip) {
+        let wanted = match (
+            node.filter(|&node| node < self.plan.nodes.len()),
+            self.tooltip,
+        ) {
             (Some(node), _) => Some((node, TooltipCause::Pointer)),
             (None, Some((_, TooltipCause::Keyboard))) => self.tooltip,
             (None, _) => None,
@@ -1578,7 +1602,10 @@ impl PlanView {
     /// node, or over it when there is no room below, kept inside the panel.
     pub fn tooltip_rect(&self, index: usize, panel: Rect, size: (f32, f32)) -> Option<Rect> {
         let node = self.node_rect(index, panel)?;
-        let (w, h) = (size.0.min(TOOLTIP_MAX_WIDTH).min(panel.w), size.1.min(panel.h));
+        let (w, h) = (
+            size.0.min(TOOLTIP_MAX_WIDTH).min(panel.w),
+            size.1.min(panel.h),
+        );
         let x = node.x.clamp(panel.x, (panel.x + panel.w - w).max(panel.x));
         let below = node.y + NODE_HEIGHT + TOOLTIP_GAP;
         let y = if below + h <= panel.y + panel.h {
@@ -1794,7 +1821,9 @@ fn draw_tooltip(paint: &mut Painter<'_, '_>, view: &PlanView, index: usize, area
             b: 0,
             a: alpha,
         };
-        paint.canvas.fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
+        paint
+            .canvas
+            .fill_rounded_rect(shadow, 6.0 + spread / 2.0, color);
     }
     paint.canvas.fill_rounded_rect(rect, 6.0, theme.border);
     let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
@@ -2027,7 +2056,11 @@ Execution Time: 10.400 ms";
             row_count: rows.len(),
             rows: rows
                 .into_iter()
-                .map(|row| row.into_iter().map(|cell| cell.map(str::to_owned)).collect())
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| cell.map(str::to_owned))
+                        .collect()
+                })
                 .collect(),
             tag: "SELECT".to_owned(),
         }
@@ -2060,7 +2093,10 @@ Note
         );
         let plan = Plan::from_result(&table(
             &["PLAN_TABLE_OUTPUT"],
-            display.iter().map(|line| vec![Some(line.as_str())]).collect(),
+            display
+                .iter()
+                .map(|line| vec![Some(line.as_str())])
+                .collect(),
         ))
         .unwrap();
         assert_eq!(plan.nodes.len(), 5);
@@ -2079,15 +2115,26 @@ Note
         let missing = lines("Error: cannot fetch last explain plan from PLAN_TABLE");
         assert_eq!(Plan::from_xplan_lines(&missing), Err(PlanError::Empty));
         for hostile in ["|", "||||", "| Id | Operation |", "|*x| y |", "   - - -"] {
-            let _ = Plan::from_xplan_lines(&lines(&format!("| Id | Operation | Name |\n{hostile}")));
+            let _ =
+                Plan::from_xplan_lines(&lines(&format!("| Id | Operation | Name |\n{hostile}")));
         }
     }
 
     #[test]
     fn showplan_all_rows_hang_under_their_parent_node_with_the_statement_as_root() {
         let columns = [
-            "Rows", "Executes", "StmtText", "StmtId", "NodeId", "Parent", "PhysicalOp",
-            "LogicalOp", "Argument", "EstimateRows", "TotalSubtreeCost", "Type",
+            "Rows",
+            "Executes",
+            "StmtText",
+            "StmtId",
+            "NodeId",
+            "Parent",
+            "PhysicalOp",
+            "LogicalOp",
+            "Argument",
+            "EstimateRows",
+            "TotalSubtreeCost",
+            "Type",
         ];
         let row = |rows: Option<&'static str>,
                    text: &'static str,
@@ -2115,7 +2162,16 @@ Note
         let profiled = table(
             &columns,
             vec![
-                row(Some("1"), "SELECT * FROM t WHERE id = 1", "1", "0", None, None, None, "SELECT"),
+                row(
+                    Some("1"),
+                    "SELECT * FROM t WHERE id = 1",
+                    "1",
+                    "0",
+                    None,
+                    None,
+                    None,
+                    "SELECT",
+                ),
                 row(
                     Some("1"),
                     "  |--Nested Loops(Inner Join)",
@@ -2363,9 +2419,11 @@ Note
                 vec!["SET SHOWPLAN_ALL OFF".to_owned()]
             )
         );
-        assert_eq!((shown.plan_at, shown.statement_at, shown.rolled_back), (1, 1, false));
-        let profiled =
-            explain_statements(QueryDialect::SqlServer, "DELETE FROM t", true).unwrap();
+        assert_eq!(
+            (shown.plan_at, shown.statement_at, shown.rolled_back),
+            (1, 1, false)
+        );
+        let profiled = explain_statements(QueryDialect::SqlServer, "DELETE FROM t", true).unwrap();
         assert_eq!(profiled.before, ["SET STATISTICS PROFILE ON"]);
         assert_eq!(profiled.after, ["SET STATISTICS PROFILE OFF"]);
         assert_eq!((profiled.plan_at, profiled.rolled_back), (2, true));

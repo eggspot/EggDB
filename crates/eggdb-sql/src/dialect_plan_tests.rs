@@ -61,7 +61,8 @@ fn explain_plan_creates_plan_table_and_writes_one_row_per_operation() {
         "{display}"
     );
     assert!(
-        display.contains("\n|   0 | SELECT STATEMENT  |      |\n|   1 |  TABLE ACCESS FULL| EMP  |\n"),
+        display
+            .contains("\n|   0 | SELECT STATEMENT  |      |\n|   1 |  TABLE ACCESS FULL| EMP  |\n"),
         "{display}"
     );
     assert_eq!(
@@ -127,7 +128,10 @@ fn explain_plan_of_an_update_plans_it_without_changing_a_row() {
         ),
         "OPERATION|OPTIONS\nUPDATE STATEMENT|NULL\nUPDATE|NULL\nTABLE ACCESS|BY INDEX ROWID\nINDEX|UNIQUE SCAN\nSELECT 4"
     );
-    assert_eq!(last(&mut session, "SELECT name FROM emp"), "NAME\nada\nSELECT 1");
+    assert_eq!(
+        last(&mut session, "SELECT name FROM emp"),
+        "NAME\nada\nSELECT 1"
+    );
 }
 
 #[test]
@@ -141,7 +145,8 @@ fn a_session_that_displays_plans_answers_explain_plan_with_the_display_and_write
         "{shown}"
     );
     assert!(
-        shown.contains("\n|   0 | SELECT STATEMENT  |      |\n|   1 |  TABLE ACCESS FULL| EMP  |\n"),
+        shown
+            .contains("\n|   0 | SELECT STATEMENT  |      |\n|   1 |  TABLE ACCESS FULL| EMP  |\n"),
         "{shown}"
     );
     assert_eq!(
@@ -274,7 +279,10 @@ fn statistics_profile_runs_the_statement_then_returns_its_plan_with_rows_and_exe
     assert!(outputs[0].starts_with("id\n1\n2\n"), "{outputs:?}");
     let profile: Vec<&str> = outputs[1].lines().collect();
     assert!(profile[0].starts_with("Rows|Executes|StmtText|StmtId|NodeId|Parent|"));
-    assert!(profile[1].starts_with("2|1|SELECT id FROM t|1|1|0|"), "{profile:?}");
+    assert!(
+        profile[1].starts_with("2|1|SELECT id FROM t|1|1|0|"),
+        "{profile:?}"
+    );
     assert!(
         profile[2].starts_with("2|1|  |--Clustered Index Scan(OBJECT:([t]."),
         "{profile:?}"
@@ -288,7 +296,11 @@ fn hostile_showplan_options_return_errors_and_never_panic() {
     let store = MemoryStore::default();
     let mut session = sqlserver_t(&store);
     for refused in ["SET SHOWPLAN_XML ON", "SET STATISTICS XML ON"] {
-        assert_eq!(fails(&mut session, refused).state().code(), "0A000", "{refused}");
+        assert_eq!(
+            fails(&mut session, refused).state().code(),
+            "0A000",
+            "{refused}"
+        );
     }
     for hostile in [
         "SET SHOWPLAN_TEXT",

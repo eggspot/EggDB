@@ -2,8 +2,8 @@ use crate::OutputColumn;
 use crate::ast::{
     AlterAction, AlterTable, ConstraintKind, CreateTable, Delete, DerivedTable, Expr, ExprKind,
     FromClause, GeneratedTable, Insert, InsertSource, InsertValue, JoinCondition, JoinedTables,
-    MergeStatement,
-    Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement, TableReference, Update,
+    MergeStatement, Name, OnDuplicate, Query, Select, SelectItem, SetExpr, Statement,
+    TableReference, Update,
 };
 use crate::column_privileges::{ColumnScopes, ScopeItem};
 use crate::dialect::Dialect;
@@ -1849,7 +1849,10 @@ impl Resolver<'_> {
         command: crate::row_security::PolicyCommand,
     ) -> SqlResult<()> {
         self.target(reference)?;
-        if self.row_security_filter(&reference.name.text, command)?.is_some() {
+        if self
+            .row_security_filter(&reference.name.text, command)?
+            .is_some()
+        {
             return Err(joined_row_security_refused());
         }
         Ok(())

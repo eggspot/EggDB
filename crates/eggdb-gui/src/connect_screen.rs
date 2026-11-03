@@ -1204,7 +1204,10 @@ pub fn draw(
     if let Some(item) = card.layout.status_item() {
         let text = format!("Layout: {item}");
         let width = pen.width(faces.ui, &text, SMALL);
-        let at = (origin.0 + LAYOUT_LINE_RIGHT - width, origin.1 + LAYOUT_LINE_TOP);
+        let at = (
+            origin.0 + LAYOUT_LINE_RIGHT - width,
+            origin.1 + LAYOUT_LINE_TOP,
+        );
         pen.text(faces.ui, &text, at, SMALL, theme.text_secondary);
     }
     if card.layout_picker.is_none() && !card.disabled() && card.ring_shown() {
@@ -1220,7 +1223,10 @@ pub fn draw(
 
 fn control_fill(pen: &Pen<'_, '_>, card: &ConnectCard, node: u32) -> (Rgba, Rgba) {
     let theme = pen.theme;
-    let fill = card.pointer.mix(node).blend(theme.bg0, theme.bg2, theme.bg2);
+    let fill = card
+        .pointer
+        .mix(node)
+        .blend(theme.bg0, theme.bg2, theme.bg2);
     if card.pointer.is_pressed(node) {
         (fill, theme.border_strong)
     } else {

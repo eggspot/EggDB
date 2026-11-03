@@ -25,12 +25,12 @@ pub(super) fn with_output_into(
     destination: Option<OutputDestination>,
 ) -> Statement {
     match destination {
-        Some(destination) => Statement::SqlServer(SqlServerStatement::OutputInto(Box::new(
-            OutputInto {
+        Some(destination) => {
+            Statement::SqlServer(SqlServerStatement::OutputInto(Box::new(OutputInto {
                 statement,
                 destination,
-            },
-        ))),
+            })))
+        }
         None => statement,
     }
 }

@@ -10,7 +10,9 @@ use crate::catalog::{
     Catalog, CatalogColumn, CatalogIndex, CatalogTable, CatalogView, KeyCount, KeySpace,
 };
 use crate::color::{Rgba, Theme};
+use crate::connection::SessionId;
 use crate::dialect::QueryDialect;
+use crate::drop_prompt::{self, DropAnswer, DropKind, DropPrompt, DropTarget};
 use crate::editor::Position;
 use crate::font::{TextStyle, Typeface};
 use crate::grid::{
@@ -20,24 +22,22 @@ use crate::grid::{
 use crate::grid_menu::{self, GridMenu};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
+use crate::key_scan::KeySpaceScan;
 use crate::layout::{Layout, LayoutAction};
 use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::object_browser::{
-    self, Group, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, RowIcon, SidebarFocus,
-    TreeAction, TreeItem,
+    self, Group, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, RowIcon, SidebarFocus, TreeAction,
+    TreeItem,
 };
 use crate::plan_view::{self, PlanView};
 use crate::pointer::{self, CaretLook, Fill, FillMix, PointerLook};
-use crate::connection::SessionId;
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
+use crate::scrollbar::{self, Axis, Extent};
+use crate::splitters::{self, RAIL_WIDTH, RegionSizes, Splitter};
 use crate::status_line;
 use crate::tab_strip::{self, ClosePrompt, PromptAnswer};
-use crate::scrollbar::{self, Axis, Extent};
-use crate::value_view;
 use crate::tree_menu::{self, TreeMenu, TreeMenuAnswer, TreeMenuItem, TreeMenuOrigin};
-use crate::drop_prompt::{self, DropAnswer, DropKind, DropPrompt, DropTarget};
-use crate::key_scan::KeySpaceScan;
-use crate::splitters::{self, RAIL_WIDTH, RegionSizes, Splitter};
+use crate::value_view;
 
 /// The width of the results grid's body, right of the row gutter, at the golden frame's size.
 pub const GRID_BODY_WIDTH: f32 = 972.0;
@@ -373,7 +373,10 @@ impl MainWindow {
                 (dx, 0.0),
                 Rect::new(left, TOOLBAR_HEIGHT, centre, EDITOR_TOP - TOOLBAR_HEIGHT),
             ),
-            Area::Editor => ((dx, 0.0), Rect::new(left, EDITOR_TOP, centre, band - EDITOR_TOP)),
+            Area::Editor => (
+                (dx, 0.0),
+                Rect::new(left, EDITOR_TOP, centre, band - EDITOR_TOP),
+            ),
             Area::Results => (
                 (dx, band - SPLITTER_TOP),
                 Rect::new(left, band, centre, BODY_BOTTOM - band),
@@ -442,7 +445,11 @@ impl MainWindow {
 
     /// Where the rail's item at `index` starts.
     pub fn rail_item_top(index: usize) -> f32 {
-        let separator = if index >= 2 { RAIL_SEPARATOR_SPACE } else { 0.0 };
+        let separator = if index >= 2 {
+            RAIL_SEPARATOR_SPACE
+        } else {
+            0.0
+        };
         RAIL_FIRST_TOP + RAIL_BUTTON_HEIGHT * index as f32 + separator
     }
 
@@ -575,7 +582,11 @@ impl MainWindow {
         };
         let mut inspector = vec![NODE_INSPECTOR];
         for node in nodes {
-            if inspector.contains(&node.id) || node.parent.is_some_and(|parent| inspector.contains(&parent)) {
+            if inspector.contains(&node.id)
+                || node
+                    .parent
+                    .is_some_and(|parent| inspector.contains(&parent))
+            {
                 inspector.push(node.id);
                 continue;
             }
@@ -603,7 +614,8 @@ impl MainWindow {
                 Some(placed) => {
                     node.bounds.x += placed.shift.0;
                     node.bounds.y += placed.shift.1;
-                    let right = (node.bounds.x + node.bounds.width).min(placed.clip.x + placed.clip.w);
+                    let right =
+                        (node.bounds.x + node.bounds.width).min(placed.clip.x + placed.clip.w);
                     let bottom =
                         (node.bounds.y + node.bounds.height).min(placed.clip.y + placed.clip.h);
                     node.bounds.width = (right - node.bounds.x).max(0.0);
@@ -644,7 +656,9 @@ impl MainWindow {
     /// under it (the first or last one above or below the text) and the nearest character
     /// boundary on it.
     pub fn editor_position_at(&self, faces: Faces<'_>, x: f32, y: f32) -> Position {
-        let shift = self.placed(Area::Editor).map_or((0.0, 0.0), |placed| placed.shift);
+        let shift = self
+            .placed(Area::Editor)
+            .map_or((0.0, 0.0), |placed| placed.shift);
         let (x, y) = (x - shift.0, y - shift.1);
         let tab = &self.tab;
         let lines = tab.editor.lines();
@@ -1096,9 +1110,9 @@ impl MainWindow {
 
     /// The tab, other than the showing one, whose session has a transaction open or failed.
     pub fn other_tab_in_transaction(&self) -> Option<&QueryTab> {
-        self.background_tabs.iter().find(|tab| {
-            tab.transaction != eggdb::sql::TransactionStatus::Idle
-        })
+        self.background_tabs
+            .iter()
+            .find(|tab| tab.transaction != eggdb::sql::TransactionStatus::Idle)
     }
 
     fn strip_width(&self) -> f32 {
@@ -1247,7 +1261,9 @@ impl MainWindow {
                 self.add_tab();
                 Some(none)
             }
-            Key::Character('w' | 'W') if primary && !press.modifiers.shift => Some(self.close_tab()),
+            Key::Character('w' | 'W') if primary && !press.modifiers.shift => {
+                Some(self.close_tab())
+            }
             Key::F4 if press.modifiers.control => Some(self.close_tab()),
             Key::Tab if press.modifiers.control => {
                 self.cycle_tab(press.modifiers.shift);
@@ -1658,9 +1674,12 @@ fn objects_rail(paint: &mut Painter<'_, '_>, window: &MainWindow) {
                 paint
                     .canvas
                     .stroke_circle(x + 5.0, y + 5.0, 8.0, 1.5, theme.text_secondary);
-                paint
-                    .canvas
-                    .line((x + 8.5, y + 8.5), (x + 12.0, y + 12.0), 1.5, theme.text_secondary);
+                paint.canvas.line(
+                    (x + 8.5, y + 8.5),
+                    (x + 12.0, y + 12.0),
+                    1.5,
+                    theme.text_secondary,
+                );
             }
             RailItem::Group(Group::Keys) => object_browser::draw_icon(paint, RowIcon::Key, x, y),
             RailItem::Group(_) => object_browser::draw_icon(paint, RowIcon::Table, x, y),
@@ -1729,7 +1748,13 @@ fn placed_regions(paint: &mut Painter<'_, '_>, window: &MainWindow) {
             Area::Sidebar => {
                 let target = placed.clip;
                 paint.rect(target.x, target.y, target.w, target.h, theme.bg1);
-                paint.rect(target.x + target.w - 1.0, target.y, 1.0, target.h, theme.border);
+                paint.rect(
+                    target.x + target.w - 1.0,
+                    target.y,
+                    1.0,
+                    target.h,
+                    theme.border,
+                );
                 if target.w < SIDEBAR_RIGHT {
                     rail(paint, target);
                     continue;
@@ -1785,7 +1810,12 @@ fn rail(paint: &mut Painter<'_, '_>, target: Rect) {
         let top = target.y + RAIL_ITEM_HEIGHT * index as f32;
         if index == RAIL_SELECTED {
             paint.canvas.fill_rounded_rect(
-                Rect::new(target.x + 4.0, top + 4.0, target.w - 9.0, RAIL_ITEM_HEIGHT - 8.0),
+                Rect::new(
+                    target.x + 4.0,
+                    top + 4.0,
+                    target.w - 9.0,
+                    RAIL_ITEM_HEIGHT - 8.0,
+                ),
                 4.0,
                 theme.selection,
             );
@@ -1810,7 +1840,14 @@ fn extra_region(paint: &mut Painter<'_, '_>, name: &str, rect: Rect) {
     paint.rect(rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, theme.border);
     let title = extra_title(name);
     let top = rect.y + ((rect.h.min(32.0) - BODY.1) / 2.0).floor();
-    paint.text(faces.ui_bold, &title, rect.x + 12.0, top, BODY, theme.text_primary);
+    paint.text(
+        faces.ui_bold,
+        &title,
+        rect.x + 12.0,
+        top,
+        BODY,
+        theme.text_primary,
+    );
 }
 
 fn extra_title(name: &str) -> String {
@@ -1829,7 +1866,13 @@ fn splitter(paint: &mut Painter<'_, '_>) {
     let theme = paint.theme;
     let centre_width = paint.centre_width();
     paint.rect(SIDEBAR_RIGHT, SPLITTER_TOP, centre_width, 6.0, theme.bg2);
-    paint.rect(SIDEBAR_RIGHT, SPLITTER_TOP + 2.0, centre_width, 1.0, theme.border);
+    paint.rect(
+        SIDEBAR_RIGHT,
+        SPLITTER_TOP + 2.0,
+        centre_width,
+        1.0,
+        theme.border,
+    );
 }
 
 fn access_text(window: &MainWindow) -> &'static str {
@@ -1888,13 +1931,25 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         1.5,
         run_ink,
     );
-    paint.text(faces.ui, window.layout.run_label(), 260.0, 13.0, BODY, run_ink);
+    paint.text(
+        faces.ui,
+        window.layout.run_label(),
+        260.0,
+        13.0,
+        BODY,
+        run_ink,
+    );
     paint.button(
         Rect::new(312.0 + dx, 8.0, 88.0, 28.0),
         under_pointer(window, NODE_RUN_ALL, other_look),
     );
     paint.polyline(
-        &[(324.0 + dx, 17.0), (324.0 + dx, 27.0), (333.0 + dx, 22.0), (324.0 + dx, 17.0)],
+        &[
+            (324.0 + dx, 17.0),
+            (324.0 + dx, 27.0),
+            (333.0 + dx, 22.0),
+            (324.0 + dx, 17.0),
+        ],
         1.5,
         other_ink,
     );
@@ -1904,7 +1959,11 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         Rect::new(408.0 + dx, 8.0, 84.0, 28.0),
         under_pointer(window, NODE_EXPLAIN, other_look),
     );
-    for (x, y, w) in [(420.0 + dx, 17.0, 10.0), (424.0 + dx, 21.0, 6.0), (428.0 + dx, 25.0, 2.0)] {
+    for (x, y, w) in [
+        (420.0 + dx, 17.0, 10.0),
+        (424.0 + dx, 21.0, 6.0),
+        (428.0 + dx, 25.0, 2.0),
+    ] {
         paint.rect(x, y, w, 2.0, other_ink);
     }
     paint.rect(421.0 + dx, 19.0, 1.0, 7.0, other_ink);
@@ -2073,14 +2132,25 @@ fn tabs(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         let hovered = window.pointer.is_hovered(node);
         let fill = window.pointer.mix(node);
         if !fill.is(Fill::Rest) {
-            paint.rect(left, 44.0, width, 35.0, fill.blend(theme.bg2, theme.bg1, theme.bg1));
+            paint.rect(
+                left,
+                44.0,
+                width,
+                35.0,
+                fill.blend(theme.bg2, theme.bg1, theme.bg1),
+            );
         }
         let next_is_background = position + 1 != window.tab_position && position + 1 < count;
         if next_is_background {
             paint.rect(left + width - 1.0, 52.0, 1.0, 20.0, theme.border);
         }
         let label_x = tab_label_x(paint, other, left);
-        let title = elided(faces.ui, &other.title, left + width - 32.0 - label_x, BODY.0);
+        let title = elided(
+            faces.ui,
+            &other.title,
+            left + width - 32.0 - label_x,
+            BODY.0,
+        );
         paint.text(faces.ui, &title, label_x, 53.0, BODY, theme.text_secondary);
         if hovered {
             close_icon(paint, left + width - 16.0, theme.text_secondary);
@@ -2495,7 +2565,10 @@ fn result_segments(tab: &QueryTab, layout: Layout) -> Vec<(&'static str, ResultV
         }
         return segments;
     }
-    let mut views = vec![(results, ResultView::Results), (messages, ResultView::Messages)];
+    let mut views = vec![
+        (results, ResultView::Results),
+        (messages, ResultView::Messages),
+    ];
     if tab.plan.is_some() {
         views.push((plan, ResultView::Plan));
     }
@@ -2526,7 +2599,9 @@ fn summary_x(tab: &QueryTab, layout: Layout) -> f32 {
     if layout != Layout::EggDb {
         return result_segments(tab, layout)
             .last()
-            .map_or(PLAN_SEGMENT_X, |(_, _, x, underline)| x + underline + SEGMENT_GAP);
+            .map_or(PLAN_SEGMENT_X, |(_, _, x, underline)| {
+                x + underline + SEGMENT_GAP
+            });
     }
     if tab.plan.is_some() {
         PLAN_SEGMENT_X + 56.0
@@ -2579,7 +2654,11 @@ fn grid_handles(paint: &mut Painter<'_, '_>, grid: &ResultGrid, top: f32, window
     if let Some(column) = window.column_edge {
         let edges = grid.column_edges();
         let edge = GRID_LEFT + edges.get(column + 1).copied().unwrap_or(0.0) - grid.scroll_x;
-        let bottom = if window.resizing { BODY_BOTTOM } else { top + grid::HEADER_HEIGHT };
+        let bottom = if window.resizing {
+            BODY_BOTTOM
+        } else {
+            top + grid::HEADER_HEIGHT
+        };
         if edge > GRID_LEFT {
             paint.rect(edge - 2.0, top, 2.0, bottom - top, theme.accent);
         }
@@ -2760,10 +2839,7 @@ fn transaction_status_item(window: &MainWindow, theme: Theme) -> Option<(String,
         return Some((text.to_owned(), color));
     }
     let other = window.other_tab_in_transaction()?;
-    Some((
-        transaction_open_in(&other.title),
-        theme.text_secondary,
-    ))
+    Some((transaction_open_in(&other.title), theme.text_secondary))
 }
 
 /// The status bar's item while another tab than the showing one holds a transaction.
@@ -2867,7 +2943,8 @@ fn grid_menu_item_of(id: u32) -> Option<usize> {
 
 impl MainWindow {
     fn results_shift(&self) -> (f32, f32) {
-        self.placed(Area::Results).map_or((0.0, 0.0), |placed| placed.shift)
+        self.placed(Area::Results)
+            .map_or((0.0, 0.0), |placed| placed.shift)
     }
 
     /// Where the open full-value view shows, in window coordinates.
@@ -2998,7 +3075,11 @@ impl MainWindow {
                 view.copy_focused = copy;
             }
             let invoked = copy && *action == AccessAction::Invoke;
-            return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
+            return Some(if invoked {
+                vec![KeyPress::plain(Key::Enter)]
+            } else {
+                Vec::new()
+            });
         }
         if self.tree_menu.is_some() {
             let Some(index) = tree_menu::item_of_node(node.id) else {
@@ -3009,7 +3090,11 @@ impl MainWindow {
                 menu.highlighted = Some(index);
             }
             let invoked = *action == AccessAction::Invoke;
-            return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
+            return Some(if invoked {
+                vec![KeyPress::plain(Key::Enter)]
+            } else {
+                Vec::new()
+            });
         }
         if self.tab.grid_menu.is_some() {
             let Some(index) = grid_menu_item_of(node.id) else {
@@ -3020,7 +3105,11 @@ impl MainWindow {
                 menu.highlighted = Some(index);
             }
             let invoked = *action == AccessAction::Invoke;
-            return Some(if invoked { vec![KeyPress::plain(Key::Enter)] } else { Vec::new() });
+            return Some(if invoked {
+                vec![KeyPress::plain(Key::Enter)]
+            } else {
+                Vec::new()
+            });
         }
         None
     }
@@ -3028,7 +3117,8 @@ impl MainWindow {
 
 impl MainWindow {
     fn sidebar_shift(&self) -> (f32, f32) {
-        self.placed(Area::Sidebar).map_or((0.0, 0.0), |placed| placed.shift)
+        self.placed(Area::Sidebar)
+            .map_or((0.0, 0.0), |placed| placed.shift)
     }
 
     /// Where the tree's open row menu shows, in window coordinates.
@@ -3045,11 +3135,7 @@ impl MainWindow {
             44.0 + 16.0 * level as f32 + shift.0,
             ROWS_TOP + ROW_HEIGHT * at.saturating_sub(self.tree.first_row) as f32 + shift.1,
         );
-        Some(tree_menu::rect_for(
-            menu.origin,
-            label,
-            self.width as f32,
-        ))
+        Some(tree_menu::rect_for(menu.origin, label, self.width as f32))
     }
 
     /// The tree's menu item under (`x`, `y`), while the menu is open.
@@ -3295,7 +3381,9 @@ const EDGE_BAND_RIGHT: f32 = 2.0;
 
 fn grid_rows_in_view(grid: &ResultGrid) -> usize {
     let body_top = grid_top(grid) + grid::HEADER_HEIGHT;
-    ((BODY_BOTTOM - body_top) / grid::ROW_HEIGHT).floor().max(1.0) as usize
+    ((BODY_BOTTOM - body_top) / grid::ROW_HEIGHT)
+        .floor()
+        .max(1.0) as usize
 }
 
 /// The grid's extent along `axis` in a centre `centre_width` wide (`docs/ux/workspace.md`
@@ -3325,12 +3413,32 @@ pub fn grid_track(grid: &ResultGrid, axis: Axis, centre_right: f32) -> Option<Re
     let body_top = grid_top(grid) + grid::HEADER_HEIGHT;
     match axis {
         Axis::Vertical if vertical => {
-            let end = if horizontal { BODY_BOTTOM - scrollbar::TRACK } else { BODY_BOTTOM };
-            Some(scrollbar::track_rect(axis, body_top, end - body_top, centre_right, BODY_BOTTOM))
+            let end = if horizontal {
+                BODY_BOTTOM - scrollbar::TRACK
+            } else {
+                BODY_BOTTOM
+            };
+            Some(scrollbar::track_rect(
+                axis,
+                body_top,
+                end - body_top,
+                centre_right,
+                BODY_BOTTOM,
+            ))
         }
         Axis::Horizontal if horizontal => {
-            let end = if vertical { centre_right - scrollbar::TRACK } else { centre_right };
-            Some(scrollbar::track_rect(axis, GRID_LEFT, end - GRID_LEFT, centre_right, BODY_BOTTOM))
+            let end = if vertical {
+                centre_right - scrollbar::TRACK
+            } else {
+                centre_right
+            };
+            Some(scrollbar::track_rect(
+                axis,
+                GRID_LEFT,
+                end - GRID_LEFT,
+                centre_right,
+                BODY_BOTTOM,
+            ))
         }
         _ => None,
     }
@@ -3367,13 +3475,15 @@ impl MainWindow {
             return None;
         }
         let centre_width = self.centre_right() - SIDEBAR_RIGHT;
-        visible_columns(&grid.widths, grid.scroll_x, centre_width - grid::GUTTER_WIDTH)
-            .find(|&column| {
-                let edge = self.edge_x(grid, column + 1);
-                edge > GRID_LEFT + shift.0
-                    && x >= edge - EDGE_BAND_LEFT
-                    && x <= edge + EDGE_BAND_RIGHT
-            })
+        visible_columns(
+            &grid.widths,
+            grid.scroll_x,
+            centre_width - grid::GUTTER_WIDTH,
+        )
+        .find(|&column| {
+            let edge = self.edge_x(grid, column + 1);
+            edge > GRID_LEFT + shift.0 && x >= edge - EDGE_BAND_LEFT && x <= edge + EDGE_BAND_RIGHT
+        })
     }
 
     fn grid_track_at(&self, x: f32, y: f32) -> Option<(Axis, Rect)> {
@@ -3382,7 +3492,8 @@ impl MainWindow {
         [Axis::Vertical, Axis::Horizontal]
             .into_iter()
             .filter_map(|axis| {
-                grid_track(grid, axis, self.centre_right()).map(|track| (axis, shifted(track, shift)))
+                grid_track(grid, axis, self.centre_right())
+                    .map(|track| (axis, shifted(track, shift)))
             })
             .find(|(_, track)| rect_contains(*track, x, y))
     }
@@ -3743,7 +3854,8 @@ impl MainWindow {
             .plan
             .as_ref()
             .filter(|plan| self.tab.view == ResultView::Plan && !plan.text_shown)?;
-        let index = usize::try_from(self.pointer.hovered?.checked_sub(NODE_FIRST_PLAN_NODE)?).ok()?;
+        let index =
+            usize::try_from(self.pointer.hovered?.checked_sub(NODE_FIRST_PLAN_NODE)?).ok()?;
         (index < plan.plan.nodes.len()).then_some(index)
     }
 
@@ -4032,9 +4144,8 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         "Result views",
         (260.0, 386.0, centre_width, 32.0),
     ));
-    for (offset, (name, view, x, underline)) in result_segments(tab, window.layout)
-        .into_iter()
-        .enumerate()
+    for (offset, (name, view, x, underline)) in
+        result_segments(tab, window.layout).into_iter().enumerate()
     {
         let mut segment = node(
             NODE_RESULTS_SEGMENT + offset as u32,
@@ -4113,12 +4224,7 @@ pub fn accessibility_tree(window: &MainWindow) -> Vec<AccessNode> {
         for node in &mut nodes {
             node.state.focused = false;
         }
-        tab_strip::prompt_nodes(
-            &mut nodes,
-            prompt,
-            NODE_MAIN_WINDOW,
-            (width, HEIGHT as f32),
-        );
+        tab_strip::prompt_nodes(&mut nodes, prompt, NODE_MAIN_WINDOW, (width, HEIGHT as f32));
     }
     if let Some((prompt, _)) = &window.drop_prompt {
         for node in &mut nodes {
@@ -4164,7 +4270,12 @@ fn tab_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow, centre_width: f32
             NODE_QUERIES,
             AccessRole::Tab,
             &tab.spoken_title(),
-            (visible_left, 44.0, (visible_right - visible_left).max(0.0), 36.0),
+            (
+                visible_left,
+                44.0,
+                (visible_right - visible_left).max(0.0),
+                36.0,
+            ),
         );
         item.state.selected = shown;
         nodes.push(item);
@@ -4186,7 +4297,12 @@ fn tab_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow, centre_width: f32
         NODE_QUERIES,
         AccessRole::Button,
         "New query tab",
-        (tab_strip::plus_x(count, centre_width, 260.0), 48.0, 28.0, 28.0),
+        (
+            tab_strip::plus_x(count, centre_width, 260.0),
+            48.0,
+            28.0,
+            28.0,
+        ),
     );
     plus.shortcut = Some(format!("{}+T", primary_name()));
     plus.actions.invoke = true;
@@ -4442,7 +4558,10 @@ fn grid_nodes(nodes: &mut Vec<AccessNode>, grid: &ResultGrid, centre_width: f32)
             (x_of(column), top, width, 28.0),
         );
         header.cell = Some(AccessCell { row: 0, column });
-        header.description = Some(format!("width {:.0} px", grid.widths.get(column).copied().unwrap_or(0.0)));
+        header.description = Some(format!(
+            "width {:.0} px",
+            grid.widths.get(column).copied().unwrap_or(0.0)
+        ));
         nodes.push(header);
     }
     let body_top = top + 28.0;
@@ -4917,7 +5036,10 @@ mod tests {
         let ssms = laid_out(Layout::Ssms);
         assert_eq!(ssms.centre_right(), 260.0 + 980.0);
         assert_eq!(bounds(&ssms, NODE_EDITOR), (300.0, 80.0, 980.0, 300.0));
-        assert_eq!(bounds(&ssms, NODE_RESULT_VIEWS), (300.0, 426.0, 980.0, 32.0));
+        assert_eq!(
+            bounds(&ssms, NODE_RESULT_VIEWS),
+            (300.0, 426.0, 980.0, 32.0)
+        );
         assert_eq!(bounds(&ssms, NODE_QUERIES), (300.0, 44.0, 980.0, 36.0));
         let run = bounds(&ssms, NODE_RUN);
         assert_eq!((run.0, run.2), (232.0, 96.0));
@@ -4936,14 +5058,20 @@ mod tests {
             .find(|node| node.id == NODE_LAYOUT_ITEM)
             .expect("the status bar names the layout");
         assert_eq!(item.name, "Works like SQL Server Management Studio");
-        assert_eq!(item.description.as_deref(), Some(crate::layout::TRADEMARK_NOTE));
+        assert_eq!(
+            item.description.as_deref(),
+            Some(crate::layout::TRADEMARK_NOTE)
+        );
         let names: Vec<&str> = tree
             .iter()
             .filter(|node| node.parent == Some(NODE_RESULT_VIEWS))
             .map(|node| node.name.as_str())
             .collect();
         assert_eq!(names[..2], ["Results", "Messages"]);
-        let objects = tree.iter().find(|node| node.id == NODE_OBJECTS).expect("tree");
+        let objects = tree
+            .iter()
+            .find(|node| node.id == NODE_OBJECTS)
+            .expect("tree");
         assert_eq!(objects.name, "Object Explorer");
         let compass = laid_out(Layout::Compass);
         assert_eq!(bounds(&compass, NODE_STATUS_BAR).2, 0.0);
@@ -4985,7 +5113,10 @@ mod tests {
         window.tab.editor = crate::editor::Editor::new("SELECT 1;");
         let now = Instant::now();
         let chord = layout_item_chord();
-        assert_eq!(window.key(chord[0], now), WindowAction::Tab(TabAction::None));
+        assert_eq!(
+            window.key(chord[0], now),
+            WindowAction::Tab(TabAction::None)
+        );
         assert!(window.chord_started && window.layout_picker.is_none());
         window.key(chord[1], now);
         assert!(!window.chord_started);
@@ -5011,7 +5142,10 @@ mod tests {
         assert_eq!(window.tab.editor.text(), "SELECT 1;");
         window.open_layout_picker();
         let tree = accessibility_tree(&window);
-        assert!(tree.iter().any(|node| node.id == layout_picker::NODE_DIALOG));
+        assert!(
+            tree.iter()
+                .any(|node| node.id == layout_picker::NODE_DIALOG)
+        );
         assert!(
             tree.iter()
                 .filter(|node| node.id < layout_picker::NODE_DIALOG)
@@ -5019,7 +5153,10 @@ mod tests {
         );
         let theme = Theme::of(ThemeKind::Dark);
         let covered = draw(&window, theme, faces());
-        assert_ne!(covered.pixel(20, 20), draw(&laid_out(Layout::Ssms), theme, faces()).pixel(20, 20));
+        assert_ne!(
+            covered.pixel(20, 20),
+            draw(&laid_out(Layout::Ssms), theme, faces()).pixel(20, 20)
+        );
         let item = AccessNode {
             id: NODE_LAYOUT_ITEM,
             ..AccessNode::default()
@@ -5083,14 +5220,23 @@ mod tests {
         assert_ne!(window.tab.session, window.background_tabs[0].session);
         window.show_tab(0);
         let _ = window.key(primary('t'), now);
-        assert_eq!(window.tab_titles(), ["Query 1", "Query 4", "Query 2", "Query 3"]);
+        assert_eq!(
+            window.tab_titles(),
+            ["Query 1", "Query 4", "Query 2", "Query 3"]
+        );
         let _ = window.key(control_tab(true), now);
         assert_eq!(window.tab.title, "Query 1");
         let _ = window.key(control_tab(true), now);
-        assert_eq!(window.tab.title, "Query 3", "Ctrl+Shift+Tab wraps to the last tab");
+        assert_eq!(
+            window.tab.title, "Query 3",
+            "Ctrl+Shift+Tab wraps to the last tab"
+        );
         let _ = window.key(control_tab(false), now);
         assert_eq!(window.tab.title, "Query 1");
-        assert_eq!(window.tab.grid.as_ref().map(|grid| grid.rows.len()), Some(3));
+        assert_eq!(
+            window.tab.grid.as_ref().map(|grid| grid.rows.len()),
+            Some(3)
+        );
     }
 
     #[test]
@@ -5124,7 +5270,10 @@ mod tests {
         assert_eq!(window.tab.title, "Query 1");
         let _ = window.key(primary('w'), now);
         let last = window.key(KeyPress::plain(Key::Enter), now);
-        assert!(matches!(last, WindowAction::CloseSession { stop: false, .. }));
+        assert!(matches!(
+            last,
+            WindowAction::CloseSession { stop: false, .. }
+        ));
         assert_eq!(window.tab_titles(), ["Query 1"], "the strip is never empty");
         assert!(window.tab.editor.text().is_empty() && window.tab.grid.is_none());
     }
@@ -5166,14 +5315,22 @@ mod tests {
         window.tab.dialect_menu = None;
         let _ = window.key(primary('t'), now);
         assert_eq!(
-            window.other_tab_in_transaction().map(|tab| tab.title.as_str()),
+            window
+                .other_tab_in_transaction()
+                .map(|tab| tab.title.as_str()),
             Some("Query 1")
         );
-        assert_eq!(transaction_open_in("Query 1"), "Transaction open in Query 1");
+        assert_eq!(
+            transaction_open_in("Query 1"),
+            "Transaction open in Query 1"
+        );
         let _ = window.key(control_tab(false), now);
         let _ = window.key(primary('w'), now);
         assert_eq!(
-            window.close_prompt.as_ref().map(|prompt| prompt.title.as_str()),
+            window
+                .close_prompt
+                .as_ref()
+                .map(|prompt| prompt.title.as_str()),
             Some("Close Query 1 and roll back?")
         );
     }
@@ -5290,7 +5447,11 @@ mod tests {
         window.key(KeyPress::plain(Key::Down), now);
         window.key(KeyPress::plain(Key::Right), now);
         window.key(KeyPress::plain(Key::Enter), now);
-        let view = window.tab.value_view.as_ref().expect("Enter opens the value view");
+        let view = window
+            .tab
+            .value_view
+            .as_ref()
+            .expect("Enter opens the value view");
         assert_eq!(view.cell, Cell { row: 1, column: 1 });
         assert_eq!(view.name(), "name value");
         assert_eq!(
@@ -5516,7 +5677,10 @@ mod tests {
         let now = Instant::now();
         window.tab.set_dialect(QueryDialect::MySql);
         window.focus_tree();
-        window.tree.expanded.insert(TreeItem::Group(crate::object_browser::Group::Indexes));
+        window
+            .tree
+            .expanded
+            .insert(TreeItem::Group(crate::object_browser::Group::Indexes));
         let index = window
             .tree
             .catalog
@@ -5526,7 +5690,10 @@ mod tests {
             .unwrap();
         window.open_drop_prompt(TreeItem::Index(index));
         let (prompt, then_selected) = window.drop_prompt.clone().expect("the dialog opens");
-        assert_eq!(prompt.statement, "DROP INDEX orders_customer_id_idx ON orders;");
+        assert_eq!(
+            prompt.statement,
+            "DROP INDEX orders_customer_id_idx ON orders;"
+        );
         assert_eq!(prompt.title(), "Drop index orders_customer_id_idx?");
         assert_eq!(
             then_selected,
@@ -5561,19 +5728,40 @@ mod tests {
         };
         assert_eq!(window.tab.title, "Keys in sessions");
         assert_eq!(window.tab.editor.text(), "SCAN sessions LIMIT 100");
-        assert_eq!(request.scan.as_ref().map(|scan| scan.title()).as_deref(), Some("Keys in sessions"));
+        assert_eq!(
+            request.scan.as_ref().map(|scan| scan.title()).as_deref(),
+            Some("Keys in sessions")
+        );
         assert_eq!(window.tab.pill_label(), "Keys");
-        assert_eq!(window.tab.run_request(true), None, "Run all is disabled in a keys tab");
+        assert_eq!(
+            window.tab.run_request(true),
+            None,
+            "Run all is disabled in a keys tab"
+        );
         assert_eq!(window.tab.explain_request(false), Ok(None));
         assert_eq!(
             window.tab.key(KeyPress::plain(Key::Character('x'))),
             TabAction::None
         );
-        assert_eq!(window.tab.editor.text(), "SCAN sessions LIMIT 100", "the editor is read-only");
-        assert!(ClosePrompt::for_tab(&window.tab).is_none(), "a keys tab closes without asking");
+        assert_eq!(
+            window.tab.editor.text(),
+            "SCAN sessions LIMIT 100",
+            "the editor is read-only"
+        );
+        assert!(
+            ClosePrompt::for_tab(&window.tab).is_none(),
+            "a keys tab closes without asking"
+        );
         window.show_tab(0);
-        assert!(matches!(window.open_keys(0), WindowAction::Tab(TabAction::Run(_))));
-        assert_eq!(window.tab_count(), 2, "the second Enter reuses the keys tab");
+        assert!(matches!(
+            window.open_keys(0),
+            WindowAction::Tab(TabAction::Run(_))
+        ));
+        assert_eq!(
+            window.tab_count(),
+            2,
+            "the second Enter reuses the keys tab"
+        );
         assert_eq!(window.tab.title, "Keys in sessions");
         window.add_tab();
         assert_eq!(window.tab.title, "Query 2");
@@ -5609,26 +5797,47 @@ mod tests {
         assert_eq!(window.focus, WindowFocus::Tree);
         assert_eq!(window.focused_splitter, None);
         let canvas = draw(&window, theme, box_faces());
-        assert_eq!(canvas.pixel(267, 600), Some(theme.border), "the sidebar ends at 268 px");
+        assert_eq!(
+            canvas.pixel(267, 600),
+            Some(theme.border),
+            "the sidebar ends at 268 px"
+        );
         let handle = window.press_layout_handle(400.0, 382.0, 1);
         assert_eq!(handle, Some(GridHandle::Splitter(Splitter::Results)));
         assert!(window.drag_grid_handle(GridHandle::Splitter(Splitter::Results), 400.0, 300.0));
         assert_eq!(window.sizes.results_band_top(), 297.0);
         window.release_grid_handle();
         assert_eq!(window.dragged_splitter, None);
-        assert_eq!(window.press_layout_handle(400.0, 299.0, 2), Some(GridHandle::Done));
-        assert_eq!(window.sizes.results_band_top(), 380.0, "a double-click resets it");
+        assert_eq!(
+            window.press_layout_handle(400.0, 299.0, 2),
+            Some(GridHandle::Done)
+        );
+        assert_eq!(
+            window.sizes.results_band_top(),
+            380.0,
+            "a double-click resets it"
+        );
         let _ = window.key(primary(Key::Character('b')), now);
         assert!(window.rail_shown() && !window.sizes.sidebar_shown);
         assert_eq!(window.sidebar_right(), RAIL_WIDTH);
         let canvas = draw(&window, theme, box_faces());
-        assert_eq!(canvas.pixel(35, 600), Some(theme.border), "the rail is 36 px wide");
-        assert_eq!(window.press_layout_handle(10.0, 60.0, 1), Some(GridHandle::Done));
+        assert_eq!(
+            canvas.pixel(35, 600),
+            Some(theme.border),
+            "the rail is 36 px wide"
+        );
+        assert_eq!(
+            window.press_layout_handle(10.0, 60.0, 1),
+            Some(GridHandle::Done)
+        );
         assert!(window.drawer_open);
         assert_eq!(window.drawer_from, Some(RailItem::Objects));
         assert_eq!(window.focus, WindowFocus::Tree);
         let _ = draw(&window, theme, box_faces());
-        assert_eq!(window.press_layout_handle(600.0, 300.0, 1), Some(GridHandle::Done));
+        assert_eq!(
+            window.press_layout_handle(600.0, 300.0, 1),
+            Some(GridHandle::Done)
+        );
         assert!(!window.drawer_open, "a click outside closes the drawer");
         let _ = window.key(primary(Key::Character('b')), now);
         assert!(!window.rail_shown());
@@ -5665,6 +5874,10 @@ mod tests {
         assert_eq!(window.width, 900);
         window.set_width(500);
         assert_eq!(window.width, 800);
-        let _ = draw(&window, Theme::of(crate::color::ThemeKind::Light), box_faces());
+        let _ = draw(
+            &window,
+            Theme::of(crate::color::ThemeKind::Light),
+            box_faces(),
+        );
     }
 }

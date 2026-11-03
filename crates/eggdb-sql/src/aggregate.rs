@@ -1895,9 +1895,9 @@ impl Grouping {
                     GroupColumn::Grouping(keys) => Value::Integer(
                         crate::grouping_sets::grouping_bits(self.sets.as_ref(), set, keys),
                     ),
-                    GroupColumn::GroupId => Value::Integer(
-                        self.sets.as_ref().map_or(0, |sets| sets.group_id(set)),
-                    ),
+                    GroupColumn::GroupId => {
+                        Value::Integer(self.sets.as_ref().map_or(0, |sets| sets.group_id(set)))
+                    }
                 });
             }
             if let Some(having) = &self.having {

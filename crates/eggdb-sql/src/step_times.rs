@@ -57,7 +57,9 @@ pub(crate) fn record<T>(run: impl FnOnce() -> T) -> (T, Vec<MeasuredSelect>) {
     let recorded = replace_recording(outer);
     (
         result,
-        recorded.map(|recorded| recorded.selects).unwrap_or_default(),
+        recorded
+            .map(|recorded| recorded.selects)
+            .unwrap_or_default(),
     )
 }
 

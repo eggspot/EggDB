@@ -913,11 +913,7 @@ impl Parser {
             return Err(syntax_error(Some(&text)));
         }
         self.at += 1;
-        let signed = if negative {
-            format!("-{text}")
-        } else {
-            text
-        };
+        let signed = if negative { format!("-{text}") } else { text };
         signed.parse::<i32>().map(i64::from).map_err(|_| {
             SqlError::new(
                 SqlState::INVALID_PARAMETER_VALUE,

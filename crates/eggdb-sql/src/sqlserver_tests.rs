@@ -1688,7 +1688,10 @@ fn merge_refuses_by_source_clauses_sql_server_refuses() {
 fn merge_runs_two_when_matched_clauses_and_names_each_action() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
-    values(&mut session, "CREATE TABLE stock (id INT PRIMARY KEY, qty INT)");
+    values(
+        &mut session,
+        "CREATE TABLE stock (id INT PRIMARY KEY, qty INT)",
+    );
     values(
         &mut session,
         "INSERT INTO stock VALUES (1, 10), (2, 20), (3, 30)",
@@ -1732,7 +1735,10 @@ fn merge_runs_two_when_matched_clauses_and_names_each_action() {
 fn merge_top_limits_the_rows_it_changes() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::SqlServer);
-    values(&mut session, "CREATE TABLE stock (id INT PRIMARY KEY, qty INT)");
+    values(
+        &mut session,
+        "CREATE TABLE stock (id INT PRIMARY KEY, qty INT)",
+    );
     let inserted = values(
         &mut session,
         "MERGE TOP (2) INTO stock USING (VALUES (1, 10), (2, 20), (3, 30)) AS s (id, qty) \
@@ -1741,10 +1747,7 @@ fn merge_top_limits_the_rows_it_changes() {
     );
     assert_eq!(inserted.len(), 2);
     assert_eq!(values(&mut session, "SELECT id FROM stock").len(), 2);
-    values(
-        &mut session,
-        "INSERT INTO stock VALUES (7, 70), (8, 80)",
-    );
+    values(&mut session, "INSERT INTO stock VALUES (7, 70), (8, 80)");
     values(
         &mut session,
         "MERGE TOP (50) PERCENT stock USING (SELECT id FROM stock) AS s ON stock.id = s.id \

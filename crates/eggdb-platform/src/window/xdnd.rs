@@ -548,7 +548,10 @@ mod tests {
         target.receive(files, URI_LIST);
         target.receive(XdndMessage::Position { source: 9, time: 3 }, URI_LIST);
         target.data(Some(b"file:///home/ana/shop.eggdb"));
-        assert_eq!(target.receive(XdndMessage::Leave { source: 8 }, URI_LIST), vec![]);
+        assert_eq!(
+            target.receive(XdndMessage::Leave { source: 8 }, URI_LIST),
+            vec![]
+        );
         assert_eq!(
             target.receive(XdndMessage::Leave { source: 9 }, URI_LIST),
             vec![XdndReaction::Event(WindowEvent::FileDragLeft)]

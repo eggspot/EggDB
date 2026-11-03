@@ -2326,7 +2326,9 @@ impl<'t> Parser<'t> {
             }
         }
         match crate::arrays::ArrayElement::of(element) {
-            Some(found) if found.is_storable() || found == crate::arrays::ArrayElement::RefCursor => {
+            Some(found)
+                if found.is_storable() || found == crate::arrays::ArrayElement::RefCursor =>
+            {
                 Ok(SqlType::Array(found))
             }
             _ => Err(crate::arrays::unsupported_element(element).at(position)),
@@ -2889,7 +2891,10 @@ impl<'t> Parser<'t> {
             rollback_on_conflict,
             overriding,
         });
-        Ok(sqlserver_functions::with_output_into(statement, output_into))
+        Ok(sqlserver_functions::with_output_into(
+            statement,
+            output_into,
+        ))
     }
 
     fn insert_value(&mut self) -> SqlResult<InsertValue> {
@@ -2968,7 +2973,10 @@ impl<'t> Parser<'t> {
             returning,
             from,
         });
-        Ok(sqlserver_functions::with_output_into(statement, output_into))
+        Ok(sqlserver_functions::with_output_into(
+            statement,
+            output_into,
+        ))
     }
 
     fn delete(&mut self) -> SqlResult<Statement> {
@@ -3020,7 +3028,10 @@ impl<'t> Parser<'t> {
             returning,
             using,
         });
-        Ok(sqlserver_functions::with_output_into(statement, output_into))
+        Ok(sqlserver_functions::with_output_into(
+            statement,
+            output_into,
+        ))
     }
 
     fn filter(&mut self) -> SqlResult<Option<Expr>> {

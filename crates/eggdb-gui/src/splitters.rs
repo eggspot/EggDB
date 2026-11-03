@@ -130,7 +130,10 @@ impl RegionSizes {
         let lines = [
             ("sidebar_width", format!("{}", self.sidebar_width.round())),
             ("results_ratio", format!("{:.4}", self.results_ratio)),
-            ("inspector_width", format!("{}", self.inspector_width.round())),
+            (
+                "inspector_width",
+                format!("{}", self.inspector_width.round()),
+            ),
             ("sidebar_shown", self.sidebar_shown.to_string()),
             ("inspector_shown", self.inspector_shown.to_string()),
         ];
@@ -146,7 +149,10 @@ impl RegionSizes {
         Self {
             sidebar_width: self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX).round(),
             results_ratio: self.results_ratio.clamp(lowest, highest),
-            inspector_width: self.inspector_width.clamp(INSPECTOR_MIN, INSPECTOR_MAX).round(),
+            inspector_width: self
+                .inspector_width
+                .clamp(INSPECTOR_MIN, INSPECTOR_MAX)
+                .round(),
             ..self
         }
     }
@@ -249,7 +255,10 @@ mod tests {
     #[test]
     fn keys_move_a_splitter_in_steps_and_stop_at_its_range() {
         let mut sizes = RegionSizes::default();
-        assert_eq!(sizes.key(Splitter::Sidebar, press(Key::Right, false)), Some(true));
+        assert_eq!(
+            sizes.key(Splitter::Sidebar, press(Key::Right, false)),
+            Some(true)
+        );
         assert_eq!(sizes.sidebar_width, 268.0);
         assert_eq!(sizes.notice(Splitter::Sidebar), "Sidebar · 268 px");
         assert_eq!(sizes.spoken(Splitter::Sidebar), "Sidebar width, 268 pixels");
@@ -257,7 +266,10 @@ mod tests {
         assert_eq!(sizes.sidebar_width, 236.0);
         sizes.key(Splitter::Sidebar, press(Key::Home, false));
         assert_eq!(sizes.sidebar_width, SIDEBAR_MIN);
-        assert_eq!(sizes.key(Splitter::Sidebar, press(Key::Left, false)), Some(false));
+        assert_eq!(
+            sizes.key(Splitter::Sidebar, press(Key::Left, false)),
+            Some(false)
+        );
         sizes.key(Splitter::Sidebar, press(Key::End, false));
         assert_eq!(sizes.sidebar_width, SIDEBAR_MAX);
         sizes.key(Splitter::Sidebar, press(Key::Enter, false));
@@ -271,8 +283,14 @@ mod tests {
         assert_eq!(sizes.results_height(), RESULTS_MIN);
         assert_eq!(sizes.notice(Splitter::Results), "Results · 120 px");
         sizes.key(Splitter::Inspector, press(Key::Left, false));
-        assert_eq!(sizes.inspector_width, 288.0, "Left widens the inspector on the right");
-        assert_eq!(sizes.key(Splitter::Inspector, press(Key::Character('a'), false)), None);
+        assert_eq!(
+            sizes.inspector_width, 288.0,
+            "Left widens the inspector on the right"
+        );
+        assert_eq!(
+            sizes.key(Splitter::Inspector, press(Key::Character('a'), false)),
+            None
+        );
     }
 
     #[test]

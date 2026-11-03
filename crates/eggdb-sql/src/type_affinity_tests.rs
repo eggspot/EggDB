@@ -92,7 +92,10 @@ fn keys_on_dynamic_columns_order_null_numbers_text_and_blobs_as_sqlite_does() {
          (-1, 'negative'), (9007199254740993, 'large'), ('', 'empty text')",
     );
     assert_eq!(
-        state(&mut session, "INSERT INTO keyed VALUES (3.0, 'same number')"),
+        state(
+            &mut session,
+            "INSERT INTO keyed VALUES (3.0, 'same number')"
+        ),
         "23505"
     );
     assert_eq!(
@@ -108,7 +111,10 @@ fn keys_on_dynamic_columns_order_null_numbers_text_and_blobs_as_sqlite_does() {
         "v\ninteger\nSELECT 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT v FROM keyed WHERE k = 9007199254740992.0"),
+        last(
+            &mut session,
+            "SELECT v FROM keyed WHERE k = 9007199254740992.0"
+        ),
         "v\nSELECT 0"
     );
     assert_eq!(
@@ -145,7 +151,10 @@ fn indexes_on_dynamic_columns_find_and_order_rows_and_unique_ones_compare_number
         "id\n2\n1\nSELECT 2"
     );
     assert_eq!(
-        last(&mut session, "SELECT id FROM things WHERE raw > 1 ORDER BY raw"),
+        last(
+            &mut session,
+            "SELECT id FROM things WHERE raw > 1 ORDER BY raw"
+        ),
         "id\n2\n1\n3\nSELECT 3"
     );
     assert_eq!(
@@ -193,7 +202,10 @@ fn tables_with_affinities_read_back_from_the_store_with_their_keys() {
         "k\n1\nSELECT 1"
     );
     last(&mut session, "INSERT INTO kept (k, n) VALUES (2, 20)");
-    assert_eq!(state(&mut session, "INSERT INTO kept (k) VALUES ('2')"), "23505");
+    assert_eq!(
+        state(&mut session, "INSERT INTO kept (k) VALUES ('2')"),
+        "23505"
+    );
     assert_eq!(
         last(&mut session, "PRAGMA table_info(kept)"),
         "cid|name|type|notnull|dflt_value|pk\n0|k|TEXT|0|NULL|1\n1|n|NUMERIC|0|NULL|0\n2|r|REAL|0|NULL|0\n3|b|BLOB|0|NULL|0\nSELECT 4"

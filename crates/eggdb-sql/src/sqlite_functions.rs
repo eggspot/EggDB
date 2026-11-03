@@ -795,7 +795,11 @@ mod tests {
             ("*", "", true),
         ];
         for (pattern, text, expected) in cases {
-            assert_eq!(glob_matches(pattern, text), expected, "{text} GLOB {pattern}");
+            assert_eq!(
+                glob_matches(pattern, text),
+                expected,
+                "{text} GLOB {pattern}"
+            );
         }
     }
 

@@ -566,9 +566,7 @@ impl ResultGrid {
             .rows
             .iter()
             .take(SAMPLED_ROWS)
-            .map(|row| {
-                vec![cell_text(row.get(column).and_then(|value| value.as_deref()), kind).0]
-            })
+            .map(|row| vec![cell_text(row.get(column).and_then(|value| value.as_deref()), kind).0])
             .collect();
         column_widths(std::slice::from_ref(name), &cells, &measured)
             .first()
@@ -1549,7 +1547,13 @@ mod tests {
                         Some("{\"k\": [1, 2]}".into()),
                         Some("\\x0aff".into()),
                     ],
-                    vec![Some("NaN".into()), None, Some("f".into()), Some("{1,2}".into()), None],
+                    vec![
+                        Some("NaN".into()),
+                        None,
+                        Some("f".into()),
+                        Some("{1,2}".into()),
+                        None,
+                    ],
                 ],
                 2,
                 vec![60.0; 5],
@@ -1574,8 +1578,14 @@ mod tests {
             grid.key(press(Key::ContextMenu, false, false), 10),
             GridAnswer::OpenMenu
         );
-        assert_eq!(grid.key(press(Key::F10, false, false), 10), GridAnswer::Ignored);
-        assert_eq!(grid.menu_item(GridMenuItem::OpenValue), GridAnswer::OpenValue);
+        assert_eq!(
+            grid.key(press(Key::F10, false, false), 10),
+            GridAnswer::Ignored
+        );
+        assert_eq!(
+            grid.menu_item(GridMenuItem::OpenValue),
+            GridAnswer::OpenValue
+        );
         grid.menu_item(GridMenuItem::SelectAll);
         assert_eq!(grid.selection(), (0..3, 0..3));
     }

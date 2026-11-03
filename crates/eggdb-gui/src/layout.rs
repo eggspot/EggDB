@@ -193,9 +193,27 @@ pub fn eggdb_key(action: LayoutAction) -> KeyPress {
 
 const SSMS_KEYS: [Shortcut; 4] = [
     shortcut(LayoutAction::RunAll, Key::F5, Held::Nothing, false, false),
-    shortcut(LayoutAction::RunAll, Key::Character('e'), Held::Primary, false, false),
-    shortcut(LayoutAction::RunAll, Key::Character('x'), Held::Nothing, false, true),
-    shortcut(LayoutAction::Explain, Key::Character('l'), Held::Primary, false, false),
+    shortcut(
+        LayoutAction::RunAll,
+        Key::Character('e'),
+        Held::Primary,
+        false,
+        false,
+    ),
+    shortcut(
+        LayoutAction::RunAll,
+        Key::Character('x'),
+        Held::Nothing,
+        false,
+        true,
+    ),
+    shortcut(
+        LayoutAction::Explain,
+        Key::Character('l'),
+        Held::Primary,
+        false,
+        false,
+    ),
 ];
 const PGADMIN_KEYS: [Shortcut; 1] = [shortcut(
     LayoutAction::RunAll,
@@ -205,9 +223,27 @@ const PGADMIN_KEYS: [Shortcut; 1] = [shortcut(
     false,
 )];
 const DBEAVER_KEYS: [Shortcut; 3] = [
-    shortcut(LayoutAction::RunStatement, Key::Enter, Held::Primary, false, false),
-    shortcut(LayoutAction::RunAll, Key::Character('x'), Held::Nothing, false, true),
-    shortcut(LayoutAction::Explain, Key::Character('e'), Held::Primary, true, false),
+    shortcut(
+        LayoutAction::RunStatement,
+        Key::Enter,
+        Held::Primary,
+        false,
+        false,
+    ),
+    shortcut(
+        LayoutAction::RunAll,
+        Key::Character('x'),
+        Held::Nothing,
+        false,
+        true,
+    ),
+    shortcut(
+        LayoutAction::Explain,
+        Key::Character('e'),
+        Held::Primary,
+        true,
+        false,
+    ),
 ];
 const DATAGRIP_KEYS: [Shortcut; 1] = [shortcut(
     LayoutAction::RunStatement,
@@ -217,9 +253,21 @@ const DATAGRIP_KEYS: [Shortcut; 1] = [shortcut(
     false,
 )];
 const WORKBENCH_KEYS: [Shortcut; 3] = [
-    shortcut(LayoutAction::RunStatement, Key::Enter, Held::Primary, false, false),
+    shortcut(
+        LayoutAction::RunStatement,
+        Key::Enter,
+        Held::Primary,
+        false,
+        false,
+    ),
     shortcut(LayoutAction::RunAll, Key::Enter, Held::Primary, true, false),
-    shortcut(LayoutAction::Explain, Key::Character('x'), Held::Primary, false, true),
+    shortcut(
+        LayoutAction::Explain,
+        Key::Character('x'),
+        Held::Primary,
+        false,
+        true,
+    ),
 ];
 const COMPASS_KEYS: [Shortcut; 1] = [shortcut(
     LayoutAction::RunAll,
@@ -641,15 +689,27 @@ mod tests {
         let explain = eggdb_key(LayoutAction::Explain);
         let ssms = Layout::Ssms;
         assert_eq!(ssms.translate(press(Key::F5, false, false, false)), run_all);
-        assert_eq!(ssms.translate(press(Key::Character('E'), true, false, false)), run_all);
+        assert_eq!(
+            ssms.translate(press(Key::Character('E'), true, false, false)),
+            run_all
+        );
         assert_eq!(ssms.translate(explain), run_all);
-        assert_eq!(ssms.translate(press(Key::Character('x'), false, false, true)), run_all);
-        assert_eq!(ssms.translate(press(Key::Character('l'), true, false, false)), explain);
+        assert_eq!(
+            ssms.translate(press(Key::Character('x'), false, false, true)),
+            run_all
+        );
+        assert_eq!(
+            ssms.translate(press(Key::Character('l'), true, false, false)),
+            explain
+        );
         let typed = press(Key::Character('l'), false, false, false);
         assert_eq!(ssms.translate(typed), typed);
         let run_statement = eggdb_key(LayoutAction::RunStatement);
         assert_eq!(ssms.translate(run_statement), run_statement);
-        assert_eq!(ssms.shortcut_label(LayoutAction::RunAll), Some("F5".to_owned()));
+        assert_eq!(
+            ssms.shortcut_label(LayoutAction::RunAll),
+            Some("F5".to_owned())
+        );
         assert!(
             ssms.shortcut_label(LayoutAction::Explain)
                 .is_some_and(|label| label.ends_with("+L"))
@@ -690,12 +750,20 @@ mod tests {
             Layout::Workbench.translate(press(Key::Character('x'), true, false, true)),
             explain
         );
-        assert_eq!(Layout::PgAdmin.translate(press(Key::F5, false, false, false)), run_all);
+        assert_eq!(
+            Layout::PgAdmin.translate(press(Key::F5, false, false, false)),
+            run_all
+        );
         let enter = KeyPress::plain(Key::Enter);
         assert_eq!(Layout::Compass.translate(enter), run_all);
         assert_eq!(Layout::DataGrip.translate(enter), enter);
         assert_eq!(Layout::RedisInsight.translate(run_statement), run_all);
-        for key in [Key::F5, Key::Enter, Key::Character('e'), Key::Character('l')] {
+        for key in [
+            Key::F5,
+            Key::Enter,
+            Key::Character('e'),
+            Key::Character('l'),
+        ] {
             for (primary, shift, alt) in [
                 (false, false, false),
                 (true, false, false),

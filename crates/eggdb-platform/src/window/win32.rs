@@ -385,7 +385,10 @@ mod tests {
     #[test]
     fn a_drag_without_files_is_refused_and_a_leave_ends_the_ring() {
         let mut target = FileDragTarget::default();
-        assert_eq!(target.enter(Vec::new(), DROPEFFECT_COPY), (DROPEFFECT_NONE, None));
+        assert_eq!(
+            target.enter(Vec::new(), DROPEFFECT_COPY),
+            (DROPEFFECT_NONE, None)
+        );
         assert_eq!(target.over(DROPEFFECT_COPY), DROPEFFECT_NONE);
         assert_eq!(target.leave(), None);
         let file = vec![PathBuf::from("shop.eggdb")];

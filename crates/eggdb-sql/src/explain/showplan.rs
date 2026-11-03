@@ -274,10 +274,14 @@ pub(crate) fn showplan_all(
             });
         }
     }
-    columns.extend(SHOWPLAN_ALL_COLUMNS.iter().map(|(name, sql_type)| OutputColumn {
-        name: (*name).to_owned(),
-        sql_type: Some(*sql_type),
-    }));
+    columns.extend(
+        SHOWPLAN_ALL_COLUMNS
+            .iter()
+            .map(|(name, sql_type)| OutputColumn {
+                name: (*name).to_owned(),
+                sql_type: Some(*sql_type),
+            }),
+    );
     let measured = |row: &mut Vec<Value>, measured: bool| {
         if let Some(rows) = profiled_rows {
             if measured {
@@ -317,10 +321,7 @@ pub(crate) fn showplan_all(
             parent,
             Value::Text(operator.physical.to_owned()),
             Value::Text(operator.logical.to_owned()),
-            operator
-                .argument
-                .clone()
-                .map_or(Value::Null, Value::Text),
+            operator.argument.clone().map_or(Value::Null, Value::Text),
         ]);
         nulls(&mut row, 8);
         row.push(Value::Text("PLAN_ROW".to_owned()));

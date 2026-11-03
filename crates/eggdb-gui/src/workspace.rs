@@ -21,12 +21,12 @@ use crate::inspector;
 use crate::layout::Layout;
 use crate::layout_picker::{self, LayoutPicker, PickerOutcome};
 use crate::main_window::{self, Faces, MainWindow, WindowAction};
-use crate::settings::ClientSettings;
-use crate::splitters::RegionSizes;
 use crate::object_browser::TreeItem;
 use crate::plan_view;
 use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::query_tab::{RunRequest, TabAction};
+use crate::settings::ClientSettings;
+use crate::splitters::RegionSizes;
 
 /// How long an open runs before the card shows its progress state, so a quick open never
 /// flickers.
@@ -230,10 +230,8 @@ impl Workspace {
         let Some(path) = self.settings_path.clone() else {
             return;
         };
-        let settings = ClientSettings {
-            layout: Some(layout),
-            ..ClientSettings::load(&path)
-        };
+        let mut settings = ClientSettings::load(&path);
+        settings.layout = Some(layout);
         if let Err(error) = settings.save(&path) {
             let notice = format!("{} applies to this window only: {error}", layout.label());
             match &mut self.screen {
@@ -282,10 +280,7 @@ impl Workspace {
     fn picker_size(&self, size: (u32, u32)) -> (f32, f32) {
         match &self.screen {
             Screen::Connect(_) => (size.0 as f32, size.1 as f32),
-            Screen::Main(window) => (
-                window.width as f32,
-                main_window::HEIGHT as f32,
-            ),
+            Screen::Main(window) => (window.width as f32, main_window::HEIGHT as f32),
         }
     }
 
@@ -1789,7 +1784,9 @@ mod tests {
         let window = workspace.main_window_mut().unwrap();
         assert_eq!(window.tab.transaction, TransactionStatus::Idle);
         assert_eq!(
-            window.other_tab_in_transaction().map(|tab| tab.title.as_str()),
+            window
+                .other_tab_in_transaction()
+                .map(|tab| tab.title.as_str()),
             Some("Query 1")
         );
         window.show_tab(0);
@@ -1894,7 +1891,14 @@ mod tests {
         let window = workspace.main_window_mut().unwrap();
         assert!(window.drop_prompt.is_none());
         assert_eq!(window.tab.notice.as_deref(), Some("Dropped table gone"));
-        assert!(!window.tree.catalog.tables.iter().any(|table| table.name == "gone"));
+        assert!(
+            !window
+                .tree
+                .catalog
+                .tables
+                .iter()
+                .any(|table| table.name == "gone")
+        );
         assert_eq!(
             window.tree.selected,
             Some(TreeItem::Group(crate::object_browser::Group::Tables))
@@ -2554,10 +2558,7 @@ mod tests {
         again.key(KeyPress::plain(Key::Up), now);
         again.key(KeyPress::plain(Key::Enter), now);
         assert_eq!(again.layout(), Layout::Ssms);
-        assert_eq!(
-            ClientSettings::load(&settings).layout,
-            Some(Layout::Ssms)
-        );
+        assert_eq!(ClientSettings::load(&settings).layout, Some(Layout::Ssms));
     }
 
     fn workspace_with_settings(directory: &Path, settings: &Path) -> Workspace {
@@ -2598,7 +2599,12 @@ mod tests {
         let row = layout_picker::row_rect((1280.0, 800.0), 7);
         let later = now + Duration::from_secs(5);
         press(&mut workspace, row.x + 10.0, row.y + 10.0, later);
-        press(&mut workspace, row.x + 10.0, row.y + 10.0, later + Duration::from_millis(50));
+        press(
+            &mut workspace,
+            row.x + 10.0,
+            row.y + 10.0,
+            later + Duration::from_millis(50),
+        );
         assert_eq!(workspace.layout(), Layout::RedisInsight);
         assert!(card(&mut workspace).layout_picker.is_none());
     }

@@ -31,12 +31,12 @@ use crate::lexer::tokenize_in;
 use crate::parser::{Parameters, Parser};
 use crate::pg_catalog::CatalogType;
 use crate::records::{self, RECORD_OID};
+use crate::routine_settings::RoutineSettings;
 use crate::routines::{
     ReturnType, RoutineDefinition, RoutineKind, RoutineLanguage, RoutineReturns, Volatility,
 };
 use crate::schemas::{base_name, display};
 use crate::session::{OutputColumn, QueryResult};
-use crate::routine_settings::RoutineSettings;
 use crate::settings::{SettingChange, SettingScope, Settings};
 use crate::store::KeyValueWrite;
 use crate::types::{Conversion, SqlType, Value, compare_values, convert};

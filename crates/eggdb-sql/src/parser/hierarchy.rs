@@ -1,7 +1,7 @@
 use super::{Level, Parser};
 use crate::ast::{
-    DerivedTable, Expr, ExprKind, FromClause, Hierarchy, HierarchyOutput, Literal, Name,
-    OrderItem, Query, Select, SelectItem, SetExpr, TableReference,
+    DerivedTable, Expr, ExprKind, FromClause, Hierarchy, HierarchyOutput, Literal, Name, OrderItem,
+    Query, Select, SelectItem, SetExpr, TableReference,
 };
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -160,7 +160,10 @@ fn outside_hierarchy(expr: &Expr) -> SqlResult<()> {
 fn plain_operand(expr: &Expr) -> SqlResult<Expr> {
     match first_hierarchical_operator(expr) {
         Some((name, position)) => Err(refused_here(
-            &format!("{} inside a hierarchical operator", name.to_ascii_uppercase()),
+            &format!(
+                "{} inside a hierarchical operator",
+                name.to_ascii_uppercase()
+            ),
             position,
         )),
         None => Ok(expr.clone()),
@@ -211,7 +214,12 @@ impl HierarchyBuilder<'_> {
     }
 
     fn output(&mut self, output: HierarchyOutput) -> String {
-        let number = match self.hierarchy.outputs.iter().position(|known| *known == output) {
+        let number = match self
+            .hierarchy
+            .outputs
+            .iter()
+            .position(|known| *known == output)
+        {
             Some(number) => number,
             None => {
                 self.hierarchy.outputs.push(output);
@@ -225,7 +233,8 @@ impl HierarchyBuilder<'_> {
         let position = expr.position;
         match hierarchical_operator(expr) {
             Some(PRIOR) => {
-                let argument = only_argument(expr).ok_or_else(|| refused_here("PRIOR", position))?;
+                let argument =
+                    only_argument(expr).ok_or_else(|| refused_here("PRIOR", position))?;
                 let input = self.input(plain_operand(argument)?);
                 self.hierarchy.prior_inputs.push(input);
                 return Ok(slot(PARENT_SLOTS + input, position));
@@ -250,7 +259,10 @@ impl HierarchyBuilder<'_> {
             return Ok(slot(input, position));
         }
         if matches!(expr.kind, ExprKind::Subquery(_)) {
-            return Err(refused_here("a subquery beside PRIOR or LEVEL in CONNECT BY", position));
+            return Err(refused_here(
+                "a subquery beside PRIOR or LEVEL in CONNECT BY",
+                position,
+            ));
         }
         crate::aggregate::rebuild(expr, &mut |child| self.connect_condition(child))
     }
@@ -383,9 +395,10 @@ pub(super) fn connect_by(mut select: Select, clause: HierarchicalClause) -> SqlR
     let position = clause.position;
     let (label, from) = match select.from.take() {
         None => (DUAL.to_owned(), None),
-        Some(from) if from.joins.is_empty() => {
-            (super::joined_dml::label_of(&from.first).to_owned(), Some(from))
-        }
+        Some(from) if from.joins.is_empty() => (
+            super::joined_dml::label_of(&from.first).to_owned(),
+            Some(from),
+        ),
         Some(_) => return Err(refused_here("CONNECT BY over a join", position)),
     };
     let mut inner = Select {

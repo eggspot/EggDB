@@ -1360,10 +1360,7 @@ impl<'a> JoinedRows<'a> {
                     None => Access::IndexLookup {
                         position,
                         lefts,
-                        probe: RefCell::new(IndexProbe::new(
-                            table.id,
-                            table.indexes[position].id,
-                        )),
+                        probe: RefCell::new(IndexProbe::new(table.id, table.indexes[position].id)),
                     },
                 }
             } else if !pairs.is_empty() {
@@ -1503,7 +1500,11 @@ impl<'a> JoinedRows<'a> {
     }
 
     fn passes(&self, level: usize, row: &[Value]) -> SqlResult<bool> {
-        let Some(filters) = self.filters.get(level).filter(|filters| !filters.is_empty()) else {
+        let Some(filters) = self
+            .filters
+            .get(level)
+            .filter(|filters| !filters.is_empty())
+        else {
             return Ok(true);
         };
         let evaluator = Evaluator {
@@ -1848,7 +1849,11 @@ mod tests {
     fn a_reused_index_probe_holds_only_the_latest_value_after_its_prefix() {
         let mut probe = IndexProbe::new(7, 3);
         let mut ranges = Vec::new();
-        for value in [Value::BigInt(123_456_789), Value::BigInt(5), Value::BigInt(-1)] {
+        for value in [
+            Value::BigInt(123_456_789),
+            Value::BigInt(5),
+            Value::BigInt(-1),
+        ] {
             encode_column_key(probe.restart(), &value, SqlType::BigInt);
             probe.close_range();
             ranges.push((probe.start.clone(), probe.end.clone()));

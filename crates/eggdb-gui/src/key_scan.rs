@@ -272,10 +272,8 @@ mod tests {
 
     #[test]
     fn a_file_scan_reads_the_first_hundred_keys_of_a_space_in_key_order() {
-        let path = std::env::temp_dir().join(format!(
-            "eggdb-gui-key-scan-{}.eggdb",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("eggdb-gui-key-scan-{}.eggdb", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let database = Database::open(&path).expect("the file opens");
         database

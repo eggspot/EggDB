@@ -76,7 +76,10 @@ fn sqlserver_select_into_makes_a_table_from_the_rows_and_columns_of_the_query() 
         vec![vec![Value::Integer(3)]]
     );
     assert_eq!(
-        tag(&mut session, "SELECT * INTO empty FROM products WHERE 1 = 0"),
+        tag(
+            &mut session,
+            "SELECT * INTO empty FROM products WHERE 1 = 0"
+        ),
         "SELECT 0"
     );
     assert_eq!(

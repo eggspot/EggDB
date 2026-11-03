@@ -303,7 +303,11 @@ pub(crate) fn create_plan_table(table: &str) -> String {
         .iter()
         .map(|(name, sql_type)| format!("{} {sql_type}", crate::schema::quoted(name)))
         .collect();
-    format!("CREATE TABLE {} ({})", written_name(table), columns.join(", "))
+    format!(
+        "CREATE TABLE {} ({})",
+        written_name(table),
+        columns.join(", ")
+    )
 }
 
 /// `INSERT` of one plan row into `table` under `plan_id` and `statement_id`.
@@ -543,7 +547,10 @@ mod tests {
             .collect();
         assert_eq!(result.rows, expected);
         assert_eq!(
-            result.columns.as_ref().map(|columns| columns[0].name.as_str()),
+            result
+                .columns
+                .as_ref()
+                .map(|columns| columns[0].name.as_str()),
             Some("plan_table_output")
         );
     }
@@ -562,7 +569,13 @@ mod tests {
 
     #[test]
     fn hostile_depths_and_quotes_never_panic() {
-        let rows = [displayed(0, u64::MAX, "SELECT STATEMENT", Some("x'y"), Some("é"))];
+        let rows = [displayed(
+            0,
+            u64::MAX,
+            "SELECT STATEMENT",
+            Some("x'y"),
+            Some("é"),
+        )];
         assert_eq!(display_lines(&rows).len(), 11);
         assert_eq!(text_literal(Some("it's")), "'it''s'");
         assert_eq!(number_literal(None), "NULL");

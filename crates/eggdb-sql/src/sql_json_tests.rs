@@ -597,10 +597,22 @@ fn is_json_tests_shape_and_unique_keys() {
         ("SELECT '{}' IS JSON SCALAR", "f"),
         ("SELECT '{}' IS JSON VALUE", "t"),
         ("SELECT '{\"a\": 1, \"a\": 2}' IS JSON", "t"),
-        ("SELECT '{\"a\": 1, \"a\": 2}' IS JSON WITH UNIQUE KEYS", "f"),
-        ("SELECT '{\"a\": 1, \"a\": 2}' IS JSON OBJECT WITHOUT UNIQUE", "t"),
-        ("SELECT '[{\"k\": 1, \"k\": 2}]'::json IS JSON WITH UNIQUE", "f"),
-        ("SELECT '{\"a\": 1, \"a\": 2}'::jsonb IS JSON WITH UNIQUE KEYS", "t"),
+        (
+            "SELECT '{\"a\": 1, \"a\": 2}' IS JSON WITH UNIQUE KEYS",
+            "f",
+        ),
+        (
+            "SELECT '{\"a\": 1, \"a\": 2}' IS JSON OBJECT WITHOUT UNIQUE",
+            "t",
+        ),
+        (
+            "SELECT '[{\"k\": 1, \"k\": 2}]'::json IS JSON WITH UNIQUE",
+            "f",
+        ),
+        (
+            "SELECT '{\"a\": 1, \"a\": 2}'::jsonb IS JSON WITH UNIQUE KEYS",
+            "t",
+        ),
         ("SELECT NULL::text IS JSON", "NULL"),
         ("SELECT '\\x5b315d'::bytea IS JSON ARRAY", "t"),
     ];
@@ -644,7 +656,10 @@ fn json_json_scalar_and_json_serialize_construct_and_print_json() {
         ("SELECT json(NULL::text)", "NULL"),
         ("SELECT pg_typeof(json('1'))::text", "json"),
         ("SELECT json_scalar(123.45)", "123.45"),
-        ("SELECT json_scalar('he said \"hi\"')", "\"he said \\\"hi\\\"\""),
+        (
+            "SELECT json_scalar('he said \"hi\"')",
+            "\"he said \\\"hi\\\"\"",
+        ),
         ("SELECT json_scalar(true)", "true"),
         ("SELECT json_scalar('2024-05-10'::date)", "\"2024-05-10\""),
         ("SELECT json_scalar(NULL::int)", "NULL"),
@@ -663,14 +678,20 @@ fn json_json_scalar_and_json_serialize_construct_and_print_json() {
         assert_eq!(one(&mut session, sql), expected, "{sql}");
     }
     assert_eq!(
-        run(&mut session, "SELECT json('1'), json_scalar(1), json_serialize('1')")
-            .expect("columns")
-            .lines()
-            .next(),
+        run(
+            &mut session,
+            "SELECT json('1'), json_scalar(1), json_serialize('1')"
+        )
+        .expect("columns")
+        .lines()
+        .next(),
         Some("json|json_scalar|json_serialize")
     );
     let failures = [
-        ("SELECT json('{\"a\": 1, \"a\": 2}' WITH UNIQUE KEYS)", "22030"),
+        (
+            "SELECT json('{\"a\": 1, \"a\": 2}' WITH UNIQUE KEYS)",
+            "22030",
+        ),
         ("SELECT json('{oops')", "22P02"),
         ("SELECT json(42)", "42804"),
         ("SELECT json_serialize('[1]' RETURNING integer)", "42804"),
@@ -686,12 +707,30 @@ fn the_decimal_path_method_rounds_to_its_precision_and_scale() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     let cases = [
-        ("SELECT jsonb_path_query('1234.5678', '$.decimal(6, 2)')", "1234.57"),
-        ("SELECT jsonb_path_query('1234.5678', '$.decimal()')", "1234.5678"),
-        ("SELECT jsonb_path_query('\"12.345\"', '$.decimal(4, 1)')", "12.3"),
-        ("SELECT jsonb_path_query('1234.5678', '$.decimal(6)')", "1235"),
-        ("SELECT jsonb_path_query('1250', '$.decimal(4, -2)')", "1300"),
-        ("SELECT jsonb_path_query('[1.25, 2.5]', '$.decimal(3, 1)')", "1.3"),
+        (
+            "SELECT jsonb_path_query('1234.5678', '$.decimal(6, 2)')",
+            "1234.57",
+        ),
+        (
+            "SELECT jsonb_path_query('1234.5678', '$.decimal()')",
+            "1234.5678",
+        ),
+        (
+            "SELECT jsonb_path_query('\"12.345\"', '$.decimal(4, 1)')",
+            "12.3",
+        ),
+        (
+            "SELECT jsonb_path_query('1234.5678', '$.decimal(6)')",
+            "1235",
+        ),
+        (
+            "SELECT jsonb_path_query('1250', '$.decimal(4, -2)')",
+            "1300",
+        ),
+        (
+            "SELECT jsonb_path_query('[1.25, 2.5]', '$.decimal(3, 1)')",
+            "1.3",
+        ),
     ];
     for (sql, expected) in cases {
         assert_eq!(
@@ -701,10 +740,19 @@ fn the_decimal_path_method_rounds_to_its_precision_and_scale() {
         );
     }
     let failures = [
-        ("SELECT jsonb_path_query('1234.5678', '$.decimal(4, 2)')", "2203G"),
+        (
+            "SELECT jsonb_path_query('1234.5678', '$.decimal(4, 2)')",
+            "2203G",
+        ),
         ("SELECT jsonb_path_query('1', '$.decimal(0)')", "22023"),
-        ("SELECT jsonb_path_query('1', '$.decimal(9999999999)')", "22023"),
-        ("SELECT jsonb_path_query('\"abc\"', '$.decimal(4)')", "2203G"),
+        (
+            "SELECT jsonb_path_query('1', '$.decimal(9999999999)')",
+            "22023",
+        ),
+        (
+            "SELECT jsonb_path_query('\"abc\"', '$.decimal(4)')",
+            "2203G",
+        ),
         ("SELECT jsonb_path_query('1', '$.decimal(1.5)')", "42601"),
     ];
     for (sql, expected) in failures {

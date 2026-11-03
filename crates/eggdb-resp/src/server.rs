@@ -108,12 +108,14 @@ impl Connection<'_> {
         let started = std::thread::Builder::new()
             .name("eggdb-resp-push".to_owned())
             .spawn(move || {
-                for queued in receiver {
+                for Queued { frame, held } in receiver {
                     forwarded.fetch_sub(1, Ordering::AcqRel);
                     let mut stream = writer
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if stream.write_all(&queued.frame).is_err() {
+                    let written = stream.write_all(&frame);
+                    drop(held);
+                    if written.is_err() {
                         return;
                     }
                 }

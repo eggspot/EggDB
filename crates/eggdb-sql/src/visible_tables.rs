@@ -616,7 +616,8 @@ fn quoted_in(dialect: Dialect, name: &str) -> String {
 }
 
 fn starts_with_with(query: &str) -> bool {
-    let trimmed = query.trim_start_matches(|character: char| character.is_whitespace() || character == '(');
+    let trimmed =
+        query.trim_start_matches(|character: char| character.is_whitespace() || character == '(');
     trimmed
         .get(..4)
         .is_some_and(|word| word.eq_ignore_ascii_case("with"))
@@ -674,7 +675,8 @@ const UNIQUE_HIDDEN: &str =
     "a unique index over a column this session cannot see would be checked against other rows";
 const FOREIGN_KEY_HIDDEN: &str =
     "a foreign key over a column this session cannot see would be checked against its table";
-const PARTITIONED_HIDDEN: &str = "it is partitioned or a partition, and its bounds may use a column this session cannot see";
+const PARTITIONED_HIDDEN: &str =
+    "it is partitioned or a partition, and its bounds may use a column this session cannot see";
 const REFERENCED_THROUGH_HIDDEN: &str =
     "a foreign key of another listed table points at a column of it this session cannot see";
 
@@ -1604,18 +1606,9 @@ enum Refusal {
     Narrowed(String),
     NarrowedView(String),
     NarrowedDelete(String),
-    HiddenInsert {
-        table: String,
-        reason: &'static str,
-    },
-    HiddenUpdate {
-        table: String,
-        reason: &'static str,
-    },
-    TiedColumn {
-        table: String,
-        column: String,
-    },
+    HiddenInsert { table: String, reason: &'static str },
+    HiddenUpdate { table: String, reason: &'static str },
+    TiedColumn { table: String, column: String },
     Shared,
     Trigger,
     Code { routine: String, place: StoredCode },

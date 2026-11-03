@@ -107,8 +107,7 @@ fn table_definition(
     let position = create.name.position;
     let mut definitions = Vec::with_capacity(columns.len());
     for column in columns {
-        if dialect == Dialect::SqlServer && (column.name.is_empty() || column.name == "?column?")
-        {
+        if dialect == Dialect::SqlServer && (column.name.is_empty() || column.name == "?column?") {
             return Err(missing_column_name(position));
         }
         definitions.push(ColumnDefinition {

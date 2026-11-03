@@ -831,7 +831,12 @@ impl Session<'_> {
         &mut self,
         statement: &crate::ast::Statement,
         binding: &Binding<'_>,
-    ) -> SqlResult<Option<(crate::execute::ExplainedQuery, crate::explain::PlannedStatement)>> {
+    ) -> SqlResult<
+        Option<(
+            crate::execute::ExplainedQuery,
+            crate::explain::PlannedStatement,
+        )>,
+    > {
         let Some(planned) = crate::explain::PlannedStatement::of(statement) else {
             return Ok(None);
         };

@@ -309,7 +309,12 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, prompt: &DropPrompt, size: (f32,
     let dialog = dialog_rect(size);
     paint.canvas.fill_rounded_rect(dialog, 8.0, theme.border);
     paint.canvas.fill_rounded_rect(
-        Rect::new(dialog.x + 1.0, dialog.y + 1.0, dialog.w - 2.0, dialog.h - 2.0),
+        Rect::new(
+            dialog.x + 1.0,
+            dialog.y + 1.0,
+            dialog.w - 2.0,
+            dialog.h - 2.0,
+        ),
         7.0,
         theme.bg0,
     );
@@ -323,22 +328,45 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, prompt: &DropPrompt, size: (f32,
     );
     if prompt.error.is_some() {
         let line = elided(faces.ui, prompt.body(), ERROR_LIMIT, SMALL.0);
-        paint.text(faces.ui, &line, dialog.x + 24.0, dialog.y + 54.0, SMALL, theme.error);
+        paint.text(
+            faces.ui,
+            &line,
+            dialog.x + 24.0,
+            dialog.y + 54.0,
+            SMALL,
+            theme.error,
+        );
     } else {
         let line = elided(faces.ui, prompt.body(), ERROR_LIMIT, BODY.0);
-        paint.text(faces.ui, &line, dialog.x + 24.0, dialog.y + 52.0, BODY, theme.text_primary);
+        paint.text(
+            faces.ui,
+            &line,
+            dialog.x + 24.0,
+            dialog.y + 52.0,
+            BODY,
+            theme.text_primary,
+        );
     }
     let statement = statement_rect(dialog);
     paint.canvas.fill_rounded_rect(statement, 4.0, theme.border);
     paint.canvas.fill_rounded_rect(
-        Rect::new(statement.x + 1.0, statement.y + 1.0, statement.w - 2.0, statement.h - 2.0),
+        Rect::new(
+            statement.x + 1.0,
+            statement.y + 1.0,
+            statement.w - 2.0,
+            statement.h - 2.0,
+        ),
         3.0,
         theme.bg1,
     );
-    for (index, line) in
-        wrapped_per_character(faces.mono, &prompt.statement, STATEMENT_TEXT_WIDTH, STATEMENT_LINES)
-            .iter()
-            .enumerate()
+    for (index, line) in wrapped_per_character(
+        faces.mono,
+        &prompt.statement,
+        STATEMENT_TEXT_WIDTH,
+        STATEMENT_LINES,
+    )
+    .iter()
+    .enumerate()
     {
         paint.text(
             faces.mono,
@@ -356,7 +384,14 @@ pub(crate) fn draw(paint: &mut Painter<'_, '_>, prompt: &DropPrompt, size: (f32,
     } else {
         theme.text_disabled
     };
-    paint.text(faces.ui, "Drop", drop.x + 12.0, drop.y + 5.0, BODY, drop_color);
+    paint.text(
+        faces.ui,
+        "Drop",
+        drop.x + 12.0,
+        drop.y + 5.0,
+        BODY,
+        drop_color,
+    );
     paint.button(cancel, Button::Primary);
     paint.text(
         faces.ui,
@@ -490,7 +525,10 @@ mod tests {
             "DROP VIEW `Order Totals`;"
         );
         assert_eq!(
-            drop_statement(&target(DropKind::Sequence, "Order Seq"), QueryDialect::SqlServer),
+            drop_statement(
+                &target(DropKind::Sequence, "Order Seq"),
+                QueryDialect::SqlServer
+            ),
             "DROP SEQUENCE [Order Seq];"
         );
     }
@@ -533,11 +571,22 @@ mod tests {
         assert_eq!(prompt.body(), "COMMIT or ROLLBACK in Query 2 first.");
         prompt.focus = DropFocus::Drop;
         assert_eq!(prompt.key(press(Key::Enter, false)), DropAnswer::Pending);
-        assert_eq!(blocked_body("Query 3", true), "Wait for Query 3 to finish first.");
         assert_eq!(
-            dropped_toast(&target(DropKind::Trigger { table: "t".to_owned() }, "g")),
+            blocked_body("Query 3", true),
+            "Wait for Query 3 to finish first."
+        );
+        assert_eq!(
+            dropped_toast(&target(
+                DropKind::Trigger {
+                    table: "t".to_owned()
+                },
+                "g"
+            )),
             "Dropped trigger g"
         );
-        assert_eq!(dialog_rect((1280.0, 800.0)), Rect::new(430.0, 304.0, 420.0, 192.0));
+        assert_eq!(
+            dialog_rect((1280.0, 800.0)),
+            Rect::new(430.0, 304.0, 420.0, 192.0)
+        );
     }
 }

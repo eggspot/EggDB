@@ -9,8 +9,8 @@ mod restore;
 mod savepoints;
 mod sqlite;
 pub(crate) mod sqlserver;
-mod triggers;
 mod transaction_settings;
+mod triggers;
 mod tsql;
 
 pub use oracle_over_tds::{PlsqlParameter, PlsqlProcedure};
@@ -2353,7 +2353,11 @@ impl<'s> Session<'s> {
 
     fn materialized_views_registered(&mut self) -> SqlResult<bool> {
         let internal = crate::schemas::qualified("eggdb_internal", "materialized_views");
-        self.read(|reader, _| Ok(reader.get(&crate::encoding::table_key(&internal))?.is_some()))
+        self.read(|reader, _| {
+            Ok(reader
+                .get(&crate::encoding::table_key(&internal))?
+                .is_some())
+        })
     }
 
     fn materialized_view_query(&mut self, name: &str) -> SqlResult<Option<String>> {
@@ -3335,11 +3339,10 @@ impl<'s> Session<'s> {
             Statement::CreateTableAs(create) => self.write("SELECT INTO", |writer, tables| {
                 crate::create_table_as::run(writer, tables, binding, dialect, create)
             }),
-            Statement::MultitableInsert(insert) => {
-                self.write_firing_triggers("INSERT", |writer, tables| {
+            Statement::MultitableInsert(insert) => self
+                .write_firing_triggers("INSERT", |writer, tables| {
                     crate::multitable_insert::run(writer, tables, binding, insert)
-                })
-            }
+                }),
             Statement::SqlServer(SqlServerStatement::OutputInto(output)) => {
                 self.run_output_into(output, binding)
             }

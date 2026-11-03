@@ -17,11 +17,11 @@ use eggdb_gui::connect_screen::{
     self, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
 };
 use eggdb_gui::connection::{EngineConnector, home_directory};
-use eggdb_gui::main_window::{self, Faces};
 use eggdb_gui::layout::Layout;
+use eggdb_gui::main_window::{self, Faces};
 use eggdb_gui::png::encode_png;
-use eggdb_gui::settings::{SETTINGS_VARIABLE, settings_path};
 use eggdb_gui::pointer::clamp_to_minimum;
+use eggdb_gui::settings::{SETTINGS_VARIABLE, settings_path};
 use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
 use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
 use eggdb_platform::window::{
@@ -512,7 +512,9 @@ mod tests {
         assert!(parse(&["--layout", "toad"]).is_err());
         assert!(parse(&["--layout"]).is_err());
         assert!(!laid_out.reduced_motion);
-        let still = parse(&["--png", "a.png", "--reduced-motion"]).unwrap().unwrap();
+        let still = parse(&["--png", "a.png", "--reduced-motion"])
+            .unwrap()
+            .unwrap();
         assert!(still.reduced_motion);
         assert!(!opening.create_if_missing && opening.read_only && !opening.file_dialog);
         let scripted = parse(&["--window", "--frames", "3", "--box-text"])

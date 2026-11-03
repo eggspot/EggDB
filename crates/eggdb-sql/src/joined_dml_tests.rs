@@ -155,7 +155,10 @@ fn update_from_refuses_the_target_listed_again_under_its_own_name() {
         "UPDATE 1"
     );
     assert_eq!(
-        last(&mut session, "SELECT sales_count FROM employees WHERE id = 1"),
+        last(
+            &mut session,
+            "SELECT sales_count FROM employees WHERE id = 1"
+        ),
         "sales_count\n5\nSELECT 1"
     );
 }
@@ -315,7 +318,10 @@ fn mysql_multiple_table_update_refuses_unclear_and_unknown_columns() {
         .contains("Unknown column 'other.price'")
     );
     assert_eq!(
-        last(&mut session, "UPDATE items SET items.price = 5 WHERE id = 1"),
+        last(
+            &mut session,
+            "UPDATE items SET items.price = 5 WHERE id = 1"
+        ),
         "UPDATE 1"
     );
 }
@@ -347,10 +353,7 @@ fn mysql_multiple_table_delete_removes_rows_from_each_listed_table() {
         ),
         "DELETE 1"
     );
-    assert_eq!(
-        last(&mut session, "SELECT id FROM t1"),
-        "id\n1\nSELECT 1"
-    );
+    assert_eq!(last(&mut session, "SELECT id FROM t1"), "id\n1\nSELECT 1");
     assert_eq!(
         last(&mut session, "SELECT id FROM t2 ORDER BY id"),
         "id\n1\n4\nSELECT 2"

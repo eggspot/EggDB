@@ -107,7 +107,9 @@ fn with_server_config(config: &ServerConfig, test: impl FnOnce(SocketAddr, &Queu
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let server = scope.spawn(|| {
-            serve(&keyspace, &listener, config, &|| stop.load(Ordering::Relaxed))
+            serve(&keyspace, &listener, config, &|| {
+                stop.load(Ordering::Relaxed)
+            })
         });
         let stopping = StopOnDrop(&stop);
         test(address, &Queues::new(&keyspace));

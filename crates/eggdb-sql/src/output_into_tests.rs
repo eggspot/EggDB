@@ -43,7 +43,7 @@ fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
 
-fn integers(rows: &[&[i64]]) -> Vec<Vec<Value>> {
+fn integers(rows: &[&[i32]]) -> Vec<Vec<Value>> {
     rows.iter()
         .map(|row| row.iter().map(|&value| Value::Integer(value)).collect())
         .collect()
@@ -145,10 +145,7 @@ fn a_failed_output_into_changes_nothing() {
         &mut session,
         "CREATE TABLE orders (id int PRIMARY KEY, total int)",
     );
-    rows(
-        &mut session,
-        "INSERT INTO orders VALUES (1, 100), (2, 200)",
-    );
+    rows(&mut session, "INSERT INTO orders VALUES (1, 100), (2, 200)");
     let steps = batch(
         &mut session,
         "DECLARE @ids TABLE (id int PRIMARY KEY)
