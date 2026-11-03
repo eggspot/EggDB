@@ -13,7 +13,7 @@ pub mod client;
 mod store;
 mod xml;
 
-pub use api::{Endpoint, MAX_REQUEST_BYTES};
+pub use api::{Endpoint, MAX_REQUEST_BYTES, over_memory_budget};
 
 #[cfg(test)]
 mod tests;

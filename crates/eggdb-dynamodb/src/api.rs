@@ -119,6 +119,15 @@ fn json(status: u16, body: String) -> Response {
     }
 }
 
+/// The answer to a request the server's memory budget cannot take: `400` with a
+/// `ThrottlingException`, which DynamoDB clients retry with backoff.
+pub fn over_memory_budget() -> Response {
+    failure(
+        "ThrottlingException",
+        "the server's connections already hold their memory budget",
+    )
+}
+
 fn failure(kind: &str, message: &str) -> Response {
     json(
         400,

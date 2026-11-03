@@ -8,7 +8,7 @@ mod api;
 mod json_out;
 mod query;
 
-pub use api::Api;
+pub use api::{Api, over_memory_budget};
 
 #[cfg(test)]
 mod tests;

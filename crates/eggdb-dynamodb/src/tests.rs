@@ -232,3 +232,14 @@ fn numbers_sort_numerically_and_unsigned_requests_are_refused() {
             .contains("UnrecognizedClientException")
     );
 }
+
+#[test]
+fn a_request_past_the_memory_budget_is_throttled() {
+    let response = crate::over_memory_budget();
+    assert_eq!(response.status, 400);
+    let text = String::from_utf8(response.body).unwrap();
+    assert!(
+        text.contains("com.amazonaws.dynamodb.v20120810#ThrottlingException"),
+        "{text}"
+    );
+}

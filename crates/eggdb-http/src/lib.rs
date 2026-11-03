@@ -1,13 +1,16 @@
 //! A small HTTP/1.1 server written from RFC 9110 and RFC 9112: one request per connection,
 //! bodies only with `Content-Length` and at most 1 MiB unless a listener sets its own limit
 //! (with `100 Continue` for clients that wait for it), with every length and wait bounded so a
-//! hostile client cannot hold a thread or memory for long. A minimal client posts to plain
-//! `http://` URLs, for webhooks.
+//! hostile client cannot hold a thread or memory for long. A listener given [`Limits`] holds
+//! every body over 64 KiB, the request's and then the response's, against the server's one
+//! memory budget (D284, D307), and answers with its own refusal when the budget is spent. A
+//! minimal client posts to plain `http://` URLs, for webhooks.
 
 mod client;
 
 pub use client::{ClientResponse, HttpTarget, host_header, parse_http_url, post, request};
 
+use eggdb_platform::connection_limits::{MemoryBudget, Reservation};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -19,7 +22,8 @@ const MAX_HEADERS: usize = 100;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const MAX_CONNECTIONS: usize = 16;
-const MAX_BODY_BYTES: usize = 1 << 20;
+/// The longest request body [`serve`] reads: 1 MiB.
+pub const MAX_BODY_BYTES: usize = 1 << 20;
 
 /// A request's line and headers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +102,8 @@ pub enum HttpError {
     TooLarge,
     /// The head is not HTTP/1.x.
     Malformed,
+    /// The body is longer than the server's memory budget has left.
+    OverMemoryBudget,
 }
 
 impl fmt::Display for HttpError {
@@ -106,6 +112,7 @@ impl fmt::Display for HttpError {
             Self::Closed => "the connection closed before the request ended",
             Self::TooLarge => "the request head is too large",
             Self::Malformed => "the request is not HTTP/1.1",
+            Self::OverMemoryBudget => "the server's connections already hold their memory budget",
         })
     }
 }
@@ -174,6 +181,20 @@ pub fn read_request_limited(
     max_body_bytes: usize,
     on_continue: &mut dyn FnMut(),
 ) -> Result<Request, HttpError> {
+    let unshared = MemoryBudget::default();
+    let mut held = unshared.empty_reservation();
+    read_request_holding(stream, max_body_bytes, &mut held, on_continue)
+}
+
+/// Reads a request as [`read_request_limited`] does, holding a body over 64 KiB in `held`
+/// before it is read (and before `100 Continue` is sent), so a declared length the budget
+/// cannot take costs nothing: that request fails with [`HttpError::OverMemoryBudget`].
+pub fn read_request_holding(
+    stream: &mut impl Read,
+    max_body_bytes: usize,
+    held: &mut Reservation<'_>,
+    on_continue: &mut dyn FnMut(),
+) -> Result<Request, HttpError> {
     let mut head = Vec::new();
     let mut chunk = [0u8; 8192];
     let end = loop {
@@ -236,6 +257,9 @@ pub fn read_request_limited(
     if length > max_body_bytes {
         return Err(HttpError::TooLarge);
     }
+    if !held.hold_if_large(length) {
+        return Err(HttpError::OverMemoryBudget);
+    }
     if length > 0
         && head.len() == end
         && request
@@ -291,10 +315,50 @@ pub fn write_response(
     stream.flush()
 }
 
+/// What a listener bounds: the longest body it reads, the memory budget its connections share
+/// with the server's other listeners, and the answer it gives when that budget is spent.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits<'b> {
+    /// The longest request body read; a longer one is answered `431`.
+    pub max_body_bytes: usize,
+    /// The bytes every connection of the server holds together.
+    pub memory_budget: &'b MemoryBudget,
+    /// What a request whose body, or whose response's body, the budget cannot take is
+    /// answered with, in the words of the protocol the listener speaks.
+    pub over_memory_budget: fn() -> Response,
+}
+
+impl<'b> Limits<'b> {
+    /// Limits of `max_body_bytes` per body under `memory_budget`, answering `503` when the
+    /// budget is spent.
+    pub fn new(max_body_bytes: usize, memory_budget: &'b MemoryBudget) -> Self {
+        Self {
+            max_body_bytes,
+            memory_budget,
+            over_memory_budget: over_memory_budget_response,
+        }
+    }
+
+    /// These limits, answering `over_memory_budget()` when the budget is spent.
+    pub fn answering_over_budget_with(self, over_memory_budget: fn() -> Response) -> Self {
+        Self {
+            over_memory_budget,
+            ..self
+        }
+    }
+}
+
+/// The plain answer to a request the server's memory budget cannot take: `503`, with
+/// `Retry-After`, so clients back off and try again.
+pub fn over_memory_budget_response() -> Response {
+    Response::text(503, "the server's connections already hold their memory budget")
+        .with_header("Retry-After", "1")
+}
+
 fn serve_one(
     mut stream: TcpStream,
     handler: &(dyn Fn(&Request) -> Response + Sync),
-    max_body_bytes: usize,
+    limits: &Limits<'_>,
 ) {
     if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(READ_TIMEOUT)).is_err()
@@ -307,14 +371,31 @@ fn serve_one(
     let mut send_continue = || {
         let _ = interim.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
     };
-    let response = match read_request_limited(&mut stream, max_body_bytes, &mut send_continue) {
+    let mut held = limits.memory_budget.empty_reservation();
+    let read = read_request_holding(
+        &mut stream,
+        limits.max_body_bytes,
+        &mut held,
+        &mut send_continue,
+    );
+    let response = match read {
         Ok(request) => {
             let response = handler(&request);
-            let _ = write_response(&mut stream, &response, request.method == "HEAD");
+            let head_only = request.method == "HEAD";
+            drop(request);
+            let response = if held.hold_if_large(response.body.len()) {
+                response
+            } else {
+                drop(response);
+                held.resize(0);
+                (limits.over_memory_budget)()
+            };
+            let _ = write_response(&mut stream, &response, head_only);
             return;
         }
         Err(HttpError::TooLarge) => Response::text(431, "the request is too large"),
         Err(HttpError::Malformed) => Response::text(400, "not an HTTP/1.1 request"),
+        Err(HttpError::OverMemoryBudget) => (limits.over_memory_budget)(),
         Err(HttpError::Closed) => return,
     };
     let _ = write_response(&mut stream, &response, false);
@@ -330,12 +411,31 @@ pub fn serve(
     serve_with_body_limit(listener, handler, stop, MAX_BODY_BYTES)
 }
 
-/// Serves requests as [`serve`] does, accepting bodies of at most `max_body_bytes`.
+/// Serves requests as [`serve`] does, accepting bodies of at most `max_body_bytes`, under a
+/// memory budget of its own.
 pub fn serve_with_body_limit(
     listener: &TcpListener,
     handler: &(dyn Fn(&Request) -> Response + Sync),
     stop: &(dyn Fn() -> bool + Sync),
     max_body_bytes: usize,
+) -> io::Result<()> {
+    let unshared = MemoryBudget::default();
+    serve_with_limits(
+        listener,
+        handler,
+        stop,
+        &Limits::new(max_body_bytes, &unshared),
+    )
+}
+
+/// Serves requests as [`serve`] does, within `limits`: bodies of at most
+/// `limits.max_body_bytes`, and every body over 64 KiB held against `limits.memory_budget`
+/// while its request is read and answered.
+pub fn serve_with_limits(
+    listener: &TcpListener,
+    handler: &(dyn Fn(&Request) -> Response + Sync),
+    stop: &(dyn Fn() -> bool + Sync),
+    limits: &Limits<'_>,
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
@@ -365,7 +465,7 @@ pub fn serve_with_body_limit(
             let spawned = std::thread::Builder::new()
                 .name("eggdb-http".to_owned())
                 .spawn_scoped(scope, move || {
-                    serve_one(stream, handler, max_body_bytes);
+                    serve_one(stream, handler, limits);
                     active.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {
@@ -482,6 +582,90 @@ mod tests {
         let mut head = Vec::new();
         write_response(&mut head, &Response::ok("text/plain", "hi"), true).unwrap();
         assert!(String::from_utf8(head).unwrap().ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_declared_body_past_the_memory_budget_is_refused_before_it_is_read() {
+        let budget = MemoryBudget::new(100_000);
+        let mut held = budget.empty_reservation();
+        let mut continued = 0;
+        let refused = read_request_holding(
+            &mut &b"PUT /b/k HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 200000\r\n\r\n"[..],
+            1 << 20,
+            &mut held,
+            &mut || continued += 1,
+        );
+        assert_eq!(
+            (refused, continued, budget.used_bytes()),
+            (Err(HttpError::OverMemoryBudget), 0, 0)
+        );
+        let mut bytes = b"PUT /b/k HTTP/1.1\r\nContent-Length: 90000\r\n\r\n".to_vec();
+        bytes.extend_from_slice(&[1u8; 90_000]);
+        let request = read_request_holding(&mut &bytes[..], 1 << 20, &mut held, &mut || {});
+        assert_eq!(request.map(|request| request.body.len()), Ok(90_000));
+        assert_eq!(budget.used_bytes(), 90_000);
+        drop(held);
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    fn exchange(address: std::net::SocketAddr, request: &[u8]) -> String {
+        let mut client = TcpStream::connect(address).unwrap();
+        client.write_all(request).unwrap();
+        let mut answer = Vec::new();
+        let _ = client.read_to_end(&mut answer);
+        String::from_utf8_lossy(&answer).into_owned()
+    }
+
+    #[test]
+    fn requests_and_responses_past_the_memory_budget_get_the_listeners_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        let budget = MemoryBudget::new(150_000);
+        let limits = Limits::new(1 << 20, &budget)
+            .answering_over_budget_with(|| Response::text(429, "slow down"));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                serve_with_limits(
+                    &listener,
+                    &|request| match request.path.as_str() {
+                        "/large" => Response::ok("text/plain", vec![b'x'; 200_000]),
+                        _ => Response::ok("text/plain", format!("{} bytes", request.body.len())),
+                    },
+                    &|| stopped.load(Ordering::Acquire),
+                    &limits,
+                )
+                .unwrap();
+            });
+            let refused = exchange(
+                address,
+                b"POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 300000\r\n\r\n",
+            );
+            assert!(refused.starts_with("HTTP/1.1 429 "), "{refused}");
+            assert!(refused.ends_with("slow down"), "{refused}");
+            let large = exchange(address, b"GET /large HTTP/1.1\r\n\r\n");
+            assert!(large.starts_with("HTTP/1.1 429 "), "{large}");
+            let mut fitting = b"POST /echo HTTP/1.1\r\nContent-Length: 100000\r\n\r\n".to_vec();
+            fitting.extend_from_slice(&[7u8; 100_000]);
+            let served = exchange(address, &fitting);
+            assert!(served.ends_with("100000 bytes"), "{served}");
+            let small = exchange(address, b"GET /small HTTP/1.1\r\n\r\n");
+            assert!(small.ends_with("0 bytes"), "{small}");
+            stopped.store(true, Ordering::Release);
+        });
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn the_plain_refusal_asks_clients_to_retry() {
+        let response = over_memory_budget_response();
+        assert_eq!(response.status, 503);
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(name, value)| name == "Retry-After" && value == "1")
+        );
     }
 
     #[test]

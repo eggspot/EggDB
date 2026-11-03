@@ -51,6 +51,17 @@ impl From<JsonSyntaxError> for Failure {
 
 type Answer = Result<Response, Failure>;
 
+/// The answer to a request the server's memory budget cannot take: `429` with a
+/// `circuit_breaking_exception`, as Elasticsearch's parent circuit breaker answers, so clients
+/// back off and retry.
+pub fn over_memory_budget() -> Response {
+    error(
+        429,
+        "circuit_breaking_exception",
+        "[parent] the server's connections already hold their memory budget",
+    )
+}
+
 fn error(status: u16, kind: &str, reason: &str) -> Response {
     let mut out = Out::default();
     out.begin_object()

@@ -769,20 +769,23 @@ impl Session<'_> {
                 }
             });
             let observability_server = scope.spawn(|| match &observability_listener {
-                Some(listener) => eggdb_http::serve_with_body_limit(
+                Some(listener) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| observability_endpoint.answer(request),
                     &stop_signals::requested,
-                    eggdb_observability::MAX_REQUEST_BYTES,
+                    &eggdb_http::Limits::new(
+                        eggdb_observability::MAX_REQUEST_BYTES,
+                        &memory_budget,
+                    ),
                 ),
                 None => Ok(()),
             });
             let rest_server = scope.spawn(|| match &rest_listener {
-                Some(listener) => eggdb_http::serve_with_body_limit(
+                Some(listener) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| rest_endpoint.answer(request),
                     &stop_signals::requested,
-                    eggdb_api::MAX_REQUEST_BYTES,
+                    &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget),
                 ),
                 None => Ok(()),
             });
@@ -807,7 +810,7 @@ impl Session<'_> {
                 }
             });
             let metrics_server = scope.spawn(|| match &metrics_listener {
-                Some(listener) => eggdb_http::serve(
+                Some(listener) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| {
                         served_databases.with_databases(|databases| {
@@ -815,14 +818,16 @@ impl Session<'_> {
                         })
                     },
                     &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget),
                 ),
                 None => Ok(()),
             });
             let mcp_server = scope.spawn(|| match (&mcp_listener, &mcp_endpoint) {
-                (Some((listener, _)), Some(endpoint)) => eggdb_http::serve(
+                (Some((listener, _)), Some(endpoint)) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget),
                 ),
                 _ => Ok(()),
             });
@@ -839,10 +844,12 @@ impl Session<'_> {
                 None => Ok(()),
             });
             let es_server = scope.spawn(|| match &es_listener {
-                Some(listener) => eggdb_http::serve(
+                Some(listener) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| es_api.answer(request),
                     &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget)
+                        .answering_over_budget_with(eggdb_esrest::over_memory_budget),
                 ),
                 None => Ok(()),
             });
@@ -882,28 +889,31 @@ impl Session<'_> {
                 None => Ok(()),
             });
             let dynamodb_server = scope.spawn(|| match (&dynamodb_listener, &dynamodb_endpoint) {
-                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
-                    16 << 20,
+                    &eggdb_http::Limits::new(16 << 20, &memory_budget)
+                        .answering_over_budget_with(eggdb_dynamodb::over_memory_budget),
                 ),
                 _ => Ok(()),
             });
             let s3_server = scope.spawn(|| match (&s3_listener, &s3_endpoint) {
-                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_body_limit(
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
-                    eggdb_s3::MAX_REQUEST_BYTES,
+                    &eggdb_http::Limits::new(eggdb_s3::MAX_REQUEST_BYTES, &memory_budget)
+                        .answering_over_budget_with(eggdb_s3::over_memory_budget),
                 ),
                 _ => Ok(()),
             });
             let sqs_server = scope.spawn(|| match (&sqs_listener, &sqs_endpoint) {
-                (Some(listener), Some(endpoint)) => eggdb_http::serve(
+                (Some(listener), Some(endpoint)) => eggdb_http::serve_with_limits(
                     listener,
                     &|request| endpoint.answer(request),
                     &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_http::MAX_BODY_BYTES, &memory_budget),
                 ),
                 _ => Ok(()),
             });

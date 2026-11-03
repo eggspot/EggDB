@@ -427,3 +427,11 @@ fn the_client_stores_lists_reads_and_deletes_objects_on_a_served_endpoint() {
         server.join().unwrap().unwrap();
     });
 }
+
+#[test]
+fn a_request_past_the_memory_budget_is_answered_slow_down() {
+    let response = crate::over_memory_budget();
+    assert_eq!(response.status, 503);
+    let text = String::from_utf8(response.body).unwrap();
+    assert!(text.contains("<Code>SlowDown</Code>"), "{text}");
+}
