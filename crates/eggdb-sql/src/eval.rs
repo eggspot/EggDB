@@ -445,8 +445,13 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         {
             ("?column?".into(), false)
         }
+        ExprKind::Function { name, .. } if name == crate::sql_json_constructors::IS_JSON => {
+            ("?column?".into(), false)
+        }
         ExprKind::Function { name, .. } => (
-            crate::sql_json::column_name(name).map_or_else(|| name.clone(), str::to_owned),
+            crate::sql_json::column_name(name)
+                .or_else(|| crate::sql_json_constructors::column_name(name))
+                .map_or_else(|| name.clone(), str::to_owned),
             true,
         ),
         ExprKind::Column { name, .. } => (name.clone(), true),
@@ -1466,6 +1471,9 @@ impl Evaluator<'_> {
             }
             name if crate::sql_json::is_query_function(name) => {
                 return crate::sql_json::query_function(self, name, arguments);
+            }
+            name if crate::sql_json_constructors::is_constructor(name) => {
+                return crate::sql_json_constructors::function(self, name, arguments);
             }
             crate::json_functions::ROW_OBJECT => {
                 return crate::json_functions::row_object(self, arguments);

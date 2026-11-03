@@ -6,6 +6,7 @@ use crate::sql_json::{
     Behavior, BehaviorClause, QueryCall, QueryKind, Quotes, RegularColumn, TableCall, TableColumn,
     TablePlan, Wrapper,
 };
+use crate::sql_json_constructors::JsonShape;
 use crate::types::{DefinedKind, SqlType};
 
 const ROOT_PATH: &str = "$";
@@ -280,11 +281,94 @@ impl Parser<'_> {
         ))
     }
 
-    /// Parses `JSON_EXISTS`, `JSON_VALUE` or `JSON_QUERY` after its name, as PostgreSQL 17 and
+    fn json_unique_keys(&mut self) -> bool {
+        let with = self.is_word("with");
+        if !(with || self.is_word("without")) || !self.is_word_at(1, "unique") {
+            return false;
+        }
+        self.at += 2;
+        self.take_word("keys");
+        with
+    }
+
+    /// Parses what follows `subject IS [NOT] JSON` in PostgreSQL: an optional `VALUE`,
+    /// `SCALAR`, `ARRAY` or `OBJECT` and an optional `WITH | WITHOUT UNIQUE [KEYS]`.
+    pub(super) fn is_json_predicate(&mut self, subject: Expr, negated: bool) -> Expr {
+        let position = subject.position;
+        let named = ["value", "scalar", "array", "object"]
+            .into_iter()
+            .find(|word| self.is_word(word))
+            .and_then(JsonShape::named);
+        let shape = match named {
+            Some(shape) => {
+                self.at += 1;
+                shape
+            }
+            None => JsonShape::Value,
+        };
+        let unique_keys = self.json_unique_keys();
+        crate::sql_json_constructors::is_json_call(subject, shape, unique_keys, negated, position)
+    }
+
+    fn sql_json_constructor(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
+        let position = name.position;
+        match name.text.as_str() {
+            "json" => {
+                self.at += 1;
+                let subject = self.json_context_item()?;
+                let unique_keys = self.json_unique_keys();
+                self.expect(&TokenKind::RightParen)?;
+                Ok(Some(crate::sql_json_constructors::json_call(
+                    subject,
+                    unique_keys,
+                    position,
+                )))
+            }
+            "json_scalar" => {
+                self.at += 1;
+                let subject = self.expression()?;
+                self.expect(&TokenKind::RightParen)?;
+                Ok(Some(crate::sql_json_constructors::json_scalar_call(
+                    subject, position,
+                )))
+            }
+            "json_serialize" => {
+                self.at += 1;
+                let subject = self.json_context_item()?;
+                let returning = if self.take_word("returning") {
+                    let type_position = self.position();
+                    let sql_type = self.cast_type()?;
+                    if !crate::sql_json_constructors::serializes_to(sql_type) {
+                        return Err(
+                            crate::sql_json_constructors::unsupported_serialize_type(sql_type)
+                                .at(type_position),
+                        );
+                    }
+                    self.json_format_clause()?;
+                    Some(sql_type)
+                } else {
+                    None
+                };
+                self.expect(&TokenKind::RightParen)?;
+                Ok(Some(crate::sql_json_constructors::json_serialize_call(
+                    subject, returning, position,
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Parses `JSON_EXISTS`, `JSON_VALUE`, `JSON_QUERY` or, in PostgreSQL, `JSON`,
+    /// `JSON_SCALAR` or `JSON_SERIALIZE` after its name, as PostgreSQL 17 and
     /// Oracle write them; `None` for any other name.
     pub(super) fn sql_json_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         if !self.sql_json_dialect() || self.peek_kind() != &TokenKind::LeftParen {
             return Ok(None);
+        }
+        if self.postgresql()
+            && let Some(expr) = self.sql_json_constructor(name)?
+        {
+            return Ok(Some(expr));
         }
         let kind = match name.text.as_str() {
             "json_exists" => QueryKind::Exists,

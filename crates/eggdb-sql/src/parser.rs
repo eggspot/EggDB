@@ -3767,6 +3767,8 @@ impl<'t> Parser<'t> {
                 right: Box::new(right),
                 negated,
             }
+        } else if self.postgresql() && self.take_word("json") {
+            return Ok(self.is_json_predicate(expr, negated));
         } else if self.sqlite() {
             let right = self.expression_above(Level::Comparison)?;
             ExprKind::IsDistinctFrom {

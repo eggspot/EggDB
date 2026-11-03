@@ -127,6 +127,9 @@ fn added_function_type(
     if let Some(sql_type) = crate::sql_json::query_result_type(name, arguments, scope) {
         return Some(Some(sql_type));
     }
+    if let Some(sql_type) = crate::sql_json_constructors::result_type(name, arguments, scope) {
+        return Some(Some(sql_type));
+    }
     if matches!(name, "pg_sleep" | "pg_notify") {
         return Some(Some(SqlType::VOID));
     }

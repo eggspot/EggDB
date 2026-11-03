@@ -1036,6 +1036,19 @@ fn not_an_object(name: &str, found: &Json) -> SqlError {
     )
 }
 
+fn base_fields(name: &str, base: &Value, columns: usize) -> SqlResult<Vec<Value>> {
+    match base {
+        Value::Null => Ok(vec![Value::Null; columns]),
+        Value::Defined(defined) => match defined.as_ref() {
+            crate::types::DefinedValue::Record(record) if record.fields.len() == columns => {
+                Ok(record.fields.clone())
+            }
+            _ => Err(row_type_required(name)),
+        },
+        _ => Err(row_type_required(name)),
+    }
+}
+
 fn populate_rows(
     name: &str,
     values: &[Value],
@@ -1049,20 +1062,16 @@ fn populate_rows(
     if names.is_empty() {
         return Err(row_type_required(name));
     }
-    if !base.is_null() {
-        return Err(SqlError::not_supported(format!(
-            "a base row that is not NULL in {name}()"
-        )));
-    }
     let declared: Vec<(&str, Option<SqlType>)> = names
         .iter()
         .map(String::as_str)
         .zip(types.iter().skip(POPULATE_FIXED_ARGUMENTS).copied())
         .collect();
+    let defaults = base_fields(name, base, declared.len())?;
     let set = name.ends_with("set");
     let text = match document {
         Value::Null if set => return Ok(()),
-        Value::Null => return sink(vec![Value::Null; declared.len()]),
+        Value::Null => return sink(defaults),
         Value::Json(text) | Value::Jsonb(text) | Value::Text(text) => text.as_str(),
         other => {
             return Err(SqlError::new(
@@ -1082,12 +1091,13 @@ fn populate_rows(
         };
         declared
             .iter()
-            .map(
-                |(column, sql_type)| match members.iter().rev().find(|(key, _)| key == column) {
-                    None => Ok(Value::Null),
+            .zip(&defaults)
+            .map(|((column, sql_type), default)| {
+                match members.iter().rev().find(|(key, _)| key == column) {
+                    None => Ok(default.clone()),
                     Some((_, node)) => crate::json_to_record::field(text, node, *sql_type, binary),
-                },
-            )
+                }
+            })
             .collect()
     };
     if !set {

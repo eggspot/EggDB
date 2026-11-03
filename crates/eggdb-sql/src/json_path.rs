@@ -112,6 +112,13 @@ enum Method {
     Integer,
     BigInt,
     Boolean,
+    Decimal(Option<DecimalModifier>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecimalModifier {
+    precision: i64,
+    scale: i64,
 }
 
 impl Method {
@@ -129,6 +136,7 @@ impl Method {
             "integer" => Self::Integer,
             "bigint" => Self::BigInt,
             "boolean" => Self::Boolean,
+            "decimal" => Self::Decimal(None),
             _ => return None,
         })
     }
@@ -147,6 +155,7 @@ impl Method {
             Self::Integer => "integer",
             Self::BigInt => "bigint",
             Self::Boolean => "boolean",
+            Self::Decimal(_) => "decimal",
         }
     }
 
@@ -854,8 +863,11 @@ impl Parser {
                 self.temporal_step(&name)
             }
             Token::Word(name) if self.peek() == Some(&Token::LeftParen) => {
-                let method = Method::named(&name).ok_or_else(|| self.unexpected())?;
+                let mut method = Method::named(&name).ok_or_else(|| self.unexpected())?;
                 self.at += 1;
+                if let Method::Decimal(modifier) = &mut method {
+                    *modifier = self.decimal_modifier()?;
+                }
                 self.expect(&Token::RightParen)?;
                 Ok(Step::Method(method))
             }
@@ -868,6 +880,52 @@ impl Parser {
                 Err(self.unexpected())
             }
         }
+    }
+
+    fn decimal_modifier(&mut self) -> SqlResult<Option<DecimalModifier>> {
+        if self.peek() == Some(&Token::RightParen) {
+            return Ok(None);
+        }
+        let precision = self.decimal_argument("precision")?;
+        let scale = if self.take(&Token::Comma) {
+            self.decimal_argument("scale")?
+        } else {
+            0
+        };
+        Ok(Some(DecimalModifier { precision, scale }))
+    }
+
+    fn decimal_argument(&mut self, what: &str) -> SqlResult<i64> {
+        let negative = match self.peek() {
+            Some(Token::Operator("-")) => true,
+            Some(Token::Operator("+")) => false,
+            _ => return self.unsigned_decimal_argument(what, false),
+        };
+        self.at += 1;
+        self.unsigned_decimal_argument(what, negative)
+    }
+
+    fn unsigned_decimal_argument(&mut self, what: &str, negative: bool) -> SqlResult<i64> {
+        let Some(Token::Number(text)) = self.peek().cloned() else {
+            return Err(self.unexpected());
+        };
+        if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(syntax_error(Some(&text)));
+        }
+        self.at += 1;
+        let signed = if negative {
+            format!("-{text}")
+        } else {
+            text
+        };
+        signed.parse::<i32>().map(i64::from).map_err(|_| {
+            SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!(
+                    "{what} of jsonpath item method .decimal() is out of range for type integer"
+                ),
+            )
+        })
     }
 
     fn temporal_step(&mut self, name: &str) -> SqlResult<Step> {
@@ -1606,7 +1664,7 @@ impl<'a> Evaluator<'a> {
                     ));
                 }
             },
-            Method::Number | Method::Integer | Method::BigInt => {
+            Method::Number | Method::Integer | Method::BigInt | Method::Decimal(_) => {
                 let number = match item {
                     Json::Number(text) => Numeric::parse(text).ok(),
                     Json::String(text) => Numeric::parse(text.trim())
@@ -1633,7 +1691,19 @@ impl<'a> Evaluator<'a> {
                     ))
                 })?;
                 match method {
-                    Method::Number => number_json(&number),
+                    Method::Number | Method::Decimal(None) => number_json(&number),
+                    Method::Decimal(Some(modifier)) => {
+                        crate::numeric::check_modifier(modifier.precision, modifier.scale)
+                            .map_err(fatal)?;
+                        let fitted = number
+                            .with_modifier(modifier.precision, modifier.scale)
+                            .map_err(|_| {
+                                cannot_cast(format!(
+                                    "argument \"{text}\" of jsonpath item method .decimal() is invalid for type numeric"
+                                ))
+                            })?;
+                        number_json(&fitted)
+                    }
                     _ => {
                         let whole = number.to_i128_rounded();
                         let fits = match method {

@@ -1949,7 +1949,9 @@ arguments and a `_tz` form, and the operators `jsonb @? path` and `jsonb @@ path
 `.**{1 to 2}`) accessors, filters `? (...)` with comparisons, `&&`, `||`, `!`, `is unknown`,
 `exists`, `like_regex` (with `flag`) and `starts with`, arithmetic (`+ - * / %`, unary signs),
 the methods `type()`, `size()`, `double()`, `number()`, `integer()`, `string()`, `abs()`,
-`floor()`, `ceiling()`, `bigint()`, `boolean()` and `keyvalue()`, the datetime methods
+`floor()`, `ceiling()`, `bigint()`, `boolean()`, `keyvalue()` and PostgreSQL 17's
+`decimal([precision [, scale]])` (a number or numeric string rounded to that precision and scale,
+`2203G` when it does not fit, `22023` for a precision outside 1 to 1000; D302), the datetime methods
 `datetime()`, `datetime(template)`, `date()`, `time([p])`, `time_tz([p])`, `timestamp([p])` and
 `timestamp_tz([p])` (ISO strings or a `to_timestamp` template; comparisons that need the session's
 time zone only in the `_tz` functions, else `22031`), and `$name` variables (D289). Errors carry PostgreSQL's
@@ -1966,8 +1968,10 @@ composite column (`r myrowtype`) member by member, as in PostgreSQL's documented
 nested array fails with `0A000` (arrays have one dimension), an array mixing nested arrays and
 scalars with `22P02`. `json_populate_record`, `jsonb_populate_record`, `json_populate_recordset`
 and `jsonb_populate_recordset` in `FROM` take their columns from the first argument's row type,
-`NULL::t` or `CAST(NULL AS t)` for a table, view or composite type `t` (a base row that is not
-NULL fails with `0A000`).
+`NULL::t` or `CAST(NULL AS t)` for a table, view or composite type `t`. A base row of a
+composite type that is not NULL (`ROW(1, 2)::pt`) gives each column the JSON member's value when
+the object has that key and the base row's value otherwise, and is returned whole for a NULL
+document (D302).
 
 The SQL/JSON query functions (D289) work as in PostgreSQL 17 and Oracle: `JSON_EXISTS(doc, path
 [PASSING v AS name, ...] [{TRUE | FALSE | UNKNOWN | ERROR} ON ERROR])`, `JSON_VALUE(... [RETURNING
@@ -1981,6 +1985,18 @@ quotes and behavior clauses, `name type EXISTS [PATH 'path']` and `NESTED [PATH]
 (...)` (children joined to their parent, siblings in a union), may follow another `FROM` item it
 reads, and produces at most 1,000,000 rows (`54000`) with at most 32 nested levels. Oracle's
 dialect accepts the same forms, columns without a type and `NULL ON ERROR`.
+
+PostgreSQL 17's SQL/JSON constructors and predicate (D302): `expr IS [NOT] JSON [VALUE | SCALAR |
+ARRAY | OBJECT] [{WITH | WITHOUT} UNIQUE [KEYS]]` tests a `text`, `bytea`, `json` or `jsonb`
+value (false for text that is not JSON, NULL for NULL, `42804` for other types; a `jsonb` value
+never has duplicate keys), and works in `CHECK` constraints. `JSON(expr [FORMAT JSON] [{WITH |
+WITHOUT} UNIQUE [KEYS]])` reads text or `bytea` as `json`, keeping the text as written (`22P02`
+for text that is not JSON, `22030` for a duplicate key under `WITH UNIQUE KEYS`, `42804` for a
+non-string argument). `JSON_SCALAR(expr)` gives the `json` value `to_json` gives (a number or
+boolean as itself, anything else as a string, a date or time stamp in ISO form).
+`JSON_SERIALIZE(expr [FORMAT JSON] [RETURNING type [FORMAT JSON]])` gives a JSON value's text as
+`text` (the default), another character type or `bytea` (other types are `42804`). Their columns
+are named `?column?`, `json`, `json_scalar` and `json_serialize`, as in PostgreSQL.
 
 **Arrays** (D128) are values of expressions, of `WITH` queries, derived tables and `VALUES` lists,
 and of results, with one dimension and elements of `smallint`, `integer`, `bigint`, `real`,
@@ -3942,9 +3958,9 @@ two, `COPY` in the binary format and in another encoding, now match). The other 
   back references explores every way it can match, bounded by the step budget, so a hostile one
   ends with `54000`.
 - `to_json`, `to_jsonb` and `json_build_*` take a whole row only as a `FROM` item's name;
-  `json_object(text[])`, `json_populate_record` in a select list or with a base row that is not
-  NULL, `JSON_TABLE`'s `PLAN` clause, `JSON_SERIALIZE`, `JSON_SCALAR`, `JSON()` and `IS JSON`
-  are missing.
+  `json_object(text[])`, `json_populate_record` in a select list and `JSON_TABLE`'s `PLAN`
+  clause are missing, and Oracle's `IS JSON` (lax syntax, `STRICT`), `JSON_SERIALIZE` options and
+  `JSON_SCALAR` are not parsed in Oracle's dialect yet.
 - `interval` (D113): only the `postgres` `IntervalStyle` is printed. PostgreSQL 17's `infinity`
   and `-infinity` intervals read, print, compare, add, multiply, divide, `justify`, and give
   `isfinite` false and `date_part` an infinite double as PostgreSQL's do (D153), but a time stamp
@@ -4371,7 +4387,7 @@ Transact-SQL reference, never SQL Server's software) and D122 list these:
   temporal tables are Msg 40517.
 
 ## Next parts (roadmap)
-- `JSON_TABLE`'s `PLAN` clause, `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
+- `JSON_TABLE`'s `PLAN` clause, and Oracle's `IS JSON`, `JSON_SERIALIZE` and `JSON_SCALAR`.
 - Point `SELECT`s as fast as SQLite's everywhere: an AST that borrows the SQL text and a plan
   cache; table statistics for choosing between key lookups and hash joins.
 - The other aggregates (`stddev`, `variance`, hypothetical-set aggregates); `DISTINCT ON` over

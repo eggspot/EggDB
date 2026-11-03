@@ -95,6 +95,8 @@ impl SqlState {
     pub const DIVISION_BY_ZERO: Self = Self(*b"22012");
     /// `22033` invalid_sql_json_subscript: an array subscript outside a strict path's array.
     pub const INVALID_SQL_JSON_SUBSCRIPT: Self = Self(*b"22033");
+    /// `22030` duplicate_json_object_key_value: `WITH UNIQUE KEYS` found a key twice.
+    pub const DUPLICATE_JSON_OBJECT_KEY_VALUE: Self = Self(*b"22030");
     /// `22036` non_numeric_sql_json_item: arithmetic or a numeric method on a non-number.
     pub const NON_NUMERIC_SQL_JSON_ITEM: Self = Self(*b"22036");
     /// `22038` singleton_sql_json_item_required: a path that must yield exactly one item.

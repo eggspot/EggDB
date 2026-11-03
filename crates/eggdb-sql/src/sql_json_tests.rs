@@ -556,6 +556,163 @@ fn json_populate_record_fills_a_table_row_type_or_a_composite_type() {
 }
 
 #[test]
+fn json_populate_record_takes_missing_fields_from_a_base_row() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TYPE pt AS (x int, y int, label text)").expect("type");
+    assert_eq!(
+        rows(
+            &mut session,
+            r#"SELECT * FROM json_populate_record(ROW(1, 2, 'base')::pt, '{"y": 20}')"#
+        ),
+        ["1|20|base"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            r#"SELECT x, y FROM jsonb_populate_recordset(ROW(0, 9, 'b')::pt, '[{"x": 1}, {"x": 2, "y": null}]') ORDER BY x"#
+        ),
+        ["1|9", "2|NULL"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            "SELECT * FROM json_populate_record(ROW(5, 6, 'kept')::pt, NULL)"
+        ),
+        ["5|6|kept"]
+    );
+}
+
+#[test]
+fn is_json_tests_shape_and_unique_keys() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let cases = [
+        ("SELECT '{\"a\": 1}' IS JSON", "t"),
+        ("SELECT 'abc' IS JSON", "f"),
+        ("SELECT 'abc' IS NOT JSON", "t"),
+        ("SELECT '[1, 2]' IS JSON ARRAY", "t"),
+        ("SELECT '[1, 2]' IS JSON OBJECT", "f"),
+        ("SELECT '\"x\"' IS JSON SCALAR", "t"),
+        ("SELECT '{}' IS JSON SCALAR", "f"),
+        ("SELECT '{}' IS JSON VALUE", "t"),
+        ("SELECT '{\"a\": 1, \"a\": 2}' IS JSON", "t"),
+        ("SELECT '{\"a\": 1, \"a\": 2}' IS JSON WITH UNIQUE KEYS", "f"),
+        ("SELECT '{\"a\": 1, \"a\": 2}' IS JSON OBJECT WITHOUT UNIQUE", "t"),
+        ("SELECT '[{\"k\": 1, \"k\": 2}]'::json IS JSON WITH UNIQUE", "f"),
+        ("SELECT '{\"a\": 1, \"a\": 2}'::jsonb IS JSON WITH UNIQUE KEYS", "t"),
+        ("SELECT NULL::text IS JSON", "NULL"),
+        ("SELECT '\\x5b315d'::bytea IS JSON ARRAY", "t"),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(one(&mut session, sql), expected, "{sql}");
+    }
+    assert_eq!(state(&mut session, "SELECT 1 IS JSON"), "42804");
+    assert_eq!(
+        run(&mut session, "SELECT '[]' IS JSON AS a, '1' IS JSON OBJECT")
+            .expect("columns")
+            .lines()
+            .next(),
+        Some("a|?column?")
+    );
+    run(
+        &mut session,
+        "CREATE TABLE docs (id int, body text CHECK (body IS JSON OBJECT))",
+    )
+    .expect("create");
+    run(&mut session, "INSERT INTO docs VALUES (1, '{\"a\": 1}')").expect("insert");
+    assert_eq!(
+        state(&mut session, "INSERT INTO docs VALUES (2, '[1]')"),
+        "23514"
+    );
+    assert_eq!(
+        rows(&mut session, "SELECT id FROM docs WHERE body IS JSON"),
+        ["1"]
+    );
+}
+
+#[test]
+fn json_json_scalar_and_json_serialize_construct_and_print_json() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let cases = [
+        (
+            "SELECT json('{\"a\":123, \"b\":[true,\"foo\"], \"a\":\"bar\"}')",
+            "{\"a\":123, \"b\":[true,\"foo\"], \"a\":\"bar\"}",
+        ),
+        ("SELECT json('[1, 2]' WITH UNIQUE KEYS)", "[1, 2]"),
+        ("SELECT json(NULL::text)", "NULL"),
+        ("SELECT pg_typeof(json('1'))::text", "json"),
+        ("SELECT json_scalar(123.45)", "123.45"),
+        ("SELECT json_scalar('he said \"hi\"')", "\"he said \\\"hi\\\"\""),
+        ("SELECT json_scalar(true)", "true"),
+        ("SELECT json_scalar('2024-05-10'::date)", "\"2024-05-10\""),
+        ("SELECT json_scalar(NULL::int)", "NULL"),
+        ("SELECT json_serialize('{ \"a\" : 1 } ')", "{ \"a\" : 1 } "),
+        (
+            "SELECT json_serialize('{ \"a\" : 1 } ' RETURNING bytea)",
+            "\\x7b20226122203a2031207d20",
+        ),
+        (
+            "SELECT json_serialize('{\"b\": 1, \"a\": 2}'::jsonb RETURNING varchar)",
+            "{\"a\": 2, \"b\": 1}",
+        ),
+        ("SELECT pg_typeof(json_serialize('1'))::text", "text"),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(one(&mut session, sql), expected, "{sql}");
+    }
+    assert_eq!(
+        run(&mut session, "SELECT json('1'), json_scalar(1), json_serialize('1')")
+            .expect("columns")
+            .lines()
+            .next(),
+        Some("json|json_scalar|json_serialize")
+    );
+    let failures = [
+        ("SELECT json('{\"a\": 1, \"a\": 2}' WITH UNIQUE KEYS)", "22030"),
+        ("SELECT json('{oops')", "22P02"),
+        ("SELECT json(42)", "42804"),
+        ("SELECT json_serialize('[1]' RETURNING integer)", "42804"),
+        ("SELECT json_serialize('not json')", "22P02"),
+    ];
+    for (sql, expected) in failures {
+        assert_eq!(state(&mut session, sql), expected, "{sql}");
+    }
+}
+
+#[test]
+fn the_decimal_path_method_rounds_to_its_precision_and_scale() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let cases = [
+        ("SELECT jsonb_path_query('1234.5678', '$.decimal(6, 2)')", "1234.57"),
+        ("SELECT jsonb_path_query('1234.5678', '$.decimal()')", "1234.5678"),
+        ("SELECT jsonb_path_query('\"12.345\"', '$.decimal(4, 1)')", "12.3"),
+        ("SELECT jsonb_path_query('1234.5678', '$.decimal(6)')", "1235"),
+        ("SELECT jsonb_path_query('1250', '$.decimal(4, -2)')", "1300"),
+        ("SELECT jsonb_path_query('[1.25, 2.5]', '$.decimal(3, 1)')", "1.3"),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(
+            rows(&mut session, sql).first().map(String::as_str),
+            Some(expected),
+            "{sql}"
+        );
+    }
+    let failures = [
+        ("SELECT jsonb_path_query('1234.5678', '$.decimal(4, 2)')", "2203G"),
+        ("SELECT jsonb_path_query('1', '$.decimal(0)')", "22023"),
+        ("SELECT jsonb_path_query('1', '$.decimal(9999999999)')", "22023"),
+        ("SELECT jsonb_path_query('\"abc\"', '$.decimal(4)')", "2203G"),
+        ("SELECT jsonb_path_query('1', '$.decimal(1.5)')", "42601"),
+    ];
+    for (sql, expected) in failures {
+        assert_eq!(state(&mut session, sql), expected, "{sql}");
+    }
+}
+
+#[test]
 fn oracle_shares_json_value_json_query_json_exists_and_json_table() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::Oracle);
