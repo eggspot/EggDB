@@ -1993,7 +1993,7 @@ fn sidebar_nodes(nodes: &mut Vec<AccessNode>, window: &MainWindow) {
         );
         item.description = Some(object_browser::row_description(row, detail.as_deref()));
         item.tree_position = Some(AccessTreePosition {
-            level: row.level,
+            level: row.level + 1,
             position: row.position,
             set_size: row.set_size,
         });
@@ -2246,7 +2246,11 @@ mod tests {
         );
         assert_eq!(
             open_statement("orders", QueryDialect::Oracle),
-            "SELECT * FROM orders FETCH FIRST 100 ROWS ONLY;"
+            "SELECT * FROM \"orders\" FETCH FIRST 100 ROWS ONLY;"
+        );
+        assert_eq!(
+            open_statement("ORDERS", QueryDialect::Oracle),
+            "SELECT * FROM ORDERS FETCH FIRST 100 ROWS ONLY;"
         );
     }
 

@@ -1814,8 +1814,8 @@ mod tests {
         let (canvas, theme) = frame(&card, ThemeKind::Light, 1.0);
         assert_eq!(
             canvas.pixel(560, 282 + 36),
-            Some(theme.accent),
-            "input moved"
+            Some(theme.error),
+            "input moved, with its error border"
         );
         assert_eq!(
             canvas.pixel(381, 296 + 36),

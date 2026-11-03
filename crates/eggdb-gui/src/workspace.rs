@@ -1054,10 +1054,19 @@ mod tests {
         assert!(card(&mut workspace).read_only);
         assert_eq!(card(&mut workspace).focus, Focus::ReadOnly);
         let tree = card_tree(&workspace);
-        workspace.access(&request(NODE_READ_ONLY, AccessAction::Invoke), &tree, now);
+        assert_eq!(
+            workspace.access(&request(NODE_READ_ONLY, AccessAction::Invoke), &tree, now),
+            WorkspaceCommand::None
+        );
+        assert!(
+            card(&mut workspace).read_only,
+            "a checkbox offers toggle, not invoke"
+        );
+        let tree = card_tree(&workspace);
+        workspace.access(&request(NODE_READ_ONLY, AccessAction::Toggle), &tree, now);
         assert!(
             !card(&mut workspace).read_only,
-            "invoking a checkbox flips it back"
+            "toggling a checkbox again flips it back"
         );
         let tree = card_tree(&workspace);
         assert_eq!(

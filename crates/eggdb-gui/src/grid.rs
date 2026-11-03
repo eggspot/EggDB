@@ -394,21 +394,21 @@ impl ResultGrid {
             Key::Space if shift => {
                 self.anchor = Cell {
                     row: here.row,
-                    column: 0,
+                    column: self.last_column(),
                 };
                 self.current = Cell {
                     row: here.row,
-                    column: self.last_column(),
+                    column: 0,
                 };
                 return GridAnswer::Moved;
             }
             Key::Space if primary => {
                 self.anchor = Cell {
-                    row: 0,
+                    row: self.last_row(),
                     column: here.column,
                 };
                 self.current = Cell {
-                    row: self.last_row(),
+                    row: 0,
                     column: here.column,
                 };
                 return GridAnswer::Moved;

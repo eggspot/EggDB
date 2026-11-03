@@ -3357,7 +3357,7 @@ mod tests {
         assert_eq!(
             summary(&events),
             vec![
-                entry(20, "TextChanged", "insert", 5),
+                entry(20, "TextChanged", "insert", 6),
                 entry(20, "TextCaretMoved", "", 7),
                 entry(20, "TextSelectionChanged", "", 0),
                 entry(31, "PropertyChange", "accessible-description", 0),
@@ -3369,7 +3369,7 @@ mod tests {
         assert_eq!(
             events.first().map(|event| event.body.get(2..4)),
             Some(Some(
-                &[Value::Int32(3), Value::Variant(Box::new(text("eu.")))][..]
+                &[Value::Int32(3), Value::Variant(Box::new(text("u.e")))][..]
             ))
         );
         for mut event in events {

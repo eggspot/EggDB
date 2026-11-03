@@ -198,7 +198,8 @@ mod tests {
         assert_eq!(key_from_dom("q"), Some(Key::Character('q')));
         assert_eq!(key_from_dom("é"), Some(Key::Character('é')));
         assert_eq!(key_from_dom("Shift"), None);
-        assert_eq!(key_from_dom("F5"), None);
+        assert_eq!(key_from_dom("F5"), Some(Key::F5));
+        assert_eq!(key_from_dom("F6"), None);
         assert_eq!(key_from_dom(""), None);
         assert_eq!(key_from_dom("\u{7}"), None);
     }
