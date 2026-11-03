@@ -3,17 +3,21 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use eggdb_platform::window::{AccessNode, AccessRequest, KeyPress, OpenFileDialog};
+use eggdb_platform::window::{
+    AccessAction, AccessNode, AccessRequest, AccessRole, KeyPress, Modifiers, OpenFileDialog,
+    PointerButton,
+};
 
 use crate::clipboard::{Clipboard, MemoryClipboard};
-use crate::connect_screen::{ConnectAction, ConnectCard, Segment, handle_key};
+use crate::connect_screen::{self, ConnectAction, ConnectCard, Segment, handle_key};
 use crate::connection::{
     CancelHandle, ConnectFailure, ConnectTarget, Connection, Connector, ResultTable,
     StatementFailure,
 };
 use crate::catalog::Catalog;
 use crate::inspector;
-use crate::main_window::{MainWindow, WindowAction};
+use crate::main_window::{self, Faces, MainWindow, WindowAction};
+use crate::pointer::{self, ClickCounter, PointerLook};
 use crate::object_browser::TreeItem;
 use crate::query_tab::{RunRequest, TabAction};
 
@@ -27,6 +31,13 @@ pub const CANCELLED_SHOWN_FOR: Duration = Duration::from_secs(2);
 pub const NOTICE_SHOWN_FOR: Duration = Duration::from_secs(2);
 
 type RunAnswer = (Connection, Vec<Result<Vec<ResultTable>, StatementFailure>>);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Drag {
+    CardField { box_left: f32 },
+    Editor,
+    Grid,
+}
 
 /// What the window around the workspace must do after an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +86,12 @@ pub struct Workspace {
     clipboard: Box<dyn Clipboard>,
     home: Option<PathBuf>,
     current: PathBuf,
+    clicks: ClickCounter,
+    drag: Option<Drag>,
+    last_input: Instant,
+    caret_blinks: bool,
+    window_active: bool,
+    reduced_motion: bool,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -110,6 +127,287 @@ impl Workspace {
             clipboard: Box::new(MemoryClipboard::default()),
             home,
             current,
+            clicks: ClickCounter::default(),
+            drag: None,
+            last_input: Instant::now(),
+            caret_blinks: false,
+            window_active: true,
+            reduced_motion: false,
+        }
+    }
+
+    /// Makes the caret blink (`docs/ux/workspace.md` 6.2) from `now`, as a window does;
+    /// offscreen frames keep it solid.
+    pub fn start_caret_blink(&mut self, now: Instant) {
+        self.caret_blinks = true;
+        self.last_input = now;
+    }
+
+    /// Keeps the caret solid and every fade instant, as the system's reduced-motion setting
+    /// asks.
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.reduced_motion = reduced;
+    }
+
+    /// The window became active (`true`) or inactive: an inactive window's caret is solid
+    /// `textDisabled`. Returns whether the frame changed.
+    pub fn set_window_active(&mut self, active: bool, now: Instant) -> bool {
+        self.window_active = active;
+        self.refresh_caret(now)
+    }
+
+    fn caret_since(&self, now: Instant) -> Duration {
+        if self.caret_blinks {
+            now.saturating_duration_since(self.last_input)
+        } else {
+            Duration::ZERO
+        }
+    }
+
+    fn refresh_caret(&mut self, now: Instant) -> bool {
+        let look = pointer::caret_look(self.caret_since(now), self.reduced_motion, self.window_active);
+        let slot = match &mut self.screen {
+            Screen::Connect(card) => &mut card.caret,
+            Screen::Main(window) => &mut window.caret,
+        };
+        let changed = *slot != look;
+        *slot = look;
+        changed
+    }
+
+    /// How long until the caret's blink needs a new frame, `None` when it does not blink.
+    pub fn until_caret_changes(&self, now: Instant) -> Option<Duration> {
+        if !self.caret_blinks {
+            return None;
+        }
+        pointer::until_caret_changes(self.caret_since(now), self.reduced_motion, self.window_active)
+    }
+
+    fn input_at(&mut self, now: Instant) {
+        self.last_input = now;
+        self.refresh_caret(now);
+    }
+
+    fn pointer_tree(&self, faces: Faces<'_>, size: (u32, u32)) -> Vec<AccessNode> {
+        match &self.screen {
+            Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, size),
+            Screen::Main(window) => main_window::accessibility_tree(window),
+        }
+    }
+
+    fn pointer_look_mut(&mut self) -> &mut PointerLook {
+        match &mut self.screen {
+            Screen::Connect(card) => &mut card.pointer,
+            Screen::Main(window) => &mut window.pointer,
+        }
+    }
+
+    /// The pointer moved to (`x`, `y`) logical pixels in a window of `size`: the hover moves
+    /// to the control under it, and a drag that started in an input, the editor or the grid
+    /// extends its selection. Returns whether the frame changed.
+    pub fn pointer_moved(&mut self, x: f32, y: f32, faces: Faces<'_>, size: (u32, u32)) -> bool {
+        let tree = self.pointer_tree(faces, size);
+        let mut changed = match self.drag {
+            Some(drag) => self.drag_to(drag, &tree, faces, x, y),
+            None => false,
+        };
+        let hovered = pointer::hit_test(&tree, x, y).map(|node| node.id);
+        let look = self.pointer_look_mut();
+        if look.hovered != hovered {
+            look.hovered = hovered;
+            changed = true;
+        }
+        changed
+    }
+
+    /// The pointer left the window: nothing is hovered. Returns whether the frame changed.
+    pub fn pointer_left(&mut self) -> bool {
+        let look = self.pointer_look_mut();
+        let changed = look.hovered.is_some();
+        look.hovered = None;
+        changed
+    }
+
+    /// A button went down at (`x`, `y`) (`docs/ux/workspace.md` 6.1): the primary button
+    /// presses the control under it, focuses an input or the editor with the caret at the
+    /// press (the word on a double-click, the line or the value on a triple-click, extending
+    /// with `Shift`), sets the grid's current cell (extending with `Shift`), and selects a tree
+    /// row (a double-click opens it). Buttons, links, checkboxes and tabs act on release.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pointer_pressed(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: PointerButton,
+        modifiers: Modifiers,
+        faces: Faces<'_>,
+        size: (u32, u32),
+        now: Instant,
+    ) -> WorkspaceCommand {
+        if button != PointerButton::Primary || self.card_mut().is_some_and(|card| card.busy) {
+            return WorkspaceCommand::None;
+        }
+        self.input_at(now);
+        let clicks = self.clicks.press(now, x, y);
+        let tree = self.pointer_tree(faces, size);
+        let Some(node) = pointer::hit_test(&tree, x, y).cloned() else {
+            return WorkspaceCommand::None;
+        };
+        {
+            let look = self.pointer_look_mut();
+            look.pressed = Some(node.id);
+            look.hovered = Some(node.id);
+        }
+        let extend = modifiers.shift;
+        let request = |action: AccessAction| AccessRequest {
+            node: node.id,
+            action,
+        };
+        let mut command = WorkspaceCommand::None;
+        match node.role {
+            AccessRole::TextField | AccessRole::TextArea => {
+                self.access(&request(AccessAction::Focus), &tree, now);
+                match &mut self.screen {
+                    Screen::Connect(card) => {
+                        card.place_caret_at(faces, node.bounds.x, x, clicks, extend);
+                        self.drag = Some(Drag::CardField {
+                            box_left: node.bounds.x,
+                        });
+                    }
+                    Screen::Main(window) if node.id == main_window::NODE_EDITOR => {
+                        window.press_editor(faces, x, y, clicks, extend);
+                        self.drag = Some(Drag::Editor);
+                    }
+                    Screen::Main(_) => {}
+                }
+            }
+            AccessRole::Cell => {
+                let anchor = self
+                    .main_window_mut()
+                    .and_then(|window| window.tab.grid.as_ref().map(|grid| grid.anchor));
+                self.access(&request(AccessAction::Focus), &tree, now);
+                if extend
+                    && let Some(anchor) = anchor
+                    && let Some(grid) = self.main_window_mut().and_then(|window| window.tab.grid.as_mut())
+                {
+                    grid.anchor = anchor;
+                }
+                self.drag = Some(Drag::Grid);
+            }
+            AccessRole::TreeItem => {
+                let action = if clicks == 2 {
+                    AccessAction::Invoke
+                } else {
+                    AccessAction::Select
+                };
+                command = self.access(&request(action), &tree, now);
+            }
+            _ => {}
+        }
+        self.pointer_look_mut().focus_by_pointer = true;
+        command
+    }
+
+    /// A button went up at (`x`, `y`): a press that started on a button, link, checkbox,
+    /// combo box or tab and ends on it acts (invoke, toggle, select); a release elsewhere
+    /// cancels it. A drag ends.
+    pub fn pointer_released(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: PointerButton,
+        faces: Faces<'_>,
+        size: (u32, u32),
+        now: Instant,
+    ) -> WorkspaceCommand {
+        if button != PointerButton::Primary {
+            return WorkspaceCommand::None;
+        }
+        self.drag = None;
+        let Some(pressed) = self.pointer_look_mut().pressed.take() else {
+            return WorkspaceCommand::None;
+        };
+        let tree = self.pointer_tree(faces, size);
+        let Some(node) = pointer::hit_test(&tree, x, y)
+            .filter(|node| node.id == pressed)
+            .cloned()
+        else {
+            return WorkspaceCommand::None;
+        };
+        let action = match node.role {
+            AccessRole::Button | AccessRole::Link | AccessRole::ComboBox => AccessAction::Invoke,
+            AccessRole::CheckBox => AccessAction::Toggle,
+            AccessRole::Tab => AccessAction::Select,
+            _ => return WorkspaceCommand::None,
+        };
+        let command = self.access(
+            &AccessRequest {
+                node: node.id,
+                action,
+            },
+            &tree,
+            now,
+        );
+        self.pointer_look_mut().focus_by_pointer = true;
+        command
+    }
+
+    /// The wheel scrolled at (`x`, `y`) by `lines_down` and `lines_right`: the grid or the
+    /// object tree under the pointer scrolls (`docs/ux/workspace.md` 3.6). Returns whether the
+    /// frame changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wheel(
+        &mut self,
+        x: f32,
+        y: f32,
+        lines_down: f32,
+        lines_right: f32,
+        modifiers: Modifiers,
+        faces: Faces<'_>,
+        size: (u32, u32),
+    ) -> bool {
+        let tree = self.pointer_tree(faces, size);
+        match &mut self.screen {
+            Screen::Main(window) => window.wheel(&tree, x, y, lines_down, lines_right, modifiers.shift),
+            Screen::Connect(_) => false,
+        }
+    }
+
+    fn drag_to(&mut self, drag: Drag, tree: &[AccessNode], faces: Faces<'_>, x: f32, y: f32) -> bool {
+        match (drag, &mut self.screen) {
+            (Drag::CardField { box_left }, Screen::Connect(card)) => {
+                let before = card.focused_field().map(|field| (field.caret(), field.selection()));
+                card.place_caret_at(faces, box_left, x, 1, true);
+                card.focused_field().map(|field| (field.caret(), field.selection())) != before
+            }
+            (Drag::Editor, Screen::Main(window)) => {
+                let before = (window.tab.editor.caret(), window.tab.editor.selection());
+                window.drag_editor(faces, x, y);
+                (window.tab.editor.caret(), window.tab.editor.selection()) != before
+            }
+            (Drag::Grid, Screen::Main(window)) => {
+                let Some(at) = tree
+                    .iter()
+                    .rev()
+                    .find(|node| node.role == AccessRole::Cell && pointer::contains(node.bounds, x, y))
+                    .and_then(|node| node.cell)
+                else {
+                    return false;
+                };
+                let Some(grid) = &mut window.tab.grid else {
+                    return false;
+                };
+                let cell = crate::grid::Cell {
+                    row: at.row,
+                    column: at.column,
+                };
+                if grid.current == cell || at.row >= grid.rows.len() || at.column >= grid.columns.len() {
+                    return false;
+                }
+                grid.current = cell;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -161,6 +459,7 @@ impl Workspace {
 
     /// Answers a key press.
     pub fn key(&mut self, press: KeyPress, now: Instant) -> WorkspaceCommand {
+        self.input_at(now);
         if let Screen::Main(window) = &mut self.screen {
             let action = window.key(press, now);
             self.window_action(action, now);
@@ -265,6 +564,20 @@ impl Workspace {
                     window.tab.notice = Some(toast);
                 }
                 self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+            }
+            TabAction::Paste => {
+                let pasted = self.clipboard.text().map(|raw| pointer::paste_text(&raw));
+                let Some(window) = self.main_window_mut() else {
+                    return;
+                };
+                match pasted {
+                    Some(Ok(text)) => window.tab.paste(&text),
+                    Some(Err(toast)) => {
+                        window.tab.notice = Some(toast.to_owned());
+                        self.notice_until = Some(now + NOTICE_SHOWN_FOR);
+                    }
+                    None => {}
+                }
             }
         }
     }
@@ -398,6 +711,30 @@ impl Workspace {
                 self.status_until = Some(now + CANCELLED_SHOWN_FOR);
                 WorkspaceCommand::None
             }
+            ConnectAction::CopySelection => {
+                if let Some(text) = self.card_mut().and_then(|card| card.copied_text()) {
+                    self.clipboard.put_text(&text);
+                }
+                WorkspaceCommand::None
+            }
+            ConnectAction::Paste => {
+                let pasted = self.clipboard.text().map(|raw| pointer::paste_text(&raw));
+                let refused = match (pasted, self.card_mut()) {
+                    (Some(Ok(text)), Some(card)) => {
+                        card.paste(&text);
+                        false
+                    }
+                    (Some(Err(toast)), Some(card)) => {
+                        card.status = Some(toast.to_owned());
+                        true
+                    }
+                    _ => false,
+                };
+                if refused {
+                    self.status_until = Some(now + NOTICE_SHOWN_FOR);
+                }
+                WorkspaceCommand::None
+            }
             ConnectAction::None
             | ConnectAction::Cancel
             | ConnectAction::ShowLayoutPicker
@@ -483,6 +820,9 @@ impl Workspace {
     /// Returns whether the screen changed.
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = self.tick_run(now);
+        if self.caret_blinks || !self.window_active {
+            changed |= self.refresh_caret(now);
+        }
         if self.notice_until.is_some_and(|until| now >= until) {
             self.notice_until = None;
             if let Some(window) = self.main_window_mut() {
@@ -885,5 +1225,134 @@ mod tests {
         workspace.wait_for_open(Duration::from_secs(10));
         assert!(matches!(workspace.screen(), Screen::Main(_)));
         let _ = std::fs::remove_file(directory.join("back.eggdb"));
+    }
+
+    const POINTER_FACES: crate::main_window::Faces<'static> = crate::main_window::Faces {
+        ui: &crate::font::BoxFace,
+        ui_bold: &crate::font::BoxFace,
+        mono: &crate::font::BoxFace,
+    };
+    const WINDOW: (u32, u32) = (1280, 800);
+
+    fn bounds_of(workspace: &Workspace, id: u32) -> eggdb_platform::window::AccessRect {
+        workspace
+            .pointer_tree(POINTER_FACES, WINDOW)
+            .into_iter()
+            .find(|node| node.id == id)
+            .map(|node| node.bounds)
+            .expect("the node is in the tree")
+    }
+
+    fn centre_of(workspace: &Workspace, id: u32) -> (f32, f32) {
+        let bounds = bounds_of(workspace, id);
+        (bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0)
+    }
+
+    fn click(workspace: &mut Workspace, (x, y): (f32, f32), now: Instant) -> WorkspaceCommand {
+        let _ = workspace.pointer_pressed(x, y, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now);
+        workspace.pointer_released(x, y, PointerButton::Primary, POINTER_FACES, WINDOW, now)
+    }
+
+    #[test]
+    fn a_checkbox_toggles_on_release_inside_and_a_release_outside_cancels() {
+        let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), scratch("pointer-check"));
+        let now = Instant::now();
+        let at = centre_of(&workspace, connect_screen::NODE_READ_ONLY);
+        assert!(workspace.pointer_moved(at.0, at.1, POINTER_FACES, WINDOW));
+        assert!(card(&mut workspace).pointer.is_hovered(connect_screen::NODE_READ_ONLY));
+        let _ = workspace.pointer_pressed(at.0, at.1, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now);
+        assert!(card(&mut workspace).pointer.is_pressed(connect_screen::NODE_READ_ONLY));
+        workspace.pointer_moved(2.0, 2.0, POINTER_FACES, WINDOW);
+        assert!(!card(&mut workspace).pointer.is_pressed(connect_screen::NODE_READ_ONLY));
+        workspace.pointer_released(2.0, 2.0, PointerButton::Primary, POINTER_FACES, WINDOW, now);
+        assert!(!card(&mut workspace).read_only, "a release outside changes nothing");
+        assert_eq!(card(&mut workspace).pointer.pressed, None);
+        click(&mut workspace, at, now + Duration::from_secs(1));
+        let shown = card(&mut workspace);
+        assert!(shown.read_only);
+        assert_eq!(shown.focus, Focus::ReadOnly);
+        assert!(shown.pointer.focus_by_pointer && !shown.ring_shown(), "a click draws no ring on a checkbox");
+        workspace.key(KeyPress::plain(Key::Space), now);
+        assert!(card(&mut workspace).ring_shown(), "a key brings the ring back");
+        assert!(workspace.pointer_left());
+        assert_eq!(card(&mut workspace).pointer.hovered, None);
+    }
+
+    #[test]
+    fn a_click_and_a_drag_in_the_file_input_place_the_caret_and_select_and_paste_replaces_it() {
+        let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), scratch("pointer-field"));
+        let now = Instant::now();
+        workspace.card_mut().expect("the card").file.set("shop.eggdb");
+        workspace.card_mut().expect("the card").focus = Focus::Open;
+        let input = bounds_of(&workspace, connect_screen::NODE_FILE);
+        let (right, left, middle) = (input.x + input.width - 2.0, input.x + 1.0, input.y + input.height / 2.0);
+        let _ = workspace.pointer_pressed(right, middle, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now);
+        let shown = card(&mut workspace);
+        assert_eq!(shown.focus, Focus::FileInput);
+        assert_eq!((shown.file.caret(), shown.file.selection()), (10, None));
+        assert!(shown.ring_shown(), "inputs keep the ring after a click");
+        assert!(workspace.pointer_moved(left, middle, POINTER_FACES, WINDOW));
+        workspace.pointer_released(left, middle, PointerButton::Primary, POINTER_FACES, WINDOW, now);
+        assert_eq!(card(&mut workspace).file.selection(), Some((0, 10)));
+        workspace.key(KeyPress { key: Key::Character('c'), modifiers: crate::accessibility::primary() }, now);
+        assert_eq!(workspace.clipboard().text().as_deref(), Some("shop.eggdb"));
+        let mut clipboard = MemoryClipboard::default();
+        clipboard.put_text("/tmp/other.eggdb\r\n");
+        workspace.set_clipboard(Box::new(clipboard));
+        workspace.key(KeyPress { key: Key::Character('v'), modifiers: crate::accessibility::primary() }, now);
+        assert_eq!(card(&mut workspace).file.value(), "/tmp/other.eggdb");
+        let mut large = MemoryClipboard::default();
+        large.put_text(&"x".repeat(pointer::MAX_PASTE_BYTES + 1));
+        workspace.set_clipboard(Box::new(large));
+        workspace.key(KeyPress { key: Key::Character('v'), modifiers: crate::accessibility::primary() }, now);
+        let shown = card(&mut workspace);
+        assert_eq!(shown.file.value(), "/tmp/other.eggdb");
+        assert_eq!(shown.status.as_deref(), Some(pointer::PASTE_TOO_LARGE));
+    }
+
+    #[test]
+    fn clicking_open_opens_and_a_click_in_the_editor_places_the_caret() {
+        use crate::font::Typeface as _;
+        let directory = scratch("pointer-open");
+        let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), directory.clone());
+        let now = Instant::now();
+        workspace.card_mut().expect("the card").file.set(&directory.join("clicked.eggdb").display().to_string());
+        click(&mut workspace, centre_of(&workspace, connect_screen::NODE_OPEN), now);
+        workspace.wait_for_open(Duration::from_secs(10));
+        assert!(matches!(workspace.screen(), Screen::Main(_)), "a click on Open opens");
+        workspace.main_window_mut().expect("the main window").tab.editor = crate::editor::Editor::new("SELECT 1;\nSELECT 22;");
+        let editor = bounds_of(&workspace, main_window::NODE_EDITOR);
+        let advance = crate::font::BoxFace.advance('x', 13.0);
+        let at = (320.0 + advance * 3.0 + 1.0, 88.0 + 20.0 + 5.0);
+        assert!(pointer::contains(editor, at.0, at.1));
+        click(&mut workspace, at, now + Duration::from_secs(2));
+        let window = workspace.main_window_mut().expect("the main window");
+        assert_eq!(window.tab.editor.caret(), crate::editor::Position { line: 1, column: 3 });
+        assert!(window.pointer.focus_by_pointer);
+        let _ = workspace.pointer_pressed(at.0, at.1, PointerButton::Primary, Modifiers::default(), POINTER_FACES, WINDOW, now + Duration::from_millis(2_100));
+        let window = workspace.main_window_mut().expect("the main window");
+        assert_eq!(window.tab.editor.selected_text().as_deref(), Some("SELECT"), "a double-click selects the word");
+        let _ = std::fs::remove_file(directory.join("clicked.eggdb"));
+    }
+
+    #[test]
+    fn the_caret_blinks_only_once_a_window_starts_it_and_goes_grey_when_inactive() {
+        let mut workspace = workspace(Arc::new(SlowConnector(Duration::ZERO)), scratch("pointer-caret"));
+        let start = Instant::now();
+        assert!(!workspace.tick(start + Duration::from_millis(1_100)));
+        assert_eq!(card(&mut workspace).caret, pointer::CaretLook::On);
+        assert_eq!(workspace.until_caret_changes(start), None);
+        workspace.start_caret_blink(start);
+        assert!(workspace.tick(start + Duration::from_millis(1_100)));
+        assert_eq!(card(&mut workspace).caret, pointer::CaretLook::Off);
+        workspace.key(KeyPress::plain(Key::End), start + Duration::from_millis(1_200));
+        assert_eq!(card(&mut workspace).caret, pointer::CaretLook::On);
+        assert_eq!(workspace.until_caret_changes(start + Duration::from_millis(1_600)), Some(Duration::from_millis(630)));
+        assert!(workspace.set_window_active(false, start + Duration::from_millis(1_700)));
+        assert_eq!(card(&mut workspace).caret, pointer::CaretLook::Inactive);
+        workspace.set_window_active(true, start + Duration::from_millis(1_800));
+        workspace.set_reduced_motion(true);
+        workspace.tick(start + Duration::from_millis(2_800));
+        assert_eq!(card(&mut workspace).caret, pointer::CaretLook::On);
     }
 }

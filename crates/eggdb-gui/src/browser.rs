@@ -65,7 +65,8 @@ pub fn theme_from_code(code: u32) -> ThemeKind {
 }
 
 /// The number a host receives for an action: 0 none, 1 open, 2 browse, 3 cancel, 4 show the
-/// layout picker, 5 load the sample dataset, 6 quit, 7 stop the open in progress.
+/// layout picker, 5 load the sample dataset, 6 quit, 7 stop the open in progress, 8 copy the
+/// focused input's selection, 9 paste into the focused input.
 pub fn action_code(action: ConnectAction) -> u32 {
     match action {
         ConnectAction::None => 0,
@@ -76,6 +77,8 @@ pub fn action_code(action: ConnectAction) -> u32 {
         ConnectAction::LoadSampleDataset => 5,
         ConnectAction::Quit => 6,
         ConnectAction::StopOpening => 7,
+        ConnectAction::CopySelection => 8,
+        ConnectAction::Paste => 9,
     }
 }
 
@@ -219,6 +222,8 @@ mod tests {
         assert_eq!(theme_from_code(9), ThemeKind::Light);
         assert_eq!(action_code(ConnectAction::None), 0);
         assert_eq!(action_code(ConnectAction::Open), 1);
+        assert_eq!(action_code(ConnectAction::CopySelection), 8);
+        assert_eq!(action_code(ConnectAction::Paste), 9);
         assert_eq!(action_code(ConnectAction::Quit), 6);
     }
 

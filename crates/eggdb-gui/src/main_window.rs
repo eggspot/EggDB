@@ -9,11 +9,13 @@ use crate::canvas::{Canvas, Rect};
 use crate::catalog::{Catalog, CatalogColumn, CatalogIndex, CatalogTable, CatalogView, KeyCount, KeySpace};
 use crate::color::{Rgba, Theme};
 use crate::dialect::QueryDialect;
+use crate::editor::Position;
 use crate::font::{TextStyle, Typeface};
 use crate::grid::{CellLook, ResultGrid, ValueKind, cell_text, quote_name, visible_columns, visible_rows};
 use crate::highlight::{Carry, TokenKind, tokens};
 use crate::inspector::{self, Inspector, InspectorBlock};
 use crate::plan_view::{self, PlanView};
+use crate::pointer::{self, CaretLook, PointerLook};
 use crate::object_browser::{self, ObjectTree, ROW_HEIGHT, ROWS_IN_VIEW, ROWS_TOP, SidebarFocus, TreeAction, TreeItem};
 use crate::query_tab::{QueryTab, ResultView, TabAction, TabFocus};
 use crate::status_line;
@@ -23,6 +25,7 @@ pub const GRID_BODY_WIDTH: f32 = 972.0;
 const GRID_LEFT: f32 = 308.0;
 const BODY_BOTTOM: f32 = 776.0;
 const EDITOR_TEXT_TOP: f32 = 88.0;
+const EDITOR_TEXT_LEFT: f32 = 320.0;
 const LINE_HEIGHT: f32 = 20.0;
 const CARET_MARGIN_LINES: usize = 4;
 const ELIDE_SCAN_LIMIT: usize = 512;
@@ -97,6 +100,10 @@ pub struct MainWindow {
     pub tab: QueryTab,
     /// The other query tabs, in the strip's order before the one that shows.
     pub background_tabs: Vec<QueryTab>,
+    /// The pointer's hover, press and whether it moved the focus last.
+    pub pointer: PointerLook,
+    /// How the editor's caret draws at this moment of its blink.
+    pub caret: CaretLook,
 }
 
 impl MainWindow {
@@ -118,7 +125,75 @@ impl MainWindow {
             width: WIDTH,
             tab: QueryTab::new("Query 1"),
             background_tabs: Vec::new(),
+            pointer: PointerLook::default(),
+            caret: CaretLook::On,
         }
+    }
+
+    /// The editor position a press at (`x`, `y`) logical pixels reaches: the visible line
+    /// under it (the first or last one above or below the text) and the nearest character
+    /// boundary on it.
+    pub fn editor_position_at(&self, faces: Faces<'_>, x: f32, y: f32) -> Position {
+        let tab = &self.tab;
+        let lines = tab.editor.lines();
+        let visible = (((editor_bottom(tab) - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor() as usize).max(1);
+        let first = first_visible_line(tab.editor.caret().line, visible).min(lines.len().saturating_sub(1));
+        let row = ((y - EDITOR_TEXT_TOP) / LINE_HEIGHT).floor().max(0.0) as usize;
+        let line = (first + row.min(visible - 1)).min(lines.len().saturating_sub(1));
+        let text = lines.get(line).map_or("", String::as_str);
+        let column = pointer::column_at(faces.mono, CODE.0, text, x - EDITOR_TEXT_LEFT);
+        Position { line, column }
+    }
+
+    /// Answers a press on the editor at (`x`, `y`): the caret at the press (the selection
+    /// extended to it with `extend`), the word on a double-click, the line on a triple-click.
+    pub fn press_editor(&mut self, faces: Faces<'_>, x: f32, y: f32, clicks: u8, extend: bool) {
+        let at = self.editor_position_at(faces, x, y);
+        let editor = &mut self.tab.editor;
+        match clicks {
+            2 => {
+                let line = editor.lines().get(at.line).map_or("", String::as_str);
+                let (start, end) = pointer::word_at(line, at.column);
+                editor.select_columns(at.line, start, end);
+            }
+            3 => editor.select_line(at.line),
+            _ if extend => editor.select_to(at),
+            _ => editor.place_caret(at),
+        }
+    }
+
+    /// Extends the editor's selection to (`x`, `y`) during a drag.
+    pub fn drag_editor(&mut self, faces: Faces<'_>, x: f32, y: f32) {
+        let at = self.editor_position_at(faces, x, y);
+        self.tab.editor.select_to(at);
+    }
+
+    /// Scrolls what is under (`x`, `y`) by the wheel's `lines_down` and `lines_right`
+    /// (`Shift` turns vertical steps horizontal): the grid by three rows or columns a notch,
+    /// the object tree by three rows. Returns whether anything moved.
+    pub fn wheel(&mut self, tree: &[AccessNode], x: f32, y: f32, lines_down: f32, lines_right: f32, shift: bool) -> bool {
+        let over = |id: u32| {
+            tree.iter()
+                .find(|node| node.id == id)
+                .is_some_and(|node| pointer::contains(node.bounds, x, y))
+        };
+        let (down, right) = if shift { (0.0, lines_right + lines_down) } else { (lines_down, lines_right) };
+        let steps = |lines: f32| (lines * pointer::WHEEL_ROWS_PER_NOTCH).round() as isize;
+        if over(NODE_GRID) {
+            if let Some(grid) = self.tab.grid.as_mut().filter(|_| self.tab.view == ResultView::Results) {
+                let before = (grid.first_row, grid.scroll_x);
+                grid.scroll_by(steps(down), steps(right), crate::query_tab::ROWS_IN_VIEW);
+                return (grid.first_row, grid.scroll_x) != before;
+            }
+            return false;
+        }
+        if over(NODE_OBJECTS) {
+            let before = self.tree.first_row;
+            let last = self.tree.rows().len().saturating_sub(object_browser::ROWS_IN_VIEW);
+            self.tree.first_row = before.saturating_add_signed(steps(down)).min(last);
+            return self.tree.first_row != before;
+        }
+        false
     }
 
     /// The sample of `docs/ux/gui.md`'s golden frame: the `shop` database.
@@ -422,6 +497,14 @@ impl Painter<'_, '_> {
         let theme = self.theme;
         match kind {
             Button::Primary => self.canvas.fill_rounded_rect(rect, 4.0, theme.accent),
+            Button::PrimaryHovered => self.canvas.fill_rounded_rect(rect, 4.0, theme.accent_hover),
+            Button::PrimaryPressed => self.canvas.fill_rounded_rect(rect, 4.0, theme.accent_pressed),
+            Button::SecondaryHovered | Button::SecondaryPressed => {
+                let edge = if kind == Button::SecondaryPressed { theme.border_strong } else { theme.border };
+                self.canvas.fill_rounded_rect(rect, 4.0, edge);
+                let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
+                self.canvas.fill_rounded_rect(inner, 3.0, theme.bg2);
+            }
             Button::Secondary => {
                 self.canvas.fill_rounded_rect(rect, 4.0, theme.border);
                 let inner = Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0);
@@ -446,9 +529,24 @@ impl Painter<'_, '_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Button {
     Primary,
+    PrimaryHovered,
+    PrimaryPressed,
     Secondary,
+    SecondaryHovered,
+    SecondaryPressed,
     Disabled,
     Ghost,
+}
+
+fn under_pointer(window: &MainWindow, id: u32, look: Button) -> Button {
+    let pointer = window.pointer;
+    match look {
+        Button::Primary if pointer.is_pressed(id) => Button::PrimaryPressed,
+        Button::Primary if pointer.is_hovered(id) => Button::PrimaryHovered,
+        Button::Secondary if pointer.is_pressed(id) => Button::SecondaryPressed,
+        Button::Secondary if pointer.is_hovered(id) => Button::SecondaryHovered,
+        other => other,
+    }
 }
 
 /// Draws `window` into a new canvas of its width and [`HEIGHT`] in `theme`, as
@@ -470,7 +568,7 @@ pub fn draw(window: &MainWindow, theme: Theme, faces: Faces<'_>) -> Canvas {
     };
     object_browser::draw(&mut paint, &window.tree, access_text(window), sidebar_focus);
     tabs(&mut paint, window);
-    editor(&mut paint, &window.tab);
+    editor(&mut paint, &window.tab, window.caret);
     results(&mut paint, &window.tab);
     if window.inspector.is_open() {
         let description = inspector::describe(&window.tree, window.inspected(), window.inspector.sample.as_ref());
@@ -523,14 +621,14 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     } else {
         (Button::Secondary, theme.text_primary)
     };
-    paint.button(Rect::new(232.0, 8.0, 72.0, 28.0), run_look);
+    paint.button(Rect::new(232.0, 8.0, 72.0, 28.0), under_pointer(window, NODE_RUN, run_look));
     paint.polyline(
         &[(244.0, 17.0), (244.0, 27.0), (253.0, 22.0), (244.0, 17.0)],
         1.5,
         run_ink,
     );
     paint.text(faces.ui, "Run", 260.0, 13.0, BODY, run_ink);
-    paint.button(Rect::new(312.0, 8.0, 88.0, 28.0), other_look);
+    paint.button(Rect::new(312.0, 8.0, 88.0, 28.0), under_pointer(window, NODE_RUN_ALL, other_look));
     paint.polyline(
         &[(324.0, 17.0), (324.0, 27.0), (333.0, 22.0), (324.0, 17.0)],
         1.5,
@@ -538,7 +636,7 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     );
     paint.rect(335.0, 17.0, 2.0, 10.0, other_ink);
     paint.text(faces.ui, "Run all", 342.0, 13.0, BODY, other_ink);
-    paint.button(Rect::new(408.0, 8.0, 84.0, 28.0), other_look);
+    paint.button(Rect::new(408.0, 8.0, 84.0, 28.0), under_pointer(window, NODE_EXPLAIN, other_look));
     for (x, y, w) in [(420.0, 17.0, 10.0), (424.0, 21.0, 6.0), (428.0, 25.0, 2.0)] {
         paint.rect(x, y, w, 2.0, other_ink);
     }
@@ -549,12 +647,12 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
     } else {
         (Button::Disabled, theme.text_disabled, theme.text_disabled)
     };
-    paint.button(Rect::new(500.0, 8.0, 68.0, 28.0), stop_look);
+    paint.button(Rect::new(500.0, 8.0, 68.0, 28.0), under_pointer(window, NODE_STOP, stop_look));
     paint
         .canvas
         .fill_rounded_rect(Rect::new(512.0, 17.0, 10.0, 10.0), 2.0, stop_icon);
     paint.text(faces.ui, "Stop", 528.0, 13.0, BODY, stop_ink);
-    paint.button(Rect::new(width - 224.0, 8.0, 120.0, 28.0), Button::Secondary);
+    paint.button(Rect::new(width - 224.0, 8.0, 120.0, 28.0), under_pointer(window, NODE_DIALECT, Button::Secondary));
     paint.text(
         faces.ui,
         window.tab.dialect.label(),
@@ -568,7 +666,7 @@ fn toolbar(paint: &mut Painter<'_, '_>, window: &MainWindow) {
         1.5,
         theme.text_primary,
     );
-    if window.tab.focus == TabFocus::DialectPill {
+    if window.tab.focus == TabFocus::DialectPill && !window.pointer.focus_by_pointer {
         focus_ring(paint, Rect::new(width - 226.0, 6.0, 124.0, 32.0));
     }
     if running {
@@ -717,7 +815,7 @@ pub fn first_visible_line(caret_line: usize, visible_lines: usize) -> usize {
     (caret_line + CARET_MARGIN_LINES + 1).saturating_sub(visible_lines.max(CARET_MARGIN_LINES + 1))
 }
 
-fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
+fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab, caret_look: CaretLook) {
     let theme = paint.theme;
     let faces = paint.faces;
     let centre_width = paint.centre_width();
@@ -799,9 +897,10 @@ fn editor(paint: &mut Painter<'_, '_>, tab: &QueryTab) {
             zigzag(paint, left, right, top + LINE_HEIGHT - 2.0);
         }
     }
-    if (first..first + visible).contains(&caret.line) {
+    if caret_look.shown() && (first..first + visible).contains(&caret.line) {
         let caret_top = EDITOR_TEXT_TOP + LINE_HEIGHT * (caret.line - first) as f32;
-        paint.rect(caret_x.round(), caret_top, 2.0, LINE_HEIGHT, theme.accent);
+        let color = if caret_look == CaretLook::Inactive { theme.text_disabled } else { theme.accent };
+        paint.rect(caret_x.round(), caret_top, 2.0, LINE_HEIGHT, color);
     }
     if let Some(error) = tab.error.as_ref().filter(|error| error.strip_shown) {
         error_strip(paint, &error.strip_text(), error.fix_label().as_deref());

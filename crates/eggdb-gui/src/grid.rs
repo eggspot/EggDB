@@ -321,6 +321,25 @@ impl ResultGrid {
         edges
     }
 
+    /// Scrolls by `rows` rows and `columns` whole columns, as the wheel does
+    /// (`docs/ux/workspace.md` 3.6), keeping the current cell and the selection; the first row
+    /// stays within a body `rows_in_view` rows tall.
+    pub fn scroll_by(&mut self, rows: isize, columns: isize, rows_in_view: usize) {
+        let last_first = self.rows.len().saturating_sub(rows_in_view.max(1));
+        self.first_row = self.first_row.saturating_add_signed(rows).min(last_first);
+        if columns == 0 {
+            return;
+        }
+        let edges = self.column_edges();
+        let first_column = edges
+            .iter()
+            .rposition(|&edge| edge <= self.scroll_x)
+            .unwrap_or(0);
+        let last_column = self.widths.len().saturating_sub(1);
+        let to = first_column.saturating_add_signed(columns).min(last_column);
+        self.scroll_x = edges.get(to).copied().unwrap_or(0.0);
+    }
+
     /// Scrolls so the current cell is in a body `rows_in_view` rows tall and `width` pixels
     /// wide.
     pub fn scroll_into_view(&mut self, rows_in_view: usize, width: f32) {
@@ -731,5 +750,31 @@ mod tests {
         grid.current = Cell { row: 0, column: 0 };
         grid.scroll_into_view(2, 200.0);
         assert_eq!((grid.first_row, grid.scroll_x), (0, 0.0));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_rows_and_whole_columns_and_keeps_the_current_cell() {
+        let rows = (0..20).map(|row| vec![Some(row.to_string()), None, None]).collect();
+        let mut grid = ResultGrid::new(
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![ValueKind::Number; 3],
+            rows,
+            20,
+            vec![80.0, 120.0, 60.0],
+        );
+        grid.current = Cell { row: 2, column: 1 };
+        grid.scroll_by(3, 0, 13);
+        assert_eq!(grid.first_row, 3);
+        grid.scroll_by(30, 0, 13);
+        assert_eq!(grid.first_row, 7, "the last rows stay in view");
+        grid.scroll_by(-30, 0, 13);
+        assert_eq!(grid.first_row, 0);
+        grid.scroll_by(0, 1, 13);
+        assert_eq!(grid.scroll_x, 80.0);
+        grid.scroll_by(0, 5, 13);
+        assert_eq!(grid.scroll_x, 200.0);
+        grid.scroll_by(0, -1, 13);
+        assert_eq!(grid.scroll_x, 80.0);
+        assert_eq!(grid.current, Cell { row: 2, column: 1 });
     }
 }

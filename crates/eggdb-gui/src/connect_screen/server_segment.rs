@@ -551,6 +551,7 @@ pub(super) fn draw_panel(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32
             failed: card.error.is_some() && card.failed_focus() == Some(focus),
             placeholder,
             masked,
+            caret: card.caret,
         };
         input_box(pen, field, at(rect), card.disabled(), look);
     }

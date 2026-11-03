@@ -244,6 +244,79 @@ impl Editor {
             .map(|(start, end)| self.offset(start)..self.offset(end))
     }
 
+    fn clamped(&self, at: Position) -> Position {
+        let line = at.line.min(self.lines.len() - 1);
+        Position {
+            line,
+            column: at.column.min(self.line_length(line)),
+        }
+    }
+
+    /// Moves the caret to `at` (clamped to the text), selecting from where the selection
+    /// started, or from the caret when nothing was selected: a pointer drag.
+    pub fn select_to(&mut self, at: Position) {
+        let to = self.clamped(at);
+        self.moved(true, to);
+    }
+
+    /// Selects `start` to `end` of line `line` (columns, clamped), the caret at the end: a
+    /// double-click's word.
+    pub fn select_columns(&mut self, line: usize, start: usize, end: usize) {
+        let from = self.clamped(Position { line, column: start });
+        let to = self.clamped(Position { line, column: end });
+        self.anchor = Some(from);
+        self.caret = to;
+    }
+
+    /// Selects line `line` with its line break, the caret at the next line's start (the end
+    /// of the text on the last line): a triple-click.
+    pub fn select_line(&mut self, line: usize) {
+        let line = line.min(self.lines.len() - 1);
+        self.anchor = Some(Position { line, column: 0 });
+        self.caret = if line + 1 < self.lines.len() {
+            Position {
+                line: line + 1,
+                column: 0,
+            }
+        } else {
+            Position {
+                line,
+                column: self.line_length(line),
+            }
+        };
+    }
+
+    /// The selected text, `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection().map(|(start, end)| self.slice(start, end))
+    }
+
+    /// Inserts `text` at the caret, replacing the selection, as one undo step; the caret ends
+    /// after it. Line breaks are `\n`.
+    pub fn paste(&mut self, text: &str) {
+        self.remember();
+        self.delete_selection();
+        let line = self.caret.line;
+        let at = byte_at(&self.lines[line], self.caret.column);
+        let tail = self.lines[line].split_off(at);
+        let mut pieces = text.split('\n');
+        let first = pieces.next().unwrap_or_default();
+        self.lines[line].push_str(first);
+        let rest: Vec<String> = pieces.map(str::to_owned).collect();
+        if rest.is_empty() {
+            self.caret.column += first.chars().count();
+            self.lines[line].push_str(&tail);
+            return;
+        }
+        let last = line + rest.len();
+        self.lines.splice(line + 1..line + 1, rest);
+        self.caret = Position {
+            line: last,
+            column: self.line_length(last),
+        };
+        self.lines[last].push_str(&tail);
+    }
+
     /// Puts the caret at `at` (clamped to the text) and clears the selection.
     pub fn place_caret(&mut self, at: Position) {
         let line = at.line.min(self.lines.len() - 1);
@@ -470,5 +543,37 @@ mod tests {
         editor.apply(Key::Left { select: false });
         editor.apply(Key::Backspace);
         assert_eq!(editor.text(), "😀");
+    }
+
+    #[test]
+    fn a_paste_replaces_the_selection_as_one_undo_step() {
+        let mut editor = Editor::new("SELECT 1 FROM t;");
+        editor.select_columns(0, 7, 8);
+        editor.paste("id,\n  name");
+        assert_eq!(editor.text(), "SELECT id,\n  name FROM t;");
+        assert_eq!(editor.caret(), Position { line: 1, column: 6 });
+        editor.paste("!");
+        assert_eq!(editor.text(), "SELECT id,\n  name! FROM t;");
+        editor.apply(Key::Undo);
+        editor.apply(Key::Undo);
+        assert_eq!(editor.text(), "SELECT 1 FROM t;");
+    }
+
+    #[test]
+    fn dragging_selects_from_the_press_and_clicks_select_words_and_lines() {
+        let mut editor = Editor::new("SELECT 1;\nSELECT 2;");
+        editor.place_caret(Position { line: 0, column: 2 });
+        editor.select_to(Position { line: 1, column: 3 });
+        assert_eq!(editor.selected_text().as_deref(), Some("LECT 1;\nSEL"));
+        editor.select_to(Position { line: 0, column: 0 });
+        assert_eq!(editor.selected_text().as_deref(), Some("SE"));
+        editor.select_to(Position { line: 9, column: 99 });
+        assert_eq!(editor.caret(), Position { line: 1, column: 9 });
+        editor.select_line(0);
+        assert_eq!(editor.selected_text().as_deref(), Some("SELECT 1;\n"));
+        editor.select_line(1);
+        assert_eq!(editor.selected_text().as_deref(), Some("SELECT 2;"));
+        editor.place_caret(Position { line: 0, column: 0 });
+        assert_eq!(editor.selected_text(), None);
     }
 }

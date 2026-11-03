@@ -9,6 +9,7 @@ use crate::connection::{
 };
 use crate::font::{TextStyle, Typeface};
 use crate::main_window::Faces;
+use crate::pointer::{self, CaretLook, PointerLook};
 
 mod accessibility;
 mod server_segment;
@@ -138,6 +139,10 @@ pub enum ConnectAction {
     Cancel,
     /// Show the layout picker behind `Where are you coming from?`.
     ShowLayoutPicker,
+    /// Put the focused input's selected text on the clipboard.
+    CopySelection,
+    /// Read the clipboard and give its text to [`ConnectCard::paste`].
+    Paste,
     /// Load the `shop` sample dataset.
     LoadSampleDataset,
     /// Stop the open or connect in progress (`Esc`, or `Cancel` while it runs).
@@ -232,6 +237,32 @@ impl TextField {
 
     fn clear_selection(&mut self) {
         self.anchor = None;
+    }
+
+    /// Puts the caret before character `column` (clamped), extending the selection from its
+    /// start, or from the caret, when `extend` is set: a click, or a drag or `Shift`+click.
+    pub fn place_caret(&mut self, column: usize, extend: bool) {
+        self.move_to(column, extend);
+    }
+
+    /// Selects the word around `column`, as a double-click does.
+    pub fn select_word(&mut self, column: usize) {
+        let (start, end) = pointer::word_at(&self.value, column);
+        self.anchor = Some(start);
+        self.caret = end;
+    }
+
+    /// The selected text, `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection().map(|(start, end)| self.slice(start, end))
+    }
+
+    /// Inserts `text` at the caret, replacing the selection: a paste, already made one line.
+    pub fn paste(&mut self, text: &str) {
+        self.delete_selection();
+        let at = self.byte_at(self.caret);
+        self.value.insert_str(at, text);
+        self.caret += text.chars().count();
     }
 
     /// Selects the whole value, as when a failure points at this field.
@@ -346,6 +377,10 @@ pub struct ConnectCard {
     pub server: ServerForm,
     /// The field the shown failure is about: it has the `error` border.
     pub failed_field: Option<FailureField>,
+    /// The pointer's hover, press and whether it moved the focus last.
+    pub pointer: PointerLook,
+    /// How the focused input's caret draws at this moment of its blink.
+    pub caret: CaretLook,
 }
 
 impl ConnectCard {
@@ -367,7 +402,99 @@ impl ConnectCard {
             segment: Segment::File,
             server: ServerForm::new(),
             failed_field: None,
+            pointer: PointerLook::default(),
+            caret: CaretLook::On,
         }
+    }
+
+    /// The focused input's text, when the focus is on one.
+    pub fn focused_field(&self) -> Option<&TextField> {
+        match self.focus {
+            Focus::FileInput => Some(&self.file),
+            Focus::Url => Some(&self.server.url),
+            Focus::Host => Some(&self.server.host),
+            Focus::Port => Some(&self.server.port),
+            Focus::Database => Some(&self.server.database),
+            Focus::User => Some(&self.server.user),
+            Focus::Password => Some(&self.server.password),
+            _ => None,
+        }
+    }
+
+    fn edit_focused_field(&mut self, edit: impl FnOnce(&mut TextField)) -> bool {
+        match self.focus {
+            Focus::FileInput => edit(&mut self.file),
+            Focus::Url => {
+                edit(&mut self.server.url);
+                self.server.url_edited();
+            }
+            focus => match self.server.field_mut(focus) {
+                Some(field) => {
+                    edit(field);
+                    self.server.field_edited();
+                }
+                None => return false,
+            },
+        }
+        true
+    }
+
+    /// Inserts the clipboard's `text`, made one line, at the focused input's caret; returns
+    /// whether an input had the focus.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let line = pointer::single_line(text);
+        self.edit_focused_field(|field| field.paste(&line))
+    }
+
+    /// The text `Ctrl/Cmd+C` copies: the focused input's selection, never the password's.
+    pub fn copied_text(&self) -> Option<String> {
+        if self.focus == Focus::Password {
+            return None;
+        }
+        self.focused_field()
+            .and_then(TextField::selected_text)
+            .map(str::to_owned)
+    }
+
+    /// Whether the focus ring draws: always after a key, and after a click only on inputs
+    /// (`docs/ux/workspace.md` 6.1).
+    pub fn ring_shown(&self) -> bool {
+        !self.pointer.focus_by_pointer || self.focused_field().is_some()
+    }
+
+    /// Places the focused input's caret for a press at `x` logical pixels in the input whose
+    /// box starts at `box_left`: the nearest character boundary, the word on a double-click,
+    /// the whole value on a triple-click, extending the selection when `extend` is set (a
+    /// drag or `Shift`+click). Nothing happens when no input has the focus.
+    pub fn place_caret_at(&mut self, faces: Faces<'_>, box_left: f32, x: f32, clicks: u8, extend: bool) {
+        let masked = self.focus == Focus::Password;
+        let Some(value) = self.focused_field().map(|field| field.value().to_owned()) else {
+            return;
+        };
+        let into = x - box_left - INPUT_TEXT_INSET;
+        let column = if masked {
+            (into / server_segment::MASK_ADVANCE).round().max(0.0) as usize
+        } else {
+            pointer::column_at(faces.ui, BODY.0, &value, into)
+        };
+        let _ = self.edit_focused_field_quietly(|field| match clicks {
+            2 if !masked => field.select_word(column),
+            2 | 3 => field.select_all(),
+            _ => field.place_caret(column, extend),
+        });
+    }
+
+    fn edit_focused_field_quietly(&mut self, edit: impl FnOnce(&mut TextField)) -> bool {
+        let field = match self.focus {
+            Focus::FileInput => &mut self.file,
+            Focus::Url => &mut self.server.url,
+            focus => match self.server.field_mut(focus) {
+                Some(field) => field,
+                None => return false,
+            },
+        };
+        edit(field);
+        true
     }
 
     /// The file the card asks to open: the File input resolved against `home` and `current`
@@ -628,6 +755,7 @@ impl ConnectCard {
 
 /// Answers a key press: the card after it and what the application should do.
 pub fn handle_key(mut card: ConnectCard, press: KeyPress) -> (ConnectCard, ConnectAction) {
+    card.pointer.focus_by_pointer = false;
     let modifiers = press.modifiers;
     let primary = modifiers.control || modifiers.command;
     if card.busy {
@@ -640,6 +768,12 @@ pub fn handle_key(mut card: ConnectCard, press: KeyPress) -> (ConnectCard, Conne
     }
     let action = match press.key {
         Key::Character('q' | 'Q') if primary => ConnectAction::Quit,
+        Key::Character('c' | 'C') if primary && card.copied_text().is_some() => {
+            ConnectAction::CopySelection
+        }
+        Key::Character('v' | 'V') if primary && card.focused_field().is_some() => {
+            ConnectAction::Paste
+        }
         Key::Character('w' | 'W') if modifiers.command => ConnectAction::Quit,
         Key::F4 if modifiers.alt => ConnectAction::Quit,
         Key::Character('o' | 'O') if primary => {
@@ -987,11 +1121,22 @@ pub fn draw(
         let at = (origin.0 + DROP_HINT.0, origin.1 + DROP_HINT.1);
         pen.text(faces.ui, DROP_HINT_LABEL, at, BODY, theme.accent);
     }
-    if !card.disabled() {
+    if !card.disabled() && card.ring_shown() {
         let (rect, radius) = focus_target(card, faces, size);
         pen.focus_ring(rect, radius);
     }
     canvas
+}
+
+fn control_fill(pen: &Pen<'_, '_>, card: &ConnectCard, node: u32) -> (Rgba, Rgba) {
+    let theme = pen.theme;
+    if card.pointer.is_pressed(node) {
+        (theme.bg2, theme.border_strong)
+    } else if card.pointer.is_hovered(node) {
+        (theme.bg2, theme.border)
+    } else {
+        (theme.bg0, theme.border)
+    }
 }
 
 fn status_line(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
@@ -1137,11 +1282,17 @@ fn file_row(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
         failed: card.error.is_some(),
         placeholder: PLACEHOLDER,
         masked: false,
+        caret: card.caret,
     };
     input_box(pen, &card.file, input, card.disabled(), look);
     if card.file_dialog {
         let browse = offset(down(BROWSE, shift), origin);
-        pen.outlined(browse, RADIUS_CONTROL, theme.bg0, theme.border);
+        let (fill, border) = if card.disabled() {
+            (theme.bg0, theme.border)
+        } else {
+            control_fill(pen, card, NODE_BROWSE)
+        };
+        pen.outlined(browse, RADIUS_CONTROL, fill, border);
         pen.centred_label(face, "Browse…", browse, theme.text_primary);
     }
 }
@@ -1151,6 +1302,7 @@ struct InputLook<'t> {
     failed: bool,
     placeholder: &'t str,
     masked: bool,
+    caret: CaretLook,
 }
 
 fn input_box(
@@ -1228,12 +1380,14 @@ fn input_box(
             theme.text_primary,
         );
     }
-    if look.focused {
+    if look.focused && look.caret.shown() {
         let caret_x = text_left + advance(pen, field.caret());
-        pen.fill(
-            Rect::new(caret_x, input.y + CARET_TOP, 2.0, 20.0),
-            theme.accent,
-        );
+        let color = if look.caret == CaretLook::Inactive {
+            theme.text_disabled
+        } else {
+            theme.accent
+        };
+        pen.fill(Rect::new(caret_x, input.y + CARET_TOP, 2.0, 20.0), color);
     }
 }
 
@@ -1278,14 +1432,28 @@ fn buttons(pen: &mut Pen<'_, '_>, card: &ConnectCard, origin: (f32, f32)) {
     let face = pen.faces.ui;
     let cancel = offset(CANCEL, origin);
     if card.can_cancel || card.disabled() {
-        pen.outlined(cancel, RADIUS_CONTROL, theme.bg0, theme.border);
+        let (fill, border) = if card.disabled() {
+            (theme.bg0, theme.border)
+        } else {
+            control_fill(pen, card, NODE_CANCEL)
+        };
+        pen.outlined(cancel, RADIUS_CONTROL, fill, border);
         pen.centred_label(face, "Cancel", cancel, theme.text_primary);
     } else {
         pen.outlined(cancel, RADIUS_CONTROL, theme.bg1, theme.border);
         pen.centred_label(face, "Cancel", cancel, theme.text_disabled);
     }
     let open = offset(OPEN, origin);
-    pen.rounded(open, RADIUS_CONTROL, theme.accent);
+    let open_fill = if card.disabled() {
+        theme.accent
+    } else if card.pointer.is_pressed(NODE_OPEN) {
+        theme.accent_pressed
+    } else if card.pointer.is_hovered(NODE_OPEN) {
+        theme.accent_hover
+    } else {
+        theme.accent
+    };
+    pen.rounded(open, RADIUS_CONTROL, open_fill);
     let label = match (card.segment, card.disabled()) {
         (Segment::File, false) => "Open",
         (Segment::File, true) => "Opening…",
@@ -1770,5 +1938,94 @@ mod tests {
         busy.progress = Some("Connecting to localhost:5432…".to_owned());
         let (canvas, theme) = frame(&busy, ThemeKind::Light, 1.0);
         assert_eq!(canvas.pixel(360 + 400, 140 + 150), Some(theme.bg1), "disabled URL input");
+    }
+
+    #[test]
+    fn a_press_in_an_input_places_the_caret_and_double_and_triple_clicks_select() {
+        let mut card = ConnectCard::first_start();
+        card.file.set("data/shop.eggdb");
+        let advance = BoxFace.advance('x', BODY.0);
+        let left = 100.0;
+        let at = |column: f32| left + INPUT_TEXT_INSET + advance * column;
+        card.place_caret_at(BOXES, left, at(4.4), 1, false);
+        assert_eq!((card.file.caret(), card.file.selection()), (4, None));
+        card.place_caret_at(BOXES, left, at(7.6), 1, true);
+        assert_eq!(card.file.selected_text(), Some("/sho"));
+        card.place_caret_at(BOXES, left, at(7.0), 2, false);
+        assert_eq!(card.file.selected_text(), Some("shop"));
+        card.place_caret_at(BOXES, left, at(7.0), 3, false);
+        assert_eq!(card.file.selected_text(), Some("data/shop.eggdb"));
+        card.place_caret_at(BOXES, left, left - 50.0, 1, false);
+        assert_eq!(card.file.caret(), 0);
+        card.focus = Focus::Password;
+        card.server.password.set("secret");
+        card.place_caret_at(BOXES, left, left + INPUT_TEXT_INSET + server_segment::MASK_ADVANCE * 2.2, 2, false);
+        assert_eq!(card.server.password.selection(), Some((0, 6)), "a double-click in the password selects it all");
+        assert_eq!(card.copied_text(), None, "the password is never copied");
+    }
+
+    #[test]
+    fn a_paste_into_an_input_is_one_line_and_updates_the_url() {
+        let mut card = ConnectCard::first_start();
+        assert!(card.paste("/tmp/a.eggdb\n"));
+        assert_eq!(card.file.value(), "/tmp/a.eggdb", "the selected quickstart path is replaced");
+        card.show_segment(Segment::Server);
+        card.focus = Focus::Host;
+        card.server.host.set("");
+        assert!(card.paste("db.example.com"));
+        assert!(card.server.url.value().contains("db.example.com"), "{}", card.server.url.value());
+        card.focus = Focus::Open;
+        assert!(!card.paste("ignored"));
+    }
+
+    #[test]
+    fn hover_and_press_fill_the_buttons_and_a_click_hides_their_ring() {
+        let mut card = ConnectCard::first_start();
+        card.can_cancel = true;
+        let origin = card_origin(SIZE.0, SIZE.1);
+        let inside = |rect: Rect| ((origin.0 + rect.x + 4.0) as usize, (origin.1 + rect.y + rect.h / 2.0) as usize);
+        let (cancel_x, cancel_y) = inside(CANCEL);
+        let (open_x, open_y) = inside(OPEN);
+        let (canvas, theme) = frame(&card, ThemeKind::Light, 1.0);
+        assert_eq!(canvas.pixel(cancel_x, cancel_y), Some(theme.bg0));
+        assert_eq!(canvas.pixel(open_x, open_y), Some(theme.accent));
+        card.pointer.hovered = Some(NODE_CANCEL);
+        let (canvas, _) = frame(&card, ThemeKind::Light, 1.0);
+        assert_eq!(canvas.pixel(cancel_x, cancel_y), Some(theme.bg2), "hover fills bg2");
+        card.pointer.pressed = Some(NODE_CANCEL);
+        let (canvas, _) = frame(&card, ThemeKind::Light, 1.0);
+        let edge = (origin.0 + CANCEL.x + CANCEL.w / 2.0) as usize;
+        assert_eq!(canvas.pixel(edge, (origin.1 + CANCEL.y) as usize), Some(theme.border_strong), "pressed edge");
+        card.pointer = PointerLook {
+            hovered: Some(NODE_OPEN),
+            ..PointerLook::default()
+        };
+        let (canvas, _) = frame(&card, ThemeKind::Light, 1.0);
+        assert_eq!(canvas.pixel(open_x, open_y), Some(theme.accent_hover));
+        card.pointer.pressed = Some(NODE_OPEN);
+        let (canvas, _) = frame(&card, ThemeKind::Light, 1.0);
+        assert_eq!(canvas.pixel(open_x, open_y), Some(theme.accent_pressed));
+        card.focus = Focus::Open;
+        card.pointer.focus_by_pointer = true;
+        assert!(!card.ring_shown());
+        card.focus = Focus::FileInput;
+        assert!(card.ring_shown(), "an input keeps its ring after a click");
+    }
+
+    #[test]
+    fn the_caret_draws_by_its_blink_and_greys_when_the_window_is_inactive() {
+        let mut card = ConnectCard::first_start();
+        card.file.set("ab");
+        let (on, theme) = frame(&card, ThemeKind::Light, 1.0);
+        card.caret = CaretLook::Off;
+        let (off, _) = frame(&card, ThemeKind::Light, 1.0);
+        card.caret = CaretLook::Inactive;
+        let (inactive, _) = frame(&card, ThemeKind::Light, 1.0);
+        let origin = card_origin(SIZE.0, SIZE.1);
+        let x = (origin.0 + FILE_INPUT.x + INPUT_TEXT_INSET + BoxFace.advance('a', BODY.0) * 2.0) as usize + 1;
+        let y = (origin.1 + FILE_INPUT.y + CARET_TOP + 10.0) as usize;
+        assert_eq!(on.pixel(x, y), Some(theme.accent));
+        assert_ne!(off.pixel(x, y), Some(theme.accent));
+        assert_eq!(inactive.pixel(x, y), Some(theme.text_disabled));
     }
 }

@@ -4,21 +4,27 @@
 //! the way typing its path and pressing `Enter` does, so a PNG shows the outcome: the main
 //! window on it, or the card with the failure's lines.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eggdb_gui::connect_screen::{
     self, DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, TITLE,
 };
+use eggdb_gui::clipboard::SystemClipboard;
 use eggdb_gui::connection::{EngineConnector, home_directory};
 use eggdb_gui::main_window::{self, Faces};
 use eggdb_gui::png::encode_png;
+use eggdb_gui::pointer::clamp_to_minimum;
 use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
 use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
-use eggdb_platform::window::{WindowEvent, WindowOptions, has_file_dialog, open_window};
+use eggdb_platform::window::{
+    AccessNode, Window, WindowEvent, WindowOptions, has_file_dialog, open_window,
+};
 
 const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
 
@@ -227,22 +233,42 @@ fn logical_size(device: (u32, u32), scale: f32) -> (u32, u32) {
     (logical(device.0), logical(device.1))
 }
 
+fn relayout(workspace: &mut Workspace, logical: (u32, u32)) {
+    let (width, _) = clamp_to_minimum(logical);
+    if let Some(window) = workspace.main_window_mut()
+        && window.width != (width as usize).max(main_window::WIDTH)
+    {
+        window.set_width(width as usize);
+    }
+}
+
+fn screen_tree(workspace: &Workspace, faces: Faces<'_>, logical: (u32, u32)) -> Vec<AccessNode> {
+    match workspace.screen() {
+        Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, logical),
+        Screen::Main(main) => main_window::accessibility_tree(main),
+    }
+}
+
 fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
-    let mut window = open_window(&WindowOptions {
-        title: TITLE.to_owned(),
-        width: DEFAULT_WIDTH,
-        height: DEFAULT_HEIGHT,
-        min_width: MIN_WIDTH,
-        min_height: MIN_HEIGHT,
-    })
-    .map_err(|error| error.to_string())?;
+    let window: Rc<RefCell<Box<dyn Window>>> = Rc::new(RefCell::new(
+        open_window(&WindowOptions {
+            title: TITLE.to_owned(),
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            min_width: MIN_WIDTH,
+            min_height: MIN_HEIGHT,
+        })
+        .map_err(|error| error.to_string())?,
+    ));
     let theme = Theme::of(options.theme);
     let mut workspace = workspace(options, has_file_dialog());
+    workspace.set_clipboard(Box::new(SystemClipboard::new(Rc::clone(&window))));
+    workspace.start_caret_blink(Instant::now());
     if let Some(open) = &options.open {
         workspace.open_typed(&open.to_string_lossy(), Instant::now());
     }
-    let mut scale = window.scale();
-    let mut size = window.size();
+    let mut scale = window.borrow().scale();
+    let mut size = window.borrow().size();
     let mut dirty = true;
     let mut presented: u32 = 0;
     let scripted = options.frames.map(|_| SCRIPTED_FRAME_INTERVAL);
@@ -250,86 +276,121 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
         if workspace.tick(Instant::now()) {
             dirty = true;
         }
+        let logical = logical_size(size, scale);
         if dirty {
-            let logical = logical_size(size, scale);
+            relayout(&mut workspace, logical);
             let frame = render(&workspace, theme, faces, logical, scale);
             let (width, height) = (frame.width() as u32, frame.height() as u32);
             window
+                .borrow_mut()
                 .present(width, height, &frame.rgba_bytes())
                 .map_err(|error| error.to_string())?;
-            let tree = match workspace.screen() {
-                Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, logical),
-                Screen::Main(main) => main_window::accessibility_tree(main),
-            };
-            window.set_accessibility_tree(&tree);
+            let tree = screen_tree(&workspace, faces, logical);
+            window.borrow_mut().set_accessibility_tree(&tree);
             dirty = false;
             presented = presented.saturating_add(1);
             if options.frames.is_some_and(|limit| presented >= limit) {
                 return Ok(());
             }
         }
-        let timeout = if workspace.is_opening() || workspace.is_running() {
-            Some(scripted.map_or(OPENING_POLL_INTERVAL, |interval| interval.min(OPENING_POLL_INTERVAL)))
-        } else {
-            scripted
-        };
-        match window
+        let polling = workspace.is_opening() || workspace.is_running();
+        let timeout = [
+            scripted,
+            polling.then_some(OPENING_POLL_INTERVAL),
+            workspace.until_caret_changes(Instant::now()),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let event = window
+            .borrow_mut()
             .next_event(timeout)
-            .map_err(|error| error.to_string())?
-        {
-            Some(event @ (WindowEvent::Key(_) | WindowEvent::AccessRequested(_))) => {
-                let now = Instant::now();
-                let command = match event {
-                    WindowEvent::AccessRequested(request) => {
-                        let logical = logical_size(size, scale);
-                        let tree = match workspace.screen() {
-                            Screen::Connect(card) => connect_screen::accessibility_tree(card, faces, logical),
-                            Screen::Main(main) => main_window::accessibility_tree(main),
-                        };
-                        workspace.access(&request, &tree, now)
-                    }
-                    WindowEvent::Key(press) => workspace.key(press, now),
-                    _ => WorkspaceCommand::None,
-                };
-                match command {
-                    WorkspaceCommand::Quit => return Ok(()),
-                    WorkspaceCommand::ChooseFile(dialog) => {
-                        let chosen = window.choose_file_to_open(&dialog).unwrap_or_else(|error| {
-                            eprintln!("eggdb-gui: {error}");
-                            None
-                        });
-                        workspace.file_chosen(chosen.as_deref());
-                    }
-                    WorkspaceCommand::None => {}
-                }
-                dirty = true;
+            .map_err(|error| error.to_string())?;
+        let now = Instant::now();
+        let at = move |x: f32, y: f32| (x / scale, y / scale);
+        let command = match event {
+            Some(WindowEvent::AccessRequested(request)) => {
+                let tree = screen_tree(&workspace, faces, logical);
+                workspace.access(&request, &tree, now)
+            }
+            Some(WindowEvent::Key(press)) => workspace.key(press, now),
+            Some(WindowEvent::PointerPressed { x, y, button, modifiers }) => {
+                let (x, y) = at(x, y);
+                workspace.pointer_pressed(x, y, button, modifiers, faces, logical, now)
+            }
+            Some(WindowEvent::PointerReleased { x, y, button, .. }) => {
+                let (x, y) = at(x, y);
+                workspace.pointer_released(x, y, button, faces, logical, now)
+            }
+            Some(WindowEvent::PointerMoved { x, y }) => {
+                let (x, y) = at(x, y);
+                dirty |= workspace.pointer_moved(x, y, faces, logical);
+                continue;
+            }
+            Some(WindowEvent::Wheel { x, y, lines_down, lines_right, modifiers }) => {
+                let (x, y) = at(x, y);
+                dirty |= workspace.wheel(x, y, lines_down, lines_right, modifiers, faces, logical);
+                continue;
+            }
+            Some(WindowEvent::PointerLeft) => {
+                dirty |= workspace.pointer_left();
+                continue;
             }
             Some(WindowEvent::FileDragEntered(paths)) => {
                 workspace.drag_entered(&paths);
                 dirty = true;
+                continue;
             }
             Some(WindowEvent::FileDragLeft) => {
                 workspace.drag_left();
                 dirty = true;
+                continue;
             }
             Some(WindowEvent::FilesDropped(paths)) => {
                 workspace.drag_left();
-                workspace.dropped(&paths, Instant::now());
+                workspace.dropped(&paths, now);
                 dirty = true;
+                continue;
             }
             Some(WindowEvent::Resized { width, height }) => {
                 size = (width, height);
                 dirty = true;
+                continue;
             }
             Some(WindowEvent::ScaleChanged(new_scale)) => {
                 scale = new_scale;
                 dirty = true;
+                continue;
             }
-            Some(WindowEvent::Redraw) => dirty = true,
+            Some(WindowEvent::Redraw) => {
+                dirty = true;
+                continue;
+            }
             Some(WindowEvent::CloseRequested) => return Ok(()),
-            Some(WindowEvent::Focused(_)) => {}
-            None => dirty = scripted.is_some(),
+            Some(WindowEvent::Focused(active)) => {
+                dirty |= workspace.set_window_active(active, now);
+                continue;
+            }
+            None => {
+                dirty |= scripted.is_some();
+                continue;
+            }
+        };
+        match command {
+            WorkspaceCommand::Quit => return Ok(()),
+            WorkspaceCommand::ChooseFile(dialog) => {
+                let chosen = window
+                    .borrow_mut()
+                    .choose_file_to_open(&dialog)
+                    .unwrap_or_else(|error| {
+                        eprintln!("eggdb-gui: {error}");
+                        None
+                    });
+                workspace.file_chosen(chosen.as_deref());
+            }
+            WorkspaceCommand::None => {}
         }
+        dirty = true;
     }
 }
 

@@ -143,6 +143,17 @@ pub enum TabAction {
         /// What the toast says.
         toast: String,
     },
+    /// Read the clipboard and give its text to [`QueryTab::paste`].
+    Paste,
+}
+
+/// The toast after copying text from the editor.
+pub fn copied_characters_toast(count: usize) -> String {
+    if count == 1 {
+        "Copied 1 character".to_owned()
+    } else {
+        format!("Copied {count} characters")
+    }
 }
 
 /// One query tab (`docs/ux/workspace.md` 2): its editor and dialect, the last run's results,
@@ -464,21 +475,50 @@ impl QueryTab {
             self.focus(TabFocus::DialectPill);
             return TabAction::None;
         }
+        let primary = press.modifiers.control || press.modifiers.command;
+        match press.key {
+            Key::Character('c' | 'C' | 'x' | 'X') if primary && !press.modifiers.shift => {
+                let Some(text) = self.editor.selected_text() else {
+                    return TabAction::None;
+                };
+                if matches!(press.key, Key::Character('x' | 'X')) {
+                    self.editor.apply(editor::Key::Backspace);
+                    self.edited(self.editor.caret().line);
+                }
+                let toast = copied_characters_toast(text.chars().count());
+                return TabAction::Copy { text, toast };
+            }
+            Key::Character('v' | 'V') if primary && !press.modifiers.shift => return TabAction::Paste,
+            _ => {}
+        }
         let Some(key) = editor_key(press) else {
             return TabAction::None;
         };
         let before = self.editor.text();
         let line = self.editor.caret().line;
         self.editor.apply(key);
-        let changed = self.editor.text() != before;
-        if changed && self.error.as_ref().is_some_and(|error| error.line == line + 1) {
+        if self.editor.text() != before {
+            self.edited(line);
+        }
+        TabAction::None
+    }
+
+    fn edited(&mut self, line: usize) {
+        if self.error.as_ref().is_some_and(|error| error.line == line + 1) {
             self.error = None;
         }
-        if let Some(plan) = self.plan.as_mut().filter(|_| changed) {
+        if let Some(plan) = self.plan.as_mut() {
             plan.highlight = None;
             plan.selected = None;
         }
-        TabAction::None
+    }
+
+    /// Inserts `text` at the editor's caret, replacing the selection (`docs/ux/workspace.md`
+    /// 6.3): `text` is already cleaned by [`crate::pointer::paste_text`].
+    pub fn paste(&mut self, text: &str) {
+        let line = self.editor.caret().line;
+        self.editor.paste(text);
+        self.edited(line);
     }
 
     /// A run of `request` started: `Run` and `Run all` disable, `Stop` enables, the
@@ -984,5 +1024,22 @@ mod tests {
         assert_eq!(oracle.key(press(Key::Character('e'), false, true)), TabAction::None);
         assert_eq!(oracle.view, ResultView::Messages);
         assert!(oracle.messages[0].starts_with("not_supported: "), "{:?}", oracle.messages);
+    }
+
+    #[test]
+    fn the_editor_copies_cuts_and_asks_for_a_paste() {
+        let mut tab = QueryTab::with_text("Query 1", "SELECT 1;");
+        assert_eq!(tab.key(press(Key::Character('c'), false, true)), TabAction::None);
+        tab.key(press(Key::Left, true, false));
+        tab.key(press(Key::Left, true, false));
+        let TabAction::Copy { text, toast } = tab.key(press(Key::Character('c'), false, true)) else {
+            panic!("a selection copies");
+        };
+        assert_eq!((text.as_str(), toast.as_str()), ("1;", "Copied 2 characters"));
+        assert!(matches!(tab.key(press(Key::Character('x'), false, true)), TabAction::Copy { .. }));
+        assert_eq!(tab.editor.text(), "SELECT ");
+        assert_eq!(tab.key(press(Key::Character('v'), false, true)), TabAction::Paste);
+        tab.paste("2;\nSELECT 3;");
+        assert_eq!(tab.editor.text(), "SELECT 2;\nSELECT 3;");
     }
 }
