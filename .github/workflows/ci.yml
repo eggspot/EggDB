@@ -14,7 +14,38 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        name: Decide whether anything besides Markdown changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo code=true >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "origin/$BASE...HEAD")
+          if printf '%s\n' "$changed" | grep -qvE '\.md$'; then
+            echo code=true >> "$GITHUB_OUTPUT"
+          else
+            echo code=false >> "$GITHUB_OUTPUT"
+          fi
+
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -27,13 +58,14 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
       - name: Check the shipped crates are only our own
         run: |
           set -o pipefail
@@ -95,6 +127,8 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   platforms:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -110,13 +144,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
@@ -134,6 +169,8 @@ jobs:
           scripts/c-api/check.sh target/debug "$(mktemp -d)"
 
   musl:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -144,17 +181,20 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup target add x86_64-unknown-linux-musl
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-musl-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-musl-${{ runner.os }}-
       - name: Test against musl, as the default Linux release is built
         run: cargo test --workspace --target x86_64-unknown-linux-musl
 
   kubernetes:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -165,13 +205,14 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup target add x86_64-unknown-linux-musl
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-musl-release-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-musl-release-${{ runner.os }}-
       - name: Build the static binary and the image
         run: |
           cargo build --release -p eggdb --target x86_64-unknown-linux-musl
@@ -199,6 +240,8 @@ jobs:
             -tAc "SELECT count(*) FROM t" | grep -qx 1
 
   resp-clients:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -210,13 +253,14 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
       - name: Install redis-cli, redis-py, pymemcache, opensearch-py, pymongo, the neo4j driver, confluent-kafka, pika, paho-mqtt, boto3, nats-py, stomp.py, python-qpid-proton, cassandra-driver and influxdb-client (test tools only, never shipped)
         run: |
           command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
@@ -496,6 +540,8 @@ jobs:
           PY
 
   redis-compare:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -511,12 +557,13 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             crates/eggdb-redis-compare/target
           key: cargo-redis-compare-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'crates/eggdb-redis-compare/Cargo.lock') }}
+          restore-keys: cargo-redis-compare-${{ runner.os }}-
       - name: Format and lint
         run: |
           cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
@@ -536,6 +583,8 @@ jobs:
           if-no-files-found: warn
 
   installers:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -566,6 +615,8 @@ jobs:
           "| Step | Seconds |`n|------|--------:|`n| download and install | $([math]::Round($installing.Elapsed.TotalSeconds, 2)) |`n| first start | $([math]::Round($starting.Elapsed.TotalSeconds, 2)) |" >> $env:GITHUB_STEP_SUMMARY
 
   egg-allocator:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -574,13 +625,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-egg-allocator-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-egg-allocator-${{ runner.os }}-
       - name: Test the eggdb binary and its library with EggDB's own allocator installed
         run: |
           cargo test -p eggdb --features egg-allocator
@@ -588,6 +640,8 @@ jobs:
           scripts/smoke-test.sh target/debug/eggdb
 
   cross:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -602,13 +656,14 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           echo "$TARGETS" | xargs rustup target add
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-cross-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-cross-${{ runner.os }}-
       - name: Lint the platform layer, the storage engine, SQL, the PostgreSQL, MySQL, SQL Server and MCP servers, the command registry and the embedded API for each target
         run: |
           for target in $TARGETS; do
@@ -620,6 +675,8 @@ jobs:
           cargo clippy -p eggdb-format --no-default-features --target thumbv7em-none-eabihf -- -D warnings
 
   bench:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -628,13 +685,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-bench-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-bench-${{ runner.os }}-
       - name: Benchmarks against the committed baseline
         run: |
           mkdir -p bench-results
@@ -650,6 +708,8 @@ jobs:
           if-no-files-found: warn
 
   compare:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -664,13 +724,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             crates/eggdb-sqlite-compare/target
           key: cargo-compare-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'crates/eggdb-sqlite-compare/Cargo.lock') }}
+          restore-keys: cargo-compare-${{ runner.os }}-
       - name: Format
         run: cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
       - name: Lint
@@ -692,6 +753,8 @@ jobs:
           if-no-files-found: warn
 
   pg-restore:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -704,13 +767,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-pg-restore-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-pg-restore-${{ runner.os }}-
       - name: Build eggdb
         run: cargo build -p eggdb
       - name: Start the official postgres:${{ matrix.postgres }} container (test oracle only, never shipped)
@@ -729,6 +793,8 @@ jobs:
         run: scripts/pg-restore/check.sh target/debug/eggdb "$RUNNER_TEMP/pg-restore" --rows 50000
 
   pg-catalog:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -737,13 +803,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-pg-catalog-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-pg-catalog-${{ runner.os }}-
       - name: Start the official postgres:16 container and pull psql 17 (test oracles only, never shipped)
         run: |
           docker run -d --name pg --network host -e POSTGRES_USER=eggdb -e POSTGRES_PASSWORD=catalog-oracle \
@@ -782,6 +849,8 @@ jobs:
           if-no-files-found: ignore
 
   pg-functions:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -790,13 +859,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-pg-functions-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-pg-functions-${{ runner.os }}-
       - name: Start the official postgres:17 container (test oracle only, never shipped)
         run: docker run -d --name pg --network host -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17
       - name: Build eggdb
@@ -840,6 +910,8 @@ jobs:
           if-no-files-found: ignore
 
   pg-apps:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -851,7 +923,7 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
@@ -859,6 +931,7 @@ jobs:
             ~/.nuget/packages
             target
           key: cargo-pg-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/NpgsqlAppCheck/NpgsqlAppCheck.csproj') }}
+          restore-keys: cargo-pg-apps-${{ runner.os }}-
       - name: Start the official postgres:17 container (test oracle only, never shipped)
         run: |
           docker run -d --name pg --network host -e POSTGRES_USER=eggdb -e POSTGRES_PASSWORD=apps-oracle \
@@ -917,6 +990,8 @@ jobs:
           if-no-files-found: ignore
 
   tds-apps:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -925,7 +1000,7 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
@@ -933,6 +1008,7 @@ jobs:
             ~/.nuget/packages
             target
           key: cargo-tds-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/TdsAppCheck/TdsAppCheck.csproj', 'crates/eggdb/tests/clients/dotnet/EfCoreAppCheck/EfCoreAppCheck.csproj') }}
+          restore-keys: cargo-tds-apps-${{ runner.os }}-
       - name: Download mssql-jdbc (MIT; test client only, never shipped)
         run: |
           mkdir -p "$RUNNER_TEMP/clients"
@@ -959,6 +1035,8 @@ jobs:
           if-no-files-found: ignore
 
   oracle-apps:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -967,13 +1045,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-oracle-apps-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-oracle-apps-${{ runner.os }}-
       - name: Download pgjdbc and pull the postgres:17 image for psql (test clients only, never shipped)
         run: |
           mkdir -p "$RUNNER_TEMP/clients"
@@ -1001,6 +1080,8 @@ jobs:
           if-no-files-found: ignore
 
   tls-clients:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1009,13 +1090,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-tls-clients-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-tls-clients-${{ runner.os }}-
       - name: Get psql 17 (postgres:17 image), the mysql client and go-sqlcmd v1.10.0 (MIT), checked against its SHA-256 (test clients only, never shipped)
         run: |
           docker pull --quiet postgres:17
@@ -1048,6 +1130,8 @@ jobs:
           if-no-files-found: ignore
 
   pg-follow:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1056,13 +1140,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-pg-follow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-pg-follow-${{ runner.os }}-
       - name: Pull the postgres:17 image (a test source, never shipped)
         run: docker pull --quiet postgres:17
       - name: Build eggdb
@@ -1083,6 +1168,8 @@ jobs:
           if-no-files-found: ignore
 
   ss-follow:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -1091,13 +1178,14 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-ss-follow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-ss-follow-${{ runner.os }}-
       - name: Pull SQL Server 2022 (a test source, never shipped) and get go-sqlcmd v1.10.0 (MIT), checked against its SHA-256
         run: |
           docker pull --quiet mcr.microsoft.com/mssql/server:2022-latest
@@ -1127,6 +1215,8 @@ jobs:
           if-no-files-found: ignore
 
   sqlalchemy-suite:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1138,13 +1228,14 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-sqlalchemy-suite-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-sqlalchemy-suite-${{ runner.os }}-
       - name: Build eggdb
         run: cargo build -p eggdb
       - name: Run SQLAlchemy's dialect compliance suite (MIT, a test tool, never shipped) against eggdb serve
@@ -1162,6 +1253,8 @@ jobs:
           if-no-files-found: ignore
 
   unix-vms:
+    needs: changes
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
@@ -1207,6 +1300,8 @@ jobs:
             cargo test -p eggdb-platform -p eggdb-storage -p eggdb --lib
 
   browser:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1217,13 +1312,14 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup target add wasm32-wasip1
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-browser-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-browser-${{ runner.os }}-
       - name: Build EggDB for WebAssembly and run it and the connect card under Node and in headless Chrome
         run: |
           cargo build --release -p eggdb-wasm --target wasm32-wasip1
@@ -1243,6 +1339,8 @@ jobs:
           grep -q "eggdb-card-test: passed" "$RUNNER_TEMP/card.html"
 
   mobile:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1255,13 +1353,14 @@ jobs:
           java-version: '21'
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-mobile-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-mobile-${{ runner.os }}-
       - name: Check the Kotlin binding (JNI over the C API) on the JVM
         run: |
           command -v kotlinc || { echo "::error::kotlinc is not installed on this runner"; exit 1; }
@@ -1272,6 +1371,8 @@ jobs:
           java -Djava.library.path="$RUNNER_TEMP/kotlin" -jar "$RUNNER_TEMP/kotlin/check.jar"
 
   apple-mobile:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -1280,17 +1381,20 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-apple-mobile-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-apple-mobile-${{ runner.os }}-
       - name: Build the C API as an XCFramework for iOS, the iOS simulator and macOS
         run: scripts/apple/xcframework.sh "$RUNNER_TEMP/EggDB.xcframework"
 
   other-cpus:
+    needs: changes
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -1317,13 +1421,14 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup target add ${{ matrix.target }}
           sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-${{ runner.os }}-
       - name: Test the file format, the storage engine, cryptography and columnar encodings on ${{ matrix.target }}
         env:
           TARGET_ENV: ${{ matrix.target }}
@@ -1336,6 +1441,8 @@ jobs:
           cargo test --target "$TARGET_ENV" -p eggdb-format -p eggdb-storage -p eggdb-crypto -p eggdb-columnar
 
   deploy-templates:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1354,6 +1461,8 @@ jobs:
           shellcheck deploy/gcp/deploy.sh scripts/apple/xcframework.sh
 
   footprint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1366,17 +1475,20 @@ jobs:
           fetch-depth: 1
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-footprint-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-footprint-${{ runner.os }}-
       - name: Measure each build profile against its budget (D6, D34)
         run: scripts/footprint.sh
 
   reproducible:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1396,6 +1508,8 @@ jobs:
           cmp "$RUNNER_TEMP/first/release/eggdb" "$RUNNER_TEMP/second/release/eggdb"
 
   unicode:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1416,6 +1530,8 @@ jobs:
           EGGDB_UNICODE_NORMALIZATION_TEST="$RUNNER_TEMP/ucd/NormalizationTest.txt" cargo test -p eggdb-text
 
   compatibility:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1427,13 +1543,14 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-compatibility-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-compatibility-${{ runner.os }}-
       - name: Install dbt-postgres (test tool only, never shipped)
         run: |
           python3 -m venv "$RUNNER_TEMP/tools"
@@ -1447,6 +1564,8 @@ jobs:
           scripts/compatibility.sh target/debug/eggdb "$RUNNER_TEMP/tools" "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP"
 
   arrow:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1458,13 +1577,14 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: cargo-arrow-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-arrow-${{ runner.os }}-
       - name: Read an exported Arrow stream with pyarrow (test tool only, never shipped)
         run: |
           python3 -m venv "$RUNNER_TEMP/arrow"
